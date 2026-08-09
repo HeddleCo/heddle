@@ -4459,7 +4459,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Help { .. } => vec!["help"],
         Commands::Status { .. } => vec!["status"],
         Commands::Watch(_) => vec!["watch"],
-        Commands::Verify => vec!["verify"],
+        Commands::Verify { .. } => vec!["verify"],
         Commands::Doctor(args) => match &args.command {
             None => vec!["doctor"],
             Some(DoctorCommands::Docs(_)) => vec!["doctor", "docs"],

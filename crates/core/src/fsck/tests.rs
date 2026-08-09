@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-use crypto::Ed25519Signer;
+use crypto::{Ed25519Signer, Signer};
 use objects::{
     object::{
         Attribution, Blob, FileProvenance, LineSpan, Origin, OriginSet, Principal, State,
-        StateAttachment, StateAttachmentBody, Tree, TreeEntry,
+        StateAttachment, StateAttachmentBody, StateSignature, Tree, TreeEntry,
     },
     store::ObjectStore,
 };
@@ -69,6 +69,48 @@ fn test_check_states_thorough_rejects_invalid_signature() {
         "expected invalid signature error, got {:?}",
         errors.iter().map(|error| &error.kind).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn fsck_thorough_provenance_fails_legacy_with_named_link() {
+    let (_temp, repo) = setup_repo();
+    let tree_hash = put_empty_tree(&repo).expect("put tree");
+    let state = State::new(tree_hash, vec![], sample_attribution());
+    let signer = Ed25519Signer::from_seed(&[8u8; 32]).expect("create signer");
+    repo.store().put_state(&state).expect("put state");
+    repo.store()
+        .put_state_attachment(&StateAttachment {
+            state_id: state.state_id,
+            body: StateAttachmentBody::Signature(StateSignature {
+                algorithm: signer.algorithm().to_string(),
+                public_key: hex::encode(signer.public_key()),
+                signature: hex::encode(
+                    signer
+                        .sign(state.compute_hash().as_bytes())
+                        .expect("sign legacy state hash"),
+                ),
+            }),
+            attribution: state.attribution.clone(),
+            created_at: state.created_at,
+            supersedes: None,
+        })
+        .expect("put legacy signature");
+    let ctx = crate::ExecutionContext::builder().repo(repo).build();
+
+    let report = super::fsck(
+        &ctx,
+        super::FsckOptions {
+            thorough: true,
+            provenance: true,
+            ..super::FsckOptions::default()
+        },
+    )
+    .expect("run fsck");
+
+    assert!(!report.valid);
+    assert!(report.errors.iter().any(|error| {
+        error.kind == "legacy_provenance" && error.message.contains("Legacy at content link")
+    }));
 }
 
 #[test]

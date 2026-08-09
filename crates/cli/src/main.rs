@@ -370,7 +370,7 @@ async fn async_main() -> Result<()> {
 
         Commands::Watch(args) => cmd_watch(&cli, args.clone()).await,
 
-        Commands::Verify => cmd_verify(&cli, cli.verbose > 0),
+        Commands::Verify { provenance } => cmd_verify(&cli, cli.verbose > 0, *provenance),
 
         Commands::Doctor(args) => match &args.command {
             None => cmd_doctor(&cli, args.profile),
@@ -595,7 +595,7 @@ async fn async_main() -> Result<()> {
         },
 
         Commands::Fsck(args) => match &args.command {
-            None => cmd_fsck(&cli, args.full, args.thorough, args.git),
+            None => cmd_fsck(&cli, args.full, args.thorough, args.provenance, args.git),
             Some(cli::cli::FsckCommands::Repair { target }) => match target {
                 cli::cli::FsckRepairCommands::Git(args) => cmd_fsck_repair_git(
                     &cli,

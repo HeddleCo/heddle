@@ -1074,6 +1074,7 @@ export interface FsckRepairGitSchema {
   objects_checked: number;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  provenance?: ProvenanceReport | null;
   repair_target?: string | null;
   repaired: boolean;
   repairs: FsckRepair[];
@@ -1086,6 +1087,7 @@ export interface FsckSchema {
   errors: FsckError[];
   git_projection_checked: boolean;
   objects_checked: number;
+  provenance?: ProvenanceReport | null;
   repair_target?: string | null;
   repaired: boolean;
   repairs: FsckRepair[];
@@ -1555,6 +1557,13 @@ export interface ParallelThreadInfo {
 export interface PartialFetchInspectionSchema {
   count: number;
   missing_blob_count: number;
+}
+
+export interface ProvenanceReport {
+  clean: boolean;
+  registry_hash?: string | null;
+  registry_status: string;
+  states: StateProvenanceVerification[];
 }
 
 export interface PullGitSchema {
@@ -2230,6 +2239,16 @@ export interface StateInfo {
   content_hash: string;
   intent?: string | null;
   state_id: string;
+}
+
+export interface StateProvenanceVerification {
+  detail: string;
+  failed_link?: string | null;
+  identity?: string | null;
+  reviewer_identities: string[];
+  reviews_verified: number;
+  state_id: string;
+  status: string;
 }
 
 export interface StatusSchema {
@@ -3174,6 +3193,7 @@ export interface VerificationCheckSchema {
 export interface VerifyReport {
   clean: boolean;
   output_kind: "verify";
+  provenance?: ProvenanceReport | null;
   repository_context?: RepositoryContextInfo | null;
   repository_label: string;
   verification: RepositoryVerificationState;

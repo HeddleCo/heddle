@@ -31,6 +31,10 @@ pub struct FsckArgs {
     #[arg(long)]
     pub thorough: bool,
 
+    /// Verify offline authorship identity and review-signature chains.
+    #[arg(long, requires = "thorough")]
+    pub provenance: bool,
+
     /// Include Git projection, mapping, notes, and checkout checks.
     #[arg(long)]
     pub git: bool,
@@ -137,7 +141,11 @@ Examples:
   heddle verify --verbose      # full proof rows and machine-contract details
   heddle verify --output json  # proof JSON when clean; error envelope when blocked
 ")]
-    Verify,
+    Verify {
+        /// Verify each state's offline authorship and review-signature chain.
+        #[arg(long)]
+        provenance: bool,
+    },
 
     /// Explain repository health, or run targeted doctor checks.
     ///

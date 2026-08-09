@@ -17261,6 +17261,78 @@
             "count"
           ],
           "type": "object"
+        },
+        "ProvenanceReport": {
+          "properties": {
+            "clean": {
+              "type": "boolean"
+            },
+            "registry_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "registry_status": {
+              "type": "string"
+            },
+            "states": {
+              "items": {
+                "$ref": "#/$defs/StateProvenanceVerification"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "clean",
+            "registry_status",
+            "states"
+          ],
+          "type": "object"
+        },
+        "StateProvenanceVerification": {
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "failed_link": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "identity": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reviewer_identities": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "reviews_verified": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state_id",
+            "status",
+            "detail",
+            "reviews_verified",
+            "reviewer_identities"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -17278,6 +17350,16 @@
           "format": "uint",
           "minimum": 0,
           "type": "integer"
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProvenanceReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "repair_target": {
           "type": [
@@ -17363,6 +17445,78 @@
             "count"
           ],
           "type": "object"
+        },
+        "ProvenanceReport": {
+          "properties": {
+            "clean": {
+              "type": "boolean"
+            },
+            "registry_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "registry_status": {
+              "type": "string"
+            },
+            "states": {
+              "items": {
+                "$ref": "#/$defs/StateProvenanceVerification"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "clean",
+            "registry_status",
+            "states"
+          ],
+          "type": "object"
+        },
+        "StateProvenanceVerification": {
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "failed_link": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "identity": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reviewer_identities": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "reviews_verified": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state_id",
+            "status",
+            "detail",
+            "reviews_verified",
+            "reviewer_identities"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -17417,6 +17571,16 @@
                 "replayed"
               ],
               "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProvenanceReport"
             },
             {
               "type": "null"
@@ -37938,6 +38102,34 @@
           ],
           "type": "object"
         },
+        "ProvenanceReport": {
+          "properties": {
+            "clean": {
+              "type": "boolean"
+            },
+            "registry_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "registry_status": {
+              "type": "string"
+            },
+            "states": {
+              "items": {
+                "$ref": "#/$defs/StateProvenanceVerification"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "clean",
+            "registry_status",
+            "states"
+          ],
+          "type": "object"
+        },
         "RepositoryContextInfo": {
           "properties": {
             "kind": {
@@ -38095,6 +38287,50 @@
           ],
           "type": "object"
         },
+        "StateProvenanceVerification": {
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "failed_link": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "identity": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reviewer_identities": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "reviews_verified": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state_id",
+            "status",
+            "detail",
+            "reviews_verified",
+            "reviewer_identities"
+          ],
+          "type": "object"
+        },
         "VerificationCheck": {
           "properties": {
             "clean": {
@@ -38166,6 +38402,16 @@
             "verify"
           ],
           "type": "string"
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProvenanceReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "repository_context": {
           "anyOf": [

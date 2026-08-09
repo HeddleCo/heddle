@@ -66,6 +66,24 @@ pub fn fsck_text(report: &FsckReport) -> Result<()> {
             }
         }
     }
+    if let Some(provenance) = &report.provenance {
+        text.push_str(&format!(
+            "  {}\n",
+            style::field("Provenance registry", &provenance.registry_status)
+        ));
+        for state in &provenance.states {
+            let short = state
+                .state_id
+                .strip_prefix("hs-")
+                .unwrap_or(&state.state_id);
+            let short = &short[..short.len().min(12)];
+            text.push_str(&format!(
+                "    {short} {:<24} {}\n",
+                state.display_status(),
+                state.detail
+            ));
+        }
+    }
     for warning in &report.warnings {
         text.push_str(&format!("{} {}\n", style::warn_marker(), warning));
     }

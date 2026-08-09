@@ -18,6 +18,7 @@ use crate::{ExecutionContext, HeddleReport, MachineOutputKind, ReportContract, s
 pub struct FsckOptions {
     pub full: bool,
     pub thorough: bool,
+    pub provenance: bool,
     pub git_projection: bool,
 }
 
@@ -28,6 +29,8 @@ pub struct FsckReport {
     pub warnings: Vec<String>,
     pub objects_checked: usize,
     pub git_projection_checked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<crate::ProvenanceReport>,
     pub repair_target: Option<String>,
     pub repaired: bool,
     pub repairs: Vec<FsckRepair>,
@@ -78,6 +81,35 @@ pub fn fsck(ctx: &ExecutionContext, opts: FsckOptions) -> Result<FsckReport> {
 
     state::check_states(repo, &mut errors, &mut objects_checked, opts.thorough)?;
 
+    let provenance = (opts.thorough && opts.provenance)
+        .then(|| crate::verify_repository_provenance(repo))
+        .transpose()?;
+    if let Some(provenance) = &provenance {
+        for state in &provenance.states {
+            match (state.status.as_str(), state.failed_link.as_deref()) {
+                ("Legacy", _) => errors.push(make_error(
+                    "legacy_provenance",
+                    &format!(
+                        "State {} Legacy at content link: {}",
+                        state.state_id, state.detail
+                    ),
+                    Some(state.state_id.clone()),
+                )),
+                (_, Some(_)) => errors.push(make_error(
+                    "invalid_provenance_chain",
+                    &format!(
+                        "State {} {}: {}",
+                        state.state_id,
+                        state.display_status(),
+                        state.detail
+                    ),
+                    Some(state.state_id.clone()),
+                )),
+                _ => {}
+            }
+        }
+    }
+
     if opts.full {
         objects::check_tree_objects(repo, &mut errors, &mut warnings, &mut objects_checked)?;
     }
@@ -101,6 +133,7 @@ pub fn fsck(ctx: &ExecutionContext, opts: FsckOptions) -> Result<FsckReport> {
         warnings,
         objects_checked,
         git_projection_checked: opts.git_projection,
+        provenance,
         repair_target: None,
         repaired: false,
         repairs: Vec::new(),

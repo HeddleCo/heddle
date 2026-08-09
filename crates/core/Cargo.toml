@@ -16,6 +16,7 @@ cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = 
 crypto = { path = "../crypto", package = "heddle-crypto", version = "0.11" }
 merge = { path = "../merge", package = "heddle-merge", version = "0.11" }
 ignore.workspace = true
+hex.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.11" }
 heddle-git-projection = { path = "../git-projection", version = "0.11", default-features = false }
 oplog = { path = "../oplog", package = "heddle-oplog", version = "0.11", default-features = false }

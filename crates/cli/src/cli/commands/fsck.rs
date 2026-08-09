@@ -8,9 +8,15 @@ use repo::RepositorySourceAuthority;
 use super::advice::RecoveryAdvice;
 use crate::cli::{Cli, execution_context_from_cli, render, should_output_json};
 
-pub fn cmd_fsck(cli: &Cli, full: bool, thorough: bool, git_projection: bool) -> Result<()> {
+pub fn cmd_fsck(
+    cli: &Cli,
+    full: bool,
+    thorough: bool,
+    provenance: bool,
+    git_projection: bool,
+) -> Result<()> {
     let ctx = execution_context_from_cli(cli)?;
-    run_fsck(cli, &ctx, full, thorough, git_projection, None)
+    run_fsck(cli, &ctx, full, thorough, provenance, git_projection, None)
 }
 
 pub fn cmd_fsck_repair_git(
@@ -21,7 +27,7 @@ pub fn cmd_fsck_repair_git(
 ) -> Result<()> {
     let ctx = execution_context_from_cli(cli)?;
     let repairs = repair_git(ctx.require_repo()?, ref_name, prefer, preview)?;
-    run_fsck(cli, &ctx, false, false, true, Some(repairs))
+    run_fsck(cli, &ctx, false, false, false, true, Some(repairs))
 }
 
 fn run_fsck(
@@ -29,6 +35,7 @@ fn run_fsck(
     ctx: &heddle_core::ExecutionContext,
     full: bool,
     thorough: bool,
+    provenance: bool,
     git_projection: bool,
     repairs: Option<Vec<FsckRepair>>,
 ) -> Result<()> {
@@ -37,6 +44,7 @@ fn run_fsck(
         FsckOptions {
             full,
             thorough,
+            provenance,
             git_projection,
         },
     )?;
