@@ -82,6 +82,7 @@ impl StateSignature {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignatureStatus {
     Valid,
+    Legacy,
     Invalid,
     Unsigned,
 }
@@ -93,6 +94,10 @@ impl SignatureStatus {
 
     pub fn is_unsigned(self) -> bool {
         self == SignatureStatus::Unsigned
+    }
+
+    pub fn is_legacy(self) -> bool {
+        self == SignatureStatus::Legacy
     }
 }
 
@@ -567,6 +572,11 @@ impl State {
             }
 
             len += 1;
+            if let Some(segment_id) = &agent.segment_id {
+                len += segment_id.len() as u64 + 1;
+            }
+
+            len += 1;
             if let Some(policy_id) = &agent.policy_id {
                 len += policy_id.len() as u64 + 1;
             }
@@ -960,6 +970,30 @@ mod tests {
             .with_timestamp(timestamp);
 
         assert_ne!(state_a.compute_hash(), state_b.compute_hash());
+    }
+
+    #[test]
+    fn agent_segment_is_included_in_state_hash_length_prefix() {
+        let state = State::new_snapshot(
+            ContentHash::compute(b"tree"),
+            vec![],
+            Attribution::with_agent(
+                Principal::new("Alice", "alice@example.com"),
+                crate::object::Agent::new("openai", "gpt-5").with_session("sess-1", "segment-1"),
+            ),
+        );
+        let segment_len = "segment-1".len() as u64 + 2;
+        let missing_segment_len_hash = ContentHash::compute_typed_with_len(
+            "state",
+            state.hash_len() - segment_len,
+            |hasher| state.update_hash(hasher),
+        );
+
+        assert_ne!(
+            state.compute_hash(),
+            missing_segment_len_hash,
+            "segment_id's option tag, bytes, and terminator must affect the typed length prefix",
+        );
     }
 
     fn sample_state() -> State {

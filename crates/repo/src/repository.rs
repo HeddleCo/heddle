@@ -516,6 +516,10 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> RepositoryLockExt for Repos
 }
 
 impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
+    pub fn heddle_dir(&self) -> &Path {
+        &self.heddle_dir
+    }
+
     /// Expert-only constructor for callers that already own the repository's
     /// component backends and invariant state.
     ///
@@ -1302,10 +1306,6 @@ impl Repository {
 
     pub fn root(&self) -> &Path {
         &self.root
-    }
-
-    pub fn heddle_dir(&self) -> &Path {
-        &self.heddle_dir
     }
 
     /// Root whose directory name should be used for managed thread checkout

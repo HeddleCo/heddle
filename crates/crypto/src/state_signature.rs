@@ -3,7 +3,7 @@
 
 use objects::object::{ContentHash, StateSignature};
 
-use crate::{Signer, SignerError, verify_state_signature};
+use crate::{Signer, SignerError, state_signature_payload, verify_state_signature};
 
 /// Error type for state signature operations.
 #[derive(Debug, thiserror::Error)]
@@ -24,7 +24,7 @@ pub fn state_signature_from_signer(
     hash: &ContentHash,
     signer: &dyn Signer,
 ) -> Result<StateSignature, StateSignatureError> {
-    let signature = signer.sign(hash.as_bytes())?;
+    let signature = signer.sign(&state_signature_payload(hash))?;
 
     Ok(StateSignature {
         algorithm: signer.algorithm().to_string(),
@@ -70,5 +70,25 @@ mod tests {
         assert_eq!(sig.algorithm(), "ed25519");
 
         verify_state_signature_bytes(&sig, &hash).expect("verify should not error");
+
+        let signature = signature_bytes(&sig).expect("decode tagged signature");
+        signer
+            .verify(&state_signature_payload(&hash), &signature)
+            .expect("signature covers the canonical domain-tagged payload");
+    }
+
+    #[test]
+    fn untagged_signature_is_rejected() {
+        let signer = Ed25519Signer::generate().expect("generate key");
+        let hash = make_test_hash();
+        let signature = signer.sign(hash.as_bytes()).expect("sign bare hash");
+        let untagged = StateSignature {
+            algorithm: signer.algorithm().to_string(),
+            public_key: hex::encode(signer.public_key()),
+            signature: hex::encode(signature),
+        };
+
+        verify_state_signature_bytes(&untagged, &hash)
+            .expect_err("an untagged signature must fail verification");
     }
 }

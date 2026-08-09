@@ -32,6 +32,15 @@ pub trait Signer: Send + Sync {
     fn verify(&self, data: &[u8], signature: &[u8]) -> Result<(), SignerError>;
 }
 
+const STATE_SIGNATURE_DOMAIN: &[u8; 16] = b"hd-state-sig-v1\x00";
+
+fn state_signature_payload(content_hash: &ContentHash) -> [u8; 48] {
+    let mut payload = [0; 48];
+    payload[..STATE_SIGNATURE_DOMAIN.len()].copy_from_slice(STATE_SIGNATURE_DOMAIN);
+    payload[STATE_SIGNATURE_DOMAIN.len()..].copy_from_slice(content_hash.as_bytes());
+    payload
+}
+
 /// Load a signer from a key file. When `algorithm` is `None`, the PEM
 /// header (or raw-seed shape) selects the backend via
 /// [`pem_loader::load_signer_from_pem`].
@@ -89,7 +98,12 @@ pub fn verify_state_signature(
     public_key: &[u8],
     signature: &[u8],
 ) -> Result<(), SignerError> {
-    verify_payload_signature(content_hash.as_bytes(), algorithm, public_key, signature)
+    verify_payload_signature(
+        &state_signature_payload(content_hash),
+        algorithm,
+        public_key,
+        signature,
+    )
 }
 
 /// Verify a detached signature over an arbitrary payload. Used by
