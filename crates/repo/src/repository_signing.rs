@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use crypto::{
-    Signer, load_signer, state_signature_from_signer, verify_payload_signature,
-    verify_state_signature_bytes,
+    Signer, load_signer, public_key_bytes, signature_bytes, state_signature_from_signer,
+    verify_payload_signature, verify_state_signature_bytes,
 };
 use objects::{
     object::{
@@ -13,9 +13,74 @@ use objects::{
     },
     store::ObjectStore,
 };
+use oplog::OpLogBackend;
+use refs::RefBackend;
 use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result};
+
+impl<R, O, S> Repository<R, O, S>
+where
+    R: RefBackend,
+    O: OpLogBackend,
+    S: ObjectStore,
+{
+    /// Re-sign a legacy state signature when its private key is still owned by
+    /// this device or repository. The legacy attachment remains as immutable
+    /// evidence; migration appends a domain-tagged signature.
+    pub(crate) fn resign_if_owned(&self, state: &State) -> Result<bool> {
+        let hash = state.compute_hash();
+        let signatures: Vec<_> = self
+            .list_state_attachments(&state.id())?
+            .into_iter()
+            .filter_map(|attachment| match attachment.body {
+                StateAttachmentBody::Signature(signature) => Some(signature),
+                _ => None,
+            })
+            .collect();
+        if signatures
+            .iter()
+            .any(|signature| verify_state_signature_bytes(signature, &hash).is_ok())
+        {
+            return Ok(false);
+        }
+
+        for signature in signatures {
+            if !legacy_signature_verifies(&signature, &hash) {
+                continue;
+            }
+            let Some(signer) = self.owning_signer_for(&signature) else {
+                continue;
+            };
+            let replacement =
+                state_signature_from_signer(&hash, signer.as_ref()).map_err(|error| {
+                    HeddleError::Conflict(format!("failed to re-sign state: {error}"))
+                })?;
+            self.put_state_attachment(&StateAttachment {
+                state_id: state.id(),
+                body: StateAttachmentBody::Signature(replacement),
+                attribution: state.attribution.clone(),
+                created_at: chrono::Utc::now(),
+                supersedes: None,
+            })?;
+            debug!(state_id = %state.id().short(), "Re-signed owned legacy state signature");
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn owning_signer_for(&self, signature: &StateSignature) -> Option<Box<dyn Signer>> {
+        let device_path = crate::identity::device_identity_path();
+        if let Some(signer) = crate::identity::load_device_signer(&device_path)
+            && signer_matches_signature(signer.as_ref(), signature)
+        {
+            return Some(signer);
+        }
+        let local_path = self.heddle_dir().join(crate::identity::LOCAL_IDENTITY_FILE);
+        let signer = crate::identity::load_local_signer(&local_path)?;
+        signer_matches_signature(signer.as_ref(), signature).then_some(signer)
+    }
+}
 
 impl Repository {
     /// Path to this repo's per-repo local signing identity (heddle#482).
@@ -205,6 +270,7 @@ impl Repository {
     ///
     /// Returns the signature status:
     /// - `SignatureStatus::Valid` if the signature is valid
+    /// - `SignatureStatus::Legacy` if only pre-domain-tag signatures verify
     /// - `SignatureStatus::Invalid` if the signature is invalid
     /// - `SignatureStatus::Unsigned` if the state has no signature
     ///
@@ -232,17 +298,9 @@ impl Repository {
             debug!("State has no signature");
             return Ok(SignatureStatus::Unsigned);
         }
-        let hash = state.compute_hash();
-        if signatures
-            .iter()
-            .any(|signature| verify_state_signature_bytes(signature, &hash).is_ok())
-        {
-            debug!("At least one state signature is valid");
-            Ok(SignatureStatus::Valid)
-        } else {
-            debug!("No state signature verifies");
-            Ok(SignatureStatus::Invalid)
-        }
+        let status = classify_state_signatures(&signatures, &state.compute_hash());
+        debug!(?status, "Classified state signatures");
+        Ok(status)
     }
 
     /// Get the signature of a state.
@@ -265,6 +323,51 @@ impl Repository {
                 _ => None,
             })
             .find(|signature| verify_state_signature_bytes(signature, &hash).is_ok()))
+    }
+}
+
+fn signer_matches_signature(signer: &dyn Signer, signature: &StateSignature) -> bool {
+    signer
+        .algorithm()
+        .eq_ignore_ascii_case(&signature.algorithm)
+        && hex::encode(signer.public_key()).eq_ignore_ascii_case(&signature.public_key)
+}
+
+fn legacy_signature_verifies(
+    signature: &StateSignature,
+    hash: &objects::object::ContentHash,
+) -> bool {
+    let Ok(public_key) = public_key_bytes(signature) else {
+        return false;
+    };
+    let Ok(signature_bytes) = signature_bytes(signature) else {
+        return false;
+    };
+    verify_payload_signature(
+        hash.as_bytes(),
+        &signature.algorithm,
+        &public_key,
+        &signature_bytes,
+    )
+    .is_ok()
+}
+
+fn classify_state_signatures(
+    signatures: &[StateSignature],
+    hash: &objects::object::ContentHash,
+) -> SignatureStatus {
+    if signatures
+        .iter()
+        .any(|signature| verify_state_signature_bytes(signature, hash).is_ok())
+    {
+        SignatureStatus::Valid
+    } else if signatures
+        .iter()
+        .any(|signature| legacy_signature_verifies(signature, hash))
+    {
+        SignatureStatus::Legacy
+    } else {
+        SignatureStatus::Invalid
     }
 }
 
@@ -420,6 +523,150 @@ mod tests {
             .expect("read signature")
             .expect("state is signed")
             .public_key
+    }
+
+    fn untagged_signature(state: &State, signer: &dyn Signer) -> StateSignature {
+        StateSignature {
+            algorithm: signer.algorithm().to_string(),
+            public_key: hex::encode(signer.public_key()),
+            signature: hex::encode(
+                signer
+                    .sign(state.compute_hash().as_bytes())
+                    .expect("sign legacy bare hash"),
+            ),
+        }
+    }
+
+    fn attach_signature(repo: &Repository, state: &State, signature: StateSignature) {
+        repo.put_state_attachment(&StateAttachment {
+            state_id: state.id(),
+            body: StateAttachmentBody::Signature(signature),
+            attribution: state.attribution.clone(),
+            created_at: chrono::Utc::now(),
+            supersedes: None,
+        })
+        .expect("attach signature");
+    }
+
+    fn write_context_attachment(repo: &Repository, state: &State) {
+        repo.put_state_attachment(&StateAttachment {
+            state_id: state.id(),
+            body: StateAttachmentBody::Context(objects::object::ContentHash::compute(b"context")),
+            attribution: state.attribution.clone(),
+            created_at: chrono::Utc::now(),
+            supersedes: None,
+        })
+        .expect("write context attachment");
+    }
+
+    #[test]
+    fn foreign_untagged_signature_is_classified_legacy() {
+        let home = TempDir::new().expect("home temp");
+        with_signing_home(home.path(), || {
+            let (_temp, repo) = setup_repo();
+            let state_id = create_test_state(&repo);
+            let state = repo
+                .store()
+                .get_state(&state_id)
+                .expect("get state")
+                .expect("state exists");
+            let foreign = Ed25519Signer::generate().expect("foreign signer");
+            attach_signature(&repo, &state, untagged_signature(&state, &foreign));
+
+            assert_eq!(
+                repo.verify_state_signature(&state_id).expect("verify"),
+                SignatureStatus::Legacy,
+            );
+
+            write_context_attachment(&repo, &state);
+            assert_eq!(
+                repo.verify_state_signature(&state_id).expect("verify"),
+                SignatureStatus::Legacy,
+                "a foreign legacy signature must not be laundered with a local key",
+            );
+        });
+    }
+
+    #[test]
+    fn next_write_resigns_legacy_local_signature_after_device_link() {
+        let home = TempDir::new().expect("home temp");
+        with_signing_home(home.path(), || {
+            let (_temp, repo) = setup_repo();
+            let state_id = create_test_state(&repo);
+            let state = repo
+                .store()
+                .get_state(&state_id)
+                .expect("get state")
+                .expect("state exists");
+            let local = repo.signing_signer().expect("local signer");
+            let local_public_key = hex::encode(local.public_key());
+            attach_signature(&repo, &state, untagged_signature(&state, local.as_ref()));
+            assert_eq!(
+                repo.verify_state_signature(&state_id).expect("verify"),
+                SignatureStatus::Legacy,
+            );
+
+            let device = Ed25519Signer::generate().expect("device signer");
+            crate::identity::link_device_key(
+                device.public_key(),
+                &device.to_pem().expect("device pem"),
+                "api.example",
+            )
+            .expect("link device key");
+            assert_ne!(hex::encode(device.public_key()), local_public_key);
+
+            write_context_attachment(&repo, &state);
+
+            assert_eq!(
+                repo.verify_state_signature(&state_id).expect("verify"),
+                SignatureStatus::Valid,
+            );
+            let tagged = repo
+                .get_state_signature(&state_id)
+                .expect("get signature")
+                .expect("tagged signature");
+            assert_eq!(
+                tagged.public_key, local_public_key,
+                "migration must use the original owning local key",
+            );
+        });
+    }
+
+    #[test]
+    fn next_write_resigns_legacy_device_signature() {
+        let home = TempDir::new().expect("home temp");
+        with_signing_home(home.path(), || {
+            let (_temp, repo) = setup_repo();
+            let state_id = create_test_state(&repo);
+            let state = repo
+                .store()
+                .get_state(&state_id)
+                .expect("get state")
+                .expect("state exists");
+            let device = Ed25519Signer::generate().expect("device signer");
+            let device_public_key = hex::encode(device.public_key());
+            crate::identity::link_device_key(
+                device.public_key(),
+                &device.to_pem().expect("device pem"),
+                "api.example",
+            )
+            .expect("link device key");
+            attach_signature(&repo, &state, untagged_signature(&state, &device));
+
+            write_context_attachment(&repo, &state);
+
+            assert_eq!(
+                repo.verify_state_signature(&state_id).expect("verify"),
+                SignatureStatus::Valid,
+            );
+            assert_eq!(
+                repo.get_state_signature(&state_id)
+                    .expect("get signature")
+                    .expect("tagged signature")
+                    .public_key,
+                device_public_key,
+            );
+        });
     }
 
     #[test]

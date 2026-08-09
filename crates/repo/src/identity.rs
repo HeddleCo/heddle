@@ -249,6 +249,13 @@ pub fn load_local_signer(local_path: &Path) -> Option<Box<dyn Signer>> {
     signer_from_pem(&local.private_key_pem).ok()
 }
 
+/// Load the global device signing key at `path` without falling back to or
+/// minting a local identity.
+pub fn load_device_signer(device_path: &Path) -> Option<Box<dyn Signer>> {
+    let device = load_device(device_path).ok().flatten()?;
+    signer_from_pem(&device.private_key_pem).ok()
+}
+
 /// Load the per-repo local identity at `path`, minting and persisting a fresh
 /// ed25519 key if the file is absent.
 pub fn load_or_mint_local(path: &Path) -> std::io::Result<LocalIdentity> {

@@ -53,6 +53,13 @@ where
                 )),
             };
         }
+        if attachment.body.kind() != StateAttachmentKind::Signature {
+            let state = self
+                .store()
+                .get_state(&attachment.state_id)?
+                .ok_or(HeddleError::StateNotFound(attachment.state_id))?;
+            self.resign_if_owned(&state)?;
+        }
         self.store().put_state_attachment(attachment)
     }
 
