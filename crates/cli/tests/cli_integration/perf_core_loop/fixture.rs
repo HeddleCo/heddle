@@ -7,7 +7,7 @@ use std::{
     time::Instant,
 };
 
-use repo::{FsMonitorMode, Repository};
+use repo::{FsMonitorMode, FsMonitorSettings, Repository, WorktreeStatusOptions};
 use tempfile::TempDir;
 
 pub(super) struct PerfFixture {
@@ -44,8 +44,7 @@ impl PerfFixture {
         drop(repo);
 
         let warm_start = Instant::now();
-        run_setup(binary, &["--output", "json", "status"], &root);
-        run_setup(binary, &["--output", "json", "status"], &root);
+        warm_native_monitor(binary, &root);
         let warm_ms = warm_start.elapsed().as_millis();
         println!(
             "SETUP paths={path_count} total_ms={} init_ms={init_ms} files_ms={files_ms} seed_ms={seed_ms} monitor_warm_ms={warm_ms}",
@@ -95,6 +94,27 @@ impl PerfFixture {
     fn dirty_path(&self) -> PathBuf {
         self.root.join("tracked/dir-00000/file-000000.txt")
     }
+}
+
+fn warm_native_monitor(binary: &Path, root: &Path) {
+    let options = WorktreeStatusOptions {
+        fsmonitor: FsMonitorSettings {
+            mode: FsMonitorMode::Native,
+        },
+    };
+    for _ in 0..20 {
+        run_setup(binary, &["--output", "json", "status"], root);
+        let repo = Repository::open(root).expect("open perf fixture for monitor warmup");
+        let report = repo
+            .inspect_change_monitor_with_options(&options)
+            .expect("inspect native monitor during warmup");
+        if report.status == "usable" {
+            run_setup(binary, &["--output", "json", "status"], root);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("native monitor did not become usable during fixture warmup");
 }
 
 fn write_files(root: &Path, count: usize) {

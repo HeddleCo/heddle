@@ -96,7 +96,9 @@ fn core_loop_release_contract() {
         println!("GATES skipped: HEDDLE_PERF_RECORD_ONLY=1");
     } else {
         enforce_contract(&results);
-        println!("GATES green: latency, scale invariance, repository opens, zero network");
+        println!(
+            "GATES green: 100k clean status target, latency, scale invariance, repository opens, zero network"
+        );
     }
 }
 

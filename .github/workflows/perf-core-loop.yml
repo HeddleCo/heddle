@@ -106,7 +106,7 @@ jobs:
             echo 'Compilation and fixture construction are reported separately from command samples.'
             echo
             echo '```text'
-            grep -E '^(RUNNER|SETUP|RESULT|COUNTERS|BASELINE|BAND|SCALE|GATES|PERF GATE)' \
+            grep -E '^(RUNNER|SETUP|RESULT|COUNTERS|BASELINE|BAND|TARGET|SCALE|GATES|PERF GATE)' \
               core-loop-contract.txt 2>/dev/null || true
             echo '```'
             echo
