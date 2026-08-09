@@ -1,9 +1,10 @@
 use api::heddle::api::v1alpha1::{
-    AnnotationScope, CompareResponse, ContextAnnotationKind, GetBlameRequest, GetBlameResponse,
-    GetCompareRequest, GetContextHistoryRequest, GetContextHistoryResponse, ListContextRequest,
-    ListContextResponse, ListContextSuggestionsRequest, ListContextSuggestionsResponse,
+    AnnotatedFile, AnnotationScope, CompareResponse, ContextAnnotationKind, ContextRevision,
+    GetBlameRequest, GetBlameResponse, GetCompareRequest, GetContextHistoryRequest,
+    ListContextRequest, ListContextSuggestionsRequest, ListContextSuggestionsResponse,
     ReviseContextRequest, ReviseContextResponse, SetContextRequest, SetContextResponse,
-    SupersedeContextRequest, SupersedeContextResponse,
+    StateContextEntry, SupersedeContextRequest, SupersedeContextResponse,
+    get_context_history_response, list_context_response,
 };
 use wire::ProtocolError;
 
@@ -56,17 +57,48 @@ impl HostedClient {
         r#ref: Option<&str>,
         prefix: Option<&str>,
         tag_filter: Option<&str>,
-    ) -> Result<ListContextResponse, ProtocolError> {
-        let request = ListContextRequest {
-            repo_path: super::helpers::repository_ref(repo_path),
-            r#ref: r#ref.unwrap_or_default().to_string(),
-            prefix: prefix.map(str::to_string),
-            tag_filter: tag_filter.map(str::to_string),
-        };
-        self.routes()
-            .list_context(&request)
-            .await
-            .map_err(hosted_to_protocol_error)
+    ) -> Result<(Vec<AnnotatedFile>, Vec<StateContextEntry>), ProtocolError> {
+        let mut files = Vec::new();
+        let mut states = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            let request = ListContextRequest {
+                repo_path: super::helpers::repository_ref(repo_path),
+                r#ref: r#ref.unwrap_or_default().to_string(),
+                prefix: prefix.map(str::to_string),
+                tag_filter: tag_filter.map(str::to_string),
+                page_size: api::MAX_PAGE_SIZE,
+                page_token: page_token.clone(),
+            };
+            let mut stream = self
+                .routes()
+                .list_context(&request)
+                .await
+                .map_err(hosted_to_protocol_error)?;
+            let mut next_page_token = None;
+            while let Some(response) = stream.next().await.map_err(hosted_to_protocol_error)? {
+                if !response.states.is_empty() {
+                    states = response.states;
+                }
+                match response.frame {
+                    Some(list_context_response::Frame::Item(file)) => files.push(file),
+                    Some(list_context_response::Frame::PageEnd(page_end)) => {
+                        next_page_token = Some(page_end.next_page_token);
+                    }
+                    None => {
+                        return Err(ProtocolError::InvalidState(
+                            "ListContext emitted an empty frame".to_string(),
+                        ));
+                    }
+                }
+            }
+            let next_page_token = terminal_page_token("ListContext", next_page_token)?;
+            if next_page_token.is_empty() {
+                return Ok((files, states));
+            }
+            reject_repeated_page_token("ListContext", &page_token, &next_page_token)?;
+            page_token = next_page_token;
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -110,16 +142,45 @@ impl HostedClient {
         repo_path: &str,
         r#ref: Option<&str>,
         annotation_id: &str,
-    ) -> Result<GetContextHistoryResponse, ProtocolError> {
-        let request = GetContextHistoryRequest {
-            repo_path: super::helpers::repository_ref(repo_path),
-            r#ref: r#ref.unwrap_or_default().to_string(),
-            annotation_id: annotation_id.to_string(),
-        };
-        self.routes()
-            .get_context_history(&request)
-            .await
-            .map_err(hosted_to_protocol_error)
+    ) -> Result<Vec<ContextRevision>, ProtocolError> {
+        let mut revisions = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            let request = GetContextHistoryRequest {
+                repo_path: super::helpers::repository_ref(repo_path),
+                r#ref: r#ref.unwrap_or_default().to_string(),
+                annotation_id: annotation_id.to_string(),
+                page_size: api::MAX_PAGE_SIZE,
+                page_token: page_token.clone(),
+            };
+            let mut stream = self
+                .routes()
+                .get_context_history(&request)
+                .await
+                .map_err(hosted_to_protocol_error)?;
+            let mut next_page_token = None;
+            while let Some(response) = stream.next().await.map_err(hosted_to_protocol_error)? {
+                match response.frame {
+                    Some(get_context_history_response::Frame::Item(revision)) => {
+                        revisions.push(revision);
+                    }
+                    Some(get_context_history_response::Frame::PageEnd(page_end)) => {
+                        next_page_token = Some(page_end.next_page_token);
+                    }
+                    None => {
+                        return Err(ProtocolError::InvalidState(
+                            "GetContextHistory emitted an empty frame".to_string(),
+                        ));
+                    }
+                }
+            }
+            let next_page_token = terminal_page_token("GetContextHistory", next_page_token)?;
+            if next_page_token.is_empty() {
+                return Ok(revisions);
+            }
+            reject_repeated_page_token("GetContextHistory", &page_token, &next_page_token)?;
+            page_token = next_page_token;
+        }
     }
 
     pub async fn list_context_suggestions(
@@ -204,6 +265,25 @@ impl HostedClient {
             .await
             .map_err(hosted_to_protocol_error)
     }
+}
+
+fn terminal_page_token(method: &str, page_token: Option<String>) -> Result<String, ProtocolError> {
+    page_token.ok_or_else(|| {
+        ProtocolError::InvalidState(format!("{method} ended without a terminal page frame"))
+    })
+}
+
+fn reject_repeated_page_token(
+    method: &str,
+    current: &str,
+    next: &str,
+) -> Result<(), ProtocolError> {
+    if current == next {
+        return Err(ProtocolError::InvalidState(format!(
+            "{method} returned a repeated page token"
+        )));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

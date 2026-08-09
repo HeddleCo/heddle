@@ -413,6 +413,8 @@ impl HostedClient {
             "heddle.api.v1alpha1.WorkflowService/ApproveThread",
             client_operation_id,
         );
+        let source_thread_id = self.require_thread_id(repo_path, source_thread).await?;
+        let target_thread_id = self.require_thread_id(repo_path, target_thread).await?;
         Ok(workflow_call!(
             self,
             approve_thread,
@@ -426,6 +428,8 @@ impl HostedClient {
                     .and_then(super::helpers::proto_state_id),
                 note: note.unwrap_or_default().to_string(),
                 client_operation_id: operation_id.to_wire(),
+                source_thread_id,
+                target_thread_id,
             }
         ))
     }
@@ -457,6 +461,8 @@ impl HostedClient {
         source_thread: &str,
         target_thread: &str,
     ) -> Result<Vec<ThreadApproval>, ProtocolError> {
+        let source_thread_id = self.require_thread_id(repo_path, source_thread).await?;
+        let target_thread_id = self.require_thread_id(repo_path, target_thread).await?;
         Ok(workflow_call!(
             self,
             list_thread_approvals,
@@ -465,6 +471,8 @@ impl HostedClient {
                 repo_path: super::helpers::repository_ref(repo_path),
                 source_thread: source_thread.to_string(),
                 target_thread: target_thread.to_string(),
+                source_thread_id,
+                target_thread_id,
             }
         )
         .approvals)
@@ -485,6 +493,8 @@ impl HostedClient {
         changed_paths: Vec<String>,
         author_user_id: Option<&str>,
     ) -> Result<CheckMergeEligibilityResponse, ProtocolError> {
+        let source_thread_id = self.require_thread_id(repo_path, source_thread).await?;
+        let target_thread_id = self.require_thread_id(repo_path, target_thread).await?;
         Ok(workflow_call!(
             self,
             check_merge_eligibility,
@@ -499,6 +509,8 @@ impl HostedClient {
                 gated_action: gated_action.to_string(),
                 changed_paths,
                 author_user_id: author_user_id.unwrap_or_default().to_string(),
+                source_thread_id,
+                target_thread_id,
             }
         ))
     }

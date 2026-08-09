@@ -2044,6 +2044,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "heddle-api"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "722263983a39fca723f5263d5ec64604d8db468f4aa379d8c037c530ddcd7e4f"
+dependencies = [
+ "bytes",
+ "hex",
+ "prost 0.14.1",
+ "prost-build",
+ "prost-reflect",
+ "prost-types 0.14.1",
+ "protoc-bin-vendored",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "heddle-cli"
 version = "0.11.0"
 dependencies = [
@@ -2058,7 +2075,7 @@ dependencies = [
  "clap_complete",
  "criterion",
  "futures",
- "heddle-api",
+ "heddle-api 0.3.0",
  "heddle-cli-args",
  "heddle-cli-contract",
  "heddle-cli-render",
@@ -2128,7 +2145,7 @@ version = "0.11.0"
 dependencies = [
  "anyhow",
  "clap",
- "heddle-api",
+ "heddle-api 0.3.0",
  "heddle-cli-shared",
  "heddle-objects",
  "heddle-repo",
@@ -2246,7 +2263,7 @@ version = "0.11.0"
 dependencies = [
  "chrono",
  "futures",
- "heddle-api",
+ "heddle-api 0.3.0",
  "heddle-crypto",
  "heddle-objects",
  "heddle-oplog",
@@ -2348,7 +2365,7 @@ name = "heddle-iroh-transport-experiment"
 version = "0.11.0"
 dependencies = [
  "bytes",
- "heddle-api",
+ "heddle-api 0.2.1",
  "heddle-objects",
  "heddle-wire",
  "heddleco-iroh",

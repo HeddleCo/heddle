@@ -19,6 +19,7 @@
 use api::heddle::api::v1alpha1::{
     AppendTurnRequest, Discussion as ProtoDiscussion, DiscussionStatusFilter,
     ListDiscussionsByStateRequest, OpenDiscussionRequest, PathSymbolRef, StateId as ProtoStateId,
+    list_discussions_response,
 };
 use objects::object::{ChangeId, StateId};
 use wire::ProtocolError;
@@ -118,6 +119,7 @@ impl HostedClient {
             visibility: visibility.to_string(),
             thread_ref: String::new(),
             client_operation_id,
+            thread_id: String::new(),
         };
         let response = self
             .routes()
@@ -158,21 +160,53 @@ impl HostedClient {
         change_id: ChangeId,
         status: &str,
     ) -> Result<Vec<HostedDiscussion>, ProtocolError> {
-        let request = ListDiscussionsByStateRequest {
-            repo_path: super::helpers::repository_ref(repo_path),
-            state_id: change_id_state_field(change_id),
-            status: discussion_status_filter(status)? as i32,
-        };
-        let response = self
-            .routes()
-            .list_discussions_by_state(&request)
-            .await
-            .map_err(hosted_to_protocol_error)?;
-        Ok(response
-            .discussions
-            .into_iter()
-            .map(decode_discussion)
-            .collect())
+        let status = discussion_status_filter(status)? as i32;
+        let mut discussions = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            let request = ListDiscussionsByStateRequest {
+                repo_path: super::helpers::repository_ref(repo_path),
+                state_id: change_id_state_field(change_id),
+                status,
+                page_size: api::MAX_PAGE_SIZE,
+                page_token: page_token.clone(),
+            };
+            let mut stream = self
+                .routes()
+                .list_discussions_by_state(&request)
+                .await
+                .map_err(hosted_to_protocol_error)?;
+            let mut next_page_token = None;
+            while let Some(response) = stream.next().await.map_err(hosted_to_protocol_error)? {
+                match response.frame {
+                    Some(list_discussions_response::Frame::Item(discussion)) => {
+                        discussions.push(decode_discussion(*discussion));
+                    }
+                    Some(list_discussions_response::Frame::PageEnd(page_end)) => {
+                        next_page_token = Some(page_end.next_page_token);
+                    }
+                    None => {
+                        return Err(ProtocolError::InvalidState(
+                            "ListByState emitted an empty frame".to_string(),
+                        ));
+                    }
+                }
+            }
+            let next_page_token = next_page_token.ok_or_else(|| {
+                ProtocolError::InvalidState(
+                    "ListByState ended without a terminal page frame".to_string(),
+                )
+            })?;
+            if next_page_token.is_empty() {
+                return Ok(discussions);
+            }
+            if next_page_token == page_token {
+                return Err(ProtocolError::InvalidState(
+                    "ListByState returned a repeated page token".to_string(),
+                ));
+            }
+            page_token = next_page_token;
+        }
     }
 }
 

@@ -1618,7 +1618,7 @@ async fn clone_network_connected(
         PullMaterialization::Full
     };
     let mut folded_refs = None;
-    let folded = client
+    let (mut result, local_repo) = client
         .clone_pull_with_depth_and_materialization(
             repo_path,
             thread.as_deref(),
@@ -1650,46 +1650,8 @@ async fn clone_network_connected(
                 Ok(repo)
             },
         )
-        .await;
-    let (mut result, local_repo, remote_refs) = match folded {
-        Ok((result, local_repo)) => (
-            result,
-            local_repo,
-            folded_refs.context("folded clone response is missing its refs")?,
-        ),
-        Err(error) if folded_refs.is_none() && !local_path.join(".git").exists() => {
-            let remote_refs = client
-                .list_refs_with_revision_addresses(repo_path)
-                .await?
-                .into_iter()
-                .filter(|entry| entry.is_thread)
-                .collect::<Vec<_>>();
-            let track_name = select_hosted_clone_thread(
-                thread.as_deref(),
-                remote_refs.iter().map(|entry| entry.name.as_str()),
-                repo_path,
-            )?;
-            let local_repo =
-                initialize_hosted_clone_repository(local_path, &remote_refs, &track_name)?;
-            let result = client
-                .repair_clone_with_depth_and_materialization(
-                    &local_repo,
-                    repo_path,
-                    &track_name,
-                    depth,
-                    materialization,
-                )
-                .await
-                .map_err(|fallback| {
-                    let error = format!(
-                        "folded clone bootstrap failed ({error}); ListRefs fallback failed ({fallback})"
-                    );
-                    anyhow!(RecoveryAdvice::network_clone_failed(&error, local_path))
-                })?;
-            (result, local_repo, remote_refs)
-        }
-        Err(error) => return Err(error.into()),
-    };
+        .await?;
+    let remote_refs = folded_refs.context("folded clone response is missing its refs")?;
     let track_name = select_hosted_clone_thread(
         thread.as_deref(),
         remote_refs
@@ -1740,9 +1702,13 @@ async fn clone_network_connected(
 
         let bootstrap = crate::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
             .context("decode hosted clone bootstrap")?
-            .as_ref()
-            .map(|metadata| metadata.resolve(&local_repo, Some(final_state)))
-            .transpose()
+            .ok_or_else(|| {
+                anyhow!(RecoveryAdvice::network_clone_failed(
+                    "hosted response is missing required folded metadata",
+                    local_path,
+                ))
+            })?
+            .resolve(&local_repo, Some(final_state))
             .context("resolve hosted clone bootstrap")?;
 
         if lazy {
@@ -1766,9 +1732,7 @@ async fn clone_network_connected(
             &local_repo,
             client,
             repo_path,
-            bootstrap
-                .as_ref()
-                .map(|metadata| metadata.discussions.as_slice()),
+            Some(bootstrap.discussions.as_slice()),
         )
         .await
         {
@@ -1787,9 +1751,7 @@ async fn clone_network_connected(
             &local_repo,
             client,
             repo_path,
-            bootstrap
-                .as_ref()
-                .map(|metadata| metadata.context.as_slice()),
+            Some(bootstrap.context.as_slice()),
         )
         .await
         {
@@ -1981,16 +1943,18 @@ async fn recover_interrupted_clone_connected(
     }
     configure_hosted_clone_origin(&repo, &intent.endpoint, &intent.repository)?;
     let bootstrap = crate::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)?
-        .as_ref()
-        .map(|metadata| metadata.resolve(&repo, Some(final_state)))
-        .transpose()?;
+        .ok_or_else(|| {
+            anyhow!(RecoveryAdvice::network_clone_failed(
+                "hosted response is missing required folded metadata",
+                root,
+            ))
+        })?
+        .resolve(&repo, Some(final_state))?;
     if let Err(error) = crate::client::discussion_sync::pull_discussions(
         &repo,
         client,
         &intent.repository,
-        bootstrap
-            .as_ref()
-            .map(|metadata| metadata.discussions.as_slice()),
+        Some(bootstrap.discussions.as_slice()),
     )
     .await
     {
@@ -2003,9 +1967,7 @@ async fn recover_interrupted_clone_connected(
         &repo,
         client,
         &intent.repository,
-        bootstrap
-            .as_ref()
-            .map(|metadata| metadata.context.as_slice()),
+        Some(bootstrap.context.as_slice()),
     )
     .await
     {
@@ -2844,6 +2806,7 @@ mod tests {
             state_id: objects::object::StateId::from_bytes([1; 32]),
             is_thread: true,
             revision_address: "git:5b2471720c93ee30e5764a19f3d3b3ae9ec9712a".to_string(),
+            thread_id: Some("thread-main".to_string()),
         }];
 
         let repo = initialize_hosted_clone_repository(&root, &remote_refs, "main")
@@ -2876,6 +2839,7 @@ mod tests {
             state_id: objects::object::StateId::from_bytes([2; 32]),
             is_thread: true,
             revision_address: "heddle:0123456789abcdef".to_string(),
+            thread_id: Some("thread-main".to_string()),
         }];
 
         let repo = initialize_hosted_clone_repository(&root, &remote_refs, "main")

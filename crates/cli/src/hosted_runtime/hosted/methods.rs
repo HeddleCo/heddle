@@ -27,6 +27,20 @@ macro_rules! unary_method {
     };
 }
 
+macro_rules! server_stream_method {
+    ($name:ident, $service:literal, $rpc:literal, $request:ty, $response:ty) => {
+        pub async fn $name(&self, request: &$request) -> Result<ServerStream<$response>> {
+            self.client
+                .call_server_stream(
+                    concat!("/heddle.api.v1alpha1.", $service, "/", $rpc),
+                    request,
+                    "",
+                )
+                .await
+        }
+    };
+}
+
 impl HostedRoutes<'_> {
     unary_method!(
         begin_web_authn_authentication,
@@ -198,7 +212,7 @@ impl HostedRoutes<'_> {
         HostedRepository
     );
 
-    unary_method!(
+    server_stream_method!(
         list_refs,
         "RepoSyncService",
         "ListRefs",
@@ -234,14 +248,14 @@ impl HostedRoutes<'_> {
         GetCompareRequest,
         CompareResponse
     );
-    unary_method!(
+    server_stream_method!(
         get_context_history,
         "RepositoryService",
         "GetContextHistory",
         GetContextHistoryRequest,
         GetContextHistoryResponse
     );
-    unary_method!(
+    server_stream_method!(
         list_context,
         "RepositoryService",
         "ListContext",
@@ -298,6 +312,13 @@ impl HostedRoutes<'_> {
         GetThreadRequest,
         ThreadSummary
     );
+    server_stream_method!(
+        list_threads,
+        "WorkflowService",
+        "ListThreads",
+        ListThreadsRequest,
+        ListThreadsResponse
+    );
     unary_method!(
         list_thread_approvals,
         "WorkflowService",
@@ -327,7 +348,7 @@ impl HostedRoutes<'_> {
         AppendTurnRequest,
         Discussion
     );
-    unary_method!(
+    server_stream_method!(
         list_discussions_by_state,
         "CollaborationService",
         "ListByState",
@@ -412,7 +433,7 @@ mod tests {
     };
 
     #[test]
-    fn shipped_native_inventory_is_43_unary_two_server_streams_and_two_bidi() {
+    fn shipped_native_inventory_is_40_unary_seven_server_streams_and_two_bidi() {
         const ROUTES: &[MethodRoute] = &[
             MethodRoute::CollaborationServiceAppendTurn,
             MethodRoute::CollaborationServiceListByState,
@@ -459,7 +480,9 @@ mod tests {
             MethodRoute::StateReviewServiceSignState,
             MethodRoute::WorkflowServiceApproveThread,
             MethodRoute::WorkflowServiceCheckMergeEligibility,
+            MethodRoute::WorkflowServiceGetThread,
             MethodRoute::WorkflowServiceListThreadApprovals,
+            MethodRoute::WorkflowServiceListThreads,
             MethodRoute::WorkflowServiceRevokeApproval,
         ];
         let shipped = ALL_METHODS
@@ -471,20 +494,20 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(shipped.len(), 47);
+        assert_eq!(shipped.len(), 49);
         assert_eq!(
             shipped
                 .iter()
                 .filter(|method| method.streaming == StreamingShape::Unary)
                 .count(),
-            43
+            40
         );
         assert_eq!(
             shipped
                 .iter()
                 .filter(|method| method.streaming == StreamingShape::ServerStreaming)
                 .count(),
-            2
+            7
         );
         assert_eq!(
             shipped
