@@ -1626,6 +1626,7 @@ pub struct ThreadCleanupSchema {
     pub dry_run: bool,
     pub merged: Vec<ThreadDroppedSchema>,
     pub auto: Vec<ThreadDroppedSchema>,
+    pub abandoned: Vec<ThreadDroppedSchema>,
     pub reclaimed_bytes: u64,
     pub would_reclaim_bytes: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

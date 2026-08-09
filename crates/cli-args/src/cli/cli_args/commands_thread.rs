@@ -117,7 +117,7 @@ Advanced split form:
     /// the repo's branch-protection policies. Read-only.
     CheckMerge(ThreadCheckMergeArgs),
 
-    /// Sweep merged or stale auto-created threads.
+    /// Sweep merged, stale auto-created, or abandoned threads.
     #[command(
         long_about = "\
 Sweep threads that have outlived their usefulness. Cleanup removes recorded checkouts, marks matching thread records abandoned, and prunes live thread refs so everyday thread lists stay focused.
@@ -125,13 +125,15 @@ Sweep threads that have outlived their usefulness. Cleanup removes recorded chec
 Modes:
   - --merged: clean up threads recorded as merged.
   - --auto --older-than <duration>: clean up harness-created threads that have not been touched in the given duration.
+  - --abandoned: remove live refs and checkout residue left by abandoned threads; retain their records, states, and audit history.
 
-The two modes can be combined. Pair with --dry-run to preview the work without changing anything on disk.",
+The three modes can be combined. Pair with --dry-run to preview the work without changing anything on disk.",
         after_help = "\
 Examples:
   heddle thread cleanup --merged --dry-run
   heddle thread cleanup --merged
   heddle thread cleanup --auto --older-than 7d --dry-run
+  heddle thread cleanup --abandoned --dry-run
 "
     )]
     Cleanup(ThreadCleanupArgs),
@@ -186,8 +188,8 @@ pub enum ThreadMarkerCommands {
 
 /// Arguments for `heddle thread list`.
 ///
-/// The default view hides harness-auto-created threads (those marked
-/// with `auto: true` on disk). Pass `--include-auto` to surface them.
+/// The default view hides harness-auto-created and abandoned threads.
+/// Pass the corresponding include flags to surface them.
 #[derive(Args, Clone, Debug, Default)]
 pub struct ThreadListArgs {
     /// Include threads created automatically by harness integrations
@@ -195,13 +197,17 @@ pub struct ThreadListArgs {
     /// the view focused on threads the user explicitly created.
     #[arg(long)]
     pub include_auto: bool,
+
+    /// Include threads whose lifecycle state is abandoned. Hidden by
+    /// default because they are no longer actionable.
+    #[arg(long)]
+    pub include_abandoned: bool,
 }
 
 /// Arguments for `heddle thread cleanup`.
 ///
-/// At least one of `--merged` or `--auto` must be set; otherwise the
-/// command refuses with a clear message. `--older-than` is required
-/// when `--auto` is set.
+/// At least one cleanup mode must be set; otherwise the command refuses
+/// with a clear message. `--older-than` is required when `--auto` is set.
 #[derive(Args, Clone, Debug)]
 pub struct ThreadCleanupArgs {
     /// Clean up threads whose recorded state is `merged`.
@@ -212,6 +218,11 @@ pub struct ThreadCleanupArgs {
     /// Combine with `--older-than` to gate the sweep on staleness.
     #[arg(long)]
     pub auto: bool,
+
+    /// Clean abandoned threads that still have a live ref or checkout
+    /// residue. States and audit history are retained.
+    #[arg(long)]
+    pub abandoned: bool,
 
     /// Maximum age (since `updated_at`) for an auto-thread to be
     /// considered live. Threads older than this are eligible for

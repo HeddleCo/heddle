@@ -845,6 +845,11 @@ pub struct TryArgs {
     #[arg(long = "keep-on-success")]
     pub keep_on_success: bool,
 
+    /// Allow Heddle global-option spellings after `--` and pass them
+    /// unchanged to the inner command.
+    #[arg(long)]
+    pub allow_heddle_global_args: bool,
+
     /// The command to run. Everything after `--` lands here. The
     /// first token is the program; the rest are its arguments.
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]

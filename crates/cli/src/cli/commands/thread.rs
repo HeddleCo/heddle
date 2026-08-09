@@ -467,7 +467,9 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
     let collect_start = Instant::now();
     let report = list_threads(
         repo,
-        ThreadListOptions::new().include_auto(args.include_auto),
+        ThreadListOptions::new()
+            .include_auto(args.include_auto)
+            .include_abandoned(args.include_abandoned),
     )?;
     let collect_summaries_ms = collect_start.elapsed().as_millis();
     let verification_start = Instant::now();

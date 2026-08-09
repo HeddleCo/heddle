@@ -110,7 +110,8 @@ impl HeddleExitCode {
             //   that output contract (the invocation parses fine; the
             //   command rejects the requested projection)
             "nothing_to_capture"
-            | "commit_requires_git_overlay"
+            | "try_global_option_after_separator" => Some(Self::Usage),
+            "commit_requires_git_overlay"
             | "commit_capture_required"
             | "git_repair_requires_adoption"
             | "git_repair_requires_import"
@@ -489,6 +490,7 @@ mod tests {
             ("remote_not_configured", HeddleExitCode::Config),
             ("remote_not_found", HeddleExitCode::Config),
             ("repository_not_found", HeddleExitCode::Config),
+            ("try_global_option_after_separator", HeddleExitCode::Usage),
             ("nothing_to_capture", HeddleExitCode::DataErr),
             ("dirty_worktree", HeddleExitCode::DataErr),
             ("state_corrupted", HeddleExitCode::DataErr),

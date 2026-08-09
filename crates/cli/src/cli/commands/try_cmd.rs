@@ -610,6 +610,7 @@ mod tests {
             workspace: WorkspaceModeArg::Materialized,
             auto_merge: false,
             keep_on_success: false,
+            allow_heddle_global_args: false,
             command: vec!["true".into()],
         };
         let cli = Cli {

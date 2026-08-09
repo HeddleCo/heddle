@@ -26,13 +26,13 @@ use cli::{
         MaintenanceCommands, ResolveArgs, RetroArgs, RevertArgs, RunArgs, ThreadCommands, UndoArgs,
         cli_args::LandArgs,
         commands::{
-            LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
-            cmd_abort, cmd_adopt, cmd_agent, cmd_capture_split, cmd_clone, cmd_collapse,
-            cmd_commit, cmd_complete, cmd_context_audit, cmd_context_check, cmd_context_edit,
-            cmd_context_get, cmd_context_history, cmd_context_list, cmd_context_rm,
-            cmd_context_set, cmd_context_suggest, cmd_context_supersede, cmd_continue,
-            cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop, cmd_diff, cmd_discuss,
-            cmd_doctor, cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fsck,
+            LogCommandOptions, RecoveryAdvice, RetroCommandOptions, SnapshotAgentOverrides,
+            build_command_catalog, cmd_abort, cmd_adopt, cmd_agent, cmd_capture_split, cmd_clone,
+            cmd_collapse, cmd_commit, cmd_complete, cmd_context_audit, cmd_context_check,
+            cmd_context_edit, cmd_context_get, cmd_context_history, cmd_context_list,
+            cmd_context_rm, cmd_context_set, cmd_context_suggest, cmd_context_supersede,
+            cmd_continue, cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop, cmd_diff,
+            cmd_discuss, cmd_doctor, cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fsck,
             cmd_fsck_repair_git, cmd_hook, cmd_init, cmd_integration, cmd_land, cmd_log,
             cmd_maintenance, cmd_oplog, cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_redo,
             cmd_remote, cmd_resolve, cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas,
@@ -175,7 +175,7 @@ async fn async_main() -> Result<()> {
         // arg form `heddle help <topic>` also goes through clap.
     }
     let raw_argv: Vec<String> = std::env::args().collect();
-    let cli = match Cli::try_parse_from(raw_argv) {
+    let cli = match Cli::try_parse_from(raw_argv.clone()) {
         Ok(cli) => cli,
         Err(err) => {
             let raw: Vec<String> = std::env::args().skip(1).collect();
@@ -216,6 +216,12 @@ async fn async_main() -> Result<()> {
     // doing this inside each render path would re-query the env on
     // every line and fight the brand goal of restraint.
     cli::cli::style::init_from_cli(&cli);
+    if let Some(advice) = try_global_options_after_separator_advice(&cli, &raw_argv) {
+        let err = anyhow::anyhow!(advice);
+        let code = HeddleExitCode::from_error(&err);
+        print_error_with_hint(&cli, &err);
+        std::process::exit(code.into());
+    }
     let command_contract = command_runtime_contract_for_command(&cli.command);
     let command_name = command_contract.display.clone();
     let command_supports_op_id = command_contract.supports_op_id;
@@ -1020,6 +1026,109 @@ fn raw_global_flag_at<'a>(
     Some((global_arg_by_short(command, first_short)?, None, 1))
 }
 
+/// Refuse canonical Heddle global options after `try`'s separator before any
+/// repository or child-process side effect can occur.
+fn try_global_options_after_separator_advice(
+    cli: &Cli,
+    raw_argv: &[String],
+) -> Option<RecoveryAdvice> {
+    let Commands::Try(args) = &cli.command else {
+        return None;
+    };
+    if args.allow_heddle_global_args {
+        return None;
+    }
+
+    let separator = raw_argv.iter().position(|token| token == "--")?;
+    let command = Cli::command();
+    let mut matches = Vec::new();
+    let mut index = separator + 1;
+    while index < raw_argv.len() {
+        let token = &raw_argv[index];
+        let Some(long_token) = token.strip_prefix("--") else {
+            index += 1;
+            continue;
+        };
+        let canonical_long = long_token
+            .split_once('=')
+            .map_or(long_token, |(long, _)| long);
+        let Some((arg, value, consumed)) = raw_global_flag_at(&command, raw_argv, index) else {
+            index += 1;
+            continue;
+        };
+        if arg.get_long() != Some(canonical_long) {
+            index += 1;
+            continue;
+        }
+
+        let recognized = match canonical_long {
+            "output" => matches!(value, Some("text" | "json" | "json-compact")),
+            "no-color" | "verbose" | "quiet" => value.is_none(),
+            "repo" | "op-id" => value.is_some(),
+            _ => false,
+        };
+        if recognized {
+            matches.push((index, consumed));
+            index += consumed;
+        } else {
+            index += 1;
+        }
+    }
+    if matches.is_empty() {
+        return None;
+    }
+
+    let detected_tokens = matches
+        .iter()
+        .flat_map(|(start, consumed)| raw_argv[*start..*start + *consumed].iter())
+        .map(|token| repo::shell_quote(token))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let matched_indexes = matches
+        .iter()
+        .flat_map(|(start, consumed)| *start..*start + *consumed)
+        .collect::<std::collections::HashSet<_>>();
+
+    let mut corrected = raw_argv[1..separator].to_vec();
+    for (start, consumed) in &matches {
+        corrected.extend_from_slice(&raw_argv[*start..*start + *consumed]);
+    }
+    corrected.push("--".to_string());
+    corrected.extend(
+        raw_argv[separator + 1..]
+            .iter()
+            .enumerate()
+            .filter(|(offset, _)| !matched_indexes.contains(&(separator + 1 + offset)))
+            .map(|(_, token)| token.clone()),
+    );
+
+    let mut pass_through = raw_argv[1..separator].to_vec();
+    pass_through.push("--allow-heddle-global-args".to_string());
+    pass_through.extend_from_slice(&raw_argv[separator..]);
+
+    let primary_command = render_heddle_invocation(&corrected);
+    let pass_through_command = render_heddle_invocation(&pass_through);
+    Some(RecoveryAdvice::safety_refusal(
+        "try_global_option_after_separator",
+        format!(
+            "Heddle global options appear after `--` and would be passed to the inner command: `{detected_tokens}`."
+        ),
+        "Move Heddle options before `--`. If the listed options belong to the inner command, add `--allow-heddle-global-args` before `--`.",
+        "canonical Heddle global options were placed after `try`'s command separator",
+        "running the command would pass those options to the inner command instead of applying them to Heddle",
+        "no repository was opened, no thread was created, and no child process was started",
+        primary_command.clone(),
+        vec![primary_command, pass_through_command],
+    ))
+}
+
+fn render_heddle_invocation(args: &[String]) -> String {
+    std::iter::once("heddle".to_string())
+        .chain(args.iter().map(|arg| repo::shell_quote(arg)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn global_arg_by_long<'a>(command: &'a clap::Command, long: &str) -> Option<&'a Arg> {
     command
         .get_arguments()
@@ -1218,6 +1327,151 @@ mod tests {
         assert!(!raw_wants_json(&args(&["--output", "text"])));
         assert!(!raw_wants_json(&args(&["--output=text"])));
         assert!(!raw_wants_json(&args(&["--output", "--no-color"])));
+    }
+
+    fn parsed_try(raw: &[&str]) -> (Cli, Vec<String>) {
+        let argv = args(raw);
+        let cli = Cli::try_parse_from(&argv)
+            .unwrap_or_else(|error| panic!("parse {raw:?} as try invocation: {error}"));
+        (cli, argv)
+    }
+
+    #[test]
+    fn try_separator_detector_matches_every_canonical_long_global_form() {
+        let cases: &[&[&str]] = &[
+            &["--output", "text"],
+            &["--output", "json"],
+            &["--output", "json-compact"],
+            &["--output=text"],
+            &["--output=json"],
+            &["--output=json-compact"],
+            &["--no-color"],
+            &["--repo", "/tmp/repo"],
+            &["--repo=/tmp/repo"],
+            &["--verbose"],
+            &["--quiet"],
+            &["--op-id", "operation-id"],
+            &["--op-id=operation-id"],
+        ];
+        for post_separator in cases {
+            let mut raw = vec!["heddle", "try", "--", "true"];
+            raw.extend_from_slice(post_separator);
+            let (cli, argv) = parsed_try(&raw);
+            assert!(
+                try_global_options_after_separator_advice(&cli, &argv).is_some(),
+                "canonical global form must be detected: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn try_separator_detector_ignores_short_unknown_and_shell_string_collisions() {
+        let cases: &[&[&str]] = &[
+            &["-C", "/tmp/repo"],
+            &["-v"],
+            &["-q"],
+            &["--help"],
+            &["--version"],
+            &["--output", "artifact.json"],
+            &["--output-file=json"],
+            &["tool --output json"],
+            &["--repo"],
+            &["--op-id"],
+        ];
+        for post_separator in cases {
+            let mut raw = vec!["heddle", "try", "--", "true"];
+            raw.extend_from_slice(post_separator);
+            let (cli, argv) = parsed_try(&raw);
+            assert!(
+                try_global_options_after_separator_advice(&cli, &argv).is_none(),
+                "non-canonical child argv must pass through: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn try_separator_advice_uses_exact_copy_and_recovery_commands() {
+        let raw = [
+            "heddle",
+            "try",
+            "--",
+            "bash",
+            "-lc",
+            "printf ok",
+            "--output",
+            "json",
+        ];
+        let (cli, argv) = parsed_try(&raw);
+        let advice = try_global_options_after_separator_advice(&cli, &argv)
+            .expect("post-separator --output json must be refused");
+        assert_eq!(advice.kind, "try_global_option_after_separator");
+        assert_eq!(
+            advice.error,
+            "Heddle global options appear after `--` and would be passed to the inner command: `--output json`."
+        );
+        assert_eq!(
+            advice.hint,
+            "Move Heddle options before `--`. If the listed options belong to the inner command, add `--allow-heddle-global-args` before `--`."
+        );
+        assert_eq!(
+            advice.primary_command,
+            "heddle try --output json -- bash -lc 'printf ok'"
+        );
+        assert_eq!(
+            advice.recovery_commands,
+            [
+                "heddle try --output json -- bash -lc 'printf ok'",
+                "heddle try --allow-heddle-global-args -- bash -lc 'printf ok' --output json",
+            ]
+        );
+    }
+
+    #[test]
+    fn try_separator_advice_moves_all_matches_in_original_order() {
+        let raw = [
+            "heddle",
+            "try",
+            "--",
+            "tool",
+            "first",
+            "--quiet",
+            "middle",
+            "--output=json",
+            "--repo",
+            "path with space",
+            "last",
+        ];
+        let (cli, argv) = parsed_try(&raw);
+        let advice = try_global_options_after_separator_advice(&cli, &argv)
+            .expect("all canonical globals must be collected");
+        assert_eq!(
+            advice.primary_command,
+            "heddle try --quiet --output=json --repo 'path with space' -- tool first middle last"
+        );
+        assert_eq!(
+            advice.recovery_commands[1],
+            "heddle try --allow-heddle-global-args -- tool first --quiet middle --output=json --repo 'path with space' last"
+        );
+    }
+
+    #[test]
+    fn try_separator_escape_disables_only_the_detector() {
+        let raw = [
+            "heddle",
+            "try",
+            "--allow-heddle-global-args",
+            "--",
+            "tool",
+            "--output",
+            "json",
+        ];
+        let (cli, argv) = parsed_try(&raw);
+        let Commands::Try(args) = &cli.command else {
+            panic!("expected try command");
+        };
+        assert!(args.allow_heddle_global_args);
+        assert_eq!(args.command, ["tool", "--output", "json"]);
+        assert!(try_global_options_after_separator_advice(&cli, &argv).is_none());
     }
 
     #[test]

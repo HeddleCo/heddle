@@ -378,6 +378,35 @@ impl ActorPresenceStore {
         Ok(entries)
     }
 
+    /// List every persisted entry without pruning stale terminal records.
+    ///
+    /// Cleanup previews use this read-only view so residue detection cannot
+    /// mutate actor-presence storage as a side effect.
+    pub fn list_without_pruning(&self) -> Result<Vec<ActorPresence>> {
+        if !self.presence_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut entries = Vec::new();
+        for dir_entry in std::fs::read_dir(&self.presence_dir)? {
+            let path = dir_entry?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "toml")
+            {
+                let content = std::fs::read_to_string(&path)?;
+                entries.push(toml::from_str::<ActorPresence>(&content).map_err(|err| {
+                    HeddleError::Config(format!(
+                        "failed to parse agent registry entry '{}': {err}",
+                        path.display()
+                    ))
+                })?);
+            }
+        }
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.started_at));
+        Ok(entries)
+    }
+
     /// Update the status of an agent entry in place.
     pub fn update_status(&self, session_id: &str, status: ActorPresenceStatus) -> Result<()> {
         let _lock = self.write_lock()?;
