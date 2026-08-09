@@ -31,14 +31,13 @@ pub use key_binding::{
 };
 pub use message_delta::{DeltaData, RequestDelta};
 pub use message_hosted::{
-    CreateHostedGrant, CreateHostedRepository, CreateNamespace, DeleteHostedGrant,
-    DeleteHostedRepository, DeleteNamespace, HarnessIdentity, HostedGrantCreated,
-    HostedGrantDeleted, HostedGrantInfo, HostedGrantUpdated, HostedGrantsList, HostedNamespaceInfo,
-    HostedRepositoryInfo, ListHostedGrants, ListHostedNamespaces, ListHostedRepositories,
-    NamespaceCreated, NamespaceDeleted, NamespaceUpdated, NamespacesList, ProgressCheckpoint,
-    RepositoriesList, RepositoryCreated, RepositoryDeleted, RepositoryUpdated, SessionDiffSummary,
-    SessionReportEnvelope, TranscriptAttachmentRef, UpdateHostedGrant, UpdateHostedRepository,
-    UpdateNamespace, UsageTotals, WorktreeChangeBaseline,
+    CreateHostedGrant, DeleteHostedGrant, DeleteHostedRepository, DeleteNamespace, HarnessIdentity,
+    HostedGrantCreated, HostedGrantDeleted, HostedGrantInfo, HostedGrantUpdated, HostedGrantsList,
+    HostedNamespaceInfo, HostedRepositoryInfo, HostedSpoolInfo, HostedSpoolKind, ListHostedGrants,
+    ListHostedNamespaces, ListHostedRepositories, NamespaceDeleted, NamespaceUpdated,
+    NamespacesList, ProgressCheckpoint, RepositoriesList, RepositoryDeleted, RepositoryUpdated,
+    SessionDiffSummary, SessionReportEnvelope, TranscriptAttachmentRef, UpdateHostedGrant,
+    UpdateHostedRepository, UpdateNamespace, UsageTotals, WorktreeChangeBaseline,
 };
 pub use message_objects::{HaveObjects, ObjectData, ObjectRequest, SendObjects, WantObjects};
 pub use message_pushpull::{PullComplete, PushComplete};

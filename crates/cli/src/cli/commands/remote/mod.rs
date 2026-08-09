@@ -1641,10 +1641,18 @@ async fn auto_provision_hosted_repo(
     client: &mut HostedClient,
     options: &PushNetworkOptions<'_>,
 ) -> Result<String> {
-    let namespace = client.get_current_user_namespace().await?;
+    let user_spool = client.get_current_user_spool().await?;
     let slug = default_spool_slug_from_repo_root(repo.root())?;
-    let derived_full_path = format!("{}/{}", namespace.full_path, slug);
-    let provisioned_repo = match client.create_repository(&namespace.full_path, &slug).await {
+    let derived_full_path = format!("{}/{}", user_spool.full_path, slug);
+    let provisioned_repo = match client
+        .create_spool(
+            &user_spool.full_path,
+            &slug,
+            wire::HostedSpoolKind::Project,
+            None,
+        )
+        .await
+    {
         Ok(created) => AutoProvisionedHostedRepo::Created(created.full_path),
         Err(err) if auto_provision_create_already_exists(&err) => {
             AutoProvisionedHostedRepo::Existing(derived_full_path)
@@ -1665,8 +1673,11 @@ async fn auto_provision_hosted_repo(
     )?;
 
     if !should_output_json(options.cli, Some(repo.config())) {
-        let display_full_path =
-            hosted_spool_display_path(&namespace.slug, &slug, provisioned_repo.full_path());
+        let display_full_path = hosted_spool_display_path(
+            user_spool.display_name.as_deref().unwrap_or_default(),
+            &slug,
+            provisioned_repo.full_path(),
+        );
         println!(
             "{} {} hosted spool {}",
             style::ok_marker(),
@@ -1960,7 +1971,7 @@ mod tests {
 
     #[cfg(feature = "client")]
     #[test]
-    fn auto_provision_reuses_create_repository_already_exists() {
+    fn auto_provision_reuses_create_spool_already_exists() {
         let typed_already_exists = ProtocolError::AlreadyExists("luke/demo-repo".to_string());
         assert!(auto_provision_create_already_exists(&typed_already_exists));
 
@@ -1977,17 +1988,20 @@ mod tests {
     #[cfg(feature = "client")]
     #[test]
     fn auto_provision_hides_internal_user_namespace_paths_in_cli_text() {
-        let namespace = wire::HostedNamespaceInfo {
-            namespace_id: "user-1".to_string(),
-            kind: "user".to_string(),
-            slug: "alice".to_string(),
-            parent_id: None,
-            display_name: None,
+        let user_spool = wire::HostedSpoolInfo {
+            spool_id: "user-1".to_string(),
             full_path: "__users/user-1".to_string(),
+            kind: "user".to_string(),
+            is_repo: false,
+            display_name: Some("alice".to_string()),
         };
 
         assert_eq!(
-            hosted_spool_display_path(&namespace.slug, "demo-repo", "__users/user-1/demo-repo"),
+            hosted_spool_display_path(
+                user_spool.display_name.as_deref().unwrap_or_default(),
+                "demo-repo",
+                "__users/user-1/demo-repo"
+            ),
             "alice/demo-repo"
         );
 
