@@ -191,6 +191,12 @@ pub fn load_object_data(
                 .ok_or_else(|| ProtocolError::ObjectNotFound(id.to_string()))?;
             rmp_serde::to_vec_named(&attachment)?
         }
+        (ObjectId::Hash(_), ObjectType::KeyBinding) => {
+            return Err(ProtocolError::InvalidState(
+                "KeyBinding registry objects must be constructed with encode_key_binding_registry"
+                    .to_string(),
+            ));
+        }
         _ => {
             return Err(ProtocolError::InvalidState(
                 "object id/type mismatch".to_string(),
@@ -270,6 +276,12 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
             return Err(ProtocolError::InvalidState(
                 "StateVisibility objects must be persisted via Repository::accept_wire_state_visibility, \
                  not store_received_object — sidecar validation is required"
+                    .to_string(),
+            ));
+        }
+        (_, ObjectType::KeyBinding) => {
+            return Err(ProtocolError::InvalidState(
+                "KeyBinding registry objects must be decoded and verified with decode_key_binding_registry"
                     .to_string(),
             ));
         }

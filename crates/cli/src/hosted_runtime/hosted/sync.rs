@@ -357,6 +357,7 @@ pub struct PullObjectMix {
     pub redactions: usize,
     pub state_visibilities: usize,
     pub state_attachments: usize,
+    pub key_bindings: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -378,6 +379,7 @@ impl PullObjectMix {
             ObjectTypeBucket::Redaction => self.redactions += 1,
             ObjectTypeBucket::StateVisibility => self.state_visibilities += 1,
             ObjectTypeBucket::StateAttachment => self.state_attachments += 1,
+            ObjectTypeBucket::KeyBinding => self.key_bindings += 1,
         }
     }
 
@@ -389,6 +391,7 @@ impl PullObjectMix {
             + self.redactions
             + self.state_visibilities
             + self.state_attachments
+            + self.key_bindings
     }
 }
 

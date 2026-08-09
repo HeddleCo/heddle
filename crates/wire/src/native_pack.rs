@@ -599,7 +599,11 @@ impl PackStreamSpool {
 }
 
 pub fn native_pack_excluded_object_types() -> &'static [ObjectType] {
-    &[ObjectType::Redaction, ObjectType::StateVisibility]
+    &[
+        ObjectType::Redaction,
+        ObjectType::StateVisibility,
+        ObjectType::KeyBinding,
+    ]
 }
 
 pub fn is_native_packable_object_type(obj_type: ObjectType) -> bool {
