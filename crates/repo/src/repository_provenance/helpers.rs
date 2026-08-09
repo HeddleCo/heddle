@@ -110,7 +110,15 @@ pub(super) fn coalesce_line_spans(line_origin_sets: &[u32]) -> Vec<LineSpan> {
 pub(super) use objects::object::split_path;
 
 pub(super) fn lookup_tree_entry(repo: &Repository, tree: &Tree, path: &Path) -> Option<TreeEntry> {
-    resolve_tree_path(repo.store(), &tree.hash(), path, LeafPolicy::Entry)
+    lookup_tree_entry_from_source(repo.store(), tree, path)
+}
+
+pub(super) fn lookup_tree_entry_from_source<S: objects::store::ObjectSource>(
+    source: &S,
+    tree: &Tree,
+    path: &Path,
+) -> Option<TreeEntry> {
+    resolve_tree_path(source, &tree.hash(), path, LeafPolicy::Entry)
         .ok()
         .flatten()
         .map(|target| target.entry)

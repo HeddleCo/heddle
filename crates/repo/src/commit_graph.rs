@@ -20,6 +20,7 @@ use super::{
     commit_graph_persistence::{
         CommitGraphCache, FsCommitGraphCache, LoadedCommitGraph, PersistedCommitGraphNode,
     },
+    history_instrumentation::HistoryObjectSource,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -209,7 +210,7 @@ where
         self.ensure_loaded(*state_b)?;
 
         let search = find_merge_base_in_graph(&self.nodes, *state_a, *state_b);
-        heddle_perf_contract::record_merge_base_ancestors_visited(search.ancestors_visited);
+        heddle_perf_contract::record_ancestors_visited(search.ancestors_visited);
         Ok(search.merge_base)
     }
 
@@ -311,7 +312,8 @@ where
             Tree::new().hash()
         };
 
-        let changes = diff_trees(self.source, &parent_tree, &state_tree)?;
+        let source = HistoryObjectSource::new(self.source);
+        let changes = diff_trees(&source, &parent_tree, &state_tree)?;
         let mut bloom = [0u8; 256];
         for change in changes.iter() {
             bloom_insert(&mut bloom, &change.path);
@@ -328,7 +330,8 @@ where
     }
 
     fn load_state_data(&self, state_id: StateId) -> Result<Option<CommitGraphStateData>> {
-        Ok(self.source.get_state(&state_id)?.map(|state| {
+        let source = HistoryObjectSource::new(self.source);
+        Ok(source.get_state(&state_id)?.map(|state| {
             (
                 state.parents,
                 state.tree,
@@ -540,7 +543,7 @@ where
     ensure_loaded_async(source, &mut nodes, *state_b).await?;
 
     let search = find_merge_base_in_graph(&nodes, *state_a, *state_b);
-    heddle_perf_contract::record_merge_base_ancestors_visited(search.ancestors_visited);
+    heddle_perf_contract::record_ancestors_visited(search.ancestors_visited);
     Ok(search.merge_base)
 }
 
@@ -598,6 +601,7 @@ async fn load_state_parents_async<S>(source: &S, state_id: StateId) -> Result<Op
 where
     S: AsyncObjectSource + ?Sized,
 {
+    let source = super::history_instrumentation::AsyncHistoryObjectSource::new(source);
     Ok(source
         .get_state(&state_id)
         .await?

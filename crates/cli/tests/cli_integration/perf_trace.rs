@@ -130,7 +130,8 @@ fn perf_trace_jsonl_status_reports_structural_counters() {
         "ref_reads",
         "oplog_reads",
         "repository_opens",
-        "merge_base_ancestors_visited",
+        "ancestors_visited",
+        "history_objects_decoded",
     ] {
         assert!(metrics.contains_key(name), "missing `{name}` in {trace}");
     }
