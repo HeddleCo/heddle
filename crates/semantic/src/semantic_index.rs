@@ -16,8 +16,8 @@
 //! one-token change perturbs exactly the symbols that contain it.
 
 use objects::object::{
-    ContentHash, SymbolEntry, SymbolKindTag, compute_file_scaffold_hash,
-    compute_symbol_semantic_hash,
+    ContentHash, ImportEntry, OccurrenceEntry, ScopeEntry, SymbolEntry, SymbolKindTag,
+    compute_file_scaffold_hash, compute_symbol_semantic_hash,
 };
 
 use crate::{
@@ -25,9 +25,9 @@ use crate::{
     symbol_resolver::{DefinitionKind, visit_definitions},
 };
 
-/// Version of the extraction logic itself. Bump when the taxonomy, container
-/// resolution, or token-stream framing changes in a way that would alter a
-/// `semantic_hash` for unchanged source — it participates in the file node's
+/// Version of the extraction logic itself. Bump when the taxonomy, source-fact
+/// extraction, container resolution, or token-stream framing changes the
+/// durable file artifact for unchanged source. It participates in file-node
 /// identity so a bump forces a clean recompute via the supersedes chain.
 ///
 /// v2: `hd-sem-file-v2`/`hd-sem-dir-v2` framed layouts, the `scaffold_hash`
@@ -39,7 +39,10 @@ use crate::{
 /// *present* in the parent's map, so a pre-Zig index (no `"zig"` entry) would
 /// otherwise carry `.zig` files forward as `Opaque` indefinitely. The bump
 /// forces those to recompute so imported Zig repos gain granularity.
-pub const EXTRACTOR_VERSION: u32 = 3;
+///
+/// v4: Persist deterministic source-local scopes, imports, and symbol
+/// occurrences alongside definitions in each semantic file node.
+pub const EXTRACTOR_VERSION: u32 = 4;
 
 /// Stable lowercase language name recorded in file nodes and the root's
 /// grammar map.
@@ -119,6 +122,9 @@ pub struct ExtractedFile {
     /// the file digest. See [`compute_file_scaffold_hash`].
     pub scaffold_hash: ContentHash,
     pub symbols: Vec<SymbolEntry>,
+    pub scopes: Vec<ScopeEntry>,
+    pub imports: Vec<ImportEntry>,
+    pub occurrences: Vec<OccurrenceEntry>,
 }
 
 /// Parse `source` (as `language`) and extract its symbols with per-symbol
@@ -153,11 +159,15 @@ pub fn extract_semantic_file(source: &[u8], language: Language) -> Option<Extrac
     });
 
     let scaffold_hash = compute_scaffold(parsed.root_node(), source, covered);
+    let syntax_index = parsed.syntax_index();
 
     Some(ExtractedFile {
         language,
         scaffold_hash,
         symbols,
+        scopes: syntax_index.semantic_scopes().to_vec(),
+        imports: syntax_index.semantic_imports().to_vec(),
+        occurrences: syntax_index.occurrences().to_vec(),
     })
 }
 
@@ -349,6 +359,93 @@ mod tests {
         assert!(extract_semantic_file(b"whatever", Language::Unknown).is_none());
     }
 
+    #[test]
+    fn extracts_structured_imports_and_symbol_occurrences() {
+        use objects::object::{ImportKindTag, OccurrenceRole, SymbolNamespace};
+
+        let source = "pub use crate::api::{greet as hello, User};\nfn run(user: User) { crate::api::greet(); hello(); }\n";
+        let extracted = extract_semantic_file(source.as_bytes(), Language::Rust).unwrap();
+
+        assert_eq!(extracted.imports.len(), 1);
+        let import = &extracted.imports[0];
+        assert_eq!(import.kind, ImportKindTag::Reexport);
+        assert_eq!(import.module_specifier, "crate::api");
+        assert_eq!(
+            import
+                .bindings
+                .iter()
+                .map(|binding| (&*binding.imported, &*binding.local))
+                .collect::<Vec<_>>(),
+            vec![("greet", "hello"), ("User", "User")]
+        );
+
+        assert!(extracted.occurrences.iter().any(|occurrence| {
+            occurrence.role == OccurrenceRole::Call
+                && occurrence.name == "greet"
+                && occurrence.qualifier == ["crate", "api"]
+        }));
+        assert!(extracted.occurrences.iter().any(|occurrence| {
+            occurrence.role == OccurrenceRole::Call && occurrence.name == "hello"
+        }));
+        assert!(extracted.occurrences.iter().any(|occurrence| {
+            occurrence.role == OccurrenceRole::TypeReference
+                && occurrence.name == "User"
+                && occurrence.namespace == SymbolNamespace::Type
+        }));
+        assert!(extracted.occurrences.iter().any(|occurrence| {
+            occurrence.role == OccurrenceRole::Definition
+                && occurrence.name == "run"
+                && occurrence.scope == 0
+        }));
+        assert_eq!(extracted.scopes[0].local_id, 0);
+    }
+
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn typescript_import_bindings_reexports_and_calls_are_source_local() {
+        use objects::object::{ImportKindTag, OccurrenceRole, SymbolNamespace};
+
+        let source = "import type { Request as Req } from './types';\nimport client, { run as execute } from './client';\nexport { User } from './models';\nexport function handle(req: Req) { client.run(); execute(); }\n";
+        let extracted = extract_semantic_file(source.as_bytes(), Language::TypeScript).unwrap();
+
+        let types = extracted
+            .imports
+            .iter()
+            .find(|import| import.module_specifier == "./types")
+            .unwrap();
+        assert_eq!(types.bindings[0].imported, "Request");
+        assert_eq!(types.bindings[0].local, "Req");
+        assert_eq!(types.bindings[0].namespace, SymbolNamespace::Type);
+
+        let client = extracted
+            .imports
+            .iter()
+            .find(|import| import.module_specifier == "./client")
+            .unwrap();
+        assert_eq!(
+            client
+                .bindings
+                .iter()
+                .map(|binding| (&*binding.imported, &*binding.local))
+                .collect::<Vec<_>>(),
+            vec![("default", "client"), ("run", "execute")]
+        );
+        assert_eq!(
+            extracted
+                .imports
+                .iter()
+                .find(|import| import.module_specifier == "./models")
+                .unwrap()
+                .kind,
+            ImportKindTag::Reexport
+        );
+        assert!(extracted.occurrences.iter().any(|occurrence| {
+            occurrence.role == OccurrenceRole::Call
+                && occurrence.name == "run"
+                && occurrence.qualifier == ["client"]
+        }));
+    }
+
     // ── Zig (heddle#1068) ────────────────────────────────────────────────
 
     /// A `.zig` blob must extract a real file node — symbols with per-symbol
@@ -395,6 +492,10 @@ mod tests {
         let ea = extract_semantic_file(tight.as_bytes(), Language::Zig).expect("tight parses");
         let eb = extract_semantic_file(loose.as_bytes(), Language::Zig).expect("loose parses");
 
+        assert_eq!(ea.imports.len(), 1);
+        assert_eq!(ea.imports[0].module_specifier, "std");
+        assert_eq!(ea.imports[0].kind, objects::object::ImportKindTag::Dynamic);
+
         assert_eq!(
             ea.scaffold_hash, eb.scaffold_hash,
             "scaffold must be reformat/comment stable"
@@ -407,7 +508,12 @@ mod tests {
                 EXTRACTOR_VERSION,
                 ContentHash::compute(src.as_bytes()),
                 e.scaffold_hash,
-                e.symbols.clone(),
+                objects::object::SemanticFileFacts {
+                    symbols: e.symbols.clone(),
+                    scopes: e.scopes.clone(),
+                    imports: e.imports.clone(),
+                    occurrences: e.occurrences.clone(),
+                },
             )
         };
         // The source blobs differ, but the reformat-stable digest must not.

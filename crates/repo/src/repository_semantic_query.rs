@@ -484,7 +484,8 @@ mod tests {
 
     use chrono::Utc;
     use objects::object::{
-        Attribution, Blob, Principal, State, StateAttachment, StateAttachmentBody, Tree, TreeEntry,
+        Attribution, Blob, Principal, SemanticFileFacts, State, StateAttachment,
+        StateAttachmentBody, Tree, TreeEntry,
     };
     use tempfile::TempDir;
 
@@ -521,7 +522,10 @@ mod tests {
             1,
             ContentHash::compute(b"src-blob"),
             ContentHash::compute(b"scaffold"),
-            vec![sym],
+            SemanticFileFacts {
+                symbols: vec![sym],
+                ..SemanticFileFacts::default()
+            },
         );
         let file_hash = put_encoded(repo, file_node.encode().unwrap());
         let (tree_node, tree_digest) = SemanticTreeNode::new(vec![SemanticTreeEntry {
