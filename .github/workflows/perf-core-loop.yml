@@ -64,6 +64,9 @@ jobs:
           /usr/bin/time -f 'release_test_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
             cargo test --locked --release -p heddle-cli --test cli_integration \
               --no-run 2>&1 | tee -a release-compile.txt
+          /usr/bin/time -f 'release_history_test_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
+            cargo test --locked --release -p heddle-repo --lib \
+              --no-run 2>&1 | tee -a release-compile.txt
           /usr/bin/time -f 'release_hosted_close_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
             cargo test --locked --release -p heddle-cli --lib \
               --no-run 2>&1 | tee -a release-compile.txt
@@ -73,6 +76,13 @@ jobs:
           set -o pipefail
           cargo test --locked --release -p heddle-cli --test cli_integration \
             core_loop_release_contract -- --ignored --nocapture 2>&1 | tee core-loop-contract.txt
+
+      - name: Enforce bounded-history contract
+        run: |
+          set -o pipefail
+          HEDDLE_PROFILE=1 cargo test --locked --release -p heddle-repo --lib \
+            bounded_history_reads_release_contract -- --ignored --nocapture \
+            2>&1 | tee history-contract.txt
 
       - name: Enforce hosted endpoint close contract
         run: |
@@ -100,6 +110,13 @@ jobs:
               core-loop-contract.txt 2>/dev/null || true
             echo '```'
             echo
+            echo '## Bounded-history release contract'
+            echo
+            echo '```text'
+            grep -E '^(HISTORY_GATE|HISTORY_NEGATIVE_CONTROL|HISTORY GATE)' \
+              history-contract.txt 2>/dev/null || true
+            echo '```'
+            echo
             echo '## Hosted endpoint close release contract'
             echo
             echo '```text'
@@ -116,6 +133,7 @@ jobs:
           path: |
             release-compile.txt
             core-loop-contract.txt
+            history-contract.txt
             hosted-close-contract.txt
 
       - name: sccache stats

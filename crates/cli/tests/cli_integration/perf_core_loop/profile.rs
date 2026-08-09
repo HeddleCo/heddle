@@ -80,6 +80,7 @@ fn structural_counters(trace: &Value) -> Counters {
         network_client_initialized: metrics["network_client_initialized"]["value"]
             .as_bool()
             .unwrap_or(true),
-        merge_base_ancestors_visited: count("merge_base_ancestors_visited"),
+        ancestors_visited: count("ancestors_visited"),
+        history_objects_decoded: count("history_objects_decoded"),
     }
 }

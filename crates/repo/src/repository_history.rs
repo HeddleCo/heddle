@@ -16,8 +16,9 @@ use tracing::{instrument, trace};
 
 use crate::{
     HeddleError, Repository, Result,
-    repository::commit_graph_persistence::{
-        CommitGraphCache, FsCommitGraphCache, NullCommitGraphCache,
+    repository::{
+        commit_graph_persistence::{CommitGraphCache, FsCommitGraphCache, NullCommitGraphCache},
+        history_instrumentation::HistoryObjectSource,
     },
 };
 
@@ -188,6 +189,7 @@ where
         {
             break;
         }
+        heddle_perf_contract::record_ancestors_visited(1);
 
         graph
             .ensure_loaded(state_id)
@@ -225,7 +227,7 @@ where
         }
 
         // Bloom says "maybe" (or no bloom) — confirm with full tree diff
-        let Some(state) = source.get_state(&state_id)? else {
+        let Some(state) = HistoryObjectSource::new(source).get_state(&state_id)? else {
             break;
         };
         if !state_matches_changed_paths(source, &state, &query.changed_paths)? {
@@ -238,7 +240,7 @@ where
     // Load full State objects only for final matches
     let mut result = Vec::with_capacity(candidate_ids.len());
     for id in candidate_ids {
-        if let Some(state) = source.get_state(&id)? {
+        if let Some(state) = HistoryObjectSource::new(source).get_state(&id)? {
             result.push(state);
         }
     }
@@ -262,10 +264,11 @@ pub(crate) fn state_matches_changed_paths<S>(
 where
     S: ObjectSource + ?Sized,
 {
-    let base_tree = parent_tree_hash(source, state)?;
+    let source = HistoryObjectSource::new(source);
+    let base_tree = parent_tree_hash(&source, state)?;
     // Early-exit: stop diffing the moment the first change matches the
     // filter, rather than materializing the whole change list to scan it.
-    let flow = diff_trees_visit(source, &base_tree, &state.tree, |change| {
+    let flow = diff_trees_visit(&source, &base_tree, &state.tree, |change| {
         if changed_paths.matches(&change.path) {
             ControlFlow::Break(())
         } else {
@@ -328,8 +331,10 @@ where
         {
             break;
         }
+        heddle_perf_contract::record_ancestors_visited(1);
 
-        let Some(state) = source.get_state(&state_id).await? else {
+        let history_source = super::history_instrumentation::AsyncHistoryObjectSource::new(source);
+        let Some(state) = history_source.get_state(&state_id).await? else {
             break;
         };
         current = state.parents.first().copied();
@@ -351,7 +356,8 @@ where
 
     let mut result = Vec::with_capacity(candidate_ids.len());
     for id in candidate_ids {
-        if let Some(state) = source.get_state(&id).await? {
+        let history_source = super::history_instrumentation::AsyncHistoryObjectSource::new(source);
+        if let Some(state) = history_source.get_state(&id).await? {
             result.push(state);
         }
     }
@@ -367,8 +373,9 @@ async fn state_matches_changed_paths_async<S>(
 where
     S: AsyncObjectSource + Sync + ?Sized,
 {
-    let base_tree = parent_tree_hash_async(source, state).await?;
-    let flow = diff_trees_visit_async(source, &base_tree, &state.tree, |change| {
+    let source = super::history_instrumentation::AsyncHistoryObjectSource::new(source);
+    let base_tree = parent_tree_hash_async(&source, state).await?;
+    let flow = diff_trees_visit_async(&source, &base_tree, &state.tree, |change| {
         if changed_paths.matches(&change.path) {
             ControlFlow::Break(())
         } else {

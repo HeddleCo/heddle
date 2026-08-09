@@ -60,14 +60,15 @@ use std::{collections::HashMap, path::Path};
 
 use objects::{
     object::{ContentHash, FileProvenance, Origin, State, StateId},
-    store::ObjectStore,
+    store::ObjectSource,
 };
 
 use super::{
     Repository, Result,
     builder::ProvenanceBuilder,
-    helpers::{lcs_line_matches, lookup_tree_entry, split_text_lines},
+    helpers::{lcs_line_matches, lookup_tree_entry_from_source, split_text_lines},
 };
+use crate::repository::history_instrumentation::HistoryObjectSource;
 
 impl Repository {
     /// Path-targeted blame: walk ancestry only along `path`'s
@@ -84,11 +85,12 @@ impl Repository {
         state: &State,
         path: &Path,
     ) -> Result<Option<FileProvenance>> {
+        let source = HistoryObjectSource::new(&self.store);
         // 1. Resolve the target file at `state`.
-        let Some(target_blob_hash) = self.lookup_blob_at_path(&state.tree, path)? else {
+        let Some(target_blob_hash) = Self::lookup_blob_at_path(&source, &state.tree, path)? else {
             return Ok(None);
         };
-        let target_blob = match self.store.get_blob(&target_blob_hash)? {
+        let target_blob = match source.get_blob(&target_blob_hash)? {
             Some(b) => b,
             None => return Ok(None),
         };
@@ -130,9 +132,10 @@ impl Repository {
         }];
 
         while let Some(entry) = worklist.pop() {
+            heddle_perf_contract::record_ancestors_visited(1);
             let entry_state = match state_cache.get(&entry.state_id) {
                 Some(s) => s.clone(),
-                None => match self.store.get_state(&entry.state_id)? {
+                None => match source.get_state(&entry.state_id)? {
                     Some(s) => {
                         state_cache.insert(s.id(), s.clone());
                         s
@@ -158,7 +161,7 @@ impl Repository {
             for parent_id in &entry_state.parents {
                 let parent_state = match state_cache.get(parent_id) {
                     Some(s) => s.clone(),
-                    None => match self.store.get_state(parent_id)? {
+                    None => match source.get_state(parent_id)? {
                         Some(s) => {
                             state_cache.insert(s.id(), s.clone());
                             s
@@ -167,7 +170,8 @@ impl Repository {
                     },
                 };
 
-                let Some(parent_blob_hash) = self.lookup_blob_at_path(&parent_state.tree, path)?
+                let Some(parent_blob_hash) =
+                    Self::lookup_blob_at_path(&source, &parent_state.tree, path)?
                 else {
                     // Parent doesn't have the file. None of the
                     // entry's lines came from this parent.
@@ -210,7 +214,7 @@ impl Repository {
 
                 // **Slow path.** Different blob — LCS to find which
                 // lines walked back unchanged.
-                let parent_blob = match self.store.get_blob(&parent_blob_hash)? {
+                let parent_blob = match source.get_blob(&parent_blob_hash)? {
                     Some(b) => b,
                     None => continue,
                 };
@@ -266,15 +270,15 @@ impl Repository {
     /// and return the file's blob hash if the leaf is a blob.
     /// Returns `None` if the path is missing or terminates at a tree
     /// or symlink rather than a blob.
-    fn lookup_blob_at_path(
-        &self,
+    fn lookup_blob_at_path<S: ObjectSource>(
+        source: &S,
         tree_hash: &ContentHash,
         path: &Path,
     ) -> Result<Option<ContentHash>> {
-        let Some(tree) = self.store.get_tree(tree_hash)? else {
+        let Some(tree) = source.get_tree(tree_hash)? else {
             return Ok(None);
         };
-        let Some(entry) = lookup_tree_entry(self, &tree, path) else {
+        let Some(entry) = lookup_tree_entry_from_source(source, &tree, path) else {
             return Ok(None);
         };
         Ok(entry.blob_hash())

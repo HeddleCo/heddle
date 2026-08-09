@@ -15,6 +15,10 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Added
 
+- **Bounded-history performance contracts.** Release CI now counts ancestry
+  visits and decoded history objects for merge-base, log, and blame, with a
+  deep-history negative control that proves an unbounded walk makes the gate red.
+
 - **Opt-in CLI OpenTelemetry traces.** Default `heddle` builds can export
   privacy-bounded command and profile-phase spans to a configured OTLP
   collector, and hosted Iroh request preludes carry W3C trace context for

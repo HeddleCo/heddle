@@ -12,6 +12,11 @@ mod context_suggestions;
 #[cfg(feature = "git-overlay")]
 #[path = "git_overlay_object_source.rs"]
 mod git_overlay_object_source;
+#[path = "history_instrumentation.rs"]
+mod history_instrumentation;
+#[cfg(test)]
+#[path = "history_perf_contract_tests.rs"]
+mod history_perf_contract_tests;
 #[path = "repo_config.rs"]
 pub(crate) mod repo_config;
 #[path = "repository_context.rs"]
