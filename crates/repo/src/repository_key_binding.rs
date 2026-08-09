@@ -20,6 +20,35 @@ pub enum AuthorshipVerification {
 }
 
 impl Repository {
+    /// Resolve a signing key through an offline registry at a claimed signing time.
+    ///
+    /// This verifies the registry's signed binding chain and validity window. It
+    /// deliberately does not verify a payload signature; callers must do that
+    /// first with the domain-specific signing payload.
+    pub fn verify_known_actor_key(
+        &self,
+        algorithm: &str,
+        public_key: &str,
+        signed_at: chrono::DateTime<chrono::Utc>,
+        registry: &KeyBindingRegistry,
+    ) -> AuthorshipVerification {
+        if !registry_is_authorized(registry) {
+            return AuthorshipVerification::Invalid;
+        }
+        let Some(binding) = find_binding_by_key(registry, algorithm, public_key) else {
+            return AuthorshipVerification::UnknownKey;
+        };
+        if signed_second_precedes(signed_at.timestamp(), binding.valid_from) {
+            return AuthorshipVerification::Invalid;
+        }
+        if binding.revoked_at.is_some_and(|revoked_at| {
+            signed_second_may_be_revoked(signed_at.timestamp(), revoked_at)
+        }) {
+            return AuthorshipVerification::Revoked;
+        }
+        AuthorshipVerification::Verified(binding.identity_ref.clone())
+    }
+
     /// Verify integrity and resolve a state author through an offline registry.
     ///
     /// Unknown keys fail closed even when their state signature is
@@ -32,10 +61,6 @@ impl Repository {
         state: &State,
         registry: &KeyBindingRegistry,
     ) -> Result<AuthorshipVerification> {
-        if !registry_is_authorized(registry) {
-            return Ok(AuthorshipVerification::Invalid);
-        }
-
         let signatures: Vec<_> = self
             .list_state_attachments(&state.id())?
             .into_iter()
@@ -48,42 +73,34 @@ impl Repository {
             return Ok(AuthorshipVerification::Invalid);
         }
 
-        let mut verified_identity: Option<&str> = None;
+        let mut verified_identity: Option<String> = None;
         let mut saw_unknown = false;
         let mut saw_revoked = false;
         let mut saw_invalid = false;
         for signature in &signatures {
-            let Some(binding) = find_binding(registry, signature) else {
-                saw_unknown = true;
-                continue;
-            };
             if verify_state_signature_bytes(signature, &state.compute_hash()).is_err() {
                 saw_invalid = true;
                 continue;
             }
-            let signed_at = state.created_at.timestamp();
-            if signed_second_precedes(signed_at, binding.valid_from) {
-                saw_invalid = true;
-                continue;
-            }
-            if binding
-                .revoked_at
-                .is_some_and(|revoked_at| signed_second_may_be_revoked(signed_at, revoked_at))
-            {
-                saw_revoked = true;
-                continue;
-            }
-            match verified_identity {
-                Some(identity) if identity != binding.identity_ref => saw_invalid = true,
-                Some(_) => {}
-                None => verified_identity = Some(&binding.identity_ref),
+            match self.verify_known_actor_key(
+                &signature.algorithm,
+                &signature.public_key,
+                state.created_at,
+                registry,
+            ) {
+                AuthorshipVerification::Verified(identity) => match &verified_identity {
+                    Some(prior) if *prior != identity => saw_invalid = true,
+                    Some(_) => {}
+                    None => verified_identity = Some(identity),
+                },
+                AuthorshipVerification::UnknownKey => saw_unknown = true,
+                AuthorshipVerification::Revoked => saw_revoked = true,
+                AuthorshipVerification::Invalid => saw_invalid = true,
             }
         }
 
         Ok(match verified_identity {
-            Some(identity) if !saw_invalid => {
-                AuthorshipVerification::Verified(identity.to_string())
-            }
+            Some(identity) if !saw_invalid => AuthorshipVerification::Verified(identity),
             Some(_) => AuthorshipVerification::Invalid,
             None if saw_revoked => AuthorshipVerification::Revoked,
             None if saw_invalid => AuthorshipVerification::Invalid,
@@ -171,16 +188,17 @@ fn signature_verifies(payload: &[u8], signature: &StateSignature) -> bool {
     verify_payload_signature(payload, &signature.algorithm, &public_key, &signature_bytes).is_ok()
 }
 
-fn find_binding<'a>(
+fn find_binding_by_key<'a>(
     registry: &'a KeyBindingRegistry,
-    signature: &StateSignature,
+    algorithm: &str,
+    public_key: &str,
 ) -> Option<&'a KeyBinding> {
     registry.bindings.iter().find(|binding| {
         key_matches(
             &binding.algorithm,
             &binding.public_key,
-            &signature.algorithm,
-            &signature.public_key,
+            algorithm,
+            public_key,
         )
     })
 }

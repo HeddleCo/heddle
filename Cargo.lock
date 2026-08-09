@@ -2230,6 +2230,7 @@ dependencies = [
  "heddle-refs",
  "heddle-repo",
  "heddle-semantic",
+ "hex",
  "ignore",
  "rmp-serde",
  "schemars",

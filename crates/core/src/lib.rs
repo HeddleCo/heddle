@@ -33,6 +33,7 @@ pub mod onboarding;
 pub mod oplog_plan;
 pub mod oss_plan;
 pub mod prove_plan;
+pub mod provenance_verify;
 pub mod purge_plan;
 pub mod query;
 pub mod rebase_plan;
@@ -199,6 +200,9 @@ pub use oplog_plan::{
 pub use prove_plan::{
     HostRepoPlanError, ProofStatusKind, proof_status_label, proof_submit_followup,
     require_host_repo,
+};
+pub use provenance_verify::{
+    ProvenanceReport, StateProvenanceVerification, verify_repository_provenance,
 };
 pub use purge_plan::{PurgeApplyPlan, plan_purge_apply, purge_apply_message, purge_force_command};
 pub use query::{QueryHit, QueryReport, QueryRequest, query};

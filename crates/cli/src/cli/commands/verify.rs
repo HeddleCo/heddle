@@ -5,8 +5,8 @@ use std::{path::Path, time::Instant};
 
 use anyhow::{Result, anyhow};
 use heddle_core::{
-    MachineContractInput, RepositorySetupGuidance, RepositoryVerificationState, VerificationCheck,
-    VerifyOptions, VerifyReport, repository_setup_guidance, verify as core_verify,
+    MachineContractInput, RepositorySetupGuidance, VerificationCheck, VerifyOptions, VerifyReport,
+    repository_setup_guidance, verify as core_verify,
 };
 use repo::{Repository, discover_heddle_root};
 
@@ -17,7 +17,7 @@ use crate::{
     perf::{ProfileField, ProfileMode, emit_profile, instrumentation_enabled, profile_mode},
 };
 
-pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
+pub fn cmd_verify(cli: &Cli, verbose: bool, provenance: bool) -> Result<()> {
     let body_start = Instant::now();
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();
@@ -28,7 +28,8 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
             .with_start_path(start)
             .with_machine_contract_input(MachineContractInput::from_coverage(
                 super::verification_health::machine_contract_coverage(),
-            )),
+            ))
+            .with_provenance(provenance),
     )?;
     // Open cost is paid either in the CLI shell (injected) or inside core
     // (facade open). Exactly one side owns it; sum keeps profile truthful.
@@ -74,11 +75,11 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
     // Config comes from the single open above — never re-open for JSON mode.
     let as_json = should_output_json(cli, prepared.repo_config.as_ref());
     if !output.clean && as_json {
-        return Err(anyhow!(verify_failed_advice(&output.trust)));
+        return Err(anyhow!(verify_failed_advice(&output)));
     }
     render_verify(&output, verbose, as_json)?;
     if !output.clean {
-        return Err(anyhow!(verify_failed_advice(&output.trust)));
+        return Err(anyhow!(verify_failed_advice(&output)));
     }
     Ok(())
 }
@@ -164,7 +165,7 @@ fn render_verify(output: &VerifyReport, verbose: bool, as_json: bool) -> Result<
     let status = human_verify_status(output);
     println!(
         "{trust_label}: {}",
-        if output.trust.verified {
+        if output.clean {
             style::accent(&status)
         } else {
             style::warn(&status)
@@ -219,6 +220,7 @@ fn render_verify(output: &VerifyReport, verbose: bool, as_json: bool) -> Result<
             println!("{:<18} {}", "", style::dim(&details));
         }
     }
+    render_provenance(output);
     if verbose {
         println!();
         println!("Repository mode: {}", output.trust.repository_mode);
@@ -250,13 +252,14 @@ fn render_compact_verify(output: &VerifyReport) -> Result<()> {
     let status = compact_verify_status(output);
     println!(
         "{trust_label}: {}",
-        if output.trust.verified {
+        if output.clean {
             style::accent(&status)
         } else {
             style::warn(&status)
         }
     );
     let summary = human_output_summary(output);
+    render_provenance(output);
     let blocker = output.trust.checks.iter().find(|check| !check.clean);
     let blocker_summary = blocker.map(|check| human_summary(check, None, false));
     if !summary.is_empty() && blocker_summary.as_deref() != Some(summary.as_str()) {
@@ -300,6 +303,27 @@ fn render_compact_verify(output: &VerifyReport) -> Result<()> {
     Ok(())
 }
 
+fn render_provenance(output: &VerifyReport) {
+    let Some(report) = &output.provenance else {
+        return;
+    };
+    println!();
+    println!("{}", style::bold("Provenance"));
+    println!("Registry: {}", report.registry_status);
+    for state in &report.states {
+        let short = state
+            .state_id
+            .strip_prefix("hs-")
+            .unwrap_or(&state.state_id);
+        let short = &short[..short.len().min(12)];
+        println!(
+            "  {short} {:<24} {}",
+            state.display_status(),
+            style::dim(&state.detail)
+        );
+    }
+}
+
 fn render_verify_observe_only_note() {
     println!(
         "Mode: {}",
@@ -323,6 +347,13 @@ fn render_verify_repository_context(output: &VerifyReport) {
 }
 
 fn human_verify_status(output: &VerifyReport) -> String {
+    if output
+        .provenance
+        .as_ref()
+        .is_some_and(|report| !report.clean)
+    {
+        return "provenance failed".to_string();
+    }
     if let Some(check) = output.trust.checks.iter().find(|check| !check.clean) {
         if is_worktree_save_blocker(check) {
             return "changes to save".to_string();
@@ -338,7 +369,7 @@ fn human_verify_status(output: &VerifyReport) -> String {
 }
 
 fn compact_verify_status(output: &VerifyReport) -> String {
-    if output.trust.verified {
+    if output.clean {
         "verified".to_string()
     } else {
         human_verify_status(output)
@@ -358,6 +389,13 @@ fn human_check_status(check: &VerificationCheck) -> String {
 }
 
 fn human_output_summary(output: &VerifyReport) -> String {
+    if let Some(state) = output
+        .provenance
+        .as_ref()
+        .and_then(|report| report.states.iter().find(|state| !state.is_clean()))
+    {
+        return format!("{}: {}", state.display_status(), state.detail);
+    }
     if let Some(check) = output.trust.checks.iter().find(|check| !check.clean) {
         if setup_needed_guidance(output).is_some() {
             return String::new();
@@ -394,7 +432,37 @@ fn verify_status_label(output: &VerifyReport) -> &'static str {
     }
 }
 
-fn verify_failed_advice(verification: &RepositoryVerificationState) -> RecoveryAdvice {
+fn verify_failed_advice(output: &VerifyReport) -> RecoveryAdvice {
+    let verification = &output.trust;
+    if verification.verified
+        && let Some(provenance) = output.provenance.as_ref().filter(|report| !report.clean)
+    {
+        let blocker = provenance
+            .states
+            .iter()
+            .find(|state| !state.is_clean())
+            .expect("an unclean provenance report has a blocker");
+        let primary_command = "heddle verify --provenance".to_string();
+        let mut advice = RecoveryAdvice::safety_refusal(
+            "provenance_verify_failed",
+            format!(
+                "Provenance verification failed: {}",
+                blocker.display_status()
+            ),
+            format!("Inspect the broken chain with `{primary_command} --verbose`."),
+            blocker.detail.clone(),
+            "accepting this state would render an unverified provenance claim as verified",
+            "verify is observe-only; repository objects, refs, index, and worktree files were left unchanged",
+            primary_command.clone(),
+            vec![primary_command],
+        );
+        if let Ok(value) = serde_json::to_value(provenance) {
+            advice
+                .extra_json_fields
+                .insert("provenance".to_string(), value);
+        }
+        return advice;
+    }
     let primary_command = if verification.recommended_action.trim().is_empty() {
         "heddle status".to_string()
     } else {
@@ -418,6 +486,13 @@ fn verify_failed_advice(verification: &RepositoryVerificationState) -> RecoveryA
         advice
             .extra_json_fields
             .insert("verification".to_string(), value);
+    }
+    if let Some(provenance) = &output.provenance
+        && let Ok(value) = serde_json::to_value(provenance)
+    {
+        advice
+            .extra_json_fields
+            .insert("provenance".to_string(), value);
     }
     advice
 }

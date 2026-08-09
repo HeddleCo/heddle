@@ -32,6 +32,7 @@ pub struct VerifyOptions {
     pub start_path: Option<PathBuf>,
     pub machine_contract_input: MachineContractInput,
     pub action_audience: ActionAudience,
+    pub provenance: bool,
 }
 
 impl VerifyOptions {
@@ -40,6 +41,7 @@ impl VerifyOptions {
             start_path: None,
             machine_contract_input: MachineContractInput::default(),
             action_audience: ActionAudience::Human,
+            provenance: false,
         }
     }
 
@@ -55,6 +57,11 @@ impl VerifyOptions {
 
     pub fn with_action_audience(mut self, audience: ActionAudience) -> Self {
         self.action_audience = audience;
+        self
+    }
+
+    pub fn with_provenance(mut self, provenance: bool) -> Self {
+        self.provenance = provenance;
         self
     }
 }
@@ -101,6 +108,8 @@ pub struct VerifyReport {
     pub repository_context: Option<RepositoryContextInfo>,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<crate::ProvenanceReport>,
     #[serde(skip)]
     #[schemars(skip)]
     pub profile: VerifyProfile,
@@ -1471,6 +1480,7 @@ pub fn verify(ctx: &ExecutionContext, opts: VerifyOptions) -> Result<VerifyRepor
                 repository_label: repository_mode_label("plain-git", "git-only"),
                 repository_context: None,
                 trust: probe.trust,
+                provenance: None,
                 profile,
             });
         }
@@ -1485,14 +1495,19 @@ pub fn verify(ctx: &ExecutionContext, opts: VerifyOptions) -> Result<VerifyRepor
         repo,
         &opts.machine_contract_input,
     )?;
+    let provenance = opts
+        .provenance
+        .then(|| crate::verify_repository_provenance(repo))
+        .transpose()?;
     profile.verification_ms = verification_start.elapsed().as_millis();
     let presentation = repository_presentation(repo, None, None);
     Ok(VerifyReport {
         output_kind: "verify",
-        clean: trust.verified,
+        clean: trust.verified && provenance.as_ref().is_none_or(|report| report.clean),
         repository_label: presentation.label,
         repository_context: presentation.context,
         trust,
+        provenance,
         profile,
     })
 }
