@@ -84,6 +84,14 @@ pub struct ImportStats {
     /// Git tree entries that were dropped or converted because the caller
     /// explicitly opted into lossy import.
     pub lossy_entries: Vec<LossyImportEntry>,
+    /// Original Git commits whose native States cannot reconstruct their
+    /// mapped bytes (lossy trees or non-UTF-8 identities). Git projection uses
+    /// these exact roots to capture Raw Git Object Residual closures.
+    pub non_reconstructable_commits: Vec<String>,
+    /// Original Git trees at which a lossy path conversion occurred. This is
+    /// retained as import evidence even though residual capture walks the full
+    /// tree closure from each commit root.
+    pub lossy_trees: Vec<String>,
 }
 
 /// Which Git refs a mechanical import should ingest.
@@ -419,6 +427,12 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
                     git_lossy,
                     ParentMapPolicy::RequireMapped,
                 )?;
+                if git_lossy || commit_has_lossy_identity(commit) {
+                    packed
+                        .stats
+                        .non_reconstructable_commits
+                        .insert(commit.sha.clone());
+                }
                 if let Some(progress) = self.progress.as_deref_mut() {
                     progress(ImportProgressEvent {
                         commits_imported: idx + 1,
@@ -517,6 +531,19 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             oplog: oplog_stats,
             reflog_only_commits,
             lossy_entries: packed_stats.lossy_entries,
+            non_reconstructable_commits: {
+                let mut commits = packed_stats
+                    .non_reconstructable_commits
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                commits.sort();
+                commits
+            },
+            lossy_trees: {
+                let mut trees = packed_stats.lossy_trees.into_iter().collect::<Vec<_>>();
+                trees.sort();
+                trees
+            },
         })
     }
 }
@@ -529,6 +556,14 @@ struct PackedImportStats {
     trees: usize,
     blobs: usize,
     lossy_entries: Vec<LossyImportEntry>,
+    non_reconstructable_commits: HashSet<String>,
+    lossy_trees: HashSet<String>,
+}
+
+fn commit_has_lossy_identity(commit: &CommitEntry) -> bool {
+    [&commit.author, &commit.committer].iter().any(|signature| {
+        signature.name.contains('\u{FFFD}') || signature.email.contains('\u{FFFD}')
+    })
 }
 
 trait ImportPackSink {
@@ -748,6 +783,7 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
                         .iter()
                         .map(|entry| rebase_lossy_entry(path_prefix, entry)),
                 );
+                self.stats.lossy_trees.insert(git_tree_sha.to_string());
             }
             return Ok(hash);
         }
@@ -765,6 +801,9 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
             .iter()
             .map(|entry| entry_relative_to_prefix(path_prefix, entry))
             .collect::<Vec<_>>();
+        if !tree_lossy_entries.is_empty() {
+            self.stats.lossy_trees.insert(git_tree_sha.to_string());
+        }
 
         let tree = Tree::from_entries(entries);
         let hash = tree.hash();
@@ -1805,6 +1844,8 @@ mod tests {
 
         assert_eq!(stats.commits_imported, 1);
         assert_eq!(stats.lossy_entries.len(), 1);
+        assert_eq!(stats.non_reconstructable_commits.len(), 1);
+        assert_eq!(stats.lossy_trees.len(), 1);
         assert_eq!(stats.lossy_entries[0].path, converted_name);
         assert!(stats.lossy_entries[0].summary_line().contains("converted"));
     }

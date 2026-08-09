@@ -173,10 +173,11 @@ Use the glossary terms in `CONTEXT.md` exactly.
      export lossy paths prefer reconstruct → residual → Bridge Mirror, with a
      hard fail when neither residual nor mirror can supply the object.
    - Fsck verifies mapped non-reconstructable objects have residuals.
-     (**Not yet** — residual validation remains follow-on.)
+     (**Shipped** — missing or invalid residual bytes are a hard fsck failure.)
    - Export/write-through can use residuals instead of the mirror for lossy objects.
-     (**Partial** — residual install is hooked; full closure capture on lossy
-     import and mirror-free export are not complete.)
+     (**Shipped** — imports capture non-reconstructable commits with their full
+     tree/blob closure plus annotated-tag wrappers; fresh export and
+     write-through install that closure without the mirror object warehouse.)
    - Old `.heddle/git` mirrors can lazily migrate needed residuals.
      (**Partial** — migrate helper exists; automatic full-mirror migration and
      explicit mirror deletion maintenance are not complete. Mirror is **not**

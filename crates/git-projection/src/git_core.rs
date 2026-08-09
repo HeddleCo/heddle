@@ -1816,20 +1816,12 @@ fn materialize_active_checkout_closure(
             continue;
         }
 
-        if !residuals.install_into(object_repo, &git_oid)? {
+        if !residuals.install_commit_closure_into(object_repo, &git_oid)? {
             return Err(GitProjectionError::CommitNotFound(format!(
                 "{git_oid} for state {state_id}; the authoritative checkout .git and Raw Git Object Residual store do not contain it"
             )));
         }
-        match verify_closure_present(object_repo, &[git_oid], excluded) {
-            Ok(()) => {}
-            Err(ClosureCheck::Incomplete { missing }) => {
-                return Err(GitProjectionError::CommitNotFound(format!(
-                    "{missing} in the closure of {git_oid}; restore the original object to the authoritative checkout .git"
-                )));
-            }
-            Err(ClosureCheck::Walk(error)) => return Err(error),
-        }
+        stack.extend(state.parents);
     }
     Ok(())
 }
@@ -3501,9 +3493,9 @@ fn clone_url_to_bare_via_sley(
 ///     [`reconstruct_commit_bytes`]'s [`export_tree`], its whole tree/blob closure)
 ///     directly into `object_repo`, then recurse into its parents;
 ///   * otherwise (lossy: `--lossy` import or non-UTF8 identity) ⇒ install that
-///     commit's object from residual storage when present; otherwise copy its
-///     reachable closure from the Bridge Mirror (lazily migrating the root into
-///     residuals) and DO NOT recurse when the mirror supplied the closure.
+///     commit's exact tree/blob closure from residual storage and continue through
+///     its state parents; legacy imports without residuals copy their reachable
+///     closure from the Bridge Mirror and lazily migrate the root.
 ///
 /// CRITICAL safety gate: every reconstructed commit's git OID MUST equal the
 /// mapped `git_oid`. A mismatch means reconstruction diverged from the imported
@@ -3530,9 +3522,9 @@ pub fn materialize_checkout_closure_from_state(
     tip_oid: ObjectId,
     excluded: &HashSet<ObjectId>,
 ) -> GitProjectionResult<()> {
-    // Lossy commits whose closure still needs Bridge Mirror copy after residual
-    // install attempts. Residual-only roots are installed per-oid below; mirror
-    // roots are batched into one excluding pack install for perf shape parity.
+    // Lossy commits whose closure must come from residuals or the legacy Bridge
+    // Mirror. Mirror-only roots are batched into one excluding pack install for
+    // performance parity.
     let mut lossy_roots: Vec<ObjectId> = Vec::new();
     let mut stack: Vec<StateId> = vec![*tip_state_id];
     let mut seen: HashSet<StateId> = HashSet::new();
@@ -3581,12 +3573,11 @@ pub fn materialize_checkout_closure_from_state(
             stack.extend(state.parents.iter().copied());
         } else {
             // Lossy residual path: prefer Raw Git Object Residual, else Bridge
-            // Mirror. Residual install covers only this commit object (not its
-            // full tree closure); when residual is present we still fall back to
-            // mirror for missing dependents if the residual is commit-only, so
-            // keep the oid in lossy_roots for mirror closure copy when residual
-            // install alone is insufficient for the checkout.
+            // Mirror. New residuals carry the exact commit/tree/blob closure;
+            // parent commits remain independently reconstructable or residual-
+            // backed, so keep walking the native state DAG.
             lossy_roots.push(git_oid);
+            stack.extend(state.parents.iter().copied());
         }
     }
 
@@ -3630,18 +3621,11 @@ fn materialize_lossy_roots_from_residual_or_mirror(
         if excluded.contains(oid) || object_repo.read_object(oid).is_ok() {
             continue;
         }
-        // Prefer residual. If residual is only the commit root, mirror copy may
-        // still be required for tree/blob dependents — those are pulled via the
-        // mirror batch below when the object still cannot be fully satisfied.
-        // For a residual that installs successfully, still attempt mirror
-        // closure copy for dependents that residual storage may not yet hold
-        // (foundation: residual capture is often commit-granular first).
-        match residual_store.install_into(object_repo, oid) {
-            Ok(true) => {
-                // Root installed from residual; still ask the mirror for any
-                // missing reachable dependents when the mirror is available.
-                mirror_needed.push(*oid);
-            }
+        // New imports capture the complete commit/tree/blob closure, so a
+        // successful residual install needs no mirror fill. Legacy stores that
+        // have no root residual still use the lazy mirror migration below.
+        match residual_store.install_commit_closure_into(object_repo, oid) {
+            Ok(true) => {}
             Ok(false) => {
                 // No residual: require mirror (and migrate the root into residual
                 // when the mirror has it).
@@ -3670,11 +3654,7 @@ fn materialize_lossy_roots_from_residual_or_mirror(
     }
 
     if !mirror_needed.is_empty() {
-        // Closure fill from the Bridge Mirror. If the mirror lacks an object
-        // that residual already supplied as a root, copy is a no-op for present
-        // oids; missing dependents (trees/blobs the residual root did not carry)
-        // must be pulled from the mirror here or the checkout `.git` is silently
-        // corrupt — commit present, closure absent.
+        // Closure fill for legacy root-only residuals / mirror-only imports.
         if let Err(error) = copy_reachable_objects_excluding(
             mirror_repo,
             object_repo,
