@@ -19,8 +19,8 @@ use api::heddle::api::v1alpha1::{
     StateVisibilityTransfer, StreamOpeningProof, ThreadConfidenceSummary,
     ThreadFreshness as ProtoThreadFreshness, ThreadIntegrationPolicy, ThreadMetadata,
     ThreadMode as ProtoThreadMode, ThreadVerificationSummary, TransportMode, UpdateRefRequest,
-    WantObjects, git_lane_transfer, pull_client_frame, pull_server_frame, push_client_frame,
-    push_server_frame, thread_state::Kind as ProtoThreadState,
+    WantObjects, git_lane_transfer, list_refs_response, pull_client_frame, pull_server_frame,
+    push_client_frame, push_server_frame, thread_state::Kind as ProtoThreadState,
 };
 use objects::{
     Progress,
@@ -189,6 +189,7 @@ pub(crate) fn decode_pull_refs(
                 state_id,
                 is_thread,
                 revision_address,
+                thread_id: None,
             })
         })
         .collect::<Result<Vec<_>, ProtocolError>>()?;
@@ -364,6 +365,7 @@ pub struct HostedRefEntry {
     pub state_id: StateId,
     pub is_thread: bool,
     pub revision_address: String,
+    pub thread_id: Option<String>,
 }
 
 impl PullObjectMix {
@@ -476,28 +478,83 @@ impl HostedClient {
         &mut self,
         repo_path: &str,
     ) -> Result<Vec<HostedRefEntry>, ProtocolError> {
-        let request = ListRefsRequest {
-            repo_path: super::helpers::repository_ref(repo_path),
-        };
-        let response = self
-            .routes()
-            .list_refs(&request)
-            .await
-            .map_err(hosted_to_protocol_error)?;
-        response
-            .refs
-            .into_iter()
-            .map(|entry| {
-                Ok(HostedRefEntry {
-                    name: entry.name,
-                    state_id: super::helpers::parse_proto_state_id(entry.state_id)?.ok_or_else(
-                        || ProtocolError::InvalidState("ref is missing its state ID".to_string()),
-                    )?,
-                    is_thread: entry.is_thread,
-                    revision_address: entry.revision_address,
-                })
-            })
-            .collect()
+        let mut refs = Vec::new();
+        let mut page_token = String::new();
+        loop {
+            let request = ListRefsRequest {
+                repo_path: super::helpers::repository_ref(repo_path),
+                page_size: api::MAX_PAGE_SIZE,
+                page_token: page_token.clone(),
+            };
+            let mut stream = self
+                .routes()
+                .list_refs(&request)
+                .await
+                .map_err(hosted_to_protocol_error)?;
+            let mut next_page_token = None;
+            while let Some(response) = stream.next().await.map_err(hosted_to_protocol_error)? {
+                match response.frame {
+                    Some(list_refs_response::Frame::Item(entry)) => {
+                        let thread_id = if entry.is_thread {
+                            if entry.thread_id.is_empty() {
+                                return Err(ProtocolError::InvalidState(format!(
+                                    "hosted thread ref '{}' is missing its stable identity",
+                                    entry.name
+                                )));
+                            }
+                            Some(entry.thread_id)
+                        } else {
+                            None
+                        };
+                        refs.push(HostedRefEntry {
+                            name: entry.name,
+                            state_id: super::helpers::parse_proto_state_id(entry.state_id)?
+                                .ok_or_else(|| {
+                                    ProtocolError::InvalidState(
+                                        "ref is missing its state ID".to_string(),
+                                    )
+                                })?,
+                            is_thread: entry.is_thread,
+                            revision_address: entry.revision_address,
+                            thread_id,
+                        });
+                    }
+                    Some(list_refs_response::Frame::PageEnd(page_end)) => {
+                        next_page_token = Some(page_end.next_page_token);
+                    }
+                    None => {
+                        return Err(ProtocolError::InvalidState(
+                            "ListRefs emitted an empty frame".to_string(),
+                        ));
+                    }
+                }
+            }
+            let next_page_token = next_page_token.ok_or_else(|| {
+                ProtocolError::InvalidState(
+                    "ListRefs ended without a terminal page frame".to_string(),
+                )
+            })?;
+            if next_page_token.is_empty() {
+                return Ok(refs);
+            }
+            if next_page_token == page_token {
+                return Err(ProtocolError::InvalidState(
+                    "ListRefs returned a repeated page token".to_string(),
+                ));
+            }
+            page_token = next_page_token;
+        }
+    }
+
+    async fn pull_thread_id(
+        &self,
+        repo_path: &str,
+        remote_thread: &str,
+    ) -> Result<String, ProtocolError> {
+        if remote_thread.starts_with(PULL_CLONE_BOOTSTRAP_THREAD_PREFIX) {
+            return Ok(String::new());
+        }
+        self.require_thread_id(repo_path, remote_thread).await
     }
 
     /// Fetch and validate the managed record for a pulled hosted thread.
@@ -511,6 +568,7 @@ impl HostedClient {
         let request = GetThreadRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             name: remote_thread.to_string(),
+            thread_id: self.require_thread_id(repo_path, remote_thread).await?,
         };
         let summary = match self.routes().get_thread(&request).await {
             Ok(summary) => summary,
@@ -550,6 +608,31 @@ impl HostedClient {
             "heddle.api.v1alpha1.RepoSyncService/UpdateRef",
             client_operation_id,
         )?;
+        let remote_refs = if is_thread || thread_metadata.is_some() {
+            Some(self.list_refs_with_revision_addresses(repo_path).await?)
+        } else {
+            None
+        };
+        let thread_id = if is_thread {
+            remote_refs
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .find(|entry| entry.is_thread && entry.name == name)
+                .and_then(|entry| entry.thread_id.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let thread_metadata = thread_metadata
+            .map(|metadata| {
+                to_proto_thread_metadata(
+                    metadata,
+                    (!thread_id.is_empty()).then_some(thread_id.as_str()),
+                    remote_refs.as_deref().unwrap_or_default(),
+                )
+            })
+            .transpose()?;
         let request = UpdateRefRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             name: name.to_string(),
@@ -559,12 +642,13 @@ impl HostedClient {
                 .map(|value| value.to_string_full())
                 .unwrap_or_default(),
             new_value: new_value.to_string_full(),
-            thread_metadata: thread_metadata.map(to_proto_thread_metadata),
+            thread_metadata,
             old_revision_address: old_value
                 .map(|value| RevisionAddress::heddle(value).to_string())
                 .unwrap_or_default(),
             new_revision_address: RevisionAddress::heddle(new_value).to_string(),
             client_operation_id: operation_id.to_wire(),
+            thread_id,
         };
         let response = self
             .routes()
@@ -814,14 +898,19 @@ impl HostedClient {
             GitLaneTransferIntent::HeddleObjectsOnly
         };
         let remote_ref_discovery_started = std::time::Instant::now();
+        let remote_refs = self.list_refs_with_revision_addresses(repo_path).await?;
+        let remote_target = remote_refs
+            .iter()
+            .find(|entry| entry.is_thread && entry.name == target_thread);
+        let target_thread_id = remote_target
+            .and_then(|entry| entry.thread_id.clone())
+            .unwrap_or_default();
         let native_expected_remote_head = if git_lane.is_none() {
-            match expected_remote_head {
-                Some(expected) => Some(expected),
-                None => {
-                    let remote_refs = self.list_refs(repo_path).await?;
-                    Some(expected_remote_head_from_refs(&remote_refs, target_thread))
-                }
-            }
+            Some(expected_remote_head.unwrap_or_else(|| {
+                remote_target.map_or(ExpectedRemoteHead::Missing, |entry| {
+                    ExpectedRemoteHead::State(entry.state_id)
+                })
+            }))
         } else {
             None
         };
@@ -863,12 +952,21 @@ impl HostedClient {
             operation_id.as_str(),
         );
         let transport_mode = preferred_transport_mode(&self.transport, object_count);
-        let thread_metadata = load_thread_metadata(repo, target_thread, local_state)?;
+        let thread_metadata = load_thread_metadata(repo, target_thread, local_state)?
+            .as_ref()
+            .map(|metadata| {
+                to_proto_thread_metadata(
+                    metadata,
+                    (!target_thread_id.is_empty()).then_some(target_thread_id.as_str()),
+                    &remote_refs,
+                )
+            })
+            .transpose()?;
         let mut push_request = PushRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             local_state: super::helpers::proto_state_id(local_state),
             target_thread: target_thread.to_string(),
-            create_thread: true,
+            create_thread: target_thread_id.is_empty(),
             force,
             objects: full_objects.as_ref().map_or_else(
                 || {
@@ -889,10 +987,11 @@ impl HostedClient {
             )),
             partial_fetch_status: partial_fetch_status_for_repo(repo),
             allow_partial_fetch: true,
-            thread_metadata: thread_metadata.map(|metadata| to_proto_thread_metadata(&metadata)),
+            thread_metadata,
             local_revision_address,
             expected_remote_head: None,
             expected_remote_head_missing: false,
+            target_thread_id,
         };
         if let Some(expected) = native_expected_remote_head {
             apply_expected_remote_head(&mut push_request, expected);
@@ -1349,6 +1448,8 @@ impl HostedClient {
             repo_path: super::helpers::repository_ref(repo_path),
             r#ref: reference.to_string(),
             path: path.to_string(),
+            start_line: 0,
+            line_count: 0,
         };
         let response = self
             .routes()
@@ -1458,6 +1559,7 @@ impl HostedClient {
             options.target_state,
             uuid::Uuid::new_v4(),
         );
+        let remote_thread_id = self.pull_thread_id(repo_path, remote_thread).await?;
         let (provider_session, provider_capability_context) =
             self.begin_provider_pull(&transfer_id, repo_path)?;
         let request_message = PullClientFrame {
@@ -1490,6 +1592,7 @@ impl HostedClient {
                     .target_state
                     .map(|state| RevisionAddress::heddle(state).to_string())
                     .unwrap_or_default(),
+                remote_thread_id,
             })),
         };
 
@@ -2144,6 +2247,7 @@ fn native_push_boundaries(
     )
 }
 
+#[cfg(test)]
 fn expected_remote_head_from_refs(
     remote_refs: &[RefEntry],
     target_thread: &str,
@@ -2708,7 +2812,7 @@ mod pull_bootstrap_tests {
     use super::*;
 
     #[test]
-    fn bootstrap_decoder_accepts_structured_empty_metadata_and_old_server_falls_back() {
+    fn bootstrap_decoder_accepts_structured_empty_metadata() {
         let temp = TempDir::new().expect("temp repo");
         let repo = Repository::init_default(temp.path()).expect("init repo");
         std::fs::write(temp.path().join("README.md"), "bootstrap\n").expect("write fixture");
@@ -2744,12 +2848,6 @@ mod pull_bootstrap_tests {
                 .expect("read marker"),
             Some(snapshot.state_id)
         );
-        assert!(
-            decode_pull_bootstrap(b"heddle-markers-v1\n")
-                .expect("legacy checkpoint is valid")
-                .is_none(),
-            "an old server must retain the unary metadata fallback"
-        );
     }
 
     #[test]
@@ -2766,7 +2864,7 @@ mod pull_bootstrap_tests {
     }
 
     #[test]
-    fn folded_refs_decode_identically_and_old_server_selects_fallback() {
+    fn folded_refs_decode_identically() {
         let main = StateId::from_bytes([7; 32]);
         let release = StateId::from_bytes([8; 32]);
         let payload: PullRefsPayload = (
@@ -2804,12 +2902,6 @@ mod pull_bootstrap_tests {
         assert_eq!(decoded.refs[1].name, "release");
         assert_eq!(decoded.refs[1].state_id, release);
         assert!(!decoded.refs[1].is_thread);
-        assert!(
-            decode_pull_refs(b"heddle-markers-v1\n")
-                .expect("old-server checkpoint remains valid")
-                .is_none(),
-            "absence of folded refs must select the standalone ListRefs fallback"
-        );
     }
 
     #[test]
@@ -2901,8 +2993,32 @@ fn state_id_string_to_bytes(s: &str) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-fn to_proto_thread_metadata(metadata: &SyncedThreadMetadata) -> ThreadMetadata {
-    ThreadMetadata {
+fn hosted_thread_id(
+    remote_refs: &[HostedRefEntry],
+    thread_name: &str,
+) -> Result<String, ProtocolError> {
+    remote_refs
+        .iter()
+        .find(|entry| entry.is_thread && entry.name == thread_name)
+        .and_then(|entry| entry.thread_id.clone())
+        .ok_or_else(|| ProtocolError::ObjectNotFound(format!("hosted thread '{thread_name}'")))
+}
+
+fn related_thread_id(
+    remote_refs: &[HostedRefEntry],
+    thread_name: Option<&String>,
+) -> Result<Option<String>, ProtocolError> {
+    thread_name
+        .map(|name| hosted_thread_id(remote_refs, name))
+        .transpose()
+}
+
+fn to_proto_thread_metadata(
+    metadata: &SyncedThreadMetadata,
+    thread_id: Option<&str>,
+    remote_refs: &[HostedRefEntry],
+) -> Result<ThreadMetadata, ProtocolError> {
+    Ok(ThreadMetadata {
         name: metadata.thread.clone(),
         target_thread: metadata.target_thread.clone(),
         parent_thread: metadata.parent_thread.clone(),
@@ -2989,7 +3105,10 @@ fn to_proto_thread_metadata(metadata: &SyncedThreadMetadata) -> ThreadMetadata {
             seconds: metadata.updated_at.timestamp(),
             nanos: metadata.updated_at.timestamp_subsec_nanos() as i32,
         }),
-    }
+        thread_id: thread_id.unwrap_or_default().to_string(),
+        target_thread_id: related_thread_id(remote_refs, metadata.target_thread.as_ref())?,
+        parent_thread_id: related_thread_id(remote_refs, metadata.parent_thread.as_ref())?,
+    })
 }
 
 struct PullExchange {

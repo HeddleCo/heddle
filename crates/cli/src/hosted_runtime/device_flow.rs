@@ -98,6 +98,18 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
         AgentAuthOperationDisposition::ReviewedSafe,
     ),
     (
+        "BindSignupInviteEmail",
+        AgentAuthOperationDisposition::Denied,
+    ),
+    (
+        "IssueSignupEmailChallenge",
+        AgentAuthOperationDisposition::Denied,
+    ),
+    (
+        "ResolveSignupInvite",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    (
         "GetInvitationSummary",
         AgentAuthOperationDisposition::ReviewedSafe,
     ),

@@ -372,7 +372,10 @@ fn remote_failure_detail(
             rule: value.rule,
             human_verification_can_override: value.human_verification_can_override,
         },
-        Some(Context::HumanVerification(_)) | None => wire::RemoteFailureDetail::Unknown {
+        Some(Context::HumanVerification(_))
+        | Some(Context::AmbiguousChangeId(_))
+        | Some(Context::Signup(_))
+        | None => wire::RemoteFailureDetail::Unknown {
             type_url: "type.googleapis.com/heddle.api.v1alpha1.ErrorDetail".to_string(),
             value: encoded,
         },

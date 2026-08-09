@@ -1071,12 +1071,12 @@ async fn list_server_targets(
     client: &mut HostedClient,
     repo_path: &str,
 ) -> Result<Vec<(ContextTarget, ContextAnnotation)>> {
-    let response = client
+    let (files, states) = client
         .list_context(repo_path, None, None, None)
         .await
         .context("list hosted context")?;
     let mut out = Vec::new();
-    for file in response.files {
+    for file in files {
         let Ok(target) = ContextTarget::file(&file.path) else {
             continue;
         };
@@ -1084,7 +1084,7 @@ async fn list_server_targets(
             out.push((target.clone(), annotation));
         }
     }
-    for state in response.states {
+    for state in states {
         let Some(state_id) = state_id_from_proto(state.state_id.as_ref()) else {
             continue;
         };
@@ -1108,7 +1108,6 @@ async fn fetch_history(
         .await
         .with_context(|| format!("fetch hosted annotation history {annotation_id}"))?;
     let mut revisions: Vec<AnnotationRevision> = history
-        .revisions
         .into_iter()
         .map(|revision| AnnotationRevision {
             revision_id: revision.revision_id,

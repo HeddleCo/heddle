@@ -17,7 +17,7 @@ mod fixture {
 
     use api::{
         HOSTED_ALPN_V1,
-        framing::{decode_request_prelude, encode_failure_response},
+        framing::{decode_request_prelude, encode_stream_failure},
         heddle::api::v1alpha1::{
             CallFailure, CallFailureCode, EndpointDescriptor, SignedEndpointDescriptor,
         },
@@ -51,6 +51,8 @@ mod fixture {
         )]));
         let certificate = temp.path().join("descriptor-ca.pem");
         std::fs::write(&certificate, &https.certificate_pem).expect("write descriptor test CA");
+        let credential = temp.path().join("clone-test.hcred");
+        write_test_credential(&credential, &https.authority);
         let destination = temp.path().join("clone");
         let remote = format!("heddle://{}/owner/repo", https.authority);
         let descriptor_public_key = hex::encode(signer.public_key());
@@ -76,6 +78,10 @@ mod fixture {
                     &descriptor_public_key,
                 ),
                 ("HEDDLE_HOME", heddle_home.to_str().expect("UTF-8 home")),
+                (
+                    "HEDDLE_CREDENTIAL",
+                    credential.to_str().expect("UTF-8 credential path"),
+                ),
             ],
         )
         .expect("invoke clone against disconnecting fixture");
@@ -87,7 +93,13 @@ mod fixture {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(output.status.code(), Some(75));
+        assert_eq!(
+            output.status.code(),
+            Some(75),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         let records = String::from_utf8(output.stdout).expect("clone stdout is UTF-8");
         let records = records
             .lines()
@@ -264,7 +276,7 @@ mod fixture {
                         "an authenticated clone must start with folded Pull, not ListRefs"
                     );
                 }
-                let failure = encode_failure_response(&CallFailure {
+                let failure = encode_stream_failure(&CallFailure {
                     code: CallFailureCode::Unavailable as i32,
                     message: "Broken pipe".to_string(),
                     error: None,

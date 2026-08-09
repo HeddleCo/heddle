@@ -20,6 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             thread: String::new(),
             after_event_id,
             event_types: Vec::new(),
+            thread_id: String::new(),
         })
         .await?;
     let event = events.next().await?;

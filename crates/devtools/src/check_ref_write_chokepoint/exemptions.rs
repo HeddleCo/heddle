@@ -10,6 +10,7 @@ pub(super) fn path_key(path: &Path) -> &str {
         "repo/src/repository_thread_materialize.rs",
         "cli/src/cli/commands/undo_apply/mod.rs",
         "cli/src/cli/commands/start_atomic.rs",
+        "cli/src/cli/commands/clone.rs",
         "cli/src/cli/commands/git_projection_io.rs",
         "git-projection/src/git_core.rs",
     ];
@@ -51,6 +52,8 @@ pub(super) fn budget(path: &Path, function: &str, method: &str) -> usize {
         ("cli/src/cli/commands/undo_apply/mod.rs", "apply", "set_undo_recovery") => 2,
         ("cli/src/cli/commands/undo_apply/mod.rs", "apply", "clear_undo_recovery") => 1,
         ("cli/src/cli/commands/start_atomic.rs", "stage_ref", "set_thread_cas") => 2,
+        ("cli/src/cli/commands/clone.rs", "clone_network_connected", "write_head") => 2,
+        ("cli/src/cli/commands/clone.rs", "recover_interrupted_clone_connected", "write_head") => 2,
         (
             "cli/src/cli/commands/git_projection_io.rs",
             "materialize_imported_attached_thread",

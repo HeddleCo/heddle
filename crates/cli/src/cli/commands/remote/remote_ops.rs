@@ -1054,9 +1054,15 @@ async fn pull_network_connected(
         .context("decode hosted pull bootstrap")?;
     let bootstrap = if result.success {
         bootstrap
-            .as_ref()
-            .map(|metadata| metadata.resolve(repo, result.final_state))
-            .transpose()
+            .ok_or_else(|| {
+                anyhow::anyhow!(RecoveryAdvice::remote_pull_failed(
+                    options.remote_thread,
+                    options.local_thread,
+                    "hosted response is missing required folded metadata",
+                ))
+            })?
+            .resolve(repo, result.final_state)
+            .map(Some)
             .context("resolve hosted pull bootstrap")?
     } else {
         None

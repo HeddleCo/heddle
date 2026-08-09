@@ -19,6 +19,7 @@ fn request() -> SubscribeRepoEventsRequest {
         thread: "main".to_string(),
         after_event_id: 40,
         event_types: vec!["ref.updated".to_string()],
+        thread_id: "thread-main".to_string(),
     }
 }
 
