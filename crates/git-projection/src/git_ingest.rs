@@ -8,10 +8,12 @@ use sley::{GitObjectType, ObjectId, Repository as SleyRepository};
 
 use super::{
     git_core::{
-        GitProjection, GitProjectionError, GitProjectionResult, collect_import_source_ref_updates,
-        open_repo,
+        GitProjection, GitProjectionError, GitProjectionResult, RefNamespace,
+        collect_import_source_ref_updates, open_repo,
     },
+    git_export::commit_requires_residual,
     git_notes,
+    git_residual::ResidualStore,
     git_util::ImportStats,
 };
 
@@ -45,8 +47,54 @@ pub fn import_git_history(
     }
     let mirror_repo = bridge.open_git_repo()?;
     bridge.seed_ingest_identity_mappings_from_repo(&mirror_repo)?;
+    capture_import_residuals(bridge, source, refs, &stats)?;
     backfill_ingest_identity_notes_in_mirror(bridge, &mirror_repo, refs)?;
     Ok(import_stats_from_ingest(stats))
+}
+
+fn capture_import_residuals(
+    bridge: &GitProjection<'_>,
+    source: &Path,
+    refs: &[String],
+    stats: &ingest::ImportStats,
+) -> GitProjectionResult<()> {
+    let source_repo = open_repo(source)?;
+    let updates = collect_import_source_ref_updates(&source_repo, refs)?;
+    let residuals = ResidualStore::open(bridge.heddle_repo.heddle_dir());
+
+    for git_sha in &stats.non_reconstructable_commits {
+        let git_oid = git_sha
+            .parse::<ObjectId>()
+            .map_err(|error| GitProjectionError::InvalidMapping(error.to_string()))?;
+        let Some(state_id) = bridge.mapping.get_heddle(git_oid) else {
+            return Err(GitProjectionError::InvalidMapping(format!(
+                "non-reconstructable imported commit {git_oid} has no Git Projection Mapping"
+            )));
+        };
+        let Some(state) = bridge.heddle_repo.store().get_state(&state_id)? else {
+            return Err(GitProjectionError::StateNotFound(state_id));
+        };
+        if !commit_requires_residual(&state) {
+            return Err(GitProjectionError::InvalidMapping(format!(
+                "ingest classified {git_oid} as non-reconstructable but its mapped state {state_id} is byte-faithful"
+            )));
+        }
+        residuals.capture_commit_closure_from_git_repo(&source_repo, &git_oid)?;
+    }
+
+    for update in updates
+        .into_iter()
+        .filter(|update| update.namespace == RefNamespace::Tag)
+    {
+        let object = source_repo
+            .read_object(&update.target)
+            .map_err(super::git_core::git_err)?;
+        if object.object_type == GitObjectType::Tag {
+            residuals.capture_tag_chain_from_git_repo(&source_repo, &update.target)?;
+            residuals.record_tag_ref(&update.name, update.target)?;
+        }
+    }
+    Ok(())
 }
 
 fn map_ingest_error(error: ingest::IngestError) -> GitProjectionError {

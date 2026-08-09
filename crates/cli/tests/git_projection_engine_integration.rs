@@ -69,45 +69,14 @@ fn import_all_with_options(
     git_path: Option<&std::path::Path>,
     options: ingest::ImportOptions,
 ) -> TestImportResult<ImportStats> {
-    let target = git_projection_root_from_mirror(git_projection);
-    let source_owned;
-    let source = if let Some(path) = git_path {
-        path
-    } else {
-        source_owned = target.clone();
-        source_owned.as_path()
-    };
-    let (stats, _map) = ingest::import_git_into_with_options(source, &target, options)
-        .map_err(|error| error.to_string())?;
-    test_support::stage_ingest_source_in_mirror(git_projection, source, &[])
-        .map_err(|error| error.to_string())?;
-    test_support::build_existing_mapping(git_projection, Some(source))
-        .map_err(|error| error.to_string())?;
-    let mirror_repo =
-        test_support::open_git_repo(git_projection).map_err(|error| error.to_string())?;
-    test_support::seed_ingest_identity_mappings_from_repo(git_projection, &mirror_repo)
-        .map_err(|error| error.to_string())?;
-    Ok(import_stats_from_ingest(stats))
-}
-
-fn git_projection_root_from_mirror(git_projection: &GitProjection<'_>) -> std::path::PathBuf {
-    git_projection
-        .mirror_path()
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("mirror path should be <root>/.heddle/git")
-        .to_path_buf()
-}
-
-fn import_stats_from_ingest(stats: ingest::ImportStats) -> ImportStats {
-    ImportStats {
-        commits_imported: stats.commits_imported,
-        states_created: stats.states_created,
-        branches_synced: stats.refs.threads_written,
-        tags_synced: stats.refs.markers_written,
-        skipped_non_commit_refs: stats.refs_seen.non_commit_skipped,
-        lossy_entries: stats.lossy_entries,
-    }
+    heddle_git_projection::git_ingest::import_git_history(
+        git_projection,
+        git_path,
+        &[],
+        options,
+        None,
+    )
+    .map_err(|error| error.to_string())
 }
 
 trait SleyTestRepoExt {
@@ -1226,6 +1195,91 @@ fn run_lossy_then_default_rerun(engine: ImportEngine) {
 fn both_engines_fail_hard_on_default_rerun_after_lossy() {
     for engine in [ImportEngine::Ingest, ImportEngine::Bridge] {
         run_lossy_then_default_rerun(engine);
+    }
+}
+
+/// #1279: a lossy import must be self-contained after the Bridge Mirror object
+/// warehouse is removed. The source has a non-UTF-8 tree name and an annotated
+/// tag, so the residual set must contain the mapped commit, its tree/blob
+/// closure, and the tag wrapper. A brand-new export then reproduces every OID
+/// and body byte using only native state plus those residuals.
+#[test]
+fn lossy_import_captures_full_residual_closure_for_fresh_export() {
+    let source_temp = init_invalid_utf8_name_repo();
+    let source_repo = open_git(source_temp.path()).expect("open source");
+    let commit_oid = find_reference(&source_repo, "refs/heads/main")
+        .expect("main ref")
+        .target()
+        .try_id()
+        .expect("main direct oid")
+        .to_owned();
+    let tag_oid = create_annotated_tag(&source_repo, "v1.0", commit_oid, "lossy release");
+    let commit = source_repo
+        .read_commit(&commit_oid)
+        .expect("read source commit");
+    let tree_oid = commit.tree;
+    let tree = source_repo.read_tree(&tree_oid).expect("read source tree");
+    let blob_oid = tree.entries[0].oid;
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let mut git_projection = GitProjection::new(&repo);
+    let stats = import_all_with_options(
+        &mut git_projection,
+        Some(source_temp.path()),
+        ingest::ImportOptions {
+            lossy: true,
+            ..ingest::ImportOptions::default()
+        },
+    )
+    .expect("lossy import");
+    assert_eq!(stats.lossy_entries.len(), 1);
+
+    let residuals = heddle_git_projection::ResidualStore::open(repo.heddle_dir());
+    for (label, oid) in [
+        ("commit", commit_oid),
+        ("tree", tree_oid),
+        ("blob", blob_oid),
+        ("annotated tag", tag_oid),
+    ] {
+        assert!(
+            residuals
+                .has_residual(source_repo.object_format(), &oid)
+                .expect("inspect residual"),
+            "lossy import must capture {label} residual {oid}",
+        );
+    }
+
+    drop(git_projection);
+    std::fs::remove_dir_all(repo.heddle_dir().join("git"))
+        .expect("remove test Bridge Mirror object warehouse");
+    let destination_temp = TempDir::new().expect("destination temp");
+    let destination = destination_temp.path().join("fresh.git");
+    let mut fresh_projection = GitProjection::new(&repo);
+    fresh_projection
+        .export_to_path(&destination)
+        .expect("fresh export from native state plus residuals");
+    let exported = open_git(&destination).expect("open fresh export");
+
+    let exported_commit = find_reference(&exported, "refs/heads/main")
+        .expect("exported main")
+        .target()
+        .try_id()
+        .expect("exported main direct oid")
+        .to_owned();
+    let exported_tag = find_reference(&exported, "refs/tags/v1.0")
+        .expect("exported tag")
+        .target()
+        .try_id()
+        .expect("exported tag direct oid")
+        .to_owned();
+    assert_eq!(exported_commit, commit_oid);
+    assert_eq!(exported_tag, tag_oid);
+    for oid in [commit_oid, tree_oid, blob_oid, tag_oid] {
+        let source = source_repo.read_object(&oid).expect("read source object");
+        let round_trip = exported.read_object(&oid).expect("read exported object");
+        assert_eq!(round_trip.object_type, source.object_type);
+        assert_eq!(round_trip.body, source.body, "object {oid} changed bytes");
     }
 }
 
