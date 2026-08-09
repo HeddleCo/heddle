@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Semantic-analysis CLI commands (`heddle semantic ...`).
 //!
-//! Thin shim over [`semantic`] — the analysis lives in the core
-//! semantic crate so the same primitives are available to hosted calls and the
-//! web UI without a CLI round-trip.
+//! Thin dispatch over the parser-backed analysis and parse-free stored-index
+//! query surfaces.
 
 use std::collections::BTreeMap;
 
@@ -23,6 +22,7 @@ use crate::{
 /// Top-level dispatch for `heddle semantic <subcommand>`.
 pub fn cmd_semantic(cli: &Cli, command: SemanticCommands) -> Result<()> {
     match command {
+        SemanticCommands::Diff { a, b } => super::semantic_diff_cmd::cmd_semantic_diff(cli, a, b),
         SemanticCommands::Hot {
             from,
             limit,

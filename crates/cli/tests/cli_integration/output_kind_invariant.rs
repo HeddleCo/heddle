@@ -109,6 +109,7 @@ const SWEPT: &[&str] = &[
     "review next",
     "review health",
     "resolve",
+    "semantic diff",
     // heddle#662 — additive discriminator paths for state inspection,
     // rebase progress JSONL, and conflict-resolution success.
     "show",
@@ -1107,6 +1108,19 @@ fn runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
             (
                 t,
                 sv(&["query", "--attribution", "src/lib.rs", "--context"]),
+            )
+        }
+        "semantic_diff" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("lib.rs"), "fn value() -> i32 { 1 }\n").unwrap();
+            heddle(&["capture", "-m", "base"], Some(t.path())).expect("capture base");
+            let first = head_state_id(t.path());
+            std::fs::write(t.path().join("lib.rs"), "fn value() -> i32 { 2 }\n").unwrap();
+            heddle(&["capture", "-m", "change"], Some(t.path())).expect("capture change");
+            let second = head_state_id(t.path());
+            (
+                t,
+                vec!["semantic".to_string(), "diff".to_string(), first, second],
             )
         }
         "redact_trust_add" => (

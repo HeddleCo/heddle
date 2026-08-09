@@ -48,7 +48,7 @@ use semantic::{
 use tracing::warn;
 
 use crate::{
-    HeddleError, Repository, Result, StateAttachmentKind, SymbolDelta,
+    HeddleError, Repository, Result, StateAttachmentKind,
     repository_semantic_query::MAX_SEMANTIC_TREE_DEPTH,
 };
 
@@ -642,28 +642,6 @@ impl Repository {
         let da = self.digest_at_path(&root_a, path_prefix)?;
         let db = self.digest_at_path(&root_b, path_prefix)?;
         Ok(da != db)
-    }
-
-    /// Symbol-level delta between two states, via a merkle walk that descends
-    /// only into differing digests (identical subtrees are pruned without
-    /// loading their file nodes).
-    pub fn semantic_diff_symbols(&self, a: &StateId, b: &StateId) -> Result<Vec<SymbolDelta>> {
-        self.recover_on_broken(&[a, b], |me| me.semantic_diff_symbols_inner(a, b))
-    }
-
-    fn semantic_diff_symbols_inner(&self, a: &StateId, b: &StateId) -> Result<Vec<SymbolDelta>> {
-        let (root_a, root_b) = match (self.semantic_index(a)?, self.semantic_index(b)?) {
-            (Some(ra), Some(rb)) => (ra, rb),
-            _ => return Ok(Vec::new()),
-        };
-        if root_a.semantic_digest == root_b.semantic_digest {
-            return Ok(Vec::new());
-        }
-        let node_a = self.load_semantic_tree(&root_a.tree)?;
-        let node_b = self.load_semantic_tree(&root_b.tree)?;
-        let mut out = Vec::new();
-        self.diff_tree_nodes(&node_a, &node_b, "", 0, &mut out)?;
-        Ok(out)
     }
 
     /// Lazy backfill: compute-and-attach a semantic index for every state that
