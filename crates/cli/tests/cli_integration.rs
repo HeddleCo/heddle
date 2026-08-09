@@ -506,6 +506,7 @@ fn heddle_output(args: &[&str], cwd: Option<&std::path::Path>) -> Result<Output,
     seed_default_test_user_config(&config_path, &dir)?;
     cmd.env("HEDDLE_CONFIG", config_path);
     cmd.env("HOME", default_test_home_path(&dir));
+    cmd.env("HEDDLE_FSMONITOR", "off");
     cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
     cmd.env("GIT_CONFIG_SYSTEM", "/dev/null");
     cmd.env("GIT_CONFIG_NOSYSTEM", "1");
@@ -560,6 +561,7 @@ fn heddle_output_with_env_removed(
     seed_default_test_user_config(&config_path, &dir)?;
     cmd.env("HEDDLE_CONFIG", config_path);
     cmd.env("HOME", default_test_home_path(&dir));
+    cmd.env("HEDDLE_FSMONITOR", "off");
     cmd.env_remove("NO_COLOR");
     for key in remove_envs {
         cmd.env_remove(key);
@@ -583,6 +585,7 @@ fn heddle_output_with_stdin(
     seed_default_test_user_config(&config_path, cwd)?;
     cmd.env("HEDDLE_CONFIG", config_path);
     cmd.env("HOME", default_test_home_path(cwd));
+    cmd.env("HEDDLE_FSMONITOR", "off");
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());

@@ -22,6 +22,7 @@ pub fn heddle_output(
         .args(args)
         .env("HEDDLE_PRINCIPAL_NAME", TEST_PRINCIPAL_NAME)
         .env("HEDDLE_PRINCIPAL_EMAIL", TEST_PRINCIPAL_EMAIL)
+        .env("HEDDLE_FSMONITOR", "off")
         .envs(envs.iter().copied());
     if let Some(cwd) = cwd {
         command.current_dir(cwd);

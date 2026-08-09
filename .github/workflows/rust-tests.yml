@@ -367,7 +367,7 @@ jobs:
             ulimit -n 65536
           fi
           echo "Open-file limit: $(ulimit -n)"
-          cargo test --locked "${package_args[@]}"
+          cargo test --locked "${package_args[@]}" -- --test-threads=4
           echo "::endgroup::"
 
       - name: No affected Rust packages
