@@ -11,28 +11,37 @@ name: Release pipeline check
 #     as empty content / silent erase / silent no-op
 #
 # These pipelines and patterns run only on their respective triggers
-# (or get hit only when grep finds something), so this job is what
-# gives normal PRs a signal that all three contracts are intact.
+# (or get hit only when grep finds something), so this workflow gives
+# the full-ci / landing suite a signal that all three contracts are intact.
 # Parallel jobs so a regression in one doesn't silence the others.
 
 on:
   pull_request:
     branches:
       - main
+    types: [opened, reopened, synchronize, labeled, unlabeled]
   push:
     branches:
       - main
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
   group: release-pipeline-check-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded PR runs should stop; merge groups are independent queue
+  # candidates and must never cancel one another.
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
   release-contract:
     name: release.yml contract
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
@@ -42,6 +51,9 @@ jobs:
 
   publish-contract:
     name: publish-crates.yml contract
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
@@ -51,6 +63,9 @@ jobs:
 
   rust-ast-invariants:
     name: Rust AST invariant checks
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 15
     steps:
@@ -95,6 +110,9 @@ jobs:
 
   authored-states-signed:
     name: authored states sign via chokepoint (heddle#482)
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:

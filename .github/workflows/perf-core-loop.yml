@@ -3,24 +3,18 @@ name: Core Loop Performance
 on:
   pull_request:
     branches: [main]
-    paths:
-      - Cargo.lock
-      - Cargo.toml
-      - crates/cli/**
-      - crates/objects/**
-      - crates/oplog/**
-      - crates/perf-contract/**
-      - crates/refs/**
-      - crates/repo/**
-      - docs/perf/**
-      - .github/workflows/perf-core-loop.yml
+    types: [opened, reopened, synchronize, labeled, unlabeled]
   push:
     branches: [main]
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 concurrency:
   group: perf-core-loop-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded PR runs should stop; merge groups are independent queue
+  # candidates and must never cancel one another.
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 defaults:
   run:
@@ -36,6 +30,9 @@ env:
 jobs:
   release-contract:
     name: Release contract (10k/100k)
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     steps:

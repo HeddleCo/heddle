@@ -2,14 +2,27 @@ name: API capability sync
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
   push:
     branches: [main]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: api-capability-sync-${{ github.workflow }}-${{ github.ref }}
+  # Superseded PR runs should stop; merge groups are independent queue
+  # candidates and must never cancel one another.
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+
 jobs:
   verify:
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
