@@ -289,4 +289,4 @@ replacement = "suite=perf / manually dispatch benchmarks.yml"
 [[exclusions]]
 id = "coverage-llvm-cov"
 reason = "Weekly instrumented job; not part of hot baseline"
-replacement = "scheduled rust-tests coverage job"
+replacement = "scheduled .github/workflows/coverage.yml job"
