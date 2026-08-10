@@ -3,7 +3,7 @@ use std::collections::{HashSet, VecDeque};
 
 use objects::{
     object::{
-        ContentHash, SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode, State,
+        BindingDelta, ContentHash, SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode, State,
         StateAttachment, StateAttachmentBody, StateAttachmentId, StateAttachmentKind, StateId,
         TreeEntryTarget,
     },
@@ -579,6 +579,9 @@ fn walk_semantic_index_closure(
                     // Emit the leaf (file node) blob; it has no children.
                     emit_semantic_blob(store, hash, excluded, seen, visit)?;
                 }
+                SemanticChild::BindingDelta(hash) => {
+                    walk_binding_delta_closure(store, hash, excluded, seen, visit)?;
+                }
             }
         }
     }
@@ -590,6 +593,7 @@ fn walk_semantic_index_closure(
 enum SemanticChild {
     Interior(ContentHash),
     Leaf(ContentHash),
+    BindingDelta(ContentHash),
 }
 
 /// Decode a semantic-closure node — the root (which points at a tree node) or a
@@ -602,7 +606,11 @@ fn decode_semantic_container(
     // tree-node shape. Content-addressed hashes make this unambiguous in
     // practice; a blob that decodes as neither is corrupt.
     if let Ok(root) = SemanticIndexRoot::decode(blob.content()) {
-        return Ok(vec![SemanticChild::Interior(root.tree)]);
+        let mut children = vec![SemanticChild::Interior(root.tree)];
+        if let Some(binding_delta) = root.binding_delta {
+            children.push(SemanticChild::BindingDelta(binding_delta));
+        }
+        return Ok(children);
     }
     let node = SemanticTreeNode::decode(blob.content())
         .map_err(|err| ProtocolError::Serialization(format!("semantic node {node_hash}: {err}")))?;
@@ -616,6 +624,30 @@ fn decode_semantic_container(
             SemanticEntryKind::Opaque => None,
         })
         .collect())
+}
+
+fn walk_binding_delta_closure(
+    store: &impl ObjectStore,
+    head: ContentHash,
+    excluded: &HashSet<ContentHash>,
+    seen: &mut HashSet<ContentHash>,
+    visit: &mut impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
+) -> Result<()> {
+    let mut cursor = Some(head);
+    while let Some(hash) = cursor {
+        if !emit_semantic_blob(store, hash, excluded, seen, visit)? {
+            break;
+        }
+        let blob = store
+            .get_blob(&hash)?
+            .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
+        cursor = BindingDelta::decode(blob.content())
+            .map_err(|err| {
+                ProtocolError::Serialization(format!("semantic binding delta {hash}: {err}"))
+            })?
+            .parent;
+    }
+    Ok(())
 }
 
 /// Emit a semantic node blob as state metadata. Returns `true` when the blob
@@ -673,8 +705,32 @@ fn collect_semantic_hashes(
                 SemanticChild::Leaf(hash) => {
                     excluded.insert(hash);
                 }
+                SemanticChild::BindingDelta(hash) => {
+                    collect_binding_delta_hashes(store, hash, excluded)?;
+                }
             }
         }
+    }
+    Ok(())
+}
+
+fn collect_binding_delta_hashes(
+    store: &impl ObjectStore,
+    head: ContentHash,
+    excluded: &mut HashSet<ContentHash>,
+) -> Result<()> {
+    let mut cursor = Some(head);
+    while let Some(hash) = cursor {
+        if !excluded.insert(hash) {
+            break;
+        }
+        let Some(blob) = store.get_blob(&hash)? else {
+            break;
+        };
+        cursor = match BindingDelta::decode(blob.content()) {
+            Ok(delta) => delta.parent,
+            Err(_) => break,
+        };
     }
     Ok(())
 }
@@ -1905,7 +1961,7 @@ mod tests {
     fn semantic_index_attachment_excluded_from_push_pack_but_kept_for_pull() {
         use std::collections::BTreeMap;
 
-        use objects::object::{SemanticIndexRoot, SemanticTreeNode};
+        use objects::object::{BindingDelta, SemanticIndexRoot, SemanticTreeNode};
 
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
@@ -1918,7 +1974,18 @@ mod tests {
             .store()
             .put_blob(&Blob::new(node.encode().unwrap()))
             .expect("put semantic tree node");
-        let root = SemanticIndexRoot::new(1, BTreeMap::new(), node_hash, node_digest);
+        let base_delta = BindingDelta::new(None, Vec::new());
+        let base_delta_hash = repo
+            .store()
+            .put_blob(&Blob::new(base_delta.encode().unwrap()))
+            .expect("put base binding delta");
+        let delta = BindingDelta::new(Some(base_delta_hash), Vec::new());
+        let delta_hash = repo
+            .store()
+            .put_blob(&Blob::new(delta.encode().unwrap()))
+            .expect("put binding delta");
+        let root = SemanticIndexRoot::new(1, BTreeMap::new(), node_hash, node_digest)
+            .with_binding_delta(delta_hash, 1);
         let root_hash = repo
             .store()
             .put_blob(&Blob::new(root.encode().unwrap()))
@@ -1965,7 +2032,7 @@ mod tests {
         // The semantic-index CONTENT blobs are ordinary content-addressed
         // objects and still ride the pack in both directions — only the
         // attachment record is sidecar'd on push.
-        for content in [root_hash, node_hash] {
+        for content in [root_hash, node_hash, delta_hash, base_delta_hash] {
             let obj = plan
                 .iter()
                 .find(|p| p.id == ObjectId::Hash(content))

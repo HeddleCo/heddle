@@ -52,8 +52,14 @@ pub use repository_semantic_index::{ParentIndex, SemanticIndexBuilder};
 mod repository_semantic_query;
 pub use repository_semantic_query::SymbolDelta;
 #[cfg(feature = "tree-sitter-symbols")]
+mod repository_symbol_graph;
+mod repository_symbol_graph_query;
+pub use repository_symbol_graph_query::ResolvedSemanticEdgeSet;
+#[cfg(feature = "tree-sitter-symbols")]
 mod repository_signals;
 mod repository_state_visibility;
+#[cfg(all(test, feature = "tree-sitter-symbols"))]
+mod repository_symbol_graph_tests;
 mod revision_address;
 pub use repository_state_visibility::{
     DefaultVisibilityBinding, PutVisibilityOutcome, VisibilityCommitKind, VisibilityCommitOutcome,
