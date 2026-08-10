@@ -2,7 +2,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, BufWriter, Write},
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -49,7 +49,6 @@ use self::probe::{
 };
 use crate::{
     cli::{
-        Cli,
         commands::{
             snapshot::{
                 SnapshotAgentOverrides, create_snapshot, summarize_confidence,
@@ -142,36 +141,6 @@ fn detected_harness_argv_impl() -> Option<Vec<String>> {
 #[cfg(not(target_os = "linux"))]
 fn detected_harness_argv_impl() -> Option<Vec<String>> {
     None
-}
-
-pub fn cmd_harness_bridge(cli: &Cli) -> Result<()> {
-    let repo = cli.open_repo()?;
-    let mut runtime = init_harness_runtime(&repo)?;
-
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let reader = BufReader::new(stdin.lock());
-    let mut writer = BufWriter::new(stdout.lock());
-
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let response = match serde_json::from_str::<BridgeRequest>(&line) {
-            Ok(request) => runtime.handle_request(request),
-            Err(err) => BridgeResponse::error(
-                None,
-                "invalid_request",
-                format!("failed to parse request: {err}"),
-            ),
-        };
-        serde_json::to_writer(&mut writer, &response)?;
-        writer.write_all(b"\n")?;
-        writer.flush()?;
-    }
-
-    Ok(())
 }
 
 pub(crate) fn relay_harness_event(
@@ -907,45 +876,6 @@ impl HarnessBridgeRuntime {
         }
     }
 
-    fn handle_request(&mut self, request: BridgeRequest) -> BridgeResponse {
-        let response = match request.method.as_str() {
-            "open_session" => self
-                .decode_params::<OpenSessionParams>(request.params)
-                .and_then(|params| self.open_session(params))
-                .and_then(to_json_value),
-            "update_progress" => self
-                .decode_params::<UpdateProgressParams>(request.params)
-                .and_then(|params| self.update_progress(params))
-                .and_then(to_json_value),
-            "record_usage" => self
-                .decode_params::<RecordUsageParams>(request.params)
-                .and_then(|params| self.record_usage(params))
-                .and_then(to_json_value),
-            "record_touched_paths" => self
-                .decode_params::<RecordTouchedPathsParams>(request.params)
-                .and_then(|params| self.record_touched_paths(params))
-                .and_then(to_json_value),
-            "close_session" => self
-                .decode_params::<CloseSessionParams>(request.params)
-                .and_then(|params| self.close_session(params))
-                .and_then(to_json_value),
-            "flush_reports" => self
-                .decode_params::<FlushReportsParams>(request.params)
-                .and_then(|params| self.flush_reports(params))
-                .and_then(to_json_value),
-            other => Err(anyhow!("unknown method '{other}'")),
-        };
-
-        match response {
-            Ok(result) => BridgeResponse::ok(request.id, result),
-            Err(err) => BridgeResponse::error(request.id, "bridge_error", err.to_string()),
-        }
-    }
-
-    fn decode_params<T: for<'de> Deserialize<'de>>(&self, value: Value) -> Result<T> {
-        serde_json::from_value(value).map_err(|err| anyhow!(err))
-    }
-
     fn open_session(&mut self, params: OpenSessionParams) -> Result<OpenSessionResult> {
         if self.user_config.harness.mode == HarnessMode::Off {
             return Err(anyhow!("harness integration is disabled in user config"));
@@ -1465,6 +1395,9 @@ impl HarnessBridgeRuntime {
         self.persist_report(report)
     }
 
+    // Exercised by unit tests; formerly reachable via the removed hidden
+    // JSON-lines harness bridge entrypoint (phase 1 free deletion).
+    #[cfg_attr(not(test), allow(dead_code))]
     fn record_touched_paths(
         &mut self,
         params: RecordTouchedPathsParams,
@@ -1526,6 +1459,9 @@ impl HarnessBridgeRuntime {
         })
     }
 
+    // Exercised by unit tests; formerly reachable via the removed hidden
+    // JSON-lines harness bridge entrypoint (phase 1 free deletion).
+    #[cfg_attr(not(test), allow(dead_code))]
     fn flush_reports(&mut self, params: FlushReportsParams) -> Result<FlushReportsResult> {
         let mut flushed = 0usize;
         let session_ids = match params.heddle_session_id {
@@ -2611,10 +2547,6 @@ fn inherited_harness_hint(key: &str) -> bool {
         || key.starts_with("OPENCODE_")
 }
 
-fn to_json_value<T: Serialize>(value: T) -> Result<Value> {
-    serde_json::to_value(value).map_err(|err| anyhow!(err))
-}
-
 fn normalize_paths<I>(paths: I) -> Vec<String>
 where
     I: IntoIterator<Item = String>,
@@ -2914,6 +2846,7 @@ impl SessionReportStore {
         Ok(())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn list_pending(&self) -> Result<Vec<String>> {
         if !self.dir.exists() {
             return Ok(Vec::new());
@@ -2934,55 +2867,6 @@ impl SessionReportStore {
         ids.sort();
         Ok(ids)
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct BridgeRequest {
-    #[serde(default)]
-    id: Option<String>,
-    method: String,
-    #[serde(default)]
-    params: Value,
-}
-
-#[derive(Debug, Serialize)]
-struct BridgeResponse {
-    #[serde(default)]
-    id: Option<String>,
-    ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<BridgeError>,
-}
-
-impl BridgeResponse {
-    fn ok(id: Option<String>, result: Value) -> Self {
-        Self {
-            id,
-            ok: true,
-            result: Some(result),
-            error: None,
-        }
-    }
-
-    fn error(id: Option<String>, code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            id,
-            ok: false,
-            result: None,
-            error: Some(BridgeError {
-                code: code.into(),
-                message: message.into(),
-            }),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct BridgeError {
-    code: String,
-    message: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -3074,6 +2958,7 @@ struct RecordUsageParams {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[cfg_attr(not(test), allow(dead_code))]
 struct RecordTouchedPathsParams {
     heddle_session_id: String,
     #[serde(default)]
@@ -3094,6 +2979,7 @@ struct CloseSessionParams {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[cfg_attr(not(test), allow(dead_code))]
 struct FlushReportsParams {
     #[serde(default)]
     heddle_session_id: Option<String>,
@@ -3129,6 +3015,7 @@ struct CloseSessionResult {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(not(test), allow(dead_code))]
 struct FlushReportsResult {
     flushed: usize,
 }
