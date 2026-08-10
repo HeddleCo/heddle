@@ -1,8 +1,19 @@
-# Phase 4 (Wire Protocol) Summary
+# Historical Phase 4 Wire Protocol Summary
 
-This phase adds a minimal, local-testable wire protocol and remote operations (push/pull) for Heddle.
+> **Status: historical design record.** This page describes the retired
+> hand-written TCP/MessagePack request-response surface. It is not the current
+> public hosted protocol contract.
 
-## Status: Complete
+The current hosted contract is owned by `HeddleCo/api` and uses generated
+protobuf messages (Prost in Rust). The `heddle-wire` crate retains native object
+transfer, graph-planning, pack, and failure-projection primitives, but legacy
+envelopes such as `ListRefs`, `RefsList`, `RefFilter`, `WantObjects`, and
+`UpdateRef` have been removed. Any remaining Weft imports of those names must be
+migrated in the coordinated clean cut before the incompatible Heddle crate is
+published.
+
+The sections below are retained only to explain the original Phase 4 design and
+must not be used as implementation or integration guidance.
 
 The wire protocol is fully implemented and tested. All core VCS commands are operational.
 

@@ -2,14 +2,10 @@
 use objects::object::StateId;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListRefs {
-    #[serde(default)]
-    pub repo_path: Option<String>,
-    #[serde(default)]
-    pub filter: Option<RefFilter>,
-}
-
+/// Filter applied when listing repository refs.
+///
+/// Retained as part of the published `heddle-wire` 0.11 surface while Weft
+/// migrates to the generated hosted API types.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefFilter {
     #[serde(default)]
@@ -72,12 +68,14 @@ impl RefFilter {
     }
 }
 
+/// Repository HEAD shape returned alongside a ref listing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HeadInfo {
     Attached { thread: String },
     Detached { state: StateId },
 }
 
+/// Published repository-ref listing response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefsList {
     pub head: HeadInfo,
@@ -90,16 +88,6 @@ pub struct RefEntry {
     pub name: String,
     pub state_id: StateId,
     pub is_thread: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateRef {
-    pub name: String,
-    #[serde(default)]
-    pub is_thread: bool,
-    pub old_value: Option<StateId>,
-    pub new_value: StateId,
-    pub force: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
