@@ -36,21 +36,48 @@ v1alpha1 RPC or a separately approved product replacement. The migration
 manifest in `HeddleCo/api` is a candidate inventory, not an authoritative
 cutover approval while the discrepancies below remain open.
 
+### Local review and native wire preparation
+
+Heddle's native review commands use the Heddle-owned
+`daemon::local_review::LocalStateReview` module directly in-process. Its domain
+types and repository-local errors are not generated API messages, and its
+methods are not evidence that Weft serves the similarly named hosted RPCs.
+Local idempotent signing responses use JSON under the explicit
+`local.state_review.sign/json-v1` replay generation. Prost remains the Rust
+message codec at the hosted API boundary; it is not a required persistence
+codec for this private local cache.
+
+Heddle's capability declaration therefore marks the CLI mappings for
+`GetReviewPayload`, `ListSignatures`, and `SignState` intentionally unsupported:
+the local commands provide Heddle behavior, not hosted RPC implementations.
+The canonical `HeddleCo/api` capability snapshot must adopt the same status and
+Heddle must pin that reviewed revision before capability attestation is green.
+API PR 93 carries that three-row correction at exact revision `8649aaec`;
+Heddle attests that immutable companion revision while the PR awaits merge.
+
+The Heddle-side cleanup also removes obsolete hand-written `heddle-wire` types,
+including ref-list types that still have known Weft consumers. Those deletions
+are preparation for a coordinated clean cut, not evidence that the consumer
+migration has landed. Heddle must not publish the incompatible crate surface
+until the companion Weft change removes those imports and the matched versions
+pass cross-repository verification. No compatibility aliases or dual-codec
+adapter will be retained.
+
 ## Current implementation status
 
 Status was verified on 2026-07-15 against API `origin/main` at `726958dd`,
 Weft `origin/main` at `939f8b40`, Tapestry PR 164's reviewed head at
 `66fb3bd0` merged into `feat/app-site-overhaul` as `51c2c3e5`, and Heddle
 `origin/main` at `48e5c20d`.
-The API capability provenance below uses merged revision `726958dd`. Heddle's
+The API capability provenance below uses companion revision `8649aaec`. Heddle's
 Rust dependencies deliberately remain pinned to contract revision `e3b3e6d0`:
 the later API commits change package/release metadata, capability declarations,
 and contract tests, but do not change `proto/` or `src/` contract code.
 
 | Component | Current state | Cutover consequence |
 |---|---|---|
-| API | Revision `e3b3e6d0` preserves the four handle operations on `IdentityService`, reserves legacy subject tag/name 1 from `HandlePrincipal`, and retains public fields on tags 2–8. Revision `726958dd` is the merged capability snapshot used by this branch. Other rows below and signing-identity semantics remain unresolved. | The corrected handle contract is exact-pinnable, but the complete cutover contract is not ready. |
-| Heddle | This draft branch consumes API contract revision `e3b3e6d0`, attests its capability declaration against `726958dd`, has merged Heddle `main` through `48e5c20d`, and no longer owns the legacy generated contract. | Heddle-local compilation is necessary but does not establish hosted interoperability. |
+| API | Revision `e3b3e6d0` preserves the four handle operations on `IdentityService`, reserves legacy subject tag/name 1 from `HandlePrincipal`, and retains public fields on tags 2–8. API PR 93 revision `8649aaec` is the exact capability snapshot used by this branch; it marks the three repository-local StateReview CLI mappings intentionally unsupported and awaits merge. Other rows below and signing-identity semantics remain unresolved. | The corrected handle and capability contracts are exact-pinnable, but the complete cutover contract is not ready. |
+| Heddle | This draft branch consumes API contract revision `e3b3e6d0`, attests its capability declaration against companion revision `8649aaec`, has merged current Heddle `main`, and no longer owns the legacy generated contract. | Heddle-local compilation is necessary but does not establish hosted interoperability. |
 | Weft | PR `HeddleCo/weft#592` merged as `939f8b40`. Production now registers the shared `IdentityService` alongside legacy services (`crates/weft-server/src/serve.rs:84-100,163-170`) and serves its four handle methods through the shared escrow/resolution adapter (`identity.rs:171-401`). Every other shared identity method is still explicitly `UNIMPLEMENTED` (`identity.rs:101-169`), and the other registered hosted services remain legacy. | The handle producer blocker is resolved; the complete v1alpha1 producer cutover is not. |
 | Tapestry | PR `HeddleCo/tapestry#164` exact-pins `@heddleco/api@0.1.1` and ports the four handle flows. Its exact reviewed head `66fb3bd0` merged into `feat/app-site-overhaul` as `51c2c3e5`. The handle-only change does not remove Tapestry's legacy `@heddleco/grpc` dependency or port its non-handle callers. | The handle web adapter blocker is resolved on the feature branch; the non-handle consumer cutover remains open. |
 | Publication | `@heddleco/api@0.1.1` is published. The Rust `heddle-api@0.1.1` crate is not; `HeddleCo/api#10` is reopened and blocked because the API repository lacks `CARGO_REGISTRY_TOKEN`. Heddle therefore retains the exact git pin in `crates/client/Cargo.toml`, `crates/cli/Cargo.toml`, and `crates/daemon/Cargo.toml`, and explicitly excludes those three packages at the Cargo, workflow, and release-plz publication boundaries. | Independently publishable Heddle crates can continue releasing, but the Rust crate must publish before Heddle can replace the temporary git pin and re-enable its three dependent packages. |
@@ -102,6 +129,12 @@ until every box below is backed by its owning PR and test evidence.
 
 ### Prepare every producer and consumer
 
+- [x] Heddle local review uses an in-process, Heddle-owned interface and an
+  explicit local replay generation rather than generated hosted message types.
+- [ ] `HeddleCo/api` marks the three local-review CLI mappings intentionally
+  unsupported, then Heddle pins and attests the reviewed capability snapshot.
+- [ ] The companion Weft change removes every consumer of the deleted
+  hand-written `heddle-wire` types and verifies the matched Heddle revision.
 - [x] Weft serves the four corrected shared handle methods and includes them in
   registration, reflection, health, policy, capability, and handler tests.
 - [ ] Weft serves the remaining shipped v1alpha1 surface and moves request
@@ -112,7 +145,7 @@ until every box below is backed by its owning PR and test evidence.
   review/event/feed routes, OAuth/provider-token flows, Polar reconciliation,
   and live handle flows.
 - [x] Heddle re-pins API revision `e3b3e6d0` and reruns its hosted adapter,
-  attests capability snapshot `726958dd`, and reruns its hosted adapter,
+  attests capability snapshot `8649aaec`, and reruns its hosted adapter,
   signing, session, CLI, daemon, schema, and supply-chain gates on this Draft.
 - [ ] Cross-product tests prove the exact Heddle and Tapestry clients can call
   the exact Weft build planned for the window.
@@ -151,6 +184,9 @@ Rust 0.1.1 crate remains blocked as described above.
   repository.
 - Heddle owns its local domain model and adapts it to generated API types only
   at hosted boundaries.
+- Repository-local review replay uses an explicit private encoding generation;
+  changing that generation is a clean cut that requires a new operation ID,
+  not an attempt to decode historical Prost bytes as JSON.
 - Local behavior does not become public protobuf merely because a daemon,
   example, test, or dormant handler once used it.
 - Live cross-product behavior cannot be removed without a complete caller and

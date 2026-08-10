@@ -71,6 +71,7 @@ delivery (CLI / future daemon / tests)
 | CLI binary `heddle` | `crates/cli` — parse, env/TTY, auth boundary, dispatch, render, exit codes |
 | Library facade | `crates/core` (`heddle-core`) — `ExecutionContext`, status/verify/diff/merge/save/query/fsck/thread_shaping |
 | Domain | `repo`, `objects`, `refs`, `oplog`, `merge`, `semantic`, `ingest`, `git-projection`, `format`, `crypto`, … |
+| Local review | `crates/daemon::local_review` — in-process Heddle-owned types; private versioned JSON replay entries, not a hosted RPC implementation |
 | Protocol | native `wire`, hosted `client` adapters, and private daemon IPC; the shared protobuf source lives only in `HeddleCo/api` |
 | Persistence | `.heddle/` object store, refs, oplog, config; Git Overlay uses real `.git` via Sley |
 | Extensions | Harness integrations, mount (FUSE/ProjFS/FSKit), optional semantic languages |

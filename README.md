@@ -261,10 +261,13 @@ Architecture and runtime details are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE
 
 ```bash
 cargo build
-cargo test
+cargo test --workspace
 cargo clippy -- -D warnings
 cargo fmt --check
 ```
+
+`cargo test --workspace` runs every non-ignored, default-feature Rust test in the workspace.
+Feature-gated and external-service suites are listed in [`.agents/testing.md`](.agents/testing.md).
 
 Contributor rules and documentation truth guidance are in [AGENTS.md](AGENTS.md).
 

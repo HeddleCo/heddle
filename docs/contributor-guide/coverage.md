@@ -4,13 +4,13 @@ Heddle enforces a **per-crate line-coverage floor**. The gate is
 per-crate (not workspace-global) so a low-coverage crate can't be
 masked by high-coverage neighbours. This page is the canonical source
 for the policy and the per-crate numbers; `codecov.yml`,
-`.github/workflows/rust-tests.yml`, and the `CONTRIBUTING.md` summary
+`.github/workflows/coverage.yml`, and the `CONTRIBUTING.md` summary
 all point here.
 
 ## How the gate fails CI
 
 The scheduled/manual `Coverage` job in
-[`.github/workflows/rust-tests.yml`](../../.github/workflows/rust-tests.yml)
+[`.github/workflows/coverage.yml`](../../.github/workflows/coverage.yml)
 runs `cargo llvm-cov` over the OSS feature set
 (`git-overlay,native,semantic,zstd`) to produce `lcov.info`, then runs:
 
@@ -99,7 +99,7 @@ The floors are deliberately conservative; raising one is encouraged.
 2. In the **same PR**, raise the number in all three places — they must
    agree or the in-CI gate and the Codecov status will diverge:
    - the `--gate <crate>=<pct>` flag in
-     [`.github/workflows/rust-tests.yml`](../../.github/workflows/rust-tests.yml),
+     [`.github/workflows/coverage.yml`](../../.github/workflows/coverage.yml),
    - the `coverage.status.project.<crate>.target` in
      [`codecov.yml`](../../codecov.yml),
    - the **Floor** column in the table above.

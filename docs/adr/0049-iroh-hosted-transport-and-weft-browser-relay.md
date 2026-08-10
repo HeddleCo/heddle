@@ -9,7 +9,8 @@ Heddle, Weft, and Tapestry will use Iroh as the transport for the governed
 network stack through a coordinated hard cutover. The protobuf contract remains
 owned by `HeddleCo/api` and Prost remains its Rust message codec; changing the
 transport does not change Heddle's durable encodings or require a simultaneous
-postcard migration.
+postcard migration. This hosted-contract choice does not require Prost for
+Heddle-owned in-process modules or their private repository-local replay caches.
 
 The hosted call module exposes unary, server-streaming, and bidirectional
 streaming operations behind one interface. Its Iroh implementation uses one

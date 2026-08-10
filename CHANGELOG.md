@@ -37,6 +37,51 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   integration target and `land` reaches the real merge verdict instead of
   diagnosing the pulled ref as Git damage.
 
+### Changed
+
+- **Published wire compatibility is preserved.** Obsolete internal wire types
+  were removed, while `HeadInfo`, `RefsList`, and `RefFilter` remain available
+  in `heddle-wire` 0.11 for the live Weft refs service.
+
+- **Oplog recovery preserves pruned suffixes.** Explicit segmented-oplog
+  recovery quarantines every container removed from the repaired generation,
+  keeping intact committed suffix bytes recoverable instead of unlinking them.
+
+- **Git-overlay corruption stays visible.** A mapped blob or tree missing from
+  Git now refreshes the cached object database once, then reports the broken
+  identity mapping instead of silently degrading to an object-store miss.
+
+- **Open-time Git HEAD reconciliation is recorded atomically.** Attached and
+  detached Git-overlay HEAD changes now flow through the oplog-backed ref-write
+  chokepoint instead of publishing a bare ref update during repository open.
+
+- **Performance paths avoid cumulative work.** The oplog now publishes bounded
+  immutable segments behind an atomic manifest, Git-overlay objects are read
+  from their authoritative source and cached directly, history queries reuse a
+  commit-graph session, and rename matching shares deterministic candidate
+  assignment with precomputed semantic inputs.
+
+- **Legacy local and transport surfaces removed.** Local review now runs
+  in-process with Heddle-owned domain types and a versioned local JSON replay
+  namespace, obsolete protobuf-shaped daemon and native wire messages are gone,
+  Git pull/sync uses the authoritative Sley path, and duplicate semantic walkers
+  and symbol taxonomies have been consolidated.
+
+- **Tests are shared, deterministic, and stricter.** CLI fixtures and process
+  setup are centralized, mirror-only and either-outcome legacy tests were
+  removed, timing assertions were replaced with branch/state proofs, and deep
+  history, recovery, compaction, cache, and rename regressions were added.
+
+- **CI policy is consolidated and risk-routed.** API capability, release,
+  facade, AST, dependency-count, and cargo-deny checks now share the required
+  Rust static-contract gate; weekly coverage is isolated from PR runs, and the
+  full telemetry lane runs only for telemetry-relevant changes. Redundant
+  cargo-audit and non-blocking unwrap-inventory workflows are retired.
+
+- **Deferred apt publication no longer exposes its signing key.** Release CI
+  stops building and signing an unused apt pool until the publisher repository
+  and coordinated release path exist.
+
 ## 0.11.0 - 2026-07-31
 
 ### Breaking
