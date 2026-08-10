@@ -84,41 +84,116 @@ pub fn compute_similarity_with_language(
     }
 }
 
-fn compute_ast_similarity(a: &str, b: &str, language: Language) -> Option<f64> {
-    let parsed_a = ParsedFile::parse(a, language)?;
-    let parsed_b = ParsedFile::parse(b, language)?;
+pub(super) struct PreparedSimilarity {
+    method: SimilarityMethod,
+    lines: Option<HashSet<String>>,
+    tokens: HashSet<String>,
+    ast_counts: HashMap<Language, Option<HashMap<String, usize>>>,
+}
 
-    let mut counts_a = HashMap::new();
-    let mut counts_b = HashMap::new();
-
-    collect_node_kinds(parsed_a.root_node(), &mut counts_a);
-    collect_node_kinds(parsed_b.root_node(), &mut counts_b);
-
-    if counts_a.is_empty() && counts_b.is_empty() {
-        return Some(1.0);
+impl PreparedSimilarity {
+    pub(super) fn new(
+        content: &str,
+        method: SimilarityMethod,
+        languages: impl IntoIterator<Item = Language>,
+    ) -> Self {
+        let tokens = content
+            .split_whitespace()
+            .map(String::from)
+            .collect::<HashSet<_>>();
+        let lines = (method == SimilarityMethod::Lines).then(|| {
+            content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(String::from)
+                .collect()
+        });
+        let ast_counts = if method == SimilarityMethod::Ast {
+            languages
+                .into_iter()
+                .map(|language| (language, ast_node_counts(content, language)))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        Self {
+            method,
+            lines,
+            tokens,
+            ast_counts,
+        }
     }
-    if counts_a.is_empty() || counts_b.is_empty() {
-        return Some(0.0);
+
+    pub(super) fn similarity(&self, other: &Self, language: Language) -> f64 {
+        debug_assert_eq!(self.method, other.method);
+        match self.method {
+            SimilarityMethod::Lines => {
+                let score = set_similarity(
+                    self.lines.as_ref().expect("lines prepared"),
+                    other.lines.as_ref().expect("lines prepared"),
+                );
+                if score == 0.0 {
+                    set_similarity(&self.tokens, &other.tokens)
+                } else {
+                    score
+                }
+            }
+            SimilarityMethod::Tokens => set_similarity(&self.tokens, &other.tokens),
+            SimilarityMethod::Ast => match (
+                self.ast_counts.get(&language).and_then(Option::as_ref),
+                other.ast_counts.get(&language).and_then(Option::as_ref),
+            ) {
+                (Some(left), Some(right)) => count_similarity(left, right),
+                _ => set_similarity(&self.tokens, &other.tokens),
+            },
+        }
     }
+}
 
-    let mut intersection = 0usize;
-    let mut union = 0usize;
-    let mut keys: HashSet<&str> = HashSet::new();
-    keys.extend(counts_a.keys().map(|k| k.as_str()));
-    keys.extend(counts_b.keys().map(|k| k.as_str()));
-
-    for key in keys {
-        let count_a = counts_a.get(key).copied().unwrap_or(0);
-        let count_b = counts_b.get(key).copied().unwrap_or(0);
-        intersection += count_a.min(count_b);
-        union += count_a.max(count_b);
+fn set_similarity(left: &HashSet<String>, right: &HashSet<String>) -> f64 {
+    if left.is_empty() && right.is_empty() {
+        return 1.0;
     }
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    left.intersection(right).count() as f64 / left.union(right).count() as f64
+}
 
+fn count_similarity(left: &HashMap<String, usize>, right: &HashMap<String, usize>) -> f64 {
+    if left.is_empty() && right.is_empty() {
+        return 1.0;
+    }
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    let keys = left.keys().chain(right.keys()).collect::<HashSet<_>>();
+    let (intersection, union) = keys.into_iter().fold((0usize, 0usize), |totals, key| {
+        let left_count = left.get(key).copied().unwrap_or(0);
+        let right_count = right.get(key).copied().unwrap_or(0);
+        (
+            totals.0 + left_count.min(right_count),
+            totals.1 + left_count.max(right_count),
+        )
+    });
     if union == 0 {
-        Some(0.0)
+        0.0
     } else {
-        Some(intersection as f64 / union as f64)
+        intersection as f64 / union as f64
     }
+}
+
+fn ast_node_counts(content: &str, language: Language) -> Option<HashMap<String, usize>> {
+    let parsed = ParsedFile::parse(content, language)?;
+    let mut counts = HashMap::new();
+    collect_node_kinds(parsed.root_node(), &mut counts);
+    Some(counts)
+}
+
+fn compute_ast_similarity(a: &str, b: &str, language: Language) -> Option<f64> {
+    let counts_a = ast_node_counts(a, language)?;
+    let counts_b = ast_node_counts(b, language)?;
+    Some(count_similarity(&counts_a, &counts_b))
 }
 
 fn collect_node_kinds(node: tree_sitter::Node<'_>, counts: &mut HashMap<String, usize>) {

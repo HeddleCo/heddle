@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! File rename detection.
 
-use super::analysis_similarity::{SimilarityMethod, compute_similarity_with_language};
+use merge::RenameCandidateIndex;
+
+use super::analysis_similarity::{PreparedSimilarity, SimilarityMethod};
 use crate::parser::Language;
 
 /// Detect file renames by comparing deleted and added files.
@@ -13,12 +15,47 @@ pub fn detect_file_renames(
     threshold: f64,
     method: SimilarityMethod,
 ) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
-    let mut candidates = Vec::new();
+    if deleted_files.is_empty() || added_files.is_empty() {
+        return Vec::new();
+    }
 
-    for (deleted_index, (deleted_path, deleted_content)) in deleted_files.iter().enumerate() {
-        let deleted_language = Language::from_path(deleted_path);
-        for (added_index, (added_path, added_content)) in added_files.iter().enumerate() {
-            let added_language = Language::from_path(added_path);
+    let deleted_languages = deleted_files
+        .iter()
+        .map(|(path, _)| Language::from_path(path))
+        .collect::<Vec<_>>();
+    let added_languages = added_files
+        .iter()
+        .map(|(path, _)| Language::from_path(path))
+        .collect::<Vec<_>>();
+    let deleted_prepared = deleted_files
+        .iter()
+        .zip(&deleted_languages)
+        .map(|((_, content), language)| {
+            PreparedSimilarity::new(
+                content,
+                method,
+                preparation_languages(*language, &added_languages),
+            )
+        })
+        .collect::<Vec<_>>();
+    let added_prepared = added_files
+        .iter()
+        .zip(&added_languages)
+        .map(|((_, content), language)| {
+            PreparedSimilarity::new(
+                content,
+                method,
+                preparation_languages(*language, &deleted_languages),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut candidates = RenameCandidateIndex::new(deleted_files.len(), added_files.len());
+
+    for (deleted_index, deleted) in deleted_prepared.iter().enumerate() {
+        let deleted_language = deleted_languages[deleted_index];
+        for (added_index, added) in added_prepared.iter().enumerate() {
+            let added_language = added_languages[added_index];
             if deleted_language != Language::Unknown
                 && added_language != Language::Unknown
                 && deleted_language != added_language
@@ -31,38 +68,41 @@ pub fn detect_file_renames(
             } else {
                 added_language
             };
-
-            let similarity = compute_similarity_with_language(
-                deleted_content,
-                added_content,
-                method,
-                similarity_language,
-            );
+            let similarity = deleted.similarity(added, similarity_language);
 
             if similarity >= threshold {
-                candidates.push((deleted_index, added_index, similarity));
+                candidates.push(deleted_index, added_index, similarity);
             }
         }
     }
 
-    candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    candidates
+        .assign()
+        .into_iter()
+        .map(|assignment| {
+            (
+                deleted_files[assignment.source_index].0.clone(),
+                added_files[assignment.target_index].0.clone(),
+            )
+        })
+        .collect()
+}
 
-    let mut used_deleted = vec![false; deleted_files.len()];
-    let mut used_added = vec![false; added_files.len()];
-    let mut renames = Vec::new();
-
-    for (deleted_index, added_index, _) in candidates {
-        if used_deleted[deleted_index] || used_added[added_index] {
-            continue;
-        }
-
-        used_deleted[deleted_index] = true;
-        used_added[added_index] = true;
-        renames.push((
-            deleted_files[deleted_index].0.clone(),
-            added_files[added_index].0.clone(),
-        ));
+fn preparation_languages(language: Language, counterparts: &[Language]) -> Vec<Language> {
+    if language != Language::Unknown {
+        return counterparts
+            .iter()
+            .any(|counterpart| *counterpart == language || *counterpart == Language::Unknown)
+            .then_some(language)
+            .into_iter()
+            .collect();
     }
 
-    renames
+    let mut languages = Vec::new();
+    for counterpart in counterparts.iter().copied() {
+        if !languages.contains(&counterpart) {
+            languages.push(counterpart);
+        }
+    }
+    languages
 }

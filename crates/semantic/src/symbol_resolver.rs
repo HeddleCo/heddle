@@ -10,10 +10,7 @@
 
 use std::{path::Path, rc::Rc};
 
-use crate::{
-    parser::{Language, ParsedFile},
-    symbol_extraction::find_definitions,
-};
+use crate::parser::{Language, ParsedFile};
 
 /// Result of resolving a symbol to lines in a source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,33 +38,8 @@ pub enum SymbolResolveError {
     SymbolNotFound(String),
 }
 
-/// Coarse symbol classification used by the reading-order partition.
-/// Mirrors the `state_review::SymbolKind` taxonomy without taking a
-/// dependency on that crate — the consumer maps these tags to the
-/// state-review enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DefinitionKind {
-    /// Type / struct definition.
-    Type,
-    /// Trait declaration (Rust).
-    Trait,
-    /// Class declaration (Python / JS / TS / Java / C++).
-    Class,
-    /// Interface declaration (TS / Java / Go).
-    Interface,
-    /// Type alias (`type Foo = ...`).
-    TypeAlias,
-    /// Enum definition.
-    EnumDef,
-    /// Constant declaration at module scope.
-    ConstDecl,
-    /// Module / namespace.
-    Module,
-    /// Function body — the consequence tier.
-    Function,
-    /// Anything we could parse but couldn't classify.
-    Other,
-}
+/// Durable symbol taxonomy shared by semantic indexes and review payloads.
+pub use objects::object::SymbolKindTag as DefinitionKind;
 
 /// One definition found in a source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,9 +123,8 @@ fn emit_named_definition<'tree>(
 }
 
 /// Iterative DFS over a `Vec<(Node, parent)>` worklist — mirrors
-/// [`symbol_extraction::find_definitions`]: a recursive walker would recurse
-/// for every child of every non-scope node, so deeply-parseable input drives
-/// call depth proportional to AST depth.
+/// A recursive walker would recurse for every child of every non-scope node,
+/// so deeply-parseable input drives call depth proportional to AST depth.
 ///
 /// The single source of truth for the definition taxonomy. [`walk_definitions`]
 /// collects the metadata; the semantic index reuses the same walk to reach
@@ -179,7 +150,7 @@ pub(crate) fn visit_definitions<'tree>(
                 emit_named_definition(node, source, DefinitionKind::Type, current_parent, emit)
             }
             "enum_item" => {
-                emit_named_definition(node, source, DefinitionKind::EnumDef, current_parent, emit)
+                emit_named_definition(node, source, DefinitionKind::Enum, current_parent, emit)
             }
             "trait_item" => {
                 emit_named_definition(node, source, DefinitionKind::Trait, current_parent, emit)
@@ -191,13 +162,9 @@ pub(crate) fn visit_definitions<'tree>(
                 current_parent,
                 emit,
             ),
-            "const_item" | "static_item" => emit_named_definition(
-                node,
-                source,
-                DefinitionKind::ConstDecl,
-                current_parent,
-                emit,
-            ),
+            "const_item" | "static_item" => {
+                emit_named_definition(node, source, DefinitionKind::Const, current_parent, emit)
+            }
             "mod_item" => {
                 // Emit the module, then descend with the module name as the new
                 // container so `mod a { fn f }` yields `f` with `["a"]` — not
@@ -345,7 +312,7 @@ pub(crate) fn visit_definitions<'tree>(
                 emit,
             ),
             "enum_declaration" => {
-                emit_named_definition(node, source, DefinitionKind::EnumDef, current_parent, emit)
+                emit_named_definition(node, source, DefinitionKind::Enum, current_parent, emit)
             }
             "lexical_declaration" | "variable_declaration" => {
                 let mut cursor = node.walk();
@@ -367,7 +334,7 @@ pub(crate) fn visit_definitions<'tree>(
                             {
                                 DefinitionKind::Function
                             } else {
-                                DefinitionKind::ConstDecl
+                                DefinitionKind::Const
                             };
                             emit(DefinitionSite {
                                 node,
@@ -386,7 +353,7 @@ pub(crate) fn visit_definitions<'tree>(
                 // a direct `identifier` child. `const Name = struct|union|
                 // enum|opaque {…}` is Zig's container-as-value idiom, whose
                 // members we walk under `[Name]`; a bare `const`/`var` binding
-                // at container scope is a `ConstDecl`.
+                // at container scope is a `Const`.
                 if kind == "variable_declaration" && !saw_declarator {
                     descended_with_new_parent = zig_visit_variable_declaration(
                         node,
@@ -395,6 +362,30 @@ pub(crate) fn visit_definitions<'tree>(
                         emit,
                         &mut stack,
                     );
+                }
+            }
+            "pair" => {
+                let Some(name_node) = node.child_by_field_name("key") else {
+                    continue;
+                };
+                let Some(value_node) = node.child_by_field_name("value") else {
+                    continue;
+                };
+                if matches!(
+                    value_node.kind(),
+                    "arrow_function" | "function" | "function_expression"
+                ) {
+                    let name = node_text(&name_node, source).to_string();
+                    if !name.is_empty() {
+                        emit(DefinitionSite {
+                            node,
+                            name,
+                            kind: DefinitionKind::Function,
+                            parent_name: current_parent.map(String::from),
+                            start_line: node.start_position().row as u32 + 1,
+                            end_line: node.end_position().row as u32 + 1,
+                        });
+                    }
                 }
             }
             "test_declaration" => {
@@ -426,7 +417,7 @@ pub(crate) fn visit_definitions<'tree>(
                 emit_named_definition(node, source, DefinitionKind::Module, current_parent, emit)
             }
             "enum_specifier" => {
-                emit_named_definition(node, source, DefinitionKind::EnumDef, current_parent, emit)
+                emit_named_definition(node, source, DefinitionKind::Enum, current_parent, emit)
             }
             "constructor_declaration" => {
                 emit_named_definition(node, source, DefinitionKind::Function, current_parent, emit)
@@ -456,6 +447,25 @@ fn walk_definitions(root: tree_sitter::Node, source: &[u8], out: &mut Vec<Defini
             parent_name: site.parent_name,
         });
     });
+}
+
+fn find_definitions(
+    root: tree_sitter::Node<'_>,
+    source: &[u8],
+    target_name: &str,
+) -> Vec<ResolvedSymbol> {
+    let mut matches = Vec::new();
+    visit_definitions(root, source, &mut |site| {
+        if site.name == target_name {
+            matches.push(ResolvedSymbol {
+                name: site.name,
+                start_line: site.start_line,
+                end_line: site.end_line,
+                parent_name: site.parent_name,
+            });
+        }
+    });
+    matches
 }
 
 fn extract_rust_impl_type_name(node: &tree_sitter::Node, source: &[u8]) -> Option<String> {
@@ -509,13 +519,13 @@ fn is_zig_container_scope(kind: &str) -> bool {
 }
 
 /// Map a Zig container-declaration node kind to its symbol taxonomy kind.
-/// `struct`/`union`/`opaque` are `Type`; `enum` is `EnumDef`.
+/// `struct`/`union`/`opaque` are `Type`; `enum` is `Enum`.
 fn zig_container_kind(kind: &str) -> Option<DefinitionKind> {
     match kind {
         "struct_declaration" | "union_declaration" | "opaque_declaration" => {
             Some(DefinitionKind::Type)
         }
-        "enum_declaration" => Some(DefinitionKind::EnumDef),
+        "enum_declaration" => Some(DefinitionKind::Enum),
         _ => None,
     }
 }
@@ -526,7 +536,7 @@ fn zig_container_kind(kind: &str) -> Option<DefinitionKind> {
 ///
 /// `const Name = struct|union|enum|opaque {…}` emits `Name` with the matching
 /// kind and walks the container's members under `[Name]`. A bare `const`/`var`
-/// binding at container scope emits a `ConstDecl`; inside a function body it is
+/// binding at container scope emits a `Const`; inside a function body it is
 /// a local and is skipped.
 fn zig_visit_variable_declaration<'tree>(
     node: tree_sitter::Node<'tree>,
@@ -580,7 +590,7 @@ fn zig_visit_variable_declaration<'tree>(
         emit(DefinitionSite {
             node,
             name,
-            kind: DefinitionKind::ConstDecl,
+            kind: DefinitionKind::Const,
             parent_name: current_parent.map(String::from),
             start_line: node.start_position().row as u32 + 1,
             end_line: node.end_position().row as u32 + 1,
@@ -619,7 +629,7 @@ pub fn resolve_symbol_lines(
         (None, symbol)
     };
 
-    let definitions = find_definitions(&parsed.root_node(), source, target_name);
+    let definitions = find_definitions(parsed.root_node(), source, target_name);
 
     // If a parent filter is specified, prefer matches where the parent matches.
     let matched = if let Some(parent) = parent_filter {
@@ -668,7 +678,7 @@ pub fn resolve_all_symbols(
         (None, symbol)
     };
 
-    let definitions = find_definitions(&parsed.root_node(), source, target_name);
+    let definitions = find_definitions(parsed.root_node(), source, target_name);
 
     if let Some(parent) = parent_filter {
         let filtered: Vec<_> = definitions
@@ -1002,11 +1012,11 @@ pub mod outer {
 
         let defs = extract_definitions(source, Path::new("lib.rs")).unwrap();
 
-        assert_definition(&defs, "LIMIT", DefinitionKind::ConstDecl, 1, 1, None);
+        assert_definition(&defs, "LIMIT", DefinitionKind::Const, 1, 1, None);
         assert_definition(&defs, "outer", DefinitionKind::Module, 2, 23, None);
         // Items inside `mod outer` now carry `outer` as their container.
         assert_definition(&defs, "Widget", DefinitionKind::Type, 3, 5, Some("outer"));
-        assert_definition(&defs, "Mode", DefinitionKind::EnumDef, 7, 10, Some("outer"));
+        assert_definition(&defs, "Mode", DefinitionKind::Enum, 7, 10, Some("outer"));
         assert_definition(
             &defs,
             "Runner",
@@ -1063,7 +1073,7 @@ export const settings = { retry: 2 };
 
         assert_definition(&defs, "Service", DefinitionKind::Interface, 1, 3, None);
         assert_definition(&defs, "Handler", DefinitionKind::TypeAlias, 5, 5, None);
-        assert_definition(&defs, "Status", DefinitionKind::EnumDef, 7, 10, None);
+        assert_definition(&defs, "Status", DefinitionKind::Enum, 7, 10, None);
         assert_definition(&defs, "Controller", DefinitionKind::Class, 12, 16, None);
         assert_definition(
             &defs,
@@ -1074,7 +1084,7 @@ export const settings = { retry: 2 };
             Some("Controller"),
         );
         assert_definition(&defs, "handle", DefinitionKind::Function, 18, 20, None);
-        assert_definition(&defs, "settings", DefinitionKind::ConstDecl, 22, 22, None);
+        assert_definition(&defs, "settings", DefinitionKind::Const, 22, 22, None);
     }
 
     #[test]
@@ -1118,10 +1128,10 @@ pub mod outer {
         let defs = extract_definitions(source, Path::new("lib.rs")).unwrap();
 
         let expected: &[(&str, DefinitionKind, u32, u32, Option<&str>)] = &[
-            ("LIMIT", DefinitionKind::ConstDecl, 1, 1, None),
+            ("LIMIT", DefinitionKind::Const, 1, 1, None),
             ("outer", DefinitionKind::Module, 2, 23, None),
             ("Widget", DefinitionKind::Type, 3, 5, Some("outer")),
-            ("Mode", DefinitionKind::EnumDef, 7, 10, Some("outer")),
+            ("Mode", DefinitionKind::Enum, 7, 10, Some("outer")),
             ("Runner", DefinitionKind::Trait, 12, 14, Some("outer")),
             (
                 "WidgetResult",
@@ -1143,8 +1153,8 @@ pub mod outer {
         }
     }
 
-    // HEDDLE-DR-4 / #876: walk_definitions must not stack-overflow on
-    // deeply-nested but syntactically-valid trees (mirrors symbol_extraction).
+    // HEDDLE-DR-4 / #876: the shared definition walker must not stack-overflow
+    // on deeply-nested but syntactically-valid trees.
     #[cfg(feature = "lang-rust")]
     #[test]
     fn deeply_nested_rust_modules_walk_definitions_does_not_stack_overflow() {
@@ -1215,9 +1225,9 @@ test "addition works" {
 
         let defs = extract_definitions(source, Path::new("sample.zig")).unwrap();
 
-        assert_definition(&defs, "std", DefinitionKind::ConstDecl, 1, 1, None);
-        assert_definition(&defs, "MAX", DefinitionKind::ConstDecl, 3, 3, None);
-        assert_definition(&defs, "counter", DefinitionKind::ConstDecl, 4, 4, None);
+        assert_definition(&defs, "std", DefinitionKind::Const, 1, 1, None);
+        assert_definition(&defs, "MAX", DefinitionKind::Const, 3, 3, None);
+        assert_definition(&defs, "counter", DefinitionKind::Const, 4, 4, None);
         assert_definition(&defs, "add", DefinitionKind::Function, 6, 9, None);
         assert_definition(&defs, "Point", DefinitionKind::Type, 11, 17, None);
         assert_definition(
@@ -1228,7 +1238,7 @@ test "addition works" {
             16,
             Some("Point"),
         );
-        assert_definition(&defs, "Color", DefinitionKind::EnumDef, 19, 19, None);
+        assert_definition(&defs, "Color", DefinitionKind::Enum, 19, 19, None);
         assert_definition(&defs, "Shape", DefinitionKind::Type, 21, 21, None);
         assert_definition(&defs, "Handle", DefinitionKind::Type, 23, 25, None);
         assert_definition(
