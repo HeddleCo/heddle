@@ -431,19 +431,6 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
         if let Some(advice) = cause.downcast_ref::<RecoveryAdvice>() {
             return ErrorClassification::from_advice(advice);
         }
-        if let Some(advice) = cause.downcast_ref::<weft_client_shim::HostedRecoveryAdvice>() {
-            return ErrorClassification {
-                kind: advice.kind.to_string(),
-                human_error: Some(advice.error.clone()),
-                hint: advice.hint.clone(),
-                unsafe_condition: advice.unsafe_condition.clone(),
-                would_change: advice.would_change.clone(),
-                preserved: advice.preserved.clone(),
-                primary_command: advice.primary_command.clone(),
-                recovery_commands: advice.recovery_commands.clone(),
-                extra_json_fields: serde_json::Map::new(),
-            };
-        }
         if let Some(git_error) =
             cause.downcast_ref::<heddle_git_projection::git_core::GitProjectionError>()
             && let Some(advice) = RecoveryAdvice::from_git_projection_error(git_error)

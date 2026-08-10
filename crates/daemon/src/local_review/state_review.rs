@@ -166,8 +166,9 @@ impl LocalStateReview {
         };
 
         // Surface fired risk signals if requested. The signal registry will
-        // replace this with a proper budget split; until then everything we
-        // read is "visible".
+        // Trimmed budget split: every signal is visible. The former ranked
+        // `state_review::budget` helper was unused and removed (HEDDLE-DR-10);
+        // reintroduce a ranked partition here if tick budgeting ships.
         let mut all_signals = Vec::new();
         if include_all_signals
             && let Some(hash) =

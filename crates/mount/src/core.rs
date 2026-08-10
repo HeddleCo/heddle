@@ -67,10 +67,7 @@ use std::{
 };
 
 use objects::{
-    object::{
-        Attribution, Blob, ContentHash, EntryType, FileMode, State, StateId, Tree, TreeEntry,
-        TreeEntryTarget,
-    },
+    object::{Blob, ContentHash, EntryType, FileMode, StateId, Tree, TreeEntry, TreeEntryTarget},
     store::{AnyStore, ObjectStore},
     sync::{LockExt, RwLockExt},
     util::gitlink_placeholder_bytes,
@@ -78,7 +75,7 @@ use objects::{
 use oplog::OpLog;
 use refs::RefManager;
 use repo::Repository;
-use tracing::{debug, instrument, warn};
+use tracing::{debug, warn};
 
 use crate::{
     cache::BlobCachePool,
@@ -581,11 +578,6 @@ impl PendingChildIndex {
             })
             .collect()
     }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.by_dir.clear();
-    }
 }
 
 /// Per-NodeId lifecycle state. Tracks both whether an inode is still
@@ -654,7 +646,7 @@ pub struct Pending<'brand> {
     tombstones: BTreeSet<PathBuf>,
     /// Directory tombstones — captured-tree directories the mount
     /// has `rmdir`'d. Distinct from file tombstones because the
-    /// capture-time `apply_pending_to_tree` walk has to drop the
+    /// capture-time tree fold has to drop the
     /// whole subtree, not a single leaf.
     dir_tombstones: BTreeSet<PathBuf>,
     /// Directories the mount has `mkdir`'d into the overlay that
@@ -741,18 +733,6 @@ impl<'brand> Pending<'brand> {
         self.state.insert(id, NodeState::Orphan { open_count });
     }
 
-    /// Read-only iterator over the per-NodeId lifecycle map. Sole
-    /// enumeration point for [`crate::pending::Pending::drain_for_capture`]'s
-    /// typed-match classification pass — keeps the underlying `state`
-    /// field private to this module while letting the retrofitted drain
-    /// classify every resident entry by [`crate::pending::ResidentLifecycle`].
-    /// Returns owned `(u64, NodeState)` pairs (both are `Copy`) so the
-    /// iterator does not borrow `self` past the classify pass; the drain
-    /// then takes its own `&mut self` borrow to apply the retention.
-    pub(crate) fn lifecycle_iter(&self) -> impl Iterator<Item = (u64, NodeState)> + '_ {
-        self.state.iter().map(|(&id, &s)| (id, s))
-    }
-
     /// Witness-gated FUSE-forget discharge. The
     /// `&KernelForgetWitness<'_, 'brand>` parameter is the type-level
     /// proof that the caller has already gone through the discharge-
@@ -797,32 +777,6 @@ impl<'brand> Pending<'brand> {
         warm_survives
     }
 
-    /// Apply the retention/clear pass of [`crate::pending::Pending::drain_for_capture`].
-    /// `surviving` is the set of NodeIds whose `state` / `hot[id]` /
-    /// `warm[id]` entries must outlive the capture — produced by the
-    /// typed-match classifier in [`crate::pending`]; every NodeId in
-    /// the set was classified as [`crate::pending::ResidentLifecycle::LiveNonZero`]
-    /// (open fds still hold the bytes — POSIX last-close-wins) or
-    /// [`crate::pending::ResidentLifecycle::Orphan`] (directory entry
-    /// gone but the bytes outlive it).
-    ///
-    /// The path-keyed overlays are unconditionally cleared: every path
-    /// they covered is now folded into the new captured tree, and the
-    /// unlink/rename T1/T3 transitions already removed `hot_by_path` /
-    /// `symlinks` / `inodes.by_path` bindings for any orphan branch,
-    /// so nothing here references a surviving NodeId by path.
-    pub(crate) fn apply_drain_for_capture(&mut self, surviving: &BTreeSet<u64>) {
-        self.hot.retain(|id, _| surviving.contains(id));
-        self.warm.retain(|id, _| surviving.contains(id));
-        self.state.retain(|id, _| surviving.contains(id));
-        self.hot_by_path.clear();
-        self.tombstones.clear();
-        self.dir_tombstones.clear();
-        self.explicit_dirs.clear();
-        self.symlinks.clear();
-        self.child_index.clear();
-    }
-
     /// Test-only: insert a per-NodeId lifecycle entry directly,
     /// bypassing the FSM entry points. Used by the
     /// [`crate::pending`] substrate tests to set up `Pending` states
@@ -835,8 +789,7 @@ impl<'brand> Pending<'brand> {
 
     /// Test-only: insert a hot-tier buffer for `id` with the given
     /// `path` and `bytes`. Used by the [`crate::pending`] tests to set
-    /// up scenarios where `drain_for_capture` must preserve the
-    /// per-NodeId byte storage alongside the lifecycle entry.
+    /// up scenarios that need hot-tier bytes alongside a lifecycle entry.
     #[cfg(test)]
     pub(crate) fn test_insert_hot(&mut self, id: u64, path: PathBuf, bytes: Vec<u8>) {
         self.hot.insert(
@@ -853,7 +806,7 @@ impl<'brand> Pending<'brand> {
 
     /// Test-only: true iff `hot[id]` is currently populated. Mirror
     /// of [`Self::test_insert_hot`] for assertion in
-    /// `drain_for_capture` tests.
+    /// substrate lifecycle tests.
     #[cfg(test)]
     pub(crate) fn test_has_hot(&self, id: u64) -> bool {
         self.hot.contains_key(&id)
@@ -2300,7 +2253,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         // After the flush, the source's bytes (if any) live in
         // `warm[src_id]`. If the source had no warm entry — captured
         // only — synthesize one keyed by the source's NodeId so
-        // `apply_pending_to_tree` plants the file under new_path. We
+        // capture-time tree fold plants the file under new_path. We
         // resolve src_id via the path → inode reverse-index (or via
         // the captured-tree walk for a captured-only source).
         let src_id = {
@@ -2347,7 +2300,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
         }
         // Captured-only source: synthesize a warm entry so capture
         // plants the bytes at new_path. The entry is keyed by the
-        // source's NodeId; `apply_pending_to_tree` resolves its
+        // source's NodeId; capture-time tree fold resolves its
         // current path through `inodes.by_path`.
         if let (Some(id), Some((blob, mode, size))) = (src_id, captured_seed) {
             pending.warm.insert(id, PendingEntry { blob, mode, size });
@@ -3208,10 +3161,11 @@ fn validate_entry_name(name: &OsStr) -> Result<&str> {
 
 /// Mount-relative path for a warm-tier entry, derived from its
 /// [`NodeRecord`]. The NodeId-keyed warm tier doesn't store the path
-/// directly; `apply_pending_to_tree` / `pending_dir_exists` /
+/// directly; capture-time tree fold / `pending_dir_exists` /
 /// `pending_children_at` resolve it via the inode registry. Only
 /// file-like records (`File`, `PendingFile`) carry warm bytes; the
 /// other variants return `None`.
+#[cfg(test)]
 fn warm_path_of_record(record: &NodeRecord) -> Option<&Path> {
     match record {
         NodeRecord::File { path, .. } | NodeRecord::PendingFile { path, .. } => Some(path),
@@ -4341,487 +4295,6 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
     fn read_link(&self, node: NodeId) -> Result<OsString> {
         ContentAddressedMount::read_link(self, node)
     }
-}
-
-// --- Capture --------------------------------------------------------------
-
-// The capture/snapshot write path drives the repository's snapshot,
-// attribution, and oplog-recording methods, which live on the default
-// local flavor (`Repository<RefManager, OpLog, AnyStore>`). Mounts are only
-// ever captured against that flavor, so this block stays concrete rather
-// than threading `S` through the snapshot surface.
-impl ContentAddressedMount {
-    /// Drain the pending tier into a fresh heddle state and update
-    /// the thread to point at it.
-    ///
-    /// This is the mount-side analogue of `heddle capture`/`heddle
-    /// snapshot`: rather than walking a worktree to discover changed
-    /// files, it folds the in-memory pending map into a real
-    /// [`Tree`] object, records a [`State`], and advances the
-    /// thread's HEAD ref.
-    ///
-    /// `intent` is propagated to `state.intent`. Attribution is
-    /// pulled from the repository's default attribution path
-    /// ([`Repository::get_attribution`]) — this honours the
-    /// `HEDDLE_AGENT_*` env, the repo config, and the user's
-    /// principal. Richer attribution paths (CLI overrides,
-    /// `ActorPresenceStore`, session segments) live in
-    /// `crates/cli/src/cli/commands/snapshot.rs::build_attribution`;
-    /// when the CLI wires this up it should call
-    /// [`Self::capture_with_attribution`] instead and pass the result
-    /// of that helper.
-    pub fn capture(&self, intent: impl Into<Option<String>>) -> Result<StateId> {
-        let attribution = self
-            .inner
-            .repo
-            .get_attribution()
-            .map_err(MountError::Store)?;
-        self.capture_with_attribution(intent, attribution)
-    }
-
-    /// Same as [`Self::capture`] but with caller-supplied attribution.
-    /// The CLI uses this so it can mirror `build_attribution` from
-    /// `snapshot.rs` (CLI overrides, agent registry lookup, etc.).
-    #[instrument(skip(self, attribution, intent), fields(thread = %self.inner.thread))]
-    pub fn capture_with_attribution(
-        &self,
-        intent: impl Into<Option<String>>,
-        attribution: Attribution,
-    ) -> Result<StateId> {
-        // Step 0: drain hot buffers. Anything that was still being
-        // edited gets promoted now so the resulting state captures
-        // the agent's last writes even if it never closed the file.
-        self.flush_all()?;
-
-        let state_snapshot = *self.inner.state.read_or_poisoned();
-        let parent_tree = self.load_tree(&state_snapshot.tree)?;
-
-        // Step 1: build the new root tree. Walks the pending map as
-        // a path-keyed virtual tree, descends into existing captured
-        // subtrees where they exist, and writes every fresh subtree
-        // to the store on the way up. Tombstones with empty parent
-        // dirs prune naturally.
-        let tree_hash = {
-            let pending = self.inner.pending.lock_or_poisoned();
-            let inodes = self.inner.inodes.lock_or_poisoned();
-            apply_pending_to_tree(self.store(), &parent_tree, &pending, &inodes)?
-        };
-
-        // Step 2: record a new state. Mirrors
-        // `Repository::snapshot_with_attribution_profiled`'s
-        // happy-path body, minus the worktree walk and the
-        // merge-conflict handling (a mount has no worktree).
-        let parent_id = self.inner.repo.head().map_err(MountError::Store)?;
-        let parents = match parent_id {
-            Some(id) => vec![id],
-            None => vec![],
-        };
-        let mut state = State::new_snapshot(tree_hash, parents, attribution);
-        if let Some(intent) = intent.into() {
-            state = state.with_intent(intent);
-        }
-        // Match the snapshot path: carry forward the configured
-        // default confidence so downstream tools that key on it
-        // don't see a sudden None for mount-captured states.
-        state = state.with_confidence(self.inner.repo.config().defaults.confidence);
-        // Auto-sign before persisting (heddle#482): route through the same
-        // authored-state chokepoint the repo capture/commit/merge paths use, so
-        // a mount-captured state is signed identically and no write bypasses it.
-        self.inner
-            .repo
-            .put_authored_state(&state)
-            .map_err(MountError::Store)?;
-
-        // Step 3 + 3a unified: advance the served thread and record the
-        // `OpRecord::Snapshot` **record-first** through the write chokepoint
-        // (heddle#354 r8). The pre-r8 path published the thread ref FIRST and
-        // recorded SECOND — the same cross-crate publish-first snapshot class as
-        // `repository_snapshot.rs`. Because the reconciler folds a `Snapshot`
-        // record authoritatively, a late snapshot record carrying a stale thread
-        // value could clobber a newer concurrent write. Routing through
-        // `commit_snapshot_atomic` makes the record commit before the publish,
-        // so the newest committed record is the newest write.
-        //
-        // A mount always serves one specific thread, so the snapshot always
-        // advances `self.inner.thread` — HEAD being attached elsewhere (or
-        // detached) does not change which ref the mount advances.
-        let state_id = state.state_id;
-        let previous_state_id = state_snapshot.state_id;
-        let served_thread = objects::object::ThreadName::from(self.inner.thread.as_str());
-
-        // Invariant A (heddle#317): a mount-captured state is a freshly created
-        // state too, so it must inherit the configured default visibility tier
-        // through the same chokepoint the repo capture path uses, FOLDED into the
-        // snapshot's own batch (PR #529 P1) so one `heddle undo` reverts the
-        // snapshot and its auto-applied default together — never a separate
-        // trailing batch. The fold-and-rewind chokepoint stages the sidecar
-        // BEFORE the commit and rewinds it if the commit fails (invariant 2), so
-        // a failed mount capture never leaves an orphaned non-public sidecar. The
-        // mount path holds no repo lock, so it passes `lock_held = false`; a
-        // public default folds nothing (absence ≡ public).
-        //
-        // Step 3 + 3a unified: advance the served thread and record the
-        // `OpRecord::Snapshot` **record-first** through the write chokepoint
-        // (heddle#354 r8).
-        self.inner
-            .repo
-            .commit_snapshot_atomic_with_capture_visibility(
-                &state_id,
-                Some(previous_state_id),
-                Some(&served_thread),
-                false,
-            )
-            .map_err(MountError::Store)?;
-
-        // Step 3b: refresh the active thread record's metadata
-        // (changed paths, heavy-impact paths, freshness, etc).
-        // Resolution is by the repo's execution-root path, so
-        // capture-from-mount lands the same updates as
-        // `cmd_snapshot`. A missing thread record (e.g. a mount
-        // opened on a thread that has no `Thread` row yet) is a
-        // no-op that returns the default refresh report.
-        let new_tree = self.load_tree(&tree_hash)?;
-        if let Err(err) = repo::snapshot_metadata::refresh_active_thread_metadata(
-            &self.inner.repo,
-            &state,
-            &new_tree,
-        ) {
-            warn!(?err, "thread metadata refresh from mount capture failed");
-        }
-
-        // Step 4: drain the pending tier. See
-        // [`crate::pending::Pending::drain_for_capture`] for the
-        // contract: `LiveZero` retires; `LiveNonZero` (open fds still
-        // hold bytes — POSIX last-close-wins) and `Orphan`
-        // (open-but-unlinked) survive with their `hot[id]`/`warm[id]`
-        // bytes; the path-keyed overlays clear because every path they
-        // covered is now folded into the new tree.
-        {
-            let mut pending = self.inner.pending.lock_or_poisoned();
-            pending.drain_for_capture();
-        }
-        let mut state_lock = self.inner.state.write_or_poisoned();
-        *state_lock = MountState {
-            state_id,
-            tree: tree_hash,
-        };
-        // The new state's tree becomes the new root; we don't
-        // remap the existing root inode (it's a permanent fixture)
-        // but we do refresh its backing tree hash.
-        let mut inodes = self.inner.inodes.lock_or_poisoned();
-        if let Some(record) = inodes.by_id.get_mut(&NodeId::ROOT.0) {
-            *record = NodeRecord::Root { tree: tree_hash };
-        }
-        warn!(
-            thread = %self.inner.thread,
-            state = %state_id,
-            "captured mount writes into new state"
-        );
-
-        Ok(state_id)
-    }
-}
-
-/// Fold a [`Pending`] map into a fresh tree rooted at `parent`,
-/// honouring nested paths.
-///
-/// Algorithm: build an in-memory virtual-DAG keyed by mount-relative
-/// directory path. For each pending warm entry `dir/.../leaf`, walk
-/// the path components; at the leaf, plant a file entry in the
-/// virtual tree; tombstones plant deletions. Then materialize the
-/// DAG bottom-up: for each directory, start from its captured
-/// counterpart (if present), apply the local file overrides and
-/// tombstones, recurse into each child directory, and write the
-/// resulting `Tree` to the store. Empty directories are pruned —
-/// a tombstone of `dir/only.rs` removes `dir` from the parent too.
-///
-/// Returns the root tree's content hash. The caller writes this to
-/// the new state.
-fn apply_pending_to_tree(
-    store: &impl ObjectStore,
-    parent: &Tree,
-    pending: &Pending,
-    inodes: &Inodes,
-) -> Result<ContentHash> {
-    /// In-memory virtual tree: a directory's local file overrides,
-    /// tombstones, and named child directories. Built lazily during
-    /// the walk; materialized recursively.
-    #[derive(Default)]
-    struct VDir {
-        /// File leaves to plant in this directory (overrides any
-        /// captured entry of the same name).
-        files: BTreeMap<String, (ContentHash, FileMode)>,
-        /// Symlink leaves: name → (blob_oid, target_len). The blob
-        /// is hashed + written at apply time so empty-symlink rename
-        /// flows just need to point at the same hash.
-        symlinks: BTreeMap<String, ContentHash>,
-        /// Names to tombstone (file or subdirectory).
-        deletions: BTreeSet<String>,
-        /// Subtrees to drop entirely (captured-dir `rmdir`). The
-        /// materialize pass removes both the captured entry and any
-        /// pending children planted by a deeper write under it.
-        dir_deletions: BTreeSet<String>,
-        /// Empty mkdirs that should survive even when no child was
-        /// written. Captured-dir collision is impossible here: an
-        /// existing captured dir would have made the `mkdir` itself
-        /// fail with EEXIST.
-        explicit_empty: BTreeSet<String>,
-        /// Named child directories that have pending content.
-        children: BTreeMap<String, VDir>,
-    }
-
-    let mut root = VDir::default();
-
-    fn descend<'a>(node: &'a mut VDir, components: &[&str]) -> &'a mut VDir {
-        let mut cursor = node;
-        for c in components {
-            if !cursor.children.contains_key(*c) {
-                cursor.children.insert((*c).to_string(), VDir::default());
-            }
-            cursor = cursor.children.get_mut(*c).unwrap();
-        }
-        cursor
-    }
-
-    // Plant warm entries. Warm is NodeId-keyed; resolve each entry's
-    // current Live path via the inode registry. Skip Orphan entries —
-    // their bytes are unreachable by path post-T1/T3 and must not
-    // resurface in the captured tree.
-    for (id, entry) in &pending.warm {
-        if pending.is_orphan(*id) {
-            continue;
-        }
-        let Some(record) = inodes.by_id.get(id) else {
-            continue;
-        };
-        let Some(path) = warm_path_of_record(record) else {
-            continue;
-        };
-        // Sanity: the record's stored path must still bind to this
-        // NodeId in `by_path`. If `inodes.by_path[path]` resolves to
-        // a different inode the record is stale (e.g. a Live → Orphan
-        // transition that didn't update the state map yet) and we
-        // skip rather than plant phantom bytes.
-        if inodes.by_path.get(path) != Some(id) {
-            continue;
-        }
-        let comps: Vec<&str> = path
-            .components()
-            .filter_map(|c| match c {
-                Component::Normal(n) => n.to_str(),
-                _ => None,
-            })
-            .collect();
-        let Some((leaf_name, dir_components)) = comps.split_last() else {
-            continue;
-        };
-        let dir = descend(&mut root, dir_components);
-        dir.files
-            .insert((*leaf_name).to_string(), (entry.blob, entry.mode));
-        dir.deletions.remove(*leaf_name);
-    }
-
-    // Plant symlinks. Their target bytes get written as a CAS blob
-    // here (lazily) so we never duplicate the hashing cost in the
-    // hot path of `symlink`.
-    for (path, target_bytes) in &pending.symlinks {
-        let comps: Vec<&str> = path
-            .components()
-            .filter_map(|c| match c {
-                Component::Normal(n) => n.to_str(),
-                _ => None,
-            })
-            .collect();
-        let Some((leaf_name, dir_components)) = comps.split_last() else {
-            continue;
-        };
-        let blob = Blob::new(target_bytes.clone());
-        let blob_oid = store.put_blob(&blob).map_err(MountError::Store)?;
-        let dir = descend(&mut root, dir_components);
-        dir.symlinks.insert((*leaf_name).to_string(), blob_oid);
-        dir.deletions.remove(*leaf_name);
-    }
-
-    // Plant explicit-empty directories. We descend to the leaf dir
-    // and mark its name in the *parent*'s `explicit_empty` set, so
-    // materialize emits a zero-entry subtree even with no children.
-    for explicit in &pending.explicit_dirs {
-        let comps: Vec<&str> = explicit
-            .components()
-            .filter_map(|c| match c {
-                Component::Normal(n) => n.to_str(),
-                _ => None,
-            })
-            .collect();
-        let Some((leaf_name, dir_components)) = comps.split_last() else {
-            continue;
-        };
-        let parent_dir = descend(&mut root, dir_components);
-        parent_dir.explicit_empty.insert((*leaf_name).to_string());
-        // Also ensure the dir's own VDir exists so materialize
-        // visits it (descend into the leaf one extra step).
-        parent_dir
-            .children
-            .entry((*leaf_name).to_string())
-            .or_default();
-    }
-
-    // Plant tombstones. Each tombstone names a *file* the agent
-    // deleted; we record it on the leaf directory so materialization
-    // skips both any pre-existing entry and any virtual file with
-    // the same name. Empty parent dirs prune naturally.
-    for tomb in &pending.tombstones {
-        let comps: Vec<&str> = tomb
-            .components()
-            .filter_map(|c| match c {
-                Component::Normal(n) => n.to_str(),
-                _ => None,
-            })
-            .collect();
-        let Some((leaf_name, dir_components)) = comps.split_last() else {
-            continue;
-        };
-        let dir = descend(&mut root, dir_components);
-        dir.files.remove(*leaf_name);
-        dir.symlinks.remove(*leaf_name);
-        dir.deletions.insert((*leaf_name).to_string());
-    }
-
-    // Plant directory tombstones. Each names a captured-tree
-    // directory the agent `rmdir`'d. The materialize pass deletes
-    // both the captured entry and any virtual children that ended
-    // up under it (a pathological case — `rmdir` requires empty —
-    // but cheap to guard against).
-    for tomb in &pending.dir_tombstones {
-        let comps: Vec<&str> = tomb
-            .components()
-            .filter_map(|c| match c {
-                Component::Normal(n) => n.to_str(),
-                _ => None,
-            })
-            .collect();
-        let Some((leaf_name, dir_components)) = comps.split_last() else {
-            continue;
-        };
-        let dir = descend(&mut root, dir_components);
-        dir.children.remove(*leaf_name);
-        dir.explicit_empty.remove(*leaf_name);
-        dir.dir_deletions.insert((*leaf_name).to_string());
-    }
-
-    /// Materialize a virtual directory against its captured counterpart
-    /// `captured` (or `Tree::new()` if no captured tree exists). Writes
-    /// every subtree to `store` and returns the resulting tree's hash,
-    /// or `None` if the resulting tree is empty (a signal the parent
-    /// should drop the entry).
-    fn materialize(
-        v: &VDir,
-        captured: &Tree,
-        store: &impl ObjectStore,
-    ) -> Result<Option<ContentHash>> {
-        let mut entries: BTreeMap<String, TreeEntry> = captured
-            .entries()
-            .iter()
-            .map(|e| (e.name().to_string(), e.clone()))
-            .collect();
-
-        // Tombstones first so deletions don't get re-added by other
-        // overrides.
-        for name in &v.deletions {
-            entries.remove(name);
-        }
-        for name in &v.dir_deletions {
-            entries.remove(name);
-        }
-
-        // File overrides.
-        for (name, (blob, mode)) in &v.files {
-            let executable = matches!(mode, FileMode::Executable);
-            let entry = TreeEntry::file(name.clone(), *blob, executable).map_err(|e| {
-                MountError::Store(objects::error::HeddleError::InvalidObject(e.to_string()))
-            })?;
-            entries.insert(name.clone(), entry);
-        }
-
-        // Symlink overrides.
-        for (name, blob) in &v.symlinks {
-            let entry = TreeEntry::symlink(name.clone(), *blob).map_err(|e| {
-                MountError::Store(objects::error::HeddleError::InvalidObject(e.to_string()))
-            })?;
-            entries.insert(name.clone(), entry);
-        }
-
-        // Recurse into each pending subdirectory.
-        for (name, child) in &v.children {
-            // dir_deletions wins: if the agent `rmdir`'d this name,
-            // drop the whole subtree regardless of any pending
-            // virtual children (which `rmdir` requires to be empty
-            // — this branch is the belt + braces).
-            if v.dir_deletions.contains(name) {
-                entries.remove(name);
-                continue;
-            }
-            // Captured counterpart: if `captured` already has a
-            // subdir under this name, load it; otherwise start from
-            // an empty tree.
-            let child_captured = match captured.get(name) {
-                Some(e) if e.is_tree() => {
-                    let hash = e.tree_hash().ok_or_else(|| {
-                        MountError::Store(objects::error::HeddleError::MissingObject {
-                            object_type: "tree".to_string(),
-                            id: "<non-tree>".to_string(),
-                        })
-                    })?;
-                    store
-                        .get_tree(&hash)
-                        .map_err(MountError::Store)?
-                        .ok_or_else(|| {
-                            MountError::Store(objects::error::HeddleError::MissingObject {
-                                object_type: "tree".to_string(),
-                                id: hash.to_string(),
-                            })
-                        })?
-                }
-                _ => Tree::new(),
-            };
-            let force_empty = v.explicit_empty.contains(name);
-            match materialize(child, &child_captured, store)? {
-                Some(hash) => {
-                    let entry = TreeEntry::directory(name.clone(), hash).map_err(|e| {
-                        MountError::Store(objects::error::HeddleError::InvalidObject(e.to_string()))
-                    })?;
-                    entries.insert(name.clone(), entry);
-                }
-                None if force_empty => {
-                    // Empty mkdir survives capture as a 0-entry tree.
-                    let hash = store.put_tree(&Tree::new()).map_err(MountError::Store)?;
-                    let entry = TreeEntry::directory(name.clone(), hash).map_err(|e| {
-                        MountError::Store(objects::error::HeddleError::InvalidObject(e.to_string()))
-                    })?;
-                    entries.insert(name.clone(), entry);
-                }
-                None => {
-                    // Subtree is empty — drop the entry from the
-                    // parent.
-                    entries.remove(name);
-                }
-            }
-        }
-
-        if entries.is_empty() {
-            return Ok(None);
-        }
-        let tree = Tree::from_entries(entries.into_values().collect());
-        let hash = store.put_tree(&tree).map_err(MountError::Store)?;
-        Ok(Some(hash))
-    }
-
-    // Materialize the root. An empty tree is still a valid root.
-    let hash = match materialize(&root, parent, store)? {
-        Some(h) => h,
-        None => store.put_tree(&Tree::new()).map_err(MountError::Store)?,
-    };
-    Ok(hash)
 }
 
 impl<S: ObjectStore + 'static> ContentAddressedMount<S> {

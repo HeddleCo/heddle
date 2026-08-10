@@ -11,9 +11,10 @@ use api::heddle::api::v1alpha1::{
 };
 use cli_shared::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
+use objects::{HeddleError, RecoveryDetails};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use weft_client_shim::{CliContext, HostedRecoveryAdvice};
+use weft_client_shim::CliContext;
 
 use super::{
     auth_requests::{AuthCommand, AuthTrustCommand},
@@ -228,10 +229,20 @@ fn cmd_auth_derive_agent(
     }
     let ttl_secs = i64::try_from(ttl_secs).context("--ttl is too large")?;
     let parent = resolve_hosted_credential(Some(server))?;
-    let parent_token = parent
-        .token
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!(HostedRecoveryAdvice::auth_required(server)))?;
+    let parent_token = parent.token.as_ref().ok_or_else(|| {
+        let primary_command = format!("heddle auth login --server {server}");
+        anyhow::anyhow!(HeddleError::recovery(
+            RecoveryDetails::safety_refusal(
+                "auth_required",
+                format!("Not authenticated with {server}"),
+                format!("Run `{primary_command}` to authenticate, then retry the hosted command."),
+                "no usable hosted credential is available for the selected server",
+                "continuing without credentials would send an unauthenticated hosted mutation",
+                "no hosted request was sent and local repository state was left unchanged",
+            )
+            .with_recovery_commands(vec![primary_command]),
+        ))
+    })?;
     let private_key_pem = parent.proof_key_pem.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
             "active credential for {server} has no device proof key; run `heddle auth login --server {server}` first"

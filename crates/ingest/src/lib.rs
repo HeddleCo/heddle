@@ -42,7 +42,6 @@ pub mod reasoning_emit;
 pub mod reasoning_extract;
 pub mod reasoning_pipeline;
 pub mod ref_emit;
-pub mod semantic_cache;
 pub mod sha_map;
 pub mod state_writer;
 pub mod transcript;
@@ -68,7 +67,6 @@ pub use reasoning_pipeline::{
     ReasoningPreview, pipeline_default_commits,
 };
 pub use ref_emit::{RefEmitStats, RefEmitter};
-pub use semantic_cache::{IngestSemanticCache, IngestSemanticCacheStats};
 pub use sha_map::{MapKind, ShaMap, ShaMapError};
 pub use state_writer::parse_attribution;
 pub use transcript::{
