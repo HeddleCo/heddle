@@ -27,7 +27,6 @@ tokio = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
-criterion = "0.8"
 pollster = "0.4"
 tempfile.workspace = true
 
@@ -37,7 +36,3 @@ postgres = ["dep:sqlx", "dep:tokio", "dep:uuid", "dep:runtime-bridge"]
 [lib]
 path = "src/lib.rs"
 name = "refs"
-
-[[bench]]
-name = "reftable_vs_packed"
-harness = false

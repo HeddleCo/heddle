@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::{DeltaDecoder, DeltaEncoder, DeltaError, MAX_DELTA_OUTPUT_SIZE, compute_delta};
+use super::{DeltaDecoder, DeltaEncoder, DeltaError, MAX_DELTA_OUTPUT_SIZE};
 
 #[test]
 fn test_delta_roundtrip() {
@@ -61,35 +61,6 @@ fn test_delta_repeated_key_adversarial_roundtrip() {
         "all-zero prefix should encode as a compact copy plus tail literal, got {} bytes",
         delta.len()
     );
-}
-
-#[test]
-fn test_compute_delta() {
-    let base = b"Line 1\nLine 2\nLine 3\nLine 4\nLine 5";
-    let target = b"Line 1\nLine 2 modified\nLine 3\nLine 4\nLine 5\nLine 6";
-
-    let result = compute_delta(base, target);
-    assert!(result.is_some());
-
-    let (delta, ratio) = result.unwrap();
-    assert!(ratio < 1.0, "delta should be smaller than target");
-
-    let decoded = DeltaDecoder::decode(base, &delta, MAX_DELTA_OUTPUT_SIZE).unwrap();
-    assert_eq!(decoded, target);
-}
-
-#[test]
-fn test_compute_delta_not_beneficial() {
-    let base = b"AAAAAAAAAAAAAAAAAAAAAAAA";
-    let target = b"BBBBBBBBBBBBBBBBBBBBBBBB";
-
-    let result = compute_delta(base, target);
-    if let Some((_, ratio)) = result {
-        assert!(
-            ratio >= 0.9,
-            "should not use delta for very different content"
-        );
-    }
 }
 
 /// Test copy instructions at various offsets including beyond the old 14-bit limit.

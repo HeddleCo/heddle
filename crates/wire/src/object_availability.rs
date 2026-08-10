@@ -7,10 +7,6 @@ use crate::{ObjectId, ObjectInfo, ObjectType, Result};
 pub struct ObjectAvailabilityPlan {
     pub have_objects: Vec<ObjectId>,
     pub want_objects: Vec<ObjectId>,
-    pub present_objects: Vec<ObjectId>,
-    pub missing_objects: Vec<ObjectId>,
-    pub resumable_objects: Vec<ObjectId>,
-    pub lazy_objects: Vec<ObjectId>,
     pub partial_fetch_allowed: bool,
 }
 
@@ -49,10 +45,8 @@ pub fn plan_object_availability(
     for info in objects {
         if has_object(store, info)? {
             plan.have_objects.push(info.id.clone());
-            plan.present_objects.push(info.id.clone());
         } else {
             plan.want_objects.push(info.id.clone());
-            plan.missing_objects.push(info.id.clone());
         }
     }
 
@@ -67,13 +61,6 @@ impl ObjectAvailabilityPlan {
 
     pub fn is_complete(&self) -> bool {
         self.want_objects.is_empty()
-            && self.missing_objects.is_empty()
-            && self.resumable_objects.is_empty()
-            && self.lazy_objects.is_empty()
-    }
-
-    pub fn has_partial_fetch_candidates(&self) -> bool {
-        !self.resumable_objects.is_empty() || !self.lazy_objects.is_empty()
     }
 }
 
@@ -161,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_tracks_present_and_missing_objects() {
+    fn test_plan_tracks_available_and_wanted_objects() {
         let blob = Blob::new(b"hello".to_vec());
         let blob_hash = blob.hash();
         let store = DummyStore {
@@ -188,8 +175,6 @@ mod tests {
 
         assert_eq!(plan.have_objects.len(), 1);
         assert_eq!(plan.want_objects.len(), 1);
-        assert_eq!(plan.present_objects.len(), 1);
-        assert_eq!(plan.missing_objects.len(), 1);
         assert!(!plan.is_complete());
     }
 
@@ -208,7 +193,6 @@ mod tests {
 
         assert!(plan.have_objects.is_empty());
         assert_eq!(plan.want_objects, vec![ObjectId::StateId(state)]);
-        assert_eq!(plan.missing_objects, vec![ObjectId::StateId(state)]);
     }
 
     #[test]
@@ -236,7 +220,6 @@ mod tests {
         let plan = ObjectAvailabilityPlan::default().with_partial_fetch_allowed(true);
 
         assert!(plan.partial_fetch_allowed);
-        assert!(!plan.has_partial_fetch_candidates());
         assert!(plan.is_complete());
     }
 }

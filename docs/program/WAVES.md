@@ -58,7 +58,7 @@ Subagents get **disjoint path ownership**; they must not commit/push unless assi
 ## Wave 7 — Platform matrix & long-tail
 
 Windows materialization, mount optional, large-ref packed-refs degradation docs/tests  
-**Status (2026-07-11):** **Open / residual tracked (docs + stress recipe advanced)** — executable platform residual checklist in [`PLATFORM_MATRIX.md`](PLATFORM_MATRIX.md); packed-refs ~10k stress recipe in [`PACKED_REFS_STRESS.md`](PACKED_REFS_STRESS.md) + `scripts/program/packed-refs-stress-recipe.sh`. Mount paths have CI foundation (Linux FUSE smoke, Windows ProjFS smoke, macOS FSKit compile-check). Full Wave 7 certification (Windows materialization edge cases, multi-host, continuous large-ref CI gate) is **not** claimed complete.
+**Status (2026-07-11):** **Open / residual tracked** — executable platform residual checklist in [`PLATFORM_MATRIX.md`](PLATFORM_MATRIX.md); historical packed-refs ~10k measurements in [`PACKED_REFS_STRESS.md`](PACKED_REFS_STRESS.md). The deferred reftable spike and its benchmark were removed in #921, leaving a packed-only executable stress recipe open. Mount paths have CI foundation (Linux FUSE smoke, Windows ProjFS smoke, macOS FSKit compile-check). Full Wave 7 certification (Windows materialization edge cases, multi-host, continuous large-ref CI gate) is **not** claimed complete.
 
 ## Wave 8 — Certification
 

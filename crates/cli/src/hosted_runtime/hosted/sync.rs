@@ -1269,28 +1269,6 @@ impl HostedClient {
         .map(|exchange| (exchange.result, exchange.profile))
     }
 
-    pub async fn pull_partial(
-        &mut self,
-        repo: &Repository,
-        repo_path: &str,
-        remote_thread: &str,
-        local_thread: Option<&str>,
-    ) -> Result<PullComplete, ProtocolError> {
-        self.pull_with_options(
-            repo,
-            repo_path,
-            remote_thread,
-            PullOptions {
-                local_thread,
-                depth: None,
-                target_state: None,
-                materialization: PullMaterialization::Lazy,
-                publish_refs: true,
-            },
-        )
-        .await
-    }
-
     pub async fn pull_with_depth_and_materialization(
         &mut self,
         repo: &Repository,
@@ -1409,29 +1387,6 @@ impl HostedClient {
                 depth: None,
                 target_state: Some(target_state),
                 materialization: PullMaterialization::Full,
-                publish_refs: true,
-            },
-        )
-        .await
-        .map(|exchange| exchange.object_count)
-    }
-
-    pub async fn fetch_state_partial(
-        &mut self,
-        repo: &Repository,
-        repo_path: &str,
-        remote_thread: &str,
-        target_state: StateId,
-    ) -> Result<usize, ProtocolError> {
-        self.pull_exchange(
-            repo,
-            repo_path,
-            remote_thread,
-            PullOptions {
-                local_thread: None,
-                depth: None,
-                target_state: Some(target_state),
-                materialization: PullMaterialization::Lazy,
                 publish_refs: true,
             },
         )

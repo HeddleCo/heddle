@@ -33,7 +33,6 @@ rusqlite.workspace = true
 # CLI's Tokio runtime (a nested `tokio::Runtime::block_on` would panic).
 pollster = "0.4"
 rmp-serde.workspace = true
-rustls.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 sley.workspace = true

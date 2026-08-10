@@ -79,7 +79,8 @@ impl IndexedOperation {
         self.timestamp().date_naive()
     }
 
-    fn matches(&self, filter: &OperationLogQuery) -> bool {
+    /// Returns whether this operation satisfies every populated query filter.
+    pub fn matches(&self, filter: &OperationLogQuery) -> bool {
         if let Some(actor) = &filter.actor
             && &self.actor_email != actor
         {
