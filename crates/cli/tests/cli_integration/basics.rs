@@ -475,7 +475,10 @@ fn test_discovery_under_home_finds_nearest_real_repository() {
     std::fs::create_dir_all(&nested).unwrap();
 
     let discovered = Repository::open(&nested).expect("discover real repository under HOME");
-    assert_eq!(discovered.root(), real_root);
+    assert_eq!(
+        discovered.root(),
+        real_root.canonicalize().expect("canonical repository root")
+    );
 }
 
 #[test]

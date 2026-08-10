@@ -3375,13 +3375,13 @@ the `discuss_show` discriminator:
 {"valid": true, "errors": [], "warnings": [], "objects_checked": 42, "git_projection_checked": false, "repair_target": null, "repaired": false, "repairs": []}
 ```
 
-`heddle oplog recover --output json` emits a non-mutating health report for a
-repository whose V5 manifest-selected oplog containers pass strict repository
-open validation. Damaged selected generations fail at that validation boundary
-instead of relying on the removed single-file `oplog.bin` auto-salvage path:
+`heddle oplog recover --output json` emits the health or explicit salvage
+report for the manifest-selected oplog containers. Optional recovery detail
+fields appear when the invocation repaired damage or found a durable report
+from an earlier recovery:
 
 ```json
-{"output_kind":"oplog_recover","already_healthy":true,"prior_recovery":false,"entries_recovered":0,"damaged_byte_start":0,"damaged_byte_end":0}
+{"output_kind":"oplog_recover","already_healthy":true,"prior_recovery":true,"strategy":"forward-greedy","entries_recovered":2,"entries_lost":1,"damaged_byte_start":256,"damaged_byte_end":320,"sidecar_path":".heddle/oplog/oplog.segments/0000000000000001.bin.oplog.recovery","suffix_segments_discarded":0,"suffix_entries_discarded":0}
 ```
 
 `heddle hook list|install|uninstall|events --output json` emit:

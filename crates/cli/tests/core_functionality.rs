@@ -9,6 +9,9 @@ use repo::Repository;
 use serde_json::Value;
 use tempfile::TempDir;
 
+#[path = "support/mod.rs"]
+mod cli_test_support;
+
 #[path = "core_functionality/diff_and_status.rs"]
 mod diff_and_status;
 #[path = "core_functionality/file_operations.rs"]
@@ -33,35 +36,11 @@ fn heddle_with_env(
     cwd: Option<&std::path::Path>,
     envs: &[(&str, &str)],
 ) -> Result<String, String> {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(args);
-    // Pin a principal identity so captures don't refuse under bare
-    // CI environments. Explicit `envs` overrides win because they're
-    // applied after.
-    cmd.env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
-        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev");
-    cmd.envs(envs.iter().copied());
-
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
+    if let Some(cwd) = cwd {
+        cli_test_support::heddle(args, Some(cwd), envs)
     } else {
-        let temp = TempDir::new().map_err(|e| e.to_string())?;
-        cmd.current_dir(temp.path());
-    }
-
-    let output = cmd.output().map_err(|e| e.to_string())?;
-    let stdout = str::from_utf8(&output.stdout).unwrap_or("").to_string();
-    let stderr = str::from_utf8(&output.stderr).unwrap_or("").to_string();
-
-    if output.status.success() {
-        Ok(stdout)
-    } else {
-        Err(format!(
-            "Exit code: {:?}\nstdout: {}\nstderr: {}",
-            output.status.code(),
-            stdout,
-            stderr
-        ))
+        let temp = TempDir::new().map_err(|error| error.to_string())?;
+        cli_test_support::heddle(args, Some(temp.path()), envs)
     }
 }
 
