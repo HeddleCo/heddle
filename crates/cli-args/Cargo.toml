@@ -11,7 +11,7 @@ categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-api = { package = "heddle-api", version = "0.3.0" }
+api = { package = "heddle-api", version = "0.5.0" }
 clap.workspace = true
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.11" }
 objects = { path = "../objects", package = "heddle-objects", version = "0.11" }

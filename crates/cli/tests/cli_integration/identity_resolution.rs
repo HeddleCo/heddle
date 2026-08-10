@@ -18,7 +18,12 @@ fn isolated_command(repo: &Path, home: &Path, heddle_home: &Path, args: &[&str])
         .env_remove("HEDDLE_PRINCIPAL_EMAIL")
         .env_remove("HEDDLE_AGENT_PROVIDER")
         .env_remove("HEDDLE_AGENT_MODEL")
-        .env_remove("NO_COLOR");
+        // Plain-text assertions below require uncolored output. The host may
+        // export CLICOLOR_FORCE=1 (which wins after NO_COLOR is cleared), so
+        // force color off rather than inheriting ambient color policy.
+        .env("NO_COLOR", "1")
+        .env_remove("CLICOLOR_FORCE")
+        .env_remove("FORCE_COLOR");
     command
 }
 

@@ -101,8 +101,17 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
         "BindSignupInviteEmail",
         AgentAuthOperationDisposition::Denied,
     ),
+    // Durable invite claim mints a signup bearer; derived agents must not
+    // consume invite codes on behalf of a parent principal.
+    ("ClaimSignupInvite", AgentAuthOperationDisposition::Denied),
     (
         "IssueSignupEmailChallenge",
+        AgentAuthOperationDisposition::Denied,
+    ),
+    // Consumes a human invite to open an agent-rooted account; account
+    // provisioning stays parent-only even though the RPC is public.
+    (
+        "ProvisionAgentRootedAccount",
         AgentAuthOperationDisposition::Denied,
     ),
     (
