@@ -19,6 +19,9 @@ use repo::Repository;
 use tempfile::TempDir;
 use wire::{ObjectData, ObjectId, ObjectType};
 
+#[path = "support/mod.rs"]
+mod cli_test_support;
+
 #[derive(Debug)]
 struct SnapshotProfile {
     file_count: usize,
@@ -30,16 +33,6 @@ struct SnapshotProfile {
     snapshot_total: Duration,
     git_add: Option<Duration>,
     git_commit: Option<Duration>,
-}
-
-fn write_snapshot_bench_files(root: &Path, file_count: usize) {
-    for i in 0..file_count {
-        std::fs::write(
-            root.join(format!("file_{i:05}.txt")),
-            format!("content {i}\n{}\n", "x".repeat(48)),
-        )
-        .unwrap();
-    }
 }
 
 fn try_run_git(dir: &Path, args: &[&str]) -> Option<()> {
@@ -64,7 +57,7 @@ fn try_git_snapshot_baseline(file_count: usize) -> Option<(Duration, Duration)> 
         temp.path(),
         &["config", "user.email", "heddle-bench@example.com"],
     )?;
-    write_snapshot_bench_files(temp.path(), file_count);
+    cli_test_support::write_many_small_files(temp.path(), file_count);
 
     let add_start = Instant::now();
     try_run_git(temp.path(), &["add", "-A"])?;
@@ -80,7 +73,7 @@ fn try_git_snapshot_baseline(file_count: usize) -> Option<(Duration, Duration)> 
 fn measure_snapshot_profile(file_count: usize) -> SnapshotProfile {
     let snapshot_temp = TempDir::new().unwrap();
     let snapshot_repo = Repository::init_default(snapshot_temp.path()).unwrap();
-    write_snapshot_bench_files(snapshot_temp.path(), file_count);
+    cli_test_support::write_many_small_files(snapshot_temp.path(), file_count);
     let attribution = snapshot_repo.get_attribution().unwrap();
 
     let snapshot_start = Instant::now();

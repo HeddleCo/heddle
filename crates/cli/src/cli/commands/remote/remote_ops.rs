@@ -344,47 +344,30 @@ impl SleyProgressSink for GitPullProgress {
     }
 }
 
-fn pull_git_overlay(
-    repo: &Repository,
-    plan: &PullPlan,
-    requested_thread: Option<&str>,
-    insecure: bool,
-    cli: &Cli,
-) -> Result<()> {
-    if plan.lazy {
-        return Err(git_pull_lazy_advice());
-    }
-    if insecure {
-        return Err(git_pull_insecure_advice());
-    }
+pub(crate) struct AuthoritativeGitPullOutcome {
+    pub(crate) old_oid: Option<sley::ObjectId>,
+    pub(crate) new_oid: sley::ObjectId,
+    pub(crate) old_state: Option<StateId>,
+    pub(crate) new_state: StateId,
+    pub(crate) changed: bool,
+    pub(crate) materialized: bool,
+    pub(crate) states_created: usize,
+    pub(crate) commits_imported: usize,
+}
 
-    let remote_name = resolve_default_remote_name(repo, plan.remote.as_deref())?;
+fn execute_authoritative_git_pull(
+    repo: &Repository,
+    remote_name: &str,
+    local_branch: &str,
+    remote_branch: &str,
+    progress: &objects::Progress,
+    mut import_progress: Option<&mut ImportProgress>,
+) -> Result<AuthoritativeGitPullOutcome> {
     let git = SleyRepository::discover(repo.root()).map_err(anyhow::Error::new)?;
-    if !git.remote_names()?.iter().any(|name| name == &remote_name) {
-        return Err(git_pull_unconfigured_remote_advice(&remote_name));
+    if !git.remote_names()?.iter().any(|name| name == remote_name) {
+        return Err(git_pull_unconfigured_remote_advice(remote_name));
     }
-    let current_branch = repo.git_overlay_current_branch()?;
-    let local_branch = plan
-        .local_thread
-        .as_deref()
-        .or(current_branch.as_deref())
-        .context("cannot pull into a detached Git checkout without --local-thread")?;
     let git_config = git.config_snapshot().map_err(anyhow::Error::new)?;
-    let remote_branch = match (
-        requested_thread,
-        git_config.get("branch", Some(local_branch), "merge"),
-    ) {
-        (Some(requested), _) => requested.to_string(),
-        (None, Some(merge_ref)) => merge_ref
-            .strip_prefix("refs/heads/")
-            .with_context(|| {
-                format!(
-                    "branch.{local_branch}.merge must name a branch under refs/heads/, not {merge_ref}"
-                )
-            })?
-            .to_string(),
-        (None, None) => plan.remote_thread.clone(),
-    };
     let local_ref = format!("refs/heads/{local_branch}");
     let remote_ref = format!("refs/heads/{remote_branch}");
     let old_oid = git
@@ -393,7 +376,6 @@ fn pull_git_overlay(
         .and_then(|reference| reference.peeled_oid(&git).ok().flatten());
     let old_state = repo.refs().get_thread(&ThreadName::new(local_branch))?;
 
-    let progress = progress_for(cli, repo);
     progress.set_phase("streaming Git objects");
     let mut sley_progress = GitPullProgress {
         progress: progress.clone(),
@@ -404,22 +386,24 @@ fn pull_git_overlay(
     let fetch_refspecs = vec![remote_ref.clone(), "+refs/notes/*:refs/notes/*".to_string()];
     let outcome = git
         .fetch_with_http_client(
-            &remote_name,
+            remote_name,
             &fetch_refspecs,
-            git_pull_fetch_options(&remote_branch),
+            git_pull_fetch_options(remote_branch),
             &mut credentials,
             &mut sley_progress,
             heddle_git_projection::configured_https_client(),
         )
-        .map_err(|error| git_pull_fetch_advice(&remote_name, &remote_branch, &error))?;
-    finish_line(
-        &progress,
-        &format!(
-            "[done] streamed {} Git objects ({} received)",
-            sley_progress.received_objects,
-            format_transfer_bytes(sley_progress.received_bytes)
-        ),
-    );
+        .map_err(|error| git_pull_fetch_advice(remote_name, remote_branch, &error))?;
+    if progress.is_active() {
+        finish_line(
+            progress,
+            &format!(
+                "[done] streamed {} Git objects ({} received)",
+                sley_progress.received_objects,
+                format_transfer_bytes(sley_progress.received_bytes)
+            ),
+        );
+    }
 
     let new_oid = outcome
         .ref_updates
@@ -436,21 +420,20 @@ fn pull_git_overlay(
     {
         return Err(git_pull_diverged_advice(
             local_branch,
-            &remote_name,
-            &remote_branch,
+            remote_name,
+            remote_branch,
         ));
     }
 
-    let staging_ref = publish_git_pull_tracking_ref(&git, &remote_name, &remote_branch, new_oid)?;
-
-    let mut import_progress = ImportProgress::start(
-        cli,
-        repo,
-        &format!("{remote_name}/{remote_branch}"),
-        &remote_name,
-    );
-    import_progress.begin_commit_import();
-    let mut on_import = |event| import_progress.commit_tick(event);
+    let staging_ref = publish_git_pull_tracking_ref(&git, remote_name, remote_branch, new_oid)?;
+    if let Some(import_progress) = import_progress.as_mut() {
+        import_progress.begin_commit_import();
+    }
+    let mut on_import = |event| {
+        if let Some(import_progress) = import_progress.as_mut() {
+            import_progress.commit_tick(event);
+        }
+    };
     let (stats, mapping) = ingest::import_git_into_scoped_with_options_and_progress(
         repo.root(),
         repo.root(),
@@ -458,22 +441,25 @@ fn pull_git_overlay(
             delta_search: repo.config().storage.delta_search.import,
             ..ingest::ImportOptions::default()
         },
-        ingest::ImportScope::refs(vec![staging_ref.clone()]),
+        ingest::ImportScope::refs(vec![staging_ref]),
         Some(&mut on_import),
     )
-    .map_err(|error| git_pull_import_advice(&remote_name, &remote_branch, &error))?;
-    import_progress.begin_ref_write();
-    import_progress.finish();
+    .map_err(|error| git_pull_import_advice(remote_name, remote_branch, &error))?;
+    if let Some(import_progress) = import_progress.as_mut() {
+        import_progress.begin_ref_write();
+        import_progress.finish();
+    }
     let new_state = mapping.get_commit(&new_oid.to_string()).ok_or_else(|| {
         git_pull_import_advice(
-            &remote_name,
-            &remote_branch,
+            remote_name,
+            remote_branch,
             &"the fetched commit was not mapped",
         )
     })?;
 
     let changed = old_oid != Some(new_oid);
-    let materialized = current_branch.as_deref() == Some(local_branch) && changed;
+    let materialized =
+        repo.git_overlay_current_branch()?.as_deref() == Some(local_branch) && changed;
     if changed {
         publish_git_pull_branch(
             repo,
@@ -506,21 +492,121 @@ fn pull_git_overlay(
             rollback.as_ref().and_then(|result| result.as_ref().err()),
         ));
     }
-    let changed_paths = changed_paths_between_states(repo, old_state.as_ref(), Some(&new_state))?;
+
+    Ok(AuthoritativeGitPullOutcome {
+        old_oid,
+        new_oid,
+        old_state,
+        new_state,
+        changed,
+        materialized,
+        states_created: stats.states_created,
+        commits_imported: stats.commits_imported,
+    })
+}
+
+pub(crate) fn pull_current_git_overlay_authoritative(
+    repo: &Repository,
+    remote_name: &str,
+) -> Result<AuthoritativeGitPullOutcome> {
+    let local_branch = repo
+        .git_overlay_current_branch()?
+        .context("cannot pull a detached Git checkout")?;
+    let git = SleyRepository::discover(repo.root()).map_err(anyhow::Error::new)?;
+    let git_config = git.config_snapshot().map_err(anyhow::Error::new)?;
+    let remote_branch = git_config
+        .get("branch", Some(&local_branch), "merge")
+        .map(|merge_ref| {
+            merge_ref
+                .strip_prefix("refs/heads/")
+                .map(ToOwned::to_owned)
+                .with_context(|| {
+                    format!(
+                        "branch.{local_branch}.merge must name a branch under refs/heads/, not {merge_ref}"
+                    )
+                })
+        })
+        .transpose()?
+        .unwrap_or_else(|| local_branch.clone());
+    execute_authoritative_git_pull(
+        repo,
+        remote_name,
+        &local_branch,
+        &remote_branch,
+        &objects::Progress::null(),
+        None,
+    )
+}
+
+fn pull_git_overlay(
+    repo: &Repository,
+    plan: &PullPlan,
+    requested_thread: Option<&str>,
+    insecure: bool,
+    cli: &Cli,
+) -> Result<()> {
+    if plan.lazy {
+        return Err(git_pull_lazy_advice());
+    }
+    if insecure {
+        return Err(git_pull_insecure_advice());
+    }
+
+    let remote_name = resolve_default_remote_name(repo, plan.remote.as_deref())?;
+    let current_branch = repo.git_overlay_current_branch()?;
+    let local_branch = plan
+        .local_thread
+        .as_deref()
+        .or(current_branch.as_deref())
+        .context("cannot pull into a detached Git checkout without --local-thread")?;
+    let git = SleyRepository::discover(repo.root()).map_err(anyhow::Error::new)?;
+    let git_config = git.config_snapshot().map_err(anyhow::Error::new)?;
+    let remote_branch = match (
+        requested_thread,
+        git_config.get("branch", Some(local_branch), "merge"),
+    ) {
+        (Some(requested), _) => requested.to_string(),
+        (None, Some(merge_ref)) => merge_ref
+            .strip_prefix("refs/heads/")
+            .with_context(|| {
+                format!(
+                    "branch.{local_branch}.merge must name a branch under refs/heads/, not {merge_ref}"
+                )
+            })?
+            .to_string(),
+        (None, None) => plan.remote_thread.clone(),
+    };
+    let progress = progress_for(cli, repo);
+    let mut import_progress = ImportProgress::start(
+        cli,
+        repo,
+        &format!("{remote_name}/{remote_branch}"),
+        &remote_name,
+    );
+    let result = execute_authoritative_git_pull(
+        repo,
+        &remote_name,
+        local_branch,
+        &remote_branch,
+        &progress,
+        Some(&mut import_progress),
+    )?;
+    let changed_paths =
+        changed_paths_between_states(repo, result.old_state.as_ref(), Some(&result.new_state))?;
     let output = PullOutput {
         outcome: build_pull_outcome(
             Some(plan),
             git_overlay_pull_execution_facts(
                 remote_name,
                 Some(local_branch.to_string()),
-                old_oid.map(|oid| oid.to_string()),
-                Some(new_oid.to_string()),
-                old_state.map(|state| state.to_string()),
-                Some(new_state.to_string()),
-                changed,
-                stats.states_created,
-                stats.commits_imported,
-                materialized,
+                result.old_oid.map(|oid| oid.to_string()),
+                Some(result.new_oid.to_string()),
+                result.old_state.map(|state| state.to_string()),
+                Some(result.new_state.to_string()),
+                result.changed,
+                result.states_created,
+                result.commits_imported,
+                result.materialized,
                 changed_paths,
             ),
         ),
