@@ -5,6 +5,8 @@ fn git(path: &std::path::Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
         .current_dir(path)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .output()
         .unwrap_or_else(|err| panic!("git {:?} should run: {}", args, err));
     assert!(
@@ -243,26 +245,41 @@ fn git_overlay_sync_adopts_fast_forward_upstream_tip() {
     assert_eq!(after["changes"]["deleted"].as_array().unwrap().len(), 0);
     assert_ne!(after["recommended_action"], "heddle capture");
     assert_eq!(git(&work, &["rev-parse", "HEAD"]), new_git_tip);
+    assert_eq!(
+        git(&work, &["rev-parse", "refs/heads/main"]),
+        new_git_tip,
+        "authoritative local branch must advance to the upstream tip"
+    );
+    assert_eq!(
+        git(&work, &["rev-parse", "refs/remotes/origin/main"]),
+        new_git_tip,
+        "authoritative remote-tracking ref must advance with the pull"
+    );
+    assert_eq!(
+        git(&work, &["status", "--porcelain"]),
+        "",
+        "authoritative pull must leave the Git worktree clean"
+    );
 
-    let import_again = heddle_output(&["import", "git", "--ref", "main"], Some(&work))
-        .expect("import command should run");
+    let rerun = heddle_output(&["pull", "--output", "json"], Some(&work))
+        .expect("repeat authoritative pull should run");
     assert!(
-        import_again.status.success(),
-        "re-importing the adopted fast-forward tip should be a clean no-op\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&import_again.stdout),
-        String::from_utf8_lossy(&import_again.stderr)
+        rerun.status.success(),
+        "repeat authoritative pull must succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&rerun.stdout),
+        String::from_utf8_lossy(&rerun.stderr)
     );
-    let after_reimport = status_json(&work);
-    assert_eq!(after_reimport["current_state"], after["current_state"]);
+    assert_eq!(git(&work, &["rev-parse", "HEAD"]), new_git_tip);
+    assert_eq!(git(&work, &["rev-parse", "refs/heads/main"]), new_git_tip);
     assert_eq!(
-        after_reimport["changes"]["modified"]
-            .as_array()
-            .unwrap()
-            .len(),
-        0
+        git(&work, &["rev-parse", "refs/remotes/origin/main"]),
+        new_git_tip
     );
+    assert_eq!(git(&work, &["status", "--porcelain"]), "");
+    let after_rerun = status_json(&work);
+    assert_eq!(after_rerun["changes"], after["changes"]);
     assert_eq!(
-        after_reimport["recommended_action"],
+        after_rerun["recommended_action"],
         after["recommended_action"]
     );
 }

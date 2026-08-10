@@ -312,7 +312,6 @@ struct GitPackPushPlan {
 }
 
 const PUSH_FULL_DESCRIPTOR_OBJECT_THRESHOLD: usize = 512;
-const PULL_PACK_SPOOL_OBJECT_THRESHOLD: usize = 512;
 const NATIVE_PACK_DRAIN_OBJECT_INTERVAL: usize = 32;
 const NATIVE_PACK_OBJECT_PREFETCH_LIMIT: usize = 32;
 const NATIVE_PACK_OBJECT_LOAD_WORKER_LIMIT: usize = 8;
@@ -1657,7 +1656,6 @@ impl HostedClient {
         })?;
         let remote_state = super::helpers::parse_proto_state_id(ready.remote_state)?
             .ok_or_else(|| ProtocolError::InvalidState("missing remote state".to_string()))?;
-        let advertised_object_count = ready.objects_to_fetch.len();
         let PullWantPlan {
             wants,
             transfer_plan,
@@ -1693,13 +1691,11 @@ impl HostedClient {
         }
 
         let receive_start = Instant::now();
-        let use_pack_spool = advertised_object_count > PULL_PACK_SPOOL_OBJECT_THRESHOLD;
-        let mut pack_state = wire::PackChunkState::default();
-        let mut pack_spool = if use_pack_spool {
-            Some(wire::PackChunkSpool::new_in(repo.heddle_dir())?)
-        } else {
-            None
-        };
+        // Native-pack size is independent of advertised object count: one blob
+        // can be close to the receive limit. Keep remote-controlled bytes on
+        // disk for every pull instead of retaining a potentially multi-GiB
+        // pack and index in memory for "small" object-count transfers.
+        let mut pack_spool = wire::PackChunkSpool::new_in(repo.heddle_dir())?;
         let mut git_lane_repo = None;
         let mut git_pack_state = GitPackPullInstallState::default();
         let mut staged_git_lane =
@@ -1755,26 +1751,14 @@ impl HostedClient {
                         ));
                     }
                     let decode_start = Instant::now();
-                    if let Some(pack_spool) = pack_spool.as_mut() {
-                        pack_spool.receive_chunk(
-                            stream_kind == PackStreamKind::Index,
-                            transfer.resume_offset,
-                            transfer.chunk_index,
-                            transfer.is_complete,
-                            &chunk.data,
-                            chunk.is_final_chunk,
-                        )?;
-                    } else {
-                        wire::receive_pack_chunk(
-                            &mut pack_state,
-                            stream_kind == PackStreamKind::Index,
-                            transfer.resume_offset,
-                            transfer.chunk_index,
-                            transfer.is_complete,
-                            &chunk.data,
-                            chunk.is_final_chunk,
-                        )?;
-                    }
+                    pack_spool.receive_chunk(
+                        stream_kind == PackStreamKind::Index,
+                        transfer.resume_offset,
+                        transfer.chunk_index,
+                        transfer.is_complete,
+                        &chunk.data,
+                        chunk.is_final_chunk,
+                    )?;
                     let decode_elapsed = decode_start.elapsed();
                     profile.pack_decode += decode_elapsed;
                     profile.pack_decode_apply += decode_elapsed;
@@ -1973,27 +1957,13 @@ impl HostedClient {
                                 installed_ids.append(&mut provider_pack.installed_ids);
                             }
                             if ordinary_pack_received {
-                                if let Some(pack_spool) = pack_spool.as_mut() {
-                                    if !pack_spool.is_complete() {
-                                        return Err(ProtocolError::InvalidState(
-                                            "pull completed before native pack stream finished"
-                                                .to_string(),
-                                        ));
-                                    }
-                                    installed_ids.extend(pack_spool.install_into(repo.store())?);
-                                } else {
-                                    if !pack_state.is_complete() {
-                                        return Err(ProtocolError::InvalidState(
-                                            "pull completed before native pack stream finished"
-                                                .to_string(),
-                                        ));
-                                    }
-                                    installed_ids.extend(wire::install_received_pack(
-                                        repo.store(),
-                                        &pack_state.pack_data,
-                                        &pack_state.index_data,
-                                    )?);
+                                if !pack_spool.is_complete() {
+                                    return Err(ProtocolError::InvalidState(
+                                        "pull completed before native pack stream finished"
+                                            .to_string(),
+                                    ));
                                 }
+                                installed_ids.extend(pack_spool.install_into(repo.store())?);
                             }
                             if installed_ids.is_empty() {
                                 return Err(ProtocolError::InvalidState(

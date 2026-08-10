@@ -134,16 +134,25 @@ fn test_remote_remove() {
 }
 
 #[test]
-fn test_remote_duplicate_name() {
+fn test_remote_add_replaces_existing_name() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
     heddle_must_succeed(&["remote", "add", "origin", "localhost:8421"], temp.path());
-    let _result = heddle(
+    heddle(
         &["remote", "add", "origin", "localhost:9999"],
         Some(temp.path()),
-    );
-    let list_result = heddle(&["remote", "list"], Some(temp.path())).unwrap();
-    assert!(list_result.contains("origin"));
+    )
+    .expect("adding an existing name updates that remote");
+    let list_result = heddle(&["remote", "list", "--output", "json"], Some(temp.path())).unwrap();
+    let list: Value = serde_json::from_str(&list_result).unwrap();
+    let origins: Vec<_> = list["remotes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|remote| remote["name"] == "origin")
+        .collect();
+    assert_eq!(origins.len(), 1, "updating a remote must not duplicate it");
+    assert_eq!(origins[0]["url"], "localhost:9999");
 }
 
 #[test]

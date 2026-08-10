@@ -75,7 +75,10 @@ use crate::{
 mod remote_ops;
 
 pub use remote_ops::{cmd_pull, cmd_remote};
-pub(crate) use remote_ops::{resolve_default_remote_name, resolved_default_remote_name};
+pub(crate) use remote_ops::{
+    pull_current_git_overlay_authoritative, resolve_default_remote_name,
+    resolved_default_remote_name,
+};
 
 #[allow(clippy::type_complexity)]
 /// CLI machine envelope: domain [`PushOutcome`] plus verification next-actions.

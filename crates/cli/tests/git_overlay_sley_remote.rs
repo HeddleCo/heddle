@@ -98,6 +98,7 @@ fn run(temp: &TempDir, cwd: &Path, args: &[&str]) -> std::process::Output {
         .env("PATH", "")
         .env("HOME", temp.path())
         .env("HEDDLE_CONFIG", config(temp))
+        .env("HEDDLE_FSMONITOR", "off")
         .env("NO_COLOR", "1")
         .output()
         .expect("run Heddle without PATH lookup")

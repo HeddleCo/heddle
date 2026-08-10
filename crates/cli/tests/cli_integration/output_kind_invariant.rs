@@ -1242,7 +1242,27 @@ fn runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
         // Stopping a daemon that is not running still exits 0 with the
         // full `daemon_stop` payload, so a bare init fixture suffices.
         "daemon_stop" => (init_fixture(), sv(&["daemon", "stop"])),
-        "oplog_recover" => (init_fixture(), sv(&["oplog", "recover"])),
+        "oplog_recover" => {
+            // Seed three captures, truncate the packed base, and explicitly
+            // recover once. Normal repository open now refuses structural
+            // damage, so the operator command is the only supported repair
+            // entrypoint. The second invocation below deterministically reads
+            // the durable sidecar (`prior_recovery: true`) and omits the
+            // optional `quarantine_path`, matching the canonical doc sample.
+            let t = init_fixture();
+            for i in 1..=3 {
+                std::fs::write(t.path().join("f.txt"), format!("v{i}")).unwrap();
+                heddle(&["capture", "-m", &format!("c{i}")], Some(t.path()))
+                    .expect("fixture capture");
+            }
+            let oplog = t.path().join(".heddle/oplog/oplog.bin");
+            let bytes = std::fs::read(&oplog).expect("read fixture oplog");
+            let cut = bytes.len() * 6 / 10;
+            std::fs::write(&oplog, &bytes[..cut]).expect("truncate fixture oplog");
+            heddle(&["oplog", "recover"], Some(t.path()))
+                .expect("explicit recovery prepares the prior-sidecar fixture");
+            (t, sv(&["oplog", "recover"]))
+        }
         "timeline_log" => (init_fixture(), sv(&["log", "--timeline"])),
         _ => return None,
     };
