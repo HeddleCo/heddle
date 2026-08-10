@@ -2,12 +2,15 @@
 //! Core FsStore structure.
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     hash::Hash,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use heddle_format::compression::CompressionConfig;
@@ -26,7 +29,7 @@ const RECENT_BLOB_CACHE_CAPACITY: usize = 2_048;
 const RECENT_TREE_CACHE_CAPACITY: usize = 1_024;
 /// Soft cap on the in-process loose-blob verification cache. Each
 /// entry is one `ContentHash` (~32 bytes) so this is ≈2 MB of memory
-/// for the upper bound, and the LRU eviction is bounded by hash
+/// for the upper bound, and clock eviction is bounded by hash
 /// hits rather than store size. 65k entries covers the typical hot
 /// working set for million-blob monorepos; a daemon that materialises
 /// dozens of unrelated trees won't drift toward unbounded growth.
@@ -54,7 +57,7 @@ pub enum LooseObjectWriteMode {
     BatchDirectorySync,
 }
 
-/// Bounded in-process object cache with true LRU eviction.
+/// Bounded in-process object cache with second-chance clock eviction.
 ///
 /// Two independent caps are enforced on every [`insert`](Self::insert):
 ///
@@ -68,15 +71,17 @@ pub enum LooseObjectWriteMode {
 /// workload (mount / `heddled`) that streams many multi-MB blobs
 /// through `get_blob` can otherwise retain `capacity × max-entry-bytes`
 /// of deep-cloned `Vec`s. With the budget, inserting a new large blob
-/// evicts LRU entries until the total fits.
+/// advances the second-chance clock until the total fits.
 ///
-/// [`get`](Self::get) promotes the key to MRU; [`insert`](Self::insert)
-/// treats re-insert as a touch. Evicts from the front of `order` when
-/// over either cap.
+/// [`get`](Self::get) marks the entry recently used through an atomic bit, so
+/// cache hits need only a shared map lock. Eviction advances a clock queue and
+/// gives marked entries one additional chance before removal. Both hits and
+/// amortized eviction stay O(1), including for the 65k-entry verification
+/// cache.
 #[derive(Debug)]
 pub(super) struct RecentObjectCache<K, V> {
-    entries: HashMap<K, V>,
-    order: VecDeque<K>,
+    entries: HashMap<K, RecentObjectCacheEntry<V>>,
+    eviction_clock: VecDeque<K>,
     capacity: usize,
     /// Soft cap on cumulative cached bytes; `None` = count-only.
     byte_budget: Option<usize>,
@@ -85,6 +90,12 @@ pub(super) struct RecentObjectCache<K, V> {
     sizer: fn(&V) -> usize,
     /// Running sum of `sizer(v)` over all `entries`.
     cached_bytes: usize,
+}
+
+#[derive(Debug)]
+struct RecentObjectCacheEntry<V> {
+    value: V,
+    recently_accessed: AtomicBool,
 }
 
 impl<K, V> RecentObjectCache<K, V>
@@ -97,7 +108,7 @@ where
     pub(super) fn with_capacity(capacity: usize) -> Self {
         Self {
             entries: HashMap::new(),
-            order: VecDeque::new(),
+            eviction_clock: VecDeque::new(),
             capacity,
             byte_budget: None,
             sizer: |_| 0,
@@ -107,7 +118,7 @@ where
 
     /// Cache capped by *both* entry count and cumulative bytes.
     /// `sizer` reports each value's heap-ish footprint; the cache
-    /// evicts LRU entries until both caps hold.
+    /// advances the second-chance clock until both caps hold.
     pub(super) fn with_byte_budget(
         capacity: usize,
         byte_budget: usize,
@@ -115,7 +126,7 @@ where
     ) -> Self {
         Self {
             entries: HashMap::new(),
-            order: VecDeque::new(),
+            eviction_clock: VecDeque::new(),
             capacity,
             byte_budget: Some(byte_budget),
             sizer,
@@ -123,15 +134,12 @@ where
         }
     }
 
-    /// Lookup with LRU promotion. Callers that hold only a read lock must
-    /// upgrade to a write lock before calling this (promotion mutates
-    /// `order`).
-    pub(super) fn get(&mut self, key: &K) -> Option<&V> {
-        if !self.entries.contains_key(key) {
-            return None;
-        }
-        self.promote(key);
-        self.entries.get(key)
+    /// Lookup with lock-free second-chance promotion inside an already-held
+    /// shared map lock. Only insertion and eviction require exclusive access.
+    pub(super) fn get(&self, key: &K) -> Option<&V> {
+        let entry = self.entries.get(key)?;
+        entry.recently_accessed.store(true, Ordering::Relaxed);
+        Some(&entry.value)
     }
 
     /// Presence check without promotion. Cheap enough to run under a
@@ -152,10 +160,7 @@ where
     /// store-level `evict_recent_blob` used in tests.
     #[cfg(test)]
     pub(super) fn remove(&mut self, key: &K) -> Option<V> {
-        let removed = self.entries.remove(key)?;
-        if let Some(position) = self.order.iter().position(|existing| existing == key) {
-            self.order.remove(position);
-        }
+        let removed = self.entries.remove(key)?.value;
         self.cached_bytes = self.cached_bytes.saturating_sub((self.sizer)(&removed));
         Some(removed)
     }
@@ -165,25 +170,31 @@ where
             return;
         }
         let new_bytes = self.byte_budget.map(|_| (self.sizer)(&value)).unwrap_or(0);
-        if let Some(old) = self.entries.insert(key, value) {
-            self.cached_bytes = self
-                .cached_bytes
-                .saturating_sub(self.byte_budget.map(|_| (self.sizer)(&old)).unwrap_or(0));
-            self.promote(&key);
+        let entry = RecentObjectCacheEntry {
+            value,
+            recently_accessed: AtomicBool::new(false),
+        };
+        if let Some(old) = self.entries.insert(key, entry) {
+            self.cached_bytes = self.cached_bytes.saturating_sub(
+                self.byte_budget
+                    .map(|_| (self.sizer)(&old.value))
+                    .unwrap_or(0),
+            );
         } else {
-            self.order.push_back(key);
+            self.eviction_clock.push_back(key);
         }
         self.cached_bytes += new_bytes;
-        self.evict_to_fit();
+        self.evict_to_fit(key);
     }
 
-    /// Evict from the LRU front until both the count cap and the byte
-    /// budget hold. The freshly-inserted entry is at the MRU back, so
-    /// it is never the eviction target (a single entry larger than the
-    /// whole budget is kept — the budget is a soft cap, not a hard
-    /// per-entry gate; the per-entry `RECENT_BLOB_CACHE_MAX_BYTES` gate
-    /// already bounds the largest thing that reaches here).
-    fn evict_to_fit(&mut self) {
+    /// Advance the second-chance clock until both the count cap and the byte
+    /// budget hold. A recently read entry is marked cold and moved to the back
+    /// once before it can be evicted. The freshly inserted entry starts at the
+    /// back, so it is not the first target (a single entry larger than the
+    /// whole budget is kept — the budget is a soft cap, not a hard per-entry
+    /// gate; the per-entry `RECENT_BLOB_CACHE_MAX_BYTES` gate already bounds
+    /// the largest thing that reaches here).
+    fn evict_to_fit(&mut self, admitted_key: K) {
         loop {
             let over_count = self.entries.len() > self.capacity;
             let over_bytes = self
@@ -192,25 +203,31 @@ where
             if !over_count && !over_bytes {
                 break;
             }
-            let Some(oldest) = self.order.pop_front() else {
+            let Some(candidate) = self.eviction_clock.pop_front() else {
                 break;
             };
-            // A key appears at most once in `order`; if it was already
-            // removed by a concurrent logical path we just skip.
-            if let Some(evicted) = self.entries.remove(&oldest) {
+            let Some(entry) = self.entries.get(&candidate) else {
+                continue;
+            };
+            // The value that triggered this pass has not had an opportunity to
+            // serve a read yet. Keep it for this pass when another victim
+            // exists; otherwise an all-hot full cache would cycle through the
+            // residents and evict the new external object immediately.
+            if candidate == admitted_key && self.entries.len() > 1 {
+                self.eviction_clock.push_back(candidate);
+                continue;
+            }
+            if entry.recently_accessed.swap(false, Ordering::Relaxed) {
+                self.eviction_clock.push_back(candidate);
+                continue;
+            }
+            if let Some(evicted) = self.entries.remove(&candidate) {
                 self.cached_bytes = self.cached_bytes.saturating_sub(
                     self.byte_budget
-                        .map(|_| (self.sizer)(&evicted))
+                        .map(|_| (self.sizer)(&evicted.value))
                         .unwrap_or(0),
                 );
             }
-        }
-    }
-
-    fn promote(&mut self, key: &K) {
-        if let Some(position) = self.order.iter().position(|existing| existing == key) {
-            let key = self.order.remove(position).expect("position in range");
-            self.order.push_back(key);
         }
     }
 }
@@ -249,7 +266,7 @@ pub struct FsStore {
     #[cfg(test)]
     snapshot_batch_flushes: AtomicUsize,
     /// In-process trust cache for loose-blob cache mirrors. A hash
-    /// enters this LRU when this process either (a) wrote the blob
+    /// enters this bounded clock cache when this process either (a) wrote the blob
     /// itself via `promote_to_loose_uncompressed` or (b) successfully
     /// hash-verified it on first read. Bytes-on-disk for any entry
     /// in this cache can be trusted without a re-hash by subsequent
@@ -257,10 +274,10 @@ pub struct FsStore {
     ///
     /// Capped at [`VERIFIED_LOOSE_BLOB_CACHE_CAPACITY`] entries so a
     /// long-lived process (`heddled`) materialising many unrelated
-    /// trees doesn't drift into unbounded memory growth. LRU
+    /// trees doesn't drift into unbounded memory growth. Second-chance
     /// eviction; an evicted hash pays one extra BLAKE3 on its next
     /// read (cost-of-evict ≈ working-set-size BLAKE3 ops). Stored as
-    /// `RecentObjectCache<…, ()>` to share the LRU-eviction
+    /// `RecentObjectCache<…, ()>` to share the clock-eviction
     /// machinery with the other on-store caches; the unit value is
     /// a marker that the corresponding loose mirror was verified.
     ///
