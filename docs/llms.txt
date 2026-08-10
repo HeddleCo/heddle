@@ -17,12 +17,13 @@ This index covers Heddle's top-level reference docs. Start an agent at `heddle h
 - [Heddle 1.0 stability criterion](STABILITY.md): Status: strawman. Every <TBD: maintainer> marker is a policy
 - [Verification And Git Projection Cleanup Plan](VERIFICATION_CLEANUP_PLAN.md): Status: cleanup plan from the July 2026 branch review and follow-up design interview.
 - [Heddle Verification State Logic Map](VERIFICATION_STATE_LOGIC_MAP.md): This map documents both the current centralized repository verification
-- [Phase 4 (Wire Protocol) Summary](WIRE_PROTOCOL.md): This phase adds a minimal, local-testable wire protocol and remote operations (push/pull) for Heddle.
+- [Historical Phase 4 Wire Protocol Summary](WIRE_PROTOCOL.md): Status: historical design record. This page describes the retired
 - [Workspace Split Plan](WORKSPACE_SPLIT_PLAN.md): Status: Phase 1 executed on 2026-05-13. The workspace now lives across three repos:
 - [Heddle CLI exit codes](exit-codes.md): The CLI follows BSD sysexits.h so codes mean the same thing to humans, init
 - [.heddleignore](heddleignore.md): .heddleignore is heddle's per-repo file for telling heddle capture,
 - [Heddle JSON output schemas](json-schemas.md): This document is the canonical reference for every CLI verb that emits
 - [Heddle personas](personas.md): This doc names the three personas heddle's OSS quality is evaluated against. Each round of "persona eval" walks current heddle main from each persona's persp...
+- [CLI trace export](telemetry.md): Heddle can export command traces to an OpenTelemetry collector. The default
 - [heddle undo](undo.md): A safety net for the operations a daily user is most likely to want to roll back.
 - [Unwrap and Expect Policy](unwrap-policy.md): Heddle should reach zero production unwrap and expect call sites before 1.0. Until that cleanup is complete, the gate is per-crate: crates that already have...
 

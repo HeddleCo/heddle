@@ -38,9 +38,9 @@ core/CLI verification ownership and internal naming cleanup.
   rewritten as current canonical TOML.
 - The pre-fidelity state-hash compatibility path was removed at the repository
   format v3 boundary.
-- `PackedOpLog` accepts only the V4 container with the StateId-native OpRecord
-  schema. V2/V3 containers and record schemas 1–3 are refused without being
-  rewritten; repository format v3 is the history-format boundary.
+- The oplog accepts the V5 manifest over immutable V4 containers with the
+  StateId-native OpRecord schema. A manifest-free V4 container is the initial
+  base; V2/V3 containers and record schemas 1–3 are refused without rewrite.
 - The deprecated ignore-driven worktree descendant remover was deleted.
   `revert` now uses the tree-driven tracked-removal interface when it can prove
   the target state contains a subtree for the path, and otherwise refuses the
@@ -96,8 +96,8 @@ Verification:
 
 ### Old packed-oplog schemas
 
-Normal packed-oplog loads accept only the V4 container with StateId-native
-OpRecord schema 4. Old V2/V3 containers and record schemas 1–3 contain
+Normal oplog loads accept the V5 manifest layout and manifest-free V4 base
+containers with StateId-native OpRecord schema 4. Old V2/V3 containers and record schemas 1–3 contain
 16-byte ChangeIds that cannot be converted into content-derived StateIds from
 the oplog alone. They are therefore refused before entry decoding and are
 never rewritten.

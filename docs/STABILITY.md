@@ -3,7 +3,7 @@
 > **Status:** strawman. Every `<TBD: maintainer>` marker is a policy
 > decision the maintainer must set before this document can gate the
 > dogfood cutover. The grounded sections (current state, format
-> inventory, what `cargo deny`/`cargo audit` already enforce) are
+> inventory, what `cargo deny` already enforces) are
 > citations against today's tree; the placeholders are the proposals
 > the maintainer is being asked to confirm or override.
 
@@ -52,24 +52,25 @@ they tune the 1.0 targets the next sections propose against it.
   (130 573 regions / 36 227 missed → 72.26 % region; 81 841 lines /
   22 896 missed → 72.02 % line; 7 872 fns / 2 399 missed → 69.52 %
   function). Per-crate breakdown is in the run's "Generate coverage
-  summary" step; no per-crate floor is enforced today — the upload
-  only fires when `CODECOV_TOKEN` is set, and the workflow does not
-  fail the build on a coverage delta. The lift mechanism is
-  [`.github/workflows/rust-tests.yml`](../.github/workflows/rust-tests.yml)
-  (`coverage` job).
-- **Performance baseline.** Two perf surfaces today, neither gated:
+  summary" step. The current scheduled/manual gate enforces per-crate floors
+  before its optional Codecov upload; the policy and current thresholds are in
+  [`docs/contributor-guide/coverage.md`](contributor-guide/coverage.md), and the
+  implementation is [`.github/workflows/coverage.yml`](../.github/workflows/coverage.yml).
+- **Performance baseline.** Two perf surfaces today:
   - Snapshot-time microbench *cargo-test* harness at
     [`crates/cli/tests/performance.rs`](../crates/cli/tests/performance.rs)
-    (asserts on phase timings; runs as part of the test suite).
+    (asserts on phase timings). Relevant PRs run the deterministic 1,000-file
+    smoke contract; pushes to `main`, the weekly schedule, and manual runs keep
+    the full 10k/100k release contract in
+    [`.github/workflows/perf-core-loop.yml`](../.github/workflows/perf-core-loop.yml).
   - A real Criterion benchmark crate-target at
     [`crates/cli/benches/local_ops.rs`](../crates/cli/benches/local_ops.rs)
     (declared via `[[bench]]` in `crates/cli/Cargo.toml`). Run with
     `cargo bench -p heddle-cli`. Not currently invoked by any CI
     workflow.
-  No Bencher/Codspeed integration; no perf-regression gate in CI;
-  Criterion exists only in `heddle-cli`, not in the workspace crates
-  whose performance characteristics most matter for 1.0 (objects,
-  repo, refs, oplog).
+  There is no Bencher/Codspeed trend integration. Criterion exists only in
+  `heddle-cli`, not in the workspace crates whose performance characteristics
+  most matter for 1.0 (objects, repo, refs, oplog).
 - **Soak / long-running tests.** No continuous long-running soak
   harness today. One large-blob *stress* fixture exists at
   [`crates/cli/tests/cli_integration/realworld_git.rs:242`](../crates/cli/tests/cli_integration/realworld_git.rs)
@@ -77,18 +78,20 @@ they tune the 1.0 targets the next sections propose against it.
   gated `#[ignore]` and run only on demand via
   `HEDDLE_LARGE_BLOB_MB`), but there is no scheduled CI job that
   loops commit/undo over hours or days.
-- **Supply-chain gate.** `cargo deny` + `cargo audit` run on every PR
-  touching `Cargo.toml`/`Cargo.lock`/`deny.toml`/`audit.yml` and on a
-  weekly Monday cron — see
-  [`.github/workflows/audit.yml`](../.github/workflows/audit.yml) and
-  [`deny.toml`](../deny.toml). License allow-list, banned-crates list
-  (no OpenSSL/native-tls — rustls only), and RustSec advisory DB are
-  all enforced.
+- **Supply-chain gate.** `cargo deny check all` runs in the required
+  `Rust Tests / Static contracts` job on every PR and push to `main`, plus a
+  weekly Monday advisory refresh — see
+  [`.github/workflows/rust-tests.yml`](../.github/workflows/rust-tests.yml) and
+  [`deny.toml`](../deny.toml). The license allow-list, banned-crates list (no
+  OpenSSL/native-tls — rustls only), source policy, RustSec advisory DB, and
+  yanked-crate refusal are all enforced by that single policy engine.
 - **Format-version constants in the tree** (non-exhaustive — these
   are the ones currently named `FORMAT_VERSION` / `VERSION`; see
   files listed for the authoritative source):
-  - Packed oplog binary: `VERSION = 2`, magic `LMOPLOG\0` in
-    [`crates/oplog/src/oplog/packed_oplog.rs:21`](../crates/oplog/src/oplog/packed_oplog.rs).
+  - Oplog layout: V5 manifest (`HDOPV5\0\0`, manifest version 2) over binary-tiered
+    immutable V4 packed containers (`LMOPLOG\0`, StateId record schema 4) in
+    [`crates/oplog/src/oplog/segmented_oplog.rs`](../crates/oplog/src/oplog/segmented_oplog.rs)
+    and [`packed_oplog.rs`](../crates/oplog/src/oplog/packed_oplog.rs).
   - Operation dedup file: `DEDUP_FORMAT_VERSION = 1` in
     [`crates/repo/src/operation_dedup.rs:36`](../crates/repo/src/operation_dedup.rs).
   - Operation-index bucket: `INDEX_FORMAT_VERSION = 1` in
@@ -465,20 +468,18 @@ ref-name rules to live in this doc or in a sibling
 
 ### 3.4 Oplog format
 
-The packed oplog binary at `.heddle/oplog/` is identified by magic
-bytes `LMOPLOG\0` and an in-file `VERSION` field, currently `2`
-([`crates/oplog/src/oplog/packed_oplog.rs:21`](../crates/oplog/src/oplog/packed_oplog.rs)).
-The current code comment explicitly states: "`2` adds the W1 fields:
-each entry now encodes its `actor` (principal name + email,
-length-prefixed UTF-8) and `operation_id` (tag byte + optional
-16-byte UUID). Pre-W1 v1 files are rejected — there are no live
-deployments to migrate from."
+The oplog at `.heddle/oplog/` uses the V5 layout accepted by
+[ADR-0050](adr/0050-segmented-oplog-publication.md). `oplog.manifest` is the
+atomic authority over one immutable base and at most 64 binary-tiered immutable
+append containers. Containers use magic `LMOPLOG\0`, container version 4, and
+StateId-native record schema 4. A repository containing only a current V4
+`oplog.bin` remains valid and becomes the base of the first V5 manifest.
 
 **1.0 commitment.**
 
 <TBD: maintainer> — proposed:
 
-- 1.0 ships at oplog `VERSION = 2` (or whatever VERSION the 1.0
+- 1.0 ships at the V5 manifest / V4 container layout (or whatever layout the 1.0
   cut takes). Pre-1.0 oplog versions are not required to be
   readable post-1.0; the cutover replays the oplog into the new
   format at upgrade time.

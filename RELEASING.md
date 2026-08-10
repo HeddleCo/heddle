@@ -210,9 +210,10 @@ Set these GitHub Actions variables as well:
 | `HEDDLE_DEVELOPER_ID_APPLICATION` | Codesigning identity, e.g. `Developer ID Application: HeddleCo, LLC (33V6242M8S)` |
 
 The release-publisher GitHub App should be installed only on
-`homebrew-tap`, `scoop-heddle`, and `apt-heddle` and granted only
-`Contents: write` and `Pull requests: write`. The token minted in the
-`publish-manifests` job lists all three in its `repositories:` scope.
+`homebrew-tap` and `scoop-heddle` and granted only `Contents: write` and
+`Pull requests: write`. The token minted in the `publish-manifests` job lists
+those two repositories in its `repositories:` scope. Add `apt-heddle` only when
+the deferred apt channel below is activated.
 
 ## Scoop manifest publication
 
@@ -251,9 +252,14 @@ bucket CI passes. The wiring (renderer present, `bucket/heddle.json`
 path, App token, `HeddleCo/scoop-heddle` target) is asserted by
 `scripts/check-release-pipeline.sh`.
 
-## apt repository publication
+## apt repository publication (planned; currently deferred)
 
-The Debian/Ubuntu install path pins Heddle's signing key to its own
+No release job currently builds, signs, or publishes an apt pool, and the apt
+signing key is not exposed to Actions. The repository and branded endpoint do
+not yet exist. The material below records the approved design to activate once
+the human-infrastructure prerequisites are complete.
+
+The planned Debian/Ubuntu install path pins Heddle's signing key to its own
 keyring and scopes trust to Heddle's source with `signed-by=` (never
 `apt-key add`, which is removed on modern apt):
 
@@ -283,9 +289,9 @@ Architectures: amd64 arm64
 Signed-By: /usr/share/keyrings/heddle-archive-keyring.gpg
 ```
 
-The repository is `HeddleCo/apt-heddle` (git-backed pool + signed index,
-served as static files via GitHub Pages at `apt.heddle.sh`). Stable
-releases run `scripts/build-apt-pool.sh`, which:
+The planned repository is `HeddleCo/apt-heddle` (git-backed pool + signed
+index, served as static files via GitHub Pages at `apt.heddle.sh`). Once
+activated, stable releases will run `scripts/build-apt-pool.sh`, which:
 
 - verifies the two `*-unknown-linux-gnu.tar.gz` archives against the
   release `SHA256SUMS`, then builds `heddle_<version>_amd64.deb` and
@@ -303,22 +309,19 @@ releases run `scripts/build-apt-pool.sh`, which:
   subkey comes from the `HEDDLE_APT_GPG_PRIVATE_KEY` secret; `apt-heddle`
   holds no secrets.
 
-Like the Homebrew cask and Scoop manifest, the signed tree is not pushed
-directly: the `publish-manifests` job uses the same release-publisher App
-token (scoped to include `apt-heddle`) and the shared
-`./.github/actions/publish-manifest` composite action to open a PR
-against `apt-heddle` carrying the whole pool + signed index
-(`manifest-path: .`). A maintainer merges it; GitHub Pages then serves
-the merged tree. The wiring (`scripts/build-apt-pool.sh` present, the
-GPG secret imported into an ephemeral `GNUPGHOME`, the `apt-heddle`
-target, and the widened App-token scope) is asserted by
-`scripts/check-release-pipeline.sh`.
+The intended publication shape mirrors Homebrew and Scoop: the
+`publish-manifests` job will use the release-publisher App and the shared
+`./.github/actions/publish-manifest` action to open a PR carrying the signed
+tree. That wiring is deliberately absent today. `scripts/build-apt-pool.sh`
+remains as the reviewed renderer, while `scripts/check-release-pipeline.sh`
+asserts that no live apt build, signing secret, token scope, or publisher target
+appears before the channel is activated.
 
 The design rationale — hosting platform, GPG key strategy, key rotation,
 and install UX — lives in
 `docs/design/apt-hosting-gpg-spike.md`.
 
-### Required GitHub Actions secrets (apt)
+### Planned GitHub Actions secret (apt; do not provision yet)
 
 - `HEDDLE_APT_GPG_PRIVATE_KEY` — the armored Ed25519 **signing subkey**
   exported offline from the primary. The primary stays offline; only the
@@ -328,9 +331,8 @@ and install UX — lives in
 ### apt human-infra prerequisites (org-admin)
 
 These are one-time setup steps tracked in
-`docs/design/apt-hosting-gpg-spike.md`. Until they land, the apt leg
-opens its PR but the published repo is not yet reachable at the branded
-URL:
+`docs/design/apt-hosting-gpg-spike.md`. Until they land, no apt build, signing,
+or publication leg runs:
 
 1. Create `HeddleCo/apt-heddle`; install the "Heddle Release Publisher"
    GitHub App on it (`Contents: write` + `Pull requests: write`).
@@ -413,9 +415,9 @@ Apple-hosted stage, adding complexity without reducing the current Apple build.
 
 ## Pipeline-contract check
 
-A lightweight `release-pipeline-check` job runs on every PR. It
-checks `.github/workflows/release.yml` and `RELEASING.md` in two
-passes:
+The required `Rust Tests / Static contracts` job runs the release-pipeline
+asserter on every PR and push to `main`. It checks
+`.github/workflows/release.yml` and `RELEASING.md` in two passes:
 
 - **Smoke (grep).** Cheap content checks: the five target triples, the
   strict-semver push trigger, presence of the `validate-tag` trust gate
@@ -541,9 +543,9 @@ settings. No workflow change is needed.
 
 ### Pipeline-contract check
 
-`scripts/check-publish-pipeline.sh` runs alongside the binary
-release check on every PR (via `release-pipeline-check.yml`). Same
-two-pass shape as `check-release-pipeline.sh`:
+`scripts/check-publish-pipeline.sh` runs alongside the binary release check in
+the required `Rust Tests / Static contracts` job. It has the same two-pass
+shape as `check-release-pipeline.sh`:
 
 - **Smoke (grep).** push-to-main trigger present, `workflow_dispatch`
   absent, `validate-publish` + `publish` jobs both present, publish

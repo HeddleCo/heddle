@@ -95,6 +95,19 @@ Binary ownership follows the same split:
 - `heddle` (this repo) owns local repository operations and its private hosted transport/downloader runtime
 - the hosted server runtime and admin operations live in the sibling **weft** repo (no `hosted` binary in this workspace)
 
+Native review commands call `daemon::local_review::LocalStateReview` directly
+in-process. That module uses Heddle-owned domain types; it is not an
+implementation of the API-owned hosted `StateReviewService` and does not use
+Prost as its local interface. Its repository-local idempotency cache encodes
+responses as JSON under the explicit `local.state_review.sign/json-v1`
+generation. The generation is private replay metadata, not a public JSON schema
+or a durable Heddle object encoding.
+
+Hosted review calls remain a separate boundary: `HeddleCo/api` owns the
+protobuf contract and Prost-generated Rust messages, and Weft owns the hosted
+producer. Native `heddle-wire` type removal does not migrate that hosted
+producer by implication.
+
 ## Core Repository Model
 
 ### Objects
@@ -1346,9 +1359,9 @@ core/CLI verification ownership and internal naming cleanup.
   rewritten as current canonical TOML.
 - The pre-fidelity state-hash compatibility path was removed at the repository
   format v3 boundary.
-- `PackedOpLog` accepts only the V4 container with the StateId-native OpRecord
-  schema. V2/V3 containers and record schemas 1–3 are refused without being
-  rewritten; repository format v3 is the history-format boundary.
+- The oplog accepts the V5 manifest over immutable V4 containers with the
+  StateId-native OpRecord schema. A manifest-free V4 container is the initial
+  base; V2/V3 containers and record schemas 1–3 are refused without rewrite.
 - The deprecated ignore-driven worktree descendant remover was deleted.
   `revert` now uses the tree-driven tracked-removal interface when it can prove
   the target state contains a subtree for the path, and otherwise refuses the
@@ -1404,8 +1417,8 @@ Verification:
 
 ### Old packed-oplog schemas
 
-Normal packed-oplog loads accept only the V4 container with StateId-native
-OpRecord schema 4. Old V2/V3 containers and record schemas 1–3 contain
+Normal oplog loads accept the V5 manifest layout and manifest-free V4 base
+containers with StateId-native OpRecord schema 4. Old V2/V3 containers and record schemas 1–3 contain
 16-byte ChangeIds that cannot be converted into content-derived StateIds from
 the oplog alone. They are therefore refused before entry decoding and are
 never rewritten.
@@ -2097,7 +2110,7 @@ Source: docs/STABILITY.md
 > **Status:** strawman. Every `<TBD: maintainer>` marker is a policy
 > decision the maintainer must set before this document can gate the
 > dogfood cutover. The grounded sections (current state, format
-> inventory, what `cargo deny`/`cargo audit` already enforce) are
+> inventory, what `cargo deny` already enforces) are
 > citations against today's tree; the placeholders are the proposals
 > the maintainer is being asked to confirm or override.
 
@@ -2146,24 +2159,25 @@ they tune the 1.0 targets the next sections propose against it.
   (130 573 regions / 36 227 missed → 72.26 % region; 81 841 lines /
   22 896 missed → 72.02 % line; 7 872 fns / 2 399 missed → 69.52 %
   function). Per-crate breakdown is in the run's "Generate coverage
-  summary" step; no per-crate floor is enforced today — the upload
-  only fires when `CODECOV_TOKEN` is set, and the workflow does not
-  fail the build on a coverage delta. The lift mechanism is
-  [`.github/workflows/rust-tests.yml`](../.github/workflows/rust-tests.yml)
-  (`coverage` job).
-- **Performance baseline.** Two perf surfaces today, neither gated:
+  summary" step. The current scheduled/manual gate enforces per-crate floors
+  before its optional Codecov upload; the policy and current thresholds are in
+  [`docs/contributor-guide/coverage.md`](contributor-guide/coverage.md), and the
+  implementation is [`.github/workflows/coverage.yml`](../.github/workflows/coverage.yml).
+- **Performance baseline.** Two perf surfaces today:
   - Snapshot-time microbench *cargo-test* harness at
     [`crates/cli/tests/performance.rs`](../crates/cli/tests/performance.rs)
-    (asserts on phase timings; runs as part of the test suite).
+    (asserts on phase timings). Relevant PRs run the deterministic 1,000-file
+    smoke contract; pushes to `main`, the weekly schedule, and manual runs keep
+    the full 10k/100k release contract in
+    [`.github/workflows/perf-core-loop.yml`](../.github/workflows/perf-core-loop.yml).
   - A real Criterion benchmark crate-target at
     [`crates/cli/benches/local_ops.rs`](../crates/cli/benches/local_ops.rs)
     (declared via `[[bench]]` in `crates/cli/Cargo.toml`). Run with
     `cargo bench -p heddle-cli`. Not currently invoked by any CI
     workflow.
-  No Bencher/Codspeed integration; no perf-regression gate in CI;
-  Criterion exists only in `heddle-cli`, not in the workspace crates
-  whose performance characteristics most matter for 1.0 (objects,
-  repo, refs, oplog).
+  There is no Bencher/Codspeed trend integration. Criterion exists only in
+  `heddle-cli`, not in the workspace crates whose performance characteristics
+  most matter for 1.0 (objects, repo, refs, oplog).
 - **Soak / long-running tests.** No continuous long-running soak
   harness today. One large-blob *stress* fixture exists at
   [`crates/cli/tests/cli_integration/realworld_git.rs:242`](../crates/cli/tests/cli_integration/realworld_git.rs)
@@ -2171,18 +2185,20 @@ they tune the 1.0 targets the next sections propose against it.
   gated `#[ignore]` and run only on demand via
   `HEDDLE_LARGE_BLOB_MB`), but there is no scheduled CI job that
   loops commit/undo over hours or days.
-- **Supply-chain gate.** `cargo deny` + `cargo audit` run on every PR
-  touching `Cargo.toml`/`Cargo.lock`/`deny.toml`/`audit.yml` and on a
-  weekly Monday cron — see
-  [`.github/workflows/audit.yml`](../.github/workflows/audit.yml) and
-  [`deny.toml`](../deny.toml). License allow-list, banned-crates list
-  (no OpenSSL/native-tls — rustls only), and RustSec advisory DB are
-  all enforced.
+- **Supply-chain gate.** `cargo deny check all` runs in the required
+  `Rust Tests / Static contracts` job on every PR and push to `main`, plus a
+  weekly Monday advisory refresh — see
+  [`.github/workflows/rust-tests.yml`](../.github/workflows/rust-tests.yml) and
+  [`deny.toml`](../deny.toml). The license allow-list, banned-crates list (no
+  OpenSSL/native-tls — rustls only), source policy, RustSec advisory DB, and
+  yanked-crate refusal are all enforced by that single policy engine.
 - **Format-version constants in the tree** (non-exhaustive — these
   are the ones currently named `FORMAT_VERSION` / `VERSION`; see
   files listed for the authoritative source):
-  - Packed oplog binary: `VERSION = 2`, magic `LMOPLOG\0` in
-    [`crates/oplog/src/oplog/packed_oplog.rs:21`](../crates/oplog/src/oplog/packed_oplog.rs).
+  - Oplog layout: V5 manifest (`HDOPV5\0\0`, manifest version 2) over binary-tiered
+    immutable V4 packed containers (`LMOPLOG\0`, StateId record schema 4) in
+    [`crates/oplog/src/oplog/segmented_oplog.rs`](../crates/oplog/src/oplog/segmented_oplog.rs)
+    and [`packed_oplog.rs`](../crates/oplog/src/oplog/packed_oplog.rs).
   - Operation dedup file: `DEDUP_FORMAT_VERSION = 1` in
     [`crates/repo/src/operation_dedup.rs:36`](../crates/repo/src/operation_dedup.rs).
   - Operation-index bucket: `INDEX_FORMAT_VERSION = 1` in
@@ -2559,20 +2575,18 @@ ref-name rules to live in this doc or in a sibling
 
 ### 3.4 Oplog format
 
-The packed oplog binary at `.heddle/oplog/` is identified by magic
-bytes `LMOPLOG\0` and an in-file `VERSION` field, currently `2`
-([`crates/oplog/src/oplog/packed_oplog.rs:21`](../crates/oplog/src/oplog/packed_oplog.rs)).
-The current code comment explicitly states: "`2` adds the W1 fields:
-each entry now encodes its `actor` (principal name + email,
-length-prefixed UTF-8) and `operation_id` (tag byte + optional
-16-byte UUID). Pre-W1 v1 files are rejected — there are no live
-deployments to migrate from."
+The oplog at `.heddle/oplog/` uses the V5 layout accepted by
+[ADR-0050](adr/0050-segmented-oplog-publication.md). `oplog.manifest` is the
+atomic authority over one immutable base and at most 64 binary-tiered immutable
+append containers. Containers use magic `LMOPLOG\0`, container version 4, and
+StateId-native record schema 4. A repository containing only a current V4
+`oplog.bin` remains valid and becomes the base of the first V5 manifest.
 
 **1.0 commitment.**
 
 <TBD: maintainer> — proposed:
 
-- 1.0 ships at oplog `VERSION = 2` (or whatever VERSION the 1.0
+- 1.0 ships at the V5 manifest / V4 container layout (or whatever layout the 1.0
   cut takes). Pre-1.0 oplog versions are not required to be
   readable post-1.0; the cutover replays the oplog into the new
   format at upgrade time.
@@ -2957,10 +2971,11 @@ Use the glossary terms in `CONTEXT.md` exactly.
      export lossy paths prefer reconstruct → residual → Bridge Mirror, with a
      hard fail when neither residual nor mirror can supply the object.
    - Fsck verifies mapped non-reconstructable objects have residuals.
-     (**Not yet** — residual validation remains follow-on.)
+     (**Shipped** — missing or invalid residual bytes are a hard fsck failure.)
    - Export/write-through can use residuals instead of the mirror for lossy objects.
-     (**Partial** — residual install is hooked; full closure capture on lossy
-     import and mirror-free export are not complete.)
+     (**Shipped** — imports capture non-reconstructable commits with their full
+     tree/blob closure plus annotated-tag wrappers; fresh export and
+     write-through install that closure without the mirror object warehouse.)
    - Old `.heddle/git` mirrors can lazily migrate needed residuals.
      (**Partial** — migrate helper exists; automatic full-mirror migration and
      explicit mirror deletion maintenance are not complete. Mirror is **not**
@@ -3125,7 +3140,7 @@ flowchart TD
 | Remote push/pull | Transfer commands refresh tracking and return post-transfer verification. `remote_ahead` and `remote_untracked` are verified clean publish guidance and recommend `push`; behind and diverged states are blockers. If upstream still points at the exact Git checkpoint just undone locally, verification reports `remote_contains_undone_checkpoint` and recommends `heddle push --force` with `heddle undo --redo` as the restore-work option, never `heddle pull` as the primary action. A command may not claim synced while blocking remote drift remains. |
 | Integrated remote divergence | If a diverged upstream has been pulled, imported, and integrated into the current Heddle state, `needs_checkpoint` becomes the primary blocker even while Git tracking still reports divergence. `commit` is allowed in exactly that integrated state because it writes the Git commit that turns the remaining state into ordinary `heddle push` work. |
 | Git projection import/repair JSON (**Target**) | `import git` and `fsck repair git` success JSON do not yet embed the post-operation `RepositoryVerificationState` — the `verification` field is `#[serde(skip_serializing)]` on those envelopes, so it is omitted from `--output json`. Agents still need a follow-up `verify` call to know whether the operation left the repository verified or still blocked. Embedding the proof inline (alongside recommended action and recovery command metadata) is target behavior. |
-| Generated artifact safety | `status`, `capture`, `commit`, `ready`, and `land` must respect explicit ignore rules, keep explicitly ignored changes from becoming fake work, and surface unignored generated/vendor/dist/build paths as ordinary dirty work or heavy-impact work when captured. Git-overlay mode prefers `.gitignore` for shared ignore policy so raw `git status --short` and Heddle agree by construction; `.heddleignore` remains available for Heddle-only excludes. Heddle must not install or assume default generated-noise patterns beyond `.heddle/`. Large captures and deletions require explicit force. |
+| Generated artifact safety | `status`, `capture`, `commit`, `ready`, and `land` must respect the ordered union of root `.gitignore` and `.heddleignore`, keep explicitly ignored changes from becoming fake work, and surface unignored generated/vendor/dist/build paths as ordinary dirty work or heavy-impact work when captured. Heddle must not install or assume default generated-noise patterns beyond `.heddle/`. Git-overlay captures above the existing safety limits require explicit force; every capture changing 500 or more paths also emits a non-blocking warning. |
 | JSON and op-id | Runtime command surfaces, command catalog output, schemas, JSON envelopes, and op-id support are derived from the command contract table. No current command advertises generated-resume op-id persistence; agents that need replay must supply an explicit id only to commands with `supports_op_id: true`. |
 | Persona-driven UX | Human text answers what happened, current state, and next step. Agent/script JSON keeps stdout parseable, stderr reserved for error envelopes, and action metadata executable or explicitly templated. Support/maintainer diagnostics live in `doctor`, and verbose/version surfaces. |
 
@@ -3218,11 +3233,22 @@ the new behavior.
 Source: docs/WIRE_PROTOCOL.md
 ========================================================================
 
-# Phase 4 (Wire Protocol) Summary
+# Historical Phase 4 Wire Protocol Summary
 
-This phase adds a minimal, local-testable wire protocol and remote operations (push/pull) for Heddle.
+> **Status: historical design record.** This page describes the retired
+> hand-written TCP/MessagePack request-response surface. It is not the current
+> public hosted protocol contract.
 
-## Status: Complete
+The current hosted contract is owned by `HeddleCo/api` and uses generated
+protobuf messages (Prost in Rust). The `heddle-wire` crate retains native object
+transfer, graph-planning, pack, and failure-projection primitives, but legacy
+envelopes such as `ListRefs`, `RefsList`, `RefFilter`, `WantObjects`, and
+`UpdateRef` have been removed. Any remaining Weft imports of those names must be
+migrated in the coordinated clean cut before the incompatible Heddle crate is
+published.
+
+The sections below are retained only to explain the original Phase 4 design and
+must not be used as implementation or integration guidance.
 
 The wire protocol is fully implemented and tested. All core VCS commands are operational.
 
@@ -3846,22 +3872,64 @@ The matcher is `gitignore`-compatible: glob patterns (`*.log`,
 `config/*.toml`), `**` for recursive directory globs, leading `/`
 for root-anchored, trailing `/` for directory-only, and `!` for
 negation. Order is significant — a later rule can re-include a path
-a previous rule ignored. The same rules apply as in `.gitignore`.
+a previous rule ignored. Heddle reads only the two files at the worktree
+root; nested per-directory `.gitignore` and `.heddleignore` files are captured
+as ordinary files but their patterns are not evaluated.
 
 ## Relationship to `.gitignore`
 
-In Git-overlay repositories, Heddle reads `.gitignore` first and
-treats it as the preferred shared ignore policy so raw `git status`
-and Heddle agree. Use `.heddleignore` only for Heddle-specific
-excludes that should not affect Git.
+In both native and Git-overlay repositories, Heddle reads the root
+`.gitignore` and root `.heddleignore` into one ordered rule stream. It reads
+`.gitignore` first and `.heddleignore` last. A positive ignore in either file
+therefore ignores a path when no later rule contradicts it. For negations,
+last match wins across the combined stream: a `.heddleignore` `!pattern` can
+re-include a path ignored by `.gitignore`, while a `.gitignore` negation cannot
+override a later `.heddleignore` ignore. Repeated patterns are preserved so a
+later rule after a negation is not accidentally discarded.
 
-In native Heddle repositories, `.heddleignore` is the ignore policy.
-Heddle does not auto-ignore project artifacts such as build outputs,
-dependency folders, caches, or generated files unless they are named
-in `.heddleignore`.
+Native mode reads `.gitignore` directly from the worktree even when no `.git`
+directory exists. Reading it does not discover, initialize, or otherwise
+require a Git repository.
+
+`heddle status` and `heddle capture` share this matcher in the root checkout
+and in isolated thread checkouts (`heddle start --path …`). Build junk that
+matches a root ignore rule is never listed as unsaved work and never enters
+permanent history.
 
 Heddle always protects its own `.heddle/` metadata. Other paths must
-be explicit in `.gitignore` or `.heddleignore`.
+be explicit in `.gitignore`, `.heddleignore`, or the config key below.
+
+## Config key: `[worktree] ignore`
+
+Repository config (`.heddle/config.toml`) can also contribute patterns:
+
+```toml
+[worktree]
+ignore = [".heddle", "scratch/"]
+```
+
+Config patterns are loaded first, then root `.gitignore`, then
+`.heddle/info/exclude`, then root `.heddleignore`. Prefer the ignore files
+for project policy; use `[worktree] ignore` for operator-local or
+repo-engine defaults that should not appear as a tracked ignore file.
+Default config always includes `.heddle`.
+
+## Capture path scoping
+
+`heddle capture` has no `--path` filter and no staging area: it saves the
+full unignored worktree. Exclude build junk with ignore rules before
+capture; do not expect path selection on the capture command. Path-scoped
+capture is a possible follow-up feature, not current behaviour.
+
+Ignore changes affect future captures only. Existing states are immutable, so
+previously captured artifacts remain in history. To clean the current line of
+work, add the root ignore rule and make one cleanup capture; the new state drops
+the now-ignored paths while older states retain them.
+
+A single capture that changes 500 or more paths emits a warning naming both
+root ignore files. The threshold is deliberately above ordinary edits and
+repo-wide refactors while still catching the reported 700-plus-path artifact
+sweep. The warning does not block an intentional large capture.
 
 ## Common-noise hints
 
@@ -3931,9 +3999,9 @@ linked in O(1) rather than duplicated per thread.
 
 What it links, and what it doesn't:
 
-- **Linked:** top-level directories at the origin root that match an
-  ignore rule (in Git-overlay repos that includes `.gitignore`; in
-  native repos, `.heddleignore`).
+- **Linked:** top-level directories at the origin root that match a
+  root ignore rule (in both modes that includes `.gitignore` and
+  `.heddleignore`).
 - **Not linked:** the admin directories `.git` and `.heddle` (even
   though they're ignored), plain files, and per-package dependency dirs
   nested below the root (e.g. a monorepo's `packages/*/node_modules`).
@@ -4385,6 +4453,8 @@ through Sley; it does not require a Git executable.
   },
   "promotion_suggested": false,
   "heavy_impact_paths": [],
+  "captured_path_count": 3,
+  "warnings": [],
   "message": "captured state hc-capture123"
 }
 ```
@@ -4581,6 +4651,7 @@ blocked peer in `stopped_at`.
 | `confidence` | number \| null | required for `capture` | Agent or human confidence score, when supplied. |
 | `principal`, `agent` | object / object \| null | required for `capture` | Accountable principal and optional agent/model provenance recorded on the captured state. |
 | `promotion_suggested`, `heavy_impact_paths` | bool / array<string> | required for `capture` | Thread-promotion signal. Empty array if none. |
+| `captured_path_count`, `warnings` | number / array<string> | required for `capture` | Number of paths changed by this capture and non-blocking warnings. Captures changing 500 or more paths include a bulk-capture warning. |
 | `output_kind`, `status` | string \| null | required when present | Stable output discriminator and machine status; `undo`, `undo --redo`, and `undo --recover` report `completed`; undo/redo previews report `preview`. |
 | `message`, `summary` | string \| null | required when present | Human-readable result. |
 | `next_action`, `recommended_action` | string \| null | required | Primary next command, if one is known. |
@@ -4912,6 +4983,7 @@ emits an array of the same object.
     }
   ],
   "auto": [],
+  "abandoned": [],
   "reclaimed_bytes": 0,
   "would_reclaim_bytes": 12288,
   "skipped": []
@@ -5393,6 +5465,8 @@ shape is the same capture envelope.
   "confidence": 0.8,
   "promotion_suggested": false,
   "heavy_impact_paths": [],
+  "captured_path_count": 2,
+  "warnings": [],
   "message": "Captured hc-sqr398dvx9ay"
 }
 ```
@@ -7034,7 +7108,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact trust remove",
       "redact purge apply"
     ],
-    "accepted_opaque_schema_verbs_total": 39,
+    "accepted_opaque_schema_verbs_total": 40,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
@@ -7046,14 +7120,14 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact trust remove",
       "redact purge apply"
     ],
-    "advanced_scope_json_commands_total": 108,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 39,
+    "advanced_scope_json_commands_total": 109,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 40,
     "advanced_scope_mutating_commands_total": 62,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 22,
-    "catalog_commands_total": 186,
+    "catalog_commands_total": 187,
     "catalog_mutating_commands_total": 90,
-    "json_commands_total": 148,
-    "json_commands_with_accepted_opaque_schema": 39,
+    "json_commands_total": 149,
+    "json_commands_with_accepted_opaque_schema": 40,
     "json_commands_with_schema": 109,
     "json_commands_without_schema": 0,
     "json_mutating_commands_total": 86,
@@ -7063,9 +7137,9 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "mutating_commands_with_accepted_opaque_schema": 22,
     "mutating_commands_with_schema": 64,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 39,
+    "opaque_schema_verbs_total": 40,
     "status": "available",
-    "summary": "186 command(s), 148 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+    "summary": "187 command(s), 149 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 40 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -7103,7 +7177,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "186 command(s), 148 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+  "summary": "187 command(s), 149 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 40 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -7474,6 +7548,13 @@ no record exists — public-by-absence):
 {"hotspots": [{"path": "src/lib.rs", "score": 0.87, "reasons": ["changed often"]}]}
 ```
 
+`heddle semantic diff --output json` emits the attached-index symbol deltas
+for its two state arguments without parsing source:
+
+```json
+{"output_kind": "semantic_diff", "from_state": "hs-0000000000000000000000000000000000000000000000000000", "to_state": "hs-1111111111111111111111111111111111111111111111111111", "deltas": [{"change": "modified", "anchor": {"file": "src/lib.rs", "symbol": "calculate"}, "kind": "function", "old_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "new_hash": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}]}
+```
+
 ## Other verbs
 
 The following verbs also emit `--output json`. Their shapes follow the same
@@ -7680,6 +7761,60 @@ Past rounds:
 - Round 4 (2026-05-27) — identified the missing "regular AI dev" persona and motivated this doc.
 
 ========================================================================
+Source: docs/telemetry.md
+========================================================================
+
+# CLI trace export
+
+Heddle can export command traces to an OpenTelemetry collector. The default
+CLI build does not include the OTLP exporter. Build it explicitly with:
+
+```sh
+cargo build -p heddle-cli --features telemetry
+```
+
+In a telemetry build, export remains off at runtime unless a trace endpoint is
+configured. Without one, Heddle does not construct a tracer provider, exporter,
+or telemetry network client.
+
+Then opt in for one shell with the collector's OTLP/HTTP base endpoint:
+
+```sh
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+heddle status
+```
+
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` takes precedence when both variables are
+set and, per the OTLP convention for signal-specific endpoints, should include
+the `/v1/traces` path. A persistent user configuration uses the same complete
+trace URL:
+
+```toml
+[logging]
+otel_traces_endpoint = "http://127.0.0.1:4318/v1/traces"
+```
+
+For the pilot observability stack under `workspace/obs`, set the endpoint to
+`http://<collector-host>:4318`; use `127.0.0.1` when Heddle runs on the same
+host as the collector.
+
+Each traced invocation emits a `heddle.command` span with the static command
+name, success/error status, numeric exit code, and duration. Existing
+`HEDDLE_PROFILE` timings are represented as `heddle.phase` child spans where
+the command already measures them. Heddle does not attach paths, argv, object
+IDs, remote URLs, environment values, or filenames. Hosted request context
+propagates W3C `traceparent` and `tracestate`; baggage is not collected or sent.
+
+Trace export is batched on a background worker. Process exit attempts a
+best-effort flush bounded to 250 milliseconds, so an unavailable collector
+cannot hold command completion indefinitely.
+
+The client-side spans and export are useful independently. End-to-end traces
+also require Weft to extract the propagated context from
+`CallContext.trace.traceparent` and `CallContext.trace.tracestate` in the Iroh
+request opening prelude and use it as the parent of its RPC lifecycle span.
+
+========================================================================
 Source: docs/undo.md
 ========================================================================
 
@@ -7691,8 +7826,14 @@ Every completed undo preserves its pre-undo state in a checkout-local internal
 ref. Run `heddle undo --recover` to materialize that state later, even after a
 divergent capture has made redo unavailable. Recovery preserves the current
 `HEAD` and attached thread, restores the saved tree as dirty worktree changes,
-and recommends `heddle capture`. It refuses without changing files when the
-recovery state is absent or the worktree is dirty.
+and recommends `heddle capture`. Unrelated local changes do not block recovery;
+it refuses without changing files only when the recovery state is absent or
+when recovery would overwrite a differing local change at the same path.
+
+Undo operations that materialize an earlier tree are explicitly destructive.
+Run `heddle undo --preview` to inspect them and `heddle undo --hard` to permit
+the worktree rewind. Plain `heddle undo` refuses before changing repository
+state or files when the selected inverse would rewrite the worktree.
 
 This document describes the user-facing surface shipped under
 [HeddleCo/heddle#23](https://github.com/HeddleCo/heddle/issues/23). The
@@ -7761,12 +7902,20 @@ contracts below are enforced by integration tests in
   destroyed the underlying bytes (the redaction's audit-trail role is then
   load-bearing).
 
-- **Dirty worktree refusal.** If you have uncommitted changes (modified
-  tracked files, untracked files), `heddle undo` refuses and surfaces the
-  dirty paths. Capture the changes with `heddle capture -m "..."` (or remove
-  them) and retry. `heddle undo --recover` enforces the same refusal before
-  materializing the preserved state. The check is shared with `revert` and
-  `sync`.
+- **Explicit destructive opt-in.** If the selected inverse would materialize
+  an earlier tree, plain `heddle undo` refuses before mutation and points to
+  `--preview` and `--hard`. `heddle undo --hard` still refuses if the worktree
+  is dirty and surfaces the exact paths that would otherwise be lost. Capture
+  the changes with `heddle capture -m "..."` (or move them) and retry.
+- **Recovery overlays unrelated changes.** `heddle undo --recover` restores
+  the preserved tree as worktree changes without moving `HEAD`. Unrelated
+  modified or untracked paths are left in place. Recovery refuses only when
+  it would overwrite differing local content at a path it needs to write or
+  remove.
+- **Ignore controls survive undo.** A worktree rewind preserves the existing
+  `.heddleignore`. Git-overlay repositories also preserve their existing
+  `.gitignore`. Undo therefore cannot expose previously ignored local junk and
+  strand its own recovery command.
 - **Destructive-boundary refusal.** If the state the inverse would restore
   has been removed from the object store — typically by `heddle maintenance gc --prune`
   reaching past the live oplog window — `heddle undo` refuses with a single
@@ -7804,6 +7953,7 @@ contracts below are enforced by integration tests in
 | `--list`                   | Print the recent batches without undoing.                   |
 | `--depth <N>`              | How many batches `--list` shows (default 20).               |
 | `--preview` / `--dry-run`  | Print what would change without applying.                   |
+| `--hard`                   | Permit an undo that rewinds worktree files.                  |
 | `--redo`                   | Re-apply operations that a prior `undo` rewound.            |
 | `--recover`                | Restore the last undo's saved state as worktree changes without moving HEAD. |
 | `--allow-redact-undo`      | Explicit opt-in to undo a `heddle redact apply` (see "Safety contracts"). |
