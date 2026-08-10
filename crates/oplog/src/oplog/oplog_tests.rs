@@ -15,7 +15,9 @@ use tempfile::TempDir;
 
 use super::{
     IsolationKey, IsolationPrecondition, OpLog, OpLogRecorder, OpRecord,
-    ReconstructibleCommitOutcome, oplog_backend::OpLogBackend,
+    ReconstructibleCommitOutcome,
+    oplog_backend::OpLogBackend,
+    packed_oplog::{packed_file_full_reads, reset_packed_file_full_reads},
 };
 
 fn create_oplog() -> (TempDir, OpLog) {
@@ -995,6 +997,68 @@ fn record_batch_exactly_once_empty_and_distinct_ids() {
         .unwrap();
     assert!(a.is_some() && b.is_some());
     assert_ne!(a, b, "distinct transaction ids commit independently");
+}
+
+#[test]
+fn committed_transaction_ids_take_one_fresh_cross_process_view() {
+    let (temp, writer) = create_oplog();
+    let observer = OpLog::new_unattributed(temp.path().join(".heddle"));
+    assert!(
+        observer
+            .committed_transaction_ids(["tx-first", "tx-second"])
+            .unwrap()
+            .is_empty()
+    );
+
+    for transaction_id in ["tx-first", "tx-second"] {
+        writer
+            .record_batch_exactly_once(
+                vec![OpRecord::TransactionCommit {
+                    transaction_id: transaction_id.to_string(),
+                    op_count: 0,
+                }],
+                Some("lane"),
+                transaction_id,
+            )
+            .unwrap();
+    }
+
+    reset_packed_file_full_reads();
+    let committed = observer
+        .committed_transaction_ids(["tx-first", "tx-second", "missing"])
+        .unwrap();
+    assert_eq!(
+        committed,
+        std::collections::HashSet::from(["tx-first".to_string(), "tx-second".to_string(),]),
+        "the bulk recovery view must refresh once and observe transactions committed by another handle"
+    );
+    assert_eq!(
+        packed_file_full_reads(),
+        2,
+        "one refreshed V5 view validates the base plus the merged binary-tier segment once, not once per candidate"
+    );
+}
+
+#[test]
+fn cached_reader_survives_writer_compaction_and_then_refreshes() {
+    let (temp, writer) = create_oplog();
+    let observer = OpLog::new_unattributed(temp.path().join(".heddle"));
+    let state = crate::oplog::fresh_state_id();
+    writer.record_snapshot(&state, None, None, None).unwrap();
+    assert_eq!(observer.recent_batches(1).unwrap().len(), 1);
+
+    for _ in 1..32 {
+        let state = crate::oplog::fresh_state_id();
+        writer.record_snapshot(&state, None, None, None).unwrap();
+    }
+    assert_eq!(
+        observer.recent_batches(1).unwrap().len(),
+        1,
+        "cached file handles remain readable after the selected generation is unlinked"
+    );
+    observer.refresh_cache().unwrap();
+    assert_eq!(observer.head_id().unwrap(), 32);
+    assert_eq!(observer.recent_batches(32).unwrap().len(), 32);
 }
 
 /// Covers the **default** (non-atomic) `record_batch_scoped_if_no_transaction`

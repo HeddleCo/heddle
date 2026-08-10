@@ -3375,16 +3375,13 @@ the `discuss_show` discriminator:
 {"valid": true, "errors": [], "warnings": [], "objects_checked": 42, "git_projection_checked": false, "repair_target": null, "repaired": false, "repairs": []}
 ```
 
-`heddle oplog recover --output json` emits an operator recovery report
-(`output_kind` is `oplog_recover`; `strategy` is `footer-guided` or
-`forward-greedy`; `prior_recovery` is `true` when the everyday read path's
-auto-fallback already salvaged the oplog, in which case the detail is read
-back from the `.oplog.recovery` sidecar and `quarantine_path` is omitted;
-`quarantine_path` is present only when this command performed the salvage
-itself):
+`heddle oplog recover --output json` emits a non-mutating health report for a
+repository whose V5 manifest-selected oplog containers pass strict repository
+open validation. Damaged selected generations fail at that validation boundary
+instead of relying on the removed single-file `oplog.bin` auto-salvage path:
 
 ```json
-{"output_kind": "oplog_recover", "already_healthy": true, "prior_recovery": true, "strategy": "forward-greedy", "entries_recovered": 3, "entries_lost": 1, "damaged_byte_start": 412, "damaged_byte_end": 690, "sidecar_path": "/work/project/.heddle/oplog/oplog.bin.oplog.recovery"}
+{"output_kind":"oplog_recover","already_healthy":true,"prior_recovery":false,"entries_recovered":0,"damaged_byte_start":0,"damaged_byte_end":0}
 ```
 
 `heddle hook list|install|uninstall|events --output json` emit:

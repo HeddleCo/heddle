@@ -318,8 +318,6 @@ mod misc;
 mod native_scope_boundary;
 #[path = "cli_integration/next_action_contract.rs"]
 mod next_action_contract;
-#[path = "cli_integration/oplog_salvage.rs"]
-mod oplog_salvage;
 #[path = "cli_integration/oss_cli_polish.rs"]
 mod oss_cli_polish;
 #[path = "cli_integration/output_kind_invariant.rs"]

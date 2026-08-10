@@ -6,6 +6,7 @@ mod oplog_core;
 mod oplog_recorder;
 mod oplog_types;
 mod packed_oplog;
+mod segmented_oplog;
 
 #[cfg(feature = "postgres")]
 mod pg_oplog;
