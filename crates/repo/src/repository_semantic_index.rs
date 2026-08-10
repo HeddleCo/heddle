@@ -33,8 +33,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use objects::{
     object::{
-        ContentHash, SemanticEntryKind, SemanticFileNode, SemanticIndexRoot, SemanticTreeEntry,
-        SemanticTreeNode, State, StateId, SymbolAnchor, SymbolEntry, Tree, TreeEntryTarget,
+        ContentHash, SemanticEntryKind, SemanticFileFacts, SemanticFileNode, SemanticIndexRoot,
+        SemanticTreeEntry, SemanticTreeNode, State, StateId, SymbolAnchor, SymbolEntry, Tree,
+        TreeEntryTarget,
     },
     store::ObjectStore,
 };
@@ -351,7 +352,12 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
             self.extractor_version,
             source_hash,
             extracted.scaffold_hash,
-            extracted.symbols,
+            SemanticFileFacts {
+                symbols: extracted.symbols,
+                scopes: extracted.scopes,
+                imports: extracted.imports,
+                occurrences: extracted.occurrences,
+            },
         );
         let digest = node.semantic_digest;
         let node_hash = self.put_node(node.encode()?);
@@ -944,14 +950,37 @@ mod tests {
     #[test]
     fn shared_blob_parsed_once() {
         let (_temp, repo) = repo();
-        let blob = put_blob(&repo, b"fn shared() -> i32 { 7 }\n");
+        let blob = put_blob(&repo, b"use crate::api::greet;\nfn shared() { greet(); }\n");
         let tree = Tree::from_entries(vec![
             TreeEntry::file("x.rs", blob, false).unwrap(),
             TreeEntry::file("y.rs", blob, false).unwrap(),
         ]);
         let mut builder = SemanticIndexBuilder::new(repo.store(), EXTRACTOR_VERSION);
-        builder.build_root(&tree, None).unwrap();
+        let (root, _) = builder.build_root(&tree, None).unwrap();
         assert_eq!(builder.parse_count, 1, "shared blob parsed once");
+        let x = repo.resolve_file_node(&root, "x.rs").unwrap().unwrap();
+        let y = repo.resolve_file_node(&root, "y.rs").unwrap().unwrap();
+        assert_eq!(x, y, "identical source blobs must share one file node");
+    }
+
+    #[test]
+    fn extracted_facts_roundtrip_through_persisted_file_node() {
+        let (_temp, repo) = repo();
+        let source = b"use crate::api::greet;\nfn run() { greet(); }\n";
+        let blob = put_blob(&repo, source);
+        let tree = Tree::from_entries(vec![TreeEntry::file("main.rs", blob, false).unwrap()]);
+        let expected = extract_semantic_file(source, Language::Rust).unwrap();
+
+        let mut builder = SemanticIndexBuilder::new(repo.store(), EXTRACTOR_VERSION);
+        let (root, _) = builder.build_root(&tree, None).unwrap();
+        let node_hash = repo.resolve_file_node(&root, "main.rs").unwrap().unwrap();
+        let loaded = repo.load_semantic_file(&node_hash).unwrap();
+
+        assert_eq!(loaded.symbols, expected.symbols);
+        assert_eq!(loaded.scopes, expected.scopes);
+        assert_eq!(loaded.imports, expected.imports);
+        assert_eq!(loaded.occurrences, expected.occurrences);
+        assert_eq!(loaded.source_blob, blob);
     }
 
     /// The lazy backfill indexes every state once and is a no-op the second
@@ -984,25 +1013,27 @@ mod tests {
         let blob = put_blob(&repo, b"fn a() -> i32 { 1 }\n");
         let tree = Tree::from_entries(vec![TreeEntry::file("a.rs", blob, false).unwrap()]);
 
-        let mut b1 = SemanticIndexBuilder::new(repo.store(), 1);
+        assert_eq!(EXTRACTOR_VERSION, 4, "schema addition must bump extraction");
+        let old_version = EXTRACTOR_VERSION - 1;
+        let mut b1 = SemanticIndexBuilder::new(repo.store(), old_version);
         let (root1, _) = b1.build_root(&tree, None).unwrap();
-        assert_eq!(root1.extractor_version, 1);
+        assert_eq!(root1.extractor_version, old_version);
 
-        // Same source, extractor bumped to 2, parent (v1) offered for reuse.
+        // Same source, current extractor offered a stale-version parent.
         let parent = parent_index(&repo, tree.clone(), root1);
-        let mut b2 = SemanticIndexBuilder::new(repo.store(), 2);
+        let mut b2 = SemanticIndexBuilder::new(repo.store(), EXTRACTOR_VERSION);
         let (root2, _) = b2.build_root(&tree, Some(&parent)).unwrap();
         assert_eq!(
             b2.parse_count, 1,
             "extractor bump must reparse, not reuse the v1 node"
         );
-        assert_eq!(root2.extractor_version, 2);
+        assert_eq!(root2.extractor_version, EXTRACTOR_VERSION);
         let node_hash = repo.resolve_file_node(&root2, "a.rs").unwrap().unwrap();
         assert_eq!(
             repo.load_semantic_file(&node_hash)
                 .unwrap()
                 .extractor_version,
-            2,
+            EXTRACTOR_VERSION,
             "no mixed-version index"
         );
     }

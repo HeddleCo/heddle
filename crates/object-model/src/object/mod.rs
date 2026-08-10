@@ -72,9 +72,11 @@ pub use risk_signal::{
 };
 pub use semantic_change::{ChangeImportance, ModificationKind, SemanticChange};
 pub use semantic_index::{
-    SemanticEntryKind, SemanticFileNode, SemanticIndexError, SemanticIndexRoot, SemanticTreeEntry,
-    SemanticTreeNode, SymbolEntry, SymbolKindTag, compute_dir_semantic_digest,
-    compute_file_scaffold_hash, compute_file_semantic_digest, compute_symbol_semantic_hash,
+    ByteSpan, ImportBinding, ImportEntry, ImportKindTag, OccurrenceEntry, OccurrenceRole,
+    ScopeEntry, ScopeKind, SemanticEntryKind, SemanticFileFacts, SemanticFileNode,
+    SemanticIndexError, SemanticIndexRoot, SemanticTreeEntry, SemanticTreeNode, SymbolEntry,
+    SymbolKindTag, SymbolNamespace, compute_dir_semantic_digest, compute_file_scaffold_hash,
+    compute_file_semantic_digest, compute_symbol_semantic_hash,
 };
 pub use session::{Session, SessionSegment, generate_session_id};
 #[cfg(feature = "async-source")]
