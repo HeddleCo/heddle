@@ -3,6 +3,7 @@
 
 mod git_projection;
 mod objects;
+mod provenance;
 mod refs;
 mod state;
 #[cfg(test)]
