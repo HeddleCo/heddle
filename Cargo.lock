@@ -2263,28 +2263,18 @@ name = "heddle-daemon"
 version = "0.11.0"
 dependencies = [
  "chrono",
- "futures",
- "heddle-api 0.3.0",
  "heddle-crypto",
  "heddle-objects",
- "heddle-oplog",
- "heddle-refs",
  "heddle-repo",
  "heddle-semantic",
  "heddle-state-review",
  "hex",
- "libc",
  "proptest",
- "prost 0.14.1",
- "prost-types 0.14.1",
  "serde",
  "serde_json",
  "serial_test",
  "tempfile",
  "tokio",
- "tokio-stream",
- "toml 1.1.3+spec-1.1.0",
- "tracing",
 ]
 
 [[package]]

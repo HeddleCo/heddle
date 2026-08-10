@@ -2,7 +2,7 @@
 //! Local typed review implementation used directly by the CLI.
 //!
 //! These operations implement the governed contract over a single local
-//! [`Repository`]. They are distinct from `hosted implementation/` because they
+//! [`Repository`]. They are distinct from hosted operations because they
 //! - don't require Postgres, Biscuit auth, or the multi-tenant registry,
 //! - are invoked directly by the local CLI process,
 //! - share the dedup/idempotency middleware with the hosted variant via
@@ -20,7 +20,10 @@ use repo::{
     operation_dedup::{OperationDedupStore, reserve_operation_id_eager},
 };
 pub use signal::{SignalHealthEntry, SignalHealthReport, get_repo_signal_health};
-pub use state_review::LocalStateReviewService;
+pub use state_review::{
+    LocalStateReview, ReviewPayload, ReviewSignal, ReviewSignalKind, ReviewSignalVisibility,
+    ReviewSummary, SignReviewRequest, SignReviewResult, StoredReviewSignature,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalReviewCode {
@@ -28,7 +31,6 @@ pub enum LocalReviewCode {
     NotFound,
     FailedPrecondition,
     Aborted,
-    Unimplemented,
     Internal,
 }
 
@@ -60,10 +62,6 @@ impl LocalReviewError {
 
     pub fn aborted(message: impl Into<String>) -> Self {
         Self::new(LocalReviewCode::Aborted, message)
-    }
-
-    pub fn unimplemented(message: impl Into<String>) -> Self {
-        Self::new(LocalReviewCode::Unimplemented, message)
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -115,8 +113,7 @@ impl LocalReviewContext {
 ///
 /// `client_operation_id` may be empty (caller didn't supply one) — in that
 /// case we don't dedup at all and just execute. When supplied, the body
-/// must be a deterministic byte representation of the request (typically
-/// the protobuf-encoded request).
+/// must be a deterministic byte representation of the request.
 pub(super) async fn with_idempotency<F, Fut, T>(
     service: &LocalReviewContext,
     client_operation_id: &str,
@@ -127,7 +124,7 @@ pub(super) async fn with_idempotency<F, Fut, T>(
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<T, LocalReviewError>>,
-    T: prost::Message + Default,
+    T: serde::Serialize + serde::de::DeserializeOwned,
 {
     use objects::object::OperationId;
     use repo::operation_dedup::{DedupOutcome, hash_request_body};
@@ -147,11 +144,21 @@ where
     let outcome = reserve_operation_id_eager(service.repo(), Arc::clone(&dedup), op_id, verb, hash)
         .map_err(|err| LocalReviewError::internal(format!("dedup reserve failed: {err}")))?;
     match outcome {
-        DedupOutcome::Replay { response } => T::decode(response.as_slice())
+        DedupOutcome::Replay { response } => serde_json::from_slice(response.as_slice())
             .map_err(|err| LocalReviewError::internal(format!("decode replay failed: {err}"))),
-        DedupOutcome::Conflict => Err(LocalReviewError::failed_precondition(
-            "client_operation_id reused with a different request body",
-        )),
+        DedupOutcome::Conflict => {
+            let message = service
+                .dedup
+                .metadata_for(op_id, verb)
+                .filter(|existing| existing.verb != verb)
+                .map_or(
+                    "client_operation_id reused with a different request body",
+                    |_| {
+                        "client_operation_id belongs to a different operation or replay encoding; use a new client_operation_id"
+                    },
+                );
+            Err(LocalReviewError::failed_precondition(message))
+        }
         DedupOutcome::InFlight => Err(LocalReviewError::aborted(
             "client_operation_id is in flight from another caller; retry once it completes",
         )),
@@ -162,7 +169,15 @@ where
             // would see as `Conflict`/`InFlight` until compaction.
             match execute().await {
                 Ok(result) => {
-                    let encoded = result.encode_to_vec();
+                    let encoded = match serde_json::to_vec(&result) {
+                        Ok(encoded) => encoded,
+                        Err(err) => {
+                            let _ = dedup.cancel(op_id, verb);
+                            return Err(LocalReviewError::internal(format!(
+                                "encode replay failed: {err}"
+                            )));
+                        }
+                    };
                     dedup.record(op_id, verb, hash, encoded).map_err(|err| {
                         LocalReviewError::internal(format!("dedup record failed: {err}"))
                     })?;
@@ -183,7 +198,7 @@ where
 
 /// Helper for translating a [`HeddleError`](objects::error::HeddleError) into
 /// a [`LocalReviewError`] with consistent codes across the local services.
-pub(super) fn to_status(err: objects::error::HeddleError) -> LocalReviewError {
+pub(super) fn map_repository_error(err: objects::error::HeddleError) -> LocalReviewError {
     use objects::error::HeddleError;
     match err {
         HeddleError::NotFound(msg) => LocalReviewError::not_found(msg),
@@ -208,10 +223,9 @@ mod tests {
 
     use std::{sync::Arc, time::Duration};
 
-    #[derive(Clone, PartialEq, prost::Message)]
-    struct UpdateRefResponse {
-        #[prost(string, tag = "1")]
-        old_value: String,
+    #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+    struct ReplayMarker {
+        marker: String,
     }
     use objects::object::OperationId;
     use repo::{Repository, operation_dedup::OperationDedupStore};
@@ -227,10 +241,10 @@ mod tests {
         (temp, LocalReviewContext::new(repo, store))
     }
 
-    /// A distinguishable prost response payload for the idempotency-flow
-    fn marker_response(marker: &str) -> UpdateRefResponse {
-        UpdateRefResponse {
-            old_value: marker.to_string(),
+    /// A distinguishable response payload for the idempotency flow.
+    fn marker_response(marker: &str) -> ReplayMarker {
+        ReplayMarker {
+            marker: marker.to_string(),
         }
     }
 
@@ -243,23 +257,21 @@ mod tests {
 
         // First call executes and records.
         let first = with_idempotency(&service, &op_id, "verb", body, || async {
-            Ok::<UpdateRefResponse, LocalReviewError>(marker_response("42"))
+            Ok::<ReplayMarker, LocalReviewError>(marker_response("42"))
         })
         .await
         .unwrap();
-        assert_eq!(first.old_value, "42");
+        assert_eq!(first.marker, "42");
 
         // Second call must replay without re-executing — proven by the
         // execute closure panicking if invoked.
         let second = with_idempotency(&service, &op_id, "verb", body, || async {
             #[allow(unreachable_code)]
-            Ok::<UpdateRefResponse, LocalReviewError>(panic!(
-                "execute must not be called on replay"
-            ))
+            Ok::<ReplayMarker, LocalReviewError>(panic!("execute must not be called on replay"))
         })
         .await
         .unwrap();
-        assert_eq!(second.old_value, "42");
+        assert_eq!(second.marker, "42");
     }
 
     #[tokio::test]
@@ -282,7 +294,7 @@ mod tests {
         let a_handle = tokio::spawn(async move {
             with_idempotency(&service_a, &op_a, "verb", body, || async move {
                 rx.await.expect("recv gate");
-                Ok::<UpdateRefResponse, LocalReviewError>(marker_response("7"))
+                Ok::<ReplayMarker, LocalReviewError>(marker_response("7"))
             })
             .await
         });
@@ -294,7 +306,7 @@ mod tests {
 
         let service_b = service.clone();
         let op_b = op_id.clone();
-        let b_result: Result<UpdateRefResponse, LocalReviewError> =
+        let b_result: Result<ReplayMarker, LocalReviewError> =
             with_idempotency(&service_b, &op_b, "verb", body, || async {
                 panic!("B's execute must not run while A holds the reservation");
             })
@@ -307,17 +319,17 @@ mod tests {
         // Now release A.
         tx.send(()).unwrap();
         let a_result = a_handle.await.unwrap().unwrap();
-        assert_eq!(a_result.old_value, "7");
+        assert_eq!(a_result.marker, "7");
 
         // After A finishes, the entry is finalised: a third call with the
         // same body replays.
         let third = with_idempotency(&service, &op_id, "verb", body, || async {
             #[allow(unreachable_code)]
-            Ok::<UpdateRefResponse, LocalReviewError>(panic!("execute must not run on replay"))
+            Ok::<ReplayMarker, LocalReviewError>(panic!("execute must not run on replay"))
         })
         .await
         .unwrap();
-        assert_eq!(third.old_value, "7");
+        assert_eq!(third.marker, "7");
     }
 
     #[tokio::test]
@@ -333,7 +345,7 @@ mod tests {
         let op_id = OperationId::new().to_string();
         let body = b"req";
 
-        let first: Result<UpdateRefResponse, LocalReviewError> =
+        let first: Result<ReplayMarker, LocalReviewError> =
             with_idempotency(&service, &op_id, "verb", body, || async {
                 Err(LocalReviewError::internal("transient"))
             })
@@ -342,10 +354,10 @@ mod tests {
 
         // Retry must succeed — the reservation was released.
         let second = with_idempotency(&service, &op_id, "verb", body, || async {
-            Ok::<UpdateRefResponse, LocalReviewError>(marker_response("11"))
+            Ok::<ReplayMarker, LocalReviewError>(marker_response("11"))
         })
         .await
         .unwrap();
-        assert_eq!(second.old_value, "11");
+        assert_eq!(second.marker, "11");
     }
 }

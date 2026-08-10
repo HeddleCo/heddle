@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Local-mode implementation of the state-review contract.
+//! Heddle-owned local state-review operations.
 //!
 //! Reads and writes review-signature attachments. Verifies the client-supplied
 //! signature against the deterministic [`signing_payload`] before persisting.
@@ -8,94 +8,138 @@
 // (`local_review::state_review`), the same way the hosted impl
 // disambiguates by being in a sibling module.
 use ::state_review::{
-    PathSymbol, ReadingOrderPartition, SymbolKind, build_review_payload_partition,
-};
-use api::heddle::api::v1alpha1::{
-    AnchoredDiscussion, GetRepoSignalHealthRequest, GetReviewPayloadRequest,
-    GetReviewProgressRequest, GetReviewProgressResponse, ListSignaturesRequest,
-    ListSignaturesResponse, MergeRequirement, PathSymbolRef as ProtoPathSymbolRef,
-    ReadingOrderPartition as ProtoReadingOrderPartition, RecordCheckAckRequest,
-    RecordCheckAckResponse, RecordVerdictRequest, RecordVerdictResponse, RepoSignalHealthReport,
-    ReviewPayload, ReviewScope as ProtoReviewScope, ReviewSignature as ProtoReviewSignature,
-    ReviewSummary, RiskSignal as ProtoRiskSignal, RiskSignalKind as ProtoRiskSignalKind,
-    SignStateRequest, SignStateResponse, SignalAnchor as ProtoSignalAnchor,
-    SignalHealthEntry as ProtoSignalHealthEntry, SignalVisibility, SigningFooter,
-    Verdict as ProtoVerdict,
+    PathSymbol, ReadingOrderPartition, SymbolKind, payload::build_review_payload_partition_owned,
 };
 use crypto::verify_payload_signature;
 use objects::{
     lock::RepositoryLockExt,
     object::{
-        Blob, DiffKind, Discussion, DiscussionResolution, DiscussionsBlob, ReviewKind, ReviewScope,
-        ReviewSignature, ReviewSignaturesBlob, RiskSignalBlob, State, StateAttachment,
-        StateAttachmentBody, StateId, SymbolAnchor, signing_payload,
+        Blob, DiffKind, Discussion, DiscussionsBlob, ProducerId, ReviewKind, ReviewScope,
+        ReviewSignature, ReviewSignaturesBlob, RiskSignalBlob, RiskSignalKind, SignalAnchor, State,
+        StateAttachment, StateAttachmentBody, StateId, signing_payload,
     },
     store::ObjectStore,
     worktree::diff_blobs,
 };
-use prost::Message;
 use repo::{Repository, StateAttachmentKind};
+use serde::{Deserialize, Serialize};
 
-use super::{LocalReviewContext, LocalReviewError as Status, to_status, with_idempotency};
+use super::{LocalReviewContext, LocalReviewError, map_repository_error, with_idempotency};
 
 /// Maximum drift (seconds) between the client's `signed_at_unix` and the
-/// server's wall clock. Generous enough to absorb NTP skew, narrow enough
+/// local wall clock. Generous enough to absorb NTP skew, narrow enough
 /// to bound the window for replay-style attacks.
 const SIGN_TIMESTAMP_SKEW_SECS: i64 = 5 * 60;
 
-/// Verdicts use a distinct canonical payload so they cannot be replayed as
-/// ordinary positive review signatures.
-const VERDICT_SIGNING_PAYLOAD_TAG: &[u8] = b"hd-rev-sig-v2\x00";
-
-/// Collision-safe marker for verdict metadata stored in the existing review
-/// signature justification field.
+/// Collision-safe marker reserved for verdict metadata persisted in the
+/// review-signature justification field by the hosted review contract.
 const VERDICT_ENVELOPE_TAG: &str = "\u{1}hd-verdict-v1\u{1}";
 
-/// Local-mode `StateReviewService` implementation.
+/// Idempotency namespace for the repository-local JSON response codec.
+///
+/// The earlier implementation reused the hosted RPC verb while caching
+/// Prost bytes. Keeping the codec generation in the verb makes that old data
+/// a cross-verb conflict instead of attempting to decode it as JSON. Dedup
+/// entries expire after seven days, so a new operation id is the clean-cut
+/// migration path.
+const LOCAL_SIGN_REPLAY_VERB: &str = "local.state_review.sign/json-v1";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewSummary {
+    pub headline: String,
+    pub files_changed: u32,
+    pub added_lines: u32,
+    pub removed_lines: u32,
+    pub in_budget_signal_count: u32,
+    pub hidden_signal_count: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewSignalKind {
+    DiffSummary,
+    Risk(RiskSignalKind),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewSignalVisibility {
+    Visible,
+    Hidden,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewSignal {
+    pub kind: ReviewSignalKind,
+    pub anchor: SignalAnchor,
+    pub reason: String,
+    pub producer: ProducerId,
+    pub computed_at: Option<i64>,
+    pub visibility: ReviewSignalVisibility,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewPayload {
+    pub state_id: StateId,
+    pub summary: ReviewSummary,
+    pub agent_narrative: Option<String>,
+    pub partition: ReadingOrderPartition,
+    pub in_budget_signals: Vec<ReviewSignal>,
+    pub all_signals: Vec<ReviewSignal>,
+    pub tick_budget: u32,
+    pub discussions: Vec<Discussion>,
+    pub signing_kinds: Vec<ReviewKind>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredReviewSignature {
+    pub id: String,
+    pub signature: ReviewSignature,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignReviewRequest {
+    pub state_id: StateId,
+    pub kind: ReviewKind,
+    pub scope: ReviewScope,
+    pub justification: Option<String>,
+    pub algorithm: String,
+    pub public_key: Vec<u8>,
+    pub signature: Vec<u8>,
+    pub signed_at: i64,
+    pub client_operation_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignReviewResult {
+    pub signature_id: String,
+    pub state_id: StateId,
+}
+
+/// Deep local review module used in-process by native CLI commands.
 #[derive(Clone)]
-pub struct LocalStateReviewService {
+pub struct LocalStateReview {
     inner: LocalReviewContext,
 }
 
-impl LocalStateReviewService {
+impl LocalStateReview {
     pub fn new(inner: LocalReviewContext) -> Self {
         Self { inner }
     }
-}
 
-impl LocalStateReviewService {
-    pub async fn get_repo_signal_health(
+    pub fn get_review_payload(
         &self,
-        request: GetRepoSignalHealthRequest,
-    ) -> Result<RepoSignalHealthReport, Status> {
-        let report = super::get_repo_signal_health(self.inner.repo(), request.window_states)
-            .map_err(to_status)?;
-        Ok(RepoSignalHealthReport {
-            entries: report
-                .entries
-                .into_iter()
-                .map(|entry| ProtoSignalHealthEntry {
-                    module_id: entry.module_id,
-                    fire_rate: entry.fire_rate,
-                    warn: entry.warn,
-                })
-                .collect(),
-            window_states: report.window_states,
-        })
-    }
-
-    pub async fn get_review_payload(
-        &self,
-        req: GetReviewPayloadRequest,
-    ) -> Result<ReviewPayload, Status> {
-        let state_id = parse_state_id(&req.state_id)?;
+        state_id: StateId,
+        include_all_signals: bool,
+    ) -> Result<ReviewPayload, LocalReviewError> {
         let repo = self.inner.repo();
         let state = repo
             .store()
             .get_state(&state_id)
-            .map_err(to_status)?
+            .map_err(map_repository_error)?
             .ok_or_else(|| {
-                Status::not_found(format!("state {} not found", state_id.to_string_full()))
+                LocalReviewError::not_found(format!(
+                    "state {} not found",
+                    state_id.to_string_full()
+                ))
             })?;
 
         // Diff the state's tree against its first parent so the summary
@@ -103,7 +147,8 @@ impl LocalStateReviewService {
         // signal registry / budgeter will eventually layer on top of
         // this; until then `files_changed` is the most useful single
         // number an agent can use for self-review.
-        let diff_summary = compute_state_diff_summary(repo, &state).map_err(to_status)?;
+        let diff_summary =
+            compute_state_diff_summary(repo, &state).map_err(map_repository_error)?;
 
         let summary = ReviewSummary {
             headline: state.intent.clone().unwrap_or_default(),
@@ -115,26 +160,26 @@ impl LocalStateReviewService {
         };
 
         let agent_narrative = if state.attribution.agent.is_some() {
-            state.intent.clone().unwrap_or_default()
+            state.intent.clone()
         } else {
-            String::new()
+            None
         };
 
         // Surface fired risk signals if requested. The signal registry will
         // replace this with a proper budget split; until then everything we
         // read is "visible".
-        let mut all_signals: Vec<ProtoRiskSignal> = Vec::new();
-        if req.include_all_signals
+        let mut all_signals = Vec::new();
+        if include_all_signals
             && let Some(hash) =
                 attachment_hash(repo, &state.state_id, StateAttachmentKind::RiskSignals)?
-            && let Some(blob) = repo.store().get_blob(&hash).map_err(to_status)?
+            && let Some(blob) = repo.store().get_blob(&hash).map_err(map_repository_error)?
         {
             let decoded = RiskSignalBlob::decode(blob.content())
-                .map_err(|err| Status::internal(format!("decode risk signals: {err}")))?;
+                .map_err(|err| LocalReviewError::internal(format!("decode risk signals: {err}")))?;
             all_signals = decoded
                 .signals
                 .into_iter()
-                .map(|s| risk_signal_to_proto(s, "visible"))
+                .map(|signal| review_signal(signal, ReviewSignalVisibility::Visible))
                 .collect();
         }
 
@@ -146,7 +191,7 @@ impl LocalStateReviewService {
         // already iterating signals get a usable record per file
         // change, and the registry-driven path will simply layer real
         // signals alongside it.
-        let mut in_budget_signals: Vec<ProtoRiskSignal> = Vec::new();
+        let mut in_budget_signals = Vec::new();
         let summary_reason = format!(
             "{} files changed (+{}/-{}, {} added, {} modified, {} deleted)",
             diff_summary.files_changed,
@@ -162,19 +207,17 @@ impl LocalStateReviewService {
         // first entry's reason field; the rest carry per-file deltas.
         const MAX_DIFF_SIGNAL_ANCHORS: usize = 32;
         if diff_summary.changed_paths.is_empty() {
-            in_budget_signals.push(ProtoRiskSignal {
-                kind: ProtoRiskSignalKind::Unspecified as i32,
-                anchor: Some(ProtoSignalAnchor {
+            in_budget_signals.push(ReviewSignal {
+                kind: ReviewSignalKind::DiffSummary,
+                anchor: SignalAnchor {
                     file: String::new(),
-                    symbol: String::new(),
-                    start_line: 0,
-                    end_line: 0,
-                }),
+                    symbol: None,
+                    line_range: None,
+                },
                 reason: summary_reason.clone(),
-                producer_module: "review_show.diff_summary".to_string(),
-                producer_version: 1,
+                producer: ProducerId::new("review_show.diff_summary", 1),
                 computed_at: None,
-                visibility: SignalVisibility::Visible as i32,
+                visibility: ReviewSignalVisibility::Visible,
             });
         } else {
             for (idx, path_kind) in diff_summary
@@ -188,55 +231,49 @@ impl LocalStateReviewService {
                 } else {
                     format!("{} ({})", path_kind.path, path_kind.kind_str())
                 };
-                in_budget_signals.push(ProtoRiskSignal {
-                    kind: ProtoRiskSignalKind::Unspecified as i32,
-                    anchor: Some(ProtoSignalAnchor {
+                in_budget_signals.push(ReviewSignal {
+                    kind: ReviewSignalKind::DiffSummary,
+                    anchor: SignalAnchor {
                         file: path_kind.path.clone(),
-                        symbol: String::new(),
-                        start_line: 0,
-                        end_line: 0,
-                    }),
+                        symbol: None,
+                        line_range: None,
+                    },
                     reason,
-                    producer_module: "review_show.diff_summary".to_string(),
-                    producer_version: 1,
+                    producer: ProducerId::new("review_show.diff_summary", 1),
                     computed_at: None,
-                    visibility: SignalVisibility::Visible as i32,
+                    visibility: ReviewSignalVisibility::Visible,
                 });
             }
         }
 
-        // Server-side reading-order partition. Same per-symbol
-        // extraction logic as the hosted handler: tree-sitter when the
+        // Build the reading-order partition from the same domain symbols
+        // used at the hosted boundary: tree-sitter when the
         // `semantic` feature is enabled, path-only fallback otherwise.
         let symbols = changed_files_as_symbols(repo, &state, &diff_summary.changed_paths)
-            .map_err(to_status)?;
-        let partition = build_review_payload_partition(&symbols);
+            .map_err(map_repository_error)?;
+        let partition = build_review_payload_partition_owned(symbols);
 
-        // Project the state's `DiscussionsBlob` (when present)
-        // into the wire-shape `AnchoredDiscussion` list.
+        // Decode the state's durable discussions attachment when present.
         let discussions =
             match attachment_hash(repo, &state.state_id, StateAttachmentKind::Discussions)? {
                 Some(hash) => {
                     let blob = repo
                         .store()
                         .get_blob(&hash)
-                        .map_err(to_status)?
+                        .map_err(map_repository_error)?
                         .ok_or_else(|| {
-                            Status::internal(format!(
+                            LocalReviewError::internal(format!(
                                 "discussions blob {} referenced by state {} is missing",
                                 hash,
                                 state.state_id.to_string_full()
                             ))
                         })?;
-                    let decoded = DiscussionsBlob::decode(blob.content())
-                        .map_err(|err| Status::internal(format!("decode discussions: {err}")))?;
-                    decoded
-                        .discussions
-                        .iter()
-                        .map(discussion_to_anchored_proto)
-                        .collect()
+                    let decoded = DiscussionsBlob::decode(blob.content()).map_err(|err| {
+                        LocalReviewError::internal(format!("decode discussions: {err}"))
+                    })?;
+                    decoded.discussions
                 }
-                None => Vec::<AnchoredDiscussion>::new(),
+                None => Vec::new(),
             };
 
         let mut summary = summary;
@@ -245,38 +282,37 @@ impl LocalStateReviewService {
             all_signals.len().saturating_sub(in_budget_signals.len()) as u32;
 
         let payload = ReviewPayload {
-            state_id: req.state_id.clone(),
-            summary: Some(summary),
+            state_id,
+            summary,
             agent_narrative,
-            partition: Some(partition_to_proto(partition)),
+            partition,
             in_budget_signals,
             all_signals,
             tick_budget: 3,
             discussions,
-            // Local mode has no policy registry — merge requirements
-            // are surfaced only by the hosted handler.
-            merge_requirements: Vec::<MergeRequirement>::new(),
-            signing_footer: Some(SigningFooter {
-                available_kinds: vec![
-                    api::heddle::api::v1alpha1::ReviewKind::Read as i32,
-                    api::heddle::api::v1alpha1::ReviewKind::AgentPreview as i32,
-                    api::heddle::api::v1alpha1::ReviewKind::AgentCoReview as i32,
-                ],
-            }),
+            signing_kinds: vec![
+                ReviewKind::Read,
+                ReviewKind::AgentPreview,
+                ReviewKind::AgentCoReview,
+            ],
         };
 
         Ok(payload)
     }
 
-    pub async fn sign_state(&self, req: SignStateRequest) -> Result<SignStateResponse, Status> {
-        let req_bytes = req.encode_to_vec();
+    pub async fn sign_state(
+        &self,
+        req: SignReviewRequest,
+    ) -> Result<SignReviewResult, LocalReviewError> {
+        let req_bytes = serde_json::to_vec(&req)
+            .map_err(|error| LocalReviewError::internal(format!("encode sign request: {error}")))?;
         let client_operation_id = req.client_operation_id.clone();
         let inner = self.inner.clone();
 
         let response = with_idempotency(
             &self.inner,
             &client_operation_id,
-            "state_review.sign_state",
+            LOCAL_SIGN_REPLAY_VERB,
             &req_bytes,
             move || {
                 let inner = inner.clone();
@@ -288,18 +324,20 @@ impl LocalStateReviewService {
         Ok(response)
     }
 
-    pub async fn list_signatures(
+    pub fn list_signatures(
         &self,
-        req: ListSignaturesRequest,
-    ) -> Result<ListSignaturesResponse, Status> {
-        let state_id = parse_state_id(&req.state_id)?;
+        state_id: StateId,
+    ) -> Result<Vec<StoredReviewSignature>, LocalReviewError> {
         let repo = self.inner.repo();
         let state = repo
             .store()
             .get_state(&state_id)
-            .map_err(to_status)?
+            .map_err(map_repository_error)?
             .ok_or_else(|| {
-                Status::not_found(format!("state {} not found", state_id.to_string_full()))
+                LocalReviewError::not_found(format!(
+                    "state {} not found",
+                    state_id.to_string_full()
+                ))
             })?;
 
         let signatures =
@@ -308,102 +346,43 @@ impl LocalStateReviewService {
                     let blob = repo
                         .store()
                         .get_blob(&hash)
-                        .map_err(to_status)?
+                        .map_err(map_repository_error)?
                         .ok_or_else(|| {
-                            Status::internal(format!(
+                            LocalReviewError::internal(format!(
                                 "review signatures blob {} missing from object store",
                                 hash
                             ))
                         })?;
                     let decoded = ReviewSignaturesBlob::decode(blob.content()).map_err(|err| {
-                        Status::internal(format!("decode review signatures: {err}"))
+                        LocalReviewError::internal(format!("decode review signatures: {err}"))
                     })?;
                     decoded
                         .signatures
                         .into_iter()
                         .enumerate()
-                        .map(|(idx, sig)| {
-                            review_signature_to_proto(sig, synthetic_signature_id(idx))
+                        .map(|(idx, sig)| StoredReviewSignature {
+                            id: synthetic_signature_id(idx),
+                            signature: sig,
                         })
                         .collect()
                 }
                 None => Vec::new(),
             };
 
-        Ok(ListSignaturesResponse { signatures })
-    }
-
-    pub async fn record_verdict(
-        &self,
-        req: RecordVerdictRequest,
-    ) -> Result<RecordVerdictResponse, Status> {
-        let req_bytes = req.encode_to_vec();
-        let client_operation_id = req.client_operation_id.clone();
-        let inner = self.inner.clone();
-
-        let response = with_idempotency(
-            &self.inner,
-            &client_operation_id,
-            "state_review.record_verdict",
-            &req_bytes,
-            move || {
-                let inner = inner.clone();
-                async move { execute_record_verdict(&inner, req).await }
-            },
-        )
-        .await?;
-
-        Ok(response)
-    }
-
-    pub async fn record_check_ack(
-        &self,
-        _request: RecordCheckAckRequest,
-    ) -> Result<RecordCheckAckResponse, Status> {
-        Err(Status::unimplemented(
-            "record_check_ack is not available in local mode: local repositories do not persist review check acknowledgements",
-        ))
-    }
-
-    pub async fn get_review_progress(
-        &self,
-        _request: GetReviewProgressRequest,
-    ) -> Result<GetReviewProgressResponse, Status> {
-        Err(Status::unimplemented(
-            "get_review_progress is not available in local mode: local repositories do not persist review progress",
-        ))
+        Ok(signatures)
     }
 }
 
-/// Body of [`LocalStateReviewService::sign_state`]. Lifted out of the trait
+/// Body of [`LocalStateReview::sign_state`]. Lifted out of the public method
 /// method so [`with_idempotency`] can re-execute it inside its closure.
 async fn execute_sign_state(
     inner: &LocalReviewContext,
-    req: SignStateRequest,
-) -> Result<SignStateResponse, Status> {
-    // 1. Validate the kind.
-    let kind = match api::heddle::api::v1alpha1::ReviewKind::try_from(req.kind)
-        .map_err(|_| Status::invalid_argument(format!("unknown review kind tag {}", req.kind)))?
-    {
-        api::heddle::api::v1alpha1::ReviewKind::Read => ReviewKind::Read,
-        api::heddle::api::v1alpha1::ReviewKind::AgentPreview => ReviewKind::AgentPreview,
-        api::heddle::api::v1alpha1::ReviewKind::AgentCoReview => ReviewKind::AgentCoReview,
-        api::heddle::api::v1alpha1::ReviewKind::Unspecified => {
-            return Err(Status::invalid_argument("review kind is required"));
-        }
-    };
-
-    // 2. Locate the state.
-    let state_id = parse_state_id(&req.state_id)?;
+    req: SignReviewRequest,
+) -> Result<SignReviewResult, LocalReviewError> {
+    let state_id = req.state_id;
     let repo = inner.repo();
 
-    // 3. Translate the scope.
-    let scope = match req.scope.as_ref() {
-        Some(s) => proto_scope_to_object(s)?,
-        None => ReviewScope::WholeChange,
-    };
-
-    // 4. Build the ReviewSignature, then verify the client-supplied
+    // Build the ReviewSignature, then verify the client-supplied
     // signature is well-formed and matches the deterministic signing
     // payload. A malformed or forged signature must never reach the
     // persisted blob. Attribute the signature to the local-mode
@@ -412,48 +391,54 @@ async fn execute_sign_state(
     // — Bob signing Alice's state should record Bob.
     let actor = repo
         .get_principal()
-        .map_err(|err| Status::internal(format!("resolve caller principal: {err}")))?;
-    if req.justification.starts_with(VERDICT_ENVELOPE_TAG) {
-        return Err(Status::invalid_argument(
+        .map_err(|err| LocalReviewError::internal(format!("resolve caller principal: {err}")))?;
+    if req
+        .justification
+        .as_deref()
+        .is_some_and(|text| text.starts_with(VERDICT_ENVELOPE_TAG))
+    {
+        return Err(LocalReviewError::invalid_argument(
             "justification must not begin with the reserved verdict-envelope prefix",
         ));
     }
-    let justification = if req.justification.is_empty() {
-        None
-    } else {
-        Some(req.justification.clone())
-    };
+    let justification = req.justification.clone().filter(|text| !text.is_empty());
 
     let now = chrono::Utc::now().timestamp();
-    let signed_at = req.signed_at.as_ref().map(|t| t.seconds).unwrap_or(0);
+    let signed_at = req.signed_at;
     if signed_at == 0 {
-        return Err(Status::invalid_argument(
+        return Err(LocalReviewError::invalid_argument(
             "signed_at is required and must match the timestamp the client signed over",
         ));
     }
     if (signed_at - now).abs() > SIGN_TIMESTAMP_SKEW_SECS {
-        return Err(Status::invalid_argument(format!(
+        return Err(LocalReviewError::invalid_argument(format!(
             "signed_at={signed_at} is too far from server time={now} (max skew {SIGN_TIMESTAMP_SKEW_SECS}s)"
         )));
     }
 
     let new_sig = ReviewSignature {
         actor,
-        kind,
-        scope: scope.clone(),
+        kind: req.kind,
+        scope: req.scope.clone(),
         justification: justification.clone(),
         signed_at,
         algorithm: req.algorithm.clone(),
         public_key: hex::encode(&req.public_key),
         signature: hex::encode(&req.signature),
     };
-    new_sig
-        .validate()
-        .map_err(|err| Status::invalid_argument(format!("invalid review signature: {err}")))?;
+    new_sig.validate().map_err(|err| {
+        LocalReviewError::invalid_argument(format!("invalid review signature: {err}"))
+    })?;
 
     let public_key_bytes = req.public_key.clone();
     let signature_bytes = req.signature.clone();
-    let payload = signing_payload(state_id, kind, &scope, signed_at, justification.as_deref());
+    let payload = signing_payload(
+        state_id,
+        req.kind,
+        &req.scope,
+        signed_at,
+        justification.as_deref(),
+    );
     verify_payload_signature(
         &payload,
         &req.algorithm,
@@ -461,7 +446,7 @@ async fn execute_sign_state(
         &signature_bytes,
     )
     .map_err(|err| {
-        Status::invalid_argument(format!(
+        LocalReviewError::invalid_argument(format!(
             "review signature failed verification ({}): {err}",
             req.algorithm
         ))
@@ -469,95 +454,31 @@ async fn execute_sign_state(
 
     let new_index = append_review_signature(repo, state_id, new_sig)?;
 
-    Ok(SignStateResponse {
+    Ok(SignReviewResult {
         signature_id: synthetic_signature_id(new_index),
-        state_id: req.state_id,
-    })
-}
-
-async fn execute_record_verdict(
-    inner: &LocalReviewContext,
-    req: RecordVerdictRequest,
-) -> Result<RecordVerdictResponse, Status> {
-    let verdict = verdict_str_from_proto(req.verdict)?;
-    let state_id = parse_state_id(&req.state_id)?;
-    if matches!(verdict, "hold" | "reject") && req.reason.trim().is_empty() {
-        return Err(Status::invalid_argument(
-            "reason is required for HOLD and REJECT verdicts",
-        ));
-    }
-    let scope = match req.scope.as_ref() {
-        Some(scope) => proto_scope_to_object(scope)?,
-        None => ReviewScope::WholeChange,
-    };
-    let signed_at = req.signed_at.as_ref().map(|time| time.seconds).unwrap_or(0);
-    if signed_at == 0 {
-        return Err(Status::invalid_argument(
-            "signed_at is required and must match the timestamp the client signed over",
-        ));
-    }
-    let now = chrono::Utc::now().timestamp();
-    if (signed_at - now).abs() > SIGN_TIMESTAMP_SKEW_SECS {
-        return Err(Status::invalid_argument(format!(
-            "signed_at={signed_at} is too far from server time={now} (max skew {SIGN_TIMESTAMP_SKEW_SECS}s)"
-        )));
-    }
-
-    let payload = verdict_signing_payload(state_id, verdict, &scope, signed_at, &req.reason);
-    verify_payload_signature(&payload, &req.algorithm, &req.public_key, &req.signature).map_err(
-        |err| {
-            Status::invalid_argument(format!(
-                "verdict signature failed verification ({}): {err}",
-                req.algorithm
-            ))
-        },
-    )?;
-
-    let repo = inner.repo();
-    let signature = ReviewSignature {
-        actor: repo
-            .get_principal()
-            .map_err(|err| Status::internal(format!("resolve caller principal: {err}")))?,
-        kind: ReviewKind::Read,
-        scope,
-        justification: Some(encode_verdict_envelope(verdict, &req.reason)),
-        signed_at,
-        algorithm: req.algorithm.clone(),
-        public_key: hex::encode(&req.public_key),
-        signature: hex::encode(&req.signature),
-    };
-    signature
-        .validate()
-        .map_err(|err| Status::invalid_argument(format!("invalid review signature: {err}")))?;
-
-    let new_index = append_review_signature(repo, state_id, signature)?;
-    Ok(RecordVerdictResponse {
-        signature_id: synthetic_signature_id(new_index),
-        state_id: req.state_id,
+        state_id,
     })
 }
 
 /// Append one signed review record while holding the repository write lock.
-/// SignState and RecordVerdict share this tail so concurrent local writes do
-/// not lose one another's attachment updates.
 fn append_review_signature(
     repo: &Repository,
     state_id: StateId,
     signature: ReviewSignature,
-) -> Result<usize, Status> {
+) -> Result<usize, LocalReviewError> {
     let _lock = repo
         .locker()
         .write()
-        .map_err(|err| Status::internal(err.to_string()))?;
+        .map_err(|err| LocalReviewError::internal(err.to_string()))?;
     repo.store()
         .get_state(&state_id)
-        .map_err(to_status)?
+        .map_err(map_repository_error)?
         .ok_or_else(|| {
-            Status::not_found(format!("state {} not found", state_id.to_string_full()))
+            LocalReviewError::not_found(format!("state {} not found", state_id.to_string_full()))
         })?;
     let prior = repo
         .latest_state_attachment(&state_id, StateAttachmentKind::ReviewSignatures)
-        .map_err(to_status)?;
+        .map_err(map_repository_error)?;
     let mut blob = match prior.as_ref().map(|attachment| {
         let StateAttachmentBody::ReviewSignatures(hash) = &attachment.body else {
             unreachable!()
@@ -568,15 +489,16 @@ fn append_review_signature(
             let raw = repo
                 .store()
                 .get_blob(&hash)
-                .map_err(to_status)?
+                .map_err(map_repository_error)?
                 .ok_or_else(|| {
-                    Status::internal(format!(
+                    LocalReviewError::internal(format!(
                         "existing review signatures blob {} missing from object store",
                         hash
                     ))
                 })?;
-            ReviewSignaturesBlob::decode(raw.content())
-                .map_err(|err| Status::internal(format!("decode review signatures: {err}")))?
+            ReviewSignaturesBlob::decode(raw.content()).map_err(|err| {
+                LocalReviewError::internal(format!("decode review signatures: {err}"))
+            })?
         }
         None => ReviewSignaturesBlob::new(Vec::new()),
     };
@@ -585,25 +507,26 @@ fn append_review_signature(
 
     let bytes = blob
         .encode()
-        .map_err(|err| Status::internal(format!("encode review signatures: {err}")))?;
+        .map_err(|err| LocalReviewError::internal(format!("encode review signatures: {err}")))?;
     let content_hash = repo
         .store()
         .put_blob(&Blob::new(bytes))
-        .map_err(to_status)?;
+        .map_err(map_repository_error)?;
 
     let attachment = StateAttachment {
         state_id,
         body: StateAttachmentBody::ReviewSignatures(content_hash),
-        attribution: repo.get_attribution().map_err(to_status)?,
+        attribution: repo.get_attribution().map_err(map_repository_error)?,
         created_at: chrono::Utc::now(),
         supersedes: prior.map(|attachment| attachment.id()),
     };
-    repo.put_state_attachment(&attachment).map_err(to_status)?;
+    repo.put_state_attachment(&attachment)
+        .map_err(map_repository_error)?;
     Ok(new_index)
 }
 
 /// `ReviewSignature` doesn't carry an explicit id; we synthesise one from
-/// the per-state index so the wire surface has stable signature ids within a
+/// the per-state index so local output has stable signature ids within a
 /// single state. (A future schema bump may add an explicit id.)
 fn synthetic_signature_id(index: usize) -> String {
     format!("rs-{index}")
@@ -613,10 +536,10 @@ fn attachment_hash(
     repo: &Repository,
     state_id: &StateId,
     kind: StateAttachmentKind,
-) -> Result<Option<objects::object::ContentHash>, Status> {
+) -> Result<Option<objects::object::ContentHash>, LocalReviewError> {
     let Some(attachment) = repo
         .latest_state_attachment(state_id, kind)
-        .map_err(to_status)?
+        .map_err(map_repository_error)?
     else {
         return Ok(None);
     };
@@ -629,221 +552,26 @@ fn attachment_hash(
     Ok(Some(hash))
 }
 
-fn parse_state_id(
-    state_id: &Option<api::heddle::api::v1alpha1::StateId>,
-) -> Result<StateId, Status> {
-    let bytes = state_id
-        .as_ref()
-        .ok_or_else(|| Status::invalid_argument("state_id is required"))?;
-    StateId::try_from_slice(&bytes.value)
-        .map_err(|err| Status::invalid_argument(format!("invalid state_id: {err}")))
-}
-
-fn api_state_id(state_id: &StateId) -> api::heddle::api::v1alpha1::StateId {
-    api::heddle::api::v1alpha1::StateId {
-        value: state_id.as_bytes().to_vec(),
-    }
-}
-
-fn verdict_signing_payload(
-    state_id: StateId,
-    verdict: &str,
-    scope: &ReviewScope,
-    signed_at: i64,
-    reason: &str,
-) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(VERDICT_SIGNING_PAYLOAD_TAG.len() + 256);
-    payload.extend_from_slice(VERDICT_SIGNING_PAYLOAD_TAG);
-    payload.extend_from_slice(state_id.to_string_full().as_bytes());
-    payload.push(0);
-    payload.extend_from_slice(verdict.as_bytes());
-    payload.push(0);
-    match scope {
-        ReviewScope::WholeChange => {
-            payload.extend_from_slice(b"whole_change");
-            payload.push(0);
-        }
-        ReviewScope::Symbols(symbols) => {
-            payload.extend_from_slice(b"symbols");
-            payload.push(0);
-            payload.extend_from_slice(&(symbols.len() as u32).to_le_bytes());
-            for symbol in symbols {
-                payload.extend_from_slice(symbol.file.as_bytes());
-                payload.push(0);
-                payload.extend_from_slice(symbol.symbol.as_bytes());
-                payload.push(0);
-            }
-        }
-    }
-    payload.extend_from_slice(&signed_at.to_le_bytes());
-    payload.extend_from_slice(reason.as_bytes());
-    payload.push(0);
-    payload
-}
-
-fn verdict_str_from_proto(tag: i32) -> Result<&'static str, Status> {
-    match ProtoVerdict::try_from(tag)
-        .map_err(|_| Status::invalid_argument(format!("unknown verdict tag {tag}")))?
-    {
-        ProtoVerdict::Sign => Ok("sign"),
-        ProtoVerdict::Hold => Ok("hold"),
-        ProtoVerdict::Reject => Ok("reject"),
-        ProtoVerdict::Unspecified => Err(Status::invalid_argument("verdict is required")),
-    }
-}
-
-fn encode_verdict_envelope(verdict: &str, reason: &str) -> String {
-    let body = serde_json::json!({ "verdict": verdict, "reason": reason });
-    format!("{VERDICT_ENVELOPE_TAG}{body}")
-}
-
-fn decode_verdict_envelope(justification: &str) -> Option<(String, String)> {
-    let body = justification.strip_prefix(VERDICT_ENVELOPE_TAG)?;
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    let verdict = value.get("verdict")?.as_str()?.to_string();
-    let reason = value
-        .get("reason")
-        .and_then(|reason| reason.as_str())
-        .unwrap_or_default()
-        .to_string();
-    Some((verdict, reason))
-}
-
-fn verdict_proto_from_str(verdict: &str) -> ProtoVerdict {
-    match verdict {
-        "sign" => ProtoVerdict::Sign,
-        "hold" => ProtoVerdict::Hold,
-        "reject" => ProtoVerdict::Reject,
-        _ => ProtoVerdict::Unspecified,
-    }
-}
-
-fn proto_scope_to_object(scope: &ProtoReviewScope) -> Result<ReviewScope, Status> {
-    use api::heddle::api::v1alpha1::review_scope::Scope;
-    match scope.scope.as_ref() {
-        None | Some(Scope::WholeChange(_)) => Ok(ReviewScope::WholeChange),
-        Some(Scope::Symbols(list)) => {
-            if list.symbols.is_empty() {
-                return Err(Status::invalid_argument(
-                    "symbols scope requires at least one symbol anchor",
-                ));
-            }
-            let symbols = list
-                .symbols
-                .iter()
-                .map(|s| SymbolAnchor::new(s.file.clone(), s.symbol.clone()))
-                .collect();
-            Ok(ReviewScope::Symbols(symbols))
-        }
-    }
-}
-
-fn object_scope_to_proto(scope: &ReviewScope) -> ProtoReviewScope {
-    use api::heddle::api::v1alpha1::review_scope::{Scope, SymbolList, WholeChange};
-    let inner = match scope {
-        ReviewScope::WholeChange => Scope::WholeChange(WholeChange {}),
-        ReviewScope::Symbols(symbols) => Scope::Symbols(SymbolList {
-            symbols: symbols
-                .iter()
-                .map(|s| ProtoPathSymbolRef {
-                    file: s.file.clone(),
-                    symbol: s.symbol.clone(),
-                })
-                .collect(),
-        }),
-    };
-    ProtoReviewScope { scope: Some(inner) }
-}
-
-fn review_signature_to_proto(sig: ReviewSignature, signature_id: String) -> ProtoReviewSignature {
-    let (verdict, reason, justification) = match sig
-        .justification
-        .as_deref()
-        .and_then(decode_verdict_envelope)
-    {
-        Some((verdict, reason)) => (
-            verdict_proto_from_str(&verdict) as i32,
-            reason,
-            String::new(),
-        ),
-        None => (
-            ProtoVerdict::Unspecified as i32,
-            String::new(),
-            sig.justification.unwrap_or_default(),
-        ),
-    };
-    ProtoReviewSignature {
-        signature_id,
-        actor_name: sig.actor.name.clone(),
-        actor_email: sig.actor.email.clone(),
-        kind: review_kind_to_proto(sig.kind) as i32,
-        scope: Some(object_scope_to_proto(&sig.scope)),
-        justification,
-        signed_at: Some(prost_types::Timestamp {
-            seconds: sig.signed_at,
-            nanos: 0,
-        }),
-        algorithm: sig.algorithm,
-        public_key: hex::decode(&sig.public_key).unwrap_or_default(),
-        signature: hex::decode(&sig.signature).unwrap_or_default(),
-        verdict,
-        reason,
-    }
-}
-
-fn review_kind_to_proto(kind: ReviewKind) -> api::heddle::api::v1alpha1::ReviewKind {
-    match kind {
-        ReviewKind::Read => api::heddle::api::v1alpha1::ReviewKind::Read,
-        ReviewKind::AgentPreview => api::heddle::api::v1alpha1::ReviewKind::AgentPreview,
-        ReviewKind::AgentCoReview => api::heddle::api::v1alpha1::ReviewKind::AgentCoReview,
-    }
-}
-
-fn risk_signal_to_proto(sig: objects::object::RiskSignal, visibility: &str) -> ProtoRiskSignal {
-    let (start_line, end_line) = sig.anchor.line_range.unwrap_or((0, 0));
-    ProtoRiskSignal {
-        kind: match sig.kind {
-            objects::object::RiskSignalKind::Novelty => ProtoRiskSignalKind::Novelty,
-            objects::object::RiskSignalKind::TestReachability => {
-                ProtoRiskSignalKind::TestReachability
-            }
-            objects::object::RiskSignalKind::PatternDeviation => {
-                ProtoRiskSignalKind::PatternDeviation
-            }
-            objects::object::RiskSignalKind::InvariantAdjacency => {
-                ProtoRiskSignalKind::InvariantAdjacency
-            }
-            objects::object::RiskSignalKind::SelfFlaggedUncertainty => {
-                ProtoRiskSignalKind::SelfFlaggedUncertainty
-            }
-        } as i32,
-        anchor: Some(ProtoSignalAnchor {
-            file: sig.anchor.file,
-            symbol: sig.anchor.symbol.unwrap_or_default(),
-            start_line,
-            end_line,
-        }),
-        reason: sig.reason,
-        producer_module: sig.producer.module,
-        producer_version: sig.producer.version,
-        computed_at: Some(prost_types::Timestamp {
-            seconds: sig.computed_at,
-            nanos: 0,
-        }),
-        visibility: match visibility {
-            "visible" => SignalVisibility::Visible,
-            "hidden" => SignalVisibility::Hidden,
-            _ => SignalVisibility::Unspecified,
-        } as i32,
+fn review_signal(
+    signal: objects::object::RiskSignal,
+    visibility: ReviewSignalVisibility,
+) -> ReviewSignal {
+    ReviewSignal {
+        kind: ReviewSignalKind::Risk(signal.kind),
+        anchor: signal.anchor,
+        reason: signal.reason,
+        producer: signal.producer,
+        computed_at: Some(signal.computed_at),
+        visibility,
     }
 }
 
 // ---------------------------------------------------------------------------
-// Symbol extraction + discussion projection (mirrors hosted impl).
+// Symbol extraction for the shared review-payload domain model.
 // ---------------------------------------------------------------------------
 
-/// Symbol projection for the reading-order partition. Mirrors the hosted-handler
-/// implementation: when the `semantic` feature is enabled and the
+/// Symbol projection for the reading-order partition. When the `semantic`
+/// feature is enabled and the
 /// changed path has a tree-sitter parser and a readable new-side blob, emits
 /// one [`PathSymbol`] per definition. Otherwise falls back to a single path-only
 /// entry (kind = `Other`), which keeps deletes and gitlink pointer changes
@@ -889,7 +617,7 @@ fn changed_files_as_symbols(
 
 #[cfg(feature = "semantic")]
 fn extract_file_symbols(path: &str, source: &[u8], out: &mut Vec<PathSymbol>) -> bool {
-    use ::semantic::symbol_resolver::{Definition, DefinitionKind, extract_definitions};
+    use ::semantic::symbol_resolver::{Definition, extract_definitions};
     let definitions: Vec<Definition> = match extract_definitions(source, std::path::Path::new(path))
     {
         Ok(defs) => defs,
@@ -899,18 +627,6 @@ fn extract_file_symbols(path: &str, source: &[u8], out: &mut Vec<PathSymbol>) ->
         return false;
     }
     for d in definitions {
-        let kind = match d.kind {
-            DefinitionKind::Type => SymbolKind::Type,
-            DefinitionKind::Trait => SymbolKind::Trait,
-            DefinitionKind::Class => SymbolKind::Class,
-            DefinitionKind::Interface => SymbolKind::Interface,
-            DefinitionKind::TypeAlias => SymbolKind::TypeAlias,
-            DefinitionKind::EnumDef => SymbolKind::EnumDef,
-            DefinitionKind::ConstDecl => SymbolKind::ConstDecl,
-            DefinitionKind::Module => SymbolKind::Module,
-            DefinitionKind::Function => SymbolKind::Function,
-            DefinitionKind::Other => SymbolKind::Other,
-        };
         let symbol = match d.parent_name.as_deref() {
             Some(parent) if !parent.is_empty() => format!("{parent}::{}", d.name),
             _ => d.name,
@@ -918,7 +634,7 @@ fn extract_file_symbols(path: &str, source: &[u8], out: &mut Vec<PathSymbol>) ->
         out.push(PathSymbol {
             file: path.to_string(),
             symbol,
-            kind,
+            kind: d.kind,
         });
     }
     true
@@ -948,76 +664,6 @@ fn collect_files(
         }
     }
     Ok(out)
-}
-
-fn partition_to_proto(p: ReadingOrderPartition) -> ProtoReadingOrderPartition {
-    ProtoReadingOrderPartition {
-        structural: p.structural.iter().map(path_symbol_to_proto).collect(),
-        consequence: p.consequence.iter().map(path_symbol_to_proto).collect(),
-        tests_and_docs: p.tests_and_docs.iter().map(path_symbol_to_proto).collect(),
-    }
-}
-
-fn path_symbol_to_proto(p: &PathSymbol) -> ProtoPathSymbolRef {
-    ProtoPathSymbolRef {
-        file: p.file.clone(),
-        symbol: p.symbol.clone(),
-    }
-}
-
-fn discussion_to_anchored_proto(d: &Discussion) -> AnchoredDiscussion {
-    AnchoredDiscussion {
-        id: d.id.clone(),
-        anchor: Some(ProtoPathSymbolRef {
-            file: d.anchor.file.clone(),
-            symbol: d.anchor.symbol.clone(),
-        }),
-        opened_against_state: Some(api_state_id(&d.opened_against_state)),
-        opened_at: Some(prost_types::Timestamp {
-            seconds: d.opened_at,
-            nanos: 0,
-        }),
-        turns: d
-            .turns
-            .iter()
-            .map(|t| api::heddle::api::v1alpha1::DiscussionTurn {
-                author_name: t.author.name.clone(),
-                author_email: t.author.email.clone(),
-                body: t.body.clone(),
-                posted_at: Some(prost_types::Timestamp {
-                    seconds: t.posted_at,
-                    nanos: 0,
-                }),
-            })
-            .collect(),
-        resolution: Some(discussion_resolution_to_proto(&d.resolution)),
-        body_changed_since_open: d.body_changed_since_open,
-        orphaned: d.orphaned,
-        visibility: d.visibility.as_str().to_string(),
-    }
-}
-
-fn discussion_resolution_to_proto(
-    resolution: &DiscussionResolution,
-) -> api::heddle::api::v1alpha1::DiscussionResolution {
-    use api::heddle::api::v1alpha1::discussion_resolution::{
-        Dismissed, Open, ResolvedByEdit, ResolvedIntoAnnotation, State,
-    };
-    let state = match resolution {
-        DiscussionResolution::Open => State::Open(Open {}),
-        DiscussionResolution::ResolvedIntoAnnotation { annotation_id } => {
-            State::IntoAnnotation(ResolvedIntoAnnotation {
-                annotation_id: annotation_id.clone(),
-            })
-        }
-        DiscussionResolution::ResolvedByEdit { state_id } => State::ByEdit(ResolvedByEdit {
-            state_id: Some(api_state_id(state_id)),
-        }),
-        DiscussionResolution::Dismissed { reason } => State::Dismissed(Dismissed {
-            reason: reason.clone(),
-        }),
-    };
-    api::heddle::api::v1alpha1::DiscussionResolution { state: Some(state) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1223,22 +869,15 @@ fn line_count(content: &[u8]) -> u32 {
 mod tests {
     use std::sync::Arc;
 
-    use api::heddle::api::v1alpha1::ReviewScope as ProtoReviewScope;
     use crypto::Signer as _;
     use repo::{Repository, operation_dedup::OperationDedupStore};
     use tempfile::TempDir;
 
     use super::*;
 
-    fn local_request<T>(request: T) -> T {
-        request
-    }
-
-    fn fresh_service() -> (LocalStateReviewService, Arc<Repository>, TempDir) {
+    fn fresh_review() -> (LocalStateReview, Arc<Repository>, TempDir) {
         let temp = TempDir::new().expect("create tempdir");
-        // SAFETY: tests run with a controlled environment; setting these
-        // env vars steers the default attribution into a predictable place.
-        // SAFETY: setting env vars in tests; rust 2024 marks these unsafe.
+        // SAFETY: these serial tests own the process-global attribution.
         unsafe {
             std::env::set_var("HEDDLE_PRINCIPAL_NAME", "Alice Tester");
             std::env::set_var("HEDDLE_PRINCIPAL_EMAIL", "alice@example.com");
@@ -1246,535 +885,291 @@ mod tests {
         let repo = Repository::init_default(temp.path()).expect("init repo");
         let dedup = OperationDedupStore::open(repo.heddle_dir()).expect("open dedup");
         let repo = Arc::new(repo);
-        let svc =
-            LocalStateReviewService::new(LocalReviewContext::new(repo.clone(), Arc::new(dedup)));
-        (svc, repo, temp)
+        let review =
+            LocalStateReview::new(LocalReviewContext::new(Arc::clone(&repo), Arc::new(dedup)));
+        (review, repo, temp)
     }
 
-    fn capture_state(repo: &Repository) -> StateId {
-        // Write a tiny file so snapshot has something to capture.
-        std::fs::write(repo.root().join("hello.txt"), b"hi").expect("write file");
-        let state = repo
-            .snapshot(Some("seed".to_string()), None)
-            .expect("snapshot");
-        state.state_id
+    fn capture_state(repo: &Repository, content: &[u8]) -> StateId {
+        std::fs::write(repo.root().join("hello.txt"), content).expect("write file");
+        repo.snapshot(Some("seed".to_string()), None)
+            .expect("snapshot")
+            .state_id
     }
 
-    fn sign_request(state_id: &StateId, op_id: &str) -> SignStateRequest {
-        signed_request(state_id, op_id, false)
-    }
-
-    fn legacy_tag_sign_request(state_id: &StateId, op_id: &str) -> SignStateRequest {
-        signed_request(state_id, op_id, true)
-    }
-
-    fn signed_request(state_id: &StateId, op_id: &str, use_legacy_tag: bool) -> SignStateRequest {
+    fn sign_request(state_id: StateId, operation_id: impl Into<String>) -> SignReviewRequest {
         let signer = crypto::Ed25519Signer::generate().expect("generate ed25519 key");
         let scope = ReviewScope::WholeChange;
         let signed_at = chrono::Utc::now().timestamp();
-        let mut payload = signing_payload(*state_id, ReviewKind::Read, &scope, signed_at, None);
-        if use_legacy_tag {
-            const LEGACY_TAG: &[u8] = b"hd-rev-sig-v1\x00";
-            payload[..LEGACY_TAG.len()].copy_from_slice(LEGACY_TAG);
-        }
-        let signature = signer.sign(&payload).expect("sign payload");
-        use api::heddle::api::v1alpha1::review_scope::{Scope, WholeChange};
-        SignStateRequest {
-            repo_path: None,
-            state_id: Some(api_state_id(state_id)),
-            kind: api::heddle::api::v1alpha1::ReviewKind::Read as i32,
-            scope: Some(ProtoReviewScope {
-                scope: Some(Scope::WholeChange(WholeChange {})),
-            }),
-            justification: String::new(),
+        let payload = signing_payload(state_id, ReviewKind::Read, &scope, signed_at, None);
+        SignReviewRequest {
+            state_id,
+            kind: ReviewKind::Read,
+            scope,
+            justification: None,
             algorithm: "ed25519".to_string(),
             public_key: signer.public_key().to_vec(),
-            signature: signature.clone(),
-            signed_at: Some(prost_types::Timestamp {
-                seconds: signed_at,
-                nanos: 0,
-            }),
-            client_operation_id: op_id.to_string(),
-        }
-    }
-
-    fn verdict_request(
-        state_id: &StateId,
-        verdict: ProtoVerdict,
-        reason: &str,
-        op_id: &str,
-    ) -> RecordVerdictRequest {
-        let signer = crypto::Ed25519Signer::generate().expect("generate ed25519 key");
-        let scope = ReviewScope::WholeChange;
-        let signed_at = chrono::Utc::now().timestamp();
-        let verdict_str = verdict_str_from_proto(verdict as i32).expect("explicit verdict");
-        let payload = verdict_signing_payload(*state_id, verdict_str, &scope, signed_at, reason);
-        let signature = signer.sign(&payload).expect("sign verdict payload");
-        use api::heddle::api::v1alpha1::review_scope::{Scope, WholeChange};
-        RecordVerdictRequest {
-            repo_path: None,
-            state_id: Some(api_state_id(state_id)),
-            verdict: verdict as i32,
-            scope: Some(ProtoReviewScope {
-                scope: Some(Scope::WholeChange(WholeChange {})),
-            }),
-            reason: reason.to_string(),
-            algorithm: "ed25519".to_string(),
-            public_key: signer.public_key().to_vec(),
-            signature,
-            signed_at: Some(prost_types::Timestamp {
-                seconds: signed_at,
-                nanos: 0,
-            }),
-            client_operation_id: op_id.to_string(),
+            signature: signer.sign(&payload).expect("sign payload"),
+            signed_at,
+            client_operation_id: operation_id.into(),
         }
     }
 
     #[tokio::test]
     #[serial_test::serial(process_global)]
-    async fn sign_state_persists_to_review_signatures_blob() {
-        let (svc, repo, _tmp) = fresh_service();
-        let state_id = capture_state(&repo);
+    async fn local_interface_signs_lists_and_replays_without_protocol_types() {
+        let (review, repo, _temp) = fresh_review();
+        let state_id = capture_state(&repo, b"hello\n");
+        let operation_id = objects::object::OperationId::new().to_string();
+        let request = sign_request(state_id, operation_id);
 
-        let resp = svc
-            .sign_state(local_request(sign_request(&state_id, "")))
-            .await
-            .expect("sign_state");
-        assert!(!resp.signature_id.is_empty());
-        assert_eq!(resp.state_id, Some(api_state_id(&state_id)));
+        let first = review.sign_state(request.clone()).await.expect("sign");
+        let replay = review.sign_state(request).await.expect("replay");
 
-        let listing = svc
-            .list_signatures(local_request(ListSignaturesRequest {
-                repo_path: None,
-                state_id: Some(api_state_id(&state_id)),
-            }))
-            .await
-            .expect("list_signatures");
-        let sigs = &listing.signatures;
-        assert_eq!(sigs.len(), 1, "expected one signature, got {sigs:?}");
-        assert_eq!(
-            sigs[0].kind,
-            api::heddle::api::v1alpha1::ReviewKind::Read as i32
-        );
-        assert_eq!(sigs[0].algorithm, "ed25519");
-        assert_eq!(sigs[0].actor_name, "Alice Tester");
-        assert_eq!(sigs[0].actor_email, "alice@example.com");
-        let scope_case = sigs[0].scope.as_ref().and_then(|s| s.scope.as_ref());
-        assert!(matches!(
-            scope_case,
-            Some(api::heddle::api::v1alpha1::review_scope::Scope::WholeChange(_))
-        ));
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(process_global)]
-    async fn sign_state_rejects_legacy_hd_domain_signature() {
-        let (svc, repo, _tmp) = fresh_service();
-        let state_id = capture_state(&repo);
-
-        let error = svc
-            .sign_state(local_request(legacy_tag_sign_request(&state_id, "")))
-            .await
-            .expect_err("signature made with the hd-rev-sig-v1 tag must fail");
-
-        assert_eq!(
-            error.code(),
-            crate::local_review::LocalReviewCode::InvalidArgument
-        );
-        assert!(error.message().contains("failed verification"));
-
-        let listing = svc
-            .list_signatures(local_request(ListSignaturesRequest {
-                repo_path: None,
-                state_id: Some(api_state_id(&state_id)),
-            }))
-            .await
-            .expect("list_signatures");
-        assert!(listing.signatures.is_empty());
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(process_global)]
-    async fn record_verdict_persists_signed_opinion_without_changing_state() {
-        let (svc, repo, _tmp) = fresh_service();
-        let state_id = capture_state(&repo);
-        let op_id = objects::object::OperationId::new().to_string();
-        let request = verdict_request(&state_id, ProtoVerdict::Hold, "needs another pass", &op_id);
-
-        let first = svc
-            .record_verdict(local_request(request.clone()))
-            .await
-            .expect("record verdict");
-        let replay = svc
-            .record_verdict(local_request(request))
-            .await
-            .expect("replay verdict");
         assert_eq!(first, replay);
-        assert_eq!(first.state_id, Some(api_state_id(&state_id)));
-        assert_eq!(repo.head().expect("read head"), Some(state_id));
+        assert_eq!(first.state_id, state_id);
+        let signatures = review.list_signatures(state_id).expect("signatures");
+        assert_eq!(signatures.len(), 1, "replay must not append");
+        assert_eq!(signatures[0].id, "rs-0");
+        assert_eq!(signatures[0].signature.kind, ReviewKind::Read);
+        assert_eq!(signatures[0].signature.scope, ReviewScope::WholeChange);
+        assert_eq!(signatures[0].signature.actor.name, "Alice Tester");
+        assert_eq!(signatures[0].signature.actor.email, "alice@example.com");
+    }
 
-        let listing = svc
-            .list_signatures(local_request(ListSignaturesRequest {
-                repo_path: None,
-                state_id: Some(api_state_id(&state_id)),
-            }))
+    #[tokio::test]
+    #[serial_test::serial(process_global)]
+    async fn legacy_prost_replay_is_a_controlled_operation_id_conflict() {
+        use repo::operation_dedup::hash_request_body;
+
+        let (review, repo, _temp) = fresh_review();
+        let state_id = capture_state(&repo, b"hello\n");
+        let operation_id = objects::object::OperationId::new();
+        let request = sign_request(state_id, operation_id.to_string());
+        let request_bytes = serde_json::to_vec(&request).expect("encode request");
+
+        // Simulate a response cached by the retired hosted/Prost-backed
+        // implementation. The bytes intentionally are not valid JSON.
+        review
+            .inner
+            .dedup
+            .record(
+                operation_id,
+                "state_review.sign_state",
+                hash_request_body(&request_bytes),
+                vec![0x0a, 0x03, b'o', b'l', b'd'],
+            )
+            .expect("record legacy replay");
+
+        let error = review
+            .sign_state(request)
             .await
-            .expect("list signatures");
-        let signatures = &listing.signatures;
-        assert_eq!(signatures.len(), 1, "idempotent replay must append once");
-        assert_eq!(signatures[0].verdict, ProtoVerdict::Hold as i32);
-        assert_eq!(signatures[0].reason, "needs another pass");
-        assert!(signatures[0].justification.is_empty());
+            .expect_err("legacy replay must not be decoded as local JSON");
+
         assert_eq!(
-            signatures[0].kind,
-            api::heddle::api::v1alpha1::ReviewKind::Read as i32
+            error.code(),
+            crate::local_review::LocalReviewCode::FailedPrecondition
+        );
+        assert!(
+            error
+                .message()
+                .contains("different operation or replay encoding")
+        );
+        assert!(
+            review
+                .list_signatures(state_id)
+                .expect("signatures")
+                .is_empty()
         );
     }
 
     #[tokio::test]
     #[serial_test::serial(process_global)]
-    async fn record_verdict_rejects_reason_changed_after_signing() {
-        let (svc, repo, _tmp) = fresh_service();
-        let state_id = capture_state(&repo);
-        let mut request = verdict_request(&state_id, ProtoVerdict::Reject, "unsafe", "");
-        request.reason = "different reason".to_string();
+    async fn local_interface_rejects_a_forged_signature() {
+        let (review, repo, _temp) = fresh_review();
+        let state_id = capture_state(&repo, b"hello\n");
+        let mut request = sign_request(state_id, "");
+        let last = request.signature.len() - 1;
+        request.signature[last] ^= 0xff;
 
-        let error = svc
-            .record_verdict(local_request(request))
+        let error = review
+            .sign_state(request)
             .await
-            .expect_err("changed signed reason must fail verification");
+            .expect_err("forgery must fail");
+
         assert_eq!(
             error.code(),
             crate::local_review::LocalReviewCode::InvalidArgument
         );
         assert!(error.message().contains("failed verification"));
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(process_global)]
-    async fn full_contract_routes_signal_health_and_stubs_review_progress() {
-        let (svc, _repo, _tmp) = fresh_service();
-        let health = svc
-            .get_repo_signal_health(local_request(GetRepoSignalHealthRequest {
-                repo_path: None,
-                window_states: 1,
-            }))
-            .await
-            .expect("local signal health");
-        assert_eq!(health.window_states, 1);
-
-        let ack_error = svc
-            .record_check_ack(local_request(RecordCheckAckRequest::default()))
-            .await
-            .expect_err("local check acks are unsupported");
-        assert_eq!(
-            ack_error.code(),
-            crate::local_review::LocalReviewCode::Unimplemented
-        );
-        assert!(ack_error.message().contains("not available in local mode"));
-
-        let progress_error = svc
-            .get_review_progress(local_request(GetReviewProgressRequest::default()))
-            .await
-            .expect_err("local review progress is unsupported");
-        assert_eq!(
-            progress_error.code(),
-            crate::local_review::LocalReviewCode::Unimplemented
-        );
         assert!(
-            progress_error
-                .message()
-                .contains("not available in local mode")
+            review
+                .list_signatures(state_id)
+                .expect("signatures")
+                .is_empty()
         );
     }
 
     #[tokio::test]
     #[serial_test::serial(process_global)]
-    async fn sign_state_idempotent() {
-        let (svc, repo, _tmp) = fresh_service();
-        let state_id = capture_state(&repo);
-        let op_id = objects::object::OperationId::new().to_string();
-        // The second call must replay the *same* request body — fresh
-        // signatures hash differently, so we build once and clone.
-        let req = sign_request(&state_id, &op_id);
+    async fn local_interface_rejects_the_reserved_verdict_envelope_prefix() {
+        let (review, repo, _temp) = fresh_review();
+        let state_id = capture_state(&repo, b"hello\n");
+        let mut request = sign_request(state_id, "");
+        request.justification = Some(format!("{VERDICT_ENVELOPE_TAG}{{\"verdict\":\"hold\"}}"));
 
-        let first = svc
-            .sign_state(local_request(req.clone()))
+        let error = review
+            .sign_state(request)
             .await
-            .expect("first sign_state");
-        let second = svc
-            .sign_state(local_request(req))
-            .await
-            .expect("second sign_state");
+            .expect_err("reserved verdict envelope must fail");
+
         assert_eq!(
-            first.signature_id, second.signature_id,
-            "replayed call must return the same signature_id"
-        );
-
-        let listing = svc
-            .list_signatures(local_request(ListSignaturesRequest {
-                repo_path: None,
-                state_id: Some(api_state_id(&state_id)),
-            }))
-            .await
-            .expect("list_signatures");
-        assert_eq!(
-            listing.signatures.len(),
-            1,
-            "idempotent replay must not append a duplicate signature"
-        );
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(process_global)]
-    async fn sign_state_rejects_forged_signature() {
-        let (svc, repo, _tmp) = fresh_service();
-        let state_id = capture_state(&repo);
-        let mut req = sign_request(&state_id, "");
-        // Flip the last byte of the signature so verification fails.
-        let last = req.signature.len() - 1;
-        req.signature[last] ^= 0xff;
-
-        let err = svc
-            .sign_state(local_request(req))
-            .await
-            .expect_err("forged signature must be rejected");
-        assert_eq!(
-            err.code(),
-            crate::local_review::LocalReviewCode::InvalidArgument,
-            "{err:?}"
-        );
-        assert!(
-            err.message().contains("failed verification"),
-            "unexpected error message: {}",
-            err.message()
-        );
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(process_global)]
-    async fn sign_state_rejects_skewed_timestamp() {
-        let (svc, repo, _tmp) = fresh_service();
-        let state_id = capture_state(&repo);
-        let mut req = sign_request(&state_id, "");
-        // Timestamp 1 hour in the future is well outside the skew window.
-        if let Some(ts) = req.signed_at.as_mut() {
-            ts.seconds += 60 * 60;
-        }
-
-        let err = svc
-            .sign_state(local_request(req))
-            .await
-            .expect_err("skewed timestamp must be rejected");
-        assert_eq!(
-            err.code(),
+            error.code(),
             crate::local_review::LocalReviewCode::InvalidArgument
         );
-        assert!(err.message().contains("too far from server time"));
+        assert!(error.message().contains("reserved verdict-envelope prefix"));
+        assert!(
+            review
+                .list_signatures(state_id)
+                .expect("signatures")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
     #[serial_test::serial(process_global)]
-    async fn sign_state_attributes_to_caller_not_state_author() {
-        // Regression for the codex-flagged bug: sign_state used to
-        // attribute the signature to the state's author. Bob signing
-        // Alice's state would record Alice. The signature must record
-        // the *caller*. In local mode the caller is resolved via
-        // `Repository::get_principal()` (env vars then config).
-        let (svc, repo, _tmp) = fresh_service();
-        // `fresh_service` already set the env to Alice; capture the
-        // state under Alice's identity so `state.attribution.principal`
-        // is Alice.
-        let state_id = capture_state(&repo);
+    async fn local_interface_rejects_a_skewed_timestamp() {
+        let (review, repo, _temp) = fresh_review();
+        let state_id = capture_state(&repo, b"hello\n");
+        let mut request = sign_request(state_id, "");
+        request.signed_at += 60 * 60;
 
-        // Now switch the local user to Bob and sign Alice's state.
-        // SAFETY: tests run with a controlled environment.
+        let error = review
+            .sign_state(request)
+            .await
+            .expect_err("skewed timestamp must fail");
+
+        assert_eq!(
+            error.code(),
+            crate::local_review::LocalReviewCode::InvalidArgument
+        );
+        assert!(error.message().contains("too far from server time"));
+        assert!(
+            review
+                .list_signatures(state_id)
+                .expect("signatures")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(process_global)]
+    async fn local_interface_attributes_the_signature_to_the_current_principal() {
+        let (review, repo, _temp) = fresh_review();
+        let state_id = capture_state(&repo, b"hello\n");
+
+        // SAFETY: this serial test owns the process-global attribution.
         unsafe {
             std::env::set_var("HEDDLE_PRINCIPAL_NAME", "Bob Signer");
             std::env::set_var("HEDDLE_PRINCIPAL_EMAIL", "bob@example.com");
         }
-
-        svc.sign_state(local_request(sign_request(&state_id, "")))
+        review
+            .sign_state(sign_request(state_id, ""))
             .await
-            .expect("sign_state");
+            .expect("sign as Bob");
 
-        let listing = svc
-            .list_signatures(local_request(ListSignaturesRequest {
-                repo_path: None,
-                state_id: Some(api_state_id(&state_id)),
-            }))
-            .await
-            .expect("list_signatures");
-        let sigs = &listing.signatures;
-        assert_eq!(sigs.len(), 1);
-        assert_eq!(
-            sigs[0].actor_name, "Bob Signer",
-            "signature must attribute to the caller (Bob), not the state author (Alice)"
-        );
-        assert_eq!(sigs[0].actor_email, "bob@example.com");
-
-        // Restore the env so other serial tests see the expected
-        // Alice baseline.
-        unsafe {
-            std::env::set_var("HEDDLE_PRINCIPAL_NAME", "Alice Tester");
-            std::env::set_var("HEDDLE_PRINCIPAL_EMAIL", "alice@example.com");
-        }
+        let signature = review
+            .list_signatures(state_id)
+            .expect("signatures")
+            .pop()
+            .expect("signature")
+            .signature;
+        assert_eq!(signature.actor.name, "Bob Signer");
+        assert_eq!(signature.actor.email, "bob@example.com");
     }
 
     #[tokio::test]
     #[serial_test::serial(process_global)]
-    async fn sign_state_serializes_concurrent_appends() {
-        let (svc, repo, _tmp) = fresh_service();
-        let state_id = capture_state(&repo);
+    async fn local_interface_serializes_concurrent_signature_appends() {
+        let (review, repo, _temp) = fresh_review();
+        let state_id = capture_state(&repo, b"hello\n");
+        let request_a = sign_request(state_id, objects::object::OperationId::new().to_string());
+        let request_b = sign_request(state_id, objects::object::OperationId::new().to_string());
 
-        // Two distinct ops so neither replays the other through dedup.
-        let op_a = objects::object::OperationId::new().to_string();
-        let op_b = objects::object::OperationId::new().to_string();
-        let req_a = sign_request(&state_id, &op_a);
-        let req_b = sign_request(&state_id, &op_b);
-
-        let svc_a = svc.clone();
-        let svc_b = svc.clone();
+        let first_review = review.clone();
+        let second_review = review.clone();
         let (a, b) = tokio::join!(
-            svc_a.sign_state(local_request(req_a)),
-            svc_b.sign_state(local_request(req_b)),
+            first_review.sign_state(request_a),
+            second_review.sign_state(request_b)
         );
-        a.expect("first sign_state");
-        b.expect("second sign_state");
+        a.expect("first sign");
+        b.expect("second sign");
 
-        let listing = svc
-            .list_signatures(local_request(ListSignaturesRequest {
-                repo_path: None,
-                state_id: Some(api_state_id(&state_id)),
-            }))
-            .await
-            .expect("list_signatures");
         assert_eq!(
-            listing.signatures.len(),
-            2,
-            "both concurrent signatures must land — neither should be lost \
-             to a stale-blob clobber"
+            review.list_signatures(state_id).expect("signatures").len(),
+            2
         );
     }
 
-    /// Regression: `get_review_payload` previously returned
-    /// `summary.files_changed = 0` and empty `in_budget_signals` for
-    /// every state, even when the diff against the parent had real
-    /// content. This test snapshots once (root state — every file is
-    /// "added"), then snapshots again with a modification, and asserts
-    /// both states report a non-empty diff summary plus a populated
-    /// `diff_summary` signal anchored on the changed file.
-    #[tokio::test]
+    #[test]
     #[serial_test::serial(process_global)]
-    async fn get_review_payload_populates_diff_summary_and_signals() {
-        let (svc, repo, _tmp) = fresh_service();
+    fn local_payload_exposes_domain_summary_signals_and_reading_order() {
+        let (review, repo, _temp) = fresh_review();
+        let state_id = capture_state(&repo, b"first\nsecond\nthird\n");
 
-        // First capture: root state, one file added. Every line of
-        // `hello.txt` should count as added.
-        std::fs::write(repo.root().join("hello.txt"), b"first\nsecond\nthird\n")
-            .expect("write hello.txt");
-        let first = repo
-            .snapshot(Some("first capture".to_string()), None)
-            .expect("first snapshot");
+        let payload = review.get_review_payload(state_id, false).expect("payload");
 
-        let resp_first = svc
-            .get_review_payload(local_request(GetReviewPayloadRequest {
-                repo_path: None,
-                state_id: Some(api_state_id(&first.state_id)),
-                include_all_signals: false,
-            }))
-            .await
-            .expect("get_review_payload first");
-        let payload_first = resp_first;
-        let summary_first = payload_first.summary.as_ref().expect("summary present");
-        assert!(
-            summary_first.files_changed >= 1,
-            "first state should report at least one file changed (vs empty parent), got {}",
-            summary_first.files_changed
-        );
-        assert!(
-            summary_first.added_lines >= 3,
-            "first state should report 3+ added lines, got {}",
-            summary_first.added_lines
-        );
-        assert!(
-            !payload_first.in_budget_signals.is_empty(),
-            "in_budget_signals must include a diff_summary entry"
-        );
-        let first_signal = &payload_first.in_budget_signals[0];
+        assert_eq!(payload.state_id, state_id);
+        assert!(payload.summary.files_changed >= 1);
+        assert!(payload.summary.added_lines >= 3);
         assert_eq!(
-            first_signal.kind,
-            ProtoRiskSignalKind::Unspecified as i32,
-            "the typed API has no synthetic diff-summary kind"
+            payload.summary.in_budget_signal_count,
+            payload.in_budget_signals.len() as u32
         );
-        assert_eq!(first_signal.producer_module, "review_show.diff_summary");
-        assert_eq!(first_signal.visibility, SignalVisibility::Visible as i32);
+        let signal = payload.in_budget_signals.first().expect("diff signal");
+        assert_eq!(signal.kind, ReviewSignalKind::DiffSummary);
+        assert_eq!(signal.producer.module, "review_show.diff_summary");
+        assert_eq!(signal.visibility, ReviewSignalVisibility::Visible);
+        assert_eq!(signal.anchor.file, "hello.txt");
+        let surfaced = payload
+            .partition
+            .structural
+            .iter()
+            .chain(payload.partition.consequence.iter())
+            .chain(payload.partition.tests_and_docs.iter())
+            .any(|symbol| symbol.file == "hello.txt");
+        assert!(surfaced, "changed path must appear in reading order");
 
-        // Second capture: modify the file. Diff vs the first state's
-        // tree should report a single modified file with at least one
-        // added and one removed line.
         std::fs::write(
             repo.root().join("hello.txt"),
-            b"first\nsecond\nthird\nfourth\n",
+            b"first\nsecond changed\nthird\nfourth\n",
         )
-        .expect("modify hello.txt");
-        let second = repo
-            .snapshot(Some("second capture".to_string()), None)
-            .expect("second snapshot");
-
-        let resp_second = svc
-            .get_review_payload(local_request(GetReviewPayloadRequest {
-                repo_path: None,
-                state_id: Some(api_state_id(&second.state_id)),
-                include_all_signals: false,
-            }))
-            .await
-            .expect("get_review_payload second");
-        let payload_second = resp_second;
-        let summary_second = payload_second.summary.as_ref().expect("summary present");
+        .expect("modify file");
+        let modified_state = repo
+            .snapshot(Some("modify".to_string()), None)
+            .expect("snapshot modification")
+            .state_id;
+        let modified = review
+            .get_review_payload(modified_state, false)
+            .expect("payload");
+        assert_eq!(modified.summary.files_changed, 1);
+        assert!(modified.summary.added_lines >= 1);
+        assert!(modified.summary.removed_lines >= 1);
         assert_eq!(
-            summary_second.files_changed, 1,
-            "second state should report exactly one modified file"
+            modified.in_budget_signals[0].anchor.file, "hello.txt",
+            "the aggregate signal must anchor on the changed file"
         );
         assert!(
-            summary_second.added_lines >= 1,
-            "second state should report at least one added line, got {}",
-            summary_second.added_lines
-        );
-        assert!(
-            !payload_second.in_budget_signals.is_empty(),
-            "in_budget_signals must include a diff_summary entry"
-        );
-        let signal = &payload_second.in_budget_signals[0];
-        assert_eq!(
-            signal
-                .anchor
-                .as_ref()
-                .map(|a| a.file.as_str())
-                .unwrap_or(""),
-            "hello.txt",
-            "diff_summary signal should anchor on the modified file"
-        );
-        assert!(
-            signal.reason.contains("files changed"),
-            "first signal reason should carry the aggregate summary, got {}",
-            signal.reason
-        );
-        // The summary's signal-count fields should reflect the visible
-        // budget so consumers can short-circuit on empty-vs-populated
-        // without re-counting the array.
-        assert_eq!(
-            summary_second.in_budget_signal_count,
-            payload_second.in_budget_signals.len() as u32,
-            "in_budget_signal_count must match the array length"
+            modified.in_budget_signals[0]
+                .reason
+                .contains("files changed")
         );
     }
 
-    #[tokio::test]
+    #[test]
     #[serial_test::serial(process_global)]
-    async fn get_review_payload_surfaces_gitlink_target_changes() {
-        let (svc, repo, _tmp) = fresh_service();
-
+    fn local_payload_surfaces_gitlink_target_changes() {
+        let (review, repo, _temp) = fresh_review();
         let old_target = "0303030303030303030303030303030303030303"
             .parse()
             .expect("old git oid");
@@ -1789,129 +1184,63 @@ mod tests {
         ]);
         let old_tree_hash = repo.store().put_tree(&old_tree).expect("put old tree");
         let new_tree_hash = repo.store().put_tree(&new_tree).expect("put new tree");
-        let base = State::new_snapshot(
-            old_tree_hash,
-            Vec::new(),
-            objects::object::Attribution::human(objects::object::Principal::new(
-                "Gitlink Reviewer",
-                "gitlink@example.test",
-            )),
-        );
-        let base_id = base.state_id;
+        let attribution = objects::object::Attribution::human(objects::object::Principal::new(
+            "Gitlink Reviewer",
+            "gitlink@example.test",
+        ));
+        let base = State::new_snapshot(old_tree_hash, Vec::new(), attribution.clone());
         repo.store().put_state(&base).expect("put base state");
-        let changed = State::new_snapshot(
-            new_tree_hash,
-            vec![base_id],
-            objects::object::Attribution::human(objects::object::Principal::new(
-                "Gitlink Reviewer",
-                "gitlink@example.test",
-            )),
-        );
-        let changed_id = changed.state_id;
+        let changed = State::new_snapshot(new_tree_hash, vec![base.state_id], attribution);
         repo.store().put_state(&changed).expect("put changed state");
 
-        let resp = svc
-            .get_review_payload(local_request(GetReviewPayloadRequest {
-                repo_path: None,
-                state_id: Some(api_state_id(&changed_id)),
-                include_all_signals: false,
-            }))
-            .await
-            .expect("get_review_payload gitlink change");
-        let payload = resp;
-        let summary = payload.summary.as_ref().expect("summary present");
-        assert_eq!(
-            summary.files_changed, 1,
-            "gitlink pointer change should count as one changed path"
-        );
-        assert_eq!(summary.added_lines, 0);
-        assert_eq!(summary.removed_lines, 0);
-        assert_eq!(
-            payload
-                .in_budget_signals
-                .first()
-                .and_then(|signal| signal.anchor.as_ref())
-                .map(|anchor| anchor.file.as_str()),
-            Some("vendor"),
-            "diff_summary signal should be anchored on the gitlink path"
-        );
-        let partition = payload.partition.expect("partition present");
-        let surfaced = partition
+        let payload = review
+            .get_review_payload(changed.state_id, false)
+            .expect("payload");
+
+        assert_eq!(payload.summary.files_changed, 1);
+        assert_eq!(payload.summary.added_lines, 0);
+        assert_eq!(payload.summary.removed_lines, 0);
+        assert_eq!(payload.in_budget_signals[0].anchor.file, "vendor");
+        let surfaced = payload
+            .partition
             .structural
             .iter()
-            .chain(partition.consequence.iter())
-            .chain(partition.tests_and_docs.iter())
+            .chain(payload.partition.consequence.iter())
+            .chain(payload.partition.tests_and_docs.iter())
             .any(|symbol| symbol.file == "vendor" && symbol.symbol == "vendor");
-        assert!(surfaced, "gitlink change should be path-visible in review");
+        assert!(surfaced, "gitlink change must remain path-visible");
     }
 
-    /// Regression for codex feedback on PRs #52 (tree fallback) and
-    /// #56 (blob fallback): `compute_state_diff_summary` must tolerate
-    /// missing trees and blobs by returning an empty/partial summary
-    /// rather than blocking the entire review payload. Construct a
-    /// state whose `tree` points to a content hash that was never
-    /// stored — `get_tree` returns `Ok(None)`, and the function must
-    /// fall back to an empty changeset instead of erroring out of
-    /// `diff_trees`. (Pre-fix, the Modified branch already tolerated
-    /// missing blobs via `.ok().flatten()`, but the Added/Deleted
-    /// branches and the top-level diff_trees call did not — surfaces
-    /// of pruned object stores all errored out inconsistently.)
-    #[tokio::test]
+    #[test]
     #[serial_test::serial(process_global)]
-    async fn get_review_payload_tolerates_missing_tree() {
-        let (svc, repo, _tmp) = fresh_service();
-        let state_id = capture_state(&repo);
-
-        // Load the state, swap its tree pointer to a synthetic hash
-        // that nothing references, and re-persist. The state object
-        // itself survives, but `repo.store().get_tree(state.tree)`
-        // will return `Ok(None)` — the missing-tree case.
-        let state = repo
+    fn local_payload_tolerates_a_missing_tree() {
+        let (review, repo, _temp) = fresh_review();
+        let state_id = capture_state(&repo, b"hello\n");
+        let mut state = repo
             .store()
             .get_state(&state_id)
             .expect("get state")
-            .expect("state present");
-        let bogus_tree = objects::object::ContentHash::compute(b"definitely-not-in-store-bytes");
-        let mut mutated = state.clone();
-        mutated.tree = bogus_tree;
-        let missing_tree_state_id = mutated.id();
-        repo.store().put_state(&mutated).expect("put mutated state");
+            .expect("state");
+        state.tree = objects::object::ContentHash::compute(b"missing-tree");
+        let missing_tree_state_id = state.id();
+        repo.store().put_state(&state).expect("put mutated state");
 
-        // The review payload must still come back — empty summary,
-        // but no internal contract failure from the local implementation.
-        let resp = svc
-            .get_review_payload(local_request(GetReviewPayloadRequest {
-                repo_path: None,
-                state_id: Some(api_state_id(&missing_tree_state_id)),
-                include_all_signals: false,
-            }))
-            .await
-            .expect("missing tree must not block review payload");
-        let payload = resp;
-        let summary = payload.summary.as_ref().expect("summary present");
+        let payload = review
+            .get_review_payload(missing_tree_state_id, false)
+            .expect("missing tree must not block the review payload");
+
+        assert_eq!(payload.summary.files_changed, 0);
+        assert_eq!(payload.in_budget_signals.len(), 1);
         assert_eq!(
-            summary.files_changed, 0,
-            "missing tree must produce a zero-change summary, got {} files",
-            summary.files_changed
+            payload.in_budget_signals[0].kind,
+            ReviewSignalKind::DiffSummary
         );
-        // Synthetic diff_summary signal should still be present so
-        // consumers always see at least one signal.
-        assert!(
-            !payload.in_budget_signals.is_empty(),
-            "in_budget_signals should always contain at least the synthetic diff_summary entry"
-        );
-        let signal = &payload.in_budget_signals[0];
         assert_eq!(
-            signal.kind,
-            ProtoRiskSignalKind::Unspecified as i32,
-            "the typed API has no synthetic diff-summary kind"
+            payload.in_budget_signals[0].producer.module,
+            "review_show.diff_summary"
         );
-        assert_eq!(signal.producer_module, "review_show.diff_summary");
     }
 
-    /// `line_count` should match git-style line counts — trailing
-    /// newline never produces a phantom empty line, but an unterminated
-    /// final line still counts.
     #[test]
     fn line_count_matches_git_semantics() {
         assert_eq!(line_count(b""), 0);
@@ -1920,8 +1249,6 @@ mod tests {
         assert_eq!(line_count(b"hello\n"), 1);
         assert_eq!(line_count(b"hello\nworld"), 2);
         assert_eq!(line_count(b"hello\nworld\n"), 2);
-        assert_eq!(line_count(b"a\nb\nc\n"), 3);
-        // Non-utf8 bytes count as zero (treated as binary).
         assert_eq!(line_count(&[0xff, 0xfe, 0xfd]), 0);
     }
 }

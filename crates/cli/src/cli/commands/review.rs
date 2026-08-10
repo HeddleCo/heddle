@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `heddle review` handler — calls hosted services in-process.
+//! `heddle review` handler over Heddle's local review interface.
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use api::heddle::api::v1alpha1::{
-    GetReviewPayloadRequest, ListSignaturesRequest, PathSymbolRef, ReviewScope as ProtoReviewScope,
-    SignStateRequest,
-};
 use daemon::local_review::{
-    LocalReviewContext, LocalReviewError, LocalStateReviewService, get_repo_signal_health,
+    LocalReviewContext, LocalStateReview, ReviewSignal, ReviewSignalKind, ReviewSignalVisibility,
+    SignReviewRequest, get_repo_signal_health,
+};
+use objects::object::{
+    Discussion, DiscussionResolution, ReviewKind, ReviewScope, StateId, SymbolAnchor,
 };
 use repo::{HistoryQuery, operation_dedup::OperationDedupStore};
 use serde::Serialize;
@@ -84,53 +84,34 @@ struct SignatureView {
 }
 
 async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
-    let svc = open_state_review_service(cli)?;
+    let review = open_local_review(cli)?;
     let state_id = resolve_state(cli, args.state.as_deref())?;
-    let payload_resp = svc
-        .get_review_payload(GetReviewPayloadRequest {
-            repo_path: None,
-            state_id: Some(api_state_id(&state_id)?),
-            include_all_signals: args.all_signals,
-        })
-        .await
-        .map_err(status_to_anyhow)?;
-    let signatures_resp = svc
-        .list_signatures(ListSignaturesRequest {
-            repo_path: None,
-            state_id: Some(api_state_id(&state_id)?),
-        })
-        .await
-        .map_err(status_to_anyhow)?;
+    let payload = review.get_review_payload(state_id, args.all_signals)?;
+    let stored_signatures = review.list_signatures(state_id)?;
 
-    use api::heddle::api::v1alpha1::ReviewKind;
-    let summary = payload_resp.summary.unwrap_or_default();
-    let signatures: Vec<SignatureView> = signatures_resp
-        .signatures
+    let signatures: Vec<SignatureView> = stored_signatures
         .iter()
-        .map(|s| {
-            let kind = ReviewKind::try_from(s.kind).unwrap_or(ReviewKind::Unspecified);
+        .map(|stored| {
+            let signature = &stored.signature;
+            let kind = signature.kind;
             let is_agent = matches!(kind, ReviewKind::AgentPreview | ReviewKind::AgentCoReview);
-            let (scope_kind, scope_symbols) = match s.scope.as_ref().and_then(|x| x.scope.as_ref())
-            {
-                Some(api::heddle::api::v1alpha1::review_scope::Scope::WholeChange(_)) => {
-                    ("whole_change".to_string(), Vec::new())
-                }
-                Some(api::heddle::api::v1alpha1::review_scope::Scope::Symbols(list)) => (
+            let (scope_kind, scope_symbols) = match &signature.scope {
+                ReviewScope::WholeChange => ("whole_change".to_string(), Vec::new()),
+                ReviewScope::Symbols(symbols) => (
                     "symbols".to_string(),
-                    list.symbols
+                    symbols
                         .iter()
                         .map(|sym| format!("{}:{}", sym.file, sym.symbol))
                         .collect(),
                 ),
-                None => (String::new(), Vec::new()),
             };
             SignatureView {
-                actor_name: s.actor_name.clone(),
-                actor_email: s.actor_email.clone(),
-                kind: review_kind_to_str(kind).to_string(),
+                actor_name: signature.actor.name.clone(),
+                actor_email: signature.actor.email.clone(),
+                kind: kind.as_str().to_string(),
                 glyph: if is_agent { AGENT_GLYPH } else { HUMAN_GLYPH },
                 is_agent,
-                signed_at_secs: s.signed_at.as_ref().map(|t| t.seconds).unwrap_or(0),
+                signed_at_secs: signature.signed_at,
                 scope_kind,
                 scope_symbols,
             }
@@ -139,35 +120,18 @@ async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
 
     let output = ReviewShowOutput {
         output_kind: "review_show",
-        state_id: api_state_id_string(payload_resp.state_id.as_ref()),
-        headline: summary.headline,
-        agent_narrative: opt_string(payload_resp.agent_narrative),
-        files_changed: summary.files_changed,
-        in_budget_signals: payload_resp
-            .in_budget_signals
-            .iter()
-            .map(signal_view)
+        state_id: payload.state_id.to_string_full(),
+        headline: payload.summary.headline,
+        agent_narrative: payload.agent_narrative,
+        files_changed: payload.summary.files_changed,
+        in_budget_signals: payload.in_budget_signals.iter().map(signal_view).collect(),
+        all_signals: payload.all_signals.iter().map(signal_view).collect(),
+        discussions: payload.discussions.iter().map(discussion_view).collect(),
+        signing_kinds: payload
+            .signing_kinds
+            .into_iter()
+            .map(|kind| kind.as_str().to_string())
             .collect(),
-        all_signals: payload_resp.all_signals.iter().map(signal_view).collect(),
-        discussions: payload_resp
-            .discussions
-            .iter()
-            .map(discussion_view)
-            .collect(),
-        signing_kinds: payload_resp
-            .signing_footer
-            .map(|f| {
-                f.available_kinds
-                    .into_iter()
-                    .map(|k| {
-                        review_kind_to_str(
-                            ReviewKind::try_from(k).unwrap_or(ReviewKind::Unspecified),
-                        )
-                        .to_string()
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
         signatures,
     };
     if should_output_json(cli, None) {
@@ -248,11 +212,13 @@ fn render_text(out: &ReviewShowOutput, all_signals: bool) {
 }
 
 async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
-    use api::heddle::api::v1alpha1::review_scope::{Scope, SymbolList, WholeChange};
-    let svc = open_state_review_service(cli)?;
+    let review = open_local_review(cli)?;
     let state_id_bytes = resolve_state_id_bytes(&cli.open_repo()?, &args.state)?;
-    let scope_inner = if args.symbols.is_empty() {
-        Scope::WholeChange(WholeChange {})
+    let state_id = StateId::from_bytes(state_id_bytes.try_into().map_err(|bytes: Vec<u8>| {
+        anyhow!("resolved state ID has invalid byte length {}", bytes.len())
+    })?);
+    let scope = if args.symbols.is_empty() {
+        ReviewScope::WholeChange
     } else {
         let parsed: Result<Vec<_>> = args
             .symbols
@@ -261,56 +227,51 @@ async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
                 let (file, symbol) = s
                     .split_once(':')
                     .ok_or_else(|| anyhow!(RecoveryAdvice::review_symbols_malformed(s)))?;
-                Ok(PathSymbolRef {
-                    file: file.to_string(),
-                    symbol: symbol.to_string(),
-                })
+                Ok(SymbolAnchor::new(file, symbol))
             })
             .collect();
-        Scope::Symbols(SymbolList { symbols: parsed? })
+        ReviewScope::Symbols(parsed?)
     };
-    let scope = ProtoReviewScope {
-        scope: Some(scope_inner),
+    let kind = match args.kind.as_wire() {
+        "read" => ReviewKind::Read,
+        "agent_preview" => ReviewKind::AgentPreview,
+        "agent_co_review" => ReviewKind::AgentCoReview,
+        _ => unreachable!("SignKindArg has a closed variant set"),
     };
-    let req = SignStateRequest {
-        repo_path: None,
-        state_id: Some(api_state_id(&state_id_bytes)?),
-        kind: args.kind.as_proto() as i32,
-        scope: Some(scope),
-        justification: args.justification.clone().unwrap_or_default(),
+    let request = SignReviewRequest {
+        state_id,
+        kind,
+        scope,
+        justification: args.justification.clone(),
         algorithm: args.algorithm.clone(),
         public_key: hex::decode(&args.public_key)
             .map_err(|e| anyhow::anyhow!("public_key must be hex-encoded: {e}"))?,
         signature: hex::decode(&args.signature)
             .map_err(|e| anyhow::anyhow!("signature must be hex-encoded: {e}"))?,
-        signed_at: Some(prost_types::Timestamp {
-            seconds: args.signed_at_unix,
-            nanos: 0,
-        }),
+        signed_at: args.signed_at_unix,
         client_operation_id: crate::operation_id::wire(cli),
     };
-    let resp = svc.sign_state(req).await.map_err(status_to_anyhow)?;
+    let response = review.sign_state(request).await?;
     if should_output_json(cli, None) {
-        let state_str = api_state_id_string(resp.state_id.as_ref());
         let out = serde_json::json!({
             "output_kind": "review_sign",
-            "signature_id": resp.signature_id,
-            "state_id": state_str,
+            "signature_id": response.signature_id,
+            "state_id": response.state_id.to_string_full(),
         });
         println!("{out}");
     } else {
         println!(
             "signed state {} as {} (signature_id {})",
-            api_state_id_string(resp.state_id.as_ref()),
+            response.state_id.to_string_full(),
             args.kind.as_wire(),
-            resp.signature_id
+            response.signature_id
         );
     }
     Ok(())
 }
 
 async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
-    let svc = open_state_review_service(cli)?;
+    let review = open_local_review(cli)?;
     let repo = cli.open_repo()?;
     let head = repo.head().context("read HEAD")?.ok_or_else(|| {
         anyhow!(RecoveryAdvice::repository_no_head_capture_first(
@@ -335,28 +296,16 @@ async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
 
     let mut next_state: Option<NextStateView> = None;
     for state in history {
-        let state_id_bytes = state.state_id.as_bytes().to_vec();
         let state_id_str = state.state_id.to_string_full();
-        let signatures = svc
-            .list_signatures(ListSignaturesRequest {
-                repo_path: None,
-                state_id: Some(api_state_id(&state_id_bytes)?),
-            })
-            .await
-            .map_err(status_to_anyhow)?
-            .signatures;
+        let signatures = review.list_signatures(state.state_id)?;
 
         let satisfied = signatures.iter().any(|s| {
             let actor_match = match actor_email.as_deref() {
-                Some(email) => s.actor_email.eq_ignore_ascii_case(email),
+                Some(email) => s.signature.actor.email.eq_ignore_ascii_case(email),
                 None => true,
             };
             let kind_match = match args.kind.as_deref() {
-                Some(k) => {
-                    let parsed = api::heddle::api::v1alpha1::ReviewKind::try_from(s.kind)
-                        .unwrap_or(api::heddle::api::v1alpha1::ReviewKind::Unspecified);
-                    review_kind_to_str(parsed) == k
-                }
+                Some(kind) => s.signature.kind.as_str() == kind,
                 None => true,
             };
             actor_match && kind_match
@@ -456,80 +405,62 @@ async fn run_health(cli: &Cli, args: &ReviewHealthArgs) -> Result<()> {
     Ok(())
 }
 
-fn open_state_review_service(cli: &Cli) -> Result<LocalStateReviewService> {
+fn open_local_review(cli: &Cli) -> Result<LocalStateReview> {
     let repo = cli.open_repo()?;
     let dedup = OperationDedupStore::open(repo.heddle_dir()).context("open dedup store")?;
     let inner = LocalReviewContext::new(Arc::new(repo), Arc::new(dedup));
-    Ok(LocalStateReviewService::new(inner))
+    Ok(LocalStateReview::new(inner))
 }
 
-fn signal_view(s: &api::heddle::api::v1alpha1::RiskSignal) -> SignalView {
-    use api::heddle::api::v1alpha1::{RiskSignalKind, SignalVisibility};
-
-    let anchor = s.anchor.clone().unwrap_or_default();
+fn signal_view(signal: &ReviewSignal) -> SignalView {
     SignalView {
-        kind: match s.kind() {
-            RiskSignalKind::Novelty => "novelty",
-            RiskSignalKind::TestReachability => "test_reachability",
-            RiskSignalKind::PatternDeviation => "pattern_deviation",
-            RiskSignalKind::InvariantAdjacency => "invariant_adjacency",
-            RiskSignalKind::SelfFlaggedUncertainty => "self_flagged_uncertainty",
-            RiskSignalKind::Unspecified => "unspecified",
+        kind: match signal.kind {
+            ReviewSignalKind::DiffSummary => "diff_summary",
+            ReviewSignalKind::Risk(kind) => kind.as_str(),
         }
         .to_string(),
-        file: anchor.file,
-        symbol: anchor.symbol,
-        reason: s.reason.clone(),
-        producer: s.producer_module.clone(),
-        visibility: match s.visibility() {
-            SignalVisibility::Visible => "visible",
-            SignalVisibility::Hidden => "hidden",
-            SignalVisibility::Unspecified => "unspecified",
+        file: signal.anchor.file.clone(),
+        symbol: signal.anchor.symbol.clone().unwrap_or_default(),
+        reason: signal.reason.clone(),
+        producer: signal.producer.module.clone(),
+        visibility: match signal.visibility {
+            ReviewSignalVisibility::Visible => "visible",
+            ReviewSignalVisibility::Hidden => "hidden",
         }
         .to_string(),
     }
 }
 
-fn discussion_view(d: &api::heddle::api::v1alpha1::AnchoredDiscussion) -> DiscussionView {
-    use api::heddle::api::v1alpha1::discussion_resolution::State;
-    let anchor = d.anchor.clone().unwrap_or_default();
-    let status = match d.resolution.as_ref().and_then(|r| r.state.as_ref()) {
-        Some(State::Open(_)) | None => "open",
-        Some(State::IntoAnnotation(_)) => "resolved_into_annotation",
-        Some(State::ByEdit(_)) => "resolved_by_edit",
-        Some(State::Dismissed(_)) => "dismissed",
+fn discussion_view(discussion: &Discussion) -> DiscussionView {
+    let status = match &discussion.resolution {
+        DiscussionResolution::Open => "open",
+        DiscussionResolution::ResolvedIntoAnnotation { .. } => "resolved_into_annotation",
+        DiscussionResolution::ResolvedByEdit { .. } => "resolved_by_edit",
+        DiscussionResolution::Dismissed { .. } => "dismissed",
     }
     .to_string();
     DiscussionView {
-        id: d.id.clone(),
-        file: anchor.file,
-        symbol: anchor.symbol,
+        id: discussion.id.clone(),
+        file: discussion.anchor.file.clone(),
+        symbol: discussion.anchor.symbol.clone(),
         status,
-        body_changed_since_open: d.body_changed_since_open,
-        orphaned: d.orphaned,
+        body_changed_since_open: discussion.body_changed_since_open,
+        orphaned: discussion.orphaned,
     }
 }
 
-fn opt_string(s: String) -> Option<String> {
-    if s.is_empty() { None } else { Some(s) }
-}
-
-fn resolve_state(cli: &Cli, explicit: Option<&str>) -> Result<Vec<u8>> {
+fn resolve_state(cli: &Cli, explicit: Option<&str>) -> Result<StateId> {
     let repo = cli.open_repo()?;
     if let Some(s) = explicit {
         // Routes through the canonical resolver so short/full IDs and
         // marker names all work — matches `heddle log --output json` output.
-        return Ok(resolve_state_id(&repo, s)?.as_bytes().to_vec());
+        return resolve_state_id(&repo, s);
     }
     let head = repo
         .head()
         .context("read HEAD")?
         .ok_or_else(|| anyhow!(RecoveryAdvice::repository_no_head_capture_first("review")))?;
-    Ok(head.as_bytes().to_vec())
-}
-
-fn status_to_anyhow(status: LocalReviewError) -> anyhow::Error {
-    anyhow::Error::new(status)
+    Ok(head)
 }
 
 fn review_mine_only_principal_required_advice() -> RecoveryAdvice {
@@ -546,31 +477,6 @@ fn review_mine_only_principal_required_advice() -> RecoveryAdvice {
             "heddle review next".to_string(),
         ],
     )
-}
-
-/// Render a 32-byte StateId from the wire as its display form.
-fn api_state_id(bytes: &[u8]) -> Result<api::heddle::api::v1alpha1::StateId> {
-    api::heddle::api::v1alpha1::StateId::from_bytes(bytes)
-        .map_err(|error| anyhow!("invalid state id: {error}"))
-}
-
-fn api_state_id_string(state_id: Option<&api::heddle::api::v1alpha1::StateId>) -> String {
-    let Some(state_id) = state_id else {
-        return String::new();
-    };
-    objects::object::StateId::try_from_slice(&state_id.value)
-        .map(|id| id.to_string_full())
-        .unwrap_or_default()
-}
-
-fn review_kind_to_str(kind: api::heddle::api::v1alpha1::ReviewKind) -> &'static str {
-    use api::heddle::api::v1alpha1::ReviewKind;
-    match kind {
-        ReviewKind::Read => "read",
-        ReviewKind::AgentPreview => "agent_preview",
-        ReviewKind::AgentCoReview => "agent_co_review",
-        ReviewKind::Unspecified => "",
-    }
 }
 
 #[cfg(test)]
@@ -636,23 +542,11 @@ mod tests {
         assert_eq!(arr[1]["warn"], true);
     }
 
-    /// Guards `review_kind_to_str` against silent gaps when a new
-    /// `ReviewKind` variant is added — adding a new variant without an
-    /// arm in the helper would compile (the match returns "" via the
-    /// catch-all) but produce garbage downstream.
     #[test]
-    fn review_kind_to_str_covers_known_variants() {
-        use api::heddle::api::v1alpha1::ReviewKind;
-        assert_eq!(review_kind_to_str(ReviewKind::Read), "read");
-        assert_eq!(
-            review_kind_to_str(ReviewKind::AgentPreview),
-            "agent_preview"
-        );
-        assert_eq!(
-            review_kind_to_str(ReviewKind::AgentCoReview),
-            "agent_co_review"
-        );
-        assert_eq!(review_kind_to_str(ReviewKind::Unspecified), "");
+    fn durable_review_kinds_have_cli_spellings() {
+        assert_eq!(ReviewKind::Read.as_str(), "read");
+        assert_eq!(ReviewKind::AgentPreview.as_str(), "agent_preview");
+        assert_eq!(ReviewKind::AgentCoReview.as_str(), "agent_co_review");
     }
 
     #[test]
