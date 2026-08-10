@@ -1,6 +1,6 @@
 # cargo-deny configuration — Heddle supply-chain gate.
 #
-# Enforced by .github/workflows/audit.yml on push + PR + weekly cron.
+# Enforced by the Static contracts job in .github/workflows/rust-tests.yml.
 # Run locally with: cargo deny check
 #
 # Schema reference: https://embarkstudios.github.io/cargo-deny/
@@ -29,10 +29,9 @@ feature-depth = 1
 [advisories]
 version = 2
 db-urls = ["https://github.com/rustsec/advisory-db"]
-# Any advisory not explicitly ignored below is a hard fail. Yanked crates
-# warn rather than fail so a yank during CI flight doesn't break unrelated PRs;
-# the weekly cron will still surface them.
-yanked = "warn"
+# Any advisory or yanked crate not explicitly ignored below is a hard fail.
+# cargo-deny is the single authoritative supply-chain policy engine.
+yanked = "deny"
 ignore = [
     # rsa 0.9.x: Marvin timing sidechannel on RSA decryption. Upstream-tracked
     # (https://github.com/RustCrypto/RSA/issues/19); no fixed release in the
@@ -46,9 +45,11 @@ ignore = [
     # transitively via biscuit-quote → biscuit-auth 6.0 (the CLI auth runtime).
     # It is a BUILD-TIME proc-macro helper, not a runtime dependency, and
     # "unmaintained" is a maintenance-status warning, not a vulnerability — no
-    # CVE, no runtime attack surface. Remove this ignore when biscuit-auth drops
-    # proc-macro-error2 upstream.
-    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; transitive build-time proc-macro via biscuit-quote → biscuit-auth 6.0; no runtime exposure, no CVE. Remove when biscuit-auth drops it." },
+    # CVE, no runtime attack surface. biscuit-rust#306 makes the Datalog macros
+    # optional, but that fix is not in a crates.io release yet; a Git pin would
+    # be stripped from Heddle's published package. Remove this ignore after a
+    # fixed biscuit-auth release can be selected without its macro feature.
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; transitive build-time proc-macro via biscuit-quote → biscuit-auth 6.0; no runtime exposure or CVE; upstream fix #306 is merged but unreleased" },
 
     # Accepted 2026-07-27: paste 1.0.15 is unmaintained
     # (RUSTSEC-2024-0436). Pulled transitively by Iroh's netlink discovery

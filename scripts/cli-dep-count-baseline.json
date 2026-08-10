@@ -1,5 +1,5 @@
 {
-  "_comment": "Package-scoped post-gix-removal transitive-dependency baseline for the heddle-cli crate (default features, normal edges only). Tracked by scripts/check-cli-dep-count.sh and wired into .github/workflows/audit.yml. The gate FAILS if the live count exceeds baseline + slack; raise the baseline (with justification) only when a dependency addition is deliberate.",
+  "_comment": "Package-scoped post-gix-removal transitive-dependency baseline for the heddle-cli crate (default features, normal edges only). Tracked by scripts/check-cli-dep-count.sh and wired into Rust Tests' Static contracts job. The gate FAILS if the live count exceeds baseline + slack; raise the baseline (with justification) only when a dependency addition is deliberate.",
   "package": "heddle-cli",
   "features": "default",
   "baseline": 408,
