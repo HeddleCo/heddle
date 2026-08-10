@@ -58,8 +58,9 @@ mod tests;
 pub use markers::ConflictMarkers;
 pub use tree_merge::{
     ConflictLabels, DetectedRename, DirectoryRename, MergeBlobSource, MergeError, MergeOptions,
-    MergeStrategy, RenameDetectionResult, RenameMatcherStats, RenameOptions, SemanticMergeFn,
-    SemanticSimilarityFn, TreeMergeResult, detect_renames_between_trees, merge_trees,
+    MergeStrategy, RenameAssignment, RenameCandidateIndex, RenameDetectionResult,
+    RenameMatcherStats, RenameOptions, SemanticMergeFn, SemanticSimilarityFn, TreeMergeResult,
+    detect_renames_between_trees, merge_trees,
 };
 
 /// Outcome of a three-way line-based merge.
