@@ -557,6 +557,125 @@ fn test_detect_file_renames() {
 }
 
 #[test]
+fn file_rename_equal_scores_keep_stable_input_order() {
+    let deleted = vec![
+        (
+            std::path::PathBuf::from("old-first.rs"),
+            "fn same() {}".to_string(),
+        ),
+        (
+            std::path::PathBuf::from("old-second.rs"),
+            "fn same() {}".to_string(),
+        ),
+    ];
+    let added = vec![
+        (
+            std::path::PathBuf::from("new-first.rs"),
+            "fn same() {}".to_string(),
+        ),
+        (
+            std::path::PathBuf::from("new-second.rs"),
+            "fn same() {}".to_string(),
+        ),
+    ];
+
+    let renames = detect_file_renames(&deleted, &added, 1.0, SimilarityMethod::Lines);
+
+    assert_eq!(
+        renames,
+        vec![
+            (
+                std::path::PathBuf::from("old-first.rs"),
+                std::path::PathBuf::from("new-first.rs"),
+            ),
+            (
+                std::path::PathBuf::from("old-second.rs"),
+                std::path::PathBuf::from("new-second.rs"),
+            ),
+        ]
+    );
+}
+
+#[test]
+#[cfg(feature = "lang-rust")]
+fn file_rename_ast_similarity_parses_each_file_once() {
+    let deleted = (0..4)
+        .map(|index| {
+            (
+                std::path::PathBuf::from(if index == 0 {
+                    "old_unknown.extension".to_string()
+                } else {
+                    format!("old_{index}.rs")
+                }),
+                format!("fn old_{index}() {{ println!(\"old {index}\"); }}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let added = (0..5)
+        .map(|index| {
+            (
+                std::path::PathBuf::from(format!("new_{index}.rs")),
+                format!("fn new_{index}() {{ println!(\"new {index}\"); }}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    crate::parser::reset_parse_count();
+
+    let _ = detect_file_renames(&deleted, &added, 0.5, SimilarityMethod::Ast);
+
+    assert_eq!(
+        crate::parser::parse_count(),
+        deleted.len() + added.len(),
+        "AST preparation must scale with files, not the deleted × added pair count"
+    );
+}
+
+#[test]
+#[cfg(feature = "lang-rust")]
+fn file_rename_ast_similarity_uses_known_language_for_unknown_path() {
+    let old_content = "fn alpha(left: i32) -> i32 { left + 1 }".to_string();
+    let new_content = "fn beta(right: i32) -> i32 { right + 9 }".to_string();
+
+    for (old_path, new_path) in [("old.unknown", "new.rs"), ("old.rs", "new.unknown")] {
+        let deleted = vec![(std::path::PathBuf::from(old_path), old_content.clone())];
+        let added = vec![(std::path::PathBuf::from(new_path), new_content.clone())];
+        crate::parser::reset_parse_count();
+
+        let renames = detect_file_renames(&deleted, &added, 0.95, SimilarityMethod::Ast);
+
+        assert_eq!(renames.len(), 1, "known side must select the AST grammar");
+        assert_eq!(
+            crate::parser::parse_count(),
+            2,
+            "both files should be prepared once with the selected Rust grammar"
+        );
+    }
+}
+
+#[test]
+#[cfg(all(feature = "lang-rust", feature = "lang-python"))]
+fn file_rename_language_pruning_happens_before_ast_parsing() {
+    let deleted = vec![(
+        std::path::PathBuf::from("old.rs"),
+        "fn old() {}".to_string(),
+    )];
+    let added = vec![(
+        std::path::PathBuf::from("new.py"),
+        "def new():\n    pass".to_string(),
+    )];
+    crate::parser::reset_parse_count();
+
+    let renames = detect_file_renames(&deleted, &added, 0.0, SimilarityMethod::Ast);
+
+    assert!(renames.is_empty());
+    assert_eq!(
+        crate::parser::parse_count(),
+        0,
+        "known-incompatible languages must be pruned before preparation"
+    );
+}
+
+#[test]
 fn test_compute_similarity_ast_fallback() {
     let a = "fn add(a: i32, b: i32) -> i32 { a + b }";
     let b = "fn sum(x: i32, y: i32) -> i32 { x + y }";
