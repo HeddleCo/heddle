@@ -7,7 +7,6 @@ mod auth_tests;
 mod auth_token;
 mod capabilities;
 mod key_binding;
-mod message_delta;
 mod message_hosted;
 mod message_objects;
 mod message_pushpull;
@@ -29,22 +28,17 @@ pub use key_binding::{
     WireKeyBinding, WireKeyBindingLiveness, WireKeyBindingRegistry, decode_key_binding_registry,
     encode_key_binding_registry,
 };
-pub use message_delta::{DeltaData, RequestDelta};
 pub use message_hosted::{
-    CreateHostedGrant, DeleteHostedGrant, DeleteHostedRepository, DeleteNamespace, HarnessIdentity,
-    HostedGrantCreated, HostedGrantDeleted, HostedGrantInfo, HostedGrantUpdated, HostedGrantsList,
-    HostedNamespaceInfo, HostedRepositoryInfo, HostedSpoolInfo, HostedSpoolKind, ListHostedGrants,
-    ListHostedNamespaces, ListHostedRepositories, NamespaceDeleted, NamespaceUpdated,
-    NamespacesList, ProgressCheckpoint, RepositoriesList, RepositoryDeleted, RepositoryUpdated,
-    SessionDiffSummary, SessionReportEnvelope, TranscriptAttachmentRef, UpdateHostedGrant,
-    UpdateHostedRepository, UpdateNamespace, UsageTotals, WorktreeChangeBaseline,
+    HarnessIdentity, HostedGrantInfo, HostedNamespaceInfo, HostedRepositoryInfo, HostedSpoolInfo,
+    HostedSpoolKind, ProgressCheckpoint, SessionDiffSummary, SessionReportEnvelope,
+    TranscriptAttachmentRef, UsageTotals, WorktreeChangeBaseline,
 };
-pub use message_objects::{HaveObjects, ObjectData, ObjectRequest, SendObjects, WantObjects};
+pub use message_objects::{ObjectData, ObjectRequest};
 pub use message_pushpull::{PullComplete, PushComplete};
-pub use message_refs::{HeadInfo, ListRefs, RefEntry, RefFilter, RefUpdated, RefsList, UpdateRef};
+pub use message_refs::{HeadInfo, RefEntry, RefFilter, RefUpdated, RefsList};
 pub use message_status::{
     Error, ErrorCode, RemoteCursorFailure, RemoteCursorReason, RemoteDuration, RemoteFailureCode,
-    RemoteFailureDetail, RemoteTimestamp, Status, StatusCode,
+    RemoteFailureDetail, RemoteTimestamp,
 };
 pub use native_pack::{
     GitPackChunkState, GrowingPackChunkReader, MAX_RECEIVED_GIT_PACK_SIZE,
