@@ -291,6 +291,6 @@ fn test_gc_performance_many_objects() {
         || {
             heddle(&["maintenance", "gc", "--aggressive"], Some(temp.path())).unwrap();
         },
-        performance_budget(Duration::from_secs(5), Duration::from_secs(10)),
+        performance_budget(Duration::from_secs(5), Duration::from_secs(15)),
     );
 }

@@ -16,7 +16,7 @@ use objects::{
     object::{ContentHash, Tree},
     store::ObjectStore,
 };
-pub use rename_matcher::RenameMatcherStats;
+pub use rename_matcher::{RenameAssignment, RenameCandidateIndex, RenameMatcherStats};
 
 use crate::{ConflictMarkers, MergeOutcome};
 
