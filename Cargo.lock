@@ -2337,7 +2337,6 @@ dependencies = [
  "heddle-oplog",
  "heddle-refs",
  "heddle-repo",
- "heddle-semantic",
  "pollster",
  "rmp-serde",
  "rusqlite",

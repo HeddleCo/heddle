@@ -8,7 +8,7 @@
 //! evaluator see the new reality.
 //!
 //! Both `heddle capture` (CLI worktree-snapshot) and
-//! `ContentAddressedMount::capture` (mount-snapshot) need to do this
+//! mount capture when re-wired (mount-snapshot) need to do this
 //! same work after their state lands. Putting it here keeps the
 //! logic in one place and lets `crates/mount` avoid pulling in
 //! `crates/cli` deps.

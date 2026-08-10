@@ -10,7 +10,7 @@ use std::path::Path;
 
 use merge::{ConflictMarkers, MergeOutcome, text_hunk_merge_with_markers};
 
-use super::{MergeStrategy, semantic_three_way_merge, three_way_merge};
+use super::semantic_three_way_merge;
 
 const MARKERS: ConflictMarkers<'static> = ConflictMarkers {
     ours: "OURS",
@@ -767,43 +767,6 @@ fn non_utf8_input_falls_through_to_hunk_merge() {
         MergeOutcome::Clean(_) | MergeOutcome::Conflicts { .. } => {}
         other => panic!("unexpected outcome: {other:?}"),
     }
-}
-
-#[test]
-fn three_way_merge_hunk_only_strategy_skips_parsing() {
-    // .rs path, but HunkOnly forces text_hunk_merge regardless.
-    let base = "fn a() { 1 }\nfn b() { 2 }\n";
-    let ours = "fn a() { 10 }\nfn b() { 2 }\n";
-    let theirs = "fn a() { 1 }\nfn b() { 20 }\n";
-    let out = three_way_merge(
-        base.as_bytes(),
-        ours.as_bytes(),
-        theirs.as_bytes(),
-        Path::new("a.rs"),
-        MARKERS,
-        MergeStrategy::HunkOnly,
-    );
-    let merged = assert_clean(out);
-    assert!(merged.contains("10"));
-    assert!(merged.contains("20"));
-}
-
-#[test]
-fn three_way_merge_semantic_strategy_uses_ast() {
-    let base = "fn a() { 1 }\nfn b() { 2 }\n";
-    let ours = "fn a() { 10 }\nfn b() { 2 }\n";
-    let theirs = "fn a() { 1 }\nfn b() { 20 }\n";
-    let out = three_way_merge(
-        base.as_bytes(),
-        ours.as_bytes(),
-        theirs.as_bytes(),
-        Path::new("a.rs"),
-        MARKERS,
-        MergeStrategy::Semantic,
-    );
-    let merged = assert_clean(out);
-    assert!(merged.contains("10"));
-    assert!(merged.contains("20"));
 }
 
 // =====================================================================

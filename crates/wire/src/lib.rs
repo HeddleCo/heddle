@@ -5,7 +5,6 @@
 #[cfg(test)]
 mod auth_tests;
 mod auth_token;
-mod capabilities;
 mod key_binding;
 mod message_hosted;
 mod message_objects;
@@ -20,10 +19,6 @@ mod provider_pack;
 mod transfer_plan;
 
 pub use auth_token::AuthToken;
-pub use capabilities::{
-    CAPABILITY_CHUNKED_TRANSFER, CAPABILITY_PACK_TRANSFER, CAPABILITY_PARTIAL_FETCH,
-    CAPABILITY_RESUMABLE_TRANSFER, Capabilities, CapabilitySet,
-};
 pub use key_binding::{
     WireKeyBinding, WireKeyBindingLiveness, WireKeyBindingRegistry, decode_key_binding_registry,
     encode_key_binding_registry,

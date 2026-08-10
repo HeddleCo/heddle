@@ -322,30 +322,4 @@ fn conserves_inputs(
     got.is_subset(&allowed)
 }
 
-/// Strategy a merge call should use for content reconciliation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MergeStrategy {
-    /// Always use `heddle-merge::text_hunk_merge` on the whole file.
-    HunkOnly,
-    /// Try AST-defined item decomposition first; fall through to
-    /// `text_hunk_merge` for unparseable / unknown-language files.
-    Semantic,
-}
-
-/// Single entry point that dispatches on [`MergeStrategy`]. Provided so call
-/// sites that already thread a strategy enum don't have to branch themselves.
-pub fn three_way_merge(
-    base: &[u8],
-    ours: &[u8],
-    theirs: &[u8],
-    path: &Path,
-    markers: ConflictMarkers<'_>,
-    strategy: MergeStrategy,
-) -> MergeOutcome {
-    match strategy {
-        MergeStrategy::HunkOnly => text_hunk_merge_with_markers(base, ours, theirs, markers),
-        MergeStrategy::Semantic => semantic_three_way_merge(base, ours, theirs, path, markers),
-    }
-}
-
 pub use merge::{ConflictMarkers as MergeConflictMarkers, MergeOutcome as MergeDriverOutcome};

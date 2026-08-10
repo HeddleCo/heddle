@@ -3,8 +3,8 @@
 //!
 //! `mount` is the platform-agnostic core (and Linux FUSE shell) that
 //! exposes a heddle thread as a directory tree. Reads walk the
-//! Merkle DAG lazily; writes (eventually) flow into a per-thread
-//! overlay that drains to a heddle commit on `heddle capture`.
+//! Merkle DAG lazily; writes flow into a per-thread overlay
+//! (capture-to-state is not wired on the live path yet).
 //!
 //! The architecture is:
 //!

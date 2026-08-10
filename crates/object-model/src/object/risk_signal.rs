@@ -111,11 +111,10 @@ impl RiskSignalKind {
     }
 
     /// Render-time priority. Lower numbers surface first when budgeting.
-    /// See `state_review::budget` for the full algorithm.
     ///
-    /// The order is load-bearing: changing it changes which signals reviewers
-    /// see first when many fire on the same state. If you bump these numbers,
-    /// update the budgeting test goldens too.
+    /// The live review path (`daemon` local `get_review_payload`) currently
+    /// treats every signal as visible rather than applying a ranked budget
+    /// split; keep this order load-bearing for callers that sort by it.
     pub fn priority_rank(&self) -> u8 {
         match self {
             Self::InvariantAdjacency => 0,
