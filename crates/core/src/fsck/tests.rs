@@ -227,10 +227,9 @@ fn test_fsck_does_not_require_gitlink_target_object() {
     assert!(warnings.is_empty(), "warnings={warnings:?}");
 }
 
-/// Fixture exercising every tree/blob fsck finding class. Expected values were
-/// captured from the pre-refactor `check_trees` + `check_blobs` pair.
+/// Fixture exercising every tree/blob fsck finding class.
 #[test]
-fn test_tree_blob_checks_characterization() {
+fn test_tree_blob_checks_report_missing_references() {
     use objects::object::ContentHash;
 
     let (_temp, repo) = setup_repo();
@@ -256,7 +255,7 @@ fn test_tree_blob_checks_characterization() {
         .put_tree(&shared_tree)
         .expect("put shared tree");
 
-    // Dangling subtree ref (missing child tree — fsck stays silent).
+    // Dangling subtree ref must be reported rather than silently skipped.
     let dangling_tree_hash = ContentHash::compute(b"missing-subtree");
     let dangling_parent = Tree::from_entries(vec![
         objects::object::TreeEntry::directory("missing", dangling_tree_hash).unwrap(),
@@ -298,16 +297,20 @@ fn test_tree_blob_checks_characterization() {
     let error_kinds: Vec<_> = errors.iter().map(|error| error.kind.as_str()).collect();
     assert_eq!(
         error_kinds,
-        vec!["missing_blob", "missing_blob"],
-        "tree-phase then blob-phase ordering must be preserved"
+        vec!["missing_blob", "missing_tree", "missing_blob"],
+        "tree-phase findings must precede blob-content findings"
     );
 
     assert_eq!(
         errors[0].message,
         "Tree entry 'absent.txt' references missing blob"
     );
-    assert_eq!(errors[1].message, "Tree references missing blob");
-    assert_eq!(errors[0].object, errors[1].object, "same missing blob hash");
+    assert_eq!(
+        errors[1].message,
+        "Tree path 'missing' references missing tree"
+    );
+    assert_eq!(errors[2].message, "Tree references missing blob");
+    assert_eq!(errors[0].object, errors[2].object, "same missing blob hash");
 
     assert_eq!(warnings.len(), 1);
     assert!(

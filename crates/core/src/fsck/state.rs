@@ -1,17 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::{
-    collections::{HashMap, HashSet},
-    path::Path,
-};
+use std::collections::{HashMap, HashSet};
 
 use objects::{
     error::Result,
-    object::{ContentHash, SignatureStatus, State, Tree},
+    object::{SignatureStatus, State},
     store::ObjectStore,
 };
 use repo::Repository;
 
-use super::{FsckError, make_error};
+use super::{FsckError, make_error, provenance::check_provenance_tree};
 
 pub(crate) fn check_states(
     repo: &Repository,
@@ -31,20 +28,17 @@ pub(crate) fn check_states(
                 }
                 check_state_integrity(repo, &state, errors, thorough)?;
             }
-            None => {
-                errors.push(make_error(
-                    "missing_state",
-                    &format!("State {} is listed but cannot be read", state_id),
-                    Some(state_id.short()),
-                ));
-            }
+            None => errors.push(make_error(
+                "missing_state",
+                &format!("State {} is listed but cannot be read", state_id),
+                Some(state_id.short()),
+            )),
         }
     }
 
     if thorough {
         check_state_cycles(&parent_map, errors);
     }
-
     Ok(())
 }
 
@@ -61,7 +55,6 @@ fn check_state_integrity(
             Some(state.tree.short()),
         ));
     }
-
     for parent in &state.parents {
         if !repo.store().has_state(parent)? {
             errors.push(make_error(
@@ -71,7 +64,6 @@ fn check_state_integrity(
             ));
         }
     }
-
     if thorough && repo.verify_state_signature(&state.state_id)? == SignatureStatus::Invalid {
         errors.push(make_error(
             "invalid_signature",
@@ -82,7 +74,6 @@ fn check_state_integrity(
             Some(state.state_id.short()),
         ));
     }
-
     if thorough && let Some(provenance_root) = state.provenance {
         if !repo.store().has_tree(&provenance_root)? {
             errors.push(make_error(
@@ -95,152 +86,9 @@ fn check_state_integrity(
                 Some(provenance_root.short()),
             ));
         } else if let Some(tree) = repo.store().get_tree(&state.tree)? {
-            check_provenance_tree(repo, &tree, &provenance_root, Path::new(""), errors)?;
+            check_provenance_tree(repo, &tree, provenance_root, errors)?;
         }
     }
-
-    Ok(())
-}
-
-fn check_provenance_tree(
-    repo: &Repository,
-    data_tree: &Tree,
-    provenance_root: &ContentHash,
-    path: &Path,
-    errors: &mut Vec<FsckError>,
-) -> Result<()> {
-    let Some(provenance_tree) = repo.store().get_tree(provenance_root)? else {
-        return Ok(());
-    };
-
-    for entry in provenance_tree.entries() {
-        let entry_path = path.join(entry.name());
-        let Some(data_entry) = data_tree.get(entry.name()) else {
-            errors.push(make_error(
-                "invalid_provenance",
-                &format!(
-                    "Provenance path '{}' does not exist in the data tree",
-                    entry_path.display()
-                ),
-                None,
-            ));
-            continue;
-        };
-
-        match entry.entry_type() {
-            objects::object::EntryType::Tree => {
-                if !data_entry.is_tree() {
-                    errors.push(make_error(
-                        "invalid_provenance",
-                        &format!(
-                            "Provenance path '{}' points to a directory but data tree has a file",
-                            entry_path.display()
-                        ),
-                        None,
-                    ));
-                    continue;
-                }
-                let Some(data_hash) = data_entry.tree_hash() else {
-                    continue;
-                };
-                let Some(provenance_hash) = entry.tree_hash() else {
-                    continue;
-                };
-                if let Some(subtree) = repo.store().get_tree(&data_hash)? {
-                    check_provenance_tree(repo, &subtree, &provenance_hash, &entry_path, errors)?;
-                }
-            }
-            objects::object::EntryType::Blob => {
-                if !data_entry.is_blob() {
-                    errors.push(make_error(
-                        "invalid_provenance",
-                        &format!(
-                            "Provenance path '{}' points to a file but data tree has a directory",
-                            entry_path.display()
-                        ),
-                        None,
-                    ));
-                    continue;
-                }
-                let Some(provenance_hash) = entry.blob_hash() else {
-                    continue;
-                };
-                let Some(provenance_blob) = repo.store().get_blob(&provenance_hash)? else {
-                    errors.push(make_error(
-                        "invalid_provenance",
-                        &format!("Missing provenance blob for '{}'", entry_path.display()),
-                        Some(provenance_hash.short()),
-                    ));
-                    continue;
-                };
-                let provenance: objects::object::FileProvenance =
-                    match rmp_serde::from_slice(provenance_blob.content()) {
-                        Ok(provenance) => provenance,
-                        Err(error) => {
-                            errors.push(make_error(
-                                "invalid_provenance",
-                                &format!(
-                                    "Invalid provenance blob for '{}': {}",
-                                    entry_path.display(),
-                                    error
-                                ),
-                                Some(provenance_hash.short()),
-                            ));
-                            continue;
-                        }
-                    };
-                if let Err(error) = provenance.validate() {
-                    errors.push(make_error(
-                        "invalid_provenance",
-                        &format!(
-                            "Invalid provenance spans for '{}': {}",
-                            entry_path.display(),
-                            error
-                        ),
-                        Some(provenance_hash.short()),
-                    ));
-                    continue;
-                }
-                let Some(data_hash) = data_entry.blob_hash() else {
-                    continue;
-                };
-                if provenance.file_blob != data_hash {
-                    errors.push(make_error(
-                        "invalid_provenance",
-                        &format!(
-                            "Provenance for '{}' points to blob {} but file uses {}",
-                            entry_path.display(),
-                            provenance.file_blob.short(),
-                            data_hash.short()
-                        ),
-                        Some(provenance_hash.short()),
-                    ));
-                    continue;
-                }
-                if let Some(blob) = repo.store().get_blob(&data_hash)?
-                    && let Ok(text) = std::str::from_utf8(blob.content())
-                {
-                    let line_count = text.lines().count() as u32;
-                    if provenance.line_count != line_count {
-                        errors.push(make_error(
-                            "invalid_provenance",
-                            &format!(
-                                "Provenance for '{}' records {} lines but file has {}",
-                                entry_path.display(),
-                                provenance.line_count,
-                                line_count
-                            ),
-                            Some(provenance_hash.short()),
-                        ));
-                    }
-                }
-            }
-            objects::object::EntryType::Symlink => {}
-            objects::object::EntryType::Gitlink => {}
-            objects::object::EntryType::Spoollink => {}
-        }
-    }
-
     Ok(())
 }
 
@@ -248,56 +96,93 @@ fn check_state_cycles(
     parent_map: &HashMap<objects::object::StateId, Vec<objects::object::StateId>>,
     errors: &mut Vec<FsckError>,
 ) {
-    let mut visiting = HashSet::new();
-    let mut visited = HashSet::new();
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum VisitState {
+        Visiting,
+        Visited,
+    }
+
+    let mut states = HashMap::with_capacity(parent_map.len());
     let mut reported = HashSet::new();
-
-    for state_id in parent_map.keys().copied() {
-        detect_cycle(
-            state_id,
-            parent_map,
-            &mut visiting,
-            &mut visited,
-            &mut reported,
-            errors,
-        );
-    }
-}
-
-fn detect_cycle(
-    state_id: objects::object::StateId,
-    parent_map: &HashMap<objects::object::StateId, Vec<objects::object::StateId>>,
-    visiting: &mut HashSet<objects::object::StateId>,
-    visited: &mut HashSet<objects::object::StateId>,
-    reported: &mut HashSet<objects::object::StateId>,
-    errors: &mut Vec<FsckError>,
-) {
-    if visited.contains(&state_id) {
-        return;
-    }
-
-    if !visiting.insert(state_id) {
-        if reported.insert(state_id) {
-            errors.push(make_error(
-                "state_cycle",
-                &format!(
-                    "State parent graph contains a cycle involving {}",
-                    state_id.short()
-                ),
-                Some(state_id.short()),
-            ));
+    for start in parent_map.keys().copied() {
+        if states.contains_key(&start) {
+            continue;
         }
-        return;
-    }
+        states.insert(start, VisitState::Visiting);
+        let mut stack = vec![(start, 0usize)];
 
-    if let Some(parents) = parent_map.get(&state_id) {
-        for parent in parents {
-            if parent_map.contains_key(parent) {
-                detect_cycle(*parent, parent_map, visiting, visited, reported, errors);
+        while let Some((state_id, next_parent)) = stack.last_mut() {
+            let parents = parent_map.get(state_id).map(Vec::as_slice).unwrap_or(&[]);
+            let next = parents.get(*next_parent).copied();
+            *next_parent += usize::from(next.is_some());
+
+            let Some(parent) = next else {
+                let completed = *state_id;
+                stack.pop();
+                states.insert(completed, VisitState::Visited);
+                continue;
+            };
+            if !parent_map.contains_key(&parent) {
+                continue;
+            }
+            match states.get(&parent).copied() {
+                Some(VisitState::Visited) => {}
+                Some(VisitState::Visiting) => {
+                    if reported.insert(parent) {
+                        errors.push(make_error(
+                            "state_cycle",
+                            &format!(
+                                "State parent graph contains a cycle involving {}",
+                                parent.short()
+                            ),
+                            Some(parent.short()),
+                        ));
+                    }
+                }
+                None => {
+                    states.insert(parent, VisitState::Visiting);
+                    stack.push((parent, 0));
+                }
             }
         }
     }
+}
 
-    visiting.remove(&state_id);
-    visited.insert(state_id);
+#[cfg(test)]
+mod cycle_tests {
+    use super::*;
+
+    fn state_id(index: usize) -> objects::object::StateId {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
+        objects::object::StateId::from_bytes(bytes)
+    }
+
+    #[test]
+    fn deep_parent_chain_is_checked_without_recursion() {
+        let mut parents = HashMap::new();
+        for index in 0..50_000 {
+            parents.insert(
+                state_id(index),
+                (index > 0)
+                    .then(|| state_id(index - 1))
+                    .into_iter()
+                    .collect(),
+            );
+        }
+        let mut errors = Vec::new();
+        check_state_cycles(&parents, &mut errors);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn cycle_is_reported_once() {
+        let first = state_id(1);
+        let second = state_id(2);
+        let parents = HashMap::from([(first, vec![second]), (second, vec![first])]);
+        let mut errors = Vec::new();
+        check_state_cycles(&parents, &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].kind, "state_cycle");
+    }
 }
