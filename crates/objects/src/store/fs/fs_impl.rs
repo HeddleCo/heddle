@@ -151,6 +151,18 @@ fn append_packed_hashes(
     append_packed_hashes_with_counter(hashes, manager, expected_type, &mut NoopEnumerationCounter)
 }
 
+fn append_unique_states(
+    states: &mut Vec<StateId>,
+    known: &mut HashSet<StateId>,
+    incoming: impl IntoIterator<Item = StateId>,
+) {
+    for id in incoming {
+        if known.insert(id) {
+            states.push(id);
+        }
+    }
+}
+
 impl FsStore {
     /// Publish the authoritative loose copies of packed states behind one
     /// parent-directory durability barrier. A later pack may refresh mutable
@@ -384,12 +396,45 @@ impl FsStore {
         }
     }
 
+    fn cache_recent_tree(&self, hash: ContentHash, tree: &Tree) {
+        if let Ok(mut cache) = self.recent_trees.write() {
+            cache.insert(hash, tree.clone());
+        }
+    }
+
+    fn cache_recent_state(&self, id: StateId, state: &State) {
+        if let Ok(mut cache) = self.recent_states.write() {
+            cache.insert(id, state.clone());
+        }
+    }
+
+    fn recent_blob(&self, hash: &ContentHash) -> Option<Blob> {
+        self.recent_blobs
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(hash).cloned())
+    }
+
+    fn recent_tree(&self, hash: &ContentHash) -> Option<Tree> {
+        self.recent_trees
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(hash).cloned())
+    }
+
+    fn recent_state(&self, id: &StateId) -> Option<State> {
+        self.recent_states
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(id).cloned())
+    }
+
     /// Single-pass blob lookup. The wrapper in `ObjectStore::get_blob`
     /// retries this once after a stale-reload on miss.
     fn try_get_blob_once(&self, hash: &ContentHash) -> Result<Option<Blob>> {
         // Cache first — avoid `path.exists()` / pack probes on warm hits.
-        // Write lock: LRU promotion mutates the order list.
-        if let Ok(mut cache) = self.recent_blobs.write()
+        // Access bits are atomic, so hits remain concurrent under a read lock.
+        if let Ok(cache) = self.recent_blobs.read()
             && let Some(blob) = cache.get(hash)
         {
             trace!("Found blob in recent object cache");
@@ -453,15 +498,9 @@ impl FsStore {
     }
 
     fn try_has_blob_once(&self, hash: &ContentHash) -> Result<bool> {
-        // Keep `has_blob` coherent with cache-first `get_blob`. A pure
-        // existence check needs no LRU promotion, so take the *read*
-        // lock and use `contains` — concurrent `has_blob` calls in
-        // heddled/mount don't serialize on the exclusive write lock.
-        if let Ok(cache) = self.recent_blobs.read()
-            && cache.contains(hash)
-        {
-            return Ok(true);
-        }
+        // This is the native-ownership probe used by `has_blob_locally`.
+        // Recent-object entries may be read-through values from an external
+        // Git overlay, so cache presence cannot establish local durability.
         let path = hash_path(&blobs_dir(&self.root), hash);
         self.loose_or_packed(&path, |m| m.has_object(hash))
     }
@@ -481,7 +520,7 @@ impl FsStore {
     /// pure in-memory varint decode for packed blobs. *No*
     /// decompression.
     fn try_get_blob_size_once(&self, hash: &ContentHash) -> Result<Option<u64>> {
-        if let Ok(mut cache) = self.recent_blobs.write()
+        if let Ok(cache) = self.recent_blobs.read()
             && let Some(blob) = cache.get(hash)
         {
             return Ok(Some(blob.content().len() as u64));
@@ -508,8 +547,8 @@ impl FsStore {
     fn try_get_tree_once(&self, hash: &ContentHash) -> Result<Option<Tree>> {
         // Cache first. The recent-object cache only ever holds trees we
         // wrote or read this process, so a hit is authoritative for a
-        // read. Write lock: LRU promotion mutates the order list.
-        if let Ok(mut cache) = self.recent_trees.write()
+        // read. Atomic second-chance marking keeps the map under a shared lock.
+        if let Ok(cache) = self.recent_trees.read()
             && let Some(tree) = cache.get(hash)
         {
             trace!("Found tree in recent object cache");
@@ -579,22 +618,19 @@ impl FsStore {
     }
 
     fn try_has_tree_once(&self, hash: &ContentHash) -> Result<bool> {
-        // Read-lock `contains`: an existence check needs no LRU
-        // promotion, so it must not serialize on the write lock.
-        if let Ok(cache) = self.recent_trees.read()
-            && cache.contains(hash)
-        {
-            return Ok(true);
-        }
+        // This is the native-ownership probe used by `has_tree_locally`.
+        // Recent-object entries may be read-through values from an external
+        // Git overlay, so cache presence cannot establish local durability.
         let path = hash_path(&trees_dir(&self.root), hash);
         self.loose_or_packed(&path, |m| m.has_object(hash))
     }
 
     fn try_get_state_once(&self, id: &StateId) -> Result<Option<State>> {
         // Cache first — avoid `path.exists()` / pack probes on warm hits.
-        // Write lock: LRU promotion mutates the order list. Put paths and
-        // successful reads below keep this coherent for the process.
-        if let Ok(mut cache) = self.recent_states.write()
+        // Atomic second-chance marking keeps hits under a shared lock. Put
+        // paths and successful reads below keep the cache coherent for the
+        // process.
+        if let Ok(cache) = self.recent_states.read()
             && let Some(state) = cache.get(id)
         {
             trace!("Found state in recent object cache");
@@ -629,7 +665,7 @@ impl FsStore {
     }
 
     fn try_has_state_once(&self, id: &StateId) -> Result<bool> {
-        // Read-lock `contains`: an existence check needs no LRU
+        // Read-lock `contains`: an existence check needs no clock
         // promotion, so it must not serialize on the write lock.
         if let Ok(cache) = self.recent_states.read()
             && cache.contains(id)
@@ -688,6 +724,9 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self), fields(hash = %hash.short()))]
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
+        if let Some(blob) = self.recent_blob(hash) {
+            return Ok(Some(blob));
+        }
         if let Some(blob) = self.try_get_blob_once(hash)? {
             return Ok(Some(blob));
         }
@@ -700,11 +739,14 @@ impl ObjectStore for FsStore {
         {
             return Ok(Some(blob));
         }
-        trace!("Blob not found");
-        match &self.external_source {
-            Some(source) => source.get_blob(hash),
-            None => Ok(None),
+        if let Some(source) = &self.external_source
+            && let Some(blob) = source.get_blob(hash)?
+        {
+            self.cache_recent_blob(*hash, &blob);
+            return Ok(Some(blob));
         }
+        trace!("Blob not found");
+        Ok(None)
     }
 
     #[instrument(skip(self, blob), fields(size = blob.content().len()))]
@@ -770,10 +812,16 @@ impl ObjectStore for FsStore {
         if ObjectStore::has_blob_locally(self, hash)? {
             return Ok(true);
         }
-        match &self.external_source {
-            Some(source) => Ok(source.get_blob(hash)?.is_some()),
-            None => Ok(false),
+        if let Some(source) = &self.external_source {
+            if self.recent_blob(hash).is_some() {
+                return Ok(true);
+            }
+            if let Some(blob) = source.get_blob(hash)? {
+                self.cache_recent_blob(*hash, &blob);
+                return Ok(true);
+            }
         }
+        Ok(false)
     }
 
     fn has_blob_locally(&self, hash: &ContentHash) -> Result<bool> {
@@ -858,13 +906,12 @@ impl ObjectStore for FsStore {
     fn promote_to_loose_uncompressed(&self, hash: &ContentHash) -> Result<bool> {
         let path = hash_path(&blobs_dir(&self.root), hash);
 
-        // An external Git-overlay blob must stay external: materialization can
-        // read its bytes through `get_blob_bytes`, but promotion would turn a
-        // read-through into an accidental native copy and violate the source-
-        // authority boundary.
-        if !self.try_has_blob_once(hash)?
+        // External-only overlay blobs stay external. If Heddle also owns a
+        // native copy, promotion is a native storage optimization and does not
+        // cross the source-authority boundary.
+        if !ObjectStore::has_blob_locally(self, hash)?
             && let Some(source) = &self.external_source
-            && source.get_blob(hash)?.is_some()
+            && (self.recent_blob(hash).is_some() || source.get_blob(hash)?.is_some())
         {
             return Ok(false);
         }
@@ -923,16 +970,24 @@ impl ObjectStore for FsStore {
         {
             return Ok(Some(size));
         }
-        match &self.external_source {
-            Some(source) => Ok(source
-                .get_blob(hash)?
-                .map(|blob| blob.content().len() as u64)),
-            None => Ok(None),
+        if let Some(source) = &self.external_source {
+            if let Some(blob) = self.recent_blob(hash) {
+                return Ok(Some(blob.content().len() as u64));
+            }
+            if let Some(blob) = source.get_blob(hash)? {
+                let size = blob.content().len() as u64;
+                self.cache_recent_blob(*hash, &blob);
+                return Ok(Some(size));
+            }
         }
+        Ok(None)
     }
 
     #[instrument(skip(self), fields(hash = %hash.short()))]
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
+        if let Some(tree) = self.recent_tree(hash) {
+            return Ok(Some(tree));
+        }
         if let Some(tree) = self.try_get_tree_once(hash)? {
             return Ok(Some(tree));
         }
@@ -941,11 +996,14 @@ impl ObjectStore for FsStore {
         {
             return Ok(Some(tree));
         }
-        trace!("Tree not found");
-        match &self.external_source {
-            Some(source) => source.get_tree(hash),
-            None => Ok(None),
+        if let Some(source) = &self.external_source
+            && let Some(tree) = source.get_tree(hash)?
+        {
+            self.cache_recent_tree(*hash, &tree);
+            return Ok(Some(tree));
         }
+        trace!("Tree not found");
+        Ok(None)
     }
 
     #[instrument(skip(self), fields(hash = %hash.short()))]
@@ -958,14 +1016,23 @@ impl ObjectStore for FsStore {
         {
             return Ok(Some(data));
         }
-        match &self.external_source {
-            Some(source) => source
-                .get_tree(hash)?
-                .map(|tree| rmp_serde::to_vec_named(&tree))
-                .transpose()
-                .map_err(|error| HeddleError::InvalidObject(error.to_string())),
-            None => Ok(None),
+        let external_tree = if let Some(tree) = self.recent_tree(hash) {
+            Some(tree)
+        } else if let Some(source) = &self.external_source {
+            let tree = source.get_tree(hash)?;
+            if let Some(tree) = &tree {
+                self.cache_recent_tree(*hash, tree);
+            }
+            tree
+        } else {
+            None
+        };
+        if let Some(tree) = external_tree {
+            return rmp_serde::to_vec_named(&tree)
+                .map(Some)
+                .map_err(|error| HeddleError::InvalidObject(error.to_string()));
         }
+        Ok(None)
     }
 
     #[instrument(skip(self, tree), fields(entry_count = tree.entries().len()))]
@@ -1016,10 +1083,16 @@ impl ObjectStore for FsStore {
         if ObjectStore::has_tree_locally(self, hash)? {
             return Ok(true);
         }
-        match &self.external_source {
-            Some(source) => Ok(source.get_tree(hash)?.is_some()),
-            None => Ok(false),
+        if let Some(source) = &self.external_source {
+            if self.recent_tree(hash).is_some() {
+                return Ok(true);
+            }
+            if let Some(tree) = source.get_tree(hash)? {
+                self.cache_recent_tree(*hash, &tree);
+                return Ok(true);
+            }
         }
+        Ok(false)
     }
 
     fn has_tree_locally(&self, hash: &ContentHash) -> Result<bool> {
@@ -1031,6 +1104,9 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self), fields(id = %id.short()))]
     fn get_state(&self, id: &StateId) -> Result<Option<State>> {
+        if let Some(state) = self.recent_state(id) {
+            return Ok(Some(state));
+        }
         if let Some(state) = self.try_get_state_once(id)? {
             return Ok(Some(state));
         }
@@ -1039,11 +1115,14 @@ impl ObjectStore for FsStore {
         {
             return Ok(Some(state));
         }
-        trace!("State not found");
-        match &self.external_source {
-            Some(source) => source.get_state(id),
-            None => Ok(None),
+        if let Some(source) = &self.external_source
+            && let Some(state) = source.get_state(id)?
+        {
+            self.cache_recent_state(*id, &state);
+            return Ok(Some(state));
         }
+        trace!("State not found");
+        Ok(None)
     }
 
     #[instrument(skip(self, state), fields(id = %state.id().short()))]
@@ -1081,18 +1160,25 @@ impl ObjectStore for FsStore {
         if self.reload_packs_if_stale()? && self.try_has_state_once(id)? {
             return Ok(true);
         }
-        match &self.external_source {
-            Some(source) => Ok(source.get_state(id)?.is_some()),
-            None => Ok(false),
+        if let Some(source) = &self.external_source {
+            if self.recent_state(id).is_some() {
+                return Ok(true);
+            }
+            if let Some(state) = source.get_state(id)? {
+                self.cache_recent_state(*id, &state);
+                return Ok(true);
+            }
         }
+        Ok(false)
     }
 
     #[instrument(skip(self))]
     fn list_states(&self) -> Result<Vec<StateId>> {
         self.reload_packs_if_stale()?;
 
-        let dir = states_dir(&self.root);
         let mut states = Vec::new();
+        let mut known = HashSet::new();
+        let dir = states_dir(&self.root);
         if dir.exists() {
             for entry in fs::read_dir(&dir)? {
                 let entry = entry?;
@@ -1100,26 +1186,27 @@ impl ObjectStore for FsStore {
                 if let Some(name) = path.file_stem()
                     && let Some(name_str) = name.to_str()
                     && let Ok(id) = StateId::parse(name_str)
+                    && known.insert(id)
                 {
                     states.push(id);
                 }
             }
         }
         if let Ok(manager) = self.pack_manager().read() {
-            for id in manager.list_all_ids()? {
-                if let PackObjectId::StateId(change_id) = id
-                    && !states.contains(&change_id)
-                {
-                    states.push(change_id);
-                }
-            }
+            append_unique_states(
+                &mut states,
+                &mut known,
+                manager
+                    .list_all_ids()?
+                    .into_iter()
+                    .filter_map(|id| match id {
+                        PackObjectId::StateId(state) => Some(state),
+                        PackObjectId::Hash(_) => None,
+                    }),
+            );
         }
         if let Some(source) = &self.external_source {
-            for id in source.list_states()? {
-                if !states.contains(&id) {
-                    states.push(id);
-                }
-            }
+            append_unique_states(&mut states, &mut known, source.list_states()?);
         }
         debug!(count = states.len(), "Listed states");
         Ok(states)
@@ -1898,5 +1985,29 @@ mod enumeration_tests {
                 "negative control unexpectedly passed the structural contract: {legacy_metrics:?}"
             );
         }
+    }
+
+    #[test]
+    fn state_union_preserves_first_seen_order_at_scale() {
+        let first = (0..20_000u32)
+            .map(|value| {
+                StateId::from_bytes(*ContentHash::compute(&value.to_le_bytes()).as_bytes())
+            })
+            .collect::<Vec<_>>();
+        let second = first[10_000..]
+            .iter()
+            .copied()
+            .chain((20_000..30_000u32).map(|value| {
+                StateId::from_bytes(*ContentHash::compute(&value.to_le_bytes()).as_bytes())
+            }))
+            .collect::<Vec<_>>();
+        let mut states = Vec::new();
+        let mut known = HashSet::new();
+
+        append_unique_states(&mut states, &mut known, first.iter().copied());
+        append_unique_states(&mut states, &mut known, second);
+
+        assert_eq!(states.len(), 30_000);
+        assert_eq!(&states[..20_000], first.as_slice());
     }
 }

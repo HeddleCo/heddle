@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
 use chrono::{TimeZone, Utc};
 use heddle_format::compression::CompressionConfig;
 use serde::Serialize;
@@ -15,7 +20,7 @@ use crate::{
         TreeEntry,
     },
     store::{
-        HeddleError, ObjectStore,
+        ExternalObjectSource, HeddleError, ObjectStore, Result as StoreResult,
         pack::{
             ObjectType as PackObjectType, PackBuilder, PackIndex, PackObjectId,
             decode_tagged_entry_header,
@@ -24,12 +29,114 @@ use crate::{
     sync::RwLockExt,
 };
 
+struct CountingBlobSource {
+    blob: Blob,
+    reads: AtomicUsize,
+}
+
+impl ExternalObjectSource for CountingBlobSource {
+    fn get_blob(&self, hash: &ContentHash) -> StoreResult<Option<Blob>> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        Ok((self.blob.hash() == *hash).then(|| self.blob.clone()))
+    }
+
+    fn get_tree(&self, _hash: &ContentHash) -> StoreResult<Option<Tree>> {
+        Ok(None)
+    }
+
+    fn get_state(&self, _id: &StateId) -> StoreResult<Option<State>> {
+        Ok(None)
+    }
+
+    fn list_states(&self) -> StoreResult<Vec<StateId>> {
+        Ok(Vec::new())
+    }
+}
+
 fn create_test_store() -> (TempDir, FsStore) {
     let temp_dir = TempDir::new().unwrap();
     let heddle_dir = temp_dir.path().join(".heddle");
     let store = FsStore::new(&heddle_dir);
     store.init().unwrap();
     (temp_dir, store)
+}
+
+#[test]
+fn external_blob_hits_are_memory_cached_without_native_materialization() {
+    let (_temp, mut store) = create_test_store();
+    let blob = Blob::from("authoritative Git bytes");
+    let hash = blob.hash();
+    let source = Arc::new(CountingBlobSource {
+        blob: blob.clone(),
+        reads: AtomicUsize::new(0),
+    });
+    store.set_external_source(source.clone());
+
+    assert_eq!(store.get_blob(&hash).unwrap(), Some(blob.clone()));
+    assert_eq!(store.get_blob(&hash).unwrap(), Some(blob.clone()));
+    assert!(store.has_blob(&hash).unwrap());
+    assert_eq!(
+        store.blob_size(&hash).unwrap(),
+        Some(blob.content().len() as u64)
+    );
+    assert_eq!(
+        store.get_blob_bytes(&hash).unwrap().unwrap().as_ref(),
+        blob.content()
+    );
+    assert_eq!(
+        source.reads.load(Ordering::Relaxed),
+        1,
+        "warm authoritative reads must stay in the in-process cache"
+    );
+    assert!(
+        !hash_path(&blobs_dir(store.root()), &hash).exists(),
+        "read-through cache hits must not create native loose objects"
+    );
+}
+
+#[test]
+fn native_blob_wins_over_external_source_without_external_io() {
+    let (_temp, mut store) = create_test_store();
+    let blob = Blob::from("Heddle-native bytes");
+    let hash = store.put_blob(&blob).unwrap();
+    let source = Arc::new(CountingBlobSource {
+        blob: blob.clone(),
+        reads: AtomicUsize::new(0),
+    });
+    store.set_external_source(source.clone());
+    store.clear_recent_caches();
+
+    assert_eq!(store.get_blob(&hash).unwrap(), Some(blob.clone()));
+    store.clear_recent_caches();
+    assert!(store.has_blob(&hash).unwrap());
+    assert_eq!(
+        store.blob_size(&hash).unwrap(),
+        Some(blob.content().len() as u64)
+    );
+    assert_eq!(source.reads.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn native_pack_blob_can_be_promoted_when_external_source_also_has_it() {
+    let (_temp, mut store) = create_test_store();
+    let blob = Blob::from("shared native and external bytes");
+    let hash = blob.hash();
+    let mut builder = PackBuilder::new(CompressionConfig::disabled());
+    builder.add(hash, PackObjectType::Blob, blob.content().to_vec());
+    let (pack_data, index_data, _) = builder.build().unwrap();
+    store.install_pack(&pack_data, &index_data).unwrap();
+
+    let source = Arc::new(CountingBlobSource {
+        blob,
+        reads: AtomicUsize::new(0),
+    });
+    store.set_external_source(source.clone());
+    store.clear_recent_caches();
+
+    assert!(store.loose_blob_path(&hash).is_none());
+    assert!(store.promote_to_loose_uncompressed(&hash).unwrap());
+    assert!(store.loose_blob_path(&hash).is_some());
+    assert_eq!(source.reads.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -1279,11 +1386,11 @@ fn loose_blob_path_rejects_torn_cache_mirror() {
     );
 }
 
-/// The byte budget must evict LRU entries once cumulative cached bytes
+/// The byte budget must evict cold entries once cumulative cached bytes
 /// exceed the cap, so a read-only workload streaming many blobs can't
 /// retain `capacity × max-entry-bytes` of deep-cloned Vecs.
 #[test]
-fn test_recent_object_cache_byte_budget_evicts_lru() {
+fn test_recent_object_cache_byte_budget_evicts_cold_entry() {
     // Large per-entry count cap, tiny byte budget: eviction is driven
     // purely by bytes. Each value is `len` bytes.
     let mut cache = super::fs_store::RecentObjectCache::<u32, Vec<u8>>::with_byte_budget(
@@ -1294,15 +1401,15 @@ fn test_recent_object_cache_byte_budget_evicts_lru() {
 
     cache.insert(1, vec![0u8; 40]); // total 40
     cache.insert(2, vec![0u8; 40]); // total 80
-    // Touch key 1 so it becomes MRU; key 2 is now the LRU victim.
+    // Touch key 1 so the clock gives it a second chance; key 2 is cold.
     assert!(cache.contains(&1));
     cache.get(&1);
-    cache.insert(3, vec![0u8; 40]); // total would be 120 > 100 → evict LRU (key 2)
+    cache.insert(3, vec![0u8; 40]); // total would be 120 > 100 → evict key 2
 
     assert!(cache.contains(&1), "recently-touched entry must survive");
     assert!(
         !cache.contains(&2),
-        "LRU entry must be evicted when the byte budget is exceeded"
+        "cold entry must be evicted when the byte budget is exceeded"
     );
     assert!(
         cache.contains(&3),
@@ -1325,4 +1432,49 @@ fn test_recent_object_cache_byte_budget_keeps_single_oversize_entry() {
         cache.contains(&1),
         "a lone oversize entry is retained; the budget is a soft aggregate cap"
     );
+}
+
+#[test]
+fn test_recent_object_cache_all_hot_residents_do_not_reject_new_entry() {
+    let mut cache = super::fs_store::RecentObjectCache::<u32, ()>::with_capacity(2);
+    cache.insert(1, ());
+    cache.insert(2, ());
+    cache.get(&1);
+    cache.get(&2);
+
+    cache.insert(3, ());
+
+    assert!(
+        cache.contains(&3),
+        "the admitted entry must survive its first pass"
+    );
+    assert_ne!(
+        cache.contains(&1),
+        cache.contains(&2),
+        "exactly one prior resident must be evicted"
+    );
+}
+
+/// Cache hits at the production verification-cache scale must remain shared
+/// operations while still influencing second-chance eviction order.
+#[test]
+fn test_recent_object_cache_large_shared_read_gets_second_chance() {
+    const CAPACITY: u32 = 65_536;
+    let mut cache = super::fs_store::RecentObjectCache::<u32, ()>::with_capacity(CAPACITY as usize);
+    for key in 0..CAPACITY {
+        cache.insert(key, ());
+    }
+
+    let shared = &cache;
+    for _ in 0..1_000 {
+        assert!(shared.get(&0).is_some());
+    }
+
+    cache.insert(CAPACITY, ());
+    assert!(cache.contains(&0), "hot entry must remain cached");
+    assert!(
+        !cache.contains(&1),
+        "oldest untouched entry must be evicted"
+    );
+    assert!(cache.contains(&CAPACITY), "new entry must be retained");
 }
