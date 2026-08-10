@@ -473,16 +473,6 @@ fn set_attrs_truncate_rejects_beyond_max_hot_file_size() {
     assert_eq!(err.to_errno(), libc::EFBIG);
 }
 
-/// Serializes the env-mutating signing test(s) below: they pin the
-/// process-global `HEDDLE_HOME` so the device-identity lookup resolves into a
-/// per-test temp dir (absent device key -> falls to the auto-minted local key).
-static SIGNING_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// heddle#482: a state captured through the MOUNT path must be auto-signed
-/// identically to one captured via `Repository::snapshot` — the mount path
-/// routes through the same capture-path chokepoint, so no state write bypasses
-/// signing.
-
 #[test]
 fn write_to_directory_returns_read_only() {
     let (_temp, mount) = open_mount();
@@ -2358,13 +2348,6 @@ mod write_ops {
         );
     }
 
-    /// `fchmod` on an unlinked-but-still-open fd must affect only the
-    /// inode behind that fd. The brief's threat model:
-    /// `open(old) → unlink(old) → create(old) → fchmod(orphan_fd, +x)`.
-    /// Without the fix, `set_attrs`'s mode mutation updated
-    /// `hot_by_path[path]` and `warm[path]` too, flipping the
-    /// newly-created file's mode at the same pathname.
-
     // --- Codex round 8 findings: 3-axis sweep (warm tier + lifecycle + atomicity)
     //
     // r7 made the write-side ops orphan-aware against `pending.hot` /
@@ -2771,28 +2754,6 @@ mod write_ops {
     // Six P1 + one P3 findings on the post-spike base (`58a30b2`). Each test
     // pins the contract from one Codex review thread on PR #182.
 
-    /// Codex thread 3293484633 (P1). Capture-time drain once cleared
-    /// `pending.state` unconditionally → drops Orphan tracking for inodes
-    /// with still-open fds. Post-drain writes through such an fd then take
-    /// the non-orphan branch and republish the (tombstoned) pathname. The
-    /// fix retains Orphan entries (and their per-NodeId hot/warm bytes) and
-    /// only retires Live entries.
-
-    /// Codex thread 3293484633 cont. (r11 #2, P1) — heddle#210 retrofit.
-    /// Capture-time drain used to drop every `Live` entry, including
-    /// `Live { open_count >= 1 }`. The open fd's lifecycle row + hot/warm
-    /// bytes disappeared, so a subsequent write through that fd
-    /// recreated an empty hot buffer — POSIX last-close-wins requires
-    /// the fd to keep seeing the bytes it already buffered. The fix
-    /// preserves `LiveNonZero` entries + their per-NodeId byte storage.
-
-    /// Codex threads 3293484634 + 3293510311 (P1). `invalidate` (FUSE
-    /// `forget`) drops `pending.warm[node]` unconditionally, but `forget`
-    /// only signals that the kernel released its cached inode reference —
-    /// not that the file's pending overlay data can be discarded. Warm is
-    /// the only durable pre-capture copy of flushed writes; dropping it
-    /// silently loses the user's committed-in-session data.
-
     /// Codex PR #182 r11 finding #3 (P1; heddle#211). `invalidate`
     /// (FUSE `forget`) drops `pending.hot[node]` unconditionally,
     /// without first checking whether the inode is still referenced.
@@ -2883,19 +2844,6 @@ mod write_ops {
         );
     }
 
-    /// Codex thread 3293510316 (P1). `read_link` on a captured `Symlink`
-    /// record reconstructs an `OsStr` with `OsStr::from_encoded_bytes_unchecked`
-    /// from blob bytes loaded from the store. That call's safety contract
-    /// requires bytes minted by `OsStr::as_encoded_bytes` in *this*
-    /// process and Rust version — captured-tree bytes can come from any
-    /// process and any version, so the call is unsound.
-    ///
-    /// On Unix, the platform-safe replacement is `OsStrExt::from_bytes`
-    /// (sound for any byte sequence); on Windows, the bytes must be UTF-8
-    /// validated and rejected otherwise (the encoding contract for `OsStr`
-    /// is process-internal). This test pins the round-trip contract: a
-    /// captured symlink's target is recoverable byte-for-byte.
-
     /// Codex thread 3293510317 (P3). `unlink_entry` always transitions
     /// the removed node into `NodeState::Orphan`, but symlinks are not
     /// openable for IO — they never receive `open`/`release` lifecycle
@@ -2916,14 +2864,6 @@ mod write_ops {
             "symlinks have no open/release lifecycle; unlink must not orphan them"
         );
     }
-
-    /// Codex thread 3293680448 (P1). `Inodes::forget` unconditionally
-    /// removes `by_path[path]` for the retired record. After an
-    /// unlink-then-recreate cycle, the stored `path` may be rebound to
-    /// a *different* live inode. A late kernel `forget` for the old
-    /// inode then deletes the live inode's path binding — capture's
-    /// warm-entry path check skips the entry, breaking lookup/read/write
-    /// routing for the replacement.
 
     // --- Codex round 13 findings: setattr lock discipline + name/mode pickiness
     //
