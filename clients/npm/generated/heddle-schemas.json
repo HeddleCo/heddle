@@ -29667,6 +29667,12 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "abandoned": {
+          "items": {
+            "$ref": "#/$defs/ThreadDroppedSchema"
+          },
+          "type": "array"
+        },
         "action": {
           "type": "string"
         },
@@ -29815,6 +29821,7 @@
         "dry_run",
         "merged",
         "auto",
+        "abandoned",
         "reclaimed_bytes",
         "would_reclaim_bytes",
         "output_kind"
