@@ -101,9 +101,10 @@ mod tests {
         let durability = CloneDurabilityBatch::begin(&root);
         let repo = Repository::init_clone(&root, RepositorySourceAuthority::Native).unwrap();
         assert!(!repo.heddle_dir().join("HEAD").exists());
+        let canonical_root = root.canonicalize().expect("canonical clone root");
         assert!(matches!(
             Repository::open(&root),
-            Err(HeddleError::IncompleteClone(path)) if path == root
+            Err(HeddleError::IncompleteClone(path)) if path == canonical_root
         ));
 
         let tree = Tree::new();
@@ -129,7 +130,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             Repository::open(&root),
-            Err(HeddleError::IncompleteClone(path)) if path == root
+            Err(HeddleError::IncompleteClone(path)) if path == canonical_root
         ));
 
         CloneIntent::clear(&root).unwrap();
