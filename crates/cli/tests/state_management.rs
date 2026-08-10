@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Integration tests for the retained state-management commands.
 
-use std::{
-    fs,
-    process::{Command, Output},
-    str,
-};
+use std::{fs, str};
 
 use serde_json::Value;
 use tempfile::TempDir;
+
+#[path = "support/mod.rs"]
+mod cli_test_support;
 
 #[path = "state_management/merge_store_integrity.rs"]
 mod merge_store_integrity;
@@ -20,40 +19,14 @@ mod revert;
 mod thread_integration;
 
 fn heddle(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(args);
-    cmd.env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
-        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev");
-
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-
-    let output = cmd.output().map_err(|e| e.to_string())?;
-    let stdout = str::from_utf8(&output.stdout).unwrap_or("").to_string();
-    let stderr = str::from_utf8(&output.stderr).unwrap_or("").to_string();
-
-    if output.status.success() {
-        Ok(stdout)
-    } else {
-        Err(format!(
-            "Exit code: {:?}\nstdout: {}\nstderr: {}",
-            output.status.code(),
-            stdout,
-            stderr
-        ))
-    }
+    cli_test_support::heddle(args, cwd, &[])
 }
 
-fn heddle_output(args: &[&str], cwd: Option<&std::path::Path>) -> Result<Output, String> {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(args);
-
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-
-    cmd.output().map_err(|e| e.to_string())
+fn heddle_output(
+    args: &[&str],
+    cwd: Option<&std::path::Path>,
+) -> Result<std::process::Output, String> {
+    cli_test_support::heddle_output(args, cwd, &[])
 }
 
 fn status_json(path: &std::path::Path) -> Value {

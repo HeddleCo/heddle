@@ -149,6 +149,12 @@ fn serve_connection(
     routes: Arc<Mutex<HashMap<String, VecDeque<TestResponse>>>>,
     requests: Arc<Mutex<Vec<String>>>,
 ) {
+    // Accepted sockets inherit O_NONBLOCK from the listener on macOS. The
+    // synchronous rustls fixture expects blocking reads, so normalize this
+    // explicitly instead of treating an ordinary handshake gap as EOF.
+    stream
+        .set_nonblocking(false)
+        .expect("blocking test HTTPS connection");
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("test HTTPS read timeout");
@@ -199,8 +205,23 @@ fn serve_connection(
         headers.push_str(&format!("Location: {location}\r\n"));
     }
     headers.push_str("\r\n");
-    let _ = stream
+    let response_written = stream
         .write_all(headers.as_bytes())
         .and_then(|_| stream.write_all(&response.body))
         .and_then(|_| stream.flush());
+    if response_written.is_ok() {
+        // Complete the TLS shutdown instead of dropping the socket immediately
+        // after the HTTP body. Current rustls clients correctly classify a
+        // missing close_notify as an unexpected EOF, which would make this
+        // fixture test transport truncation rather than descriptor trust.
+        stream.conn.send_close_notify();
+        let _ = stream
+            .sock
+            .set_read_timeout(Some(Duration::from_millis(250)));
+        // `complete_io` first flushes close_notify, then gives the client a
+        // chance to answer its own shutdown alert. Draining that final record
+        // prevents macOS from turning a socket close with unread TLS bytes into
+        // a TCP reset.
+        let _ = stream.conn.complete_io(&mut stream.sock);
+    }
 }

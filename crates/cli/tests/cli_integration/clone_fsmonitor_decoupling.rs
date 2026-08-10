@@ -47,6 +47,16 @@ fn stop_monitor_helper(root: &Path) {
     let _ = repo::shutdown_local_monitor_helper(root);
 }
 
+fn status_with_native_monitor(root: &Path) {
+    let output = heddle_output_with_env(&["status"], Some(root), &[("HEDDLE_FSMONITOR", "native")])
+        .expect("run status in cloned repo");
+    assert!(
+        output.status.success(),
+        "status in cloned repo failed: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 #[test]
 fn clone_does_not_start_the_fsmonitor_helper() {
     let temp = TempDir::new().unwrap();
@@ -82,7 +92,7 @@ fn clone_does_not_start_the_fsmonitor_helper() {
     // The negative case: the same predicate has to be able to observe a start,
     // otherwise the assertion above would hold for a clone that never ran. The
     // monitor is deferred to the cloned repo's first status, not removed.
-    heddle(&["status"], Some(&destination)).expect("status in cloned repo");
+    status_with_native_monitor(&destination);
     assert!(
         !monitor_start_markers(&destination).is_empty(),
         "post-clone status should still start the fsmonitor helper on demand",
@@ -125,7 +135,7 @@ fn git_overlay_clone_does_not_start_the_fsmonitor_helper() {
         "git-overlay clone must not start the fsmonitor helper either",
     );
 
-    heddle(&["status"], Some(&destination)).expect("status in cloned repo");
+    status_with_native_monitor(&destination);
     assert!(
         !monitor_start_markers(&destination).is_empty(),
         "post-clone status should still start the fsmonitor helper on demand",

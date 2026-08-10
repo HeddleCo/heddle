@@ -16,7 +16,8 @@ fn test_blame_large_file_performance() {
     assert_performance(
         "blame large file",
         || {
-            let _ = heddle(&["query", "--attribution", "large.txt"], Some(temp.path()));
+            heddle(&["query", "--attribution", "large.txt"], Some(temp.path()))
+                .expect("attribution query should succeed");
         },
         performance_budget(Duration::from_secs(2), Duration::from_secs(4)),
     );
@@ -31,8 +32,12 @@ fn test_blame_binary_file() {
     fs::write(temp.path().join("binary.bin"), binary_content).unwrap();
     heddle(&["capture", "-m", "Binary"], Some(temp.path())).unwrap();
 
-    let result = heddle(&["query", "--attribution", "binary.bin"], Some(temp.path()));
-    assert!(result.is_ok() || result.unwrap_err().contains("binary"));
+    let error = heddle(&["query", "--attribution", "binary.bin"], Some(temp.path()))
+        .expect_err("binary files do not carry line provenance");
+    assert!(
+        error.contains("No provenance data") && error.contains("binary.bin"),
+        "binary attribution refusal should identify the missing provenance: {error}"
+    );
 }
 
 #[test]

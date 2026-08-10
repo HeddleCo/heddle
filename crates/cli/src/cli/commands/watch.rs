@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Stream live oplog activity (`heddle watch`).
 //!
-//! Tails the append-only oplog file at `<repo>/.heddle/oplog/oplog.bin`
+//! Tails the oplog generation rooted at `<repo>/.heddle/oplog/`
 //! and emits one line per recorded operation as it lands — capture,
 //! merge, thread create/update, marker, fork, collapse, goto. Default
 //! behavior tails forever and exits on SIGINT (Ctrl-C). `--since 5m`
@@ -11,11 +11,11 @@
 //!
 //! ## Tailing strategy
 //!
-//! The oplog is a *single packed file* rewritten atomically on each
-//! batch — there's no stable byte offset to seek by. Instead we
+//! The oplog is a manifest-selected generation of immutable packed
+//! containers, so there is no single stable byte offset to seek by. Instead we
 //! track a `last_emitted_id` watermark (`OpEntry::id` is a
 //! monotonically-increasing `u64` minted by `OpLog::record_*`),
-//! reload the file on every notify event, and emit any entry with
+//! reload the selected generation on every notify event, and emit any entry with
 //! `id > last_emitted_id`. That keeps the cursor logic trivial and
 //! correct even when the writer rewrites the file between events.
 //!
@@ -49,7 +49,10 @@ use heddle_core::watch_plan::{
     WatchSincePlanError, is_relevant_watch_event, plan_watch_filter, plan_watch_since_cutoff,
     watch_passes_filter,
 };
-use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{
+    Config as NotifyConfig, Error as NotifyError, ErrorKind as NotifyErrorKind, Event, EventKind,
+    PollWatcher, RecommendedWatcher, RecursiveMode, Watcher,
+};
 use objects::{object::StateId, store::ObjectStore};
 use oplog::{OpEntry, OpLog, OpLogBackend, OpRecord, RecordedHead};
 use repo::Repository;
@@ -65,6 +68,7 @@ use crate::cli::{
 /// get an ellipsis suffix; the column stays predictable so eyes can
 /// track confidence values without horizontal scanning.
 const INTENT_DISPLAY_WIDTH: usize = 50;
+const OPLOG_WATCH_MODE: RecursiveMode = RecursiveMode::Recursive;
 
 /// Entry kinds the user can pass to `--filter`. Names match the `kind` field
 /// emitted in JSON mode (which is `OpRecord::verb()`) so a `--filter snapshot`
@@ -86,23 +90,16 @@ fn valid_filter_kinds() -> Vec<&'static str> {
 ///
 /// 1. Open the repository (canonical path discovery walks parents).
 /// 2. Replay the `--since` window, emitting in chronological order.
-/// 3. Spawn a `notify` watcher on the oplog file — the channel
+/// 3. Spawn a recursive `notify` watcher on the oplog directory — the channel
 ///    sends events into the main loop, which drains pending entries
 ///    (id > watermark) on each modify and exits cleanly on SIGINT.
 pub async fn cmd_watch(cli: &Cli, args: WatchArgs) -> Result<()> {
     let repo = cli.open_repo().context("opening repository for watch")?;
     let heddle_dir = repo.heddle_dir().to_path_buf();
-    let oplog_path = oplog_file_path(&heddle_dir);
+    let oplog_path = oplog_watch_path(&heddle_dir);
 
-    // The oplog file may not exist yet on a brand-new repo — treat
-    // that as "no events to replay; wait for the first writer". The
-    // notify watcher attaches to the parent directory in that case
-    // so the first append doesn't get lost.
-    if !oplog_path.parent().is_some_and(Path::is_dir) {
-        let path = oplog_path
-            .parent()
-            .map(Path::display)
-            .map_or_else(|| "<unknown>".to_string(), |display| display.to_string());
+    if !oplog_path.is_dir() {
+        let path = oplog_path.display();
         return Err(anyhow!(RecoveryAdvice::invalid_usage(
             "watch_oplog_missing",
             format!("oplog directory missing at {path}; run `heddle init` first"),
@@ -162,11 +159,10 @@ pub async fn cmd_watch(cli: &Cli, args: WatchArgs) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the path to the oplog file. Mirrors `OpLog::oplog_path`
-/// (kept private in the `oplog` crate); the layout is part of the
-/// on-disk contract so duplicating the literal here is acceptable.
-fn oplog_file_path(heddle_dir: &Path) -> PathBuf {
-    heddle_dir.join("oplog").join("oplog.bin")
+/// Watch the entire oplog generation namespace so atomic manifest swaps and
+/// immutable segment/base publication all wake the tailer.
+fn oplog_watch_path(heddle_dir: &Path) -> PathBuf {
+    heddle_dir.join("oplog")
 }
 
 /// Resolve JSON-vs-text mode from the command contract. `watch`
@@ -269,27 +265,8 @@ fn tail_loop(
     max_iterations: Option<usize>,
 ) -> Result<()> {
     let (tx, rx) = mpsc::channel();
-    let watch_target = if oplog_path.exists() {
-        oplog_path.to_path_buf()
-    } else {
-        oplog_path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| heddle_dir.to_path_buf())
-    };
-
-    let mut watcher: RecommendedWatcher = RecommendedWatcher::new(
-        move |event| {
-            // Best-effort send — if the receiver is gone, the loop
-            // already decided to stop and there's nothing to do.
-            let _ = tx.send(event);
-        },
-        NotifyConfig::default(),
-    )
-    .context("constructing notify watcher")?;
-    watcher
-        .watch(&watch_target, RecursiveMode::NonRecursive)
-        .with_context(|| format!("watching {}", watch_target.display()))?;
+    let watch_target = oplog_path.to_path_buf();
+    let _watcher = start_watcher(&watch_target, poll_interval, tx)?;
 
     let mut iterations = 0usize;
     loop {
@@ -328,6 +305,62 @@ fn tail_loop(
     }
 
     Ok(())
+}
+
+fn start_watcher(
+    watch_target: &Path,
+    poll_interval: Duration,
+    tx: mpsc::Sender<notify::Result<Event>>,
+) -> Result<Box<dyn Watcher>> {
+    let config = NotifyConfig::default();
+    match RecommendedWatcher::new(event_sender(tx.clone()), config) {
+        Ok(mut watcher) => match watcher.watch(watch_target, OPLOG_WATCH_MODE) {
+            Ok(()) => Ok(Box::new(watcher)),
+            Err(error) if watcher_resource_exhausted(&error) => {
+                start_poll_watcher(watch_target, poll_interval, tx)
+            }
+            Err(error) => {
+                Err(error).with_context(|| format!("watching {}", watch_target.display()))
+            }
+        },
+        Err(error) if watcher_resource_exhausted(&error) => {
+            start_poll_watcher(watch_target, poll_interval, tx)
+        }
+        Err(error) => Err(error).context("constructing notify watcher"),
+    }
+}
+
+fn start_poll_watcher(
+    watch_target: &Path,
+    poll_interval: Duration,
+    tx: mpsc::Sender<notify::Result<Event>>,
+) -> Result<Box<dyn Watcher>> {
+    let config = NotifyConfig::default().with_poll_interval(poll_interval);
+    let mut watcher = PollWatcher::new(event_sender(tx), config)
+        .context("constructing polling notify watcher after OS watch exhaustion")?;
+    watcher
+        .watch(watch_target, OPLOG_WATCH_MODE)
+        .with_context(|| format!("poll-watching {}", watch_target.display()))?;
+    Ok(Box::new(watcher))
+}
+
+fn event_sender(
+    tx: mpsc::Sender<notify::Result<Event>>,
+) -> impl FnMut(notify::Result<Event>) + Send + 'static {
+    move |event| {
+        // Best-effort send — if the receiver is gone, the loop already decided
+        // to stop and there is nothing left to do.
+        let _ = tx.send(event);
+    }
+}
+
+fn watcher_resource_exhausted(error: &NotifyError) -> bool {
+    matches!(error.kind, NotifyErrorKind::MaxFilesWatch)
+        || matches!(
+            &error.kind,
+            NotifyErrorKind::Io(source)
+                if matches!(source.raw_os_error(), Some(24) | Some(28))
+        )
 }
 
 fn drain_and_emit_pending(
@@ -752,6 +785,22 @@ mod tests {
     }
 
     #[test]
+    fn resource_exhaustion_falls_back_but_other_notify_errors_do_not() {
+        assert!(watcher_resource_exhausted(&NotifyError::new(
+            NotifyErrorKind::MaxFilesWatch,
+        )));
+        assert!(watcher_resource_exhausted(&NotifyError::io(
+            std::io::Error::from_raw_os_error(24),
+        )));
+        assert!(watcher_resource_exhausted(&NotifyError::io(
+            std::io::Error::from_raw_os_error(28),
+        )));
+        assert!(!watcher_resource_exhausted(&NotifyError::generic(
+            "unrelated",
+        )));
+    }
+
+    #[test]
     fn parse_since_accepts_common_units() {
         let now = Utc::now();
         let cases = [("30s", 30), ("5m", 5 * 60), ("2h", 2 * 60 * 60)];
@@ -760,6 +809,26 @@ mod tests {
             let delta = (now - cutoff).num_seconds();
             assert!((delta - secs).abs() <= 2, "spec {spec}: delta={delta}");
         }
+    }
+
+    #[test]
+    fn watch_targets_the_recursive_segmented_oplog_namespace() {
+        let (_tmp, heddle_dir) = synthetic_repo();
+        write_entries(
+            &heddle_dir,
+            vec![OpRecord::Snapshot {
+                new_state: StateId::from_bytes([78; 32]),
+                prev_head: None,
+                head: None,
+                thread: None,
+            }],
+        );
+
+        let target = oplog_watch_path(&heddle_dir);
+        assert_eq!(target, heddle_dir.join("oplog"));
+        assert!(target.join("oplog.manifest").is_file());
+        assert!(target.join("oplog.segments").is_dir());
+        assert!(matches!(OPLOG_WATCH_MODE, RecursiveMode::Recursive));
     }
 
     #[test]

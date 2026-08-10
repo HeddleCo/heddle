@@ -68,25 +68,3 @@ fn test_fsck_basic_vs_full() {
     assert!(heddle(&["fsck"], Some(temp.path())).is_ok());
     assert!(heddle(&["fsck", "--full"], Some(temp.path())).is_ok());
 }
-
-#[test]
-fn test_fsck_reports_corrupted_object() {
-    let temp = TempDir::new().unwrap();
-    setup_repo_with_file(&temp, "file.txt", "content");
-
-    let objects_dir = temp.path().join(".heddle/objects");
-    for entry in walkdir::WalkDir::new(&objects_dir) {
-        let entry = entry.unwrap();
-        if entry.file_type().is_file() {
-            let content = fs::read(entry.path()).unwrap();
-            if content.len() > 10 {
-                let mut corrupted = content.clone();
-                corrupted[5] = 0xFF;
-                fs::write(entry.path(), corrupted).unwrap();
-                break;
-            }
-        }
-    }
-
-    let _result = heddle(&["fsck", "--full"], Some(temp.path()));
-}

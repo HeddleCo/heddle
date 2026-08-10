@@ -1,128 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::{path::Path, process::Command};
-
-use objects::store::ObjectStore;
-use repo::Repository;
-
 use super::*;
-
-#[derive(Debug)]
-struct RepositorySnapshotProfile {
-    tree_walk_ms: u128,
-    blob_prep_ms: u128,
-    blob_write_ms: u128,
-    tree_write_ms: u128,
-    state_ref_oplog_ms: u128,
-    snapshot_total: Duration,
-}
-
-fn write_snapshot_bench_files(root: &Path, file_count: usize) {
-    for i in 0..file_count {
-        fs::write(
-            root.join(format!("file{i}.txt")),
-            format!("content {i}\n{}\n", "x".repeat(48)),
-        )
-        .unwrap();
-    }
-}
-
-fn measure_repository_snapshot(file_count: usize) -> RepositorySnapshotProfile {
-    let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
-    write_snapshot_bench_files(temp.path(), file_count);
-    let attribution = repo.get_attribution().unwrap();
-
-    let start = Instant::now();
-    let execution = repo
-        .snapshot_with_attribution_profiled(Some("Many files".to_string()), None, attribution)
-        .unwrap();
-    let snapshot_total = start.elapsed();
-
-    assert!(
-        repo.store()
-            .get_tree(&execution.state.tree)
-            .unwrap()
-            .is_some(),
-        "repository snapshot benchmark should materialize a tree"
-    );
-
-    RepositorySnapshotProfile {
-        tree_walk_ms: execution.profile.tree_walk_ms,
-        blob_prep_ms: execution.profile.blob_prep_ms,
-        blob_write_ms: execution.profile.blob_write_ms,
-        tree_write_ms: execution.profile.tree_write_ms,
-        state_ref_oplog_ms: execution.profile.state_ref_oplog_ms,
-        snapshot_total,
-    }
-}
-
-fn try_run_git(dir: &Path, args: &[&str]) -> Option<()> {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .status()
-        .ok()?;
-    status.success().then_some(())
-}
-
-fn try_measure_git_snapshot(file_count: usize) -> Option<(Duration, Duration)> {
-    let version = Command::new("git").arg("--version").status().ok()?;
-    if !version.success() {
-        return None;
-    }
-
-    let temp = TempDir::new().ok()?;
-    try_run_git(temp.path(), &["init", "-q"])?;
-    try_run_git(temp.path(), &["config", "user.name", "Heddle Bench"])?;
-    try_run_git(
-        temp.path(),
-        &["config", "user.email", "heddle-bench@example.com"],
-    )?;
-    write_snapshot_bench_files(temp.path(), file_count);
-
-    let add_start = Instant::now();
-    try_run_git(temp.path(), &["add", "-A"])?;
-    let add_elapsed = add_start.elapsed();
-
-    let commit_start = Instant::now();
-    try_run_git(temp.path(), &["commit", "-qm", "benchmark"])?;
-    let commit_elapsed = commit_start.elapsed();
-
-    Some((add_elapsed, commit_elapsed))
-}
-
-fn print_snapshot_cli_report(
-    file_count: usize,
-    repository_profile: &RepositorySnapshotProfile,
-    cli_elapsed: Duration,
-    git_baseline: Option<(Duration, Duration)>,
-) {
-    let cli_overhead = cli_elapsed
-        .checked_sub(repository_profile.snapshot_total)
-        .unwrap_or_default();
-    println!(
-        "snapshot perf report: files={} repository_snapshot={:?} tree_walk_ms={} blob_prep_ms={} blob_write_ms={} tree_write_ms={} state_ref_oplog_ms={} cli_end_to_end={:?} cli_overhead_estimate={:?}",
-        file_count,
-        repository_profile.snapshot_total,
-        repository_profile.tree_walk_ms,
-        repository_profile.blob_prep_ms,
-        repository_profile.blob_write_ms,
-        repository_profile.tree_write_ms,
-        repository_profile.state_ref_oplog_ms,
-        cli_elapsed,
-        cli_overhead
-    );
-
-    match git_baseline {
-        Some((add, commit)) => println!(
-            "snapshot perf report: git_add={:?} git_commit={:?} git_total={:?}",
-            add,
-            commit,
-            add + commit
-        ),
-        None => println!("snapshot perf report: git baseline unavailable; skipping parity output"),
-    }
-}
 
 #[test]
 fn test_snapshot_performance_small_repo() {
@@ -145,22 +22,14 @@ fn test_snapshot_performance_small_repo() {
 #[test]
 fn test_snapshot_performance_many_files() {
     let file_count = 1_000usize;
-    let repository_profile = measure_repository_snapshot(file_count);
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    write_snapshot_bench_files(temp.path(), file_count);
+    cli_test_support::write_many_small_files(temp.path(), file_count);
 
     let start = Instant::now();
     heddle(&["capture", "-m", "Many files"], Some(temp.path())).unwrap();
     let cli_elapsed = start.elapsed();
-
-    print_snapshot_cli_report(
-        file_count,
-        &repository_profile,
-        cli_elapsed,
-        try_measure_git_snapshot(file_count),
-    );
 
     assert!(
         cli_elapsed < Duration::from_secs(20),
@@ -168,6 +37,10 @@ fn test_snapshot_performance_many_files() {
         cli_elapsed,
         Duration::from_secs(20)
     );
+    let status = status_json(temp.path());
+    for kind in ["added", "modified", "deleted"] {
+        assert_eq!(status["changes"][kind], serde_json::json!([]), "{status}");
+    }
 }
 
 #[test]
@@ -195,7 +68,7 @@ fn test_status_performance_large_repo() {
     assert_performance(
         "status with 500 files, 100 modified",
         || {
-            let _ = heddle(&["status"], Some(temp.path()));
+            heddle(&["status"], Some(temp.path())).expect("status should succeed");
         },
         performance_budget(Duration::from_secs(5), Duration::from_secs(10)),
     );
@@ -237,7 +110,7 @@ fn test_diff_performance_large_file() {
     assert_performance(
         "diff 10k line file with 1k changes",
         || {
-            let _ = heddle(&["diff"], Some(temp.path()));
+            heddle(&["diff"], Some(temp.path())).expect("diff should succeed");
         },
         budget,
     );
@@ -260,7 +133,7 @@ fn test_log_performance_deep_history() {
     assert_performance(
         "log with 100 commits",
         || {
-            let _ = heddle(&["log", "--oneline"], Some(temp.path()));
+            heddle(&["log", "--oneline"], Some(temp.path())).expect("log should succeed");
         },
         performance_budget(Duration::from_secs(2), Duration::from_secs(4)),
     );
@@ -291,6 +164,6 @@ fn test_gc_performance_many_objects() {
         || {
             heddle(&["maintenance", "gc", "--aggressive"], Some(temp.path())).unwrap();
         },
-        performance_budget(Duration::from_secs(5), Duration::from_secs(15)),
+        performance_budget(Duration::from_secs(5), Duration::from_secs(10)),
     );
 }

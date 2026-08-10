@@ -318,6 +318,8 @@ mod misc;
 mod native_scope_boundary;
 #[path = "cli_integration/next_action_contract.rs"]
 mod next_action_contract;
+#[path = "cli_integration/oplog_salvage.rs"]
+mod oplog_salvage;
 #[path = "cli_integration/oss_cli_polish.rs"]
 mod oss_cli_polish;
 #[path = "cli_integration/output_kind_invariant.rs"]
@@ -504,6 +506,10 @@ fn heddle_output(args: &[&str], cwd: Option<&std::path::Path>) -> Result<Output,
     seed_default_test_user_config(&config_path, &dir)?;
     cmd.env("HEDDLE_CONFIG", config_path);
     cmd.env("HOME", default_test_home_path(&dir));
+    cmd.env("HEDDLE_FSMONITOR", "off");
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    cmd.env("GIT_CONFIG_SYSTEM", "/dev/null");
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
 
     cmd.output().map_err(|e| e.to_string())
 }
@@ -555,6 +561,7 @@ fn heddle_output_with_env_removed(
     seed_default_test_user_config(&config_path, &dir)?;
     cmd.env("HEDDLE_CONFIG", config_path);
     cmd.env("HOME", default_test_home_path(&dir));
+    cmd.env("HEDDLE_FSMONITOR", "off");
     cmd.env_remove("NO_COLOR");
     for key in remove_envs {
         cmd.env_remove(key);
@@ -578,6 +585,7 @@ fn heddle_output_with_stdin(
     seed_default_test_user_config(&config_path, cwd)?;
     cmd.env("HEDDLE_CONFIG", config_path);
     cmd.env("HOME", default_test_home_path(cwd));
+    cmd.env("HEDDLE_FSMONITOR", "off");
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());

@@ -17,7 +17,6 @@ use heddle_core::{
     recovery_scope_checkout as core_recovery_scope_checkout,
     should_squash_land as core_should_squash_land,
 };
-use heddle_git_projection::GitProjection;
 use objects::{
     lock::{RepositoryLockExt, WriteLockGuard},
     object::{State, StateId, ThreadName},
@@ -1119,8 +1118,7 @@ fn sync_remote_before_land_if_needed(repo: &Repository, thread_id: &str) -> Resu
 
     ensure_worktree_clean(repo, "land")?;
     let remote_name = super::remote::resolve_default_remote_name(repo, None)?;
-    let mut bridge = GitProjection::new(repo);
-    bridge.pull(&remote_name)?;
+    super::remote::pull_current_git_overlay_authoritative(repo, &remote_name)?;
 
     let trust = git_overlay_txn::post_verify(repo);
     if !trust.verified {
