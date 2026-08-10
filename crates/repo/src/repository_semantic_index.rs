@@ -1024,7 +1024,7 @@ mod tests {
         let blob = put_blob(&repo, b"fn a() -> i32 { 1 }\n");
         let tree = Tree::from_entries(vec![TreeEntry::file("a.rs", blob, false).unwrap()]);
 
-        assert_eq!(EXTRACTOR_VERSION, 4, "schema addition must bump extraction");
+        assert_eq!(EXTRACTOR_VERSION, 5, "schema addition must bump extraction");
         let old_version = EXTRACTOR_VERSION - 1;
         let mut b1 = SemanticIndexBuilder::new(repo.store(), old_version);
         let (root1, _) = b1.build_root(&tree, None).unwrap();
