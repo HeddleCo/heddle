@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Credential configuration for embedded Sley transports.
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     ffi::OsStr,
     io::{Cursor, Read as _},
@@ -45,6 +47,8 @@ pub struct EmbeddingSafeCredentialProvider {
     external_helper_config: GitConfig,
     external_helpers: Vec<ExternalCredentialHelper>,
     external_helper_timeout: Duration,
+    #[cfg(test)]
+    oversized_helper_outputs: AtomicUsize,
 }
 
 struct ExternalCredentialHelper {
@@ -76,6 +80,8 @@ impl EmbeddingSafeCredentialProvider {
             external_helper_config,
             external_helpers,
             external_helper_timeout: CREDENTIAL_HELPER_TIMEOUT,
+            #[cfg(test)]
+            oversized_helper_outputs: AtomicUsize::new(0),
         }
     }
 
@@ -184,6 +190,9 @@ impl EmbeddingSafeCredentialProvider {
                 }
             };
             if output.len() > MAX_CREDENTIAL_HELPER_OUTPUT {
+                #[cfg(test)]
+                self.oversized_helper_outputs
+                    .fetch_add(1, Ordering::Relaxed);
                 terminate_helper(&mut child);
                 continue;
             }
@@ -677,8 +686,6 @@ mod tests {
             Some(temp.path().as_os_str()),
             Duration::from_secs(2),
         );
-        let started = Instant::now();
-
         assert_helper_preconditions(&provider, &oversized, temp.path());
         assert_helper_preconditions(&provider, &fallback, temp.path());
         let credential = provider
@@ -686,7 +693,13 @@ mod tests {
             .expect("oversized helper falls through")
             .expect("fallback helper fills credentials");
 
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(
+            provider
+                .oversized_helper_outputs
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the output-size guard, not the helper timeout, must reject the streaming helper"
+        );
         assert_eq!(credential.username.as_deref(), Some("fallback"));
     }
 
