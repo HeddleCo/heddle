@@ -580,7 +580,12 @@ fn walk_semantic_index_closure(
                     emit_semantic_blob(store, hash, excluded, seen, visit)?;
                 }
                 SemanticChild::BindingDelta(hash) => {
-                    walk_binding_delta_closure(store, hash, excluded, seen, visit)?;
+                    // Binding deltas are state-scoped attachments. Emit this
+                    // state's direct delta; ancestor states contribute their
+                    // own deltas when (and only when) the state walk reaches
+                    // them. Following `delta.parent` here would cross a
+                    // shallow-clone boundary.
+                    emit_binding_delta(store, hash, excluded, seen, visit)?;
                 }
             }
         }
@@ -588,8 +593,7 @@ fn walk_semantic_index_closure(
     Ok(())
 }
 
-/// The two child kinds encountered walking the semantic closure: an interior
-/// node to descend into, or a leaf (file node) blob to emit.
+/// Child kinds encountered while walking a state's semantic closure.
 enum SemanticChild {
     Interior(ContentHash),
     Leaf(ContentHash),
@@ -626,27 +630,22 @@ fn decode_semantic_container(
         .collect())
 }
 
-fn walk_binding_delta_closure(
+fn emit_binding_delta(
     store: &impl ObjectStore,
-    head: ContentHash,
+    hash: ContentHash,
     excluded: &HashSet<ContentHash>,
     seen: &mut HashSet<ContentHash>,
     visit: &mut impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
 ) -> Result<()> {
-    let mut cursor = Some(head);
-    while let Some(hash) = cursor {
-        if !emit_semantic_blob(store, hash, excluded, seen, visit)? {
-            break;
-        }
-        let blob = store
-            .get_blob(&hash)?
-            .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
-        cursor = BindingDelta::decode(blob.content())
-            .map_err(|err| {
-                ProtocolError::Serialization(format!("semantic binding delta {hash}: {err}"))
-            })?
-            .parent;
+    if !emit_semantic_blob(store, hash, excluded, seen, visit)? {
+        return Ok(());
     }
+    let blob = store
+        .get_blob(&hash)?
+        .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
+    BindingDelta::decode(blob.content()).map_err(|err| {
+        ProtocolError::Serialization(format!("semantic binding delta {hash}: {err}"))
+    })?;
     Ok(())
 }
 
@@ -706,31 +705,10 @@ fn collect_semantic_hashes(
                     excluded.insert(hash);
                 }
                 SemanticChild::BindingDelta(hash) => {
-                    collect_binding_delta_hashes(store, hash, excluded)?;
+                    excluded.insert(hash);
                 }
             }
         }
-    }
-    Ok(())
-}
-
-fn collect_binding_delta_hashes(
-    store: &impl ObjectStore,
-    head: ContentHash,
-    excluded: &mut HashSet<ContentHash>,
-) -> Result<()> {
-    let mut cursor = Some(head);
-    while let Some(hash) = cursor {
-        if !excluded.insert(hash) {
-            break;
-        }
-        let Some(blob) = store.get_blob(&hash)? else {
-            break;
-        };
-        cursor = match BindingDelta::decode(blob.content()) {
-            Ok(delta) => delta.parent,
-            Err(_) => break,
-        };
     }
     Ok(())
 }
@@ -1539,6 +1517,10 @@ mod tests {
 
     #[test]
     fn depth_and_exclude_options_match_between_full_and_plan() {
+        use std::collections::BTreeMap;
+
+        use objects::object::{BindingDelta, SemanticIndexRoot, SemanticTreeNode};
+
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         let path = temp.path().join("story.txt");
@@ -1549,6 +1531,38 @@ mod tests {
         let middle = repo.snapshot(Some("middle".to_string()), None).unwrap();
         std::fs::write(&path, "tip\n").unwrap();
         let tip = repo.snapshot(Some("tip".to_string()), None).unwrap();
+
+        let (semantic_tree, semantic_digest) = SemanticTreeNode::new(Vec::new());
+        let semantic_tree_hash = repo
+            .store()
+            .put_blob(&Blob::new(semantic_tree.encode().unwrap()))
+            .unwrap();
+        let attach_delta = |state: StateId, parent: Option<ContentHash>| {
+            let delta = BindingDelta::new(parent, Vec::new());
+            let delta_hash = repo
+                .store()
+                .put_blob(&Blob::new(delta.encode().unwrap()))
+                .unwrap();
+            let root =
+                SemanticIndexRoot::new(1, BTreeMap::new(), semantic_tree_hash, semantic_digest)
+                    .with_binding_delta(delta_hash, 1);
+            let root_hash = repo
+                .store()
+                .put_blob(&Blob::new(root.encode().unwrap()))
+                .unwrap();
+            repo.put_state_attachment(&StateAttachment {
+                state_id: state,
+                body: StateAttachmentBody::SemanticIndex(root_hash),
+                attribution: test_attribution(),
+                created_at: Utc::now(),
+                supersedes: None,
+            })
+            .unwrap();
+            delta_hash
+        };
+        let base_delta = attach_delta(base.state_id, None);
+        let middle_delta = attach_delta(middle.state_id, Some(base_delta));
+        let tip_delta = attach_delta(tip.state_id, Some(middle_delta));
 
         let depth_zero = assert_plan_parity(
             &repo,
@@ -1561,6 +1575,9 @@ mod tests {
         assert!(depth_zero.contains(&(ObjectId::StateId(tip.state_id), ObjectType::State)));
         assert!(!depth_zero.contains(&(ObjectId::StateId(middle.state_id), ObjectType::State)));
         assert!(!depth_zero.contains(&(ObjectId::StateId(base.state_id), ObjectType::State)));
+        assert!(depth_zero.contains(&(ObjectId::Hash(tip_delta), ObjectType::Blob)));
+        assert!(!depth_zero.contains(&(ObjectId::Hash(middle_delta), ObjectType::Blob)));
+        assert!(!depth_zero.contains(&(ObjectId::Hash(base_delta), ObjectType::Blob)));
 
         let depth_one = assert_plan_parity(
             &repo,
@@ -1573,6 +1590,9 @@ mod tests {
         assert!(depth_one.contains(&(ObjectId::StateId(tip.state_id), ObjectType::State)));
         assert!(depth_one.contains(&(ObjectId::StateId(middle.state_id), ObjectType::State)));
         assert!(!depth_one.contains(&(ObjectId::StateId(base.state_id), ObjectType::State)));
+        assert!(depth_one.contains(&(ObjectId::Hash(tip_delta), ObjectType::Blob)));
+        assert!(depth_one.contains(&(ObjectId::Hash(middle_delta), ObjectType::Blob)));
+        assert!(!depth_one.contains(&(ObjectId::Hash(base_delta), ObjectType::Blob)));
 
         let exclude_middle = assert_plan_parity(
             &repo,
@@ -1961,7 +1981,9 @@ mod tests {
     fn semantic_index_attachment_excluded_from_push_pack_but_kept_for_pull() {
         use std::collections::BTreeMap;
 
-        use objects::object::{BindingDelta, SemanticIndexRoot, SemanticTreeNode};
+        use objects::object::{
+            BindingDelta, FileBindingDelta, SemanticIndexRoot, SemanticTreeNode,
+        };
 
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
@@ -1974,7 +1996,14 @@ mod tests {
             .store()
             .put_blob(&Blob::new(node.encode().unwrap()))
             .expect("put semantic tree node");
-        let base_delta = BindingDelta::new(None, Vec::new());
+        let base_delta = BindingDelta::new(
+            None,
+            vec![FileBindingDelta::new(
+                "unreachable-parent.rs",
+                None,
+                Vec::new(),
+            )],
+        );
         let base_delta_hash = repo
             .store()
             .put_blob(&Blob::new(base_delta.encode().unwrap()))
@@ -2032,7 +2061,7 @@ mod tests {
         // The semantic-index CONTENT blobs are ordinary content-addressed
         // objects and still ride the pack in both directions — only the
         // attachment record is sidecar'd on push.
-        for content in [root_hash, node_hash, delta_hash, base_delta_hash] {
+        for content in [root_hash, node_hash, delta_hash] {
             let obj = plan
                 .iter()
                 .find(|p| p.id == ObjectId::Hash(content))
@@ -2041,6 +2070,12 @@ mod tests {
             assert!(obj.obj_type.packable_for_push());
             assert!(obj.obj_type.packable_for_pull());
         }
+        assert!(
+            !plan
+                .iter()
+                .any(|object| object.id == ObjectId::Hash(base_delta_hash)),
+            "a binding delta belonging to an unreachable parent state must not ride this state's closure"
+        );
 
         // Partitioning the plan by push-packability puts the record on the
         // sidecar side and never in the pack side.
