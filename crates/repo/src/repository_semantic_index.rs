@@ -446,7 +446,13 @@ impl Repository {
             None => SemanticIndexBuilder::new(self.store(), EXTRACTOR_VERSION),
         };
         match builder.build_root(tree, parent.as_ref()) {
-            Ok((_, root_hash)) => Ok(Some(root_hash)),
+            Ok((root, _)) => match self.persist_resolved_semantic_edges(prior, root) {
+                Ok(root_hash) => Ok(Some(root_hash)),
+                Err(err) => {
+                    warn!(error = %err, "semantic graph: resolution failed; skipping index");
+                    Ok(None)
+                }
+            },
             Err(err) => {
                 warn!(error = %err, "semantic index: build failed; skipping");
                 Ok(None)
@@ -458,7 +464,9 @@ impl Repository {
     /// version match this binary's. A stale root is served as a MISS so a
     /// bump recomputes.
     fn index_is_current(&self, root: &SemanticIndexRoot) -> bool {
-        root.extractor_version == EXTRACTOR_VERSION
+        root.binding_delta.is_some()
+            && root.resolver_version == semantic::cross_file_resolution::RESOLVER_VERSION
+            && root.extractor_version == EXTRACTOR_VERSION
             && root
                 .grammars
                 .iter()
@@ -563,7 +571,8 @@ impl Repository {
             return Ok(None);
         };
         let mut builder = SemanticIndexBuilder::new(self.store(), EXTRACTOR_VERSION);
-        let (_, root_hash) = builder.build_root(&tree, None)?;
+        let (root, _) = builder.build_root(&tree, None)?;
+        let root_hash = self.persist_resolved_semantic_edges(None, root)?;
         self.attach_semantic_index(state_id, &state, root_hash)?;
         Ok(Some(self.load_index_root(&root_hash)?))
     }
@@ -662,7 +671,9 @@ impl Repository {
         let ordered = self.order_states_oldest_first(states)?;
         let mut count = 0;
         for state_id in ordered {
-            let already = self.attached_semantic_index(&state_id)?.is_some();
+            let already = self
+                .attached_semantic_index(&state_id)?
+                .is_some_and(|root| self.index_is_current(&root));
             if already && !all {
                 continue; // restartable: skip states that already have one.
             }

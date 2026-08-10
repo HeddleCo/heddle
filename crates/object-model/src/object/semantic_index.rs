@@ -585,6 +585,14 @@ pub struct SemanticIndexRoot {
     pub tree: ContentHash,
     /// The top tree node's `semantic_digest` — the whole-tree fingerprint.
     pub semantic_digest: ContentHash,
+    /// State-scoped resolved-edge delta rooted at this state. This is separate
+    /// from `tree`: syntax remains Merkle-shareable while bindings may depend
+    /// on repository placement and the first parent's edge set.
+    #[serde(default)]
+    pub binding_delta: Option<ContentHash>,
+    /// Heddle-owned resolver policy version used to produce `binding_delta`.
+    #[serde(default)]
+    pub resolver_version: u32,
 }
 
 impl SemanticIndexRoot {
@@ -602,7 +610,16 @@ impl SemanticIndexRoot {
             grammars,
             tree,
             semantic_digest,
+            binding_delta: None,
+            resolver_version: 0,
         }
+    }
+
+    /// Attach a resolved-edge delta to this state-scoped root.
+    pub fn with_binding_delta(mut self, binding_delta: ContentHash, resolver_version: u32) -> Self {
+        self.binding_delta = Some(binding_delta);
+        self.resolver_version = resolver_version;
+        self
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, SemanticIndexError> {

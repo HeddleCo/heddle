@@ -6,6 +6,7 @@
 
 pub mod analysis;
 pub mod cache;
+pub mod cross_file_resolution;
 pub mod diff;
 pub mod merge_driver;
 pub mod parser;

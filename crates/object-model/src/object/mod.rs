@@ -19,6 +19,7 @@ mod operation_id;
 mod redaction;
 mod risk_signal;
 mod semantic_change;
+mod semantic_edges;
 mod semantic_index;
 mod session;
 mod source;
@@ -71,6 +72,7 @@ pub use risk_signal::{
     SignalAnchor,
 };
 pub use semantic_change::{ChangeImportance, ModificationKind, SemanticChange};
+pub use semantic_edges::{BindingDelta, FileBindingDelta, ResolvedSemanticEdge, SemanticEdgeKind};
 pub use semantic_index::{
     ByteSpan, ImportBinding, ImportEntry, ImportKindTag, OccurrenceEntry, OccurrenceRole,
     ScopeEntry, ScopeKind, SemanticEntryKind, SemanticFileFacts, SemanticFileNode,
@@ -123,9 +125,8 @@ pub use timeline::{
     TimelineOperationIdParseError, TimelineOperationKind, TimelineStepId, TimelineToolCallStatus,
     TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
 };
-pub use tree::TreeDecodeError;
 pub use tree::{
-    EntryType, FileMode, Tree, TreeEntry, TreeEntryTarget, TreeError,
+    EntryType, FileMode, Tree, TreeDecodeError, TreeEntry, TreeEntryTarget, TreeError,
     validate_name as validate_tree_entry_name,
 };
 #[cfg(feature = "async-source")]
