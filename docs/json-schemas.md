@@ -951,6 +951,7 @@ emits an array of the same object.
     }
   ],
   "auto": [],
+  "abandoned": [],
   "reclaimed_bytes": 0,
   "would_reclaim_bytes": 12288,
   "skipped": []

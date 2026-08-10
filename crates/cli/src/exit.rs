@@ -101,6 +101,9 @@ impl HeddleExitCode {
             "remote_not_configured" | "remote_not_found" | "repository_not_found" => {
                 Some(Self::Config)
             }
+            // A Heddle global option after `try --` is a malformed
+            // invocation, not a child-command argument.
+            "try_global_option_after_separator" => Some(Self::Usage),
             // Well-formed input the command semantically rejects:
             // - nothing staged / no changes to capture
             // - a reconcile that needs a `--prefer` side
@@ -489,6 +492,7 @@ mod tests {
             ("remote_not_configured", HeddleExitCode::Config),
             ("remote_not_found", HeddleExitCode::Config),
             ("repository_not_found", HeddleExitCode::Config),
+            ("try_global_option_after_separator", HeddleExitCode::Usage),
             ("nothing_to_capture", HeddleExitCode::DataErr),
             ("dirty_worktree", HeddleExitCode::DataErr),
             ("state_corrupted", HeddleExitCode::DataErr),

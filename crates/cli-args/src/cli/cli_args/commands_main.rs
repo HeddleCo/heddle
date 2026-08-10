@@ -197,6 +197,9 @@ Examples:
     /// when you already have a thread and just want to exec a command
     /// inside its checkout (no thread creation, no capture, no
     /// rollback).
+    #[command(after_help = "\
+Heddle options must appear before `--`. Everything after `--` is passed unchanged to the inner command. If the inner command uses a Heddle global-option spelling, pass `--allow-heddle-global-args` before `--`.
+")]
     Try(TryArgs),
 
     /// Automation/workflow command: run a command inside an existing

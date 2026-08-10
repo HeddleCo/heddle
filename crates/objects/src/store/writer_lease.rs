@@ -280,6 +280,14 @@ impl WriterLeaseStore {
         self.list_locked()
     }
 
+    /// List persisted leases without reaping expired active records.
+    ///
+    /// Cleanup previews use this read-only view so residue detection cannot
+    /// mutate lease storage as a side effect.
+    pub fn list_without_reaping(&self) -> Result<Vec<WriterLease>> {
+        self.list_locked()
+    }
+
     pub fn abandon_thread(&self, thread: &str, now: DateTime<Utc>) -> Result<()> {
         let _lock = self.write_lock()?;
         for mut lease in self.list_locked()? {

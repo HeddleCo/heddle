@@ -52,6 +52,9 @@ pub struct ThreadListOptions {
     /// When `false` (default for CLI), harness-created (`auto`) threads are
     /// omitted unless they are the current checkout lane.
     pub include_auto: bool,
+    /// When `false` (default for CLI), abandoned threads are omitted unless
+    /// they are the current checkout lane.
+    pub include_abandoned: bool,
 }
 
 impl ThreadListOptions {
@@ -61,6 +64,11 @@ impl ThreadListOptions {
 
     pub fn include_auto(mut self, include_auto: bool) -> Self {
         self.include_auto = include_auto;
+        self
+    }
+
+    pub fn include_abandoned(mut self, include_abandoned: bool) -> Self {
+        self.include_abandoned = include_abandoned;
         self
     }
 }
@@ -297,6 +305,11 @@ pub fn list_threads(repo: &Repository, options: ThreadListOptions) -> Result<Thr
         // worse than the noise it adds.
         summaries.retain(|summary| summary.is_current || !summary.auto);
     }
+    if !options.include_abandoned {
+        summaries.retain(|summary| {
+            summary.is_current || !matches!(summary.thread_state, Some(ThreadState::Abandoned))
+        });
+    }
     let available_git_refs = split_available_git_refs(&mut summaries);
     let current = summaries
         .iter()
@@ -336,14 +349,6 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadListEntry
             .push(entry);
     }
     for mut thread in thread_manager.list()? {
-        if thread.state == ThreadState::Abandoned
-            && repo
-                .refs()
-                .get_thread(&ThreadName::new(&thread.thread))?
-                .is_none()
-        {
-            continue;
-        }
         refresh_thread_freshness(repo, &mut thread)?;
         threads_by_name.insert(thread.thread.clone(), thread);
     }

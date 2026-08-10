@@ -18,7 +18,7 @@ use heddle_core::{
 use objects::{
     fs_ops::remove_path_recursively,
     object::{StateId, ThreadName},
-    store::{ActorPresenceStore, ObjectStore, WriterLeaseStore},
+    store::{ActorPresenceStore, ObjectStore, WriterLeaseStatus, WriterLeaseStore},
 };
 use oplog::{OpLogRecorder, OpRecord, ThreadUpdateSnapshots};
 use refs::{Head, RefExpectation, RefUpdate};
@@ -987,13 +987,14 @@ fn current_thread_drop_advice(repo: &Repository, thread_id: &str) -> RecoveryAdv
 fn thread_cleanup_mode_required_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "thread_cleanup_mode_required",
-        "heddle thread cleanup requires at least one mode flag: pass --merged to sweep merged threads, --auto --older-than <duration> to sweep stale auto-threads, or both.",
-        "Choose `heddle thread cleanup --merged --dry-run` or `heddle thread cleanup --auto --older-than 7d --dry-run` first.",
+        "heddle thread cleanup requires at least one mode flag: --merged, --auto --older-than <duration>, or --abandoned.",
+        "Add --dry-run to the cleanup mode you intend; for abandoned threads, run `heddle thread cleanup --abandoned --dry-run`.",
         "thread cleanup was invoked without a mode flag",
         "cleanup without an explicit mode could remove threads the user did not mean to sweep",
         "no thread metadata, checkout directories, mounts, or reservations were changed",
-        "heddle thread cleanup --merged --dry-run",
+        "heddle thread cleanup --abandoned --dry-run",
         vec![
+            "heddle thread cleanup --abandoned --dry-run".to_string(),
             "heddle thread cleanup --merged --dry-run".to_string(),
             "heddle thread cleanup --auto --older-than 7d --dry-run".to_string(),
         ],
@@ -1586,6 +1587,9 @@ struct ThreadCleanupOutput {
     /// Threads dropped (or that would be dropped, in dry-run) because
     /// they are auto-created and stale per `--older-than`.
     auto: Vec<DroppedThread>,
+    /// Abandoned threads cleaned (or that would be cleaned, in dry-run)
+    /// because operational residue remains.
+    abandoned: Vec<DroppedThread>,
     /// Total bytes reclaimed from removing thread checkouts. Always
     /// `0` in dry-run mode — see `would_reclaim_bytes` for the
     /// estimate. This split prevents automation that reads
@@ -1751,7 +1755,7 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 fn cmd_thread_cleanup(cli: &Cli, repo: &Repository, args: ThreadCleanupArgs) -> Result<()> {
-    if !args.merged && !args.auto {
+    if !args.merged && !args.auto && !args.abandoned {
         return Err(anyhow!(thread_cleanup_mode_required_advice()));
     }
     if args.older_than.is_some() && !args.auto {
@@ -1770,6 +1774,16 @@ fn cmd_thread_cleanup(cli: &Cli, repo: &Repository, args: ThreadCleanupArgs) -> 
     let manager = thread_manager(repo);
     let threads = manager.list()?;
     let now = Utc::now();
+    let actor_presence = if args.abandoned {
+        ActorPresenceStore::new(repo.heddle_dir()).list_without_pruning()?
+    } else {
+        Vec::new()
+    };
+    let writer_leases = if args.abandoned {
+        WriterLeaseStore::new(repo.heddle_dir()).list_without_reaping()?
+    } else {
+        Vec::new()
+    };
 
     // Cleanup running from inside a qualifying thread used to drop
     // its own checkout mid-command, leaving the user in a deleted
@@ -1783,13 +1797,68 @@ fn cmd_thread_cleanup(cli: &Cli, repo: &Repository, args: ThreadCleanupArgs) -> 
 
     let mut merged_drops: Vec<(Thread, DroppedThread)> = Vec::new();
     let mut auto_drops: Vec<(Thread, DroppedThread)> = Vec::new();
+    let mut abandoned_drops: Vec<(Thread, DroppedThread)> = Vec::new();
     let mut skipped: Vec<SkippedThread> = Vec::new();
 
     for thread in threads {
-        // Skip already-abandoned threads — `cmd_thread_drop` marks
-        // dropped threads abandoned, so re-running cleanup should be
-        // a no-op for them.
         if matches!(thread.state, ThreadState::Abandoned) {
+            if !args.abandoned {
+                continue;
+            }
+            let thread_name = ThreadName::new(&thread.thread);
+            let has_live_ref = repo.refs().get_thread(&thread_name)?.is_some();
+            let has_execution_path = thread.execution_path.exists();
+            let has_manifest =
+                repo::thread_manifest::manifest_path(repo.heddle_dir(), &thread.thread).exists();
+            let has_actor_presence = actor_presence.iter().any(|entry| {
+                entry.thread == thread.thread
+                    || entry.thread_id.as_deref() == Some(thread.id.as_str())
+            });
+            let has_active_writer_lease = writer_leases.iter().any(|lease| {
+                lease.thread == thread.thread && lease.status == WriterLeaseStatus::Active
+            });
+            if !(has_live_ref
+                || has_execution_path
+                || has_manifest
+                || has_actor_presence
+                || has_active_writer_lease)
+            {
+                continue;
+            }
+
+            let is_active = active_thread_id
+                .as_deref()
+                .is_some_and(|id| id == thread.id);
+            if is_active {
+                skipped.push(SkippedThread {
+                    thread: thread.thread.clone(),
+                    id: thread.id.clone(),
+                    reason: "active",
+                    note:
+                        "currently the active thread; would leave the user in a deleted directory"
+                            .to_string(),
+                });
+                continue;
+            }
+
+            let age_seconds = (now - thread.updated_at).num_seconds().max(0);
+            let bytes = directory_size(&thread.execution_path);
+            let execution_path = thread
+                .execution_path
+                .to_str()
+                .map(ToString::to_string)
+                .filter(|path| !path.is_empty());
+            abandoned_drops.push((
+                thread.clone(),
+                DroppedThread {
+                    thread: thread.thread,
+                    id: thread.id,
+                    reason: "abandoned",
+                    age_seconds,
+                    bytes,
+                    execution_path,
+                },
+            ));
             continue;
         }
         let age_seconds = (now - thread.updated_at).num_seconds().max(0);
@@ -1867,7 +1936,11 @@ fn cmd_thread_cleanup(cli: &Cli, repo: &Repository, args: ThreadCleanupArgs) -> 
 
     let mut reclaimed_bytes: u64 = 0;
     if !args.dry_run {
-        for (thread, dropped) in merged_drops.iter().chain(auto_drops.iter()) {
+        for (thread, dropped) in merged_drops
+            .iter()
+            .chain(auto_drops.iter())
+            .chain(abandoned_drops.iter())
+        {
             apply_thread_drop(repo, &manager, thread)?;
             reclaimed_bytes = reclaimed_bytes.saturating_add(dropped.bytes);
         }
@@ -1875,10 +1948,13 @@ fn cmd_thread_cleanup(cli: &Cli, repo: &Repository, args: ThreadCleanupArgs) -> 
 
     let merged_summary: Vec<DroppedThread> = merged_drops.iter().map(|(_, d)| d.clone()).collect();
     let auto_summary: Vec<DroppedThread> = auto_drops.iter().map(|(_, d)| d.clone()).collect();
-    let total_dropped = merged_summary.len() + auto_summary.len();
+    let abandoned_summary: Vec<DroppedThread> =
+        abandoned_drops.iter().map(|(_, d)| d.clone()).collect();
+    let total_dropped = merged_summary.len() + auto_summary.len() + abandoned_summary.len();
     let would_reclaim: u64 = merged_summary
         .iter()
         .chain(auto_summary.iter())
+        .chain(abandoned_summary.iter())
         .map(|d| d.bytes)
         .sum();
 
@@ -1900,6 +1976,18 @@ fn cmd_thread_cleanup(cli: &Cli, repo: &Repository, args: ThreadCleanupArgs) -> 
             "{} {} stale auto-thread(s)",
             action_word,
             auto_summary.len()
+        ));
+    }
+    if args.abandoned {
+        let abandoned_action = if args.dry_run {
+            "would clean"
+        } else {
+            "cleaned"
+        };
+        parts.push(format!(
+            "{} {} abandoned thread(s)",
+            abandoned_action,
+            abandoned_summary.len()
         ));
     }
     let bytes_for_message = if args.dry_run {
@@ -1936,6 +2024,7 @@ fn cmd_thread_cleanup(cli: &Cli, repo: &Repository, args: ThreadCleanupArgs) -> 
         dry_run: args.dry_run,
         merged: merged_summary.clone(),
         auto: auto_summary.clone(),
+        abandoned: abandoned_summary.clone(),
         reclaimed_bytes: if args.dry_run { 0 } else { reclaimed_bytes },
         would_reclaim_bytes: would_reclaim,
         skipped: skipped.clone(),
@@ -1948,7 +2037,11 @@ fn cmd_thread_cleanup(cli: &Cli, repo: &Repository, args: ThreadCleanupArgs) -> 
         if total_dropped == 0 {
             println!("No threads matched the cleanup criteria.");
         } else {
-            for entry in merged_summary.iter().chain(auto_summary.iter()) {
+            for entry in merged_summary
+                .iter()
+                .chain(auto_summary.iter())
+                .chain(abandoned_summary.iter())
+            {
                 println!(
                     "  - {} ({}) [{}]  {}  age {}s",
                     entry.thread,

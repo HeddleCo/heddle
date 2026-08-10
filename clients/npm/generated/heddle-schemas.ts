@@ -2415,6 +2415,7 @@ export interface ThreadCaptureSummarySchema {
 }
 
 export interface ThreadCleanupSchema {
+  abandoned: ThreadDroppedSchema[];
   action: string;
   auto: ThreadDroppedSchema[];
   blockers: string[];
