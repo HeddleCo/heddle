@@ -51,13 +51,9 @@ fn ingest_into_git_projection(
     let target = test_support::heddle_repo(git_projection).root();
     ingest::import_git_into_with_options(source, target, ingest::ImportOptions::default())
         .map_err(|error| error.to_string())?;
-    test_support::stage_ingest_source_in_mirror(git_projection, source, &[])
-        .map_err(|error| error.to_string())?;
     test_support::build_existing_mapping(git_projection, Some(source))
         .map_err(|error| error.to_string())?;
-    let mirror_repo =
-        test_support::open_git_repo(git_projection).map_err(|error| error.to_string())?;
-    test_support::seed_ingest_identity_mappings_from_repo(git_projection, &mirror_repo)
+    test_support::seed_ingest_identity_mappings_from_store(git_projection)
         .map_err(|error| error.to_string())
 }
 

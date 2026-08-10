@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Core Git Projection and Bridge Mirror operations.
+//! Core Git Projection operations.
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -572,10 +572,11 @@ impl SyncMapping {
     }
 }
 
-/// Legacy-named implementation for explicit Git Projection and Bridge Mirror operations.
+/// Explicit Git Projection operations.
 pub struct GitProjection<'a> {
     pub heddle_repo: &'a HeddleRepository,
     pub git_repo_path: Option<PathBuf>,
+    scratch_repo: Option<tempfile::TempDir>,
     pub mapping: SyncMapping,
     pub commit_message_overrides: HashMap<StateId, String>,
     pub commit_parent_overrides: HashMap<StateId, Vec<ObjectId>>,
@@ -757,6 +758,7 @@ impl<'a> GitProjection<'a> {
         Self {
             heddle_repo,
             git_repo_path: None,
+            scratch_repo: None,
             mapping: SyncMapping::new(),
             commit_message_overrides: HashMap::new(),
             commit_parent_overrides: HashMap::new(),
@@ -764,33 +766,18 @@ impl<'a> GitProjection<'a> {
         }
     }
 
-    /// Initialize the Bridge Mirror in the .heddle/git directory.
-    pub fn init_mirror(&mut self) -> GitProjectionResult<()> {
-        let _guard = self.init_mirror_with_guard()?;
-        _guard.commit();
+    /// Initialize an ephemeral writable sley repository for one projection run.
+    pub fn init_scratch_repo(&mut self) -> GitProjectionResult<()> {
+        if self.scratch_repo.is_some() {
+            return Ok(());
+        }
+        let scratch = tempfile::Builder::new()
+            .prefix("heddle-git-projection-")
+            .tempdir()?;
+        SleyRepository::init_bare(scratch.path()).map_err(git_err)?;
+        self.git_repo_path = Some(scratch.path().to_path_buf());
+        self.scratch_repo = Some(scratch);
         Ok(())
-    }
-
-    /// Variant of `init_mirror` that returns a `MirrorInitGuard` so
-    /// callers performing a multi-step bring-up (init + first export)
-    /// can roll back the partially-created mirror if a later step
-    /// fails. Call `guard.commit()` once the mirror is known-good.
-    pub fn init_mirror_with_guard(&mut self) -> GitProjectionResult<MirrorInitGuard> {
-        let git_dir = self.heddle_repo.heddle_dir().join("git");
-
-        let did_create = if git_dir.exists() {
-            let _ = open_repo(&git_dir)?;
-            false
-        } else {
-            fs::create_dir_all(&git_dir)?;
-            let _ = SleyRepository::init_bare(&git_dir).map_err(git_err)?;
-            let mirror_repo = open_repo(&git_dir)?;
-            seed_checkout_note_refs_into_mirror(self.heddle_repo.root(), &mirror_repo)?;
-            true
-        };
-
-        self.git_repo_path = Some(git_dir.clone());
-        Ok(MirrorInitGuard::new_from_init(git_dir, did_create))
     }
 
     /// Get the path to the legacy Bridge Mirror directory.
@@ -803,7 +790,7 @@ impl<'a> GitProjection<'a> {
         self.mirror_path().exists()
     }
 
-    /// Open the Git repository (mirror or regular).
+    /// Open the active scratch repository, a legacy mirror, or the checkout.
     pub fn open_git_repo(&self) -> GitProjectionResult<SleyRepository> {
         if let Some(ref path) = self.git_repo_path {
             open_repo(path)
@@ -815,6 +802,12 @@ impl<'a> GitProjection<'a> {
                 open_repo(self.heddle_repo.root())
             }
         }
+    }
+
+    fn active_projection_path(&self) -> GitProjectionResult<PathBuf> {
+        self.git_repo_path
+            .clone()
+            .ok_or(GitProjectionError::GitRepoNotInitialized)
     }
 
     /// Sort states topologically (parents before children).
@@ -908,33 +901,38 @@ impl<'a> GitProjection<'a> {
         }
     }
 
-    /// Export current Heddle state into the internal mirror, then write it out
-    /// as a bare git repository at `target_path`. Auto-initializes
+    /// Reconstruct current Heddle state into an ephemeral projection, then write
+    /// it as a bare git repository at `target_path`. Auto-initializes
     /// `target_path` as a bare repo if it does not already exist.
     pub fn export_to_path(
         &mut self,
         target_path: &Path,
     ) -> GitProjectionResult<super::git_util::ExportStats> {
-        self.init_mirror()?;
+        self.init_scratch_repo()?;
         let stats = self.export()?;
-        self.copy_mirror_to_path(
+        // A colocated Git checkout is the durable Git-side checkpoint now that
+        // the projection itself is ephemeral. Keep it current before this
+        // scratch repository is dropped so the next command does not mistake
+        // the checkout's older HEAD for an out-of-band rewind.
+        self.write_current_checkout_from_existing_projection()?;
+        self.copy_projection_to_path(
             target_path,
             &format!("heddle: export from {}", self.heddle_repo.root().display()),
         )?;
         Ok(stats)
     }
 
-    /// Shared helper: copy every reachable object from the internal mirror to
-    /// `target_path`, then reconcile its branch/tag/note refs to the WHOLE-MIRROR
+    /// Shared helper: copy every reachable object from the scratch projection to
+    /// `target_path`, then reconcile its branch/tag/note refs to the whole
     /// served frontier. The destination is created as a bare repo when it does not
     /// exist. Explicit export never overwrites or deletes an out-of-band destination
     /// tip that Heddle does not own.
-    fn copy_mirror_to_path(
+    fn copy_projection_to_path(
         &mut self,
         target_path: &Path,
         log_message: &str,
     ) -> GitProjectionResult<()> {
-        let mirror_repo = self.open_git_repo()?;
+        let projection_repo = self.open_git_repo()?;
         let target_repo = if target_path.exists() {
             open_repo(target_path)?
         } else {
@@ -943,12 +941,13 @@ impl<'a> GitProjection<'a> {
             open_repo(target_path)?
         };
 
-        // Export only the mirror's managed frontier. A foreign branch or tag
-        // Heddle never wrote must not enter the destination's desired set.
-        let managed_record = read_mirror_managed_refs(&mirror_repo)?;
-        let served_frontier = collect_managed_ref_updates(&mirror_repo, &managed_record)?;
+        // Export only the managed frontier reconstructed from the store. A foreign
+        // branch/tag heddle never wrote — even one at a heddle-minted commit —
+        // must not enter the destination's desired set.
+        let managed_record = read_projection_managed_refs(self.heddle_repo.heddle_dir())?;
+        let served_frontier = collect_managed_ref_updates(&projection_repo, &managed_record)?;
         copy_reachable_objects(
-            &mirror_repo,
+            &projection_repo,
             &target_repo,
             served_frontier.iter().map(|update| update.target),
         )?;
@@ -958,7 +957,7 @@ impl<'a> GitProjection<'a> {
         let old_at_destination = read_destination_ref_map(&target_repo)?;
         let previously_exported = read_exported_refs(&target_repo)?;
         let plan = plan_destination_reconcile(
-            &mirror_repo,
+            &projection_repo,
             &served_frontier,
             None,
             &old_at_destination,
@@ -1104,38 +1103,6 @@ impl<'a> GitProjection<'a> {
             }
         }
 
-        Ok(())
-    }
-
-    pub fn stage_ingest_source_in_mirror(
-        &mut self,
-        source: &Path,
-        refs: &[String],
-    ) -> GitProjectionResult<()> {
-        let source_repo = open_repo(source)?;
-        let updates = collect_import_source_ref_updates(&source_repo, refs)?;
-        if updates.is_empty() {
-            return Ok(());
-        }
-
-        self.init_mirror()?;
-        let mirror_repo = self.open_git_repo()?;
-        copy_reachable_objects(
-            &source_repo,
-            &mirror_repo,
-            updates.iter().map(|update| update.target),
-        )?;
-        apply_ref_updates(
-            &mirror_repo,
-            &updates,
-            &format!("heddle: stage ingest source from {}", source.display()),
-        )?;
-
-        let mut record = read_or_seed_mirror_managed_refs(&mirror_repo)?;
-        for update in &updates {
-            record.insert(full_ref_name(update), update.target);
-        }
-        write_mirror_managed_refs(&mirror_repo, &record)?;
         Ok(())
     }
 
@@ -1507,7 +1474,7 @@ impl<'a> GitProjection<'a> {
         Ok(WriteThroughOutcome::Wrote(git_oid))
     }
 
-    pub fn write_current_checkout_from_existing_mirror(
+    pub fn write_current_checkout_from_existing_projection(
         &mut self,
     ) -> GitProjectionResult<WriteThroughOutcome> {
         if !self.heddle_repo.root().join(".git").exists() {
@@ -1531,15 +1498,15 @@ impl<'a> GitProjection<'a> {
                 ));
             }
         };
-        self.write_thread_state_checkout_from_existing_mirror(&thread, &state_id)
+        self.write_thread_state_checkout_from_existing_projection(&thread, &state_id)
     }
 
-    fn write_thread_state_checkout_from_existing_mirror(
+    fn write_thread_state_checkout_from_existing_projection(
         &mut self,
         thread: &str,
         state_id: &StateId,
     ) -> GitProjectionResult<WriteThroughOutcome> {
-        let mirror_repo = self.open_git_repo()?;
+        let projection_repo = self.open_git_repo()?;
         if self.mapping.is_empty() {
             self.build_existing_mapping(None)?;
         }
@@ -1550,7 +1517,7 @@ impl<'a> GitProjection<'a> {
             .git_overlay_mapped_git_commit_for_state(state_id)
             .map_err(|error| GitProjectionError::Git(error.to_string()))?
         {
-            ObjectId::from_hex(mirror_repo.object_format(), &git_commit)
+            ObjectId::from_hex(projection_repo.object_format(), &git_commit)
                 .map_err(|error| GitProjectionError::InvalidMapping(error.to_string()))?
         } else {
             return Ok(WriteThroughOutcome::Skipped(
@@ -1565,7 +1532,7 @@ impl<'a> GitProjection<'a> {
             ));
         }
         let checkout = CheckoutWrite::prepare(self.heddle_repo.root(), thread)?;
-        if checkout.checkout_repo.git_dir() == mirror_repo.git_dir() {
+        if checkout.checkout_repo.git_dir() == projection_repo.git_dir() {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::MirrorIsWorktree,
             ));
@@ -1573,7 +1540,7 @@ impl<'a> GitProjection<'a> {
         materialize_checkout_closure_from_state(
             self.heddle_repo,
             &self.mapping,
-            &mirror_repo,
+            &projection_repo,
             &checkout.object_repo,
             state_id,
             git_oid,
@@ -1602,42 +1569,6 @@ fn checkout_note_ref_exists(root: &Path) -> GitProjectionResult<bool> {
         .find_reference(super::git_notes::NOTES_REF)
         .map_err(git_err)?
         .is_some())
-}
-
-fn seed_checkout_note_refs_into_mirror(
-    root: &Path,
-    mirror_repo: &SleyRepository,
-) -> GitProjectionResult<()> {
-    if !root.join(".git").exists() {
-        return Ok(());
-    }
-
-    let checkout_repo = match SleyRepository::discover(root) {
-        Ok(repo) => repo,
-        Err(_) => return Ok(()),
-    };
-    if checkout_repo.git_dir() == mirror_repo.git_dir() {
-        return Ok(());
-    }
-    let object_repo = common_repo_for_worktree(&checkout_repo)?;
-    let note_updates = collect_ref_updates(&object_repo)?
-        .into_iter()
-        .filter(|update| update.namespace == RefNamespace::Note)
-        .collect::<Vec<_>>();
-    if note_updates.is_empty() {
-        return Ok(());
-    }
-
-    copy_reachable_objects(
-        &object_repo,
-        mirror_repo,
-        note_updates.iter().map(|update| update.target),
-    )?;
-    apply_ref_updates(
-        mirror_repo,
-        &note_updates,
-        "heddle: seed mirror note refs from checkout",
-    )
 }
 
 fn hydrate_checkout_notes_from_remote_without_mirror(
@@ -2106,48 +2037,6 @@ fn fsync_path(path: &Path) -> GitProjectionResult<()> {
     }
 }
 
-/// RAII guard for `init_mirror`. When the mirror directory did not
-/// exist at acquisition time, an early Drop (panic, error return)
-/// removes the partially-initialized `.heddle/git/` so a future
-/// `heddle export git ...` doesn't see a half-built bare repo. Call
-/// `commit()` once the mirror is known-good (e.g. after a successful
-/// first export) to disarm the guard.
-pub struct MirrorInitGuard {
-    path: PathBuf,
-    /// `Some(true)` means we created the directory in this call and
-    /// own its rollback; `Some(false)` (or `None` after commit) means
-    /// hands off.
-    rollback: Option<bool>,
-}
-
-impl MirrorInitGuard {
-    pub fn new_from_init(path: PathBuf, did_create: bool) -> Self {
-        Self {
-            path,
-            rollback: Some(did_create),
-        }
-    }
-
-    pub fn commit(mut self) {
-        self.rollback = None;
-    }
-}
-
-impl Drop for MirrorInitGuard {
-    fn drop(&mut self) {
-        if matches!(self.rollback, Some(true))
-            && self.path.exists()
-            && let Err(err) = std::fs::remove_dir_all(&self.path)
-        {
-            tracing::warn!(
-                path = %self.path.display(),
-                error = %err,
-                "failed to roll back partial legacy Bridge Mirror; manual cleanup may be required"
-            );
-        }
-    }
-}
-
 /// Git projection policy: a thread is considered an "unclaimed bootstrap"
 /// when it /// points at an empty-tree state with no parents. That is the exact shape of
 /// the state produced by `Repository::seed_default_thread`, and it cannot
@@ -2452,7 +2341,7 @@ fn local_path_from_url(url: &str) -> GitProjectionResult<Option<PathBuf>> {
     Ok(Some(path))
 }
 
-fn collect_ref_updates(repo: &SleyRepository) -> GitProjectionResult<Vec<RefUpdate>> {
+pub(crate) fn collect_ref_updates(repo: &SleyRepository) -> GitProjectionResult<Vec<RefUpdate>> {
     let mut updates = Vec::new();
 
     for reference in repo.references().list_refs().map_err(git_err)? {
@@ -2490,8 +2379,8 @@ pub struct ExportedCommitCounts {
 
 /// Count and partition the commits reachable from the branch and tag tips
 /// that `collect_ref_updates` writes to a destination. Derived from the SAME
-/// ref set `copy_mirror_to_path` copies, so the reported counts equal what
-/// actually lands in the destination — including stale mirror refs left
+/// ref set `copy_projection_to_path` copies, so the reported counts equal what
+/// actually lands in the destination — including stale managed refs left
 /// behind by a dropped Heddle thread (export does not prune them, so the
 /// commit is still copied and must still be counted; pruning would be a
 /// separate behavior change). Notes refs are excluded: they carry
@@ -2752,10 +2641,9 @@ pub fn write_exported_refs(
     write_exported_refs_at(&exported_refs_manifest_path(target_repo), refs)
 }
 
-/// Filename, under the internal MIRROR's git dir, of heddle's record of which
-/// full ref names it MANAGES in the mirror, each mapped to the tip it last
-/// published for that ref. The mirror-side analog of [`HEDDLE_EXPORTED_REFS_FILE`]
-/// (the destination's `heddle-exported-refs`): the mirror reconcile had no
+/// Filename, under durable Git Projection state, recording which full ref names
+/// Heddle manages, each mapped to the tip it last published. This is the source
+/// analog of [`HEDDLE_EXPORTED_REFS_FILE`] at a destination: the reconcile had no
 /// persisted ownership record, so it reconstructed ownership ad-hoc from OID
 /// membership — the bug that drove heddle#316 through 7 review rounds. A mirror
 /// ref is MANAGED iff its full name is a key here, NEVER by OID membership: a
@@ -2763,63 +2651,77 @@ pub fn write_exported_refs(
 /// foreign because heddle never recorded WRITING it under that name. The format,
 /// atomic-write, and parse contract are shared verbatim with the destination
 /// record (`read_exported_refs_at`/`write_exported_refs_at`).
-const HEDDLE_MIRROR_MANAGED_REFS_FILE: &str = "heddle-mirror-managed-refs";
+const HEDDLE_PROJECTION_MANAGED_REFS_FILE: &str = "heddle-managed-refs";
 
-/// On-disk path of the mirror's managed-refs record.
-fn mirror_managed_refs_path(mirror_repo: &SleyRepository) -> PathBuf {
-    mirror_repo.git_dir().join(HEDDLE_MIRROR_MANAGED_REFS_FILE)
+fn projection_managed_refs_path(heddle_dir: &Path) -> PathBuf {
+    heddle_dir
+        .join("git-projection")
+        .join(HEDDLE_PROJECTION_MANAGED_REFS_FILE)
 }
 
-/// Whether the mirror's managed-refs record exists on disk. Used to distinguish
-/// a genuine FIRST export after this code lands (absent → seed from the current
-/// mirror ref set so pre-existing heddle refs aren't all misread as foreign)
-/// from a record that exists but is empty (everything was legitimately dropped —
-/// do NOT re-seed).
-pub fn mirror_managed_refs_recorded(mirror_repo: &SleyRepository) -> bool {
-    mirror_managed_refs_path(mirror_repo).exists()
+fn legacy_mirror_managed_refs_path(mirror_repo: &SleyRepository) -> PathBuf {
+    mirror_repo.git_dir().join("heddle-mirror-managed-refs")
 }
 
-/// The full ref names heddle MANAGES in the mirror (full ref name → last-published
-/// tip OID). `Ok(empty)` when the record is absent — callers seed a first run from
-/// the current mirror ref set; see [`mirror_managed_refs_recorded`].
-pub fn read_mirror_managed_refs(
-    mirror_repo: &SleyRepository,
+/// Read the store-owned projection ref record.
+pub fn read_projection_managed_refs(
+    heddle_dir: &Path,
 ) -> GitProjectionResult<HashMap<String, ObjectId>> {
-    read_exported_refs_at(&mirror_managed_refs_path(mirror_repo))
+    read_exported_refs_at(&projection_managed_refs_path(heddle_dir))
 }
 
-/// Persist the mirror's managed-refs record. Atomic temp+rename via
-/// [`write_exported_refs_at`].
-pub fn write_mirror_managed_refs(
-    mirror_repo: &SleyRepository,
+/// Persist the store-owned projection ref record.
+pub fn write_projection_managed_refs(
+    heddle_dir: &Path,
     refs: &HashMap<String, ObjectId>,
 ) -> GitProjectionResult<()> {
-    write_exported_refs_at(&mirror_managed_refs_path(mirror_repo), refs)
+    write_exported_refs_at(&projection_managed_refs_path(heddle_dir), refs)
 }
 
-/// Read the mirror's managed-refs record, SEEDING a genuine first run (no record
-/// on disk) from the current mirror ref set so the reconcile does not misread
-/// every pre-existing heddle ref as foreign.
-///
-/// This is the #1 first-run risk (heddle#316): an absent record on the first
-/// export after this code lands must NOT make existing refs look foreign — that
-/// would silently stop embargo retraction (a now-embargoed thread tip would never
-/// be rewound/deleted because its branch would be treated as a foreign ref to
-/// spare). Every ref currently in the mirror was put there by heddle (the mint
-/// reconcile, `import git`, or `fetch`), so claiming them all as managed on the first
-/// run is correct. A record that EXISTS but is empty (everything was legitimately
-/// dropped) is NOT re-seeded — only a truly-absent record triggers the seed.
-pub fn read_or_seed_mirror_managed_refs(
-    mirror_repo: &SleyRepository,
+/// Read store-owned reconcile state, lazily migrating a legacy mirror record.
+pub fn read_or_seed_projection_managed_refs(
+    heddle_dir: &Path,
 ) -> GitProjectionResult<HashMap<String, ObjectId>> {
-    if mirror_managed_refs_recorded(mirror_repo) {
-        read_mirror_managed_refs(mirror_repo)
+    if projection_managed_refs_path(heddle_dir).exists() {
+        return read_projection_managed_refs(heddle_dir);
+    }
+    let legacy_path = heddle_dir.join("git");
+    if !legacy_path.exists() {
+        return Ok(HashMap::new());
+    }
+    let legacy_repo = open_repo(&legacy_path)?;
+    let refs = if legacy_mirror_managed_refs_path(&legacy_repo).exists() {
+        read_exported_refs_at(&legacy_mirror_managed_refs_path(&legacy_repo))?
     } else {
-        Ok(collect_ref_updates(mirror_repo)?
+        collect_ref_updates(&legacy_repo)?
             .into_iter()
             .map(|update| (full_ref_name(&update), update.target))
-            .collect())
+            .collect()
+    };
+    write_projection_managed_refs(heddle_dir, &refs)?;
+    Ok(refs)
+}
+
+/// Recreate the prior managed ref surface in an ephemeral projection repo.
+pub fn materialize_projection_managed_refs(
+    repo: &SleyRepository,
+    refs: &HashMap<String, ObjectId>,
+) -> GitProjectionResult<()> {
+    for (name, target) in refs {
+        if repo.read_object(target).is_err()
+            || repo.find_reference(name).map_err(git_err)?.is_some()
+        {
+            continue;
+        }
+        set_reference(
+            repo,
+            name,
+            *target,
+            RefPrecondition::MustNotExist,
+            "heddle: restore store-sourced projection ref",
+        )?;
     }
+    Ok(())
 }
 
 /// The mirror refs heddle MANAGES, as [`RefUpdate`]s — [`collect_ref_updates`]
@@ -2866,17 +2768,15 @@ enum RefMove {
     /// past heddle's last-published tip also descends from `new`, but is
     /// [`Diverged`](RefMove::Diverged), never force-overwritten (heddle#316 r12).
     Rewind,
-    /// `old` and `new` share no ancestor line (or `old` is unresolvable here) —
+    /// `old` and `new` share no ancestor line —
     /// the divergence the fast-forward guard exists to catch.
     Diverged,
 }
 
 /// Classify how a destination ref moves from `old` to `new`, resolving the
-/// topology in `repo` (the mirror, which holds every served object PLUS any
-/// previously-exported-now-embargoed object the purge dropped from the mapping
-/// but not from the object DB). The single place that distinguishes a deliberate
-/// embargo rewind from a fork, so both push destinations force the former and
-/// reject the latter identically.
+/// topology in the ephemeral projection repository. This is the single place
+/// that distinguishes a deliberate embargo/redaction replacement from a fork,
+/// so both push destinations force the former and reject the latter identically.
 ///
 /// `recorded_tip` is the tip heddle last published for this ref at THIS
 /// destination (from its exported-refs record), or `None` when heddle has no
@@ -2910,16 +2810,26 @@ fn classify_ref_move(
     // authorized ONLY when heddle OWNS the rewind: `old` is exactly the tip heddle
     // itself last published for this ref here (per the exported-refs record). A
     // destination tip heddle did NOT publish — an out-of-band descendant the user
-    // advanced and fetched into the mirror — is never force-overwritten; it falls
+    // advanced — is never force-overwritten; it falls
     // through to `Diverged` (FF-rejected unless the user passes `--force`), so its
-    // newer commit survives. `old`'s objects survive in the mirror because heddle
-    // published it (the embargo purge drops the StateId→OID mapping, never the
-    // object); if `old` is NOT resolvable here we cannot prove a rewind anyway.
-    if recorded_tip == Some(old)
-        && repo.read_commit(&old).is_ok()
-        && commit_is_descendant_of(repo, old, new)?
-    {
-        return Ok(RefMove::Rewind);
+    // newer commit survives.
+    //
+    // A fresh scratch repository deliberately does not contain every object
+    // published by an earlier export. Redaction can also remint an imported
+    // commit at a derived SHA. In either case the destination-owned ref record
+    // is the durable proof that an absent `old` is ours to replace. When `old`
+    // is present we retain the stronger ancestry proof and reject unrelated
+    // history even if the record says Heddle last published it.
+    if recorded_tip == Some(old) {
+        match repo.read_object(&old) {
+            Err(sley::GitError::NotFound(kind)) if kind.missing_object_kind().is_some() => {
+                return Ok(RefMove::Rewind);
+            }
+            Ok(_) if commit_is_descendant_of(repo, old, new)? => {
+                return Ok(RefMove::Rewind);
+            }
+            Ok(_) | Err(_) => {}
+        }
     }
     Ok(RefMove::Diverged)
 }
@@ -3510,8 +3420,8 @@ fn clone_url_to_bare_via_sley(
 /// that remain residual- or mirror-backed: git objects are content-addressed, so
 /// a faithful reconstruction lands the exact same OID the mirror copy would have,
 /// and the lossy path installs verbatim bytes. The exclude set keeps it O(objects
-/// new since the parent). `init_mirror` remains available for migration; this
-/// path does not delete `.heddle/git`.
+/// new since the parent). A legacy mirror remains a read-only migration fallback;
+/// this path never creates or populates `.heddle/git`.
 #[allow(clippy::too_many_arguments)]
 pub fn materialize_checkout_closure_from_state(
     heddle_repo: &HeddleRepository,

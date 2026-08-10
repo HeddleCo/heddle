@@ -93,7 +93,7 @@ impl<'a> GitProjection<'a> {
 ///
 /// `commits_total` counts the commits that actually land in the
 /// destination: it is derived from the same branch/tag ref set
-/// (`collect_ref_updates`) that `copy_mirror_to_path` copies, by walking
+/// (`collect_ref_updates`) that `copy_projection_to_path` copies, by walking
 /// the commit ancestry of those tips. Counting from the copy path — rather
 /// than a parallel walk over current Heddle refs — guarantees the reported
 /// total equals what's copied, including a stale mirror ref left behind by
