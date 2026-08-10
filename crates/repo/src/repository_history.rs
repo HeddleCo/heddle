@@ -170,72 +170,87 @@ where
     use super::commit_graph::CommitGraphIndex;
 
     let mut graph = CommitGraphIndex::with_cache(source, cache);
-    let mut candidate_ids = Vec::new();
-    let mut current = query.start;
-
-    while let Some(state_id) = current {
-        if candidate_ids.len() >= query.limit {
-            break;
-        }
-
-        // `stop_at` (the exclusive `--since` bound) is checked
-        // BEFORE filters so the walk terminates at the bound even
-        // when the bound state itself is filtered out by `--agent`
-        // or `--path`. Without this, a `--since` whose resolved
-        // state doesn't match the active filter would silently
-        // degrade and matches older than the bound would leak.
-        if let Some(stop) = query.stop_at
-            && state_id == stop
-        {
-            break;
-        }
-        heddle_perf_contract::record_ancestors_visited(1);
-
-        graph
-            .ensure_loaded(state_id)
-            .map_err(|e| HeddleError::InvalidObject(e.to_string()))?;
-        let Some(meta) = graph.node_metadata(&state_id) else {
-            break;
-        };
-        current = meta.first_parent;
-
-        // Fast agent filter from cached metadata — no state load needed
-        if let Some(ref filter) = query.agent_model_substring {
-            match &meta.agent_model {
-                Some(model) if model.contains(filter.as_str()) => {}
-                _ => continue,
-            }
-        }
-
-        if query.changed_paths.is_empty() {
-            // No path filter — this is a match
-            candidate_ids.push(state_id);
-            trace!(state = %state_id, "history query matched state (no path filter)");
-            continue;
-        }
-
-        // Use bloom filter to skip expensive tree diffs
-        graph
-            .ensure_bloom_populated(state_id)
-            .map_err(|e| HeddleError::InvalidObject(e.to_string()))?;
-        if graph
-            .node_bloom(&state_id)
-            .is_some_and(|bloom| !query.changed_paths.bloom_maybe_matches(bloom))
-        {
-            // Bloom says "definitely not changed" — skip
-            continue;
-        }
-
-        // Bloom says "maybe" (or no bloom) — confirm with full tree diff
-        let Some(state) = HistoryObjectSource::new(source).get_state(&state_id)? else {
-            break;
-        };
-        if !state_matches_changed_paths(source, &state, &query.changed_paths)? {
-            continue;
-        }
-        trace!(state = %state_id, "history query matched state");
-        candidate_ids.push(state_id);
+    let Some(start) = query.start else {
+        return Ok(Vec::new());
+    };
+    if query.limit == 0 || query.stop_at == Some(start) {
+        return Ok(Vec::new());
     }
+
+    let mut session = graph
+        .history_session(start)
+        .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+    let walk_result = (|| -> Result<Vec<StateId>> {
+        let mut candidate_ids = Vec::new();
+        let mut current = Some(start);
+
+        while let Some(state_id) = current {
+            if candidate_ids.len() >= query.limit {
+                break;
+            }
+
+            // `stop_at` (the exclusive `--since` bound) is checked
+            // BEFORE filters so the walk terminates at the bound even
+            // when the bound state itself is filtered out by `--agent`
+            // or `--path`. Without this, a `--since` whose resolved
+            // state doesn't match the active filter would silently
+            // degrade and matches older than the bound would leak.
+            if let Some(stop) = query.stop_at
+                && state_id == stop
+            {
+                break;
+            }
+            heddle_perf_contract::record_ancestors_visited(1);
+
+            let Some(meta) = session.node_metadata(&state_id) else {
+                break;
+            };
+            current = meta.first_parent;
+
+            // Fast agent filter from cached metadata — no state load needed
+            if let Some(ref filter) = query.agent_model_substring {
+                match &meta.agent_model {
+                    Some(model) if model.contains(filter.as_str()) => {}
+                    _ => continue,
+                }
+            }
+
+            if query.changed_paths.is_empty() {
+                // No path filter — this is a match
+                candidate_ids.push(state_id);
+                trace!(state = %state_id, "history query matched state (no path filter)");
+                continue;
+            }
+
+            // Use bloom filter to skip expensive tree diffs. The session has
+            // already resolved this node's parent closure, so this only
+            // computes missing filters and keeps them dirty in memory.
+            session
+                .ensure_bloom_populated(state_id)
+                .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+            if session
+                .node_bloom(&state_id)
+                .is_some_and(|bloom| !query.changed_paths.bloom_maybe_matches(bloom))
+            {
+                // Bloom says "definitely not changed" — skip
+                continue;
+            }
+
+            // Bloom says "maybe" (or no bloom) — confirm with full tree diff
+            let Some(state) = HistoryObjectSource::new(source).get_state(&state_id)? else {
+                break;
+            };
+            if !state_matches_changed_paths(source, &state, &query.changed_paths)? {
+                continue;
+            }
+            trace!(state = %state_id, "history query matched state");
+            candidate_ids.push(state_id);
+        }
+
+        Ok(candidate_ids)
+    })();
+    session.finish();
+    let candidate_ids = walk_result?;
 
     // Load full State objects only for final matches
     let mut result = Vec::with_capacity(candidate_ids.len());
@@ -452,14 +467,16 @@ fn normalize_repo_relative_path(path: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{cell::Cell, fs, rc::Rc};
 
+    use objects::{
+        object::{Attribution, Blob, Principal, State, Tree, TreeEntry},
+        store::{InMemoryStore, ObjectStore},
+    };
     #[cfg(feature = "async-source")]
     use objects::{
-        object::{
-            Attribution, Blob, ContentHash, EntryType, Principal, State, StateId, Tree, TreeEntry,
-        },
-        store::{AsyncObjectSource, InMemoryStore, ObjectStore},
+        object::{ContentHash, EntryType, StateId},
+        store::AsyncObjectSource,
     };
     use tempfile::TempDir;
 
@@ -467,7 +484,35 @@ mod tests {
         ChangedPathFilter, ChangedPathFilters, HistoryQuery, normalize_repo_relative_path,
         query_history_with_cache,
     };
-    use crate::{Repository, repository::commit_graph_persistence::NullCommitGraphCache};
+    use crate::{
+        Repository,
+        repository::commit_graph_persistence::{
+            CommitGraphCache, LoadedCommitGraph, NullCommitGraphCache,
+        },
+    };
+
+    #[derive(Clone, Default)]
+    struct CountingCommitGraphCache {
+        loads: Rc<Cell<usize>>,
+        saves: Rc<Cell<usize>>,
+        saved_nodes: Rc<Cell<usize>>,
+        saved_blooms: Rc<Cell<usize>>,
+    }
+
+    impl CommitGraphCache for CountingCommitGraphCache {
+        fn load(&self) -> anyhow::Result<Option<LoadedCommitGraph>> {
+            self.loads.set(self.loads.get() + 1);
+            Ok(None)
+        }
+
+        fn save(&self, nodes: &LoadedCommitGraph) -> anyhow::Result<()> {
+            self.saves.set(self.saves.get() + 1);
+            self.saved_nodes.set(nodes.len());
+            self.saved_blooms
+                .set(nodes.values().filter(|node| node.bloom.is_some()).count());
+            Ok(())
+        }
+    }
 
     #[test]
     fn changed_path_filter_matches_exact_paths_and_children() {
@@ -544,6 +589,62 @@ mod tests {
                 .map(|state| state.id())
                 .collect::<Vec<_>>(),
             expected
+        );
+    }
+
+    #[test]
+    fn path_filtered_history_batches_graph_persistence_across_a_long_walk() {
+        const HISTORY_LEN: usize = 64;
+
+        let store = InMemoryStore::new();
+        let attribution = Attribution::human(Principal::new("Test User", "test@example.com"));
+        let mut parent = None;
+        let mut expected = Vec::with_capacity(HISTORY_LEN);
+
+        for index in 0..HISTORY_LEN {
+            let blob = ObjectStore::put_blob(
+                &store,
+                &Blob::from_slice(format!("revision {index}\n").as_bytes()),
+            )
+            .unwrap();
+            let tree = Tree::from_entries(vec![
+                TreeEntry::file("tracked.txt".to_string(), blob, false).unwrap(),
+            ]);
+            let tree_hash = ObjectStore::put_tree(&store, &tree).unwrap();
+            let state = State::new(tree_hash, parent.into_iter().collect(), attribution.clone());
+            ObjectStore::put_state(&store, &state).unwrap();
+            parent = Some(state.id());
+            expected.push(state.id());
+        }
+        expected.reverse();
+
+        let cache = CountingCommitGraphCache::default();
+        let loads = Rc::clone(&cache.loads);
+        let saves = Rc::clone(&cache.saves);
+        let saved_nodes = Rc::clone(&cache.saved_nodes);
+        let saved_blooms = Rc::clone(&cache.saved_blooms);
+        let query = HistoryQuery::new(parent)
+            .with_limit(HISTORY_LEN)
+            .with_changed_paths(ChangedPathFilters::try_from_paths(["tracked.txt"]).unwrap());
+
+        let result = query_history_with_cache(&store, &query, cache).unwrap();
+
+        assert_eq!(
+            result.iter().map(State::id).collect::<Vec<_>>(),
+            expected,
+            "batching must preserve newest-to-oldest first-parent ordering"
+        );
+        assert_eq!(loads.get(), 1, "one query should open the cache once");
+        assert_eq!(
+            saves.get(),
+            1,
+            "all ancestry and Bloom mutations should persist as one graph snapshot"
+        );
+        assert_eq!(saved_nodes.get(), HISTORY_LEN);
+        assert_eq!(
+            saved_blooms.get(),
+            HISTORY_LEN,
+            "the one persisted snapshot should contain every Bloom mutation"
         );
     }
 
