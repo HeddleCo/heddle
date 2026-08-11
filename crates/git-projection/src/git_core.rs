@@ -804,12 +804,6 @@ impl<'a> GitProjection<'a> {
         }
     }
 
-    fn active_projection_path(&self) -> GitProjectionResult<PathBuf> {
-        self.git_repo_path
-            .clone()
-            .ok_or(GitProjectionError::GitRepoNotInitialized)
-    }
-
     /// Sort states topologically (parents before children).
     pub fn sort_states_topologically(
         &self,

@@ -39,6 +39,10 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- **Adopt no longer maintains an eager Git mirror.** Git projections are now
+  exported or reconstructed on demand from Heddle's authoritative object store,
+  while preserving commit, tag, note, and residual-object fidelity.
+
 - **Published wire compatibility is preserved.** Obsolete internal wire types
   were removed, while `HeadInfo`, `RefsList`, and `RefFilter` remain available
   in `heddle-wire` 0.11 for the live Weft refs service.
