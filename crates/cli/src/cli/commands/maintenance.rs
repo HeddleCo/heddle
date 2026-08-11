@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-use anyhow::Result;
+use std::{num::NonZeroUsize, sync::Arc};
+
+use anyhow::{Result, anyhow};
 use heddle_core::maintenance_plan::{MaintenanceInspectView, MaintenanceRefreshView};
+use objects::store::{
+    AnyStore, FsRepackOperation, RepackPolicy, RepackResourceLimits, RepackSchedule,
+    RepackScheduler,
+};
 use serde::Serialize;
 
 use crate::cli::{
@@ -12,6 +18,15 @@ struct MaintenanceOutput<'a, T> {
     output_kind: &'static str,
     #[serde(flatten)]
     report: &'a T,
+}
+
+#[derive(Serialize)]
+struct RepackOutput {
+    output_kind: &'static str,
+    objects_repacked: u64,
+    bytes_repacked: u64,
+    duration_ms: u128,
+    bytes_reclaimed: u64,
 }
 
 pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
@@ -103,6 +118,36 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
                 for line in view.lines() {
                     println!("{line}");
                 }
+            }
+        }
+        MaintenanceCommands::Repack => {
+            let AnyStore::Fs(store) = repo.store();
+            let scheduler = RepackScheduler::new(
+                RepackPolicy::default(),
+                RepackResourceLimits::new(NonZeroUsize::MIN),
+            );
+            let operation = Arc::new(FsRepackOperation::new(store.clone()));
+            let RepackSchedule::Started(handle) = scheduler.repack_now(operation)? else {
+                return Err(anyhow!("native repack is already running"));
+            };
+            let report = handle.wait()?;
+            let output = RepackOutput {
+                output_kind: "maintenance_repack",
+                objects_repacked: report.objects_repacked,
+                bytes_repacked: report.bytes_repacked,
+                duration_ms: report.duration.as_millis(),
+                bytes_reclaimed: report.bytes_reclaimed,
+            };
+            if should_output_json(cli, Some(repo.config())) {
+                println!("{}", serde_json::to_string(&output)?);
+            } else {
+                println!(
+                    "Repacked {} objects ({} bytes) in {} ms; reclaimed {} bytes",
+                    output.objects_repacked,
+                    output.bytes_repacked,
+                    output.duration_ms,
+                    output.bytes_reclaimed
+                );
             }
         }
         MaintenanceCommands::Gc {

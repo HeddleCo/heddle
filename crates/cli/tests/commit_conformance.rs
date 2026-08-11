@@ -33,13 +33,19 @@
 //! where annotated tags become first-class content-addressed objects.
 
 use std::{
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
 };
 
 use cli::Repository;
 use heddle_git_projection::{
     git_core::GitProjection, git_reconstruct::commit_object_id, test_support,
+};
+use objects::store::{
+    AnyStore, FsRepackOperation, RepackPolicy, RepackResourceLimits, RepackSchedule,
+    RepackScheduler,
 };
 use sley::{ObjectId, Repository as SleyRepository};
 use tempfile::TempDir;
@@ -288,6 +294,22 @@ fn assert_all_commits_reconstruct(case: &str, source: &Path) {
     ingest_into_git_projection(&mut git_projection, source)
         .unwrap_or_else(|e| panic!("[{case}] import from git failed: {e}"));
 
+    // #1326: fidelity must survive the real native replacement-pack cutover,
+    // not merely the import encoder. Use the scheduler's manual entry point so
+    // this remains the #566 byte-exact reconstruction gate after a repack.
+    let AnyStore::Fs(store) = repo.store();
+    let scheduler = RepackScheduler::new(
+        RepackPolicy::default(),
+        RepackResourceLimits::new(NonZeroUsize::MIN).with_io_rate(None),
+    );
+    let operation = Arc::new(FsRepackOperation::new(store.clone()));
+    let RepackSchedule::Started(handle) = scheduler.repack_now(operation).unwrap() else {
+        panic!("[{case}] native repack did not start");
+    };
+    handle
+        .wait()
+        .unwrap_or_else(|error| panic!("[{case}] native repack failed: {error}"));
+
     // A writable odb for tree-OID resolution (git trees are content-addressed,
     // so the OID is independent of which repo it lands in).
     let recon_repo = git_projection
@@ -393,7 +415,7 @@ fn assert_all_commits_export_from_state(case: &str, source: &Path) {
 }
 
 #[test]
-fn commit_conformance_plain_corpus() {
+fn commit_conformance_plain_corpus_survives_native_repack() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path();
     build_plain_corpus(dir);

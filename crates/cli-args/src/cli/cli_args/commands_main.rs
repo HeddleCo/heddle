@@ -543,6 +543,9 @@ pub enum MaintenanceCommands {
     /// Refresh repository performance sidecars without changing repository meaning.
     Refresh,
 
+    /// Repack native objects now through the resource-controlled scheduler.
+    Repack,
+
     /// Garbage collect unreachable objects.
     Gc {
         /// Prune unreachable objects.

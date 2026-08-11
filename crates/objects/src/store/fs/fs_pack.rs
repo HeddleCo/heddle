@@ -302,6 +302,10 @@ impl FsStore {
     /// is a no-op (nothing loose, one pack already covers everything).
     ///
     pub(super) fn pack_objects_impl(&self, delta_search: bool) -> Result<(u64, u64)> {
+        // Serialize every source-pack-retiring path with background repack,
+        // including callers in another process. Ordinary immutable pack
+        // installs remain concurrent and are preserved at scheduler cutover.
+        let _repack_lock = super::repack::acquire_repack_lock_blocking(&packs_dir(&self.root))?;
         let loose_blobs = list_hashes_from_dir(&blobs_dir(&self.root))?;
         let loose_trees = list_hashes_from_dir(&trees_dir(&self.root))?;
 
@@ -445,8 +449,7 @@ impl FsStore {
                 remove_file_ignore_missing(&snapshot_commit_marker_path(pack_path, artifact_id))?;
             }
         }
-        // Disk shrank (packs removed), so `reload_if_disk_grew` would
-        // not pick this up — force a full reload of the pack list.
+        // Retiring source packs requires a full reload of the pack list.
         self.reload_packs()?;
         self.clear_recent_object_caches();
 

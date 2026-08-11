@@ -7,6 +7,7 @@ mod fs_pack;
 mod fs_paths;
 mod fs_store;
 mod pack_install_journal;
+mod repack;
 
 #[cfg(test)]
 mod fs_tests;
@@ -18,3 +19,4 @@ pub use pack_install_journal::{
     pack_install_metrics_reset, pack_install_metrics_snapshot, recover_pack_install_intents,
     recover_pack_install_intents_with_ttl,
 };
+pub use repack::FsRepackOperation;

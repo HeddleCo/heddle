@@ -8,6 +8,7 @@ mod manager;
 mod pack_builder;
 mod pack_index;
 mod pack_reader;
+mod repack;
 mod shared;
 mod streaming_builder;
 pub(crate) mod varint;
@@ -20,6 +21,11 @@ pub use manager::PackManager;
 pub use pack_builder::PackBuilder;
 pub use pack_index::PackIndex;
 pub use pack_reader::{EncodedPackSubset, PackReader};
+pub use repack::{
+    CancellationToken, LoadMonitor, RepackContext, RepackError, RepackHandle, RepackInventory,
+    RepackOperation, RepackOutcome, RepackPolicy, RepackReason, RepackReport, RepackResourceLimits,
+    RepackSchedule, RepackScheduler,
+};
 pub use shared::{
     PACK_CHECKSUM_LEN, PackContainerSpec, PackEntryHeader, PackObjectId, PackObjectRecord,
     append_container_checksum, compress_pack_payload, decode_tagged_entry_header,

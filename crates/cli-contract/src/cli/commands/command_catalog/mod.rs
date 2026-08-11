@@ -2128,6 +2128,20 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
+        &["maintenance", "repack"],
+        surface(
+            json_discriminators(
+                opaque_schemas(GC_MUTATION, &["maintenance repack"]),
+                &[json_discriminator(
+                    Some("maintenance repack"),
+                    "output_kind",
+                    "maintenance_repack",
+                )],
+            ),
+            "admin",
+        ),
+    ),
+    entry(
         &["maintenance", "gc"],
         surface(
             json_discriminators(
@@ -4697,6 +4711,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Maintenance { command } => match command {
             MaintenanceCommands::Inspect => vec!["maintenance", "inspect"],
             MaintenanceCommands::Refresh => vec!["maintenance", "refresh"],
+            MaintenanceCommands::Repack => vec!["maintenance", "repack"],
             MaintenanceCommands::Gc { .. } => vec!["maintenance", "gc"],
         },
         Commands::Clone(_) => vec!["clone"],

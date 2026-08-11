@@ -273,6 +273,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["log"], &["log"]),
     sample(&["maintenance", "inspect"], &["maintenance", "inspect"]),
     sample(&["maintenance", "refresh"], &["maintenance", "refresh"]),
+    sample(&["maintenance", "repack"], &["maintenance", "repack"]),
     sample(&["maintenance", "gc"], &["maintenance", "gc"]),
     sample(&["pull"], &["pull"]),
     sample(&["push"], &["push"]),
@@ -1598,7 +1599,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
     // runtime JSON already emits `output_kind` (abort, adopt, the agent
     // session verbs, continue, daemon stop,
     // doctor, expand, fetch, land, log,
-    // maintenance inspect/refresh/gc, pull, push, query, ready,
+    // maintenance inspect/refresh/repack/gc, pull, push, query, ready,
     // the remote family, start, switch, sync, and the thread lifecycle
     // verbs). Any further sweep MUST extend this list and document the
     // addition.
@@ -1690,6 +1691,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "log",
             "maintenance inspect",
             "maintenance refresh",
+            "maintenance repack",
             "maintenance gc",
             "pull",
             "push",
