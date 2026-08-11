@@ -5,15 +5,19 @@
 >
 > **Scope:** unify (1) #564 de-lossy / mirror-drop **correctness**, (2) O(delta)
 > **fast export** after the mirror is gone, and (3) weft adopt-perf
-> (weft#1255 quadratic serialization, weft#1256 `path_hint` delta-grouping)
-> into **one shared primitive** — a delta enumerator over adjacent trees.
+> (weft#1255 Phase B projection-prep structural sharing, weft#1256
+> `path_hint` delta-grouping / pack-encoding) into **one shared primitive** —
+> a delta enumerator over adjacent trees + a `ContentHash`-keyed memo — with
+> two complementary weft consumers (projection-prep vs pack encoding), not
+> one conflated bucket. Phase A of weft#1255 (weft PR #1259, merged
+> `f32eefaf`) refined the adopt-side attribution; §6 follows that split.
 >
-> **Grounding:** every concrete `path:line` below was grepped against this
-> checkout (`task/1321-docs-spike-unified-adopt-export-perf-des` @
-> `a08e9680`, off `origin/main`, verified 2026-08-11). Where a capability is
-> planned-not-shipped it is labeled per AGENTS.md (`shipped` /
-> `foundation in place` / `planned`). Unverifiable anchors are marked
-> **unverified** rather than invented.
+> **Grounding:** every concrete heddle `path:line` below was grepped against
+> this checkout (`task/1321-docs-spike-unified-adopt-export-perf-des`, off
+> `origin/main`, verified 2026-08-11; weft Phase A numbers from PR #1259).
+> Where a capability is planned-not-shipped it is labeled per AGENTS.md
+> (`shipped` / `foundation in place` / `planned`). Unverifiable anchors are
+> marked **unverified** rather than invented.
 >
 > **Hard constraint — do not contradict #593:** non-UTF8 identities are closed
 > by making `Principal.name` / `Principal.email` into `Vec<u8>`
@@ -45,15 +49,21 @@ source of truth.
 **(b) Reconstruction is O(whole reachable history).** The mirror was also a
 secret **incremental cache**: it held prior OIDs and bytes so a later push
 only paid for new objects. Dropping it without replacing the cache property
-re-pays full-history CPU on every export. That is the same defect
-weft#1255 measured on adopt — each commit's work scales with the whole tree
-rather than the delta it introduced — and the same defect visible in heddle's
-memo-less `export_tree` recursion
-(`crates/git-projection/src/git_export.rs:232-306`, recursive call at `:274`).
+re-pays full-history CPU on every export. Heddle's memo-less `export_tree`
+recursion (`crates/git-projection/src/git_export.rs:232-306`, recursive call
+at `:274`) is the export-side instance of that full-tree re-walk. On weft
+adopt, Phase A of weft#1255 (PR #1259) split the earlier "quadratic
+serialization" story into **two complementary costs** (see §6):
+(1) full-tree-per-state flattening in **immutable projection preparation**
+— the structural twin of `export_tree` — and (2) **deduplicated
+content-pack encoding** inside `serialization_encoding_ms` (not per-commit
+tree re-flattening; a native `State` only carries a tree `ContentHash`).
+The shared delta enumerator + `ContentHash` memo targets (1) and feeds
+changed paths into (2) via weft#1256's `path_hint`.
 
 **Goal:** minimal-residual lossless export **+** O(delta) fast export, as
 **one coherent direction** — not three parallel fights (#564 correctness,
-#568/#1313 mirror-drop speed, weft#1255/#1256 adopt encoding).
+#568/#1313 mirror-drop speed, weft#1255 Phase B / #1256 adopt costs).
 
 ### 1.1 What is already shipped (do not re-plan)
 
@@ -75,7 +85,10 @@ memo-less `export_tree` recursion
    gaps close (§4).
 3. The **O(delta) layered export architecture** that replaces the mirror's
    cache value without keeping the mirror's bytes (§5).
-4. The **unification** with weft adopt-perf via one delta enumerator (§6).
+4. The **unification** with weft adopt-perf via one delta enumerator +
+   `ContentHash` memo (§6), with Phase A's two-bucket split (projection-prep
+   vs content-pack encoding) so `serialization_encoding_ms` is not treated as
+   `export_tree`.
 5. Failure modes (§7) and phasing that batches the #564 format bump once (§8).
 
 ---
@@ -413,16 +426,27 @@ visibility leak; the failure mode of a spurious full reconcile is CPU.
 
 ## 6. The unification (the strategic core)
 
-### 6.1 Same defect, two call sites
+### 6.1 Two complementary costs, one shared primitive
 
-`export_tree`'s memo-less full-tree recursion **is the same defect** as
-weft#1255 (adopt serializes work proportional to the whole tree per commit).
-weft#1255 measured it: ghostty adoption ~29 minutes, `serialization_encoding_ms`
-~70 % of hydrate, per-commit cost scaling with commit count (quadratic in
-repo scale). The physical model is "each commit re-encodes state proportional
-to the whole tree," not "encoding is slow."
+Phase A of weft#1255 (PR #1259, merge `f32eefaf`) **refuted** the earlier
+mechanism that treated adopt's hot `serialization_encoding_ms` bucket as
+per-commit full-tree re-flattening of native `State`. It also **confirmed** a
+separate full-tree-per-state walk elsewhere. The spike now tracks **two
+buckets**, not one:
 
-### 6.2 One primitive
+| Bucket | What it actually is (Phase A) | Twin / lever |
+|---|---|---|
+| **A — Immutable projection preparation** | Full-tree-per-state flattening: `prepare_immutable_state_projection_chunks` → `ImmutableProjectionBuilder::prepare` → `append_tree_projection` still walks every state's tree closure and emits flat membership (bounded 800-commit fixture: 801 states → 14,298 membership rows ≈ 17.85 objects/state). Unchanged subtrees are cached by `ContentHash` for *decode*, but the *flat closure* is still re-emitted per state. | **Twin of heddle's memo-less `export_tree`** (`git_export.rs:232-306`). Target of the shared structural-sharing / `ContentHash`-memo primitive — **weft#1255 Phase B**. |
+| **B — Deduplicated content-pack encoding** | Dominates the old `serialization_encoding_ms` aggregate. A native `State` serializes only its tree `ContentHash` (~215–289 B/body on the fixture; 1,600 state bodies / 438,176 B total). Content-pack encoding was **615.96 ms of 740.17 ms** total serialization on that run; state-body encode was only ~23 ms. Not `commits × full tree` through `State` MessagePack. | **weft#1256** `path_hint` / delta-grouping: better deltas → fewer/smaller pack inputs to encode. Related cost, distinct from bucket A. |
+
+Empirical superlinearity on ghostty (adoption ~29 min, old
+`serialization_encoding_ms` ~70 % of hydrate) is **not discarded** — Phase A
+refutes the *mechanism*, not the *shape*. Content-pack work scales with
+deduplicated pack-input bytes/compressibility; projection-prep scales with
+`states × tree closure`. Both improve when adjacent trees share structure via
+a delta walk + `ContentHash` memo; they are **not the identical bucket**.
+
+### 6.2 One primitive, multiple consumption sites
 
 Heddle already has the shared substrate:
 
@@ -433,25 +457,34 @@ tree_diff(parent_state.tree, state.tree) → changed (path, entry)
 Implemented as `diff_trees` / `diff_trees_visit` in
 `crates/object-model/src/object/tree_diff.rs:129-180` (sorted merge-join,
 deterministic order, early-exit visitor). Public re-exports live at
-`crates/object-model/src/object/mod.rs:133-134`.
+`crates/object-model/src/object/mod.rs:133-134`. Pair it with a
+`ContentHash`-keyed memo of per-subtree encoded artifacts (export: git OID;
+adopt projection: subtree membership / manifest; pack path: optional
+grouping key).
 
-| Consumer | Walks the delta to… |
-|---|---|
-| **Heddle export** (#1313 / #568 speed) | Materialize only new/changed git objects; inherit OIDs for unchanged `ContentHash`es (Layers 0–2) |
-| **Weft adopt encoding** (weft#1255) | Encode only the delta into the projection / pack, not the full tree per commit |
-| **Weft pack delta-grouping** (weft#1256) | The changed **path** falls out of the enumerator for free → exactly the `path_hint` `PackBuilder::add_with_path` already accepts (`crates/pack/src/store/pack/pack_builder.rs:61-89`) and that production currently hardcodes to `None` (`:57`) |
+| Consumer | Uses the primitive to… | Bucket |
+|---|---|---|
+| **Heddle export** (#1313 / #568 speed) | Materialize only new/changed git objects; inherit OIDs for unchanged `ContentHash`es (Layers 0–2) | Export twin of **A** |
+| **Weft adopt projection prep** (weft#1255 Phase B) | Stop re-flattening full tree closures per state; reuse content-hash-addressed subtree manifests / membership | **A** |
+| **Weft pack delta-grouping** (weft#1256) | Changed **paths** fall out of the same enumerator → `path_hint` for `PackBuilder::add_with_path` (`crates/pack/src/store/pack/pack_builder.rs:61-89`; production currently hardcodes `None` at `:57`) → better deltas, fewer/smaller content-pack inputs | **B** |
 
-So **#1313 / #568** (mirror-drop O(delta)), **weft#1255** (adopt quadratic),
-and **weft#1256** (delta-grouping / `path_hint`) consume **one primitive**
-instead of three separate fights.
+So **#1313 / #568** (mirror-drop O(delta)), **weft#1255 Phase B** (projection-prep
+structural sharing), and **weft#1256** (pack `path_hint`) still consume **one
+primitive** — delta enumerator + `ContentHash` memo — instead of three
+separate fights. They are complementary sites, not three copies of the same
+CPU line item.
 
 ### 6.3 What this is not
 
+- Not a claim that weft#1255's `serialization_encoding_ms` **is** `export_tree`
+  (Phase A closed that conflation; bucket A is the twin, bucket B is pack).
+- Not a proposal to add structural sharing to weft `stage_state` / MessagePack
+  state encoding (already root-hash sized; ~23 ms on the Phase A fixture).
 - Not a proposal to share process memory between heddle and weft.
 - Not a proposal to change the pack wire format.
 - Not a re-opening of #593, #606, S7, or #575 field shapes.
-- The primitive is the **delta enumerator + OID memo discipline**; each
-  consumer keeps its own encoder / pack builder.
+- The primitive is the **delta enumerator + ContentHash-memo discipline**;
+  each consumer keeps its own encoder / pack builder / projection schema.
 
 ### 6.4 Cross-repo ownership
 
@@ -461,8 +494,9 @@ instead of three separate fights.
 | Layer-0 memo in `export_tree` | heddle `git-projection` | P0 with/after #1313 |
 | Durable `ContentHash → OID` map + visibility epoch | heddle `git-projection` / store | P1 |
 | Structured fidelity remaining gaps | heddle object-model + ingest | #593, #606, S7, #575 (P2) |
-| Adopt encoding walks delta | weft | weft#1255 (P3) |
-| `path_hint` from delta paths | weft (calls heddle `PackBuilder`) | weft#1256 (P3) |
+| Adopt projection-prep structural sharing (bucket A) | weft | weft#1255 Phase B (P3) |
+| `path_hint` from delta paths → pack encoding (bucket B) | weft (calls heddle `PackBuilder`) | weft#1256 (P3) |
+| Phase A hydrate attribution (shipped) | weft | weft#1255 / PR #1259 |
 
 ---
 
@@ -562,9 +596,11 @@ floor stays, tiny, in-store). Do not ship five sequential re-hashes.
 
 | Work | Outcome |
 |---|---|
-| Thread delta enumerator into adopt encoding | Closes weft#1255 quadratic serialization |
-| Feed changed paths as `path_hint` into `PackBuilder::add_with_path` | Closes weft#1256 delta-grouping |
+| Thread delta enumerator + `ContentHash` memo into **immutable projection preparation** | Closes weft#1255 Phase B full-tree-per-state flattening (bucket A; twin of export Layer 0) |
+| Feed changed paths as `path_hint` into `PackBuilder::add_with_path` | Closes weft#1256 delta-grouping → fewer/smaller content-pack inputs (bucket B) |
 | Optional Layer-3 bytes cache | Only if clone-serving becomes hot; never load-bearing |
+
+Phase A attribution (PR #1259) is already merged; P3 does not re-do instrumentation.
 
 ---
 
@@ -594,8 +630,8 @@ When this spike is accepted, update or comment on:
 | HeddleCo/heddle#606 | Nonstandard modes structured field |
 | HeddleCo/heddle#575 | Annotated tags first-class |
 | HeddleCo/heddle#1321 | This spike's tracking issue |
-| HeddleCo/weft#1255 | Adopt quadratic serialization — consumes delta enumerator at P3 |
-| HeddleCo/weft#1256 | `path_hint` / delta-grouping — path falls out of the same enumerator |
+| HeddleCo/weft#1255 | Adopt perf; Phase A (PR #1259) split buckets; Phase B projection-prep consumes delta enumerator + memo at P3 |
+| HeddleCo/weft#1256 | `path_hint` / pack delta-grouping (bucket B) — path falls out of the same enumerator |
 | `docs/adr/0042-retire-persistent-bridge-mirror.md` | Accepted endgame this spike refines with speed + floor honesty |
 | `CONTEXT.md` (Raw Git Object Residual, Bridge Mirror, Git Projection Mapping) | Glossary; residual "in-store" evolution may need a glossary note at P2 |
 
@@ -620,6 +656,7 @@ When this spike is accepted, update or comment on:
 | `materialize_cached_mappings` symbol | **Absent** — proposed Layer-0 name only | — |
 | S7 as a filed GitHub issue number | **Unverified** — labeled S7 in #564 decomposition comment only | #564 comment 2026-08-09 |
 | Exact ghostty ContentHash→OID map byte size | **Estimated** (~5–8 MB) from entry-size × object count; not measured in this checkout | §4.3 P0 will measure |
+| weft#1255 Phase A two-bucket split | **Yes** (cross-repo) | weft PR #1259 (`f32eefaf`): State body ~215–289 B; content-pack 615.96/740.17 ms; projection-prep full-tree flatten separate |
 
 ---
 
@@ -627,13 +664,17 @@ When this spike is accepted, update or comment on:
 
 #564 already decides how to make git export **correct** without a Bridge
 Mirror; this spike decides how to make it **fast** and how to stop fighting
-the same full-tree walk three times. Close the remaining structured gaps
+full-tree walks at every related site. Close the remaining structured gaps
 (#593 `Vec<u8>` identities — not an override — #606 modes, S7 names, #575
 tags, notes in-store), backstop the class with an **import-time
 reconstruct-and-compare gate**, keep a **tiny in-store residual floor** for
 the irreducible non-canonical tail, and replace the mirror's cache value
 with a **version-stamped `ContentHash → OID` map** plus a shared
-**`tree_diff` delta enumerator** that heddle export and weft adopt
-(weft#1255 / #1256) both consume. Phase it so the quadratic dies at P0, push
-becomes O(delta) at P1, the format bump batches once at P2, and weft rides
-the same primitive at P3.
+**`tree_diff` delta enumerator + `ContentHash` memo**. Phase A of weft#1255
+(PR #1259) split adopt into two complementary costs: **projection-prep
+full-tree-per-state flattening** (twin of heddle `export_tree`; Phase B /
+shared memo) and **deduplicated content-pack encoding** (where #1256
+`path_hint` helps) — not one identical `serialization_encoding_ms` =
+`export_tree` bucket. Phase it so export's quadratic dies at P0, push
+becomes O(delta) at P1, the format bump batches once at P2, and weft
+consumes the same primitive at P3 (projection-prep + path-fed pack).
