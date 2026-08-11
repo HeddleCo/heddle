@@ -539,12 +539,17 @@ impl ResidualStore {
                     "Raw Git Object Residual closure for {root} is missing {oid}"
                 ))
             })?;
-            target
+            let written = target
                 .write_object(EncodedObject::new(
                     residual.object_type,
                     residual.body.clone(),
                 ))
                 .map_err(git_err)?;
+            if written != oid {
+                return Err(GitProjectionError::Git(format!(
+                    "installing Raw Git Object Residual wrote {written}, expected {oid}"
+                )));
+            }
             match residual.object_type {
                 GitObjectType::Commit => {
                     let commit =
@@ -874,7 +879,10 @@ fn object_type_from_tag(tag: u8) -> GitProjectionResult<GitObjectType> {
 
 #[cfg(test)]
 mod tests {
-    use sley::Repository as SleyRepository;
+    use sley::{
+        CommitObject, EntryKind, GitTime, Repository as SleyRepository, Signature, TreeEditor,
+        plumbing::{sley_core::ByteString, sley_object::EncodedObject},
+    };
 
     use super::*;
 
@@ -966,6 +974,102 @@ committer A <a@e> 1 +0000\n\
             .unwrap()
             .unwrap();
         assert_eq!(residual.body, b"migrated-bytes\n");
+    }
+
+    fn write_test_commit(
+        repo: &SleyRepository,
+        tree: ObjectId,
+        parents: Vec<ObjectId>,
+        message: &str,
+    ) -> ObjectId {
+        let signature = Signature {
+            name: ByteString::new(b"Residual Test".to_vec()),
+            email: ByteString::new(b"residual@heddle.test".to_vec()),
+            time: GitTime::new(0, 0),
+            raw: b"Residual Test <residual@heddle.test> 0 +0000".to_vec(),
+        };
+        let commit = CommitObject {
+            tree,
+            parents,
+            author: signature.to_ident_bytes(),
+            committer: signature.to_ident_bytes(),
+            encoding: None,
+            message: message.as_bytes().to_vec(),
+        };
+        repo.write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
+            .expect("write commit")
+    }
+
+    #[test]
+    fn auxiliary_ref_closure_round_trips_without_git_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let heddle = dir.path().join(".heddle");
+        let source = SleyRepository::init_bare(dir.path().join("source.git")).unwrap();
+        let target = SleyRepository::init_bare(dir.path().join("target.git")).unwrap();
+        fs::create_dir_all(&heddle).unwrap();
+
+        let parent_blob = source.write_blob(b"parent\n").unwrap();
+        let mut parent_tree = TreeEditor::new();
+        parent_tree.upsert("parent.txt", EntryKind::Blob, parent_blob);
+        let parent_tree = source.write_tree(parent_tree).unwrap();
+        let parent = write_test_commit(&source, parent_tree, Vec::new(), "parent\n");
+
+        let tip_blob = source.write_blob(b"tip\n").unwrap();
+        let mut tip_tree = TreeEditor::new();
+        tip_tree.upsert("tip.txt", EntryKind::Blob, tip_blob);
+        let tip_tree = source.write_tree(tip_tree).unwrap();
+        let tip = write_test_commit(&source, tip_tree, vec![parent], "tip\n");
+
+        let store = ResidualStore::open(&heddle);
+        store
+            .capture_object_closure_from_git_repo(&source, &tip)
+            .unwrap();
+        store.record_note_ref("review/nested", tip).unwrap();
+        assert_eq!(
+            store.list_note_refs(ObjectFormat::Sha1).unwrap(),
+            vec![ResidualNoteRef {
+                name: "review/nested".into(),
+                oid: tip,
+            }]
+        );
+
+        assert!(store.install_object_closure_into(&target, &tip).unwrap());
+        for oid in [parent_blob, parent_tree, parent, tip_blob, tip_tree, tip] {
+            assert!(
+                target.read_object(&oid).is_ok(),
+                "auxiliary-ref closure omitted {oid}"
+            );
+        }
+        assert!(!heddle.join("git").exists());
+    }
+
+    #[test]
+    fn auxiliary_ref_install_rejects_incomplete_closure() {
+        let dir = tempfile::tempdir().unwrap();
+        let heddle = dir.path().join(".heddle");
+        let source = SleyRepository::init_bare(dir.path().join("source.git")).unwrap();
+        let target = SleyRepository::init_bare(dir.path().join("target.git")).unwrap();
+        fs::create_dir_all(&heddle).unwrap();
+
+        let blob = source.write_blob(b"required\n").unwrap();
+        let mut tree = TreeEditor::new();
+        tree.upsert("required.txt", EntryKind::Blob, blob);
+        let tree = source.write_tree(tree).unwrap();
+        let tip = write_test_commit(&source, tree, Vec::new(), "tip\n");
+
+        let store = ResidualStore::open(&heddle);
+        store
+            .capture_object_closure_from_git_repo(&source, &tip)
+            .unwrap();
+        fs::remove_file(store.residual_path(ObjectFormat::Sha1, &blob)).unwrap();
+
+        let error = store
+            .install_object_closure_into(&target, &tip)
+            .expect_err("missing dependent must be a hard fidelity error");
+        assert!(
+            error.to_string().contains("closure") && error.to_string().contains(&blob.to_string()),
+            "unexpected incomplete-closure error: {error}"
+        );
     }
 
     #[test]

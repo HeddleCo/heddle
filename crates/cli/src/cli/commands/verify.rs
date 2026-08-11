@@ -103,7 +103,7 @@ fn verify_execution_context_from_cli(cli: &Cli, start: &Path) -> Result<VerifyEx
     };
     let mut builder = heddle_core::ExecutionContext::builder()
         .start_path(start.to_path_buf())
-        .config(config)
+        .config(config.clone())
         .verbosity(verbosity)
         .progress(std::sync::Arc::new(heddle_core::NoopProgress))
         .warnings(std::sync::Arc::new(heddle_core::NoopWarnings));
@@ -123,6 +123,11 @@ fn verify_execution_context_from_cli(cli: &Cli, start: &Path) -> Result<VerifyEx
         match Repository::open(start) {
             Ok(repo) => {
                 let repo_open_ms = open_start.elapsed().as_millis();
+                let mode = config
+                    .worktree_status_options(Some(repo.config()))
+                    .fsmonitor
+                    .mode;
+                let repo = repo.with_fsmonitor_mode(mode);
                 let repo_config = repo.config().clone();
                 (builder.repo(repo), Some(repo_config), repo_open_ms)
             }

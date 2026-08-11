@@ -399,6 +399,14 @@ fn materialize_cached_mappings(
         let reconstructed = if commit_is_byte_faithful(&state) {
             let content =
                 reconstruct_commit_bytes(bridge.heddle_repo, repo, &bridge.mapping, &state)?;
+            let reconstructed = commit_object_id(&content);
+            if reconstructed != mapped_oid {
+                return Err(reconstruction_oid_mismatch(
+                    &state_id,
+                    reconstructed,
+                    mapped_oid,
+                ));
+            }
             write_commit_object(repo, &content)?
         } else {
             write_state_object(
@@ -424,6 +432,17 @@ fn materialize_cached_mappings(
         }
     }
     Ok(())
+}
+
+fn reconstruction_oid_mismatch(
+    state_id: &StateId,
+    reconstructed: ObjectId,
+    mapped: ObjectId,
+) -> GitProjectionError {
+    GitProjectionError::Git(format!(
+        "export reconstruction OID mismatch for state {state_id}: reconstructed {reconstructed}, expected mapped {mapped}; \
+         refusing to export a wrong-OID commit (unmodeled fidelity gap)"
+    ))
 }
 
 fn export_scoped(
@@ -642,13 +661,19 @@ fn export_scoped(
                     )?;
                     // Safety net: the regenerated object MUST hash to the mapped
                     // OID. A mismatch means reconstruction diverged from the
-                    // imported bytes (an undetected fidelity gap), so fall back to
-                    // residual / Bridge Mirror / mapped OID rather than write a
-                    // wrong-SHA object.
+                    // imported bytes (an undetected fidelity gap), so hard-error
+                    // rather than silently remap the imported identity.
                     let reconstructed = commit_object_id(&content);
-                    if mapped.map(|m| m == reconstructed).unwrap_or(true) {
-                        write_commit_object(&repo, &content)?;
+                    if let Some(mapped_oid) = mapped
+                        && mapped_oid != reconstructed
+                    {
+                        return Err(reconstruction_oid_mismatch(
+                            &state_id,
+                            reconstructed,
+                            mapped_oid,
+                        ));
                     }
+                    write_commit_object(&repo, &content)?;
                 } else if let Some(mapped_oid) = mapped {
                     // Lossy path: install the commit plus its exact tree/blob
                     // closure. Import capture guarantees this is complete, so a

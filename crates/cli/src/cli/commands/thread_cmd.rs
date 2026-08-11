@@ -391,7 +391,7 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
         _ => {}
     }
 
-    let repo = Repository::open(repo_path)?;
+    let repo = cli.open_repo()?;
     match command {
         ThreadCommands::Create {
             name,

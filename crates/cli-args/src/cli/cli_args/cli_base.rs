@@ -107,7 +107,12 @@ impl Cli {
                 &cwd
             }
         };
-        repo::Repository::open(repo_path).context("open Heddle repository")
+        let repo = repo::Repository::open(repo_path).context("open Heddle repository")?;
+        let mode = Self::user_config_or_exit()
+            .worktree_status_options(Some(repo.config()))
+            .fsmonitor
+            .mode;
+        Ok(repo.with_fsmonitor_mode(mode))
     }
 }
 

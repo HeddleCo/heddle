@@ -202,6 +202,52 @@ fn assert_roundtrip_fidelity_opts(case: &str, source: &Path, lossy: bool) {
     }
 }
 
+/// A cached mapping is an assertion that reconstructed bytes retain the
+/// imported Git identity. If that assertion is wrong, export must fail loudly
+/// instead of silently remapping the state to the newly derived OID.
+#[test]
+fn reconstruction_oid_mismatch_refuses_silent_remap() {
+    let source_home = TempDir::new().expect("source temp");
+    let source = source_home.path();
+    init_repo(source);
+    write_and_commit(source, "guard.txt", b"fidelity\n", "guard fidelity");
+
+    let heddle_home = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
+    let mut bridge = GitProjection::new(&repo);
+    ingest_into_bridge(&mut bridge, source, false).expect("import source");
+
+    let (state_id, original_oid) = bridge
+        .mapping
+        .iter()
+        .next()
+        .map(|(state_id, oid)| (*state_id, *oid))
+        .expect("imported mapping");
+    let wrong_oid = sley::ObjectId::empty_tree(original_oid.format());
+    assert_ne!(wrong_oid, original_oid, "fixture must poison the mapping");
+    bridge.mapping.insert(state_id, wrong_oid);
+
+    let destination_home = TempDir::new().expect("destination temp");
+    let error = bridge
+        .export_to_path(&destination_home.path().join("export.git"))
+        .expect_err("wrong mapped OID must stop export");
+    let message = error.to_string();
+    assert!(
+        message.contains("export reconstruction OID mismatch")
+            && message.contains("refusing to export a wrong-OID commit"),
+        "unexpected fidelity error: {message}"
+    );
+    assert_eq!(
+        bridge.mapping.get_git(&state_id),
+        Some(wrong_oid),
+        "failed export must roll the mapping back instead of silently remapping"
+    );
+    assert!(
+        !repo.heddle_dir().join("git").exists(),
+        "fidelity failure must not recreate the retired eager mirror"
+    );
+}
+
 #[test]
 fn store_sourced_reconcile_retracts_embargo_across_ephemeral_exports() {
     let home = TempDir::new().expect("heddle temp");
