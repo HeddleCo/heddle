@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
-};
+use std::collections::{HashMap, HashSet};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use objects::{
     object::{ContentHash, DiffKind, State, StateId, diff_trees},
-    store::{FsStore, ObjectStore},
+    store::FsStore,
 };
 use semantic::{SimilarityMethod, detect_file_renames};
 
 use crate::{
+    blob_paths::{extension, path_text},
     lineage::{LineageStats, RenameRecord},
     model::ObjectSet,
     tree_access::{leaf_hash, leaf_paths},
@@ -278,30 +276,4 @@ fn path_hashes(
             Err(error) => Some(Err(error)),
         })
         .collect()
-}
-
-fn path_text(
-    store: &FsStore,
-    paths: &HashMap<String, ContentHash>,
-) -> Result<Vec<(PathBuf, String)>> {
-    paths
-        .iter()
-        .map(|(path, hash)| {
-            let bytes = store
-                .get_blob(hash)?
-                .with_context(|| format!("missing blob {hash}"))?;
-            Ok((
-                PathBuf::from(path),
-                String::from_utf8_lossy(bytes.content()).into_owned(),
-            ))
-        })
-        .collect()
-}
-
-fn extension(path: &str) -> &str {
-    Path::new(path)
-        .file_name()
-        .and_then(|name| Path::new(name).extension())
-        .and_then(|value| value.to_str())
-        .unwrap_or("")
 }

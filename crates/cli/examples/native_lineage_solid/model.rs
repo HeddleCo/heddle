@@ -15,14 +15,6 @@ pub enum ObjectRef {
 }
 
 impl ObjectRef {
-    pub fn sort_key(&self) -> ([u8; 32], u8) {
-        match self {
-            Self::State(id) => (*id.as_bytes(), 0),
-            Self::Tree(hash) => (*hash.as_bytes(), 1),
-            Self::Blob(hash) => (*hash.as_bytes(), 2),
-        }
-    }
-
     pub fn kind(&self) -> &'static str {
         match self {
             Self::State(_) => "state",
@@ -112,16 +104,6 @@ impl ObjectSet {
             blobs: self.blobs.len(),
             total: self.states.len() + self.trees.len() + self.blobs.len(),
         }
-    }
-
-    pub fn all_refs(&self) -> Vec<ObjectRef> {
-        self.states
-            .iter()
-            .copied()
-            .map(ObjectRef::State)
-            .chain(self.trees.iter().copied().map(ObjectRef::Tree))
-            .chain(self.blobs.iter().copied().map(ObjectRef::Blob))
-            .collect()
     }
 }
 
