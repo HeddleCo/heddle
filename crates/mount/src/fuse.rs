@@ -1190,7 +1190,7 @@ impl Filesystem for FuseShell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::mocks::PanicShell;
+    use crate::{error::MountError, tests::mocks::PanicShell};
 
     /// A panic in `guard_call`'s closure must translate to an `Err`
     /// with a usable errno, not unwind out of the callback. The FUSE
@@ -1241,5 +1241,94 @@ mod tests {
         let result: Result<usize> = guard_call("read", || shell.read(NodeId(1), 0, &mut [0u8; 4]));
         let err = result.expect_err("expected PanicShell to panic");
         assert_eq!(err.to_errno(), libc::EIO);
+    }
+
+    #[test]
+    fn file_mode_from_unix_preserves_only_execute_bit() {
+        assert_eq!(file_mode_from_unix(0o644), FileMode::Normal);
+        assert_eq!(file_mode_from_unix(0o600), FileMode::Normal);
+        assert_eq!(file_mode_from_unix(0o755), FileMode::Executable);
+        assert_eq!(file_mode_from_unix(0o111), FileMode::Executable);
+        assert_eq!(file_mode_from_unix(0o701), FileMode::Executable);
+    }
+
+    #[test]
+    fn file_type_for_kind_maps_every_node_kind() {
+        assert_eq!(file_type_for_kind(NodeKind::Directory), FileType::Directory);
+        assert_eq!(file_type_for_kind(NodeKind::File), FileType::RegularFile);
+        assert_eq!(file_type_for_kind(NodeKind::Symlink), FileType::Symlink);
+    }
+
+    #[test]
+    fn make_file_attr_and_converters_cover_all_kinds() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for (kind, size, mode, nlink) in [
+            (NodeKind::File, 42u64, 0o100644u32, 1u32),
+            (NodeKind::Directory, 0, 0o040755, 2),
+            (NodeKind::Symlink, 7, 0o120777, 1),
+        ] {
+            let attr = make_file_attr(NodeId(9), size, mtime, kind, mode, nlink);
+            assert_eq!(attr.ino.0, 9);
+            assert_eq!(attr.size, size);
+            assert_eq!(attr.blocks, size.div_ceil(512));
+            assert_eq!(attr.kind, file_type_for_kind(kind));
+            assert_eq!(attr.perm, (mode & 0o7777) as u16);
+            assert_eq!(attr.nlink, nlink);
+            assert_eq!(attr.uid, process_uid());
+            assert_eq!(attr.gid, process_gid());
+            assert_eq!(attr.blksize, 4096);
+        }
+
+        let attrs = crate::shell::Attrs {
+            node: NodeId(3),
+            size: 10,
+            mtime,
+            kind: NodeKind::File,
+            unix_mode: 0o100644,
+            nlink: 1,
+        };
+        let from_attrs = file_attr_from(attrs);
+        assert_eq!(from_attrs.ino.0, 3);
+        assert_eq!(from_attrs.size, 10);
+
+        let entry = crate::shell::Entry {
+            node: NodeId(4),
+            name: "x".into(),
+            kind: NodeKind::Directory,
+            size: 0,
+            unix_mode: 0o040755,
+        };
+        let from_entry = entry_attr_from(&entry, mtime);
+        assert_eq!(from_entry.ino.0, 4);
+        assert_eq!(from_entry.kind, FileType::Directory);
+        assert_eq!(from_entry.nlink, 1);
+    }
+
+    #[test]
+    fn errno_from_mount_error_matches_to_errno() {
+        for err in [
+            MountError::NotFound("x".into()),
+            MountError::Stale("s".into()),
+            MountError::ReadOnly,
+            MountError::AlreadyExists("e".into()),
+            MountError::IsADirectory("d".into()),
+            MountError::NotEmpty("d".into()),
+            MountError::InvalidArgument("a".into()),
+            MountError::FileTooLarge("f".into()),
+            MountError::SessionInit("s".into()),
+            MountError::NotADirectory("d".into()),
+            MountError::UnknownThread("t".into()),
+        ] {
+            let raw = err.to_errno();
+            assert_eq!(errno_from_mount_error(err).code(), raw);
+        }
+    }
+
+    #[test]
+    fn default_config_is_constructible() {
+        let _ = default_config();
+        assert_eq!(TTL, Duration::from_secs(1));
+        assert_eq!(GENERATION, Generation(0));
     }
 }

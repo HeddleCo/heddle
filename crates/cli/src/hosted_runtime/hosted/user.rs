@@ -608,3 +608,45 @@ fn parse_hosted_role_arg(
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use api::heddle::api::v1alpha1::{HostedRole, grant_target_ref::Target};
+
+    use super::*;
+
+    #[test]
+    fn parse_hosted_role_arg_accepts_every_role_and_rejects_unknown() {
+        assert_eq!(parse_hosted_role_arg("reader").unwrap(), HostedRole::Reader);
+        assert_eq!(
+            parse_hosted_role_arg(" Developer ").unwrap(),
+            HostedRole::Developer
+        );
+        assert_eq!(
+            parse_hosted_role_arg("MAINTAINER").unwrap(),
+            HostedRole::Maintainer
+        );
+        assert_eq!(parse_hosted_role_arg("admin").unwrap(), HostedRole::Admin);
+        assert_eq!(parse_hosted_role_arg("owner").unwrap(), HostedRole::Owner);
+        let err = parse_hosted_role_arg("root").unwrap_err();
+        assert!(err.to_string().contains("invalid role"));
+    }
+
+    #[test]
+    fn build_target_ref_requires_exactly_one_path() {
+        let ns = build_target_ref(Some("acme"), None).unwrap().unwrap();
+        assert!(matches!(ns.target, Some(Target::NamespacePath(p)) if p == "acme"));
+
+        let repo = build_target_ref(None, Some("acme/widgets"))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(repo.target, Some(Target::RepoPath(_))));
+
+        // Exactly one required: neither, both, or empty-only → error.
+        assert!(build_target_ref(None, None).is_err());
+        assert!(build_target_ref(Some("acme"), Some("acme/widgets")).is_err());
+        assert!(build_target_ref(Some(""), None).is_err());
+        assert!(build_target_ref(None, Some("")).is_err());
+        assert!(build_target_ref(Some(""), Some("")).is_err());
+    }
+}

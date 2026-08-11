@@ -221,3 +221,86 @@ fn discussion_status_filter(status: &str) -> Result<DiscussionStatusFilter, Prot
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use api::heddle::api::v1alpha1::{
+        DiscussionTurn as ProtoTurn, PathSymbolRef, StateId as ProtoStateId,
+    };
+    use objects::object::ChangeId;
+
+    use super::*;
+
+    #[test]
+    fn discussion_status_filter_accepts_known_and_rejects_unknown() {
+        assert_eq!(
+            discussion_status_filter("all").unwrap(),
+            DiscussionStatusFilter::Unspecified
+        );
+        assert_eq!(
+            discussion_status_filter("open").unwrap(),
+            DiscussionStatusFilter::Open
+        );
+        assert_eq!(
+            discussion_status_filter("resolved").unwrap(),
+            DiscussionStatusFilter::Resolved
+        );
+        assert_eq!(
+            discussion_status_filter("orphaned").unwrap(),
+            DiscussionStatusFilter::Orphaned
+        );
+        assert!(discussion_status_filter("closed").is_err());
+    }
+
+    #[test]
+    fn change_id_state_field_wraps_16_byte_change_id() {
+        let change = ChangeId::from_bytes([0x11; 16]);
+        let field = change_id_state_field(change).expect("proto state wrapper");
+        assert_eq!(field.value, change.as_bytes().to_vec());
+    }
+
+    #[test]
+    fn decode_discussion_maps_anchor_turns_and_optional_state() {
+        let state = StateId::from_bytes([0x22; 32]);
+        let proto = ProtoDiscussion {
+            id: "disc-1".into(),
+            anchor: Some(PathSymbolRef {
+                file: "src/lib.rs".into(),
+                symbol: "main".into(),
+            }),
+            opened_against_state: Some(ProtoStateId {
+                value: state.as_bytes().to_vec(),
+            }),
+            visibility: "team".into(),
+            turns: vec![ProtoTurn {
+                author_name: "alice".into(),
+                author_email: "a@x".into(),
+                body: "lgtm".into(),
+                posted_at: Some(prost_types::Timestamp {
+                    seconds: 42,
+                    nanos: 0,
+                }),
+            }],
+            ..Default::default()
+        };
+        let decoded = decode_discussion(proto);
+        assert_eq!(decoded.id, "disc-1");
+        assert_eq!(decoded.file, "src/lib.rs");
+        assert_eq!(decoded.symbol, "main");
+        assert_eq!(decoded.opened_against_state, Some(state));
+        assert_eq!(decoded.visibility, "team");
+        assert_eq!(decoded.turns.len(), 1);
+        assert_eq!(decoded.turns[0].author_name, "alice");
+        assert_eq!(decoded.turns[0].body, "lgtm");
+        assert_eq!(decoded.turns[0].posted_at_secs, 42);
+
+        // Missing optional fields collapse cleanly.
+        let empty = decode_discussion(ProtoDiscussion {
+            id: "empty".into(),
+            ..Default::default()
+        });
+        assert!(empty.file.is_empty());
+        assert!(empty.opened_against_state.is_none());
+        assert!(empty.turns.is_empty());
+    }
+}

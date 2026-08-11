@@ -229,3 +229,120 @@ impl DryRunPlan {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dry_run_plan_new_seeds_catalog_side_effects_and_stable_kind() {
+        let plan = DryRunPlan::new("ready", "evaluate readiness");
+        assert_eq!(plan.output_kind, DRY_RUN_PLAN_OUTPUT_KIND);
+        assert_eq!(plan.command, "ready");
+        assert_eq!(plan.summary, "evaluate readiness");
+        assert!(!plan.performed_mutation);
+        assert!(plan.ref_updates.is_empty());
+        assert!(plan.integrations.is_empty());
+        assert!(plan.verdicts.is_empty());
+        assert!(plan.blockers.is_empty());
+        assert!(plan.notes.is_empty());
+        // Unknown command falls back to the empty surface rather than panicking.
+        let unknown = DryRunPlan::new("not-a-catalog-command", "noop");
+        assert!(!unknown.side_effects.may_move_ref);
+        assert!(!unknown.side_effects.network_io);
+    }
+
+    #[test]
+    fn dry_run_plan_note_appends_and_chains() {
+        let mut plan = DryRunPlan::new("push", "push preview");
+        plan.note("first").note("second");
+        assert_eq!(plan.notes, vec!["first".to_string(), "second".to_string()]);
+    }
+
+    #[test]
+    fn dry_run_plan_render_text_covers_every_section() {
+        let mut plan = DryRunPlan::new("land", "land preview");
+        // Force every side-effect flag so the surface summary enumerates them.
+        plan.side_effects = CommandSideEffectFlags {
+            may_move_ref: true,
+            destructive_requires_force: true,
+            network_io: true,
+            writes_heddle_refs: true,
+            writes_git_refs: true,
+        };
+        plan.ref_updates.push(RefUpdatePreview {
+            name: "feature/x".into(),
+            from: Some("abc".into()),
+            to: Some("def".into()),
+            requires_force: true,
+        });
+        plan.ref_updates.push(RefUpdatePreview {
+            name: "remote-only".into(),
+            from: None,
+            to: None,
+            requires_force: false,
+        });
+        plan.integrations.push(IntegrationPreview {
+            thread: "feature/x".into(),
+            target: Some("main".into()),
+            merge_relation: "ahead".into(),
+            freshness: "fresh".into(),
+            conflict_count: 1,
+            conflicts: vec!["src/lib.rs".into()],
+            changed_path_count: 3,
+            would_transition_to: Some("landed".into()),
+            would_capture_dirty: true,
+        });
+        plan.integrations.push(IntegrationPreview {
+            thread: "orphan".into(),
+            target: None,
+            merge_relation: "unknown".into(),
+            freshness: "stale".into(),
+            conflict_count: 0,
+            conflicts: vec![],
+            changed_path_count: 0,
+            would_transition_to: None,
+            would_capture_dirty: false,
+        });
+        plan.verdicts.push(DryRunVerdict {
+            source: "verification".into(),
+            status: "pass".into(),
+            detail: "clean".into(),
+        });
+        plan.verdicts.push(DryRunVerdict {
+            source: "integration".into(),
+            status: "blocked".into(),
+            detail: "conflicts".into(),
+        });
+        plan.verdicts.push(DryRunVerdict {
+            source: "policy".into(),
+            status: "warn".into(),
+            detail: "review pending".into(),
+        });
+        plan.blockers.push("needs attention".into());
+        plan.note("skipped server round-trip");
+
+        // render_text writes to stdout; the contract is "does not panic and
+        // covers every branch". Capture is not required for coverage.
+        plan.render_text();
+    }
+
+    #[test]
+    fn dry_run_plan_serializes_with_stable_output_kind() {
+        let mut plan = DryRunPlan::new("push", "push preview");
+        plan.ref_updates.push(RefUpdatePreview {
+            name: "main".into(),
+            from: None,
+            to: Some("deadbeef".into()),
+            requires_force: false,
+        });
+        let json = serde_json::to_value(&plan).expect("serialize");
+        assert_eq!(json["output_kind"], DRY_RUN_PLAN_OUTPUT_KIND);
+        assert_eq!(json["performed_mutation"], false);
+        assert_eq!(json["command"], "push");
+        assert_eq!(json["ref_updates"][0]["name"], "main");
+        // Empty vectors are skipped.
+        assert!(json.get("blockers").is_none());
+        assert!(json.get("notes").is_none());
+    }
+}

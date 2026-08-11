@@ -3220,4 +3220,384 @@ mod tests {
             assert_eq!(bytes_a_read, bytes_a);
         }
     }
+
+    // ── Pure helper / advice coverage (coverage recovery for dead-code
+    //    sweep PR). These surfaces are genuinely reachable; they were just
+    //    never driven by unit tests, so the gate saw them as dead weight.
+    #[test]
+    fn clone_repo_name_from_label_strips_git_suffix_and_path_segments() {
+        assert_eq!(clone_repo_name_from_label("acme/widgets.git"), "widgets");
+        assert_eq!(clone_repo_name_from_label("acme/widgets/"), "widgets");
+        assert_eq!(clone_repo_name_from_label("widgets"), "widgets");
+        assert_eq!(
+            clone_repo_name_from_label("git@github.com:acme/widgets.git"),
+            "widgets"
+        );
+        assert_eq!(
+            clone_repo_name_from_label("ssh://git@host/acme/widgets.git"),
+            "widgets"
+        );
+        // Windows drive paths must not be split on the colon.
+        assert_eq!(clone_repo_name_from_label(r"C:\src\widgets.git"), "widgets");
+        assert_eq!(clone_repo_name_from_label("C:/src/widgets.git"), "widgets");
+        // Local paths with a colon in a non-host position keep the full tail.
+        assert_eq!(
+            clone_repo_name_from_label("/tmp/weird:name/repo.git"),
+            "repo"
+        );
+        assert_eq!(clone_repo_name_from_label("///"), "///");
+    }
+
+    #[test]
+    fn format_clone_completion_lines_has_three_guidance_lines() {
+        let lines = format_clone_completion_lines("widgets", 12, "main");
+        assert_eq!(lines.len(), 3);
+        assert!(
+            lines[0].contains("widgets") && lines[0].contains("12"),
+            "first line should name the repo and commit count: {}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("main"),
+            "second line should name the current thread: {}",
+            lines[1]
+        );
+        assert!(
+            lines[2].contains("heddle status"),
+            "third line should hint the next step: {}",
+            lines[2]
+        );
+    }
+
+    #[test]
+    fn clone_dirty_paths_sorts_and_dedups_status_entries() {
+        use std::path::PathBuf;
+
+        use objects::worktree::WorktreeStatus;
+
+        let status = WorktreeStatus {
+            modified: vec![PathBuf::from("b.txt"), PathBuf::from("a.txt")],
+            added: vec![PathBuf::from("a.txt"), PathBuf::from("c.txt")],
+            deleted: vec![PathBuf::from("z.txt")],
+        };
+        assert_eq!(
+            clone_dirty_paths(&status),
+            vec![
+                "a.txt".to_string(),
+                "b.txt".to_string(),
+                "c.txt".to_string(),
+                "z.txt".to_string(),
+            ]
+        );
+        assert!(
+            clone_dirty_paths(&WorktreeStatus {
+                modified: vec![],
+                added: vec![],
+                deleted: vec![],
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn looks_like_bare_git_admin_root_detects_bare_layout() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let bare = temp.path().join("bare.git");
+        std::fs::create_dir_all(bare.join("objects")).unwrap();
+        std::fs::create_dir_all(bare.join("refs")).unwrap();
+        std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert!(looks_like_bare_git_admin_root(&bare));
+
+        // A worktree with `.git` is not a bare admin root.
+        let work = temp.path().join("work");
+        std::fs::create_dir_all(work.join(".git")).unwrap();
+        std::fs::create_dir_all(work.join("objects")).unwrap();
+        std::fs::create_dir_all(work.join("refs")).unwrap();
+        std::fs::write(work.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert!(!looks_like_bare_git_admin_root(&work));
+
+        // Missing HEAD is not bare either.
+        let incomplete = temp.path().join("incomplete");
+        std::fs::create_dir_all(incomplete.join("objects")).unwrap();
+        std::fs::create_dir_all(incomplete.join("refs")).unwrap();
+        assert!(!looks_like_bare_git_admin_root(&incomplete));
+    }
+
+    #[test]
+    fn clone_advice_builders_carry_stable_kinds_and_primary_commands() {
+        let advice = clone_invalid_remote_url_advice("not a url");
+        assert_eq!(advice.kind, "clone_invalid_remote_url");
+        assert!(advice.error.contains("not a url"));
+        assert_eq!(advice.primary_command, "heddle clone <remote> <path>");
+
+        let advice = clone_destination_exists_advice("/tmp/exists");
+        assert_eq!(advice.kind, "clone_destination_exists");
+        assert!(advice.error.contains("/tmp/exists"));
+
+        let advice = git_overlay_clone_insecure_advice();
+        assert_eq!(advice.kind, "git_overlay_clone_insecure_unsupported");
+        assert!(advice.error.contains("--insecure"));
+
+        let depth = unsupported_git_overlay_clone_option_advice("--depth", Some("1"));
+        assert_eq!(depth.kind, "git_overlay_clone_option_unsupported");
+        assert!(depth.error.contains("--depth 1"));
+        assert!(depth.error.contains("shallow boundary"));
+
+        let lazy = unsupported_git_overlay_clone_option_advice("--lazy", None);
+        assert!(lazy.error.contains("--lazy"));
+        assert!(lazy.error.contains("all blobs locally"));
+
+        let advice = clone_verification_failed_advice(
+            "index dirty",
+            "worktree drifted",
+            "would overwrite",
+            "heddle status",
+        );
+        assert_eq!(advice.kind, "clone_verification_failed");
+        assert_eq!(advice.primary_command, "heddle status");
+        assert!(advice.hint.contains("heddle status"));
+
+        let advice = clone_git_overlay_import_failed_advice(
+            Some("feature"),
+            "file:///tmp/src",
+            "import blew up".into(),
+        );
+        assert_eq!(advice.kind, "git_overlay_clone_import_failed");
+        assert!(advice.error.contains("import blew up"));
+        assert!(advice.error.contains("feature"));
+
+        let advice = clone_git_overlay_import_failed_advice(None, "file:///tmp/src", "boom".into());
+        assert_eq!(advice.kind, "git_overlay_clone_import_failed");
+        assert!(!advice.error.contains("requested ref"));
+
+        let advice = clone_git_overlay_branch_not_imported_advice("feature", "file:///tmp/src");
+        assert_eq!(advice.kind, "git_overlay_clone_branch_not_imported");
+        assert!(advice.error.contains("feature"));
+
+        let advice = clone_git_overlay_no_branch_refs_advice("file:///tmp/src");
+        assert_eq!(advice.kind, "git_overlay_clone_no_branch_refs");
+        assert!(advice.unsafe_condition.contains("file:///tmp/src"));
+
+        let filter = local_clone_option_unsupported_advice("--filter", "blob:none");
+        assert_eq!(filter.kind, "local_clone_option_unsupported");
+        assert!(filter.error.contains("--filter blob:none"));
+        let lazy = local_clone_option_unsupported_advice("--lazy", "");
+        assert!(lazy.error.contains("--lazy"));
+
+        let advice = clone_default_remote_failed_advice("heddle://host/repo", "disk full".into());
+        assert_eq!(advice.kind, "clone_default_remote_failed");
+        assert!(advice.error.contains("disk full"));
+        assert_eq!(advice.primary_command, "heddle remote add origin <url>");
+
+        let remote = std::path::Path::new("/tmp/missing-remote");
+        let advice = clone_remote_not_found_advice(remote);
+        assert_eq!(advice.kind, "clone_remote_not_found");
+        assert!(advice.error.contains("missing-remote"));
+
+        let advice = clone_remote_thread_not_found_advice("feature/x", remote);
+        assert_eq!(advice.kind, "clone_remote_thread_not_found");
+        assert!(advice.error.contains("feature/x"));
+        assert_eq!(advice.primary_command, "heddle thread list");
+
+        let advice = monorepo_requires_hosted_remote_advice("file:///tmp/x");
+        assert_eq!(advice.kind, "monorepo_requires_hosted_remote");
+        assert!(advice.error.contains("file:///tmp/x"));
+    }
+
+    #[test]
+    fn reject_unsupported_for_git_overlay_blocks_insecure_and_lazy() {
+        let insecure = CloneOptions {
+            thread: None,
+            depth: None,
+            lazy: false,
+            filter: None,
+            insecure: true,
+        };
+        let err = reject_unsupported_for_git_overlay(&insecure).unwrap_err();
+        assert!(
+            err.to_string().contains("insecure") || format!("{err:#}").contains("insecure"),
+            "insecure should be refused: {err}"
+        );
+
+        let lazy = CloneOptions {
+            thread: None,
+            depth: None,
+            lazy: true,
+            filter: None,
+            insecure: false,
+        };
+        let err = reject_unsupported_for_git_overlay(&lazy).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("lazy")
+                || msg.contains("option")
+                || msg.contains("filter")
+                || msg.contains("depth")
+                || msg.contains("supported"),
+            "lazy should be refused for git-overlay: {msg}"
+        );
+
+        let ok = CloneOptions {
+            thread: None,
+            depth: None,
+            lazy: false,
+            filter: None,
+            insecure: false,
+        };
+        reject_unsupported_for_git_overlay(&ok).expect("plain options ok");
+    }
+
+    #[test]
+    fn reject_unsupported_for_monorepo_blocks_depth_lazy_filter() {
+        let depth = CloneOptions {
+            thread: None,
+            depth: Some(1),
+            lazy: false,
+            filter: None,
+            insecure: false,
+        };
+        assert!(reject_unsupported_for_monorepo(&depth).is_err());
+
+        let lazy = CloneOptions {
+            thread: None,
+            depth: None,
+            lazy: true,
+            filter: None,
+            insecure: false,
+        };
+        assert!(reject_unsupported_for_monorepo(&lazy).is_err());
+
+        let filter = CloneOptions {
+            thread: None,
+            depth: None,
+            lazy: false,
+            filter: Some("blob:none".into()),
+            insecure: false,
+        };
+        assert!(reject_unsupported_for_monorepo(&filter).is_err());
+
+        let ok = CloneOptions {
+            thread: None,
+            depth: None,
+            lazy: false,
+            filter: None,
+            insecure: false,
+        };
+        reject_unsupported_for_monorepo(&ok).expect("plain monorepo options ok");
+    }
+
+    #[test]
+    fn atomic_clone_destination_stages_then_publishes() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let dest = temp.path().join("repo");
+        let atomic = AtomicCloneDestination::new(&dest).expect("stage");
+        assert!(atomic.path().exists());
+        assert_ne!(atomic.path(), dest.as_path());
+        // Write a marker into staging so publish has something to move.
+        std::fs::write(atomic.path().join("marker"), b"ok").unwrap();
+        atomic.publish().expect("publish");
+        assert!(dest.join("marker").is_file());
+        assert_eq!(std::fs::read_to_string(dest.join("marker")).unwrap(), "ok");
+    }
+
+    #[test]
+    fn atomic_clone_destination_cleans_unpublished_staging_on_drop() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let dest = temp.path().join("repo");
+        let staging = {
+            let atomic = AtomicCloneDestination::new(&dest).expect("stage");
+            let staging = atomic.path().to_path_buf();
+            std::fs::write(staging.join("leftover"), b"x").unwrap();
+            assert!(staging.exists());
+            staging
+            // drop without publish
+        };
+        assert!(
+            !staging.exists(),
+            "unpublished staging must be removed on drop"
+        );
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn select_clone_thread_priority_order() {
+        use objects::object::ThreadName;
+
+        let temp = tempfile::TempDir::new().expect("temp");
+        let repo = Repository::init_default(temp.path()).expect("init");
+        // Snapshot once so we have a real state tip to point threads at.
+        std::fs::write(temp.path().join("seed.txt"), b"seed").unwrap();
+        let state = repo
+            .snapshot(Some("seed".into()), None)
+            .expect("snapshot seed state");
+        let state_id = state.state_id;
+        for name in ["alpha", "main", "zeta"] {
+            repo.set_thread_recorded(&ThreadName::from(name), &state_id)
+                .expect("create thread tip");
+        }
+
+        // Explicit request wins even if it is not yet present as a thread.
+        assert_eq!(
+            select_clone_thread(&repo, Some("requested"), Some("alpha"), "remote").unwrap(),
+            "requested"
+        );
+        // HEAD hint wins over alphabetical when present.
+        assert_eq!(
+            select_clone_thread(&repo, None, Some("zeta"), "remote").unwrap(),
+            "zeta"
+        );
+        // Prefer main when no hint.
+        assert_eq!(
+            select_clone_thread(&repo, None, None, "remote").unwrap(),
+            "main"
+        );
+
+        // A second repo still has main from init/snapshot; selection stays on main.
+        let temp2 = tempfile::TempDir::new().expect("temp2");
+        let repo2 = Repository::init_default(temp2.path()).expect("init2");
+        std::fs::write(temp2.path().join("seed.txt"), b"seed").unwrap();
+        let state2 = repo2.snapshot(Some("seed".into()), None).expect("snapshot");
+        for name in ["zeta", "alpha"] {
+            repo2
+                .set_thread_recorded(&ThreadName::from(name), &state2.state_id)
+                .expect("thread tip");
+        }
+        assert_eq!(
+            select_clone_thread(&repo2, None, None, "remote").unwrap(),
+            "main"
+        );
+        // Empty-thread remote must refuse.
+        let temp3 = tempfile::TempDir::new().expect("temp3");
+        let repo3 = Repository::init_default(temp3.path()).expect("init3");
+        // Wipe all threads by never snapshotting and clearing main if possible —
+        // a brand-new init may already have main; explicit request still works.
+        assert_eq!(
+            select_clone_thread(&repo3, Some("explicit"), None, "remote").unwrap(),
+            "explicit"
+        );
+    }
+
+    #[test]
+    fn hosted_clone_origin_url_joins_endpoint_and_repo_path() {
+        assert_eq!(
+            hosted_clone_origin_url("weft.local:8421", "acme/widgets"),
+            "heddle://weft.local:8421/acme/widgets"
+        );
+    }
+
+    #[test]
+    fn validate_monorepo_destination_rejects_escape_and_accepts_nested() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let root = temp.path().join("clone-root");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let nested = validate_monorepo_destination(&root, Path::new("services/api")).unwrap();
+        assert_eq!(nested, root.join("services/api"));
+
+        let escape = validate_monorepo_destination(&root, Path::new("../outside"));
+        assert!(escape.is_err(), "parent escape must be refused");
+
+        let abs = validate_monorepo_destination(&root, Path::new("/etc/passwd"));
+        assert!(abs.is_err(), "absolute path must be refused");
+    }
 }
