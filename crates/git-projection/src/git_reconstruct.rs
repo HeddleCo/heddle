@@ -241,11 +241,9 @@ fn append_folded(out: &mut Vec<u8>, value: &[u8]) {
 }
 
 impl GitProjection<'_> {
-    /// Open (initializing if necessary) a writable sley repo suitable for
-    /// reconstruction's tree-OID resolution. Any writable odb works — git trees
-    /// are content-addressed — so the bridge's own mirror is reused.
+    /// Open an ephemeral writable sley repo for tree-OID resolution.
     pub fn reconstruction_repo(&mut self) -> GitProjectionResult<SleyRepository> {
-        self.init_mirror()?;
+        self.init_scratch_repo()?;
         self.open_git_repo()
     }
 

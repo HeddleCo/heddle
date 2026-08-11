@@ -734,7 +734,7 @@ fn materialize_imported_attached_thread(
     })?;
 
     if bridge.heddle_repo.root().join(".git").exists() {
-        bridge.write_current_checkout_from_existing_mirror()?;
+        bridge.write_current_checkout_from_existing_projection()?;
     }
     Ok(())
 }

@@ -215,6 +215,23 @@ impl<'a> GitProjection<'a> {
         Ok(())
     }
 
+    /// Seed durable ingest identities without requiring a Git object warehouse.
+    pub fn seed_ingest_identity_mappings_from_store(&mut self) -> GitProjectionResult<()> {
+        for (git_sha, state_id) in self.heddle_repo.git_overlay_ingest_commit_mapping()? {
+            let state_id = StateId::parse(&state_id)?;
+            if self.heddle_repo.store().get_state(&state_id)?.is_none()
+                || self.mapping.has_heddle(&state_id)
+            {
+                continue;
+            }
+            let git_oid = parse_stored_git_oid(&git_sha)?;
+            if !self.mapping.has_git(git_oid) {
+                self.mapping.insert(state_id, git_oid);
+            }
+        }
+        Ok(())
+    }
+
     #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
     pub fn prune_unreachable_mapping_entries(&mut self) -> GitProjectionResult<usize> {
         let repo = self.open_git_repo()?;

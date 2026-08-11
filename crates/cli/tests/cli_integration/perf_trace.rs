@@ -47,6 +47,16 @@ fn setup_profile_repo_with_sensitive_input() -> TempDir {
     temp
 }
 
+fn seed_stale_monitor_endpoint(temp: &TempDir) {
+    let endpoint = temp.path().join(".heddle/state/monitor-helper.json");
+    std::fs::create_dir_all(endpoint.parent().expect("monitor state parent")).unwrap();
+    std::fs::write(
+        endpoint,
+        r#"{"version":1,"host":"127.0.0.1","port":9,"pid":null}"#,
+    )
+    .unwrap();
+}
+
 #[test]
 fn perf_trace_jsonl_status_keeps_stdout_json_and_stderr_parseable() {
     let temp = setup_profile_repo_with_sensitive_input();
@@ -174,6 +184,7 @@ fn perf_trace_jsonl_version_reports_startup_totals() {
 #[test]
 fn perf_trace_jsonl_thread_list_uses_named_phase_records() {
     let temp = setup_profile_repo_with_sensitive_input();
+    seed_stale_monitor_endpoint(&temp);
 
     let output = heddle_output_with_env(
         &["--output", "json", "thread", "list"],
@@ -216,6 +227,7 @@ fn perf_trace_jsonl_thread_list_uses_named_phase_records() {
 fn perf_trace_jsonl_verify_uses_named_phase_records() {
     let temp = setup_profile_repo_with_sensitive_input();
     heddle(&["capture", "-m", "profile input"], Some(temp.path())).unwrap();
+    seed_stale_monitor_endpoint(&temp);
 
     let output = heddle_output_with_env(
         &["--output", "json", "verify"],

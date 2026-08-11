@@ -20,6 +20,8 @@ const MIN_MATCH_LENGTH_LARGE: usize = 16;
 const MIN_MATCH_LENGTH_SMALL: usize = 8;
 /// Maximum offsets to inspect for a single 4-byte key.
 const MAX_MATCH_CANDIDATES: usize = 1024;
+/// Compare long common prefixes in chunks before locating the exact tail.
+const MATCH_CHUNK_SIZE: usize = 32;
 
 /// Delta encoder.
 #[derive(Debug)]
@@ -317,6 +319,12 @@ impl DeltaEncoder {
     fn match_length(base: &[u8], base_pos: usize, target: &[u8], target_pos: usize) -> usize {
         let max_len = (base.len() - base_pos).min(target.len() - target_pos);
         let mut len = 0;
+        while len + MATCH_CHUNK_SIZE <= max_len
+            && base[base_pos + len..base_pos + len + MATCH_CHUNK_SIZE]
+                == target[target_pos + len..target_pos + len + MATCH_CHUNK_SIZE]
+        {
+            len += MATCH_CHUNK_SIZE;
+        }
         while len < max_len && base[base_pos + len] == target[target_pos + len] {
             len += 1;
         }

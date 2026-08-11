@@ -58,6 +58,7 @@ pub const RESIDUALS_DIR_NAME: &str = "git-residuals";
 
 const RESIDUAL_MAGIC: &[u8; 4] = b"HR01";
 const TAG_REFS_FILE_NAME: &str = "tag-refs.json";
+const NOTE_REFS_FILE_NAME: &str = "note-refs.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResidualTagRef {
@@ -65,8 +66,19 @@ pub struct ResidualTagRef {
     pub oid: ObjectId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidualNoteRef {
+    pub name: String,
+    pub oid: ObjectId,
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct TagRefFile {
+    refs: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct NoteRefFile {
     refs: BTreeMap<String, String>,
 }
 
@@ -343,6 +355,50 @@ impl ResidualStore {
         }
     }
 
+    /// Capture the complete object closure rooted at an imported auxiliary ref.
+    pub fn capture_object_closure_from_git_repo(
+        &self,
+        source: &SleyRepository,
+        root: &ObjectId,
+    ) -> GitProjectionResult<()> {
+        let format = source.object_format();
+        let mut stack = vec![*root];
+        let mut seen = HashSet::new();
+        while let Some(oid) = stack.pop() {
+            if !seen.insert(oid) {
+                continue;
+            }
+            let object = source.read_object(&oid).map_err(git_err)?;
+            self.put_residual_verified(oid, format, object.object_type, object.body.clone())?;
+            match object.object_type {
+                GitObjectType::Commit => {
+                    let commit =
+                        sley::CommitObject::parse_ref(format, &object.body).map_err(git_err)?;
+                    stack.push(commit.tree);
+                    stack.extend(commit.parents.iter().copied());
+                }
+                GitObjectType::Tree => {
+                    let tree = sley::TreeObject::parse(format, &object.body).map_err(git_err)?;
+                    stack.extend(
+                        tree.entries
+                            .into_iter()
+                            .filter(|entry| !entry.is_gitlink())
+                            .map(|entry| entry.oid),
+                    );
+                }
+                GitObjectType::Tag => {
+                    stack.push(
+                        sley::TagObject::parse(format, &object.body)
+                            .map_err(git_err)?
+                            .object,
+                    );
+                }
+                GitObjectType::Blob => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Persist the raw annotated-tag object targeted by an imported tag ref.
     /// Native markers retain the peeled state identity; this sidecar retains the
     /// wrapper identity needed to recreate an annotated ref in a fresh projection.
@@ -394,6 +450,50 @@ impl ResidualStore {
             .collect()
     }
 
+    /// Persist an imported note ref independently of a Git mirror.
+    pub fn record_note_ref(&self, name: &str, oid: ObjectId) -> GitProjectionResult<()> {
+        let path = self.residuals_dir().join(NOTE_REFS_FILE_NAME);
+        let mut file = match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<NoteRefFile>(&bytes).map_err(|error| {
+                GitProjectionError::Git(format!("invalid residual note-ref mapping: {error}"))
+            })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => NoteRefFile::default(),
+            Err(error) => return Err(error.into()),
+        };
+        file.refs.insert(name.to_string(), oid.to_string());
+        let bytes = serde_json::to_vec_pretty(&file).map_err(|error| {
+            GitProjectionError::Git(format!("serialize residual note-ref mapping: {error}"))
+        })?;
+        write_file_atomic(&path, &bytes)?;
+        Ok(())
+    }
+
+    /// Read durable imported note ref identities.
+    pub fn list_note_refs(
+        &self,
+        format: ObjectFormat,
+    ) -> GitProjectionResult<Vec<ResidualNoteRef>> {
+        let path = self.residuals_dir().join(NOTE_REFS_FILE_NAME);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let file = serde_json::from_slice::<NoteRefFile>(&bytes).map_err(|error| {
+            GitProjectionError::Git(format!("invalid residual note-ref mapping: {error}"))
+        })?;
+        file.refs
+            .into_iter()
+            .map(|(name, oid)| {
+                ObjectId::from_hex(format, &oid)
+                    .map(|oid| ResidualNoteRef { name, oid })
+                    .map_err(|error| {
+                        GitProjectionError::Git(format!("invalid note residual oid {oid}: {error}"))
+                    })
+            })
+            .collect()
+    }
+
     /// Install a residual into a target Git object database.
     ///
     /// Prefer this over reading residual bytes and re-framing in call sites.
@@ -413,6 +513,68 @@ impl ResidualStore {
             return Err(GitProjectionError::Git(format!(
                 "installing Raw Git Object Residual wrote {written}, expected {oid}"
             )));
+        }
+        Ok(true)
+    }
+
+    /// Install a complete auxiliary-ref closure captured by
+    /// [`Self::capture_object_closure_from_git_repo`].
+    pub fn install_object_closure_into(
+        &self,
+        target: &SleyRepository,
+        root: &ObjectId,
+    ) -> GitProjectionResult<bool> {
+        let format = target.object_format();
+        if self.get_residual(format, root)?.is_none() {
+            return Ok(false);
+        }
+        let mut stack = vec![*root];
+        let mut seen = HashSet::new();
+        while let Some(oid) = stack.pop() {
+            if !seen.insert(oid) {
+                continue;
+            }
+            let residual = self.get_residual(format, &oid)?.ok_or_else(|| {
+                GitProjectionError::Git(format!(
+                    "Raw Git Object Residual closure for {root} is missing {oid}"
+                ))
+            })?;
+            let written = target
+                .write_object(EncodedObject::new(
+                    residual.object_type,
+                    residual.body.clone(),
+                ))
+                .map_err(git_err)?;
+            if written != oid {
+                return Err(GitProjectionError::Git(format!(
+                    "installing Raw Git Object Residual wrote {written}, expected {oid}"
+                )));
+            }
+            match residual.object_type {
+                GitObjectType::Commit => {
+                    let commit =
+                        sley::CommitObject::parse_ref(format, &residual.body).map_err(git_err)?;
+                    stack.push(commit.tree);
+                    stack.extend(commit.parents.iter().copied());
+                }
+                GitObjectType::Tree => {
+                    let tree = sley::TreeObject::parse(format, &residual.body).map_err(git_err)?;
+                    stack.extend(
+                        tree.entries
+                            .into_iter()
+                            .filter(|entry| !entry.is_gitlink())
+                            .map(|entry| entry.oid),
+                    );
+                }
+                GitObjectType::Tag => {
+                    stack.push(
+                        sley::TagObject::parse(format, &residual.body)
+                            .map_err(git_err)?
+                            .object,
+                    );
+                }
+                GitObjectType::Blob => {}
+            }
         }
         Ok(true)
     }
@@ -717,7 +879,10 @@ fn object_type_from_tag(tag: u8) -> GitProjectionResult<GitObjectType> {
 
 #[cfg(test)]
 mod tests {
-    use sley::Repository as SleyRepository;
+    use sley::{
+        CommitObject, EntryKind, GitTime, Repository as SleyRepository, Signature, TreeEditor,
+        plumbing::{sley_core::ByteString, sley_object::EncodedObject},
+    };
 
     use super::*;
 
@@ -809,6 +974,102 @@ committer A <a@e> 1 +0000\n\
             .unwrap()
             .unwrap();
         assert_eq!(residual.body, b"migrated-bytes\n");
+    }
+
+    fn write_test_commit(
+        repo: &SleyRepository,
+        tree: ObjectId,
+        parents: Vec<ObjectId>,
+        message: &str,
+    ) -> ObjectId {
+        let signature = Signature {
+            name: ByteString::new(b"Residual Test".to_vec()),
+            email: ByteString::new(b"residual@heddle.test".to_vec()),
+            time: GitTime::new(0, 0),
+            raw: b"Residual Test <residual@heddle.test> 0 +0000".to_vec(),
+        };
+        let commit = CommitObject {
+            tree,
+            parents,
+            author: signature.to_ident_bytes(),
+            committer: signature.to_ident_bytes(),
+            encoding: None,
+            message: message.as_bytes().to_vec(),
+        };
+        repo.write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
+            .expect("write commit")
+    }
+
+    #[test]
+    fn auxiliary_ref_closure_round_trips_without_git_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let heddle = dir.path().join(".heddle");
+        let source = SleyRepository::init_bare(dir.path().join("source.git")).unwrap();
+        let target = SleyRepository::init_bare(dir.path().join("target.git")).unwrap();
+        fs::create_dir_all(&heddle).unwrap();
+
+        let parent_blob = source.write_blob(b"parent\n").unwrap();
+        let mut parent_tree = TreeEditor::new();
+        parent_tree.upsert("parent.txt", EntryKind::Blob, parent_blob);
+        let parent_tree = source.write_tree(parent_tree).unwrap();
+        let parent = write_test_commit(&source, parent_tree, Vec::new(), "parent\n");
+
+        let tip_blob = source.write_blob(b"tip\n").unwrap();
+        let mut tip_tree = TreeEditor::new();
+        tip_tree.upsert("tip.txt", EntryKind::Blob, tip_blob);
+        let tip_tree = source.write_tree(tip_tree).unwrap();
+        let tip = write_test_commit(&source, tip_tree, vec![parent], "tip\n");
+
+        let store = ResidualStore::open(&heddle);
+        store
+            .capture_object_closure_from_git_repo(&source, &tip)
+            .unwrap();
+        store.record_note_ref("review/nested", tip).unwrap();
+        assert_eq!(
+            store.list_note_refs(ObjectFormat::Sha1).unwrap(),
+            vec![ResidualNoteRef {
+                name: "review/nested".into(),
+                oid: tip,
+            }]
+        );
+
+        assert!(store.install_object_closure_into(&target, &tip).unwrap());
+        for oid in [parent_blob, parent_tree, parent, tip_blob, tip_tree, tip] {
+            assert!(
+                target.read_object(&oid).is_ok(),
+                "auxiliary-ref closure omitted {oid}"
+            );
+        }
+        assert!(!heddle.join("git").exists());
+    }
+
+    #[test]
+    fn auxiliary_ref_install_rejects_incomplete_closure() {
+        let dir = tempfile::tempdir().unwrap();
+        let heddle = dir.path().join(".heddle");
+        let source = SleyRepository::init_bare(dir.path().join("source.git")).unwrap();
+        let target = SleyRepository::init_bare(dir.path().join("target.git")).unwrap();
+        fs::create_dir_all(&heddle).unwrap();
+
+        let blob = source.write_blob(b"required\n").unwrap();
+        let mut tree = TreeEditor::new();
+        tree.upsert("required.txt", EntryKind::Blob, blob);
+        let tree = source.write_tree(tree).unwrap();
+        let tip = write_test_commit(&source, tree, Vec::new(), "tip\n");
+
+        let store = ResidualStore::open(&heddle);
+        store
+            .capture_object_closure_from_git_repo(&source, &tip)
+            .unwrap();
+        fs::remove_file(store.residual_path(ObjectFormat::Sha1, &blob)).unwrap();
+
+        let error = store
+            .install_object_closure_into(&target, &tip)
+            .expect_err("missing dependent must be a hard fidelity error");
+        assert!(
+            error.to_string().contains("closure") && error.to_string().contains(&blob.to_string()),
+            "unexpected incomplete-closure error: {error}"
+        );
     }
 
     #[test]

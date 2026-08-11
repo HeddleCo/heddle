@@ -591,18 +591,15 @@ fn test_cli_export_git_writes_bare_repo() {
 }
 
 /// heddle#1096 -- an ordinary Git-side commit pushed onto a Heddle-managed
-/// mirror branch is foreign: Heddle never published that OID under the ref name.
+/// destination branch is foreign: Heddle never published that OID under the ref name.
 /// Export must report the divergence and leave the foreign tip untouched, not
 /// misclassify it as a now-embargoed tip and force-rewind it.
 #[test]
-fn test_cli_export_git_preserves_foreign_mirror_push_and_reports_divergence() {
+fn test_cli_export_git_preserves_foreign_destination_push_and_reports_divergence() {
     let source = TempDir::new().unwrap();
     let dest_holder = TempDir::new().unwrap();
     let dest = dest_holder.path().join("export");
 
-    init_colocated_git_repo(source.path());
-    std::fs::write(source.path().join("file.txt"), "heddle tip\n").unwrap();
-    git_commit_all_in(source.path(), "Heddle tip");
     init_direct_git_overlay(source.path());
     std::fs::write(source.path().join("file.txt"), "Heddle projection tip\n").unwrap();
     heddle(
@@ -623,17 +620,18 @@ fn test_cli_export_git_preserves_foreign_mirror_push_and_reports_divergence() {
         String::from_utf8_lossy(&first.stderr),
     );
 
-    let mirror = open_git(source.path().join(".heddle/git")).expect("open bridge mirror");
-    let heddle_tip = find_reference(&mirror, "refs/heads/main")
+    let destination_repo = open_git(&dest).expect("open export destination");
+    let heddle_tip = find_reference(&destination_repo, "refs/heads/main")
         .expect("main after first export")
         .peel_to_id()
         .expect("peel Heddle tip");
-    let tree = mirror
+    assert!(!source.path().join(".heddle/git").exists());
+    let tree = destination_repo
         .read_commit(&heddle_tip)
         .expect("read Heddle tip")
         .tree;
     let foreign_tip = git_commit_with_tree(
-        &mirror,
+        &destination_repo,
         Some("refs/heads/main"),
         tree,
         "foreign push",
@@ -647,15 +645,15 @@ fn test_cli_export_git_preserves_foreign_mirror_push_and_reports_divergence() {
     .expect("second export");
     let stdout = String::from_utf8_lossy(&second.stdout);
     let stderr = String::from_utf8_lossy(&second.stderr);
-    let mirror_tip_after = find_reference(&mirror, "refs/heads/main")
+    let destination_tip_after = find_reference(&destination_repo, "refs/heads/main")
         .expect("main after second export")
         .peel_to_id()
-        .expect("peel mirror tip after second export");
+        .expect("peel destination tip after second export");
 
     let mut violations = Vec::new();
-    if mirror_tip_after != foreign_tip {
+    if destination_tip_after != foreign_tip {
         violations.push(format!(
-            "foreign tip was clobbered: expected {foreign_tip}, found {mirror_tip_after}"
+            "foreign tip was clobbered: expected {foreign_tip}, found {destination_tip_after}"
         ));
     }
     if second.status.code() != Some(74) {
@@ -664,20 +662,16 @@ fn test_cli_export_git_preserves_foreign_mirror_push_and_reports_divergence() {
             second.status.code()
         ));
     }
-    if !stdout.contains("[warn] 1 ref diverged; left untouched (heddle did not overwrite)") {
-        violations.push("stdout did not report one untouched diverged ref".to_string());
-    }
-    let expected_reason = format!(
-        "refs/heads/main: modified concurrently in git: found {foreign_tip}, heddle was publishing {heddle_tip}"
-    );
-    if !stdout.contains(&expected_reason) {
+    if !stdout.is_empty() {
         violations.push(format!(
-            "stdout did not classify the foreign tip as concurrent modification: expected `{expected_reason}`"
+            "a rejected export must not emit a success summary: {stdout}"
         ));
     }
-    if !stderr.contains("exported 0 refs, 1 diverged (concurrent git-side update): refs/heads/main")
-    {
-        violations.push("stderr did not summarize the diverged ref".to_string());
+    if !stderr.contains("Remote branch does not fast-forward the local Git checkpoint") {
+        violations.push("stderr did not report the remote non-fast-forward".to_string());
+    }
+    if !stderr.contains("Next: heddle pull") {
+        violations.push("stderr did not provide the safe recovery command".to_string());
     }
 
     assert!(
@@ -720,6 +714,10 @@ fn test_cli_import_git_from_external_repo() {
             .get_thread(&ThreadName::new("main"))
             .unwrap()
             .is_some()
+    );
+    assert!(
+        !heddle_repo_dir.path().join(".heddle/git").exists(),
+        "explicit Git import must not eagerly populate the retired mirror"
     );
 }
 

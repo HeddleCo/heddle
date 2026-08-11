@@ -113,9 +113,13 @@ impl PackBuilder {
             if objects.len() < 2
                 || matches!(obj_type, ObjectType::State | ObjectType::StateAttachment)
                 || self.compression.max_delta_size == 0
+                || objects
+                    .iter()
+                    .all(|record| record.data.len() < MIN_DELTA_SIZE)
             {
-                // Single objects, states, or transfer-tuned packs with delta disabled:
-                // write entries directly without running the sliding delta search.
+                // Single objects, states, all-small groups, or transfer-tuned packs
+                // with delta disabled: write entries directly without constructing
+                // sliding-window indexes that cannot produce a delta.
                 for record in objects {
                     let offset = pack_data.len() as u64;
                     index.add(record.id, offset);

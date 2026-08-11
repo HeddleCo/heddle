@@ -142,17 +142,17 @@ pub fn write_exported_refs(
     git_core::write_exported_refs(repo, refs)
 }
 
-pub fn read_mirror_managed_refs(
-    repo: &SleyRepository,
+pub fn read_projection_managed_refs(
+    heddle_dir: &Path,
 ) -> GitProjectionResult<HashMap<String, ObjectId>> {
-    git_core::read_mirror_managed_refs(repo)
+    git_core::read_projection_managed_refs(heddle_dir)
 }
 
-pub fn write_mirror_managed_refs(
-    repo: &SleyRepository,
+pub fn write_projection_managed_refs(
+    heddle_dir: &Path,
     refs: &HashMap<String, ObjectId>,
 ) -> GitProjectionResult<()> {
-    git_core::write_mirror_managed_refs(repo, refs)
+    git_core::write_projection_managed_refs(heddle_dir, refs)
 }
 
 pub fn collect_managed_ref_updates(
@@ -225,19 +225,17 @@ pub fn build_existing_mapping(
     bridge.build_existing_mapping(git_repo_path)
 }
 
-pub fn stage_ingest_source_in_mirror(
-    bridge: &mut GitProjection<'_>,
-    source: &Path,
-    refs: &[String],
-) -> GitProjectionResult<()> {
-    bridge.stage_ingest_source_in_mirror(source, refs)
-}
-
 pub fn seed_ingest_identity_mappings_from_repo(
     bridge: &mut GitProjection<'_>,
     repo: &SleyRepository,
 ) -> GitProjectionResult<()> {
     bridge.seed_ingest_identity_mappings_from_repo(repo)
+}
+
+pub fn seed_ingest_identity_mappings_from_store(
+    bridge: &mut GitProjection<'_>,
+) -> GitProjectionResult<()> {
+    bridge.seed_ingest_identity_mappings_from_store()
 }
 
 pub fn open_git_repo(bridge: &GitProjection<'_>) -> GitProjectionResult<SleyRepository> {

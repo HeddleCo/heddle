@@ -527,7 +527,7 @@ fn assert_verify_check_rows(parsed: &Value) {
 }
 
 #[test]
-fn git_overlay_matrix_undo_reconciles_stale_mirror_after_push_pull() {
+fn git_overlay_matrix_undo_reconciles_checkout_without_persistent_mirror() {
     let temp = TempDir::new().unwrap();
     let work = temp.path().join("work");
     let origin = temp.path().join("origin.git");
@@ -568,18 +568,9 @@ fn git_overlay_matrix_undo_reconciles_stale_mirror_after_push_pull() {
         "second\n",
         "undoing Git publication must preserve the captured worktree"
     );
-    let mirror = work.join(".heddle/git");
-    assert_eq!(
-        git_stdout(
-            &work,
-            &[
-                "--git-dir",
-                mirror.to_str().unwrap(),
-                "rev-parse",
-                "refs/heads/main",
-            ],
-        ),
-        previous
+    assert!(
+        !work.join(".heddle/git").exists(),
+        "undo must not require a persistent Git mirror"
     );
 }
 

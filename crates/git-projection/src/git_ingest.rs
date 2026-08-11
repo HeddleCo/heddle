@@ -3,8 +3,8 @@
 
 use std::{collections::HashSet, path::Path};
 
-use objects::{object::StateId, store::ObjectStore};
-use sley::{GitObjectType, ObjectId, Repository as SleyRepository};
+use objects::store::ObjectStore;
+use sley::{GitObjectType, ObjectId};
 
 use super::{
     git_core::{
@@ -12,7 +12,6 @@ use super::{
         collect_import_source_ref_updates, open_repo,
     },
     git_export::commit_requires_residual,
-    git_notes,
     git_residual::ResidualStore,
     git_util::ImportStats,
 };
@@ -39,16 +38,10 @@ pub fn import_git_history(
         progress,
     )
     .map_err(map_ingest_error)?;
-    bridge.stage_ingest_source_in_mirror(source, refs)?;
-    if refs.is_empty() {
-        bridge.build_existing_mapping(Some(source))?;
-    } else {
-        bridge.build_existing_mapping(None)?;
-    }
-    let mirror_repo = bridge.open_git_repo()?;
-    bridge.seed_ingest_identity_mappings_from_repo(&mirror_repo)?;
+    bridge.build_existing_mapping(Some(source))?;
+    bridge.seed_ingest_identity_mappings_from_store()?;
     capture_import_residuals(bridge, source, refs, &stats)?;
-    backfill_ingest_identity_notes_in_mirror(bridge, &mirror_repo, refs)?;
+    bridge.save_mapping_to_disk()?;
     Ok(import_stats_from_ingest(stats))
 }
 
@@ -82,16 +75,22 @@ fn capture_import_residuals(
         residuals.capture_commit_closure_from_git_repo(&source_repo, &git_oid)?;
     }
 
-    for update in updates
-        .into_iter()
-        .filter(|update| update.namespace == RefNamespace::Tag)
-    {
-        let object = source_repo
-            .read_object(&update.target)
-            .map_err(super::git_core::git_err)?;
-        if object.object_type == GitObjectType::Tag {
-            residuals.capture_tag_chain_from_git_repo(&source_repo, &update.target)?;
-            residuals.record_tag_ref(&update.name, update.target)?;
+    for update in updates {
+        match update.namespace {
+            RefNamespace::Tag => {
+                let object = source_repo
+                    .read_object(&update.target)
+                    .map_err(super::git_core::git_err)?;
+                if object.object_type == GitObjectType::Tag {
+                    residuals.capture_tag_chain_from_git_repo(&source_repo, &update.target)?;
+                    residuals.record_tag_ref(&update.name, update.target)?;
+                }
+            }
+            RefNamespace::Note => {
+                residuals.capture_object_closure_from_git_repo(&source_repo, &update.target)?;
+                residuals.record_note_ref(&update.name, update.target)?;
+            }
+            RefNamespace::Branch => {}
         }
     }
     Ok(())
@@ -144,85 +143,4 @@ fn import_stats_from_ingest(stats: ingest::ImportStats) -> ImportStats {
         skipped_non_commit_refs: stats.refs_seen.non_commit_skipped,
         lossy_entries: stats.lossy_entries,
     }
-}
-
-fn backfill_ingest_identity_notes_in_mirror(
-    bridge: &GitProjection<'_>,
-    mirror_repo: &SleyRepository,
-    refs: &[String],
-) -> GitProjectionResult<()> {
-    let scoped_commits = if refs.is_empty() {
-        None
-    } else {
-        let updates = collect_import_source_ref_updates(mirror_repo, refs)?;
-        Some(reachable_commits_from_updates(mirror_repo, updates)?)
-    };
-
-    for (git_sha, state_id) in bridge.heddle_repo.git_overlay_ingest_commit_mapping()? {
-        let state_id = StateId::parse(&state_id)?;
-        let git_oid = git_sha
-            .parse::<ObjectId>()
-            .map_err(|err| GitProjectionError::InvalidMapping(err.to_string()))?;
-        if scoped_commits
-            .as_ref()
-            .is_some_and(|commits| !commits.contains(&git_oid))
-        {
-            continue;
-        }
-        if mirror_repo.read_object(&git_oid).is_err() {
-            continue;
-        }
-        if git_notes::read_note(mirror_repo, git_oid)?.is_some() {
-            continue;
-        }
-        let tier = bridge
-            .heddle_repo
-            .effective_visibility_tier(&state_id)
-            .map_err(|error| {
-                GitProjectionError::Git(format!("resolve visibility for {state_id}: {error:#}"))
-            })?;
-        if !repo::visible(&tier, &repo::AudienceTier::Public) {
-            continue;
-        }
-        let Some(state) = bridge.heddle_repo.store().get_state(&state_id)? else {
-            continue;
-        };
-        git_notes::write_note(
-            mirror_repo,
-            git_oid,
-            &git_notes::HeddleNote::from_state(&state),
-        )?;
-    }
-    Ok(())
-}
-
-fn reachable_commits_from_updates(
-    repo: &SleyRepository,
-    updates: Vec<super::git_core::RefUpdate>,
-) -> GitProjectionResult<HashSet<ObjectId>> {
-    let mut stack = updates
-        .into_iter()
-        .map(|update| update.target)
-        .collect::<Vec<_>>();
-    let mut seen = HashSet::new();
-    let mut commits = HashSet::new();
-    while let Some(oid) = stack.pop() {
-        if !seen.insert(oid) {
-            continue;
-        }
-        let object = repo.read_object(&oid).map_err(super::git_core::git_err)?;
-        match object.object_type {
-            GitObjectType::Commit => {
-                commits.insert(oid);
-                let commit = repo.read_commit(&oid).map_err(super::git_core::git_err)?;
-                stack.extend(commit.parents);
-            }
-            GitObjectType::Tag => {
-                let tag = repo.read_tag(&oid).map_err(super::git_core::git_err)?;
-                stack.push(tag.object);
-            }
-            GitObjectType::Tree | GitObjectType::Blob => {}
-        }
-    }
-    Ok(commits)
 }

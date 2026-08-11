@@ -26,6 +26,7 @@ serde.workspace = true
 serde_json.workspace = true
 sley.workspace = true
 sley-transport.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
@@ -36,6 +37,3 @@ tracing.workspace = true
 default = ["git-overlay", "zstd"]
 git-overlay = []
 zstd = ["objects/zstd", "repo/zstd", "ingest/zstd", "wire/zstd"]
-
-[dev-dependencies]
-tempfile.workspace = true

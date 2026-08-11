@@ -23,7 +23,8 @@
 use std::{collections::BTreeMap, path::Path, process::Command};
 
 use cli::{ObjectStore, Repository};
-use heddle_git_projection::{git_core::GitProjection, test_support};
+use heddle_git_projection::git_core::GitProjection;
+use objects::object::{Principal, Redaction, StateVisibility, ThreadName, VisibilityTier};
 use tempfile::TempDir;
 
 fn ingest_into_bridge(
@@ -31,19 +32,18 @@ fn ingest_into_bridge(
     source: &Path,
     lossy: bool,
 ) -> Result<(), String> {
-    let target = test_support::heddle_repo(bridge).root();
-    ingest::import_git_into_with_options(
-        source,
-        target,
+    heddle_git_projection::git_ingest::import_git_history(
+        bridge,
+        Some(source),
+        &[],
         ingest::ImportOptions {
             lossy,
             ..ingest::ImportOptions::default()
         },
+        None,
     )
-    .map_err(|error| error.to_string())?;
-    test_support::stage_ingest_source_in_mirror(bridge, source, &[])
-        .map_err(|error| error.to_string())?;
-    test_support::build_existing_mapping(bridge, Some(source)).map_err(|error| error.to_string())
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 
 /// Deterministic identity + dates so every fixture produces stable SHAs
@@ -155,12 +155,20 @@ fn assert_roundtrip_fidelity_opts(case: &str, source: &Path, lossy: bool) {
     let mut bridge = GitProjection::new(&repo);
     ingest_into_bridge(&mut bridge, source, lossy)
         .unwrap_or_else(|e| panic!("[{case}] import from git failed: {e}"));
+    assert!(
+        !repo.heddle_dir().join("git").exists(),
+        "[{case}] import must not create the retired eager Git mirror"
+    );
 
     let dest_home = TempDir::new().expect("dest temp");
     let dest = dest_home.path().join("export");
     bridge
         .export_to_path(&dest)
         .unwrap_or_else(|e| panic!("[{case}] export_to_path failed: {e}"));
+    assert!(
+        !repo.heddle_dir().join("git").exists(),
+        "[{case}] export scratch repository must remain ephemeral"
+    );
 
     // (3) the export must be a structurally sound git repo.
     git(&dest, &["fsck", "--full", "--strict"]);
@@ -192,6 +200,194 @@ fn assert_roundtrip_fidelity_opts(case: &str, source: &Path, lossy: bool) {
              (byte-identity broken)"
         );
     }
+}
+
+/// A cached mapping is an assertion that reconstructed bytes retain the
+/// imported Git identity. If that assertion is wrong, export must fail loudly
+/// instead of silently remapping the state to the newly derived OID.
+#[test]
+fn reconstruction_oid_mismatch_refuses_silent_remap() {
+    let source_home = TempDir::new().expect("source temp");
+    let source = source_home.path();
+    init_repo(source);
+    write_and_commit(source, "guard.txt", b"fidelity\n", "guard fidelity");
+
+    let heddle_home = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
+    let mut bridge = GitProjection::new(&repo);
+    ingest_into_bridge(&mut bridge, source, false).expect("import source");
+
+    let (state_id, original_oid) = bridge
+        .mapping
+        .iter()
+        .next()
+        .map(|(state_id, oid)| (*state_id, *oid))
+        .expect("imported mapping");
+    let wrong_oid = sley::ObjectId::empty_tree(original_oid.format());
+    assert_ne!(wrong_oid, original_oid, "fixture must poison the mapping");
+    bridge.mapping.insert(state_id, wrong_oid);
+
+    let destination_home = TempDir::new().expect("destination temp");
+    let error = bridge
+        .export_to_path(&destination_home.path().join("export.git"))
+        .expect_err("wrong mapped OID must stop export");
+    let message = error.to_string();
+    assert!(
+        message.contains("export reconstruction OID mismatch")
+            && message.contains("refusing to export a wrong-OID commit"),
+        "unexpected fidelity error: {message}"
+    );
+    assert_eq!(
+        bridge.mapping.get_git(&state_id),
+        Some(wrong_oid),
+        "failed export must roll the mapping back instead of silently remapping"
+    );
+    assert!(
+        !repo.heddle_dir().join("git").exists(),
+        "fidelity failure must not recreate the retired eager mirror"
+    );
+}
+
+#[test]
+fn store_sourced_reconcile_retracts_embargo_across_ephemeral_exports() {
+    let home = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(home.path()).expect("init heddle");
+    let mut config = repo.config().clone();
+    config.set_principal("Grace Hopper", "grace@example.com");
+    config
+        .save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(home.path()).expect("reopen heddle");
+
+    std::fs::write(home.path().join("base.txt"), b"base\n").expect("write base");
+    repo.snapshot(Some("base".into()), None)
+        .expect("snapshot base");
+    let base = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .expect("read main")
+        .expect("main tip");
+    std::fs::write(home.path().join("tip.txt"), b"tip\n").expect("write tip");
+    repo.snapshot(Some("tip".into()), None)
+        .expect("snapshot tip");
+    let tip = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .expect("read main")
+        .expect("main tip");
+
+    let destination_home = TempDir::new().expect("destination temp");
+    let destination = destination_home.path().join("export.git");
+    let (base_oid, tip_oid) = {
+        let mut projection = GitProjection::new(&repo);
+        projection
+            .export_to_path(&destination)
+            .expect("first export");
+        (
+            projection.mapping.get_git(&base).expect("base mapped"),
+            projection.mapping.get_git(&tip).expect("tip mapped"),
+        )
+    };
+    assert_eq!(
+        git(&destination, &["rev-parse", "refs/heads/main"]).trim(),
+        tip_oid.to_string()
+    );
+
+    repo.put_state_visibility(StateVisibility {
+        state: tip,
+        tier: VisibilityTier::Private {
+            scope_label: "security".into(),
+        },
+        embargo_until: None,
+        declarer: Principal::new("Grace Hopper", "grace@example.com"),
+        declared_at: chrono::Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .expect("embargo tip");
+
+    let mut projection = GitProjection::new(&repo);
+    projection
+        .export_to_path(&destination)
+        .expect("store-sourced embargo reconcile");
+    assert_eq!(
+        git(&destination, &["rev-parse", "refs/heads/main"]).trim(),
+        base_oid.to_string(),
+        "a fresh projection instance must rewind the destination from store-owned reconcile state"
+    );
+    assert!(projection.mapping.get_git(&tip).is_none());
+    assert!(!repo.heddle_dir().join("git").exists());
+}
+
+#[test]
+fn store_sourced_reconcile_replaces_redacted_tip_with_derived_sha() {
+    let home = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(home.path()).expect("init heddle");
+    let mut config = repo.config().clone();
+    config.set_principal("Grace Hopper", "grace@example.com");
+    config
+        .save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(home.path()).expect("reopen heddle");
+
+    std::fs::write(home.path().join("secret.txt"), b"credential=secret\n").expect("write secret");
+    repo.snapshot(Some("secret".into()), None)
+        .expect("snapshot secret");
+    let tip = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .expect("read main")
+        .expect("main tip");
+    let state = repo
+        .store()
+        .get_state(&tip)
+        .expect("read state")
+        .expect("tip state");
+    let tree = repo
+        .store()
+        .get_tree(&state.tree)
+        .expect("read tree")
+        .expect("tip tree");
+    let secret_blob = tree
+        .entries()
+        .iter()
+        .find(|entry| entry.name() == "secret.txt")
+        .and_then(|entry| entry.leaf_content_hash())
+        .expect("secret blob");
+
+    let destination_home = TempDir::new().expect("destination temp");
+    let destination = destination_home.path().join("export.git");
+    let original_oid = {
+        let mut projection = GitProjection::new(&repo);
+        projection
+            .export_to_path(&destination)
+            .expect("first export");
+        projection.mapping.get_git(&tip).expect("tip mapped")
+    };
+
+    repo.put_redaction(Redaction {
+        redacted_blob: secret_blob,
+        state: tip,
+        path: "secret.txt".into(),
+        reason: "leaked credential".into(),
+        redactor: Principal::new("Grace Hopper", "grace@example.com"),
+        redacted_at: chrono::Utc::now(),
+        signature: None,
+        purged_at: None,
+        supersedes: None,
+    })
+    .expect("redact secret");
+
+    let mut projection = GitProjection::new(&repo);
+    projection
+        .export_to_path(&destination)
+        .expect("store-sourced redaction reconcile");
+    let derived_oid = git(&destination, &["rev-parse", "refs/heads/main"]);
+    assert_ne!(derived_oid.trim(), original_oid.to_string());
+    let materialized = git(&destination, &["show", "refs/heads/main:secret.txt"]);
+    assert!(materialized.contains("redacted by Heddle"));
+    assert!(!materialized.contains("credential=secret"));
+    assert!(!repo.heddle_dir().join("git").exists());
 }
 
 #[test]
@@ -570,7 +766,7 @@ fn import_preserves_noncanonical_extension_header_order() {
 /// non-UTF8 byte cannot be reconstructed byte-exactly from Heddle state, because
 /// `Principal.name` is a `String` and import lossily replaces the byte with
 /// U+FFFD (the #564-deferred gap). Export must detect this and serve the
-/// VERBATIM mirror bytes at the original OID rather than mint a reconstructed
+/// VERBATIM residual bytes at the original OID rather than mint a reconstructed
 /// (wrong-SHA) object. A regression that reconstructs unconditionally fails this
 /// round-trip (the commit OID drifts) — and the pre-fix #567 code errored out of
 /// the export entirely on the mapped-OID mismatch.
@@ -614,7 +810,7 @@ fn roundtrip_non_utf8_author_identity() {
 
 /// As [`roundtrip_non_utf8_author_identity`], for the COMMITTER identity — the
 /// guard checks the distinct `State.committer` principal too, so a non-UTF8
-/// committer name must likewise route to the verbatim-mirror fallback.
+/// committer name must likewise route to the verbatim-residual fallback.
 #[test]
 fn roundtrip_non_utf8_committer_identity() {
     let tmp = TempDir::new().unwrap();

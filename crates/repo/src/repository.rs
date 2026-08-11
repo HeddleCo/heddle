@@ -2933,6 +2933,17 @@ impl Repository {
         self
     }
 
+    /// Apply the runtime-resolved fsmonitor mode to this repository handle.
+    ///
+    /// CLI configuration merges user, repository, and environment settings.
+    /// Storing that resolved mode on the handle ensures nested verification
+    /// and summary paths use the same decision as explicit status calls.
+    #[must_use]
+    pub fn with_fsmonitor_mode(mut self, mode: crate::FsMonitorMode) -> Self {
+        self.config.worktree.fsmonitor.mode = mode;
+        self
+    }
+
     pub fn config(&self) -> &RepoConfig {
         self.repo_config()
     }
