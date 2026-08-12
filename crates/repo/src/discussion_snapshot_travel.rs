@@ -227,6 +227,7 @@ mod tests {
                 author: Principal::new("Alice", "alice@example.com"),
                 body: "please check this".to_string(),
                 posted_at: 1_700_000_000,
+                references: Vec::new(),
             }],
             resolution: DiscussionResolution::Open,
             body_changed_since_open: false,

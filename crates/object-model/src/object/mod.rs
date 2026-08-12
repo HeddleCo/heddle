@@ -50,8 +50,8 @@ pub use blob::Blob;
 pub use collaboration::*;
 pub use diff::{DiffKind, FileChange, FileChangeSet};
 pub use discussion::{
-    Discussion, DiscussionError, DiscussionId, DiscussionResolution, DiscussionTurn,
-    DiscussionsBlob, generate_discussion_id,
+    Discussion, DiscussionError, DiscussionId, DiscussionReference, DiscussionReferenceKind,
+    DiscussionResolution, DiscussionTurn, DiscussionsBlob, generate_discussion_id,
 };
 pub use hash::{ChangeId, ChangeIdParseError, ContentHash, StateId, StateIdParseError};
 pub use identifiers::{MarkerName, Scope, ThreadName};
