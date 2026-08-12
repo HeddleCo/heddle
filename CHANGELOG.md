@@ -13,6 +13,8 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+## 0.12.0 - 2026-08-12
+
 ### Added
 
 - **Bounded-history performance contracts.** Release CI now counts ancestry
@@ -40,10 +42,13 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   symbol-aware IDs, and `resolve` text and JSON expose one richly attributed
   ConflictResolved record per region.
 
-- **Background pack repack and compact native storage.** `heddle maintenance
+- **Background pack repack and complete native storage.** `heddle maintenance
   repack` consolidates loose objects behind a typed-hash-verified cutover
   with JSON metrics; tree and state metadata pack into compact columnar
-  frames, and readers prefer hot-tier records over solid frames.
+  frames, readers prefer hot-tier records over solid frames, and
+  lineage-solid blob writing completes the native storage format. Stored
+  bytes versus Git pack measure 0.911× for semver, 0.830× for ripgrep, and
+  0.874× for curl, with byte-exact Git reconstruction.
 
 - **Opt-in delta search.** Independent `[storage.delta_search]` settings for
   import, snapshot, and GC default to off, so delta compression stays a
