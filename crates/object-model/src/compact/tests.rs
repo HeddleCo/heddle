@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 use chrono::{TimeZone, Utc};
 use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
-use super::{decode_state_frame, decode_tree_frame, encode_state_frame, encode_tree_frame};
+use super::{
+    decode_blob_frame, decode_state_frame, decode_tree_frame, encode_blob_frame,
+    encode_state_frame, encode_tree_frame,
+};
 use crate::object::{
     Agent, Attribution, ChangeId, ChangeLineage, ChangeLineageKind, ContentHash, Principal,
     SpoolId, State, StateId, Status, Tree, TreeEntry, Verification,
@@ -136,6 +139,32 @@ fn corrupt_frame_byte_rejects_every_contained_object() {
 
     for _ in &trees {
         let error = decode_tree_frame(&encoded).unwrap_err();
+        assert!(error.to_string().contains("checksum mismatch"));
+    }
+}
+
+#[test]
+fn blob_frame_round_trips_offsets_lengths_and_typed_hashes() {
+    let bodies = [b"newest body".as_slice(), b"older body".as_slice(), &[]];
+    let encoded = encode_blob_frame(&bodies).unwrap();
+    let decoded = decode_blob_frame(&encoded).unwrap();
+
+    assert_eq!(decoded.len(), bodies.len());
+    for ((hash, actual), expected) in decoded.iter().zip(bodies) {
+        assert_eq!(*actual, expected);
+        assert_eq!(*hash, ContentHash::compute_typed("blob", expected));
+    }
+}
+
+#[test]
+fn corrupt_blob_frame_byte_rejects_every_contained_object() {
+    let bodies = [b"first".as_slice(), b"second".as_slice()];
+    let mut encoded = encode_blob_frame(&bodies).unwrap();
+    let corrupt_at = encoded.len() / 2;
+    encoded[corrupt_at] ^= 0x01;
+
+    for _ in bodies {
+        let error = decode_blob_frame(&encoded).unwrap_err();
         assert!(error.to_string().contains("checksum mismatch"));
     }
 }

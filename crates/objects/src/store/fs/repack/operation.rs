@@ -165,6 +165,7 @@ impl FsRepackOperation {
         let mut expected = HashSet::new();
         let mut state_ids = Vec::new();
         let mut tree_hashes = Vec::new();
+        let mut blob_hashes = Vec::new();
         #[cfg(test)]
         let mut corrupt_first = self.corrupt_first_object;
         #[cfg(not(test))]
@@ -179,6 +180,7 @@ impl FsRepackOperation {
                     return Ok(());
                 }
                 match (id, object_type) {
+                    (PackObjectId::Hash(hash), ObjectType::Blob) => blob_hashes.push(hash),
                     (PackObjectId::Hash(hash), ObjectType::Tree) => tree_hashes.push(hash),
                     (PackObjectId::StateId(state_id), ObjectType::State) => {
                         state_ids.push(state_id);
@@ -209,14 +211,7 @@ impl FsRepackOperation {
         for hash in &snapshot.loose_blobs {
             let id = PackObjectId::Hash(*hash);
             if expected.insert(id) {
-                let blob = ObjectStore::get_blob(&self.store, hash)?.ok_or_else(|| {
-                    HeddleError::InvalidObject(format!("loose blob disappeared: {hash}"))
-                })?;
-                let data = blob.content().to_vec();
-                let bytes = data.len() as u64;
-                builder.add(*hash, ObjectType::Blob, data)?;
-                logical_bytes = logical_bytes.saturating_add(bytes);
-                context.checkpoint(bytes).map_err(BuildError::Cancelled)?;
+                blob_hashes.push(*hash);
             }
         }
         for hash in &snapshot.loose_trees {
@@ -230,6 +225,7 @@ impl FsRepackOperation {
             &mut builder,
             &state_ids,
             &tree_hashes,
+            &blob_hashes,
             context,
             &mut corrupt_first,
         )?);

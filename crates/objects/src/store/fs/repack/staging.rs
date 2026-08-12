@@ -79,6 +79,7 @@ impl Drop for RepackStaging {
     }
 }
 
+#[derive(Debug)]
 pub(super) enum BuildError {
     Store(HeddleError),
     Cancelled(RepackError),

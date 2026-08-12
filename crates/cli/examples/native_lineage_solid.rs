@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Real compact-repack falsifier for heddle#1337, derived from #1325.
+//! Full-format lineage-solid falsifier for heddle#1340, derived from #1325.
 
 #[path = "native_lineage_solid/blob_lineage.rs"]
 mod blob_lineage;
@@ -66,6 +66,7 @@ struct Comparisons {
 struct RegatedTotal {
     compact_metadata_bytes: u64,
     blob_lineage_frame_bytes: u64,
+    prototype_blob_lineage_frame_bytes: u64,
     index_bytes: u64,
     total_bytes: u64,
     git_pack_bytes: u64,
@@ -158,11 +159,12 @@ fn regate(
 ) -> RegatedTotal {
     let compact_metadata_bytes = compact.compact_tree_bytes + compact.compact_state_bytes;
     let index_bytes = compact.index_bytes;
-    let total_bytes = compact_metadata_bytes + blobs.compressed_bytes + index_bytes;
+    let total_bytes = compact_metadata_bytes + compact.compact_blob_bytes + index_bytes;
     let git_pack_and_idx_bytes = git.pack_bytes + git.idx_bytes;
     RegatedTotal {
         compact_metadata_bytes,
-        blob_lineage_frame_bytes: blobs.compressed_bytes,
+        blob_lineage_frame_bytes: compact.compact_blob_bytes,
+        prototype_blob_lineage_frame_bytes: blobs.compressed_bytes,
         index_bytes,
         total_bytes,
         git_pack_bytes: git.pack_bytes,

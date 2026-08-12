@@ -17,8 +17,10 @@ use crate::{
 
 #[derive(Serialize)]
 pub struct RealCompactMeasurement {
+    pub source_blob_bytes: u64,
     pub source_tree_bytes: u64,
     pub source_state_bytes: u64,
+    pub compact_blob_bytes: u64,
     pub compact_tree_bytes: u64,
     pub compact_state_bytes: u64,
     pub index_bytes: u64,
@@ -33,7 +35,8 @@ pub fn measure_real_compact_repack(
     store: &FsStore,
     objects: &ObjectSet,
 ) -> Result<RealCompactMeasurement> {
-    let (source_tree_bytes, source_state_bytes) = source_metadata_bytes(store, objects)?;
+    let (source_blob_bytes, source_tree_bytes, source_state_bytes) =
+        source_object_bytes(store, objects)?;
     let (source_fingerprint, _) = fingerprint_objects(store, objects)?;
     run_repack(store)?;
     store.clear_recent_object_caches();
@@ -41,11 +44,18 @@ pub fn measure_real_compact_repack(
     if source_fingerprint != reconstructed_fingerprint {
         bail!("real compact writer changed native object bytes");
     }
-    let (compact_tree_bytes, compact_state_bytes, index_bytes, replacement_pack_bytes) =
-        physical_metadata_bytes(store)?;
+    let (
+        compact_blob_bytes,
+        compact_tree_bytes,
+        compact_state_bytes,
+        index_bytes,
+        replacement_pack_bytes,
+    ) = physical_object_bytes(store)?;
     Ok(RealCompactMeasurement {
+        source_blob_bytes,
         source_tree_bytes,
         source_state_bytes,
+        compact_blob_bytes,
         compact_tree_bytes,
         compact_state_bytes,
         index_bytes,
@@ -57,17 +67,18 @@ pub fn measure_real_compact_repack(
     })
 }
 
-fn source_metadata_bytes(store: &FsStore, objects: &ObjectSet) -> Result<(u64, u64)> {
+fn source_object_bytes(store: &FsStore, objects: &ObjectSet) -> Result<(u64, u64, u64)> {
+    let mut blobs = 0u64;
     let mut trees = 0u64;
     let mut states = 0u64;
     for object in objects.iter() {
         match object {
             ObjectRef::Tree(_) => trees += object.load(store)?.len() as u64,
             ObjectRef::State(_) => states += object.load(store)?.len() as u64,
-            ObjectRef::Blob(_) => {}
+            ObjectRef::Blob(_) => blobs += object.load(store)?.len() as u64,
         }
     }
-    Ok((trees, states))
+    Ok((blobs, trees, states))
 }
 
 fn run_repack(store: &FsStore) -> Result<()> {
@@ -83,7 +94,7 @@ fn run_repack(store: &FsStore) -> Result<()> {
     Ok(())
 }
 
-fn physical_metadata_bytes(store: &FsStore) -> Result<(u64, u64, u64, u64)> {
+fn physical_object_bytes(store: &FsStore) -> Result<(u64, u64, u64, u64, u64)> {
     let packs_dir = store.root().join("packs");
     let paths = fs::read_dir(&packs_dir)?
         .map(|entry| entry.map(|value| value.path()))
@@ -95,6 +106,7 @@ fn physical_metadata_bytes(store: &FsStore) -> Result<(u64, u64, u64, u64)> {
             (pack, index)
         })
         .collect::<Vec<_>>();
+    let mut blob_bytes = 0u64;
     let mut tree_bytes = 0u64;
     let mut state_bytes = 0u64;
     let mut index_bytes = 0u64;
@@ -102,10 +114,11 @@ fn physical_metadata_bytes(store: &FsStore) -> Result<(u64, u64, u64, u64)> {
     for (pack, index) in paths {
         let reader = PackReader::open(&pack, &index)
             .with_context(|| format!("open replacement pack {}", pack.display()))?;
+        blob_bytes += reader.encoded_payload_bytes(ObjectType::Blob)?;
         tree_bytes += reader.encoded_payload_bytes(ObjectType::Tree)?;
         state_bytes += reader.encoded_payload_bytes(ObjectType::State)?;
         index_bytes += fs::metadata(&index)?.len();
         pack_bytes += fs::metadata(&pack)?.len();
     }
-    Ok((tree_bytes, state_bytes, index_bytes, pack_bytes))
+    Ok((blob_bytes, tree_bytes, state_bytes, index_bytes, pack_bytes))
 }

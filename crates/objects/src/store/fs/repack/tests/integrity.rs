@@ -181,7 +181,9 @@ fn deliberately_corrupted_repack_output_is_rejected_before_cutover() {
         .wait()
         .unwrap_err();
     assert!(
-        matches!(error, RepackError::Operation(ref message) if message.contains("corruption")),
+        matches!(error, RepackError::Operation(ref message)
+            if message.contains("compact frame checksum mismatch")
+                || message.contains("object corruption")),
         "typed-hash validation should reject the output, got {error:?}"
     );
     assert_eq!(direct_pack_names(store.root()), before);

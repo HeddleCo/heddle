@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Lossless columnar encodings used by background compact repacks.
 
+mod blob;
 mod dictionary;
 mod io;
 mod state;
 mod state_decode;
 mod tree;
 
+pub use blob::{decode_blob_frame, encode_blob_frame, is_blob_frame};
 pub use state::{encode_state_frame, is_state_frame};
 pub use state_decode::decode_state_frame;
 use thiserror::Error;

@@ -103,6 +103,7 @@ impl<'a> PackData<'a> {
 pub struct PackReader<'a> {
     data: PackData<'a>,
     index: PackIndex,
+    aliased_offsets: HashSet<u64>,
     content_end: usize,
     #[cfg(test)]
     compact_frame_reads: AtomicUsize,
@@ -140,9 +141,11 @@ impl PackReader<'static> {
             verify_container_layout(&pack_bytes, pack_container_spec())?
         };
         let index = PackIndex::from_owned_bytes(index_data)?;
+        let aliased_offsets = index.aliased_offsets()?;
         Ok(Self {
             data: PackData::Owned(pack_bytes),
             index,
+            aliased_offsets,
             content_end,
             #[cfg(test)]
             compact_frame_reads: AtomicUsize::new(0),
@@ -153,9 +156,11 @@ impl PackReader<'static> {
         let pack_data = pack_data.into();
         let (_, _, content_end) = verify_container(&pack_data, pack_container_spec())?;
         let index = PackIndex::from_bytes(index_data.as_ref())?;
+        let aliased_offsets = index.aliased_offsets()?;
         Ok(Self {
             data: PackData::Owned(pack_data),
             index,
+            aliased_offsets,
             content_end,
             #[cfg(test)]
             compact_frame_reads: AtomicUsize::new(0),
@@ -167,9 +172,11 @@ impl<'a> PackReader<'a> {
     pub fn from_slice(pack_data: &'a [u8], index_data: impl AsRef<[u8]>) -> Result<Self> {
         let (_, _, content_end) = verify_container(pack_data, pack_container_spec())?;
         let index = PackIndex::from_bytes(index_data.as_ref())?;
+        let aliased_offsets = index.aliased_offsets()?;
         Ok(Self {
             data: PackData::Borrowed(pack_data),
             index,
+            aliased_offsets,
             content_end,
             #[cfg(test)]
             compact_frame_reads: AtomicUsize::new(0),
@@ -341,9 +348,7 @@ impl<'a> PackReader<'a> {
                 ));
             }
             let header = decode_tagged_entry_header(self.content_from(offset)?)?;
-            if matches!(header.obj_type, ObjectType::Tree | ObjectType::State)
-                && self.read_compact_objects_at(offset)?.is_some()
-            {
+            if self.read_compact_objects_at(offset)?.is_some() {
                 return Ok(None);
             }
             let expected_size = usize::try_from(*expected_size).ok();
@@ -524,7 +529,9 @@ impl<'a> PackReader<'a> {
             self.content_from(header_start)?,
         )
         .ok_or_else(|| StoreError::InvalidObject("Truncated type+size varint".to_string()))?;
-        if matches!(obj_type, ObjectType::Tree | ObjectType::State) {
+        if (obj_type == ObjectType::Blob && self.aliased_offsets.contains(&(offset as u64)))
+            || matches!(obj_type, ObjectType::Tree | ObjectType::State)
+        {
             let Some((_, data)) = self.get_object(&id)? else {
                 return Ok(None);
             };
@@ -633,10 +640,14 @@ impl<'a> PackReader<'a> {
             stored_data.to_vec()
         };
 
-        if obj_type != ObjectType::Delta && is_compact_frame(&decompressed) {
+        let shared_blob =
+            obj_type == ObjectType::Blob && self.aliased_offsets.contains(&(offset as u64));
+        if obj_type != ObjectType::Delta && (shared_blob || is_compact_frame(&decompressed)) {
             #[cfg(test)]
             self.record_compact_frame_read();
-            if let Some(data) = decode_compact_object(requested_id, obj_type, &decompressed)? {
+            if let Some(data) =
+                decode_compact_object(requested_id, obj_type, &decompressed, shared_blob)?
+            {
                 return Ok(PackObjectRecord {
                     id: *requested_id,
                     obj_type,
@@ -677,7 +688,15 @@ impl<'a> PackReader<'a> {
             ));
         }
         let header = decode_tagged_entry_header(self.content_from(offset)?)?;
-        if !matches!(header.obj_type, ObjectType::Tree | ObjectType::State) {
+        if !matches!(
+            header.obj_type,
+            ObjectType::Blob | ObjectType::Tree | ObjectType::State
+        ) {
+            return Ok(None);
+        }
+        let shared_blob =
+            header.obj_type == ObjectType::Blob && self.aliased_offsets.contains(&(offset as u64));
+        if header.obj_type == ObjectType::Blob && !shared_blob {
             return Ok(None);
         }
         let data_start = checked_index_add(offset, header.header_len, "entry data start")?;
@@ -696,10 +715,10 @@ impl<'a> PackReader<'a> {
             )));
         }
         #[cfg(test)]
-        if is_compact_frame(&data) {
+        if shared_blob || is_compact_frame(&data) {
             self.record_compact_frame_read();
         }
-        decode_compact_objects(header.obj_type, &data)
+        decode_compact_objects(header.obj_type, &data, shared_blob)
     }
 
     fn read_delta_record(
@@ -826,7 +845,8 @@ fn verify_record_id_matches(requested: &PackObjectId, found: &PackObjectId) -> R
 }
 
 fn is_compact_frame(data: &[u8]) -> bool {
-    heddle_object_model::compact::is_tree_frame(data)
+    heddle_object_model::compact::is_blob_frame(data)
+        || heddle_object_model::compact::is_tree_frame(data)
         || heddle_object_model::compact::is_state_frame(data)
 }
 
@@ -834,8 +854,9 @@ fn decode_compact_object(
     requested_id: &PackObjectId,
     obj_type: ObjectType,
     data: &[u8],
+    require_blob_frame: bool,
 ) -> Result<Option<Vec<u8>>> {
-    let Some(objects) = decode_compact_objects(obj_type, data)? else {
+    let Some(objects) = decode_compact_objects(obj_type, data, require_blob_frame)? else {
         return Ok(None);
     };
     objects
@@ -848,11 +869,18 @@ fn decode_compact_object(
 fn decode_compact_objects(
     obj_type: ObjectType,
     data: &[u8],
+    require_blob_frame: bool,
 ) -> Result<Option<DecodedCompactObjects>> {
-    if !is_compact_frame(data) {
-        return Ok(None);
-    }
     match obj_type {
+        ObjectType::Blob if require_blob_frame => {
+            heddle_object_model::compact::decode_blob_frame(data)
+                .map_err(|error| StoreError::InvalidObject(error.to_string()))?
+                .into_iter()
+                .map(|(hash, body)| Ok((PackObjectId::Hash(hash), ObjectType::Blob, body.to_vec())))
+                .collect::<Result<Vec<_>>>()
+                .map(Some)
+        }
+        ObjectType::Blob => Ok(None),
         ObjectType::Tree if heddle_object_model::compact::is_tree_frame(data) => {
             heddle_object_model::compact::decode_tree_frame(data)
                 .map_err(|error| StoreError::InvalidObject(error.to_string()))?
@@ -879,9 +907,10 @@ fn decode_compact_objects(
                 .collect::<Result<Vec<_>>>()
                 .map(Some)
         }
-        _ => Err(StoreError::InvalidObject(
+        _ if is_compact_frame(data) => Err(StoreError::InvalidObject(
             "compact frame magic does not match its pack object type".into(),
         )),
+        _ => Ok(None),
     }
 }
 

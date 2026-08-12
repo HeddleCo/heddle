@@ -9,7 +9,10 @@ use heddle_object_model::compact::{
     decode_state_frame, decode_tree_frame, encode_state_frame, encode_tree_frame, encoded_tree_size,
 };
 
-use super::{super::FsStore, staging::BuildError};
+use super::{
+    super::FsStore, blob_lineage::blob_lineage_order, blob_writer::add_blob_frames,
+    staging::BuildError,
+};
 use crate::{
     object::{ContentHash, State, StateId, Tree},
     store::{
@@ -25,22 +28,27 @@ mod state_writer;
 
 use state_writer::add_state_frames;
 
-const FRAME_LIMIT: usize = 12 * 1024 * 1024;
+pub(super) const FRAME_LIMIT: usize = 12 * 1024 * 1024;
 
 pub(super) fn add_compact_metadata(
     store: &FsStore,
     builder: &mut StreamingPackBuilder<File>,
     state_ids: &[StateId],
     tree_hashes: &[ContentHash],
+    blob_hashes: &[ContentHash],
     context: &RepackContext,
     corrupt_first: &mut bool,
 ) -> Result<u64, BuildError> {
     let states = load_states(store, state_ids)?;
     let state_order = newest_first_topology(&states)?;
     let tree_order = tree_path_order(store, tree_hashes, &states, &state_order)?;
+    let blob_order = blob_lineage_order(store, &states, &state_order, blob_hashes)?;
+    let blob_bytes = add_blob_frames(store, builder, &blob_order, context, corrupt_first)?;
     let state_bytes = add_state_frames(builder, &states, &state_order, context, corrupt_first)?;
     let tree_bytes = add_tree_frames(store, builder, &tree_order, context, corrupt_first)?;
-    Ok(state_bytes.saturating_add(tree_bytes))
+    Ok(blob_bytes
+        .saturating_add(state_bytes)
+        .saturating_add(tree_bytes))
 }
 
 fn load_states(store: &FsStore, ids: &[StateId]) -> Result<HashMap<StateId, State>, BuildError> {

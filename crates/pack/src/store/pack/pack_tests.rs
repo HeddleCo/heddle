@@ -64,17 +64,17 @@ fn test_pack_container_header_codec_matches_v3_bytes() {
 }
 
 #[test]
-fn test_pack_index_header_codec_matches_legacy_bytes() {
-    let legacy = b"LMI\0\
-        \0\0\0\x02\
+fn test_pack_index_header_codec_matches_current_bytes() {
+    let current = b"LMI\0\
+        \0\0\0\x03\
         \0\0\0\0\0\0\0\0"
         .to_vec();
 
     let encoded = PackIndex::new().to_bytes();
 
-    assert_eq!(encoded, legacy);
+    assert_eq!(encoded, current);
     assert!(
-        PackIndex::from_bytes(&legacy)
+        PackIndex::from_bytes(&current)
             .unwrap()
             .ids()
             .unwrap()
@@ -91,6 +91,7 @@ fn test_pack_index_roundtrip() {
     index.sort();
 
     let bytes = index.to_bytes();
+    assert_eq!(bytes.len(), 16 + 3 * 40);
     let restored = PackIndex::from_bytes(&bytes).expect("Failed to deserialize index");
 
     assert_eq!(
@@ -117,6 +118,23 @@ fn test_pack_index_roundtrip() {
             .unwrap(),
         None
     );
+}
+
+#[test]
+fn test_pack_index_distinguishes_hash_and_state_with_identical_bytes() {
+    let bytes = [9; 32];
+    let hash_id = PackObjectId::Hash(ContentHash::from_bytes(bytes));
+    let state_id = PackObjectId::StateId(StateId::from_bytes(bytes));
+    let mut index = PackIndex::new();
+    index.add(hash_id, 100);
+    index.add(state_id, 200);
+    index.sort();
+
+    let encoded = index.to_bytes();
+    let restored = PackIndex::from_bytes(&encoded).unwrap();
+
+    assert_eq!(restored.find(&hash_id).unwrap(), Some(100));
+    assert_eq!(restored.find(&state_id).unwrap(), Some(200));
 }
 
 #[test]
@@ -739,7 +757,7 @@ fn test_delta_window_pack_bytes_are_stable() {
     );
     assert_eq!(
         blake3::hash(&index_data).to_string(),
-        "60f164bdc2dbb696c68f1c07a0b84e18f678fe915d7d446e43b1966f365b74f9"
+        "bd27a0fc4ce6c2614fcaef304b01472e98007d121041ffbe4961b275ea44c540"
     );
 }
 
