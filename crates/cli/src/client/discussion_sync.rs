@@ -984,6 +984,7 @@ mod tests {
                 author: Principal::new("Reviewer", "reviewer@example.com"),
                 body: "keep this invariant".to_string(),
                 posted_at: 1_700_000_001,
+                references: Vec::new(),
             }],
             resolution: DiscussionResolution::Open,
             body_changed_since_open: false,
