@@ -2131,7 +2131,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["maintenance", "repack"],
         surface(
             json_discriminators(
-                opaque_schemas(GC_MUTATION, &["maintenance repack"]),
+                documented_schemas(GC_MUTATION, &["maintenance repack"]),
                 &[json_discriminator(
                     Some("maintenance repack"),
                     "output_kind",

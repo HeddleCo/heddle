@@ -1515,6 +1515,18 @@ export interface MaintenanceRefreshSchema {
   unpaired_packs_pruned: number;
 }
 
+export interface MaintenanceRepackSchema {
+  bytes_reclaimed: number;
+  bytes_repacked: number;
+  duration_ms: number;
+  idempotency_status?: string | null;
+  objects_repacked: number;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "maintenance_repack";
+  replayed?: boolean | null;
+}
+
 export interface MaterializedThreadInfo {
   file_count: number;
   name: string;
@@ -3386,6 +3398,7 @@ export interface HeddleVerbOutputs {
   "maintenance gc": MaintenanceGcSchema;
   "maintenance inspect": MaintenanceInspectSchema;
   "maintenance refresh": MaintenanceRefreshSchema;
+  "maintenance repack": MaintenanceRepackSchema;
   "oplog recover": OplogRecoverSchema;
   pull: PullSchema;
   push: PushSchema;
@@ -3549,6 +3562,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "maintenance gc",
   "maintenance inspect",
   "maintenance refresh",
+  "maintenance repack",
   "oplog recover",
   "pull",
   "push",

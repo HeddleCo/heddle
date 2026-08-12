@@ -833,9 +833,17 @@ fn try_spawn_local_helper_with(
     state_path: &Path,
     spawn: impl FnOnce() -> Result<(), HeddleError>,
 ) -> Result<bool, HeddleError> {
+    try_spawn_local_helper_with_probe(state_path, spawn, endpoint_is_current_and_live)
+}
+
+fn try_spawn_local_helper_with_probe(
+    state_path: &Path,
+    spawn: impl FnOnce() -> Result<(), HeddleError>,
+    endpoint_is_live: impl Fn(&Path) -> bool,
+) -> Result<bool, HeddleError> {
     let _start_lease = objects::lock::RepoLock::at(helper_start_lock_path(state_path)).write()?;
     let endpoint_path = helper_endpoint_path(state_path);
-    if endpoint_is_current_and_live(&endpoint_path) {
+    if endpoint_is_live(&endpoint_path) {
         return Ok(true);
     }
 
@@ -852,7 +860,7 @@ fn try_spawn_local_helper_with(
         spawn()?;
     }
 
-    Ok(endpoint_is_current_and_live(&endpoint_path))
+    Ok(endpoint_is_live(&endpoint_path))
 }
 
 fn try_establish_local_helper_baseline(
@@ -1377,7 +1385,7 @@ mod tests {
     use super::{
         HELPER_HOST, HELPER_PROTOCOL_VERSION, helper_endpoint_path,
         local_helper_binary_for_executable, shutdown_local_monitor_helper, subtree_has_changes,
-        try_spawn_local_helper_with,
+        try_spawn_local_helper_with, try_spawn_local_helper_with_probe,
     };
     use crate::{DirectoryCacheEntry, WorktreeIndex};
 
@@ -1451,16 +1459,26 @@ mod tests {
     }
 
     #[test]
-    fn cold_start_never_polls_for_worker_readiness() {
+    fn cold_start_checks_worker_readiness_only_before_and_after_spawn() {
         let temp = TempDir::new().unwrap();
         let state_path = temp.path().join(".heddle/state/fsmonitor.toml");
-        let started = std::time::Instant::now();
-        let ready = try_spawn_local_helper_with(&state_path, || Ok(())).unwrap();
+        let readiness_checks = AtomicUsize::new(0);
+        let spawns = AtomicUsize::new(0);
+        let ready = try_spawn_local_helper_with_probe(
+            &state_path,
+            || {
+                spawns.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_| {
+                readiness_checks.fetch_add(1, Ordering::SeqCst);
+                false
+            },
+        )
+        .unwrap();
         assert!(!ready);
-        assert!(
-            started.elapsed() < std::time::Duration::from_millis(100),
-            "cold spawn should return immediately instead of polling"
-        );
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        assert_eq!(readiness_checks.load(Ordering::SeqCst), 2);
     }
 
     #[test]
