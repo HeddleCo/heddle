@@ -113,6 +113,45 @@ pub struct DiscussionTurn {
     pub body: String,
     /// Unix epoch seconds.
     pub posted_at: i64,
+    /// Structured references occupying byte spans within [`Self::body`].
+    #[serde(default)]
+    pub references: Vec<DiscussionReference>,
+}
+
+/// One durable entity reference embedded in a discussion turn.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscussionReference {
+    /// Entity category used to resolve [`Self::id`].
+    pub kind: DiscussionReferenceKind,
+    /// Stable identity of the referent, never its display label.
+    pub id: String,
+    /// State where a file, line, or symbol reference was known to be valid.
+    pub at: Option<StateId>,
+    /// Inclusive UTF-8 byte offset into the turn body.
+    pub start: u32,
+    /// Exclusive UTF-8 byte offset into the turn body.
+    pub end: u32,
+}
+
+/// Kind of entity named by a [`DiscussionReference`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiscussionReferenceKind {
+    /// Human user identity.
+    User,
+    /// Agent identity.
+    Agent,
+    /// Spool identity.
+    Spool,
+    /// Thread identity.
+    Thread,
+    /// State identity.
+    State,
+    /// File path relative to a state.
+    File,
+    /// File and line identity relative to a state.
+    Line,
+    /// File and symbol identity relative to a state.
+    Symbol,
 }
 
 impl DiscussionTurn {
@@ -180,6 +219,7 @@ mod tests {
                 author: sample_principal(),
                 body: "why does this branch exist?".into(),
                 posted_at: 1_700_000_000,
+                references: Vec::new(),
             }],
             resolution: DiscussionResolution::Open,
             body_changed_since_open: false,
