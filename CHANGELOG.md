@@ -30,6 +30,49 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   with the API-owned request/event types, and resume from the last delivered
   event ID after an explicit disconnect error.
 
+- **Symbol-level semantic diff.** `heddle semantic diff` reports added,
+  removed, modified, and moved symbols from attached semantic indexes, and
+  persisted per-file imports, references, and occurrences keep later queries
+  parse-free.
+
+- **Structured conflict regions.** Merge conflicts now persist independently
+  addressable regions with source-state provenance, exact hunk hashes, and
+  symbol-aware IDs, and `resolve` text and JSON expose one richly attributed
+  ConflictResolved record per region.
+
+- **Background pack repack and compact native storage.** `heddle maintenance
+  repack` consolidates loose objects behind a typed-hash-verified cutover
+  with JSON metrics; tree and state metadata pack into compact columnar
+  frames, and readers prefer hot-tier records over solid frames.
+
+- **Opt-in delta search.** Independent `[storage.delta_search]` settings for
+  import, snapshot, and GC default to off, so delta compression stays a
+  measured opt-in rather than a synchronous import cost.
+
+- **Canonical manifest encodings and fsck rules.** `heddle-object-model`
+  defines the content-addressed manifest node, binding, and extent encodings
+  together with 26 named integrity rules. The live write path is not yet
+  cut over.
+
+- **`try` refuses Heddle globals after `--`.** Canonical Heddle options
+  placed after `try --` now fail with a typed usage error and the exact
+  corrected command; `--allow-heddle-global-args` is the explicit escape.
+
+- **Abandoned threads stay out of the default list.** `thread list` hides
+  abandoned threads unless `--include-abandoned` is set, and
+  `thread cleanup --abandoned` prunes leftover live refs without erasing
+  history.
+
+- **Lossy Git residual closures.** Import captures the full residual object
+  closure for every non-reconstructable commit so a fresh export reproduces
+  commits, trees, blobs, and annotated tags without a Git mirror, and fsck
+  treats a missing residual as a hard error.
+
+- **Offline provenance verification.** `heddle verify --provenance` and
+  `heddle fsck --thorough --provenance` check content integrity,
+  domain-tagged authorship, registry identity, and review signatures, and
+  emit only exact fail-closed statuses.
+
 ### Fixed
 
 - **Large captures avoid repository-wide semantic graph rebuilds.** Captures
@@ -41,6 +84,54 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   into a clone now restores its thread metadata, so `thread list` exposes its
   integration target and `land` reaches the real merge verdict instead of
   diagnosing the pulled ref as Git damage.
+
+- **Native capture honours `.gitignore`.** Status and capture evaluate the
+  ordered union of root `.gitignore`, `.heddle/info/exclude`, and
+  `.heddleignore`, and editing those policy files invalidates the change
+  monitor so narrowed rules re-surface previously ignored paths.
+
+- **Context and discuss no longer invent a Heddle store.** Read-only
+  `context` and `discuss` commands in a plain Git clone report an absent
+  store instead of bootstrapping `.heddle`, and Git-overlay writes warn once
+  that the record is local to that working copy.
+
+- **Clone JSON failures stay terminal.** An explicit `--output json` or
+  `json-compact` clone that disconnects now reaches the structured error
+  renderer with a typed non-zero exit instead of treating the closed pipe as
+  success.
+
+- **Land reports typed eligibility blockers.** A blocked `land` names the
+  failed check, lifecycle and policy state, merge relation, and affected
+  paths, and no longer suggests a no-op `sync` when nothing can change the
+  blocker.
+
+- **Device approval waits for the authorization expiry.** Device login no
+  longer dies on the generic 30-second RPC deadline; the wait is bounded by
+  the server-issued authorization lifetime and names that budget when it
+  expires.
+
+- **Codex capture attribution reads the session model.** Capture records the
+  effective Codex `turn_context.model` from the matching rollout instead of
+  leaving agent attribution empty.
+
+- **Auth introspection honours `HEDDLE_CREDENTIAL`.** `whoami`,
+  `auth derive-agent`, and `auth create-service-token` resolve through the
+  same credential path as `auth status`, including env-only credentials when
+  the server is unreachable.
+
+- **User config no longer shadows repository discovery.** An ancestor
+  `.heddle` directory is treated as a repository only when it contains
+  repository members, so `~/.heddle` config no longer blocks `init` or
+  `status` in a home-directory checkout.
+
+- **Git-overlay clones adopt advertised Git-lane authority.** Hosted clones
+  whose bootstrap ref is a Git lane initialize as Git Overlay with the
+  external Git object store, including interrupted-clone recovery, instead
+  of opening as native Heddle.
+
+- **Legacy Git tree modes normalize on import.** Non-canonical regular-file
+  modes such as `100664` and `100775` map to `100644` and `100755`, so
+  historical repositories like early `git.git` adopt instead of failing.
 
 ### Changed
 
@@ -90,6 +181,35 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 - **Deferred apt publication no longer exposes its signing key.** Release CI
   stops building and signing an unused apt pool until the publisher repository
   and coordinated release path exist.
+
+- **Clone and status stop doing work they do not need.** Clone publishes
+  with one verified durability commit, skips the fsmonitor helper, and
+  consumes folded bootstrap refs when the server advertises them; status
+  and capture scale with changed paths and are gated at 100k tracked files.
+
+- **Reachable Iroh peers skip the relay.** Hosted connections try signed
+  direct addresses first and only build a relay-enabled endpoint after that
+  bounded attempt fails.
+
+- **Timeline operations pack and journal.** Canonical timeline operations
+  live in domain-separated packs, derived indexes append instead of
+  rewriting, and `maintenance gc` consolidates and reclaims them.
+
+- **Fsck walks trees iteratively.** Missing-tree integrity events now carry
+  parent and path context, and deep-tree walks no longer recurse on the
+  call stack.
+
+### Security
+
+- **State signatures are domain-tagged.** State hashes are signed and
+  verified as `hd-state-sig-v1` and bare-hash signatures are rejected.
+  Pre-tag evidence is classified as Legacy and re-signed on the next
+  attachment write when the matching key is still available.
+
+- **Authorship verifies against a fail-closed key-binding registry.**
+  Only registered, unrevoked signing keys count as known actors; empty or
+  non-matching registries fail closed. Registries travel on the wire as
+  content-addressed `KeyBinding` objects and hash mismatches are rejected.
 
 ## 0.11.0 - 2026-07-31
 
