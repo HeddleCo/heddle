@@ -330,6 +330,8 @@ mod output_kind_invariant;
 mod output_kind_runtime;
 #[path = "cli_integration/output_mode_no_auto.rs"]
 mod output_mode_no_auto;
+#[path = "cli_integration/perf_adopt.rs"]
+mod perf_adopt;
 #[path = "cli_integration/perf_core_loop/mod.rs"]
 mod perf_core_loop;
 #[path = "cli_integration/perf_trace.rs"]

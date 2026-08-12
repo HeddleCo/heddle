@@ -2315,6 +2315,7 @@ version = "0.11.0"
 dependencies = [
  "heddle-ingest",
  "heddle-objects",
+ "heddle-perf-contract",
  "heddle-refs",
  "heddle-repo",
  "heddle-wire",

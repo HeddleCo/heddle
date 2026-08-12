@@ -3702,6 +3702,7 @@ pub fn copy_reachable_objects(
     // this needs pack identity/stream planning, route it through the Sley
     // reachable-pack facade gate instead of adding a Heddle-local planner.
     let roots = roots.into_iter().collect::<Vec<_>>();
+    heddle_perf_contract::record_git_reachable_copy_operation();
     target.copy_reachable_from(source, &roots).map_err(git_err)
 }
 
@@ -3736,6 +3737,7 @@ pub fn copy_reachable_objects_excluding(
     // TODO: This local incremental transfer already delegates pack installation
     // to Sley. Keep future reachable-pack planning Sley-gated here too; Heddle
     // should not grow its own exclusion-aware pack planner.
+    heddle_perf_contract::record_git_reachable_copy_operation();
     sley::plumbing::sley_odb::install_reachable_pack_excluding(
         source.objects().as_ref(),
         target.objects().as_ref(),

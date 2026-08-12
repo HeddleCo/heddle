@@ -81,6 +81,13 @@ jobs:
             bounded_history_reads_release_contract -- --ignored --nocapture \
             2>&1 | tee history-contract.txt
 
+      - name: Enforce adopt no-eager-mirror contract
+        run: |
+          set -o pipefail
+          HEDDLE_PROFILE=1 cargo test --locked --release -p heddle-cli \
+            --test cli_integration adopt_no_eager_mirror_release_contract \
+            -- --ignored --nocapture 2>&1 | tee adopt-contract.txt
+
       - name: Enforce hosted endpoint close contract
         run: |
           set -o pipefail
@@ -120,6 +127,12 @@ jobs:
             grep -E '^(HOSTED_CLOSE|HOSTED CLOSE GATE)' \
               hosted-close-contract.txt 2>/dev/null || true
             echo '```'
+            echo
+            echo '## Adopt no-eager-mirror release contract'
+            echo
+            echo '```text'
+            grep -E '^(ADOPT_GATE|ADOPT GATE)' adopt-contract.txt 2>/dev/null || true
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload release evidence
@@ -131,6 +144,7 @@ jobs:
             release-compile.txt
             core-loop-contract.txt
             history-contract.txt
+            adopt-contract.txt
             hosted-close-contract.txt
 
       - name: sccache stats

@@ -172,6 +172,10 @@ fn record_structural_counters() {
             ),
             ProfileField::count("ancestors_visited", counters.ancestors_visited),
             ProfileField::count("history_objects_decoded", counters.history_objects_decoded),
+            ProfileField::count(
+                "git_reachable_copy_operations",
+                counters.git_reachable_copy_operations,
+            ),
         ],
     );
 }
