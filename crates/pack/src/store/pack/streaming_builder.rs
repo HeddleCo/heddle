@@ -59,6 +59,7 @@
 //!   the second pass.
 
 use std::{
+    collections::HashSet,
     fs::{File, OpenOptions},
     io::{self, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
     path::PathBuf,
@@ -136,6 +137,7 @@ pub struct StreamingPackBuilder<W: Write + Read + Seek> {
     /// Logical append position. Avoids flushing the buffered writer before
     /// every object just to ask the file for its current offset.
     pack_position: u64,
+    record_count: u64,
     object_count: u64,
     declared_object_count: Option<u64>,
     total_uncompressed: u64,
@@ -313,6 +315,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
             pack_writer: Some(BufWriter::new(pack_writer)),
             header_offset,
             pack_position: header_offset + header_bytes.len() as u64,
+            record_count: 0,
             object_count: 0,
             declared_object_count,
             total_uncompressed: 0,
@@ -509,18 +512,100 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
             }
         }
 
-        // Append the index entry (id || u64 BE offset) to the bucket
-        // matching the id's first inner byte. The bucket file is opened
-        // lazily so a sparse pack only creates files it actually uses.
-        let bucket_idx = bucket_index_for(&id);
-        let bucket = self.get_or_open_bucket(bucket_idx)?;
-        let mut idx_entry = Vec::with_capacity(33 + 8);
-        id.encode_tagged(&mut idx_entry);
-        idx_entry.extend_from_slice(&offset.to_be_bytes());
-        bucket.write_all(&idx_entry).map_err(StoreError::from)?;
-
+        self.add_index_entry(id, offset)?;
+        self.record_count += 1;
         self.object_count += 1;
         Ok(())
+    }
+
+    /// Add one compact frame shared by several logical tree or state ids.
+    ///
+    /// `stored_data` is either the raw frame or a zstd frame whose decoded
+    /// length is `uncompressed_size`. Every id is indexed at the same physical
+    /// record; [`super::PackReader`] verifies and decodes the complete frame
+    /// before selecting the requested logical object.
+    pub fn add_shared_frame(
+        &mut self,
+        ids: &[PackObjectId],
+        obj_type: ObjectType,
+        uncompressed_size: usize,
+        stored_data: &[u8],
+    ) -> Result<()> {
+        if ids.is_empty() {
+            return Err(StoreError::InvalidObject(
+                "compact frame must contain at least one object".to_string(),
+            ));
+        }
+        if !matches!(obj_type, ObjectType::Tree | ObjectType::State) {
+            return Err(StoreError::InvalidObject(
+                "shared compact frames may contain only trees or states".to_string(),
+            ));
+        }
+        let unique = ids.iter().copied().collect::<HashSet<_>>();
+        if unique.len() != ids.len() {
+            return Err(StoreError::InvalidObject(
+                "compact frame contains duplicate object ids".to_string(),
+            ));
+        }
+        if ids.iter().any(|id| {
+            !matches!(
+                (obj_type, id),
+                (ObjectType::Tree, PackObjectId::Hash(_))
+                    | (ObjectType::State, PackObjectId::StateId(_))
+            )
+        }) {
+            return Err(StoreError::InvalidObject(
+                "compact frame id kind does not match its object type".to_string(),
+            ));
+        }
+
+        let entry_start = self.pack_position;
+        let offset = entry_start
+            .checked_sub(self.header_offset)
+            .expect("header offset should precede compact frame");
+        let mut header = Vec::with_capacity(48);
+        ids[0].encode_tagged(&mut header);
+        super::varint::encode_type_and_size(obj_type, uncompressed_size as u64, &mut header);
+        super::varint::encode_varint(stored_data.len() as u64, &mut header);
+        let writer = self
+            .pack_writer
+            .as_mut()
+            .expect("add_shared_frame called after finalize");
+        writer.write_all(&header).map_err(StoreError::from)?;
+        writer.write_all(stored_data).map_err(StoreError::from)?;
+        self.pack_position = self
+            .pack_position
+            .checked_add((header.len() + stored_data.len()) as u64)
+            .ok_or_else(|| {
+                StoreError::InvalidObject("streaming pack position overflow".to_string())
+            })?;
+        self.total_uncompressed = self
+            .total_uncompressed
+            .saturating_add(uncompressed_size as u64);
+        self.total_compressed = self
+            .total_compressed
+            .saturating_add(stored_data.len() as u64);
+        self.record_count = self
+            .record_count
+            .checked_add(1)
+            .ok_or_else(|| StoreError::InvalidObject("pack record count overflow".to_string()))?;
+        for id in ids {
+            self.add_index_entry(*id, offset)?;
+        }
+        self.object_count = self
+            .object_count
+            .checked_add(ids.len() as u64)
+            .ok_or_else(|| StoreError::InvalidObject("pack object count overflow".to_string()))?;
+        Ok(())
+    }
+
+    fn add_index_entry(&mut self, id: PackObjectId, offset: u64) -> Result<()> {
+        let bucket_idx = bucket_index_for(&id);
+        let bucket = self.get_or_open_bucket(bucket_idx)?;
+        let mut entry = Vec::with_capacity(33 + 8);
+        id.encode_tagged(&mut entry);
+        entry.extend_from_slice(&offset.to_be_bytes());
+        bucket.write_all(&entry).map_err(StoreError::from)
     }
 
     fn get_or_open_bucket(&mut self, idx: usize) -> Result<&mut BufWriter<File>> {
@@ -602,10 +687,10 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
             .into_inner()
             .map_err(|e| StoreError::from(std::io::Error::other(e.to_string())))?;
         if let Some(expected) = self.declared_object_count {
-            if expected != self.object_count {
+            if expected != self.record_count {
                 return Err(StoreError::InvalidObject(format!(
-                    "streaming pack declared {expected} object(s) but added {}",
-                    self.object_count
+                    "streaming pack declared {expected} record(s) but added {}",
+                    self.record_count
                 )));
             }
         } else {
@@ -613,7 +698,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
                 .seek(SeekFrom::Start(self.header_offset))
                 .map_err(StoreError::from)?;
             let mut header_bytes = Vec::with_capacity(16);
-            write_container_header(&mut header_bytes, pack_container_spec(), self.object_count);
+            write_container_header(&mut header_bytes, pack_container_spec(), self.record_count);
             writer.write_all(&header_bytes).map_err(StoreError::from)?;
         }
 
@@ -936,6 +1021,93 @@ mod tests {
     }
 
     #[test]
+    fn shared_compact_tree_frame_reconstructs_each_indexed_object() {
+        use crate::object::{Tree, TreeEntry};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (mut builder, _, index_path) = fresh_builder(&tmp);
+        let blob = deterministic_hash(0x33);
+        let trees = vec![
+            Tree::from_entries(vec![TreeEntry::file("a", blob, false).unwrap()]),
+            Tree::from_entries(vec![TreeEntry::file("b", blob, true).unwrap()]),
+        ];
+        let ids = trees
+            .iter()
+            .map(|tree| PackObjectId::Hash(tree.hash()))
+            .collect::<Vec<_>>();
+        let frame = heddle_object_model::compact::encode_tree_frame(&trees).unwrap();
+        builder
+            .add_shared_frame(&ids, ObjectType::Tree, frame.len(), &frame)
+            .unwrap();
+        let (pack, index, stats) = finalize_cursor(builder, &index_path);
+        let reader = PackReader::from_bytes(pack, index).unwrap();
+
+        assert_eq!(stats.object_count, 2);
+        assert_eq!(
+            reader.encoded_payload_bytes(ObjectType::Tree).unwrap(),
+            frame.len() as u64
+        );
+        let hosted = ids
+            .iter()
+            .zip(&trees)
+            .map(|(id, tree)| {
+                (
+                    *id,
+                    ObjectType::Tree,
+                    rmp_serde::to_vec_named(tree).unwrap().len() as u64,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            reader
+                .copy_hosted_encoded_subset(&hosted)
+                .unwrap()
+                .is_none(),
+            "repository-local compact frames must use the hosted fallback"
+        );
+        for (id, tree) in ids.iter().zip(&trees) {
+            let (object_type, bytes) = reader.get_object(id).unwrap().unwrap();
+            assert_eq!(object_type, ObjectType::Tree);
+            assert_eq!(bytes, rmp_serde::to_vec_named(tree).unwrap());
+        }
+    }
+
+    #[test]
+    fn corrupt_compact_frame_byte_invalidates_every_contained_object() {
+        use crate::object::{Tree, TreeEntry};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (mut builder, _, index_path) = fresh_builder(&tmp);
+        let blob = deterministic_hash(0x44);
+        let trees = vec![
+            Tree::from_entries(vec![TreeEntry::file("a", blob, false).unwrap()]),
+            Tree::from_entries(vec![TreeEntry::file("b", blob, true).unwrap()]),
+        ];
+        let ids = trees
+            .iter()
+            .map(|tree| PackObjectId::Hash(tree.hash()))
+            .collect::<Vec<_>>();
+        let mut frame = heddle_object_model::compact::encode_tree_frame(&trees).unwrap();
+        let corrupt_at = frame.len() / 2;
+        frame[corrupt_at] ^= 0x01;
+        builder
+            .add_shared_frame(&ids, ObjectType::Tree, frame.len(), &frame)
+            .unwrap();
+        let (pack, index, _) = finalize_cursor(builder, &index_path);
+        let reader = PackReader::from_bytes(pack, index).unwrap();
+
+        for id in ids {
+            let error = reader.get_object(&id).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("compact frame checksum mismatch"),
+                "unexpected error for {id:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn mixed_hash_and_changeid_ids_all_retrievable() {
         let tmp = tempfile::TempDir::new().unwrap();
         let (mut b, _, idx_path) = fresh_builder(&tmp);
@@ -1225,7 +1397,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("streaming pack declared 2 object(s) but added 1")
+                .contains("streaming pack declared 2 record(s) but added 1")
         );
     }
 

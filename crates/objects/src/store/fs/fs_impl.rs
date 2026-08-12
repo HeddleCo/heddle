@@ -296,12 +296,7 @@ impl FsStore {
 /// installed ids regardless of how the bytes reach the store.
 fn validate_and_list_pack(reader: &crate::store::pack::PackReader) -> Result<Vec<PackObjectId>> {
     let ids = reader.list_ids()?;
-    for id in &ids {
-        let Some((obj_type, data)) = reader.get_object_bytes(id)? else {
-            continue;
-        };
-        validate_pack_entry(id, obj_type, data.as_ref())?;
-    }
+    reader.visit_objects(|id, object_type, data| validate_pack_entry(&id, object_type, data))?;
     Ok(ids)
 }
 
@@ -310,23 +305,25 @@ fn state_entries_from_pack(
     ids: &[PackObjectId],
 ) -> Result<Vec<(StateId, Vec<u8>)>> {
     let mut states = Vec::new();
-    for id in ids {
-        let PackObjectId::StateId(change_id) = id else {
-            continue;
-        };
-        let Some((obj_type, data)) = reader.get_object(id)? else {
-            continue;
-        };
-        if obj_type != ObjectType::State {
-            return Err(HeddleError::InvalidObject(format!(
-                "pack id {} is indexed as {:?}, expected State",
-                change_id.to_string_full(),
-                obj_type
-            )));
+    let expected = ids.iter().copied().collect::<HashSet<_>>();
+    reader.visit_objects(|id, object_type, data| {
+        if !expected.contains(&id) {
+            return Err(HeddleError::InvalidObject(
+                "pack visitor yielded an unindexed object".into(),
+            ));
         }
-        validate_state_serialized(&data, *change_id)?;
-        states.push((*change_id, data));
-    }
+        if let PackObjectId::StateId(state_id) = id {
+            if object_type != ObjectType::State {
+                return Err(HeddleError::InvalidObject(format!(
+                    "pack id {} is indexed as {object_type:?}, expected State",
+                    state_id.to_string_full()
+                )));
+            }
+            validate_state_serialized(data, state_id)?;
+            states.push((state_id, data.to_vec()));
+        }
+        Ok(())
+    })?;
     Ok(states)
 }
 
@@ -335,12 +332,13 @@ fn attachment_entries_from_pack(
     ids: &[PackObjectId],
 ) -> Result<Vec<StateAttachment>> {
     let mut attachments = Vec::new();
-    for id in ids {
-        let Some((ObjectType::StateAttachment, data)) = reader.get_object(id)? else {
-            continue;
-        };
-        attachments.push(rmp_serde::from_slice(&data)?);
-    }
+    let expected = ids.iter().copied().collect::<HashSet<_>>();
+    reader.visit_objects(|id, object_type, data| {
+        if expected.contains(&id) && object_type == ObjectType::StateAttachment {
+            attachments.push(rmp_serde::from_slice(data)?);
+        }
+        Ok(())
+    })?;
     Ok(attachments)
 }
 
@@ -1448,13 +1446,10 @@ impl ObjectStore for FsStore {
         let reader = crate::store::pack::PackReader::from_slice(pack_data, index_data)?;
         let ids = validate_and_list_pack(&reader)?;
         let state_entries = state_entries_from_pack(&reader, &ids)?;
+        let attachment_entries = attachment_entries_from_pack(&reader, &ids)?;
         self.install_pack_files(pack_data, index_data)?;
         self.write_packed_state_mirrors_batch(state_entries)?;
-        for id in &ids {
-            let Some((ObjectType::StateAttachment, data)) = reader.get_object(id)? else {
-                continue;
-            };
-            let attachment: StateAttachment = rmp_serde::from_slice(&data)?;
+        for attachment in attachment_entries {
             self.put_state_attachment(&attachment)?;
         }
         self.clear_recent_object_caches();
@@ -1539,13 +1534,7 @@ impl ObjectStore for FsStore {
             let index = path.with_extension("idx");
             let valid = crate::store::pack::PackReader::open(&path, &index)
                 .and_then(|reader| {
-                    for id in reader.list_ids()? {
-                        let (kind, bytes) = reader.get_object(&id)?.ok_or_else(|| {
-                            HeddleError::InvalidObject(format!("pack index lost object {id:?}"))
-                        })?;
-                        validate_pack_entry(&id, kind, &bytes)?;
-                    }
-                    Ok(())
+                    reader.visit_objects(|id, kind, bytes| validate_pack_entry(&id, kind, bytes))
                 })
                 .is_ok();
             if !valid {

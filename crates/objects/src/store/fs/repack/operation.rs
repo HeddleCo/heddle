@@ -8,6 +8,7 @@ use super::{
         fs_io::list_hashes_from_dir,
         fs_paths::{blobs_dir, packs_dir, trees_dir},
     },
+    compact::add_compact_metadata,
     cutover::{
         acquire_repack_lock, cutover, file_len, hash_file, object_file_len, preserve_commit_markers,
     },
@@ -16,17 +17,17 @@ use super::{
 use crate::store::{
     HeddleError, ObjectStore, Result,
     pack::{
-        ObjectType, PackObjectId, RepackContext, RepackError, RepackInventory, RepackOperation,
-        RepackOutcome, StreamingPackBuilder,
+        ObjectType, PackObjectId, PackReader, RepackContext, RepackError, RepackInventory,
+        RepackOperation, RepackOutcome, StreamingPackBuilder,
     },
 };
 
-/// Existing LMPK encoder wired behind the generic background repack seam.
+/// Compact native encoder wired behind the generic background repack seam.
 ///
 /// It streams one object at a time (bounded memory), verifies every typed id
 /// and the exact expected object set, then installs the immutable replacement
-/// before retiring source packs under the pack-manager write lock. S2/S4
-/// replace this operation; the scheduler itself has no native-pack knowledge.
+/// before retiring source packs under the pack-manager write lock. The
+/// scheduler itself has no native-pack knowledge.
 pub struct FsRepackOperation {
     store: FsStore,
     #[cfg(test)]
@@ -161,39 +162,49 @@ impl FsRepackOperation {
             compression,
             staging.buckets.clone(),
         )?;
-        let loose_tree_set = snapshot.loose_trees.iter().copied().collect::<HashSet<_>>();
         let mut expected = HashSet::new();
+        let mut state_ids = Vec::new();
+        let mut tree_hashes = Vec::new();
         #[cfg(test)]
-        let mut first = true;
+        let mut corrupt_first = self.corrupt_first_object;
+        #[cfg(not(test))]
+        let mut corrupt_first = false;
+        let mut logical_bytes = 0u64;
 
-        for id in &snapshot.ids {
-            if !expected.insert(*id) {
-                continue;
+        for (pack, index) in &snapshot.old_pack_files {
+            let reader = PackReader::open(pack, index)?;
+            let mut checkpoint_error = None;
+            let visit = reader.visit_objects(|id, object_type, data| {
+                if !expected.insert(id) {
+                    return Ok(());
+                }
+                match (id, object_type) {
+                    (PackObjectId::Hash(hash), ObjectType::Tree) => tree_hashes.push(hash),
+                    (PackObjectId::StateId(state_id), ObjectType::State) => {
+                        state_ids.push(state_id);
+                    }
+                    _ => {
+                        let mut data = data.to_vec();
+                        if corrupt_first {
+                            data.push(0xff);
+                            corrupt_first = false;
+                        }
+                        logical_bytes = logical_bytes.saturating_add(data.len() as u64);
+                        builder.add_id(id, object_type, data)?;
+                    }
+                }
+                if let Err(error) = context.checkpoint(data.len() as u64) {
+                    checkpoint_error = Some(error);
+                    return Err(HeddleError::InvalidObject(
+                        "repack source walk interrupted".to_string(),
+                    ));
+                }
+                Ok(())
+            });
+            if let Some(error) = checkpoint_error {
+                return Err(BuildError::Cancelled(error));
             }
-            let Some((object_type, mut data)) = self.read_snapshot_object(id)? else {
-                return Err(HeddleError::InvalidObject(format!(
-                    "repack source object disappeared: {id:?}"
-                ))
-                .into());
-            };
-            if let PackObjectId::Hash(hash) = id
-                && object_type == ObjectType::Tree
-                && loose_tree_set.contains(hash)
-                && let Some(loose) = ObjectStore::get_tree_serialized(&self.store, hash)?
-            {
-                data = loose;
-            }
-            #[cfg(test)]
-            if self.corrupt_first_object && first {
-                data.push(0xff);
-            }
-            #[cfg(test)]
-            {
-                first = false;
-            }
-            let bytes = data.len() as u64;
-            builder.add_id(*id, object_type, data)?;
-            context.checkpoint(bytes).map_err(BuildError::Cancelled)?;
+            visit?;
         }
         for hash in &snapshot.loose_blobs {
             let id = PackObjectId::Hash(*hash);
@@ -204,31 +215,26 @@ impl FsRepackOperation {
                 let data = blob.content().to_vec();
                 let bytes = data.len() as u64;
                 builder.add(*hash, ObjectType::Blob, data)?;
+                logical_bytes = logical_bytes.saturating_add(bytes);
                 context.checkpoint(bytes).map_err(BuildError::Cancelled)?;
             }
         }
         for hash in &snapshot.loose_trees {
             let id = PackObjectId::Hash(*hash);
             if expected.insert(id) {
-                let data =
-                    ObjectStore::get_tree_serialized(&self.store, hash)?.ok_or_else(|| {
-                        HeddleError::InvalidObject(format!("loose tree disappeared: {hash}"))
-                    })?;
-                let bytes = data.len() as u64;
-                builder.add(*hash, ObjectType::Tree, data)?;
-                context.checkpoint(bytes).map_err(BuildError::Cancelled)?;
+                tree_hashes.push(*hash);
             }
         }
-        let (_, stats) = builder.finalize()?;
-        Ok((expected, stats.total_uncompressed))
-    }
-
-    fn read_snapshot_object(&self, id: &PackObjectId) -> Result<Option<(ObjectType, Vec<u8>)>> {
-        let manager =
-            self.store.pack_manager().read().map_err(|_| {
-                HeddleError::Config("Failed to acquire pack manager lock".to_string())
-            })?;
-        manager.get_object(id)
+        logical_bytes = logical_bytes.saturating_add(add_compact_metadata(
+            &self.store,
+            &mut builder,
+            &state_ids,
+            &tree_hashes,
+            context,
+            &mut corrupt_first,
+        )?);
+        builder.finalize()?;
+        Ok((expected, logical_bytes))
     }
 }
 
