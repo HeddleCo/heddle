@@ -3,7 +3,11 @@
 
 use std::{fs, path::PathBuf};
 
-use objects::{fs_atomic::write_file_atomic, lock::RepoLock, object::StateId};
+use objects::{
+    fs_atomic::write_file_atomic,
+    lock::RepoLock,
+    object::{ContentHash, StateId},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{Repository, Result};
@@ -15,6 +19,9 @@ pub struct MergeState {
     pub base: Option<StateId>,
     pub conflicts: Vec<String>,
     pub resolved: Vec<String>,
+    /// Content-addressed [`StructuredConflict`](objects::object::StructuredConflict) blob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_conflicts: Option<ContentHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_root: Option<PathBuf>,
 }
@@ -53,6 +60,7 @@ impl MergeStateManager {
         theirs: StateId,
         base: Option<StateId>,
         conflicts: Vec<String>,
+        structured_conflicts: Option<ContentHash>,
     ) -> Result<()> {
         let _lock = self.write_lock()?;
         let state = MergeState {
@@ -61,6 +69,7 @@ impl MergeStateManager {
             base,
             conflicts,
             resolved: Vec::new(),
+            structured_conflicts,
             worktree_root: self.worktree_root.clone(),
         };
         self.write_state(&state)?;
@@ -171,7 +180,7 @@ impl MergeStateManager {
     /// alive, but its "our" side now reflects the just-committed
     /// checkpoint so subsequent `--ours` resolves pull from the latest
     /// WIP rather than the pre-merge baseline. `theirs`, `base`,
-    /// `conflicts`, and `resolved` are preserved untouched.
+    /// `conflicts`, `resolved`, and `structured_conflicts` are preserved untouched.
     pub fn carry_forward(&self, new_ours: StateId) -> Result<MergeState> {
         let _lock = self.write_lock()?;
         let mut state = self
@@ -266,6 +275,7 @@ mod tests {
                 theirs,
                 Some(base),
                 vec!["a.txt".to_string(), "b.txt".to_string()],
+                Some(ContentHash::compute(b"structured-conflicts")),
             )
             .unwrap();
         manager.resolve("a.txt").unwrap();
@@ -275,6 +285,10 @@ mod tests {
         assert_eq!(state.theirs, theirs);
         assert_eq!(state.base, Some(base));
         assert_eq!(state.resolved, vec!["a.txt".to_string()]);
+        assert_eq!(
+            state.structured_conflicts,
+            Some(ContentHash::compute(b"structured-conflicts"))
+        );
     }
 
     #[test]
@@ -288,6 +302,7 @@ mod tests {
                 theirs,
                 None,
                 vec!["a.txt".to_string(), "b.txt".to_string()],
+                None,
             )
             .unwrap();
         let newly_resolved = manager.resolve_all().unwrap();

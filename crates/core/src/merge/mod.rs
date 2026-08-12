@@ -27,7 +27,7 @@ use merge::{
     detect_renames_between_trees, merge_trees,
 };
 use objects::{
-    object::{Attribution, ContentHash, StateId, ThreadName, Tree},
+    object::{Attribution, Blob, ContentHash, StateId, ThreadName, Tree},
     store::{ActorPresenceStatus, ActorPresenceStore, ObjectStore},
 };
 use oplog::{OpBatch, OpLogBackend, OpLogRecorder, OpRecord};
@@ -52,12 +52,14 @@ mod apply;
 mod git_commit;
 mod plan;
 mod relation;
+mod structured;
 mod worktree_safety;
 
 pub use apply::apply_merged_tree;
 pub use git_commit::{GitCommitInfo, GitCommitPreview};
 pub use plan::MergePlan;
 pub use relation::{MergeRelation, MergeRelationKind};
+pub use structured::build_conflict_payload;
 pub use worktree_safety::ensure_worktree_clean;
 
 /// CLI merge planning must hydrate partial-clone blobs before content merge.
@@ -1199,11 +1201,19 @@ pub fn merge_thread_into_current_transactional(
     apply_merged_tree(repo, &merge_result.tree)?;
 
     if !merge_result.conflicts.is_empty() {
+        let structured_conflicts = merge_plan
+            .structured_conflicts()
+            .map(|payload| -> Result<ContentHash> {
+                let bytes = payload.encode()?;
+                Ok(repo.store().put_blob(&Blob::new(bytes))?)
+            })
+            .transpose()?;
         merge_manager.start(
             current_state.state_id,
             merge_target_id,
             Some(merge_base_id),
             merge_result.conflicts.clone(),
+            structured_conflicts,
         )?;
         // Conflicted merge: the merge wrote a partial tree containing
         // conflict markers. Reporting either `current..target` or

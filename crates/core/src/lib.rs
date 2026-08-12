@@ -39,6 +39,7 @@ pub mod query;
 pub mod rebase_plan;
 pub mod redact_plan;
 pub mod remote;
+pub mod resolve;
 pub mod resolve_plan;
 pub mod retro_plan;
 pub mod revert_plan;
@@ -246,6 +247,11 @@ pub use remote::{
     resolved_default_remote_name, show_plain_git_remote, show_remote, summarize_pull_outcome,
     summarize_push_outcome, transport_error_message, transport_mismatch_blocker,
     uses_git_overlay_mirror_rpc, uses_local_git_overlay_transport,
+};
+pub use resolve::{
+    AgentReport, ConflictRangeReport, ConflictRegionReport, ConflictResolutionModeReport,
+    ConflictResolutionReport, ConflictSideReport, PrincipalReport, ResolveReport,
+    ResolverAttributionReport, ResolverKindReport,
 };
 pub use resolve_plan::{
     ResolveSideSelection, contains_line_start_conflict_markers, path_is_active_conflict,

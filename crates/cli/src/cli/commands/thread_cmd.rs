@@ -17,7 +17,7 @@ use heddle_core::{
 };
 use objects::{
     fs_ops::remove_path_recursively,
-    object::{StateId, ThreadName},
+    object::{Blob, StateId, ThreadName},
     store::{ActorPresenceStore, ObjectStore, WriterLeaseStatus, WriterLeaseStore},
 };
 use oplog::{OpLogRecorder, OpRecord, ThreadUpdateSnapshots};
@@ -760,11 +760,31 @@ fn persist_refresh_conflict_state(
     base: Option<objects::object::StateId>,
     paths: Vec<String>,
 ) -> Result<()> {
+    let structured_conflicts = if let Some(base_id) = base {
+        let base_tree = tree_for_state(thread_repo, &base_id)?;
+        let our_tree = tree_for_state(thread_repo, &ours)?;
+        let their_tree = tree_for_state(thread_repo, &theirs)?;
+        let payload = heddle_core::merge::build_conflict_payload(
+            thread_repo,
+            (base_id, &base_tree),
+            (ours, &our_tree),
+            (theirs, &their_tree),
+            &tree,
+            &paths,
+        )?;
+        Some(
+            thread_repo
+                .store()
+                .put_blob(&Blob::new(payload.encode()?))?,
+        )
+    } else {
+        None
+    };
     super::merge::apply_merged_tree_external(thread_repo, &tree)?;
     ensure_refresh_conflict_markers_materialized(thread_repo, &ours, &theirs, &paths)?;
     thread_repo
         .merge_state_manager()
-        .start(ours, theirs, base, paths)?;
+        .start(ours, theirs, base, paths, structured_conflicts)?;
     Ok(())
 }
 

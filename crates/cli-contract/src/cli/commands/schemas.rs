@@ -17,7 +17,7 @@
 use std::{collections::BTreeMap, sync::OnceLock};
 
 use anyhow::{Result, anyhow};
-use heddle_core::{DiffReport, FsckReport, QueryReport, StatusReport, VerifyReport};
+use heddle_core::{DiffReport, FsckReport, QueryReport, ResolveReport, StatusReport, VerifyReport};
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
@@ -60,6 +60,7 @@ macro_rules! schema_registry {
 fn report_contract_schema_verbs() -> &'static [&'static str] {
     &[
         QueryReport::CONTRACT.schema_name,
+        ResolveReport::CONTRACT.schema_name,
         DiffReport::CONTRACT.schema_name,
         FsckReport::CONTRACT.schema_name,
         StatusReport::CONTRACT.schema_name,
@@ -151,7 +152,6 @@ schema_registry! {
     (&["watch"], WatchLineSchema),
     (&["integration list", "integration doctor"], IntegrationStatusListSchema),
     (&["try"], TrySchema),
-    (&["resolve"], ResolveSchema),
     (&["maintenance inspect"], MaintenanceInspectSchema),
     (&["maintenance refresh"], MaintenanceRefreshSchema),
     (&["error"], ErrorEnvelopeSchema),
@@ -256,6 +256,9 @@ fn stabilize_land_output_shapes(verb: &str, schema: &mut Value) {
 fn schema_for_report_contract_verb(verb: &str) -> Option<Value> {
     match verb {
         verb if verb == QueryReport::CONTRACT.schema_name => Some((QueryReport::CONTRACT.schema)()),
+        verb if verb == ResolveReport::CONTRACT.schema_name => {
+            Some((ResolveReport::CONTRACT.schema)())
+        }
         verb if verb == DiffReport::CONTRACT.schema_name => Some((DiffReport::CONTRACT.schema)()),
         verb if verb == FsckReport::CONTRACT.schema_name => Some((FsckReport::CONTRACT.schema)()),
         verb if verb == StatusReport::CONTRACT.schema_name => {
@@ -990,20 +993,6 @@ pub struct BlameContextSnippetSchema {
     pub kind: String,
     pub content: String,
     pub revision_count: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ResolveSchema {
-    pub output_kind: String,
-    pub message: Option<String>,
-    pub resolved: Option<Vec<String>>,
-    pub remaining: Option<Vec<String>>,
-    pub conflicts: Option<Vec<String>>,
-    pub continued: Option<bool>,
-    pub continuation_status: Option<String>,
-    pub continuation_message: Option<String>,
-    pub next_action: Option<String>,
-    pub recommended_action: Option<String>,
 }
 
 #[allow(dead_code, clippy::large_enum_variant)]

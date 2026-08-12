@@ -3,7 +3,10 @@
 
 use anyhow::{Result, anyhow};
 use merge::{ConflictLabels, TreeMergeResult, merge_trees};
-use objects::{object::StateId, store::ObjectStore};
+use objects::{
+    object::{StateId, StructuredConflict},
+    store::ObjectStore,
+};
 use repo::{CommitGraphIndex, Repository};
 
 use super::{
@@ -16,6 +19,7 @@ use super::{
 pub struct MergePlan {
     relation: MergeRelation,
     merge_result: Option<TreeMergeResult>,
+    structured_conflicts: Option<StructuredConflict>,
 }
 
 impl MergePlan {
@@ -61,6 +65,10 @@ impl MergePlan {
         self.merge_result.as_ref()
     }
 
+    pub fn structured_conflicts(&self) -> Option<&StructuredConflict> {
+        self.structured_conflicts.as_ref()
+    }
+
     fn build(
         repo: &Repository,
         graph: &mut CommitGraphIndex<'_>,
@@ -79,6 +87,7 @@ impl MergePlan {
                     0,
                 ),
                 merge_result: None,
+                structured_conflicts: None,
             });
         }
 
@@ -92,6 +101,7 @@ impl MergePlan {
                     0,
                 ),
                 merge_result: None,
+                structured_conflicts: None,
             });
         }
 
@@ -121,6 +131,18 @@ impl MergePlan {
         } else {
             MergeRelationKind::Conflicted
         };
+        let structured_conflicts = if merge_result.conflicts.is_empty() {
+            None
+        } else {
+            Some(super::structured::build_conflict_payload(
+                repo,
+                (merge_base_id, &base_tree),
+                (*current_state_id, &current_tree),
+                (*target_state_id, &target_tree),
+                &merge_result.tree,
+                &merge_result.conflicts,
+            )?)
+        };
 
         Ok(Self {
             relation: MergeRelation::new(
@@ -131,6 +153,7 @@ impl MergePlan {
                 merge_result.conflicts.len(),
             ),
             merge_result: Some(merge_result),
+            structured_conflicts,
         })
     }
 }

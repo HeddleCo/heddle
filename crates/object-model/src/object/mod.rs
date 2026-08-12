@@ -33,6 +33,8 @@ mod state_provenance;
 mod state_review;
 mod state_visibility;
 mod structured_conflict;
+#[cfg(test)]
+mod structured_conflict_tests;
 mod suggestion_core;
 mod timeline;
 mod tree;
@@ -111,7 +113,7 @@ pub use state_visibility::{
     StateVisibilityError,
 };
 pub use structured_conflict::{
-    ConflictError, ConflictResolution, ConflictSide, ConflictSymbol, StructuredConflict,
+    ConflictError, ConflictRange, ConflictRegion, ConflictSide, StructuredConflict,
 };
 pub use suggestion_core::{
     ContextSuggestion, ContextSuggestionTier, HIGH_SUGGESTION_THRESHOLD,
