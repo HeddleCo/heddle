@@ -239,6 +239,7 @@ mod tests {
                 author: objects::object::Principal::new("a", "a@x"),
                 body: "body".into(),
                 posted_at: 1_700_000_000,
+                references: Vec::new(),
             }],
             resolution: DiscussionResolution::Open,
             body_changed_since_open: false,

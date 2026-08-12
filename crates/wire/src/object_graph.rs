@@ -1875,6 +1875,7 @@ mod tests {
                 author: principal,
                 body: "Should this sync?".to_string(),
                 posted_at: 1_782_400_000,
+                references: Vec::new(),
             }],
             resolution: DiscussionResolution::Open,
             body_changed_since_open: false,

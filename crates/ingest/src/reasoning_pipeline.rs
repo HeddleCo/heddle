@@ -37,7 +37,7 @@ use std::{
 
 use objects::{
     object::{ContentHash, EntryType},
-    store::ObjectStore,
+    store::ObjectSource,
 };
 use repo::Repository;
 use tracing::{debug, info, warn};
@@ -238,13 +238,19 @@ impl<'a> ReasoningPipeline<'a> {
             .emit_annotations
             .then(|| ReasoningEmitter::new(self.repo, self.sha_map));
         let mut preview = Vec::new();
-        let mut seen_commits: HashMap<String, crate::git_walk::CommitEntry> = HashMap::new();
+        // Cache every CommitEntry we parse during this run. The pipeline
+        // receives an arbitrary SHA list (often sorted hex, not topo), so
+        // we fill the cache on miss for both the current commit and its
+        // first parent. That means each git commit is `read_commit`'d at
+        // most once per run — never re-parsed solely to learn the parent
+        // tree for `changed_files`.
+        let mut commit_cache: HashMap<String, crate::git_walk::CommitEntry> = HashMap::new();
 
         let mut last_progress = 0usize;
         for (idx, sha) in git_shas.iter().enumerate() {
             self.stats.commits_scanned += 1;
 
-            let commit = match self.git.read_commit(sha) {
+            let commit = match self.cached_read_commit(sha, &mut commit_cache) {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(sha, error = %e, "read_commit failed, skipping");
@@ -253,11 +259,23 @@ impl<'a> ReasoningPipeline<'a> {
                 }
             };
 
-            let parent_commit = commit
-                .parents
-                .first()
-                .and_then(|parent| seen_commits.get(parent));
-            let changed = match self.changed_files(&commit, parent_commit) {
+            let parent_commit = match commit.parents.first() {
+                Some(parent_sha) => match self.cached_read_commit(parent_sha, &mut commit_cache) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        warn!(
+                            sha,
+                            parent = %parent_sha,
+                            error = %e,
+                            "read_commit(parent) failed, skipping"
+                        );
+                        self.stats.skipped_git_errors += 1;
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            let changed = match self.changed_files(&commit, parent_commit.as_ref()) {
                 Ok(v) => v,
                 Err(PipelineFileError::UntranslatedTree(_)) => {
                     debug!(sha, "commit tree not in sha_map — skipping");
@@ -270,7 +288,6 @@ impl<'a> ReasoningPipeline<'a> {
                     continue;
                 }
             };
-            seen_commits.insert(commit.sha.clone(), commit.clone());
 
             let ranked = matcher.score_commit(&commit, &changed);
             let eligible: Vec<_> = ranked
@@ -453,17 +470,36 @@ impl<'a> ReasoningPipeline<'a> {
         anchors
     }
 
+    /// Read a commit once per pipeline run, reusing the shared cache.
+    ///
+    /// Returns a clone so the caller can hold the entry while mutating
+    /// the cache for a parent lookup (avoids self-referential borrows).
+    fn cached_read_commit(
+        &self,
+        sha: &str,
+        cache: &mut HashMap<String, crate::git_walk::CommitEntry>,
+    ) -> crate::Result<crate::git_walk::CommitEntry> {
+        if let Some(hit) = cache.get(sha) {
+            return Ok(hit.clone());
+        }
+        let entry = self.git.read_commit(sha)?;
+        cache.insert(sha.to_string(), entry.clone());
+        Ok(entry)
+    }
+
     /// Compute repo-relative changed *file* paths for a commit, working
     /// at leaf-file granularity even when a whole subdirectory was
-    /// introduced or removed in the commit (the upstream `diff_trees`
-    /// does not recurse into newly-added subtrees, so for a root commit
-    /// it would surface `"src"` instead of `"src/auth.rs"` — wrong for
-    /// our transcript matcher, which keys on file paths).
+    /// introduced or removed in the commit.
     ///
     /// Strategy: compare trees recursively and skip any subtree whose
     /// content hash is identical on both sides. Any leaf path present
     /// on only one side, or with a different hash, is "changed". Root
     /// commits go through the same path with an empty `from` side.
+    ///
+    /// `parsed_parent` is the already-parsed first parent (threaded from
+    /// the pipeline's commit cache). When `None` but the commit has a
+    /// parent, we fall back to a single `read_commit` so standalone
+    /// callers remain correct.
     ///
     /// Assumes `Importer` already translated the commit tree and (if
     /// present) the parent tree into the Heddle store.
@@ -808,7 +844,11 @@ fn has_durable_language(lower: &str) -> bool {
 }
 
 /// Diff two trees recursively, skipping equal subtree hashes.
-fn diff_tree_files<S: ObjectStore + ?Sized>(
+///
+/// Equal child tree/blob hashes short-circuit: the entire subtree is
+/// skipped without further store reads. Bound on [`ObjectSource`] so
+/// tests can wrap a store and count `get_tree` visits.
+fn diff_tree_files<S: ObjectSource + ?Sized>(
     store: &S,
     from_hash: Option<&ContentHash>,
     to_hash: Option<&ContentHash>,
@@ -863,7 +903,7 @@ fn diff_tree_files<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-fn diff_matching_entries<S: ObjectStore + ?Sized>(
+fn diff_matching_entries<S: ObjectSource + ?Sized>(
     store: &S,
     from: &objects::object::TreeEntry,
     to: &objects::object::TreeEntry,
@@ -875,6 +915,8 @@ fn diff_matching_entries<S: ObjectStore + ?Sized>(
         (EntryType::Tree, EntryType::Tree) => {
             let from_hash = from.tree_hash();
             let to_hash = to.tree_hash();
+            // Equal subtree hashes short-circuit inside `diff_tree_files`
+            // before either child tree is loaded from the store.
             diff_tree_files(store, from_hash.as_ref(), to_hash.as_ref(), &path, changed)?;
         }
         (EntryType::Blob | EntryType::Symlink, EntryType::Blob | EntryType::Symlink) => {
@@ -884,6 +926,8 @@ fn diff_matching_entries<S: ObjectStore + ?Sized>(
         }
         (EntryType::Gitlink | EntryType::Spoollink, EntryType::Gitlink | EntryType::Spoollink) => {}
         _ => {
+            // Type change (blob↔tree, etc.): expand both sides to leaf
+            // paths so the path set matches the old full-tree walk.
             collect_entry_files(store, from, prefix, changed)?;
             collect_entry_files(store, to, prefix, changed)?;
         }
@@ -891,7 +935,7 @@ fn diff_matching_entries<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-fn collect_entry_files<S: ObjectStore + ?Sized>(
+fn collect_entry_files<S: ObjectSource + ?Sized>(
     store: &S,
     entry: &objects::object::TreeEntry,
     prefix: &str,
@@ -910,7 +954,7 @@ fn collect_entry_files<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-fn collect_tree_file_paths<S: ObjectStore + ?Sized>(
+fn collect_tree_file_paths<S: ObjectSource + ?Sized>(
     store: &S,
     root: &ContentHash,
     prefix: &str,
@@ -937,8 +981,11 @@ fn join_diff_path(prefix: &str, name: &str) -> String {
 /// hash. Directory entries expand; the returned map is keyed on the
 /// slash-joined repo-relative path. Missing tree objects (shouldn't
 /// happen if `Importer` succeeded) propagate as store errors.
+///
+/// Reference implementation of the pre-#884 full-tree materialization;
+/// tests pin the incremental walker to identical path sets.
 #[cfg(test)]
-fn collect_tree_files<S: ObjectStore + ?Sized>(
+fn collect_tree_files<S: ObjectSource + ?Sized>(
     store: &S,
     root: &ContentHash,
 ) -> Result<std::collections::BTreeMap<String, ContentHash>, anyhow::Error> {
@@ -948,7 +995,7 @@ fn collect_tree_files<S: ObjectStore + ?Sized>(
 }
 
 #[cfg(test)]
-fn walk_tree<S: ObjectStore + ?Sized>(
+fn walk_tree<S: ObjectSource + ?Sized>(
     store: &S,
     hash: &ContentHash,
     prefix: &str,
@@ -1034,7 +1081,7 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use objects::{
         object::{Blob, StateAttachmentBody, StateId, Tree, TreeEntry},
-        store::InMemoryStore,
+        store::{InMemoryStore, ObjectSource, ObjectStore},
     };
     use repo::{Repository, StateAttachmentKind};
     use tempfile::TempDir;
@@ -1161,13 +1208,19 @@ mod tests {
         TreeEntry::directory(name.to_string(), hash).expect("valid directory entry")
     }
 
-    fn old_full_walk_changed_files(
-        store: &InMemoryStore,
-        from_hash: &ContentHash,
-        to_hash: &ContentHash,
+    fn old_full_walk_changed_files<S: ObjectSource + ?Sized>(
+        store: &S,
+        from_hash: Option<&ContentHash>,
+        to_hash: Option<&ContentHash>,
     ) -> Vec<String> {
-        let from_files = collect_tree_files(store, from_hash).expect("collect from tree");
-        let to_files = collect_tree_files(store, to_hash).expect("collect to tree");
+        let from_files = match from_hash {
+            Some(h) => collect_tree_files(store, h).expect("collect from tree"),
+            None => std::collections::BTreeMap::new(),
+        };
+        let to_files = match to_hash {
+            Some(h) => collect_tree_files(store, h).expect("collect to tree"),
+            None => std::collections::BTreeMap::new(),
+        };
         let mut changed = Vec::new();
         for (path, to_blob) in &to_files {
             match from_files.get(path) {
@@ -1186,17 +1239,74 @@ mod tests {
         changed
     }
 
-    fn incremental_changed_files(
-        store: &InMemoryStore,
-        from_hash: &ContentHash,
-        to_hash: &ContentHash,
+    fn incremental_changed_files<S: ObjectSource + ?Sized>(
+        store: &S,
+        from_hash: Option<&ContentHash>,
+        to_hash: Option<&ContentHash>,
     ) -> Vec<String> {
         let mut changed = Vec::new();
-        diff_tree_files(store, Some(from_hash), Some(to_hash), "", &mut changed)
-            .expect("diff test trees");
+        diff_tree_files(store, from_hash, to_hash, "", &mut changed).expect("diff test trees");
         changed.sort();
         changed.dedup();
         changed
+    }
+
+    /// Counts `get_tree` visits; other ObjectSource methods are unused by
+    /// the incremental walker but required by the trait.
+    struct CountingSource<'a> {
+        inner: &'a InMemoryStore,
+        tree_reads: std::cell::Cell<usize>,
+    }
+
+    impl<'a> CountingSource<'a> {
+        fn new(inner: &'a InMemoryStore) -> Self {
+            Self {
+                inner,
+                tree_reads: std::cell::Cell::new(0),
+            }
+        }
+
+        fn tree_reads(&self) -> usize {
+            self.tree_reads.get()
+        }
+    }
+
+    impl ObjectSource for CountingSource<'_> {
+        fn get_tree(
+            &self,
+            hash: &ContentHash,
+        ) -> objects::store::Result<Option<objects::object::Tree>> {
+            self.tree_reads.set(self.tree_reads.get() + 1);
+            ObjectSource::get_tree(self.inner, hash)
+        }
+
+        fn get_state(
+            &self,
+            id: &objects::object::StateId,
+        ) -> objects::store::Result<Option<objects::object::State>> {
+            ObjectSource::get_state(self.inner, id)
+        }
+
+        fn get_blob(
+            &self,
+            hash: &ContentHash,
+        ) -> objects::store::Result<Option<objects::object::Blob>> {
+            ObjectSource::get_blob(self.inner, hash)
+        }
+    }
+
+    fn assert_incremental_matches_full_walk<S: ObjectSource + ?Sized>(
+        store: &S,
+        from_hash: Option<&ContentHash>,
+        to_hash: Option<&ContentHash>,
+    ) -> Vec<String> {
+        let incremental = incremental_changed_files(store, from_hash, to_hash);
+        let full_walk = old_full_walk_changed_files(store, from_hash, to_hash);
+        assert_eq!(
+            incremental, full_walk,
+            "incremental path set must match full-tree materialization"
+        );
+        incremental
     }
 
     /// Load transcripts from a test-local `.claude/projects/<slug>/*.jsonl`
@@ -1360,8 +1470,8 @@ mod tests {
             vec![test_dir("docs", docs), test_dir("src", new_src)],
         );
 
-        let changed = incremental_changed_files(&store, &old_root, &new_root);
-
+        let changed =
+            assert_incremental_matches_full_walk(&store, Some(&old_root), Some(&new_root));
         assert_eq!(changed, vec!["src/mid/deep/target.rs"]);
     }
 
@@ -1408,13 +1518,166 @@ mod tests {
             ],
         );
 
-        let incremental = incremental_changed_files(&store, &old_root, &new_root);
-        let full_walk = old_full_walk_changed_files(&store, &old_root, &new_root);
-
-        assert_eq!(incremental, full_walk);
+        let incremental =
+            assert_incremental_matches_full_walk(&store, Some(&old_root), Some(&new_root));
         assert_eq!(
             incremental,
             vec!["lib/a.rs", "lib/added.rs", "lib/deleted.rs", "lib/link"]
+        );
+    }
+
+    /// Equivalence gate across add / modify / delete / rename-as-delete+add,
+    /// nested dirs, blob↔tree type change, root-commit (empty from), and an
+    /// equal-hash unchanged subtree. Path set must match the pre-#884
+    /// full-tree materialization exactly (sorted).
+    #[test]
+    fn incremental_tree_diff_equivalence_suite() {
+        let store = InMemoryStore::new();
+        let blob_a = put_test_blob(&store, "a\n");
+        let blob_a2 = put_test_blob(&store, "a2\n");
+        let blob_b = put_test_blob(&store, "b\n");
+        let blob_c = put_test_blob(&store, "c\n");
+        let blob_d = put_test_blob(&store, "d\n");
+        let blob_e = put_test_blob(&store, "e\n");
+
+        // Nested unchanged bulk under vendor/ — shared hash both sides.
+        let mut vendor_entries = Vec::new();
+        for i in 0..40 {
+            vendor_entries.push(test_file(&format!("pkg{i:02}.rs"), blob_c));
+        }
+        let vendor = put_test_tree(&store, vendor_entries);
+
+        // Old: src/a.rs, src/old_name.rs, src/nested/deep.rs, README, vendor/*
+        //      + keep/file.rs later becomes a tree (type change).
+        let old_nested = put_test_tree(&store, vec![test_file("deep.rs", blob_d)]);
+        let old_src = put_test_tree(
+            &store,
+            vec![
+                test_file("a.rs", blob_a),
+                test_file("old_name.rs", blob_b),
+                test_dir("nested", old_nested),
+            ],
+        );
+        let keep_file = put_test_tree(&store, vec![test_file("file.rs", blob_e)]);
+        let old_root = put_test_tree(
+            &store,
+            vec![
+                test_file("README", blob_c),
+                test_dir("keep", keep_file),
+                test_dir("src", old_src),
+                test_dir("vendor", vendor),
+            ],
+        );
+
+        // New: a.rs modified, old_name deleted, new_name added (rename),
+        // nested/deep deleted, nested/other added, keep becomes a blob
+        // (type change tree→blob), README unchanged, vendor shared.
+        let new_nested = put_test_tree(&store, vec![test_file("other.rs", blob_d)]);
+        let new_src = put_test_tree(
+            &store,
+            vec![
+                test_file("a.rs", blob_a2),
+                test_file("new_name.rs", blob_b),
+                test_dir("nested", new_nested),
+            ],
+        );
+        let new_root = put_test_tree(
+            &store,
+            vec![
+                test_file("README", blob_c),
+                test_file("keep", blob_e), // was a tree, now a blob
+                test_dir("src", new_src),
+                test_dir("vendor", vendor),
+            ],
+        );
+
+        let changed =
+            assert_incremental_matches_full_walk(&store, Some(&old_root), Some(&new_root));
+        assert_eq!(
+            changed,
+            vec![
+                "keep".to_string(),
+                "keep/file.rs".to_string(),
+                "src/a.rs".to_string(),
+                "src/nested/deep.rs".to_string(),
+                "src/nested/other.rs".to_string(),
+                "src/new_name.rs".to_string(),
+                "src/old_name.rs".to_string(),
+            ]
+        );
+
+        // Root commit: empty from → full to (all leaves added).
+        let root_only = assert_incremental_matches_full_walk(&store, None, Some(&new_root));
+        assert!(root_only.contains(&"src/a.rs".to_string()));
+        assert!(root_only.contains(&"vendor/pkg00.rs".to_string()));
+        assert_eq!(
+            root_only.len(),
+            1 /*README*/ + 1 /*keep*/ + 3 /*src leaves*/ + 40 /*vendor*/
+        );
+
+        // Identical roots → empty.
+        let none = assert_incremental_matches_full_walk(&store, Some(&new_root), Some(&new_root));
+        assert!(none.is_empty());
+    }
+
+    /// Perf evidence: a small change under a large equal-hash sibling
+    /// subtree must not load that sibling. Full-tree materialization
+    /// always walks both sides of the bulk subtree.
+    #[test]
+    fn incremental_tree_diff_skips_equal_subtree_store_reads() {
+        let store = InMemoryStore::new();
+        let stable = put_test_blob(&store, "stable\n");
+        let old_leaf = put_test_blob(&store, "old\n");
+        let new_leaf = put_test_blob(&store, "new\n");
+
+        // Large unchanged bulk: 50 leaves under bulk/.
+        let mut bulk_entries = Vec::new();
+        for i in 0..50 {
+            bulk_entries.push(test_file(&format!("f{i:02}.rs"), stable));
+        }
+        let bulk = put_test_tree(&store, bulk_entries);
+
+        let old_hot = put_test_tree(&store, vec![test_file("hot.rs", old_leaf)]);
+        let new_hot = put_test_tree(&store, vec![test_file("hot.rs", new_leaf)]);
+
+        let old_root = put_test_tree(
+            &store,
+            vec![test_dir("bulk", bulk), test_dir("hot", old_hot)],
+        );
+        let new_root = put_test_tree(
+            &store,
+            vec![test_dir("bulk", bulk), test_dir("hot", new_hot)],
+        );
+
+        // Full walk: loads root×2 + bulk×2 + hot×2 = 6 tree reads at minimum,
+        // plus bulk's single tree is shared hash so collect loads it once per
+        // side → 2 bulk loads. CountingSource wraps the same InMemoryStore.
+        let full_counter = CountingSource::new(&store);
+        let full = old_full_walk_changed_files(&full_counter, Some(&old_root), Some(&new_root));
+        let full_reads = full_counter.tree_reads();
+
+        let inc_counter = CountingSource::new(&store);
+        let incremental = incremental_changed_files(&inc_counter, Some(&old_root), Some(&new_root));
+        let inc_reads = inc_counter.tree_reads();
+
+        assert_eq!(incremental, full);
+        assert_eq!(incremental, vec!["hot/hot.rs"]);
+        // Incremental must not open the bulk tree at all (equal child hash
+        // short-circuit). Full walk opens it on both collect passes.
+        assert!(
+            inc_reads < full_reads,
+            "incremental reads ({inc_reads}) should be strictly fewer than full-walk reads ({full_reads})"
+        );
+        // Expected incremental loads: old_root, new_root, old_hot, new_hot.
+        // bulk is never loaded. = 4.
+        assert_eq!(
+            inc_reads, 4,
+            "expected only roots + hot subtrees; bulk equal-hash must be skipped"
+        );
+        // Full walk loads bulk at least once per side.
+        assert!(
+            full_reads >= 6,
+            "full walk should load roots + bulk×2 + hot×2, got {full_reads}"
         );
     }
 

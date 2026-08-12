@@ -383,6 +383,7 @@ mod tests {
                 author: Principal::new("Ada", "ada@example.com"),
                 body: body.to_string(),
                 posted_at: 1_700_000_000,
+                references: Vec::new(),
             }],
             resolution: DiscussionResolution::Open,
             body_changed_since_open: false,
