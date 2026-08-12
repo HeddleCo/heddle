@@ -344,6 +344,85 @@ fn supersede_context_request(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn content_facade_round_trips_every_rpc_shape_over_native_transport() {
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+
+        client
+            .get_compare("acme/widgets", "main~1", "main", true)
+            .await
+            .unwrap();
+        client
+            .get_blame("acme/widgets", Some("main"), "src/lib.rs")
+            .await
+            .unwrap();
+        assert_eq!(
+            client
+                .list_context("acme/widgets", Some("main"), Some("src"), Some("reviewed"),)
+                .await
+                .unwrap(),
+            (Vec::new(), Vec::new())
+        );
+        client
+            .set_context(
+                "acme/widgets",
+                "src/lib.rs",
+                None,
+                AnnotationScope::default(),
+                ContextAnnotationKind::default(),
+                vec!["reviewed".to_string()],
+                "context",
+                Some("codex"),
+                Some("test"),
+                "set-context-op".to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            client
+                .get_context_history("acme/widgets", Some("main"), "annotation-1")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        client
+            .list_context_suggestions("acme/widgets", Some("main"), 10)
+            .await
+            .unwrap();
+        client
+            .revise_context(
+                "acme/widgets",
+                "annotation-1",
+                "revised",
+                vec!["updated".to_string()],
+                None,
+                None,
+                ContextAnnotationKind::default(),
+                "revise-context-op".to_string(),
+            )
+            .await
+            .unwrap();
+        client
+            .supersede_context(
+                "acme/widgets",
+                "annotation-1",
+                Some("src/new.rs"),
+                None,
+                AnnotationScope::default(),
+                Vec::new(),
+                "replacement",
+                None,
+                None,
+                ContextAnnotationKind::default(),
+                "supersede-context-op".to_string(),
+            )
+            .await
+            .unwrap();
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
     #[test]
     fn context_revision_retry_request_reuses_the_callers_operation_id() {
         let operation_id =

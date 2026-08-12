@@ -32,6 +32,11 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Fixed
 
+- **Large captures avoid repository-wide semantic graph rebuilds.** Captures
+  whose changes cannot affect parsed source files now preserve the binding
+  delta through a hash-pruned tree comparison, and CLI performance contracts
+  run without competing with one another for runner resources.
+
 - **Native pull preserves managed threads.** Pulling a pushed managed thread
   into a clone now restores its thread metadata, so `thread list` exposes its
   integration target and `land` reaches the real merge verdict instead of

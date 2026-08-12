@@ -19,7 +19,7 @@ use objects::{error::HeddleError, object::Tree};
 use rmp_serde::{decode::from_slice, encode::to_vec_named};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::{
     FsMonitorMode, FsMonitorSettings, WorktreeIndex,
@@ -760,7 +760,7 @@ fn try_local_helper_query(
         Err(error) => {
             retire_failed_helper_endpoint(state_path, &endpoint)?;
             let _ = try_spawn_local_helper(repo_root, state_path)?;
-            warn!(%error, host = %endpoint.host, port = endpoint.port, "Local monitor helper query failed; falling back");
+            log_helper_fallback(&error, &endpoint, "query");
             return Ok(None);
         }
     };
@@ -806,7 +806,7 @@ fn try_local_helper_refresh(repo_root: &Path, state_path: &Path) -> Result<bool,
                 if attempt == 0 && try_spawn_local_helper(repo_root, state_path)? {
                     continue;
                 }
-                warn!(%error, host = %endpoint.host, port = endpoint.port, "Local monitor helper refresh failed; falling back");
+                log_helper_fallback(&error, &endpoint, "refresh");
                 return Ok(false);
             }
         };
@@ -876,14 +876,22 @@ fn try_establish_local_helper_baseline(
             return Ok(());
         }
     };
-    let response: MonitorHelperResponse = send_json_request(
+    let response: MonitorHelperResponse = match send_json_request(
         &endpoint,
         &MonitorHelperRequest {
             version: HELPER_PROTOCOL_VERSION,
             command: "baseline".to_string(),
             since: expected_cursor.map(str::to_string),
         },
-    )?;
+    ) {
+        Ok(response) => response,
+        Err(error) => {
+            retire_failed_helper_endpoint(state_path, &endpoint)?;
+            let _ = try_spawn_local_helper(repo_root, state_path)?;
+            log_helper_fallback(&error, &endpoint, "baseline");
+            return Ok(());
+        }
+    };
     if !response.ok {
         return Err(HeddleError::Config(
             response
@@ -909,6 +917,17 @@ fn retire_failed_helper_endpoint(
         remove_endpoint_if_owned(&helper_endpoint_path(state_path), expected);
     }
     Ok(())
+}
+
+fn log_helper_fallback(error: &HeddleError, endpoint: &EndpointState, operation: &'static str) {
+    match error {
+        HeddleError::Io(_) => {
+            debug!(%error, host = %endpoint.host, port = endpoint.port, operation, "Local monitor helper unavailable; falling back");
+        }
+        _ => {
+            warn!(%error, host = %endpoint.host, port = endpoint.port, operation, "Local monitor helper protocol failed; falling back");
+        }
+    }
 }
 
 fn spawn_local_helper_background(repo_root: &Path, state_path: &Path) -> Result<(), HeddleError> {
@@ -1043,20 +1062,26 @@ pub fn shutdown_local_monitor_helper(
     }
 
     if let Some(endpoint) = endpoint {
-        let response: MonitorHelperResponse = send_json_request(
+        let response: Result<MonitorHelperResponse, HeddleError> = send_json_request(
             &endpoint,
             &MonitorHelperRequest {
                 version: HELPER_PROTOCOL_VERSION,
                 command: "shutdown".to_string(),
                 since: None,
             },
-        )?;
-        if !response.ok {
-            return Err(HeddleError::Config(
-                response
-                    .error
-                    .unwrap_or_else(|| "native monitor refused shutdown".to_string()),
-            ));
+        );
+        match response {
+            Ok(response) if !response.ok => {
+                return Err(HeddleError::Config(
+                    response
+                        .error
+                        .unwrap_or_else(|| "native monitor refused shutdown".to_string()),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                log_helper_fallback(&error, &endpoint, "shutdown");
+            }
         }
     }
 
@@ -1516,6 +1541,35 @@ mod tests {
             !checkout.exists(),
             "a drained watcher must not recreate its checkout"
         );
+    }
+
+    #[test]
+    fn shutdown_tolerates_stale_endpoint_after_watcher_exit() {
+        let temp = TempDir::new().unwrap();
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".heddle/state")).unwrap();
+        let state_path = checkout.join(".heddle/state/fsmonitor.toml");
+        let endpoint_path = helper_endpoint_path(&state_path);
+        let listener = std::net::TcpListener::bind((HELPER_HOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        crate::daemon::persist_endpoint(
+            &endpoint_path,
+            &crate::daemon::EndpointState {
+                version: HELPER_PROTOCOL_VERSION,
+                host: HELPER_HOST.to_string(),
+                port,
+                // A stale endpoint can outlive its worker and its PID can be
+                // reused, so liveness alone cannot prove the socket is live.
+                pid: Some(std::process::id()),
+            },
+        )
+        .unwrap();
+
+        let shutdown = shutdown_local_monitor_helper(&checkout).unwrap();
+        assert!(!endpoint_path.exists());
+        drop(shutdown);
     }
 
     #[test]

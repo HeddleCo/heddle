@@ -3106,6 +3106,194 @@ fn partial_fetch_status_for_repo(repo: &Repository) -> i32 {
     }
 }
 
+#[cfg(test)]
+mod native_exchange_tests {
+    use objects::object::{Attribution, Principal};
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn repository(temp: &TempDir) -> (Repository, StateId) {
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("tracked.txt"), "content\n").unwrap();
+        let state = repo
+            .snapshot_with_attribution(
+                Some("native exchange fixture".to_string()),
+                None,
+                Attribution::human(Principal::new("Test", "test@example.com")),
+            )
+            .unwrap()
+            .id();
+        (repo, state)
+    }
+
+    #[tokio::test]
+    async fn native_push_and_clone_pull_complete_the_real_framed_exchange() {
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        let source = TempDir::new().unwrap();
+        let (repo, state) = repository(&source);
+
+        assert!(client.list_refs("acme/widgets").await.unwrap().is_empty());
+        let pushed = client
+            .push_with_expected_head(
+                &repo,
+                "acme/widgets",
+                state,
+                "main",
+                false,
+                ExpectedRemoteHead::Missing,
+                "push-test-op".to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(!pushed.success);
+        assert_eq!(pushed.error.as_deref(), Some("test rejection"));
+
+        let clone = TempDir::new().unwrap();
+        let (pulled, cloned_repo) = client
+            .clone_pull_with_depth_and_materialization(
+                "acme/widgets",
+                Some("main"),
+                Some(1),
+                PullMaterialization::Lazy,
+                |_| Repository::init_default(clone.path()).map_err(ProtocolError::from),
+            )
+            .await
+            .unwrap();
+        assert!(!pulled.success);
+        assert_eq!(pulled.error.as_deref(), Some("test rejection"));
+        assert_eq!(cloned_repo.root(), clone.path());
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn compact_pull_of_a_complete_local_state_publishes_no_synthetic_objects() {
+        let source = TempDir::new().unwrap();
+        let (repo, state) = repository(&source);
+        let remote_state = super::super::helpers::proto_state_id(state).unwrap();
+        let (mut client, server) =
+            crate::hosted_runtime::hosted::test_server::start_with_remote_state(remote_state).await;
+
+        let received = client
+            .fetch_state(
+                &repo,
+                "acme/widgets",
+                PULL_CLONE_BOOTSTRAP_THREAD_PREFIX,
+                state,
+            )
+            .await
+            .unwrap();
+        assert_eq!(received, 0);
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn complete_local_state_exercises_each_public_pull_mode_without_refetching() {
+        let source = TempDir::new().unwrap();
+        let (repo, state) = repository(&source);
+        let remote_state = super::super::helpers::proto_state_id(state).unwrap();
+        let (mut client, server) =
+            crate::hosted_runtime::hosted::test_server::start_with_remote_state(remote_state).await;
+        let bootstrap = PULL_CLONE_BOOTSTRAP_THREAD_PREFIX;
+
+        assert!(
+            client
+                .pull(&repo, "acme/widgets", bootstrap, None)
+                .await
+                .unwrap()
+                .success
+        );
+        let (profiled, profile) = client
+            .pull_profiled(&repo, "acme/widgets", bootstrap, None)
+            .await
+            .unwrap();
+        assert!(profiled.success);
+        assert_eq!(profile.objects_received, 0);
+        assert!(
+            client
+                .pull_with_depth(&repo, "acme/widgets", bootstrap, None, Some(1))
+                .await
+                .unwrap()
+                .success
+        );
+        assert!(
+            client
+                .pull_with_depth_and_materialization(
+                    &repo,
+                    "acme/widgets",
+                    bootstrap,
+                    None,
+                    Some(1),
+                    PullMaterialization::Lazy,
+                )
+                .await
+                .unwrap()
+                .success
+        );
+        assert!(
+            client
+                .repair_clone_with_depth_and_materialization(
+                    &repo,
+                    "acme/widgets",
+                    bootstrap,
+                    None,
+                    PullMaterialization::Full,
+                )
+                .await
+                .unwrap()
+                .success
+        );
+        assert_eq!(
+            client
+                .hydrate_missing_blobs_for_state(&repo, "acme/widgets", bootstrap, state)
+                .await
+                .unwrap(),
+            0
+        );
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clone_pull_installs_a_complete_native_pack() {
+        let source = TempDir::new().unwrap();
+        let (repo, state) = repository(&source);
+        let objects = wire::enumerate_state_closure(repo.store(), state).unwrap();
+        let pack = wire::build_native_pack(repo.store(), &objects).unwrap();
+        let remote_state = super::super::helpers::proto_state_id(state).unwrap();
+        let (mut client, server) =
+            crate::hosted_runtime::hosted::test_server::start_with_pull_pack(
+                remote_state,
+                pack.pack_data,
+                pack.index_data,
+            )
+            .await;
+        let clone = TempDir::new().unwrap();
+
+        let (pulled, cloned_repo) = client
+            .clone_pull_with_depth_and_materialization(
+                "acme/widgets",
+                Some("main"),
+                None,
+                PullMaterialization::Full,
+                |_| Repository::init_default(clone.path()).map_err(ProtocolError::from),
+            )
+            .await
+            .unwrap();
+        assert!(pulled.success);
+        assert_eq!(pulled.final_state, Some(state));
+        assert!(cloned_repo.store().has_state(&state).unwrap());
+
+        client.close().await;
+        server.await.unwrap();
+    }
+}
+
 fn pull_transfer_id(
     repo_path: &str,
     remote_thread: &str,
