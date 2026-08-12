@@ -15,18 +15,18 @@ blake3.workspace = true
 chrono.workspace = true
 hex.workspace = true
 ignore.workspace = true
-heddle-perf-contract = { path = "../perf-contract", version = "0.11" }
+heddle-perf-contract = { path = "../perf-contract", version = "0.12" }
 libc.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.11" }
-crypto = { path = "../crypto", package = "heddle-crypto", version = "0.11" }
-oplog = { path = "../oplog", package = "heddle-oplog", version = "0.11" }
-wire = { path = "../wire", package = "heddle-wire", version = "0.11", default-features = false }
-refs = { path = "../refs", package = "heddle-refs", version = "0.11" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.12" }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.12" }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.12" }
+wire = { path = "../wire", package = "heddle-wire", version = "0.12", default-features = false }
+refs = { path = "../refs", package = "heddle-refs", version = "0.12" }
 notify.workspace = true
 rmp-serde.workspace = true
 rusqlite.workspace = true
-semantic = { path = "../semantic", package = "heddle-semantic", version = "0.11", optional = true }
-state_review = { path = "../state_review", package = "heddle-state-review", version = "0.11", optional = true }
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.12", optional = true }
+state_review = { path = "../state_review", package = "heddle-state-review", version = "0.12", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sley.workspace = true
@@ -83,7 +83,7 @@ async-source = ["objects/async-source"]
 
 [dev-dependencies]
 hex.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.11", features = ["async-source", "memory-backend"] }
+objects = { path = "../objects", package = "heddle-objects", version = "0.12", features = ["async-source", "memory-backend"] }
 proptest.workspace = true
 tempfile.workspace = true
 

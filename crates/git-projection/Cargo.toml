@@ -14,13 +14,13 @@ path = "src/lib.rs"
 name = "heddle_git_projection"
 
 [dependencies]
-objects = { path = "../objects", package = "heddle-objects", version = "0.11", features = ["memory-backend"] }
-refs = { path = "../refs", package = "heddle-refs", version = "0.11" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.12", features = ["memory-backend"] }
+refs = { path = "../refs", package = "heddle-refs", version = "0.12" }
 # `default-features = false` so this crate's `zstd` feature controls the
 # cascade end-to-end (same pattern as ingest/cli).
-repo = { path = "../repo", package = "heddle-repo", version = "0.11", default-features = false, features = ["git-overlay"] }
-ingest = { path = "../ingest", package = "heddle-ingest", version = "0.11", default-features = false }
-wire = { path = "../wire", package = "heddle-wire", version = "0.11", default-features = false }
+repo = { path = "../repo", package = "heddle-repo", version = "0.12", default-features = false, features = ["git-overlay"] }
+ingest = { path = "../ingest", package = "heddle-ingest", version = "0.12", default-features = false }
+wire = { path = "../wire", package = "heddle-wire", version = "0.12", default-features = false }
 
 serde.workspace = true
 serde_json.workspace = true
