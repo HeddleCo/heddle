@@ -228,17 +228,24 @@ impl PackManager {
         Ok(())
     }
 
-    /// Cheap check: does the packs directory hold more pack/index
-    /// pairs than we have loaded? Reuses `discover_pack_paths` so
-    /// half-installed packs (a `.pack` whose `.idx` sibling hasn't
-    /// landed yet) are filtered out — otherwise we'd loop forever
-    /// reloading a count we can never match.
+    /// Check whether the immutable pack set on disk differs from this snapshot.
+    ///
+    /// Comparing only counts misses the decisive repack transition (`one old`
+    /// → `one replacement`). Exact path comparison lets another `FsStore`
+    /// recover after an atomic cutover even when cardinality is unchanged.
+    /// Half-installed packs remain filtered by `discover_pack_paths`.
     pub fn needs_reload(&self) -> Result<bool> {
-        Ok(Self::discover_pack_paths(&self.packs_dir)?.len() > self.packs.len())
+        let discovered = Self::discover_pack_paths(&self.packs_dir)?;
+        Ok(discovered.len() != self.packs.len()
+            || discovered
+                .iter()
+                .zip(&self.packs)
+                .any(|((pack, index), cached)| {
+                    *pack != cached.pack_path || *index != cached.index_path
+                }))
     }
 
-    /// Reload the pack list only if the packs directory has more
-    /// pack/index pairs on disk than we know about in memory.
+    /// Reload the pack list when the immutable pack set changed on disk.
     ///
     /// Catches the multi-instance case: two `FsStore`s back the same
     /// shared object dir (typical for lightweight thread worktrees,
@@ -247,11 +254,11 @@ impl PackManager {
     /// a new pack, the main repo's already-open `pack_manager`
     /// doesn't know about it; without this `get_blob`/`has_blob`
     /// from the main repo would surface "object not found".
-    pub fn reload_if_disk_grew(&mut self) -> Result<bool> {
+    pub fn reload_if_stale(&mut self) -> Result<bool> {
         if !self.needs_reload()? {
             return Ok(false);
         }
-        debug!("PackManager: pack dir grew under us, reloading");
+        debug!("PackManager: pack set changed under us, reloading");
         self.reload()?;
         Ok(true)
     }

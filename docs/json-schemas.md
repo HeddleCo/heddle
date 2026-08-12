@@ -2903,6 +2903,26 @@ prune incomplete pack-install artifacts, but does not change repository meaning.
 | `unpaired_pack_bytes_freed` | integer | Bytes recovered by pruning unpaired packs. |
 | `report` | object | The resulting maintenance-inspect report, without a second discriminator. |
 
+## `heddle maintenance repack --output json`
+
+Repack streams the current native object set into a staged immutable pack,
+verifies every typed object identity, and reports the completed cutover. New
+objects installed after the repack snapshot are preserved separately.
+
+```json
+{"output_kind": "maintenance_repack", "objects_repacked": 42, "bytes_repacked": 8192, "duration_ms": 37, "bytes_reclaimed": 2048}
+```
+
+### Maintenance Repack Fields
+
+| Field | Type | Semantics |
+|-------|------|-----------|
+| `output_kind` | string | Always `maintenance_repack`. |
+| `objects_repacked` | integer | Typed objects copied into the replacement pack. |
+| `bytes_repacked` | integer | Logical payload bytes copied and verified. |
+| `duration_ms` | integer | Wall-clock duration of the completed repack. |
+| `bytes_reclaimed` | integer | Physical bytes removed by retiring superseded storage. |
+
 ## `heddle export git --output json`
 
 Export emits:
@@ -3088,26 +3108,26 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact trust remove",
       "redact purge apply"
     ],
-    "advanced_scope_json_commands_total": 109,
+    "advanced_scope_json_commands_total": 110,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 40,
-    "advanced_scope_mutating_commands_total": 62,
+    "advanced_scope_mutating_commands_total": 63,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 22,
-    "catalog_commands_total": 187,
-    "catalog_mutating_commands_total": 90,
-    "json_commands_total": 149,
+    "catalog_commands_total": 188,
+    "catalog_mutating_commands_total": 91,
+    "json_commands_total": 150,
     "json_commands_with_accepted_opaque_schema": 40,
-    "json_commands_with_schema": 109,
+    "json_commands_with_schema": 110,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 86,
+    "json_mutating_commands_total": 87,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 86,
+    "mutating_commands_total": 87,
     "mutating_commands_with_accepted_opaque_schema": 22,
-    "mutating_commands_with_schema": 64,
+    "mutating_commands_with_schema": 65,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 40,
     "status": "available",
-    "summary": "187 command(s), 149 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 40 accepted opaque schema(s) outside clean verification",
+    "summary": "188 command(s), 150 JSON command(s), 91 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 40 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3145,7 +3165,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "187 command(s), 149 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 40 accepted opaque schema(s) outside clean verification",
+  "summary": "188 command(s), 150 JSON command(s), 91 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 40 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true

@@ -154,6 +154,7 @@ schema_registry! {
     (&["try"], TrySchema),
     (&["maintenance inspect"], MaintenanceInspectSchema),
     (&["maintenance refresh"], MaintenanceRefreshSchema),
+    (&["maintenance repack"], MaintenanceRepackSchema),
     (&["error"], ErrorEnvelopeSchema),
 }
 
@@ -919,6 +920,15 @@ pub struct MaintenanceRefreshSchema {
     pub unpaired_packs_pruned: u64,
     pub unpaired_pack_bytes_freed: u64,
     pub report: MaintenanceInspectReportSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MaintenanceRepackSchema {
+    pub output_kind: String,
+    pub objects_repacked: u64,
+    pub bytes_repacked: u64,
+    pub duration_ms: u128,
+    pub bytes_reclaimed: u64,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

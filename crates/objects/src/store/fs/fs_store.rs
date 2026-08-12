@@ -451,10 +451,9 @@ impl FsStore {
         manager.reload()
     }
 
-    /// Reload pack files only if the packs directory has grown on
-    /// disk since we last read it. Cheap (one `read_dir` + count)
-    /// when nothing changed; full reload only when a sibling
-    /// `FsStore` has installed a new pack.
+    /// Reload pack files only if the immutable pack set changed on disk.
+    /// Cheap discovery when nothing changed; full reload when a sibling
+    /// `FsStore` installed a pack or atomically replaced a generation.
     ///
     /// Returns `true` when a reload happened. Used by `get_*` and
     /// `has_*` paths after an in-memory miss to recover from the
@@ -466,7 +465,7 @@ impl FsStore {
     /// the write lock; only the first thread that observes a stale
     /// view escalates and does the reload.
     pub(super) fn reload_packs_if_stale(&self) -> Result<bool> {
-        // Fast path: read-lock and bail out if disk hasn't grown.
+        // Fast path: read-lock and bail out if the disk snapshot still matches.
         {
             let manager = self.pack_manager.read().map_err(|_| {
                 crate::store::HeddleError::Config("Failed to acquire pack manager lock".to_string())
@@ -481,7 +480,7 @@ impl FsStore {
         let mut manager = self.pack_manager.write().map_err(|_| {
             crate::store::HeddleError::Config("Failed to acquire pack manager lock".to_string())
         })?;
-        manager.reload_if_disk_grew()
+        manager.reload_if_stale()
     }
 
     /// Get the pack manager for pack operations.

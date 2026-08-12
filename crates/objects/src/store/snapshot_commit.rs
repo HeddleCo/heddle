@@ -109,8 +109,8 @@ impl SnapshotPackManager {
         Ok(())
     }
 
-    /// Reload both layers when a complete pack/index pair appeared on disk.
-    pub fn reload_if_disk_grew(&mut self) -> Result<bool> {
+    /// Reload both layers when the complete pack/index set changed on disk.
+    pub fn reload_if_stale(&mut self) -> Result<bool> {
         if !self.format.needs_reload()? {
             return Ok(false);
         }

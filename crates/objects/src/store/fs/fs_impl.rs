@@ -344,7 +344,11 @@ fn attachment_entries_from_pack(
     Ok(attachments)
 }
 
-fn validate_pack_entry(id: &PackObjectId, obj_type: ObjectType, data: &[u8]) -> Result<()> {
+pub(super) fn validate_pack_entry(
+    id: &PackObjectId,
+    obj_type: ObjectType,
+    data: &[u8],
+) -> Result<()> {
     match (id, obj_type) {
         (PackObjectId::Hash(hash), ObjectType::Blob) => validate_blob_bytes(data, *hash),
         (PackObjectId::Hash(hash), ObjectType::Tree) => {
@@ -675,10 +679,57 @@ impl FsStore {
         let path = state_path(&self.root, id);
         self.loose_or_packed(&path, |m| m.has_object_id(&PackObjectId::StateId(*id)))
     }
+
+    fn try_get_action_once(&self, id: &ActionId) -> Result<Option<Action>> {
+        let path = action_path(&self.root, id);
+        if let Some(data) = read_file_bytes(&path)? {
+            trace!(size = data.as_slice().len(), "Action data read");
+            return Ok(Some(validate_loaded_action(
+                id,
+                codec::decode_action(data.as_slice())?,
+            )?));
+        }
+        if let Ok(manager) = self.pack_manager().read()
+            && let Some((ObjectType::Action, data)) = manager.get_hashed_object(id.as_hash())?
+        {
+            trace!("Found action in packfile");
+            return Ok(Some(validate_loaded_action(
+                id,
+                rmp_serde::from_slice(&data)?,
+            )?));
+        }
+        Ok(None)
+    }
+
+    fn try_get_state_attachment_once(
+        &self,
+        state: &StateId,
+        id: &StateAttachmentId,
+    ) -> Result<Option<StateAttachment>> {
+        let path = state_attachment_path(&self.root, state, id);
+        let bytes = if let Some(bytes) = read_file_bytes(&path)? {
+            bytes.as_slice().to_vec()
+        } else if let Ok(manager) = self.pack_manager().read()
+            && let Some((ObjectType::StateAttachment, bytes)) =
+                manager.get_hashed_object(id.as_hash())?
+        {
+            bytes
+        } else {
+            return Ok(None);
+        };
+        let attachment: StateAttachment = rmp_serde::from_slice(&bytes)?;
+        if attachment.state_id != *state || attachment.id() != *id {
+            return Err(HeddleError::InvalidObject(
+                "state attachment address does not match content".to_string(),
+            ));
+        }
+        Ok(Some(attachment))
+    }
 }
 
 impl FsStore {
     pub(crate) fn snapshot_commit_descriptors_impl(&self) -> Result<Vec<SnapshotCommitDescriptor>> {
+        self.reload_packs_if_stale()?;
         let manager = self
             .pack_manager()
             .read()
@@ -690,6 +741,7 @@ impl FsStore {
         &self,
         state: &StateId,
     ) -> Result<Option<SnapshotCommitDescriptor>> {
+        self.reload_packs_if_stale()?;
         let manager = self
             .pack_manager()
             .read()
@@ -1217,24 +1269,13 @@ impl ObjectStore for FsStore {
         state: &StateId,
         id: &StateAttachmentId,
     ) -> Result<Option<StateAttachment>> {
-        let path = state_attachment_path(&self.root, state, id);
-        let bytes = if let Some(bytes) = read_file_bytes(&path)? {
-            bytes.as_slice().to_vec()
-        } else if let Ok(manager) = self.pack_manager().read()
-            && let Some((ObjectType::StateAttachment, bytes)) =
-                manager.get_hashed_object(id.as_hash())?
-        {
-            bytes
-        } else {
-            return Ok(None);
-        };
-        let attachment: StateAttachment = rmp_serde::from_slice(&bytes)?;
-        if attachment.state_id != *state || attachment.id() != *id {
-            return Err(HeddleError::InvalidObject(
-                "state attachment address does not match content".to_string(),
-            ));
+        if let Some(attachment) = self.try_get_state_attachment_once(state, id)? {
+            return Ok(Some(attachment));
         }
-        Ok(Some(attachment))
+        if self.reload_packs_if_stale()? {
+            return self.try_get_state_attachment_once(state, id);
+        }
+        Ok(None)
     }
 
     fn put_state_attachment(&self, attachment: &StateAttachment) -> Result<StateAttachmentId> {
@@ -1289,27 +1330,14 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self), fields(id = %id))]
     fn get_action(&self, id: &ActionId) -> Result<Option<Action>> {
-        let path = action_path(&self.root, id);
-        if !path.exists()
-            && let Ok(manager) = self.pack_manager().read()
-            && let Some((obj_type, data)) = manager.get_hashed_object(id.as_hash())?
-            && obj_type == ObjectType::Action
-        {
-            trace!("Found action in packfile");
-            let action = validate_loaded_action(id, rmp_serde::from_slice(&data)?)?;
+        if let Some(action) = self.try_get_action_once(id)? {
             return Ok(Some(action));
         }
-        match read_file_bytes(&path)? {
-            Some(data) => {
-                trace!(size = data.as_slice().len(), "Action data read");
-                let action = validate_loaded_action(id, codec::decode_action(data.as_slice())?)?;
-                Ok(Some(action))
-            }
-            None => {
-                trace!("Action not found");
-                Ok(None)
-            }
+        if self.reload_packs_if_stale()? {
+            return self.try_get_action_once(id);
         }
+        trace!("Action not found");
+        Ok(None)
     }
 
     #[instrument(skip(self, action))]
@@ -1328,6 +1356,7 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self))]
     fn list_actions(&self) -> Result<Vec<ActionId>> {
+        self.reload_packs_if_stale()?;
         let dir = actions_dir(&self.root);
         let mut action_hashes = Vec::new();
         if dir.exists() {
@@ -1355,6 +1384,7 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self))]
     fn list_blobs(&self) -> Result<Vec<ContentHash>> {
+        self.reload_packs_if_stale()?;
         let dir = blobs_dir(&self.root);
         let mut blobs = list_hashes_from_dir(&dir)?;
         if let Ok(manager) = self.pack_manager().read() {
@@ -1365,6 +1395,7 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self))]
     fn list_trees(&self) -> Result<Vec<ContentHash>> {
+        self.reload_packs_if_stale()?;
         let dir = trees_dir(&self.root);
         let mut trees = list_hashes_from_dir(&dir)?;
         if let Ok(manager) = self.pack_manager().read() {

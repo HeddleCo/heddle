@@ -21227,6 +21227,94 @@
       "title": "MaintenanceRefreshSchema",
       "type": "object"
     },
+    "maintenance repack": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "bytes_reclaimed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bytes_repacked": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "duration_ms": {
+          "format": "uint128",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "objects_repacked": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "maintenance_repack"
+          ],
+          "type": "string"
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "output_kind",
+        "objects_repacked",
+        "bytes_repacked",
+        "duration_ms",
+        "bytes_reclaimed"
+      ],
+      "title": "MaintenanceRepackSchema",
+      "type": "object"
+    },
     "oplog recover": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": true,
