@@ -109,14 +109,21 @@ pub(super) fn verify_staged(
             "replacement pack object set differs from the source snapshot",
         ));
     }
-    for id in ids {
-        let (object_type, data) = reader
-            .get_object(&id)
-            .map_err(RepackError::operation)?
-            .ok_or_else(|| RepackError::message(format!("replacement object missing: {id:?}")))?;
-        validate_pack_entry(&id, object_type, &data).map_err(RepackError::operation)?;
-        context.checkpoint(data.len() as u64)?;
+    let mut checkpoint_error = None;
+    let verification = reader.visit_objects(|id, object_type, data| {
+        validate_pack_entry(&id, object_type, data)?;
+        if let Err(error) = context.checkpoint(data.len() as u64) {
+            checkpoint_error = Some(error);
+            return Err(HeddleError::InvalidObject(
+                "compact verification interrupted".to_string(),
+            ));
+        }
+        Ok(())
+    });
+    if let Some(error) = checkpoint_error {
+        return Err(error);
     }
+    verification.map_err(RepackError::operation)?;
     Ok(())
 }
 

@@ -2496,6 +2496,7 @@ dependencies = [
  "heddle-fs-prims",
  "heddle-object-model",
  "memmap2",
+ "rmp-serde",
  "tempfile",
  "tracing",
  "zstd",

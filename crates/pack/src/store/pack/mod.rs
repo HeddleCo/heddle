@@ -4,6 +4,7 @@
 //! Packfiles bundle multiple objects together with delta compression,
 //! achieving 50-70% space savings for repositories with many similar objects.
 
+mod compact_frame;
 mod manager;
 mod pack_builder;
 mod pack_index;
@@ -17,6 +18,7 @@ mod versioned_header;
 #[cfg(test)]
 mod pack_tests;
 
+pub use compact_frame::compress_compact_frame;
 pub use manager::PackManager;
 pub use pack_builder::PackBuilder;
 pub use pack_index::PackIndex;

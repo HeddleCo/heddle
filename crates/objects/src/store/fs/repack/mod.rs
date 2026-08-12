@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Filesystem payload for the storage-agnostic repack scheduler.
 
+mod compact;
 mod cutover;
 mod operation;
 mod staging;
