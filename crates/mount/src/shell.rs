@@ -439,6 +439,24 @@ mod tests {
     }
 
     #[test]
+    fn kind_for_mode_maps_every_file_mode() {
+        assert_eq!(kind_for_mode(FileMode::Normal), NodeKind::File);
+        assert_eq!(kind_for_mode(FileMode::Executable), NodeKind::File);
+        assert_eq!(kind_for_mode(FileMode::Gitlink), NodeKind::File);
+        assert_eq!(kind_for_mode(FileMode::Symlink), NodeKind::Symlink);
+        assert_eq!(kind_for_mode(FileMode::Spoollink), NodeKind::File);
+        assert_eq!(DIR_UNIX_MODE, 0o040755);
+    }
+
+    #[test]
+    fn rename_options_default_allows_replace() {
+        assert_eq!(
+            RenameOptions::default(),
+            RenameOptions { no_replace: false }
+        );
+    }
+
+    #[test]
     fn release_default_delegates_to_flush() {
         let s = StubShell::default();
         assert_eq!(s.flush_calls.get(), 0);
@@ -464,13 +482,5 @@ mod tests {
             RenameOptions::default(),
             RenameOptions { no_replace: false }
         );
-    }
-
-    #[test]
-    fn kind_for_mode_maps_each_file_mode() {
-        assert_eq!(kind_for_mode(FileMode::Normal), NodeKind::File);
-        assert_eq!(kind_for_mode(FileMode::Executable), NodeKind::File);
-        assert_eq!(kind_for_mode(FileMode::Symlink), NodeKind::Symlink);
-        assert_eq!(kind_for_mode(FileMode::Spoollink), NodeKind::File);
     }
 }

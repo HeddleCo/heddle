@@ -282,6 +282,8 @@ mod diff_patch_conformance;
 mod discuss_carry_forward;
 #[path = "cli_integration/doctor_docs.rs"]
 mod doctor_docs;
+#[path = "cli_integration/dry_run_preview.rs"]
+mod dry_run_preview;
 #[path = "cli_integration/error_envelope_lint.rs"]
 mod error_envelope_lint;
 #[path = "cli_integration/exit_codes.rs"]

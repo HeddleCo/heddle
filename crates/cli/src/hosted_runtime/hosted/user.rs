@@ -608,3 +608,163 @@ fn parse_hosted_role_arg(
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use api::heddle::api::v1alpha1::{HostedRole, grant_target_ref::Target};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn administration_facade_builds_and_dispatches_every_native_request() {
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+
+        client.who_am_i().await.unwrap();
+        let _ = client
+            .create_service_account(CreateServiceAccountRequest::default())
+            .await;
+        let _ = client
+            .issue_service_account_credential(IssueServiceAccountCredentialRequest::default())
+            .await;
+        client.begin_login("alice@example.com").await.unwrap();
+        let _ = client.get_current_user_spool().await;
+        assert!(client.list_spools(true).await.unwrap().is_empty());
+        let _ = client
+            .create_spool(
+                "acme",
+                "widgets",
+                wire::HostedSpoolKind::Project,
+                Some("Widgets".to_string()),
+            )
+            .await;
+        client
+            .create_invitation("alice@example.com", "acme", "developer")
+            .await
+            .unwrap();
+        let _ = client
+            .update_namespace("acme", Some("acme-new"), Some(None))
+            .await;
+        client.delete_namespace("acme-new").await.unwrap();
+        let _ = client
+            .update_repository("acme/widgets", "widgets-new")
+            .await;
+        client.delete_repository("acme/widgets-new").await.unwrap();
+        let _ = client
+            .create_grant("principal:alice", "reader", None, Some("acme/widgets"))
+            .await;
+        assert!(
+            client
+                .list_grants(Some("repo:acme/widgets"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let _ = client
+            .update_grant("principal:alice", "maintainer", Some("acme"), None)
+            .await;
+        client
+            .delete_grant("principal:alice", Some("acme"), None)
+            .await
+            .unwrap();
+        client
+            .revoke_approval("approval-1", "revoke-approval-op".to_string())
+            .await
+            .unwrap();
+        client
+            .grant_support_access(
+                "operator@example.com",
+                None,
+                Some("acme/widgets"),
+                300,
+                "investigation",
+                "support-op".to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            client
+                .list_support_access_grants(Some("acme"), None, true)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        client
+            .revoke_support_access("support-1", "support-revoke-op".to_string())
+            .await
+            .unwrap();
+        client.resolve_monorepo("acme", Some(4)).await.unwrap();
+
+        let invalid_state = objects::object::StateId::from_bytes([3; 32]).to_string_full();
+        assert!(
+            client
+                .approve_thread(
+                    "acme/widgets",
+                    "feature",
+                    "main",
+                    &invalid_state,
+                    Some("looks good"),
+                    "approval-op".to_string(),
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .list_thread_approvals("acme/widgets", "feature", "main")
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .check_merge_eligibility(
+                    "acme/widgets",
+                    "feature",
+                    "main",
+                    &invalid_state,
+                    "land",
+                    vec!["src/lib.rs".to_string()],
+                    Some("principal:alice"),
+                )
+                .await
+                .is_err()
+        );
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn parse_hosted_role_arg_accepts_every_role_and_rejects_unknown() {
+        assert_eq!(parse_hosted_role_arg("reader").unwrap(), HostedRole::Reader);
+        assert_eq!(
+            parse_hosted_role_arg(" Developer ").unwrap(),
+            HostedRole::Developer
+        );
+        assert_eq!(
+            parse_hosted_role_arg("MAINTAINER").unwrap(),
+            HostedRole::Maintainer
+        );
+        assert_eq!(parse_hosted_role_arg("admin").unwrap(), HostedRole::Admin);
+        assert_eq!(parse_hosted_role_arg("owner").unwrap(), HostedRole::Owner);
+        let err = parse_hosted_role_arg("root").unwrap_err();
+        assert!(err.to_string().contains("invalid role"));
+    }
+
+    #[test]
+    fn build_target_ref_requires_exactly_one_path() {
+        let ns = build_target_ref(Some("acme"), None).unwrap().unwrap();
+        assert!(matches!(ns.target, Some(Target::NamespacePath(p)) if p == "acme"));
+
+        let repo = build_target_ref(None, Some("acme/widgets"))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(repo.target, Some(Target::RepoPath(_))));
+
+        // Exactly one required: neither, both, or empty-only → error.
+        assert!(build_target_ref(None, None).is_err());
+        assert!(build_target_ref(Some("acme"), Some("acme/widgets")).is_err());
+        assert!(build_target_ref(Some(""), None).is_err());
+        assert!(build_target_ref(None, Some("")).is_err());
+        assert!(build_target_ref(Some(""), Some("")).is_err());
+    }
+}

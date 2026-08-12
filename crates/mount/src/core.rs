@@ -142,6 +142,42 @@ fn validate_truncate_size(new_size: u64) -> Result<usize> {
     })
 }
 
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn validate_write_extent_accepts_in_bounds_writes() {
+        assert_eq!(validate_write_extent(0, 0).unwrap(), 0);
+        assert_eq!(validate_write_extent(0, 64).unwrap(), 64);
+        assert_eq!(
+            validate_write_extent(MAX_MOUNT_HOT_FILE_SIZE - 1, 1).unwrap(),
+            MAX_MOUNT_HOT_FILE_SIZE as usize
+        );
+    }
+
+    #[test]
+    fn validate_write_extent_rejects_overflow_and_oversize() {
+        let err = validate_write_extent(u64::MAX, 1).unwrap_err();
+        assert!(matches!(err, MountError::InvalidArgument(_)));
+        let err = validate_write_extent(MAX_MOUNT_HOT_FILE_SIZE, 1).unwrap_err();
+        assert!(matches!(err, MountError::FileTooLarge(_)));
+        let err = validate_write_extent(0, (MAX_MOUNT_HOT_FILE_SIZE as usize) + 1).unwrap_err();
+        assert!(matches!(err, MountError::FileTooLarge(_)));
+    }
+
+    #[test]
+    fn validate_truncate_size_accepts_in_bounds_and_rejects_oversize() {
+        assert_eq!(validate_truncate_size(0).unwrap(), 0);
+        assert_eq!(
+            validate_truncate_size(MAX_MOUNT_HOT_FILE_SIZE).unwrap(),
+            MAX_MOUNT_HOT_FILE_SIZE as usize
+        );
+        let err = validate_truncate_size(MAX_MOUNT_HOT_FILE_SIZE + 1).unwrap_err();
+        assert!(matches!(err, MountError::FileTooLarge(_)));
+    }
+}
+
 /// Tunables for when buffered writes get promoted to CAS.
 #[derive(Clone, Copy, Debug)]
 pub struct PromotionPolicy {

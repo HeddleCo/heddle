@@ -168,6 +168,12 @@ ignored = ["cbindgen"]
 # without changing the install command (heddle#190 r4 / Codex PR
 # #225 P1).
 
+[lints.rust]
+# cargo-llvm-cov injects `cfg(coverage)` so FUSE e2e tests can run under
+# the coverage gate without forcing every plain `cargo test` host to
+# mount FUSE. Silence the unexpected_cfgs lint for that well-known name.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
+
 [lib]
 path = "src/lib.rs"
 name = "mount"

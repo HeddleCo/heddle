@@ -753,12 +753,88 @@ mod tests {
             nfsstat3::NFS3ERR_NOENT
         ));
         assert!(matches!(
+            mount_err_to_nfs(&MountError::UnknownThread("t".into())),
+            nfsstat3::NFS3ERR_NOENT
+        ));
+        assert!(matches!(
+            mount_err_to_nfs(&MountError::Stale("s".into())),
+            nfsstat3::NFS3ERR_STALE
+        ));
+        assert!(matches!(
             mount_err_to_nfs(&MountError::ReadOnly),
             nfsstat3::NFS3ERR_ROFS
         ));
         assert!(matches!(
             mount_err_to_nfs(&MountError::NotADirectory("d".into())),
             nfsstat3::NFS3ERR_NOTDIR
+        ));
+        assert!(matches!(
+            mount_err_to_nfs(&MountError::AlreadyExists("e".into())),
+            nfsstat3::NFS3ERR_EXIST
+        ));
+        assert!(matches!(
+            mount_err_to_nfs(&MountError::IsADirectory("d".into())),
+            nfsstat3::NFS3ERR_ISDIR
+        ));
+        assert!(matches!(
+            mount_err_to_nfs(&MountError::NotEmpty("d".into())),
+            nfsstat3::NFS3ERR_NOTEMPTY
+        ));
+        assert!(matches!(
+            mount_err_to_nfs(&MountError::InvalidArgument("a".into())),
+            nfsstat3::NFS3ERR_INVAL
+        ));
+        assert!(matches!(
+            mount_err_to_nfs(&MountError::FileTooLarge("f".into())),
+            nfsstat3::NFS3ERR_FBIG
+        ));
+        assert!(matches!(
+            mount_err_to_nfs(&MountError::SessionInit("s".into())),
+            nfsstat3::NFS3ERR_IO
+        ));
+    }
+
+    #[test]
+    fn system_time_to_nfstime_is_monotonic_for_epoch() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let t = system_time_to_nfstime(UNIX_EPOCH + Duration::from_secs(42));
+        assert_eq!(t.seconds, 42);
+        assert_eq!(t.nseconds, 0);
+    }
+
+    #[test]
+    fn fattr_from_populates_type_and_size() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        use crate::shell::NodeKind;
+
+        let f = fattr_from(1, NodeKind::File, 123, 0o644, 1, UNIX_EPOCH);
+        assert_eq!(f.size, 123);
+        assert_eq!(f.fileid, 1);
+        assert_eq!(f.used, 123);
+        assert_eq!(f.mode, 0o644);
+        let d = fattr_from(2, NodeKind::Directory, 0, 0o755, 2, UNIX_EPOCH);
+        assert_eq!(d.fileid, 2);
+        assert_eq!(d.nlink, 2);
+        let l = fattr_from(3, NodeKind::Symlink, 4, 0o777, 1, UNIX_EPOCH);
+        assert_eq!(l.fileid, 3);
+        assert_eq!(l.size, 4);
+
+        // Pre-epoch timestamps collapse to zero.
+        let pre = system_time_to_nfstime(UNIX_EPOCH - Duration::from_secs(5));
+        assert_eq!(pre.seconds, 0);
+        assert_eq!(pre.nseconds, 0);
+        let post = system_time_to_nfstime(UNIX_EPOCH + Duration::from_nanos(1_500_000_000));
+        assert_eq!(post.seconds, 1);
+        assert_eq!(post.nseconds, 500_000_000);
+    }
+
+    #[test]
+    fn mount_err_to_nfs_maps_store_errors_to_io() {
+        use objects::error::HeddleError;
+        assert!(matches!(
+            mount_err_to_nfs(&MountError::Store(HeddleError::InvalidObject("x".into()))),
+            nfsstat3::NFS3ERR_IO
         ));
     }
 }

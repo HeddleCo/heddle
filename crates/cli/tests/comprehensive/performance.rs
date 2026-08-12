@@ -2,6 +2,7 @@
 use super::*;
 
 #[test]
+#[serial_test::serial(performance)]
 fn test_snapshot_performance_small_repo() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "content");
@@ -20,6 +21,7 @@ fn test_snapshot_performance_small_repo() {
 }
 
 #[test]
+#[serial_test::serial(performance)]
 fn test_snapshot_performance_many_files() {
     let file_count = 1_000usize;
     let temp = TempDir::new().unwrap();
@@ -44,6 +46,7 @@ fn test_snapshot_performance_many_files() {
 }
 
 #[test]
+#[serial_test::serial(performance)]
 fn test_status_performance_large_repo() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
@@ -75,6 +78,7 @@ fn test_status_performance_large_repo() {
 }
 
 #[test]
+#[serial_test::serial(performance)]
 // 10k-line × 1k-change diff: 3s on release, ~6× slower in debug. We
 // scale the budget when `debug_assertions` are on so
 // `--include-ignored` (debug) still catches catastrophic regressions
@@ -117,6 +121,7 @@ fn test_diff_performance_large_file() {
 }
 
 #[test]
+#[serial_test::serial(performance)]
 fn test_log_performance_deep_history() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
@@ -140,6 +145,7 @@ fn test_log_performance_deep_history() {
 }
 
 #[test]
+#[serial_test::serial(performance)]
 fn test_gc_performance_many_objects() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();

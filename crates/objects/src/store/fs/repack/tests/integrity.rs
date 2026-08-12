@@ -134,6 +134,49 @@ fn loose_object_trigger_consolidates_and_reclaims_the_loose_copy() {
 }
 
 #[test]
+fn pack_count_trigger_atomically_swaps_multiple_packs_for_one_replacement() {
+    let (_temp, store) = create_store();
+    let first = Blob::from("first source pack");
+    let second = Blob::from("second source pack");
+    store
+        .put_blobs_packed(vec![(first.hash(), first.content().to_vec())])
+        .unwrap();
+    store
+        .put_blobs_packed(vec![(second.hash(), second.content().to_vec())])
+        .unwrap();
+
+    let policy = RepackPolicy {
+        loose_object_threshold: None,
+        pack_count_threshold: Some(2),
+        pack_bytes_threshold: None,
+        fragmentation_threshold_bps: None,
+    };
+    let limits = RepackResourceLimits::new(NonZeroUsize::MIN).with_io_rate(None);
+    let scheduler = RepackScheduler::new(policy, limits);
+    let operation = Arc::new(FsRepackOperation::new(store.clone()));
+    assert_eq!(operation.inspect().unwrap().pack_count, 2);
+
+    let report = started_handle(scheduler.schedule_if_needed(operation).unwrap())
+        .wait()
+        .unwrap();
+
+    assert_eq!(report.objects_repacked, 2);
+    assert_eq!(
+        direct_pack_names(store.root())
+            .iter()
+            .filter(|name| name.ends_with(".pack"))
+            .count(),
+        1,
+        "cutover should retire both source packs only after publishing one replacement"
+    );
+    for blob in [&first, &second] {
+        let loaded = store.get_blob(&blob.hash()).unwrap().unwrap();
+        assert_eq!(loaded.content(), blob.content());
+        assert_eq!(loaded.hash(), blob.hash());
+    }
+}
+
+#[test]
 fn deliberately_corrupted_repack_output_is_rejected_before_cutover() {
     let (_temp, store) = create_store();
     let blob = Blob::from("authoritative bytes must survive rejection");

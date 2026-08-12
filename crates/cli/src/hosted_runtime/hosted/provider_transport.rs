@@ -428,7 +428,14 @@ fn fresh_handle() -> [u8; 16] {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_source;
+    use std::{io, task::Poll};
+
+    use cli_shared::ClientConfig;
+    use iroh::endpoint::transports::CustomTransport as _;
+
+    use super::{
+        ProviderWebSocketTransport, WEBSOCKET_TRANSPORT_ID, fresh_handle, validate_source,
+    };
 
     #[test]
     fn provider_url_requires_exact_provider_and_ticket_query() {
@@ -447,5 +454,54 @@ mod tests {
         ] {
             assert!(validate_source("provider-a", invalid, "opaque").is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn provider_transport_binds_once_and_rejects_unregistered_routes() {
+        let transport = ProviderWebSocketTransport::new(ClientConfig::default());
+        assert!(format!("{transport:?}").contains("registered_provider_lanes: 0"));
+        assert!(
+            transport
+                .register_source(
+                    "provider-a",
+                    "not-an-endpoint-id",
+                    "wss://iroh.example/direct?provider=provider-a&ticket=opaque",
+                    "opaque",
+                )
+                .is_err()
+        );
+
+        let mut bound = transport.bind().unwrap();
+        assert_eq!(
+            transport.bind().unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert!(format!("{bound:?}").contains("BoundProviderWebSocketTransport"));
+        let sender = bound.create_sender();
+        let valid = iroh_base::CustomAddr::from_parts(WEBSOCKET_TRANSPORT_ID, &fresh_handle());
+        let invalid = iroh_base::CustomAddr::from_parts(WEBSOCKET_TRANSPORT_ID + 1, b"invalid");
+        assert!(sender.is_valid_send_addr(&valid));
+        assert!(!sender.is_valid_send_addr(&invalid));
+
+        let mut no_buffers = [];
+        let mut no_metas = [];
+        let mut no_infos = [];
+        let waker = futures::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        assert!(matches!(
+            bound.poll_recv(&mut context, &mut no_buffers, &mut no_metas, &mut no_infos),
+            Poll::Ready(Ok(0))
+        ));
+
+        let endpoint_id = iroh_base::SecretKey::generate().public();
+        transport
+            .register_source(
+                "provider-a",
+                &endpoint_id.to_string(),
+                "wss://iroh.example/direct?provider=provider-a&ticket=opaque",
+                "opaque",
+            )
+            .unwrap();
+        assert!(format!("{transport:?}").contains("registered_provider_lanes: 1"));
     }
 }

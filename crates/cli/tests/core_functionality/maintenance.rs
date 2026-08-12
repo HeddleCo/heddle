@@ -242,6 +242,39 @@ fn test_maintenance_refresh_creates_or_refreshes_sidecars_in_simple_repo() {
     );
 }
 
+#[test]
+fn test_maintenance_repack_json_reports_real_nonempty_cutover() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    fs::write(temp.path().join("tracked.txt"), "repack me").unwrap();
+    heddle_must_succeed(&["capture", "-m", "initial"], temp.path());
+
+    let output = heddle(
+        &["--output", "json", "maintenance", "repack"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let report: Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(report["output_kind"], "maintenance_repack");
+    assert!(report["objects_repacked"].as_u64().unwrap() > 0);
+    assert!(report["bytes_repacked"].as_u64().unwrap() > 0);
+    assert!(report["duration_ms"].as_u64().is_some());
+    assert!(report["bytes_reclaimed"].as_u64().is_some());
+
+    let rerun = heddle(&["maintenance", "repack"], Some(temp.path())).unwrap();
+    assert!(
+        rerun.starts_with("Repacked ") && rerun.contains("reclaimed"),
+        "a same-content rerun should complete and render metrics: {rerun}"
+    );
+
+    let status = heddle(&["status", "--short"], Some(temp.path())).unwrap();
+    assert!(
+        status.contains("clean"),
+        "repository should remain readable and clean after cutover: {status}"
+    );
+}
+
 /// The top-level `store` group was removed in the whole-CLI consolidation
 /// (#473). `store warm` is slated to re-home under `maintenance` in a later
 /// phase; for now the verb must error as unknown.

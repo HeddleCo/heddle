@@ -71,6 +71,21 @@ use mount::{BackgroundSession, ContentAddressedMount, FuseShell};
 use repo::Repository;
 use tempfile::TempDir;
 
+/// True when the host can actually mount FUSE (device node + fusermount3).
+/// Coverage runs these tests under `cfg(coverage)` so they contribute to
+/// the mount floor when the runner has FUSE; otherwise they no-op so a
+/// bare llvm-cov host still finishes green.
+fn fuse_runtime_available() -> bool {
+    std::path::Path::new("/dev/fuse").exists()
+        && std::process::Command::new("fusermount3")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+}
+
 /// Build a tiny repo with one captured file (`hello.txt` containing
 /// `"world"`) and return the temp dir + an open `Repository` handle.
 /// Both shipped because the temp dir's `Drop` cleans up the on-disk
@@ -135,8 +150,15 @@ fn wait_for(target: &Path, expect_present: bool, dur: Duration) {
 }
 
 #[test]
-#[ignore = "requires FUSE on host; opt-in via --ignored"]
+#[cfg_attr(
+    not(coverage),
+    ignore = "requires FUSE on host; opt-in via --ignored or cargo-llvm-cov"
+)]
 fn fuse_mount_serves_blob_content() {
+    if !fuse_runtime_available() {
+        eprintln!("skipping: FUSE runtime unavailable");
+        return;
+    }
     let (_repo_dir, repo) = build_fixture();
     let (session, mountpoint) = mount_fixture(repo);
 
@@ -148,8 +170,15 @@ fn fuse_mount_serves_blob_content() {
 }
 
 #[test]
-#[ignore = "requires FUSE on host; opt-in via --ignored"]
+#[cfg_attr(
+    not(coverage),
+    ignore = "requires FUSE on host; opt-in via --ignored or cargo-llvm-cov"
+)]
 fn fuse_mount_round_trips_writes_to_existing_file() {
+    if !fuse_runtime_available() {
+        eprintln!("skipping: FUSE runtime unavailable");
+        return;
+    }
     let (_repo_dir, repo) = build_fixture();
     let (session, mountpoint) = mount_fixture(repo);
 
@@ -206,8 +235,15 @@ fn fuse_mount_round_trips_writes_to_existing_file() {
 /// invalidation (or re-introduces a caching mode the inval can't reach)
 /// fails here with the stale bytes.
 #[test]
-#[ignore = "requires FUSE on host; opt-in via --ignored"]
+#[cfg_attr(
+    not(coverage),
+    ignore = "requires FUSE on host; opt-in via --ignored or cargo-llvm-cov"
+)]
 fn fuse_mount_cache_stays_coherent_after_write() {
+    if !fuse_runtime_available() {
+        eprintln!("skipping: FUSE runtime unavailable");
+        return;
+    }
     let (_repo_dir, repo) = build_fixture();
     let (session, mountpoint) = mount_fixture(repo);
 
@@ -277,8 +313,15 @@ fn fuse_mount_cache_stays_coherent_after_write() {
 /// heddle#87 removes. A regression that re-introduces `FOPEN_DIRECT_IO`
 /// fails here: the counter advances on the second read.
 #[test]
-#[ignore = "requires FUSE on host; opt-in via --ignored"]
+#[cfg_attr(
+    not(coverage),
+    ignore = "requires FUSE on host; opt-in via --ignored or cargo-llvm-cov"
+)]
 fn fuse_mount_serves_repeat_reads_from_cache() {
+    if !fuse_runtime_available() {
+        eprintln!("skipping: FUSE runtime unavailable");
+        return;
+    }
     use std::sync::atomic::Ordering;
 
     let (_repo_dir, repo) = build_fixture();
@@ -314,8 +357,15 @@ fn fuse_mount_serves_repeat_reads_from_cache() {
 }
 
 #[test]
-#[ignore = "requires FUSE on host; opt-in via --ignored"]
+#[cfg_attr(
+    not(coverage),
+    ignore = "requires FUSE on host; opt-in via --ignored or cargo-llvm-cov"
+)]
 fn fuse_mount_serves_concurrent_readers() {
+    if !fuse_runtime_available() {
+        eprintln!("skipping: FUSE runtime unavailable");
+        return;
+    }
     let (_repo_dir, repo) = build_fixture();
     let (session, mountpoint) = mount_fixture(repo);
 
@@ -362,8 +412,15 @@ fn fuse_mount_serves_concurrent_readers() {
 /// direct-IO flag and that kernel-version floor, so the test no
 /// longer probes the kernel version.)
 #[test]
-#[ignore = "requires FUSE on host; opt-in via --ignored"]
+#[cfg_attr(
+    not(coverage),
+    ignore = "requires FUSE on host; opt-in via --ignored or cargo-llvm-cov"
+)]
 fn fuse_mount_serves_mmap_readers() {
+    if !fuse_runtime_available() {
+        eprintln!("skipping: FUSE runtime unavailable");
+        return;
+    }
     let (_repo_dir, repo) = build_fixture();
     let (session, mountpoint) = mount_fixture(repo);
 
@@ -400,8 +457,15 @@ fn fuse_mount_serves_mmap_readers() {
 /// trip so a regression in the trampoline / errno mapping / direct-
 /// io flag is caught even when the core remains correct.
 #[test]
-#[ignore = "requires FUSE on host; opt-in via --ignored"]
+#[cfg_attr(
+    not(coverage),
+    ignore = "requires FUSE on host; opt-in via --ignored or cargo-llvm-cov"
+)]
 fn fuse_mount_round_trips_write_side_ops() {
+    if !fuse_runtime_available() {
+        eprintln!("skipping: FUSE runtime unavailable");
+        return;
+    }
     let (_repo_dir, repo) = build_fixture();
     let (session, mountpoint) = mount_fixture(repo);
     let root = mountpoint.path();
@@ -497,8 +561,15 @@ fn fuse_mount_round_trips_write_side_ops() {
 }
 
 #[test]
-#[ignore = "requires FUSE on host; opt-in via --ignored"]
+#[cfg_attr(
+    not(coverage),
+    ignore = "requires FUSE on host; opt-in via --ignored or cargo-llvm-cov"
+)]
 fn fuse_mount_unmounts_cleanly_on_session_drop() {
+    if !fuse_runtime_available() {
+        eprintln!("skipping: FUSE runtime unavailable");
+        return;
+    }
     let (_repo_dir, repo) = build_fixture();
     let (session, mountpoint) = mount_fixture(repo);
     let target = mountpoint.path().join("hello.txt");
