@@ -1073,6 +1073,39 @@ mod tests {
     }
 
     #[test]
+    fn compact_tree_extraction_rejects_an_index_alias_with_the_wrong_typed_hash() {
+        use crate::object::{Tree, TreeEntry};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (mut builder, _, index_path) = fresh_builder(&tmp);
+        let blob = deterministic_hash(0x34);
+        let trees = vec![
+            Tree::from_entries(vec![TreeEntry::file("a", blob, false).unwrap()]),
+            Tree::from_entries(vec![TreeEntry::file("b", blob, true).unwrap()]),
+        ];
+        let wrong_hash = ContentHash::compute_typed("tree", b"not the second tree");
+        assert_ne!(wrong_hash, trees[1].hash());
+        let ids = vec![
+            PackObjectId::Hash(trees[0].hash()),
+            PackObjectId::Hash(wrong_hash),
+        ];
+        let frame = heddle_object_model::compact::encode_tree_frame(&trees).unwrap();
+        builder
+            .add_shared_frame(&ids, ObjectType::Tree, frame.len(), &frame)
+            .unwrap();
+        let (pack, index, _) = finalize_cursor(builder, &index_path);
+        let reader = PackReader::from_bytes(pack, index).unwrap();
+
+        let error = reader.get_object(&ids[1]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not contain indexed object"),
+            "extraction must derive and verify the tree's typed hash: {error}"
+        );
+    }
+
+    #[test]
     fn corrupt_compact_frame_byte_invalidates_every_contained_object() {
         use crate::object::{Tree, TreeEntry};
 

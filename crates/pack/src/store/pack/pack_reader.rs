@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pack reader for extracting objects from packfiles.
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fs::File,
     io::Read,
     path::Path,
@@ -28,6 +30,19 @@ const MMAP_THRESHOLD_BYTES: u64 = 256 * 1024;
 
 type DecodedCompactObject = (PackObjectId, ObjectType, Vec<u8>);
 type DecodedCompactObjects = Vec<DecodedCompactObject>;
+
+/// Physical read tier for an indexed pack object.
+///
+/// Hot records have one independently addressable record per logical object.
+/// Solid-frame records share one payload across several logical objects and
+/// therefore require a frame decompression on a cache-cold read.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum PackReadTier {
+    /// Independently addressable, random-access record.
+    Hot,
+    /// Compact payload shared by several tree or state ids.
+    SolidFrame,
+}
 
 fn read_file_bytes_for_pack(path: &Path) -> Result<Bytes> {
     let file = File::open(path)?;
@@ -89,6 +104,8 @@ pub struct PackReader<'a> {
     data: PackData<'a>,
     index: PackIndex,
     content_end: usize,
+    #[cfg(test)]
+    compact_frame_reads: AtomicUsize,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +144,8 @@ impl PackReader<'static> {
             data: PackData::Owned(pack_bytes),
             index,
             content_end,
+            #[cfg(test)]
+            compact_frame_reads: AtomicUsize::new(0),
         })
     }
 
@@ -138,6 +157,8 @@ impl PackReader<'static> {
             data: PackData::Owned(pack_data),
             index,
             content_end,
+            #[cfg(test)]
+            compact_frame_reads: AtomicUsize::new(0),
         })
     }
 }
@@ -150,12 +171,49 @@ impl<'a> PackReader<'a> {
             data: PackData::Borrowed(pack_data),
             index,
             content_end,
+            #[cfg(test)]
+            compact_frame_reads: AtomicUsize::new(0),
         })
     }
 
     /// List all object ids in this pack.
     pub fn list_ids(&self) -> Result<Vec<PackObjectId>> {
         self.index.ids()
+    }
+
+    /// List logical ids together with their physical read tier.
+    ///
+    /// A shared compact frame is represented by several index aliases at one
+    /// record offset. Direct records have a unique offset and form the hot,
+    /// random-access tier. A one-object compact frame is intentionally treated
+    /// as hot here: it has no read amplification over a direct record.
+    pub(super) fn indexed_read_tiers(&self) -> Result<Vec<(PackObjectId, PackReadTier)>> {
+        let entries = self.index.entries()?;
+        let mut aliases = HashMap::<u64, usize>::with_capacity(entries.len());
+        for entry in &entries {
+            *aliases.entry(entry.offset).or_default() += 1;
+        }
+        Ok(entries
+            .into_iter()
+            .map(|entry| {
+                let tier = if aliases[&entry.offset] > 1 {
+                    PackReadTier::SolidFrame
+                } else {
+                    PackReadTier::Hot
+                };
+                (entry.id, tier)
+            })
+            .collect())
+    }
+
+    #[cfg(test)]
+    pub(super) fn compact_frame_read_count(&self) -> usize {
+        self.compact_frame_reads.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn record_compact_frame_read(&self) {
+        self.compact_frame_reads.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn list_hashes(&self) -> Result<Vec<ContentHash>> {
@@ -575,16 +633,18 @@ impl<'a> PackReader<'a> {
             stored_data.to_vec()
         };
 
-        if obj_type != ObjectType::Delta
-            && let Some(data) = decode_compact_object(requested_id, obj_type, &decompressed)?
-        {
-            return Ok(PackObjectRecord {
-                id: *requested_id,
-                obj_type,
-                data,
-                delta_base: None,
-                path_hint: None,
-            });
+        if obj_type != ObjectType::Delta && is_compact_frame(&decompressed) {
+            #[cfg(test)]
+            self.record_compact_frame_read();
+            if let Some(data) = decode_compact_object(requested_id, obj_type, &decompressed)? {
+                return Ok(PackObjectRecord {
+                    id: *requested_id,
+                    obj_type,
+                    data,
+                    delta_base: None,
+                    path_hint: None,
+                });
+            }
         }
         verify_record_id_matches(requested_id, &id)?;
         let (resolved_type, final_data) = if obj_type == ObjectType::Delta {
@@ -634,6 +694,10 @@ impl<'a> PackReader<'a> {
                 header.uncompressed_size,
                 data.len()
             )));
+        }
+        #[cfg(test)]
+        if is_compact_frame(&data) {
+            self.record_compact_frame_read();
         }
         decode_compact_objects(header.obj_type, &data)
     }

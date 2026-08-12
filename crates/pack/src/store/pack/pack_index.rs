@@ -141,14 +141,19 @@ impl EncodedIndex {
 }
 
 impl PackIndex {
-    /// Return all ids in this index.
-    pub fn ids(&self) -> Result<Vec<PackObjectId>> {
+    /// Return all decoded index entries.
+    pub(super) fn entries(&self) -> Result<Vec<IndexEntry>> {
         if let Some(encoded) = &self.encoded {
             return (0..encoded.count)
-                .map(|index| encoded.entry(index).map(|entry| entry.id))
+                .map(|index| encoded.entry(index))
                 .collect();
         }
-        Ok(self.entries.iter().map(|entry| entry.id).collect())
+        Ok(self.entries.clone())
+    }
+
+    /// Return all ids in this index.
+    pub fn ids(&self) -> Result<Vec<PackObjectId>> {
+        Ok(self.entries()?.into_iter().map(|entry| entry.id).collect())
     }
 }
 
