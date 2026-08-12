@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pack index for fast object lookup within packfiles.
 
+use std::collections::HashSet;
+
 use bytes::Bytes;
 
 use crate::store::{
@@ -12,8 +14,10 @@ use crate::store::{
 };
 
 pub(super) const INDEX_MAGIC: &[u8; 4] = b"LMI\0";
-pub(super) const INDEX_VERSION: u32 = 2;
-const INDEX_ENTRY_LEN: usize = 33 + 8;
+pub(super) const INDEX_VERSION: u32 = 3;
+pub(super) const INDEX_ENTRY_LEN: usize = 32 + 8;
+const STATE_ID_OFFSET_TAG: u64 = 1 << 63;
+const PACK_OFFSET_MASK: u64 = !STATE_ID_OFFSET_TAG;
 
 /// Entry in the pack index.
 #[derive(Debug, Clone, Copy)]
@@ -88,8 +92,7 @@ impl PackIndex {
         let mut result = Vec::new();
         index_header().write_vec(&mut result, self.entries.len() as u64);
         for entry in &self.entries {
-            entry.id.encode_tagged(&mut result);
-            result.extend_from_slice(&entry.offset.to_be_bytes());
+            result.extend_from_slice(&encode_index_entry(entry.id, entry.offset));
         }
         result
     }
@@ -132,12 +135,46 @@ impl EncodedIndex {
         let bytes = self.data.get(start..end).ok_or_else(|| {
             crate::store::StoreError::InvalidObject("Index data truncated".to_string())
         })?;
-        let (id, id_len) = PackObjectId::decode_tagged(bytes)?;
-        let offset = u64::from_be_bytes(bytes[id_len..].try_into().map_err(|_| {
-            crate::store::StoreError::InvalidObject("Invalid offset length".to_string())
-        })?);
-        Ok(IndexEntry { id, offset })
+        decode_index_entry(bytes)
     }
+}
+
+pub(super) fn encode_index_entry(id: PackObjectId, offset: u64) -> [u8; INDEX_ENTRY_LEN] {
+    assert!(
+        offset <= PACK_OFFSET_MASK,
+        "pack index offset exceeds the 63-bit format limit"
+    );
+    let mut bytes = [0u8; INDEX_ENTRY_LEN];
+    let tagged_offset = match id {
+        PackObjectId::Hash(hash) => {
+            bytes[..32].copy_from_slice(hash.as_bytes());
+            offset
+        }
+        PackObjectId::StateId(state_id) => {
+            bytes[..32].copy_from_slice(state_id.as_bytes());
+            offset | STATE_ID_OFFSET_TAG
+        }
+    };
+    bytes[32..].copy_from_slice(&tagged_offset.to_be_bytes());
+    bytes
+}
+
+fn decode_index_entry(bytes: &[u8]) -> Result<IndexEntry> {
+    let raw_id: [u8; 32] = bytes[..32].try_into().map_err(|_| {
+        crate::store::StoreError::InvalidObject("Invalid index id length".to_string())
+    })?;
+    let tagged_offset = u64::from_be_bytes(bytes[32..].try_into().map_err(|_| {
+        crate::store::StoreError::InvalidObject("Invalid offset length".to_string())
+    })?);
+    let id = if tagged_offset & STATE_ID_OFFSET_TAG == 0 {
+        PackObjectId::Hash(crate::object::ContentHash::from_bytes(raw_id))
+    } else {
+        PackObjectId::StateId(crate::object::StateId::from_bytes(raw_id))
+    };
+    Ok(IndexEntry {
+        id,
+        offset: tagged_offset & PACK_OFFSET_MASK,
+    })
 }
 
 impl PackIndex {
@@ -154,6 +191,17 @@ impl PackIndex {
     /// Return all ids in this index.
     pub fn ids(&self) -> Result<Vec<PackObjectId>> {
         Ok(self.entries()?.into_iter().map(|entry| entry.id).collect())
+    }
+
+    pub(super) fn aliased_offsets(&self) -> Result<HashSet<u64>> {
+        let mut seen = HashSet::new();
+        let mut aliases = HashSet::new();
+        for entry in self.entries()? {
+            if !seen.insert(entry.offset) {
+                aliases.insert(entry.offset);
+            }
+        }
+        Ok(aliases)
     }
 }
 

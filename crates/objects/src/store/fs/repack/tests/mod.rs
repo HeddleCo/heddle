@@ -21,7 +21,7 @@ use crate::store::{
     RepackLoadMonitor, RepackPolicy, RepackResourceLimits, RepackSchedule, RepackScheduler,
 };
 
-fn create_store() -> (TempDir, FsStore) {
+pub(super) fn create_store() -> (TempDir, FsStore) {
     let temp = TempDir::new().unwrap();
     let store = FsStore::new(temp.path().join(".heddle"));
     store.init().unwrap();

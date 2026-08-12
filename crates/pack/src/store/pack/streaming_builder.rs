@@ -518,7 +518,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         Ok(())
     }
 
-    /// Add one compact frame shared by several logical tree or state ids.
+    /// Add one compact frame shared by several logical blob, tree, or state ids.
     ///
     /// `stored_data` is either the raw frame or a zstd frame whose decoded
     /// length is `uncompressed_size`. Every id is indexed at the same physical
@@ -536,9 +536,12 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
                 "compact frame must contain at least one object".to_string(),
             ));
         }
-        if !matches!(obj_type, ObjectType::Tree | ObjectType::State) {
+        if !matches!(
+            obj_type,
+            ObjectType::Blob | ObjectType::Tree | ObjectType::State
+        ) {
             return Err(StoreError::InvalidObject(
-                "shared compact frames may contain only trees or states".to_string(),
+                "shared compact frames may contain only blobs, trees, or states".to_string(),
             ));
         }
         let unique = ids.iter().copied().collect::<HashSet<_>>();
@@ -550,7 +553,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         if ids.iter().any(|id| {
             !matches!(
                 (obj_type, id),
-                (ObjectType::Tree, PackObjectId::Hash(_))
+                (ObjectType::Blob | ObjectType::Tree, PackObjectId::Hash(_))
                     | (ObjectType::State, PackObjectId::StateId(_))
             )
         }) {
@@ -809,19 +812,16 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
 
 /// Write the index container header to `out`. Mirrors
 /// [`PackIndex::to_bytes`]'s prefix exactly (4-byte magic, 4-byte
-/// big-endian version, 8-byte big-endian count) so a reader written
-/// against the existing format works without modification.
+/// big-endian version, 8-byte big-endian count) so the streaming and
+/// in-memory builders produce the same index container.
 fn write_index_header<W: Write>(out: &mut W, count: u64) -> Result<()> {
     super::pack_index::index_header().write_to(out, count)
 }
 
-/// Append one `(id, offset)` index entry to `out`. The encoding
-/// matches [`PackIndex::to_bytes`]: tagged id immediately followed by
-/// an 8-byte big-endian offset.
+/// Append one `(id, offset)` index entry to `out` using the compact
+/// [`PackIndex::to_bytes`] encoding.
 fn write_index_entry<W: Write>(out: &mut W, id: PackObjectId, offset: u64) -> Result<()> {
-    let mut buf = Vec::with_capacity(33 + 8);
-    id.encode_tagged(&mut buf);
-    buf.extend_from_slice(&offset.to_be_bytes());
+    let buf = super::pack_index::encode_index_entry(id, offset);
     out.write_all(&buf).map_err(StoreError::from)
 }
 
@@ -1106,6 +1106,61 @@ mod tests {
     }
 
     #[test]
+    fn shared_lineage_blob_frame_reconstructs_each_indexed_object() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (mut builder, _, index_path) = fresh_builder(&tmp);
+        let bodies = [b"newest version".as_slice(), b"older version".as_slice()];
+        let ids = bodies
+            .iter()
+            .map(|body| PackObjectId::Hash(ContentHash::compute_typed("blob", body)))
+            .collect::<Vec<_>>();
+        let frame = heddle_object_model::compact::encode_blob_frame(&bodies).unwrap();
+        builder
+            .add_shared_frame(&ids, ObjectType::Blob, frame.len(), &frame)
+            .unwrap();
+        let (pack, index, stats) = finalize_cursor(builder, &index_path);
+        let reader = PackReader::from_bytes(pack, index).unwrap();
+
+        assert_eq!(stats.object_count, bodies.len() as u64);
+        assert_eq!(
+            reader.encoded_payload_bytes(ObjectType::Blob).unwrap(),
+            frame.len() as u64
+        );
+        for (id, expected) in ids.iter().zip(bodies) {
+            let (object_type, actual) = reader.get_object(id).unwrap().unwrap();
+            assert_eq!(object_type, ObjectType::Blob);
+            assert_eq!(actual, expected);
+            let PackObjectId::Hash(hash) = id else {
+                unreachable!("blob ids are hashes")
+            };
+            assert_eq!(
+                reader.get_hashed_object_type(hash).unwrap(),
+                Some(ObjectType::Blob)
+            );
+            assert_eq!(
+                reader.get_hashed_object_size(hash).unwrap(),
+                Some(expected.len() as u64)
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_blob_starting_with_frame_magic_remains_ordinary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (mut builder, _, index_path) = fresh_builder(&tmp);
+        let body = b"HCB2 arbitrary user content".to_vec();
+        let hash = ContentHash::compute_typed("blob", &body);
+        builder.add(hash, ObjectType::Blob, body.clone()).unwrap();
+        let (pack, index, _) = finalize_cursor(builder, &index_path);
+        let reader = PackReader::from_bytes(pack, index).unwrap();
+
+        assert_eq!(
+            reader.get_object(&PackObjectId::Hash(hash)).unwrap(),
+            Some((ObjectType::Blob, body))
+        );
+    }
+
+    #[test]
     fn corrupt_compact_frame_byte_invalidates_every_contained_object() {
         use crate::object::{Tree, TreeEntry};
 
@@ -1125,6 +1180,35 @@ mod tests {
         frame[corrupt_at] ^= 0x01;
         builder
             .add_shared_frame(&ids, ObjectType::Tree, frame.len(), &frame)
+            .unwrap();
+        let (pack, index, _) = finalize_cursor(builder, &index_path);
+        let reader = PackReader::from_bytes(pack, index).unwrap();
+
+        for id in ids {
+            let error = reader.get_object(&id).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("compact frame checksum mismatch"),
+                "unexpected error for {id:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn corrupt_blob_frame_byte_invalidates_every_contained_object() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (mut builder, _, index_path) = fresh_builder(&tmp);
+        let bodies = [b"newest version".as_slice(), b"older version".as_slice()];
+        let ids = bodies
+            .iter()
+            .map(|body| PackObjectId::Hash(ContentHash::compute_typed("blob", body)))
+            .collect::<Vec<_>>();
+        let mut frame = heddle_object_model::compact::encode_blob_frame(&bodies).unwrap();
+        let corrupt_at = frame.len() / 2;
+        frame[corrupt_at] ^= 0x01;
+        builder
+            .add_shared_frame(&ids, ObjectType::Blob, frame.len(), &frame)
             .unwrap();
         let (pack, index, _) = finalize_cursor(builder, &index_path);
         let reader = PackReader::from_bytes(pack, index).unwrap();
@@ -1561,7 +1645,9 @@ mod tests {
         // Inspect bucket file sizes BEFORE finalize (which deletes them).
         b.pack_writer.as_mut().unwrap().flush().unwrap();
         let mut max_entries = 0usize;
-        let entry_size = 33 + 8; // tagged-hash + u64 offset
+        // Bucket files use the temporary tagged ID encoding; only the
+        // finalized index folds the tag into the offset.
+        let entry_size = 33 + 8;
         for path in b.bucket_paths.iter() {
             if path.exists() {
                 let size = std::fs::metadata(path).unwrap().len() as usize;
