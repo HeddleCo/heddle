@@ -14,7 +14,7 @@ use crate::{
     object::ContentHash,
     store::{
         Result,
-        pack::{ObjectType, PackObjectId, PackReader},
+        pack::{ObjectType, PackObjectId, PackReadTier, PackReader},
     },
 };
 
@@ -30,8 +30,14 @@ pub struct PackManager {
 
 #[derive(Default)]
 struct ObjectLocationIndex {
-    locations: HashMap<PackObjectId, usize>,
+    locations: HashMap<PackObjectId, ObjectLocation>,
     complete: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ObjectLocation {
+    pack_index: usize,
+    tier: PackReadTier,
 }
 
 struct CachedPack {
@@ -149,13 +155,11 @@ impl PackManager {
             let Some(reader) = pack.verified_reader() else {
                 continue;
             };
-            let Ok(ids) = reader.list_ids() else {
+            let Ok(objects) = reader.indexed_read_tiers() else {
                 continue;
             };
-            for id in ids {
-                // Preserve the historical first-pack-wins lookup behavior for
-                // duplicate immutable objects.
-                locations.entry(id).or_insert(pack_index);
+            for (id, tier) in objects {
+                remember_location(&mut locations, id, pack_index, tier);
             }
         }
         ObjectLocationIndex {
@@ -178,7 +182,7 @@ impl PackManager {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(location) = index.locations.get(id) {
-                return Ok(Some(*location));
+                return Ok(Some(location.pack_index));
             }
             if index.complete {
                 return Ok(None);
@@ -194,16 +198,16 @@ impl PackManager {
                 let Some(reader) = pack.reader() else {
                     continue;
                 };
-                let Ok(ids) = reader.list_ids() else {
+                let Ok(objects) = reader.indexed_read_tiers() else {
                     continue;
                 };
-                for object_id in ids {
-                    index.locations.entry(object_id).or_insert(pack_index);
+                for (object_id, tier) in objects {
+                    remember_location(&mut index.locations, object_id, pack_index, tier);
                 }
             }
             index.complete = true;
         }
-        Ok(index.locations.get(id).copied())
+        Ok(index.locations.get(id).map(|location| location.pack_index))
     }
 
     /// Add a complete pack/index pair to the in-memory format index.
@@ -212,7 +216,7 @@ impl PackManager {
             return Ok(());
         }
         let reader = PackReader::open(&pack_path, &index_path)?;
-        let ids = reader.list_ids()?;
+        let objects = reader.indexed_read_tiers()?;
         let pack_index = self.packs.len();
         let cached = CachedPack::validated(pack_path, index_path, reader);
         self.packs.push(cached);
@@ -221,8 +225,8 @@ impl PackManager {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if index.complete {
-            for id in ids {
-                index.locations.entry(id).or_insert(pack_index);
+            for (id, tier) in objects {
+                remember_location(&mut index.locations, id, pack_index, tier);
             }
         }
         Ok(())
@@ -276,6 +280,19 @@ impl PackManager {
             trace!("Found object in pack");
         }
         Ok(object)
+    }
+
+    /// Return the physical tier that will serve `id`.
+    ///
+    /// When both layouts contain the same immutable object, lookup always
+    /// selects the hot random-access record before a solid frame.
+    pub fn object_read_tier(&self, id: &PackObjectId) -> Result<Option<PackReadTier>> {
+        let _ = self.object_location(id)?;
+        let index = self
+            .object_locations
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(index.locations.get(id).map(|location| location.tier))
     }
 
     /// Read `id` from one specific discovered pack without building the
@@ -401,6 +418,26 @@ impl PackManager {
 
     pub fn packs_dir(&self) -> &Path {
         &self.packs_dir
+    }
+}
+
+fn remember_location(
+    locations: &mut HashMap<PackObjectId, ObjectLocation>,
+    id: PackObjectId,
+    pack_index: usize,
+    tier: PackReadTier,
+) {
+    let candidate = ObjectLocation { pack_index, tier };
+    match locations.get_mut(&id) {
+        Some(existing)
+            if existing.tier == PackReadTier::SolidFrame && tier == PackReadTier::Hot =>
+        {
+            *existing = candidate;
+        }
+        Some(_) => {}
+        None => {
+            locations.insert(id, candidate);
+        }
     }
 }
 

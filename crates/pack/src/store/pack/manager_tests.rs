@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{fs::OpenOptions, sync::Arc};
+
 use heddle_format::compression::CompressionConfig;
 use tempfile::TempDir;
 
 use super::PackManager;
 use crate::{
-    object::ContentHash,
-    store::pack::{ObjectType, PackBuilder},
+    object::{ContentHash, Tree, TreeEntry},
+    store::pack::{ObjectType, PackBuilder, PackObjectId, PackReadTier, StreamingPackBuilder},
 };
 
 fn write_pack(
@@ -30,6 +32,49 @@ fn write_pack(
 
 fn cached_location_count(manager: &PackManager) -> usize {
     manager.object_locations.read().unwrap().locations.len()
+}
+
+fn write_solid_tree_pack(root: &std::path::Path, name: &str, trees: &[Tree]) {
+    let pack_path = root.join(format!("{name}.pack"));
+    let index_path = root.join(format!("{name}.idx"));
+    let bucket_dir = root.join(format!("{name}-buckets"));
+    let file = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(&pack_path)
+        .unwrap();
+    let mut builder =
+        StreamingPackBuilder::new(file, index_path, CompressionConfig::disabled(), bucket_dir)
+            .unwrap();
+    let ids = trees
+        .iter()
+        .map(|tree| PackObjectId::Hash(tree.hash()))
+        .collect::<Vec<_>>();
+    let frame = heddle_object_model::compact::encode_tree_frame(trees).unwrap();
+    builder
+        .add_shared_frame(&ids, ObjectType::Tree, frame.len(), &frame)
+        .unwrap();
+    let _ = builder.finalize().unwrap();
+}
+
+fn write_hot_tree_pack(
+    root: &std::path::Path,
+    name: &str,
+    tree: &Tree,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let mut builder = PackBuilder::new(CompressionConfig::disabled());
+    builder.add(
+        tree.hash(),
+        ObjectType::Tree,
+        rmp_serde::to_vec_named(tree).unwrap(),
+    );
+    let (pack, index, _) = builder.build().unwrap();
+    let pack_path = root.join(format!("{name}.pack"));
+    let index_path = root.join(format!("{name}.idx"));
+    std::fs::write(&pack_path, pack).unwrap();
+    std::fs::write(&index_path, index).unwrap();
+    (pack_path, index_path)
 }
 
 #[test]
@@ -77,4 +122,67 @@ fn adding_a_pack_extends_a_completed_lazy_index() {
     assert_eq!(cached_location_count(&manager), 1);
     assert!(manager.has_object(&id));
     assert!(manager.get_hashed_object(&id).unwrap().is_some());
+}
+
+#[test]
+fn random_access_record_wins_over_solid_frame_for_concurrent_reads() {
+    let temp = TempDir::new().unwrap();
+    let blob = ContentHash::compute_typed("blob", b"hot-tier-payload");
+    let trees = vec![
+        Tree::from_entries(vec![TreeEntry::file("a", blob, false).unwrap()]),
+        Tree::from_entries(vec![TreeEntry::file("b", blob, true).unwrap()]),
+    ];
+    write_solid_tree_pack(temp.path(), "a-solid", &trees);
+    let mut manager = PackManager::new_with_index_mode(temp.path().to_path_buf(), false);
+    let hot_id = PackObjectId::Hash(trees[0].hash());
+    let solid_id = PackObjectId::Hash(trees[1].hash());
+    assert_eq!(
+        manager.object_read_tier(&hot_id).unwrap(),
+        Some(PackReadTier::SolidFrame)
+    );
+
+    let (hot_pack, hot_index) = write_hot_tree_pack(temp.path(), "z-hot", &trees[0]);
+    manager.add_pack(hot_pack, hot_index).unwrap();
+    assert_eq!(
+        manager.object_read_tier(&hot_id).unwrap(),
+        Some(PackReadTier::Hot)
+    );
+    assert_eq!(
+        manager.object_read_tier(&solid_id).unwrap(),
+        Some(PackReadTier::SolidFrame)
+    );
+    let manager = Arc::new(manager);
+
+    let expected = Arc::new(rmp_serde::to_vec_named(&trees[0]).unwrap());
+    let readers = (0..8)
+        .map(|_| {
+            let manager = Arc::clone(&manager);
+            let expected = Arc::clone(&expected);
+            std::thread::spawn(move || {
+                for _ in 0..32 {
+                    let (object_type, bytes) = manager.get_object(&hot_id).unwrap().unwrap();
+                    assert_eq!(object_type, ObjectType::Tree);
+                    assert_eq!(bytes, *expected);
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for reader in readers {
+        reader.join().unwrap();
+    }
+
+    let solid = manager
+        .packs
+        .iter()
+        .find(|pack| pack.pack_path.ends_with("a-solid.pack"))
+        .unwrap()
+        .reader()
+        .unwrap();
+    assert_eq!(
+        solid.compact_frame_read_count(),
+        0,
+        "hot-tier point reads must not decompress the duplicate solid frame"
+    );
+    assert!(manager.get_object(&solid_id).unwrap().is_some());
+    assert_eq!(solid.compact_frame_read_count(), 1);
 }

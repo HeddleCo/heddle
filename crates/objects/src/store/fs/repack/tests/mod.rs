@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod concurrency;
+mod hot_tier;
 mod integrity;
 
 use std::{

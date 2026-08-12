@@ -22,7 +22,7 @@ pub use compact_frame::compress_compact_frame;
 pub use manager::PackManager;
 pub use pack_builder::PackBuilder;
 pub use pack_index::PackIndex;
-pub use pack_reader::{EncodedPackSubset, PackReader};
+pub use pack_reader::{EncodedPackSubset, PackReadTier, PackReader};
 pub use repack::{
     CancellationToken, LoadMonitor, RepackContext, RepackError, RepackHandle, RepackInventory,
     RepackOperation, RepackOutcome, RepackPolicy, RepackReason, RepackReport, RepackResourceLimits,
