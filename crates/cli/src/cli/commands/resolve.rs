@@ -142,7 +142,7 @@ fn cmd_resolve_list(
         for path in &unresolved {
             println!("{}", path);
             for conflict in conflicts.iter().filter(|conflict| &conflict.path == path) {
-                print_conflict_region(conflict);
+                render_conflict_region(conflict);
             }
         }
     }
@@ -198,7 +198,7 @@ fn cmd_resolve_all(
             println!("  {}", path);
         }
         for resolution in &output.resolutions {
-            print_resolution(resolution);
+            render_resolution(resolution);
         }
         if !remaining.is_empty() {
             println!("Remaining: {} conflict(s)", remaining.len());
@@ -251,7 +251,7 @@ fn cmd_resolve_file(
             println!("{} conflict(s) remaining", remaining.len());
         }
         for resolution in &output.resolutions {
-            print_resolution(resolution);
+            render_resolution(resolution);
         }
         print_continuation(&output);
     }
@@ -348,7 +348,7 @@ fn verify_conflict_side(repo: &Repository, side: &objects::object::ConflictSide)
     Ok(())
 }
 
-fn print_conflict_region(conflict: &ConflictRegionReport) {
+fn render_conflict_region(conflict: &ConflictRegionReport) {
     let symbol = conflict
         .symbol
         .as_deref()
@@ -358,12 +358,12 @@ fn print_conflict_region(conflict: &ConflictRegionReport) {
         "  {}{} lines {}..{}",
         conflict.id, symbol, conflict.merged_range.start_line, conflict.merged_range.end_line
     );
-    print_conflict_side("base", &conflict.base);
-    print_conflict_side("ours", &conflict.ours);
-    print_conflict_side("theirs", &conflict.theirs);
+    render_conflict_side("base", &conflict.base);
+    render_conflict_side("ours", &conflict.ours);
+    render_conflict_side("theirs", &conflict.theirs);
 }
 
-fn print_conflict_side(label: &str, side: &heddle_core::ConflictSideReport) {
+fn render_conflict_side(label: &str, side: &heddle_core::ConflictSideReport) {
     println!(
         "    {label}: state {} blob {} lines {}..{} hunk {}",
         side.source_state,
@@ -374,7 +374,7 @@ fn print_conflict_side(label: &str, side: &heddle_core::ConflictSideReport) {
     );
 }
 
-fn print_resolution(resolution: &ConflictResolutionReport) {
+fn render_resolution(resolution: &ConflictResolutionReport) {
     let actor = resolution
         .resolver
         .agent
