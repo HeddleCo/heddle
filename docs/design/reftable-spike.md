@@ -2,8 +2,9 @@
 
 **Status:** Spike complete. **Recommendation: defer past 0.3.**
 **Issue:** [HeddleCo/heddle#21](https://github.com/HeddleCo/heddle/issues/21)
-**Prototype:** `crates/refs/src/refs/reftable_model.rs`
-**Bench:** `crates/refs/benches/reftable_vs_packed.rs`
+**Artifacts:** Historical prototype and benchmark removed after the defer decision
+([HeddleCo/heddle#921](https://github.com/HeddleCo/heddle/issues/921)). File paths
+and measurements below describe those removed spike artifacts.
 
 ## Question
 
@@ -334,9 +335,10 @@ crate-level surface area to the same robustness as
 
 ## Decision
 
-**Defer past 0.3.** Keep the spike code in tree as documentation +
-red-tested model. File a follow-up impl issue if any of the triggers
-above fires. Until then, packed-refs is fine for heddle's target user.
+**Defer past 0.3.** The spike results remain recorded here, but the unused
+prototype is not shipped as public API. File a follow-up implementation issue
+if any of the triggers above fires. Until then, packed-refs is fine for heddle's
+target user.
 
 The round-2 bench correction (real `fsync` + atomic rename on persist)
 narrowed the append+persist speedup from 18–34× to 2.4–6.2×. That
@@ -346,9 +348,7 @@ measured correctly. The defer call holds.
 
 ## Pointers
 
-- Prototype model: `crates/refs/src/refs/reftable_model.rs`
-- Red-commit tests (14): `crates/refs/src/refs/reftable_tests.rs`
-- Bench: `crates/refs/benches/reftable_vs_packed.rs`
+- Historical prototype, red-commit tests, and benchmark: removed in #921.
 - Current packed-refs cold-load hot path:
   `crates/refs/src/refs/refs_manager.rs:116` (and `:168` for markers)
 - `ChangeId` raw shape: `crates/objects/src/object/hash.rs:99`

@@ -2,10 +2,8 @@
 //! Local glue between cli's dispatch and the `WeftExtensions`
 //! trait surface.
 //!
-//! In OSS builds without the `client` feature, `main.rs` constructs a
-//! `NoopWeftExtensions` from the shim crate directly. With
-//! `client` enabled, this module provides
-//! [`EnabledWeftExtensions`], which downcasts the trait's opaque
+//! With `client` enabled, this module provides [`EnabledWeftExtensions`],
+//! which downcasts the trait's opaque
 //! arguments back to `cli::cli::AuthCommands` and delegates to the
 //! CLI-owned hosted runtime. Closed builds can continue replacing the shim
 //! package through `[patch.crates-io]` without owning Heddle's transport.

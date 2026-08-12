@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use objects::{
     object::{
         BindingDelta, ContentHash, FileBindingDelta, SemanticEntryKind, SemanticFileNode,
-        SemanticIndexRoot,
+        SemanticIndexRoot, SemanticTreeEntry,
     },
     store::ObjectStore,
 };
@@ -26,8 +26,6 @@ impl Repository {
         parent_state: Option<&objects::object::State>,
         root: SemanticIndexRoot,
     ) -> Result<ContentHash> {
-        let current_files = self.semantic_files(&root)?;
-        let current_resolution = resolve_repository(&current_files);
         let parent_root = parent_state
             .map(|state| self.attached_semantic_index(&state.id()))
             .transpose()?
@@ -36,6 +34,15 @@ impl Repository {
             .as_ref()
             .filter(|root| root.resolver_version == RESOLVER_VERSION)
             .and_then(|root| root.binding_delta);
+
+        if let (Some(parent_root), Some(parent_delta)) = (&parent_root, parent_delta)
+            && !self.semantic_file_nodes_changed(parent_root.tree, root.tree)?
+        {
+            return self.persist_binding_delta(root, Some(parent_delta), Vec::new());
+        }
+
+        let current_files = self.semantic_files(&root)?;
+        let current_resolution = resolve_repository(&current_files);
 
         let frontier = if parent_delta.is_some() {
             let parent_files = self.semantic_files(parent_root.as_ref().expect("checked above"))?;
@@ -64,6 +71,15 @@ impl Repository {
                 None => FileBindingDelta::new(path, None, Vec::new()),
             })
             .collect();
+        self.persist_binding_delta(root, parent_delta, files)
+    }
+
+    fn persist_binding_delta(
+        &self,
+        root: SemanticIndexRoot,
+        parent_delta: Option<ContentHash>,
+        files: Vec<FileBindingDelta>,
+    ) -> Result<ContentHash> {
         let delta = BindingDelta::new(parent_delta, files);
         let delta_bytes = delta.encode()?;
         let delta_hash = ContentHash::compute_typed("blob", &delta_bytes);
@@ -73,6 +89,96 @@ impl Repository {
         self.store()
             .put_blobs_packed(vec![(delta_hash, delta_bytes), (root_hash, root_bytes)])?;
         Ok(root_hash)
+    }
+
+    fn semantic_file_nodes_changed(
+        &self,
+        parent_hash: ContentHash,
+        current_hash: ContentHash,
+    ) -> Result<bool> {
+        let mut pairs = vec![(parent_hash, current_hash, 0usize)];
+        while let Some((parent_hash, current_hash, depth)) = pairs.pop() {
+            if parent_hash == current_hash {
+                continue;
+            }
+            if depth > crate::repository_semantic_query::MAX_SEMANTIC_TREE_DEPTH {
+                return Err(HeddleError::InvalidObject(
+                    "semantic index tree exceeds max depth".to_string(),
+                ));
+            }
+            let parent = self.load_semantic_tree(&parent_hash)?;
+            let current = self.load_semantic_tree(&current_hash)?;
+            let parent_by_name = parent
+                .entries
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry))
+                .collect::<BTreeMap<_, _>>();
+            let current_by_name = current
+                .entries
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry))
+                .collect::<BTreeMap<_, _>>();
+            let names = parent_by_name
+                .keys()
+                .chain(current_by_name.keys())
+                .copied()
+                .collect::<BTreeSet<_>>();
+
+            for name in names {
+                match (parent_by_name.get(name), current_by_name.get(name)) {
+                    (Some(parent), Some(current)) => match (parent.kind, current.kind) {
+                        (SemanticEntryKind::Opaque, SemanticEntryKind::Opaque) => {}
+                        (SemanticEntryKind::File, SemanticEntryKind::File) => {
+                            if parent.node != current.node {
+                                return Ok(true);
+                            }
+                        }
+                        (SemanticEntryKind::Dir, SemanticEntryKind::Dir) => {
+                            pairs.push((parent.node, current.node, depth + 1));
+                        }
+                        _ => {
+                            if self.semantic_entry_contains_file(parent)?
+                                || self.semantic_entry_contains_file(current)?
+                            {
+                                return Ok(true);
+                            }
+                        }
+                    },
+                    (Some(entry), None) | (None, Some(entry)) => {
+                        if self.semantic_entry_contains_file(entry)? {
+                            return Ok(true);
+                        }
+                    }
+                    (None, None) => unreachable!("name came from one of the two trees"),
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn semantic_entry_contains_file(&self, entry: &SemanticTreeEntry) -> Result<bool> {
+        match entry.kind {
+            SemanticEntryKind::File => Ok(true),
+            SemanticEntryKind::Opaque => Ok(false),
+            SemanticEntryKind::Dir => {
+                let mut stack = vec![(entry.node, 0usize)];
+                while let Some((hash, depth)) = stack.pop() {
+                    if depth > crate::repository_semantic_query::MAX_SEMANTIC_TREE_DEPTH {
+                        return Err(HeddleError::InvalidObject(
+                            "semantic index tree exceeds max depth".to_string(),
+                        ));
+                    }
+                    for child in self.load_semantic_tree(&hash)?.entries {
+                        match child.kind {
+                            SemanticEntryKind::File => return Ok(true),
+                            SemanticEntryKind::Dir => stack.push((child.node, depth + 1)),
+                            SemanticEntryKind::Opaque => {}
+                        }
+                    }
+                }
+                Ok(false)
+            }
+        }
     }
 
     pub(crate) fn semantic_files(

@@ -144,3 +144,71 @@ pub(crate) fn panic_payload_str(payload: &Box<dyn std::any::Any + Send>) -> Stri
         "<non-string panic payload>".to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use objects::error::HeddleError;
+
+    use super::*;
+
+    #[test]
+    fn to_errno_maps_every_mount_error_variant() {
+        assert_eq!(MountError::NotFound("x".into()).to_errno(), libc::ENOENT);
+        assert_eq!(
+            MountError::UnknownThread("t".into()).to_errno(),
+            libc::ENOENT
+        );
+        assert_eq!(MountError::Stale("s".into()).to_errno(), stale_errno());
+        assert_eq!(
+            MountError::NotADirectory("d".into()).to_errno(),
+            libc::ENOTDIR
+        );
+        assert_eq!(MountError::ReadOnly.to_errno(), libc::EROFS);
+        assert_eq!(
+            MountError::AlreadyExists("e".into()).to_errno(),
+            libc::EEXIST
+        );
+        assert_eq!(
+            MountError::IsADirectory("d".into()).to_errno(),
+            libc::EISDIR
+        );
+        assert_eq!(MountError::NotEmpty("d".into()).to_errno(), libc::ENOTEMPTY);
+        assert_eq!(
+            MountError::InvalidArgument("a".into()).to_errno(),
+            libc::EINVAL
+        );
+        assert_eq!(MountError::FileTooLarge("f".into()).to_errno(), libc::EFBIG);
+        assert_eq!(MountError::SessionInit("s".into()).to_errno(), libc::EIO);
+        assert_eq!(
+            MountError::Store(HeddleError::NotFound("o".into())).to_errno(),
+            libc::ENOENT
+        );
+        assert_eq!(
+            MountError::Store(HeddleError::StateNotFound(
+                objects::object::StateId::from_bytes([0xab; 32])
+            ))
+            .to_errno(),
+            libc::ENOENT
+        );
+        assert_eq!(
+            MountError::Store(HeddleError::MissingObject {
+                object_type: "blob".into(),
+                id: "deadbeef".into(),
+            })
+            .to_errno(),
+            libc::ENOENT
+        );
+        let io_err = io::Error::from_raw_os_error(libc::EACCES);
+        assert_eq!(
+            MountError::Store(HeddleError::Io(io_err)).to_errno(),
+            libc::EACCES
+        );
+        // Non-NotFound store errors fall through to EIO.
+        assert_eq!(
+            MountError::Store(HeddleError::InvalidObject("c".into())).to_errno(),
+            libc::EIO
+        );
+    }
+}

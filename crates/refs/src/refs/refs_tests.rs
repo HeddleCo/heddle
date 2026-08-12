@@ -21,8 +21,8 @@ fn create_ref_manager() -> (TempDir, RefManager) {
 /// Product-path packed-refs stress below the ~10k degradation threshold.
 ///
 /// Keeps CI honest that `pack_refs` + cold load remain correct as ref count
-/// grows into the low thousands. Full 10k/50k/100k scale lives in Criterion
-/// (`reftable_vs_packed`) — see `docs/program/PACKED_REFS_STRESS.md`.
+/// grows into the low thousands. Historical 10k/50k/100k measurements are
+/// recorded in `docs/program/PACKED_REFS_STRESS.md`.
 #[test]
 fn packed_refs_product_stress_two_thousand_threads() {
     let (temp, refs) = create_ref_manager();

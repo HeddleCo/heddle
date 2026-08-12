@@ -105,9 +105,7 @@ async fn async_main() -> Result<()> {
     let hosted: Box<dyn weft_client_shim::WeftExtensions> =
         Box::new(cli::extensions::EnabledWeftExtensions);
     // OSS builds dispatch no hosted commands (those `Commands` variants
-    // are gated behind `client`), so the trait object is unused
-    // and we drop the binding entirely. Keeping the shim trait + Noop
-    // visible for downstream consumers and post-split closed builds.
+    // are gated behind `client`), so no trait object is needed.
 
     let profile = profile_enabled();
     // Intercept the bare-help shapes BEFORE clap parses, so we

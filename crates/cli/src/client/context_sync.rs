@@ -1138,6 +1138,9 @@ fn revise_op_id(repo_path: &str, server_id: &str, revision_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use objects::object::{Attribution, Principal};
+    use tempfile::TempDir;
+
     use super::*;
 
     fn rev(id: &str, attr: &str, content: &str, created_at: i64) -> AnnotationRevision {
@@ -1353,5 +1356,105 @@ mod tests {
         get_or_create_entry(&mut mirror, "ns/repo", "local-a").server_id = "srv-1".into();
         assert!(server_id_is_linked(&mirror, "ns/repo", "srv-1"));
         assert!(!server_id_is_linked(&mirror, "ns/repo", "srv-2"));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_pull_materializes_context_once_and_persists_the_mirror() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
+        repo.snapshot_with_attribution(
+            Some("seed".to_string()),
+            None,
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        )
+        .unwrap();
+        let target = ContextTarget::file("lib.rs").unwrap();
+        let annotation = Annotation::new(
+            AnnotationScope::Symbol {
+                name: "run".to_string(),
+                resolved_lines: Some((1, 1)),
+            },
+            AnnotationKind::Invariant,
+            "preserve this contract".to_string(),
+            vec!["api".to_string()],
+            "reviewer <>".to_string(),
+            1_700_000_000,
+            None,
+            None,
+        );
+        let bootstrap = vec![(target, ContextBlob::new(vec![annotation]))];
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+
+        assert_eq!(
+            pull_context(&repo, &mut client, "acme/widgets", Some(&bootstrap))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            pull_context(&repo, &mut client, "acme/widgets", Some(&bootstrap))
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(mirror_path(repo.heddle_dir()).is_file());
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn push_context_persists_its_create_nonce_when_id_recovery_fails() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
+        let state = repo
+            .snapshot_with_attribution(
+                Some("seed".to_string()),
+                None,
+                Attribution::human(Principal::new("Test", "test@example.com")),
+            )
+            .unwrap()
+            .id();
+        let head_state = repo.store().get_state(&state).unwrap().unwrap();
+        let target = ContextTarget::file("lib.rs").unwrap();
+        let user_config = crate::config::UserConfig::load_default().unwrap_or_default();
+        let self_attribution =
+            crate::cli::commands::snapshot::resolve_attribution(&repo, &user_config)
+                .unwrap()
+                .to_string();
+        let annotation = Annotation::new(
+            AnnotationScope::File,
+            AnnotationKind::Constraint,
+            "do not remove".to_string(),
+            vec![],
+            self_attribution,
+            1_700_000_000,
+            None,
+            None,
+        );
+        let root = repo
+            .set_context_blob(None, &target, &ContextBlob::new(vec![annotation]))
+            .unwrap();
+        put_context_attachment(&repo, &head_state, Some(root)).unwrap();
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+
+        assert_eq!(
+            push_context(&repo, &mut client, "acme/widgets")
+                .await
+                .unwrap(),
+            0,
+            "the fixture deliberately omits the server-minted annotation id"
+        );
+        let mirror = load_mirror(repo.heddle_dir()).unwrap();
+        assert!(
+            mirror.repos["acme/widgets"].annotations[0]
+                .pending_create_op
+                .is_some()
+        );
+
+        client.close().await;
+        server.await.unwrap();
     }
 }

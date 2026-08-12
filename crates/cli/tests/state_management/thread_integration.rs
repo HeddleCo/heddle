@@ -201,7 +201,27 @@ fn refresh_conflict_names_path_and_persists_resolve_state() {
     )
     .expect("persisted conflict should be listable from the beta checkout");
     let listed: Value = serde_json::from_str(&listed).expect("resolve list should be JSON");
-    assert_eq!(listed["conflicts"], serde_json::json!(["contested.txt"]));
+    assert_eq!(
+        listed["conflict_paths"],
+        serde_json::json!(["contested.txt"]),
+        "path compatibility field should retain the refresh conflict: {listed}"
+    );
+    let conflicts = listed["conflicts"]
+        .as_array()
+        .expect("resolve list should expose structured conflicts");
+    assert_eq!(conflicts.len(), 1, "{listed}");
+    assert_eq!(conflicts[0]["path"], "contested.txt", "{listed}");
+    assert!(
+        conflicts[0]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("conflict-")),
+        "refresh conflict should carry a stable structured id: {listed}"
+    );
+    for side in ["base", "ours", "theirs"] {
+        assert!(conflicts[0][side]["source_state"].is_string(), "{listed}");
+        assert!(conflicts[0][side]["blob_id"].is_string(), "{listed}");
+        assert!(conflicts[0][side]["hunk_hash"].is_string(), "{listed}");
+    }
     assert_markers_at_column_zero(
         &fs::read_to_string(beta.join("contested.txt")).unwrap(),
         "persisted refresh conflict",

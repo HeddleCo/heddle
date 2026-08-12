@@ -3,10 +3,9 @@
 
 //! Patchable extension trait surface for the Heddle CLI.
 //!
-//! OSS builds use [`NoopWeftExtensions`], which returns a friendly
-//! "hosted features not enabled" error on every method. Closed builds may
-//! replace this package through `[patch.crates-io]` while the Heddle CLI keeps
-//! ownership of its native transport and download runtime.
+//! Client builds provide the active implementation. Closed builds may replace
+//! this package through `[patch.crates-io]` while the Heddle CLI keeps ownership
+//! of its native transport and download runtime.
 //!
 //! Why a separate crate (and not just a trait in `cli`)? When the
 //! repos physically split, the OSS `heddle-cli` crate ships on
@@ -22,7 +21,7 @@
 
 use std::{any::Any, path::Path};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use async_trait::async_trait;
 
 /// Small projection of `cli::Cli` that hosted commands rely on.
@@ -77,36 +76,4 @@ pub trait WeftExtensions: Send + Sync {
     /// token kind, scopes, operation ceiling, TTL, signing + reachability).
     /// `server` is the optional `--server` override.
     async fn whoami(&self, ctx: &(dyn CliContext + 'static), server: Option<String>) -> Result<()>;
-}
-
-/// Noop implementation used in OSS builds. Every method returns the
-/// same friendly error pointing the user at the closed-build
-/// installation path.
-pub struct NoopWeftExtensions;
-
-#[async_trait]
-impl WeftExtensions for NoopWeftExtensions {
-    async fn auth(
-        &self,
-        _ctx: &(dyn CliContext + 'static),
-        _command: &(dyn Any + Send + Sync),
-    ) -> Result<()> {
-        Err(anyhow!(not_enabled_error("auth")))
-    }
-
-    async fn whoami(
-        &self,
-        _ctx: &(dyn CliContext + 'static),
-        _server: Option<String>,
-    ) -> Result<()> {
-        Err(anyhow!(not_enabled_error("whoami")))
-    }
-}
-
-fn not_enabled_error(command: &str) -> String {
-    format!(
-        "`heddle {command}` requires the client build of Heddle. \
-         Install it from https://heddleco.com or rebuild the CLI with \
-         `--features client` if you're working from source."
-    )
 }

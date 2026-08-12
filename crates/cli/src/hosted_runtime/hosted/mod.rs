@@ -27,6 +27,8 @@ mod state_review;
 mod sync;
 #[cfg(test)]
 mod test_https;
+#[cfg(test)]
+pub(crate) mod test_server;
 mod thread_identity;
 mod thread_metadata;
 mod user;

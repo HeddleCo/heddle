@@ -50,23 +50,10 @@ fn test_raw_binary_with_marker_byte_is_not_treated_as_compressed() {
 }
 
 #[test]
-fn test_delta_roundtrip() {
-    let config = CompressionConfig::default();
-    let base2 = b"Hello, World! This is version 1. ";
-    let target2 = b"Hello, World! This is version 2. ";
-
-    let compressed = compress_delta(target2, base2, &config).unwrap();
-    if let Some(compressed) = compressed {
-        let decompressed = decompress_delta(&compressed, base2).unwrap();
-        assert_eq!(target2.as_slice(), decompressed.as_slice());
-    }
-}
-
-#[test]
 fn test_compression_type_from_u8() {
-    assert_eq!(CompressionType::from_u8(0), Some(CompressionType::None));
+    assert_eq!(CompressionType::from_u8(0), None);
     assert_eq!(CompressionType::from_u8(1), Some(CompressionType::Zstd));
-    assert_eq!(CompressionType::from_u8(2), Some(CompressionType::Delta));
+    assert_eq!(CompressionType::from_u8(2), None);
     assert_eq!(CompressionType::from_u8(99), None);
 }
 
@@ -137,29 +124,6 @@ fn test_decompress_rejects_oversized_header() {
     let mut encoded = vec![CompressionType::Zstd as u8];
     encoded.extend_from_slice(&size.to_be_bytes());
     encoded.extend_from_slice(&compressed_payload);
-
-    let error = decompress(&encoded).unwrap_err();
-    assert!(matches!(error, CompressionError::SizeLimitExceeded { .. }));
-}
-
-#[test]
-fn test_decompress_none_header_rejects_size_mismatch() {
-    let payload = b"tiny";
-    let mut encoded = vec![CompressionType::None as u8];
-    encoded.extend_from_slice(&((payload.len() as u64) + 1).to_be_bytes());
-    encoded.extend_from_slice(payload);
-
-    let error = decompress(&encoded).unwrap_err();
-    assert!(matches!(error, CompressionError::CorruptedData(_)));
-}
-
-#[test]
-fn test_decompress_none_header_rejects_oversized_size() {
-    let payload = b"tiny";
-    let size = (256_u64 * 1024 * 1024) + 1;
-    let mut encoded = vec![CompressionType::None as u8];
-    encoded.extend_from_slice(&size.to_be_bytes());
-    encoded.extend_from_slice(payload);
 
     let error = decompress(&encoded).unwrap_err();
     assert!(matches!(error, CompressionError::SizeLimitExceeded { .. }));

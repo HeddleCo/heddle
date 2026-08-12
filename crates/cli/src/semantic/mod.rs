@@ -128,3 +128,67 @@ fn map_result(result: semantic::diff::SemanticDiffResult) -> SemanticDiffResult 
         file_changes: result.file_changes,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use objects::object::ContentHash;
+    use repo::{Repository, WorktreeStatusOptions};
+    use semantic::diff::SemanticDiffOptions;
+
+    use super::*;
+
+    fn two_tree_repo() -> (tempfile::TempDir, Repository, ContentHash, ContentHash) {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let repo = Repository::init_default(temp.path()).expect("init");
+        fs::write(temp.path().join("a.rs"), b"fn a() {}\n").unwrap();
+        let base = repo
+            .snapshot(Some("base".into()), None)
+            .expect("base snapshot");
+        fs::write(temp.path().join("a.rs"), b"fn a() { let x = 1; }\n").unwrap();
+        fs::write(temp.path().join("b.rs"), b"fn b() {}\n").unwrap();
+        let head = repo
+            .snapshot(Some("head".into()), None)
+            .expect("head snapshot");
+        (temp, repo, base.tree, head.tree)
+    }
+
+    #[test]
+    fn semantic_diff_and_check_and_summary_cover_facade() {
+        let (_temp, repo, from, to) = two_tree_repo();
+        let options = SemanticDiffOptions::default();
+
+        let diff = semantic_diff(&repo, &from, &to, &options).expect("diff");
+        assert!(
+            !diff.file_changes.is_empty() || !diff.changes.is_empty(),
+            "expected some semantic or file-level change"
+        );
+
+        let check = semantic_check_only(&repo, &from, &to, &options).expect("check");
+        let _ = check;
+
+        let summary = semantic_diff_summary(&repo, &from, &to, &options).expect("summary");
+        let _ = summary;
+    }
+
+    #[test]
+    fn semantic_worktree_facades_cover_dirty_paths() {
+        let (temp, repo, from, _to) = two_tree_repo();
+        // Dirty the worktree relative to `from`.
+        fs::write(temp.path().join("a.rs"), b"fn a() { dirty(); }\n").unwrap();
+        fs::write(temp.path().join("c.rs"), b"fn c() {}\n").unwrap();
+        let options = SemanticDiffOptions::default();
+        let status_options = WorktreeStatusOptions::default();
+
+        let diff =
+            semantic_diff_worktree(&repo, &from, &options, &status_options).expect("wt diff");
+        let _ = diff;
+        let check = semantic_check_only_worktree(&repo, &from, &options, &status_options)
+            .expect("wt check");
+        let _ = check;
+        let summary = semantic_diff_summary_worktree(&repo, &from, &options, &status_options)
+            .expect("wt summary");
+        let _ = summary;
+    }
+}

@@ -29,8 +29,6 @@ mod fsck_comprehensive;
 mod gc_comprehensive;
 #[path = "comprehensive/integration.rs"]
 mod integration;
-#[path = "comprehensive/performance.rs"]
-mod performance;
 #[path = "comprehensive/platform_compat.rs"]
 mod platform_compat;
 #[path = "comprehensive/resolve.rs"]
@@ -139,10 +137,9 @@ fn performance_budget(release: Duration, debug: Duration) -> Duration {
         return debug.saturating_mul(3);
     }
     if cfg!(debug_assertions) {
-        // Comprehensive perf checks run in the default parallel harness beside
-        // other subprocess-heavy tests. Keep debug-mode budgets loose enough to
-        // avoid scheduler-noise flakes while release budgets guard production
-        // expectations.
+        // The remaining blame timing smoke runs in this parallel harness beside
+        // other subprocess-heavy tests. Its release budget still guards the
+        // production expectation.
         debug
     } else {
         release

@@ -145,7 +145,7 @@ fn query_oplog_fallback(
     let mut hits = Vec::new();
     for entry in entries {
         let hit = indexed_from_oplog_entry(&entry);
-        if indexed_operation_matches(&hit, query) {
+        if hit.matches(query) {
             hits.push(hit);
         }
     }
@@ -164,46 +164,6 @@ fn indexed_from_oplog_entry(entry: &OpEntry) -> IndexedOperation {
         signal_kinds: Vec::new(),
         state_id: primary_state_id(&entry.operation),
     }
-}
-
-fn indexed_operation_matches(hit: &IndexedOperation, query: &OperationLogQuery) -> bool {
-    if let Some(actor) = &query.actor
-        && &hit.actor_email != actor
-    {
-        return false;
-    }
-    if let Some(symbol) = &query.symbol
-        && !hit.symbols.iter().any(|candidate| candidate == symbol)
-    {
-        return false;
-    }
-    if let Some(kind) = &query.signal_kind
-        && !hit.signal_kinds.iter().any(|candidate| candidate == kind)
-    {
-        return false;
-    }
-    if let Some(thread) = &query.thread
-        && hit.thread.as_deref() != Some(thread.as_str())
-    {
-        return false;
-    }
-    if let Some(verbs) = &query.verbs
-        && !verbs.iter().any(|verb| verb == &hit.verb)
-    {
-        return false;
-    }
-    let timestamp = hit.timestamp();
-    if let Some(start) = query.since
-        && timestamp < start
-    {
-        return false;
-    }
-    if let Some(end) = query.until
-        && timestamp > end
-    {
-        return false;
-    }
-    true
 }
 
 fn hit_to_report(hit: IndexedOperation) -> QueryHit {

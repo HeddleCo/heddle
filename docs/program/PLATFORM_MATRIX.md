@@ -22,7 +22,7 @@ This file does **not** invent product wins. Cross-check `GAP_MAP.md` L1/L2/L3/L6
 | macOS FSKit mount | **Foundation** | CI `fskit-check` on `macos-26`: `cargo check -p heddle-mount --features fskit` when mount paths change — **compile**, not full mount e2e in PR matrix. |
 | Mount feature optional | **Shipped** (product stance) | Local VCS must not require FUSE/ProjFS/FSKit at runtime; failures degrade. (CLI Cargo `default` may include the `mount` feature for install convenience — product stance is still “mount not required for core VCS.”) |
 | packed-refs scale | **Shipped** with known degradation | Packed-refs implemented; **degrades ~10k+ refs** (`AGENTS.md`). Stress recipe: [`PACKED_REFS_STRESS.md`](PACKED_REFS_STRESS.md). |
-| Reftable format | **Not implemented** / **Planned** long-tail | GAP_MAP **L2** open. Spike model + bench only; no production `RefManager` backend. |
+| Reftable format | **Not implemented** / **Planned** long-tail | GAP_MAP **L2** open. Historical spike results are recorded, but its unused model and bench were removed; no production `RefManager` backend exists. |
 | Partial clone / lazy object fetch | **Planned** | GAP_MAP **L3**; product non-goal until implemented (`PRODUCT_CONTRACT` explicit non-goals). |
 | Multi-host perf / equal-work re-stamp | **Open** (Wave 6 residual) | Single-host n=5 samples in `PERF_BASELINE.md`; multi-host matrix and quieter-host re-run still open. |
 | L6 object-shard grandparent fsync | **Shipped on tip with residual notes in GAP_MAP L6** | Production durable creates via `create_dir_all_durable` (atomic write / publish / store layout / pack install / sidecars / agent-task / lock / agent registry / streaming pack buckets; `create_private_dir_all` fsyncs new ancestors with Unix `0o700`). Residual: tests-only bare `create_dir_all`; **Windows directory fsync remains platform no-op**. |
@@ -102,10 +102,10 @@ Treat items as done only when evidence is checked in (tests, CI job, or program 
 
 ### Refs scale
 
-- [x] Document packed-refs degradation threshold (~10k) with a reproducible stress recipe (fixture size, command, expected graceful behavior vs OOM/timeout).  
-  **Evidence:** [`PACKED_REFS_STRESS.md`](PACKED_REFS_STRESS.md) + `scripts/program/packed-refs-stress-recipe.sh` → `cargo bench -p heddle-refs --bench reftable_vs_packed`.
-- [x] Add or classify a large-ref test as stress (not a false “oracle pass” on tiny fixtures).  
-  **Evidence:** Criterion bench sizes 10k/50k/100k classified as **stress tool**; `refs_packed_tests` remain small-fixture **correctness** only. Not a continuous CI gate.
+- [ ] Restore a reproducible packed-refs degradation stress recipe (~10k+) without reviving the deferred reftable prototype.
+  **Evidence:** [`PACKED_REFS_STRESS.md`](PACKED_REFS_STRESS.md) retains the historical measurements and expected graceful behavior; the executable spike benchmark was removed in #921.
+- [x] Classify historical large-ref measurements as stress (not a false “oracle pass” on tiny fixtures).
+  **Evidence:** Historical Criterion sizes 10k/50k/100k are stress evidence; `refs_packed_tests` remain small-fixture **correctness** only. Not a continuous CI gate.
 - [x] Reftable remains **Planned** unless implementation lands — do not green Wave 7 by renaming reftable as shipped.  
   **Evidence:** capability table + GAP_MAP L2 + `docs/design/reftable-spike.md` (defer).
 

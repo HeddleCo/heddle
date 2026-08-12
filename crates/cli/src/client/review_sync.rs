@@ -328,7 +328,9 @@ fn sign_op_id(repo_path: &str, state_id: &StateId, signature_hex: &str) -> Strin
 
 #[cfg(test)]
 mod tests {
-    use objects::object::SymbolAnchor;
+    use chrono::Utc;
+    use objects::object::{Attribution, Blob, Principal, StateAttachment, SymbolAnchor};
+    use tempfile::TempDir;
 
     use super::*;
 
@@ -389,5 +391,75 @@ mod tests {
             "state not on server yet".into()
         )));
         assert!(!is_permanent(&ProtocolError::Remote("unavailable".into())));
+    }
+
+    #[tokio::test]
+    async fn push_installs_owned_signatures_and_persists_permanent_rejections() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let principal = Principal::new("Reviewer", "reviewer@example.com");
+        let mut config = repo.config().clone();
+        config.set_principal(principal.name.clone(), principal.email.clone());
+        config.save(&repo.heddle_dir().join("config.toml")).unwrap();
+        let repo = Repository::open(temp.path()).unwrap();
+        std::fs::write(temp.path().join("reviewed.txt"), "reviewed\n").unwrap();
+        let state = repo
+            .snapshot_with_attribution(
+                Some("review target".to_string()),
+                None,
+                Attribution::human(principal.clone()),
+            )
+            .unwrap()
+            .id();
+
+        let signature = |actor: Principal, public_key: &str, signature: &str| ReviewSignature {
+            actor,
+            kind: ReviewKind::Read,
+            scope: ReviewScope::WholeChange,
+            justification: None,
+            signed_at: 1_700_000_000,
+            algorithm: "ed25519".to_string(),
+            public_key: public_key.to_string(),
+            signature: signature.to_string(),
+        };
+        let signatures = ReviewSignaturesBlob {
+            format_version: 1,
+            signatures: vec![
+                signature(principal.clone(), "not-hex", "aa"),
+                signature(principal.clone(), "aa", "bb"),
+                signature(Principal::new("Other", "other@example.com"), "cc", "dd"),
+            ],
+        };
+        let blob = Blob::new(signatures.encode().unwrap());
+        repo.store().put_blob(&blob).unwrap();
+        repo.put_state_attachment(&StateAttachment {
+            state_id: state,
+            body: StateAttachmentBody::ReviewSignatures(blob.hash()),
+            attribution: Attribution::human(principal),
+            created_at: Utc::now(),
+            supersedes: None,
+        })
+        .unwrap();
+
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        assert_eq!(
+            push_review_signatures(&repo, &mut client, "acme/widgets")
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            push_review_signatures(&repo, &mut client, "acme/widgets")
+                .await
+                .unwrap(),
+            0
+        );
+        let mirror = load_mirror(repo.heddle_dir()).unwrap();
+        let repo_mirror = &mirror.repos["acme/widgets"];
+        assert_eq!(repo_mirror.synced.len(), 1);
+        assert_eq!(repo_mirror.rejected.len(), 1);
+
+        client.close().await;
+        server.await.unwrap();
     }
 }

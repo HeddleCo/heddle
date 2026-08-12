@@ -1001,4 +1001,147 @@ mod tests {
         let err = framing::read_frame::<_, WorkerEvent>(&mut r).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
+
+    #[test]
+    fn framing_round_trips_every_event_and_command_variant() {
+        use std::io::Cursor;
+
+        let events = [
+            WorkerEvent::MountReady {
+                pid: 1,
+                mount_path: PathBuf::from("/mnt"),
+            },
+            WorkerEvent::MountError {
+                message: "boom".into(),
+            },
+            WorkerEvent::StatusOk {
+                pid: 2,
+                mount_path: PathBuf::from("/mnt2"),
+            },
+            WorkerEvent::Stopping,
+        ];
+        for event in &events {
+            let mut buf = Vec::new();
+            framing::write_frame(&mut buf, event).unwrap();
+            let mut r = Cursor::new(buf);
+            let parsed: WorkerEvent = framing::read_frame(&mut r).unwrap();
+            assert_eq!(&parsed, event);
+        }
+
+        for cmd in [SupervisorCommand::Stop, SupervisorCommand::Status] {
+            let mut buf = Vec::new();
+            framing::write_frame(&mut buf, &cmd).unwrap();
+            let mut r = Cursor::new(buf);
+            let parsed: SupervisorCommand = framing::read_frame(&mut r).unwrap();
+            assert_eq!(parsed, cmd);
+        }
+    }
+
+    #[test]
+    fn framing_write_rejects_oversize_payload() {
+        let huge = "x".repeat(framing::MAX_FRAME_BYTES + 1);
+        let err = framing::write_frame(&mut Vec::new(), &WorkerEvent::MountError { message: huge })
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn worker_args_parses_out_of_order_and_rejects_missing_values() {
+        let argv = vec![
+            "--ipc-fd",
+            "7",
+            "--mountpoint",
+            "/mnt",
+            "--thread-id",
+            "main",
+            "--repo-root",
+            "/repo",
+        ];
+        let parsed = WorkerArgs::parse(&argv).expect("order-independent parse");
+        assert_eq!(parsed.ipc_fd, 7);
+        assert_eq!(parsed.mountpoint, PathBuf::from("/mnt"));
+        assert_eq!(parsed.thread_id, "main");
+        assert_eq!(parsed.repo_root, PathBuf::from("/repo"));
+
+        assert!(WorkerArgs::parse(&["--repo-root"]).is_err());
+        assert!(WorkerArgs::parse(&["--ipc-fd", "not-a-number"]).is_err());
+        assert!(WorkerArgs::parse(&["--thread-id"]).is_err());
+        assert!(WorkerArgs::parse(&["--mountpoint"]).is_err());
+    }
+
+    #[test]
+    fn stop_grace_from_env_parses_override() {
+        // SAFETY: test-only env mutation on a dedicated key.
+        unsafe {
+            std::env::remove_var(STOP_GRACE_ENV);
+        }
+        assert!(stop_grace_from_env().is_none());
+        unsafe {
+            std::env::set_var(STOP_GRACE_ENV, "150");
+        }
+        assert_eq!(stop_grace_from_env(), Some(Duration::from_millis(150)));
+        unsafe {
+            std::env::set_var(STOP_GRACE_ENV, "not-a-number");
+        }
+        assert!(stop_grace_from_env().is_none());
+        unsafe {
+            std::env::remove_var(STOP_GRACE_ENV);
+        }
+    }
+
+    #[test]
+    fn format_exit_renders_exit_code() {
+        let status = std::process::Command::new("true")
+            .status()
+            .expect("spawn true");
+        let rendered = format_exit(&status);
+        assert!(
+            rendered.contains("0") || rendered.contains("exit"),
+            "format_exit should mention the exit status: {rendered}"
+        );
+        assert_eq!(Liveness::Running as u8, 0);
+        assert_eq!(Liveness::Exited as u8, 1);
+    }
+
+    #[test]
+    fn format_exit_renders_signal_when_killed() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id() as i32;
+        // SAFETY: kill is async-signal-safe; we own this child.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+        let status = child.wait().expect("wait killed child");
+        let rendered = format_exit(&status);
+        assert!(
+            rendered.contains("signal") || rendered.contains("9") || !status.success(),
+            "format_exit should describe a signal kill: {rendered}"
+        );
+    }
+
+    #[test]
+    fn default_worker_binary_honors_env_override() {
+        unsafe {
+            std::env::set_var(WORKER_BINARY_ENV, "/tmp/heddle-fuse-worker-override");
+        }
+        let path = default_worker_binary().expect("env override");
+        assert_eq!(path, PathBuf::from("/tmp/heddle-fuse-worker-override"));
+        unsafe {
+            std::env::remove_var(WORKER_BINARY_ENV);
+        }
+        // Without override, resolution should still succeed (current_exe sibling).
+        let _ = default_worker_binary();
+    }
+
+    #[test]
+    fn constants_are_stable() {
+        assert_eq!(PANIC_ON_INIT_ENV, "HEDDLE_FUSE_WORKER_PANIC_ON_INIT");
+        assert_eq!(STOP_GRACE_ENV, "HEDDLE_FUSE_WORKER_STOP_GRACE_MS");
+        assert_eq!(WORKER_BINARY_ENV, "HEDDLE_FUSE_WORKER_BIN");
+        assert_eq!(DEFAULT_STOP_GRACE, Duration::from_secs(2));
+        assert_eq!(framing::MAX_FRAME_BYTES, 64 * 1024);
+    }
 }

@@ -138,6 +138,34 @@ fn rust_cross_file_roundtrip_and_frontier_delta_are_exact() {
 }
 
 #[test]
+fn opaque_only_change_inherits_bindings_without_a_repository_wide_resolve() {
+    let (temp, repo) = repo();
+    for index in 0..128 {
+        let directory = temp.path().join(format!("data/{index:03}"));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("value.txt"), format!("value {index}\n")).unwrap();
+    }
+    let first = snapshot(&repo, &temp, &[]);
+    std::fs::write(temp.path().join("data/000/value.txt"), "changed\n").unwrap();
+    let second = snapshot(&repo, &temp, &[]);
+
+    let first_root = repo.attached_semantic_index(&first).unwrap().unwrap();
+    let second_root = repo.attached_semantic_index(&second).unwrap().unwrap();
+    assert_ne!(
+        first_root.tree, second_root.tree,
+        "opaque content still changes the semantic index tree"
+    );
+    let second_delta = repo
+        .load_binding_delta(&second_root.binding_delta.unwrap())
+        .unwrap();
+    assert_eq!(second_delta.parent, first_root.binding_delta);
+    assert!(
+        second_delta.files.is_empty(),
+        "opaque files cannot change cross-file symbol bindings"
+    );
+}
+
+#[test]
 fn typescript_named_import_resolves_across_files() {
     let (temp, repo) = repo();
     let state = snapshot(

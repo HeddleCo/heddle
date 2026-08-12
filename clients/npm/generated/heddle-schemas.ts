@@ -315,6 +315,14 @@ export interface AgentReleaseSchema {
   verification: RepositoryVerificationStateSchema;
 }
 
+export interface AgentReport {
+  model: string;
+  policy_id?: string | null;
+  provider: string;
+  segment_id?: string | null;
+  session_id?: string | null;
+}
+
 export interface AgentReservationListSchema {
   alive_only: boolean;
   reservations: AgentReservationSchema[];
@@ -670,6 +678,39 @@ export interface CommitSchema {
   status: string;
   summary: string;
   verification: RepositoryVerificationStateSchema;
+}
+
+export interface ConflictRangeReport {
+  end_line: number;
+  start_line: number;
+}
+
+export interface ConflictRegionReport {
+  base: ConflictSideReport;
+  id: string;
+  merged_range: ConflictRangeReport;
+  occurrence: number;
+  ours: ConflictSideReport;
+  path: string;
+  symbol?: string | null;
+  theirs: ConflictSideReport;
+}
+
+export type ConflictResolutionModeReport = "ours" | "theirs" | "edit" | "auto";
+
+export interface ConflictResolutionReport {
+  conflict_id: string;
+  mode: ConflictResolutionModeReport;
+  path: string;
+  resolution: string;
+  resolver: ResolverAttributionReport;
+}
+
+export interface ConflictSideReport {
+  blob_id?: string | null;
+  hunk_hash: string;
+  range: ConflictRangeReport;
+  source_state: string;
 }
 
 export interface ContextAuditSchema {
@@ -1571,6 +1612,11 @@ export interface PartialFetchInspectionSchema {
   missing_blob_count: number;
 }
 
+export interface PrincipalReport {
+  email: string;
+  name: string;
+}
+
 export interface ProvenanceReport {
   clean: boolean;
   registry_hash?: string | null;
@@ -1967,11 +2013,14 @@ export interface RepositoryVerificationStateSchema {
 
 export type RequiredNullableNextState = ReviewNextStateSchema | null;
 
-export interface ResolveSchema {
-  conflicts?: string[] | null;
+export interface ResolveReport {
+  /** Path-level compatibility/progress surface, including structural conflicts. */
+  conflict_paths: string[];
+  /** Content conflicts expanded into independently addressable regions. */
+  conflicts: ConflictRegionReport[];
   continuation_message?: string | null;
   continuation_status?: string | null;
-  continued?: boolean | null;
+  continued: boolean;
   idempotency_status?: string | null;
   message?: string | null;
   next_action?: string | null;
@@ -1979,10 +2028,20 @@ export interface ResolveSchema {
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   output_kind: "resolve";
   recommended_action?: string | null;
-  remaining?: string[] | null;
+  remaining: string[];
   replayed?: boolean | null;
-  resolved?: string[] | null;
+  /** Resolution operations produced by this command invocation. */
+  resolutions: ConflictResolutionReport[];
+  resolved: string[];
 }
+
+export interface ResolverAttributionReport {
+  agent?: AgentReport | null;
+  kind: ResolverKindReport;
+  principal: PrincipalReport;
+}
+
+export type ResolverKindReport = "human" | "agent";
 
 export interface RetroAgentEntrySchema {
   completed_at?: string | null;
@@ -3418,7 +3477,7 @@ export interface HeddleVerbOutputs {
   "remote remove": RemoteRemoveSchema;
   "remote set-default": RemoteSetDefaultSchema;
   "remote show": RemoteInfoSchema2;
-  resolve: ResolveSchema;
+  resolve: ResolveReport;
   retro: RetroSchema;
   revert: RevertSchema;
   "review health": ReviewHealthSchema;

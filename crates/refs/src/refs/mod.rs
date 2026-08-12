@@ -28,15 +28,10 @@ mod refs_tests;
 #[cfg(test)]
 mod refs_packed_tests;
 
-#[cfg(test)]
-mod reftable_tests;
-
 pub use backend::CoreRefBackend;
 pub use facet::SpoolFacet;
 pub use head::{Head, HeadParseError};
-pub use heddle_schema::refs::{
-    FOOTER_LEN, HEADER_LEN, MAGIC, PackedRefsModel, ReftableError, ReftableModel,
-};
+pub use heddle_schema::refs::PackedRefsModel;
 pub use name::{RefNameError, validate_ref_name};
 pub use operation_index::{IndexedOperation, OperationLogIndex, OperationLogQuery};
 #[cfg(feature = "postgres")]

@@ -780,10 +780,12 @@ fn parse_visibility_token(token: &str) -> VisibilityTier {
 mod tests {
     use objects::object::{
         Attribution, CollaborationAnchor, CollaborationIdempotencyKey,
-        CollaborationOperationBodyV1, CollaborationOperationEnvelope, ContentHash,
-        DiscussionRecordId, DiscussionTurnV1, LegacyDiscussionId, LegacyDiscussionResolutionV1,
-        LegacySourceLocator, Principal, StateAttachmentId, StateId, VisibilityTier,
+        CollaborationOperationBodyV1, CollaborationOperationEnvelope, ContentHash, Discussion,
+        DiscussionRecordId, DiscussionResolution, DiscussionTurn, DiscussionTurnV1,
+        LegacyDiscussionId, LegacyDiscussionResolutionV1, LegacySourceLocator, Principal,
+        StateAttachmentId, StateId, SymbolAnchor, VisibilityTier,
     };
+    use tempfile::TempDir;
 
     use super::*;
 
@@ -957,5 +959,119 @@ mod tests {
             turns.iter().all(|t| !t.is_self),
             "with no local principal, no turn may be classified as ours"
         );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_pull_materializes_discussion_once_and_persists_the_mirror() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
+        let state = repo
+            .snapshot_with_attribution(
+                Some("seed".to_string()),
+                None,
+                Attribution::human(Principal::new("Test", "test@example.com")),
+            )
+            .unwrap()
+            .id();
+        let bootstrap = vec![Discussion {
+            id: "server-discussion-1".to_string(),
+            anchor: SymbolAnchor::new("lib.rs", "run"),
+            opened_against_state: state,
+            opened_at: 1_700_000_000,
+            thread_ref: None,
+            turns: vec![DiscussionTurn {
+                author: Principal::new("Reviewer", "reviewer@example.com"),
+                body: "keep this invariant".to_string(),
+                posted_at: 1_700_000_001,
+            }],
+            resolution: DiscussionResolution::Open,
+            body_changed_since_open: false,
+            orphaned: false,
+            visibility: VisibilityTier::Internal,
+            resolved_annotation_id: None,
+        }];
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+
+        assert_eq!(
+            pull_discussions(&repo, &mut client, "acme/widgets", Some(&bootstrap))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            pull_discussions(&repo, &mut client, "acme/widgets", Some(&bootstrap))
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(mirror_path(repo.heddle_dir()).is_file());
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn push_discussion_opens_then_appends_only_unlinked_self_turns() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
+        let state = repo
+            .snapshot_with_attribution(
+                Some("seed".to_string()),
+                None,
+                Attribution::human(Principal::new("Test", "test@example.com")),
+            )
+            .unwrap()
+            .id();
+        let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+        let discussion_id = DiscussionRecordId::generate();
+        let author = repo.get_attribution().unwrap();
+        let open = write_local_operation(
+            &store,
+            discussion_id,
+            Vec::new(),
+            author.clone(),
+            1_700_000_000_000,
+            CollaborationOperationBodyV1::Open {
+                title: "run contract".to_string(),
+                anchor: CollaborationAnchor::Symbol {
+                    state_id: state,
+                    path: "lib.rs".to_string(),
+                    symbol: "run".to_string(),
+                },
+                visibility: VisibilityTier::Internal,
+                turn: DiscussionTurnV1::new("first turn").unwrap(),
+            },
+        )
+        .unwrap();
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        assert_eq!(
+            push_discussions(&repo, &mut client, "acme/widgets")
+                .await
+                .unwrap(),
+            1
+        );
+
+        write_local_operation(
+            &store,
+            discussion_id,
+            vec![open],
+            author,
+            1_700_000_001_000,
+            CollaborationOperationBodyV1::AppendTurn {
+                turn: DiscussionTurnV1::new("second turn").unwrap(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            push_discussions(&repo, &mut client, "acme/widgets")
+                .await
+                .unwrap(),
+            1
+        );
+
+        client.close().await;
+        server.await.unwrap();
     }
 }

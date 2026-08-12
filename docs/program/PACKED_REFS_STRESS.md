@@ -6,7 +6,7 @@ refs). Labels follow program truth rules.
 | Surface | Status |
 |---------|--------|
 | Product on-disk format: text `packed-refs` | **Shipped** (degrades ~10k+) |
-| Criterion scale bench (10k / 50k / 100k) | **Shipped** as stress tool (not a CI oracle gate) |
+| Criterion scale bench (10k / 50k / 100k) | **Historical** — removed with the deferred reftable spike |
 | Reftable binary format in product `RefManager` | **Planned** / not implemented |
 | Continuous CI gate at 10k+ refs | **Unknown** / not claimed |
 | Product-path unit stress (2k threads pack+reload) | **Shipped** as CI unit test (`packed_refs_product_stress_two_thousand_threads`) |
@@ -22,11 +22,11 @@ Packed-refs is a single line-oriented file under `.heddle/refs/packed-refs`.
 Cold load parses the whole file into an in-memory model; single cold lookups
 pay full parse + map lookup. That is correct and durable for typical repos, but
 **latency and rewrite cost grow with ref count**. Product docs already say
-packed-refs **degrades ~10k+ refs**. Reftable is a spike prototype only — it is
-**not** the production ref store.
+packed-refs **degrades ~10k+ refs**. The reftable spike prototype was removed
+after its defer decision and is **not** the production ref store.
 
-This recipe documents how to **measure** that curve without treating the bench
-as a false “oracle pass” on tiny fixtures.
+This document records the historical measurement method without treating it as
+a current “oracle pass” on tiny fixtures.
 
 ---
 
@@ -38,7 +38,7 @@ as a false “oracle pass” on tiny fixtures.
 | **50_000** | Mid stress — confirms trend continues |
 | **100_000** | Upper bench size in Criterion spike |
 
-Fixture shape in the bench (not product CLI):
+Historical fixture shape from the removed bench (not product CLI):
 
 - Threads only (markers = 0); names like `feature/branch-000123`, `topic/…`,
   `release/…`, `user/alice/…`, `user/bob/…`
@@ -47,8 +47,8 @@ Fixture shape in the bench (not product CLI):
 
 Source of truth:
 
-- Bench: [`crates/refs/benches/reftable_vs_packed.rs`](../../crates/refs/benches/reftable_vs_packed.rs)
-- `const SIZES: &[usize] = &[10_000, 50_000, 100_000];`
+- Historical measurements and methodology: [`docs/design/reftable-spike.md`](../design/reftable-spike.md)
+- The executable benchmark was removed with the deferred prototype in #921.
 
 Unit/integration tests under `crates/refs` exercise packed-refs **correctness**
 on **small** fixtures (handful of threads). Those are **not** scale stress.
@@ -57,28 +57,10 @@ on **small** fixtures (handful of threads). Those are **not** scale stress.
 
 ## Commands
 
-### 1. Preferred: Criterion bench (checked-in, equal sizes)
+### 1. Historical equal-size benchmark
 
-From repo root:
-
-```bash
-# Full stress groups at 10k / 50k / 100k
-cargo bench -p heddle-refs --bench reftable_vs_packed
-
-# Optional: filter a single group (Criterion filter)
-cargo bench -p heddle-refs --bench reftable_vs_packed -- cold_load
-cargo bench -p heddle-refs --bench reftable_vs_packed -- cold_single_lookup
-cargo bench -p heddle-refs --bench reftable_vs_packed -- append_one_persist
-```
-
-Wrapper script (prints expected graceful behavior, does not invent thresholds):
-
-```bash
-bash scripts/program/packed-refs-stress-recipe.sh
-# or: bash scripts/program/packed-refs-stress-recipe.sh --filter cold_load
-```
-
-**What is measured** (see bench module docs):
+The checked-in Criterion benchmark and wrapper were removed with the deferred
+reftable prototype in #921. These were the recorded measurement groups:
 
 | Group | Meaning for product packed-refs path |
 |-------|--------------------------------------|
@@ -88,9 +70,10 @@ bash scripts/program/packed-refs-stress-recipe.sh
 | `list_all` | Enumerate every ref name (status / sync style work) |
 | `append_one_persist` | Add one ref + rewrite whole file via `write_file_atomic` (same durability path as production `PackedRefs::save`) |
 
-Stderr also prints on-disk byte sizes at each `n` for packed vs reftable prototype.
+The removed benchmark also printed on-disk byte sizes at each `n` for packed
+refs versus the reftable prototype.
 
-### 2. Product CLI path (correctness / ops, not equal-work scale gate)
+### 2. Product CLI path (correctness / ops, not a scale gate)
 
 Product consolidates loose refs into packed-refs via maintenance GC:
 
@@ -110,8 +93,8 @@ heddle doctor
 ```
 
 **There is no supported product command that fabricates 10k threads for stress.**
-For scale numbers, use the Criterion bench (above), not a hand-rolled CLI loop
-in CI as an “oracle.”
+The repository currently has no supported executable 10k-ref stress recipe. Do
+not substitute a hand-rolled CLI loop in CI as an “oracle.”
 
 API-level product path (library tests / tooling):
 
@@ -150,10 +133,10 @@ revisit reftable if users hit >10k-ref pain or layout migration is forced.
 
 Do **not** claim from this recipe alone:
 
-1. **Reftable is shipped** — `ReftableModel` is a spike in schema/refs benches;
-   **not** wired through `RefManager` / production save path.
-2. **Wave 7 full green** — stress docs + recipe close a residual item; they do
-   not certify multi-host or continuous CI scale gates.
+1. **Reftable is shipped** — the prototype was removed and no production
+   `RefManager` / save path exists.
+2. **Wave 7 full green** — historical stress evidence does not certify
+   multi-host or continuous CI scale gates.
 3. **CI continuously gates 10k+ refs** — `PLATFORM_MATRIX` still lists large-ref
    stress as **Unknown** as a continuous gate.
 4. **Bench reftable numbers are product SLA** — prototype format; append path in
@@ -168,9 +151,9 @@ Do **not** claim from this recipe alone:
 
 | Checklist item | Status |
 |----------------|--------|
-| Document ~10k threshold + reproducible recipe | **Done** (this file + script) |
-| Classify large-ref work as stress, not tiny-fixture oracle | **Done** (Criterion 10k/50k/100k; unit tests remain correctness-only) |
+| Document ~10k threshold | **Done** (this file records the historical result) |
+| Reproducible 10k+ stress recipe | **Open** — removed with the deferred reftable prototype |
+| Classify large-ref work as stress, not tiny-fixture oracle | **Done** (historical Criterion results remain stress evidence; unit tests remain correctness-only) |
 | Reftable product backend | **Planned** — leave open in GAP_MAP L2 |
 
-Related: [`PLATFORM_MATRIX.md`](PLATFORM_MATRIX.md),
-[`scripts/program/packed-refs-stress-recipe.sh`](../../scripts/program/packed-refs-stress-recipe.sh).
+Related: [`PLATFORM_MATRIX.md`](PLATFORM_MATRIX.md).

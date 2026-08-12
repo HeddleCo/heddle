@@ -26127,16 +26127,226 @@
       "type": "object"
     },
     "resolve": {
+      "$defs": {
+        "AgentReport": {
+          "properties": {
+            "model": {
+              "type": "string"
+            },
+            "policy_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "provider": {
+              "type": "string"
+            },
+            "segment_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "provider",
+            "model"
+          ],
+          "type": "object"
+        },
+        "ConflictRangeReport": {
+          "properties": {
+            "end_line": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "start_line": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start_line",
+            "end_line"
+          ],
+          "type": "object"
+        },
+        "ConflictRegionReport": {
+          "properties": {
+            "base": {
+              "$ref": "#/$defs/ConflictSideReport"
+            },
+            "id": {
+              "type": "string"
+            },
+            "merged_range": {
+              "$ref": "#/$defs/ConflictRangeReport"
+            },
+            "occurrence": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ours": {
+              "$ref": "#/$defs/ConflictSideReport"
+            },
+            "path": {
+              "type": "string"
+            },
+            "symbol": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "theirs": {
+              "$ref": "#/$defs/ConflictSideReport"
+            }
+          },
+          "required": [
+            "id",
+            "path",
+            "occurrence",
+            "merged_range",
+            "base",
+            "ours",
+            "theirs"
+          ],
+          "type": "object"
+        },
+        "ConflictResolutionModeReport": {
+          "enum": [
+            "ours",
+            "theirs",
+            "edit",
+            "auto"
+          ],
+          "type": "string"
+        },
+        "ConflictResolutionReport": {
+          "properties": {
+            "conflict_id": {
+              "type": "string"
+            },
+            "mode": {
+              "$ref": "#/$defs/ConflictResolutionModeReport"
+            },
+            "path": {
+              "type": "string"
+            },
+            "resolution": {
+              "type": "string"
+            },
+            "resolver": {
+              "$ref": "#/$defs/ResolverAttributionReport"
+            }
+          },
+          "required": [
+            "conflict_id",
+            "path",
+            "resolution",
+            "mode",
+            "resolver"
+          ],
+          "type": "object"
+        },
+        "ConflictSideReport": {
+          "properties": {
+            "blob_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "hunk_hash": {
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/ConflictRangeReport"
+            },
+            "source_state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_state",
+            "range",
+            "hunk_hash"
+          ],
+          "type": "object"
+        },
+        "PrincipalReport": {
+          "properties": {
+            "email": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "email"
+          ],
+          "type": "object"
+        },
+        "ResolverAttributionReport": {
+          "properties": {
+            "agent": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AgentReport"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "$ref": "#/$defs/ResolverKindReport"
+            },
+            "principal": {
+              "$ref": "#/$defs/PrincipalReport"
+            }
+          },
+          "required": [
+            "kind",
+            "principal"
+          ],
+          "type": "object"
+        },
+        "ResolverKindReport": {
+          "enum": [
+            "human",
+            "agent"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "conflicts": {
+        "conflict_paths": {
+          "description": "Path-level compatibility/progress surface, including structural conflicts.",
           "items": {
             "type": "string"
           },
-          "type": [
-            "array",
-            "null"
-          ]
+          "type": "array"
+        },
+        "conflicts": {
+          "description": "Content conflicts expanded into independently addressable regions.",
+          "items": {
+            "$ref": "#/$defs/ConflictRegionReport"
+          },
+          "type": "array"
         },
         "continuation_message": {
           "type": [
@@ -26151,10 +26361,7 @@
           ]
         },
         "continued": {
-          "type": [
-            "boolean",
-            "null"
-          ]
+          "type": "boolean"
         },
         "idempotency_status": {
           "type": [
@@ -26226,10 +26433,7 @@
           "items": {
             "type": "string"
           },
-          "type": [
-            "array",
-            "null"
-          ]
+          "type": "array"
         },
         "replayed": {
           "type": [
@@ -26237,20 +26441,30 @@
             "null"
           ]
         },
+        "resolutions": {
+          "description": "Resolution operations produced by this command invocation.",
+          "items": {
+            "$ref": "#/$defs/ConflictResolutionReport"
+          },
+          "type": "array"
+        },
         "resolved": {
           "items": {
             "type": "string"
           },
-          "type": [
-            "array",
-            "null"
-          ]
+          "type": "array"
         }
       },
       "required": [
-        "output_kind"
+        "output_kind",
+        "resolved",
+        "remaining",
+        "conflict_paths",
+        "conflicts",
+        "resolutions",
+        "continued"
       ],
-      "title": "ResolveSchema",
+      "title": "ResolveReport",
       "type": "object"
     },
     "retro": {
