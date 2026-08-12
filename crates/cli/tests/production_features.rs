@@ -6,6 +6,7 @@
 use std::{fs, process::Command, str};
 
 use ntest::timeout;
+use objects::object::{StateAttachmentBody, StructuredConflict};
 use oplog::{ConflictResolutionMode, OpLogBackend, OpRecord};
 use repo::Repository;
 use serde_json::Value;
@@ -127,8 +128,8 @@ mod resolve {
         create_conflict(&temp);
         fs::write(temp.path().join("file.txt"), "resolved content").unwrap();
 
-        heddle_with_env(
-            &["resolve", "file.txt"],
+        let resolved = heddle_with_env(
+            &["--output", "json", "resolve", "file.txt"],
             Some(temp.path()),
             &[
                 ("HEDDLE_PRINCIPAL_NAME", "Resolution Owner"),
@@ -138,6 +139,15 @@ mod resolve {
             ],
         )
         .unwrap();
+        let resolved: Value = serde_json::from_str(&resolved).expect("resolve JSON");
+        let resolution = &resolved["resolutions"][0];
+        assert_eq!(resolution["path"], "file.txt", "{resolved}");
+        assert_eq!(resolution["mode"], "edit", "{resolved}");
+        assert_eq!(resolution["resolver"]["kind"], "agent", "{resolved}");
+        assert_eq!(
+            resolution["resolver"]["agent"]["provider"], "openai",
+            "{resolved}"
+        );
 
         let entries = recent_oplog_entries(&temp);
         let event = entries
@@ -152,7 +162,8 @@ mod resolve {
                 _ => None,
             })
             .expect("production resolve must append ConflictResolved");
-        assert_eq!(event.0, "file.txt");
+        assert!(event.0.starts_with("conflict-"), "{}", event.0);
+        assert_eq!(event.0, resolution["conflict_id"].as_str().unwrap());
         assert_eq!(event.1, "edit");
         assert_eq!(*event.3, ConflictResolutionMode::Edit);
         assert_eq!(event.2.principal.name, "Resolution Owner");
@@ -239,7 +250,7 @@ mod resolve {
     }
 
     #[test]
-    #[timeout(15000)]
+    #[timeout(30000)]
     #[serial]
     fn test_thread_refresh_conflict_continue_then_land_resolved_thread() {
         let temp = TempDir::new().unwrap();
@@ -252,6 +263,19 @@ mod resolve {
         assert_eq!(resolved["output_kind"], "resolve", "{resolved}");
         assert_eq!(resolved["continued"], true, "{resolved}");
         assert_eq!(resolved["continuation_status"], "continued", "{resolved}");
+        let repo = Repository::open(temp.path()).unwrap();
+        let merged_state = repo.head().unwrap().expect("resolved merge state");
+        let attachment = repo
+            .latest_state_attachment(
+                &merged_state,
+                repo::StateAttachmentKind::StructuredConflicts,
+            )
+            .unwrap()
+            .expect("structured conflicts retained on resolved state");
+        assert!(matches!(
+            attachment.body,
+            StateAttachmentBody::StructuredConflicts(_)
+        ));
 
         heddle(&["thread", "switch", "main"], Some(temp.path())).expect("switch main");
         let landed = heddle(
@@ -283,7 +307,56 @@ mod resolve {
 
         let output: Value = serde_json::from_str(&result.unwrap()).expect("resolve list JSON");
         assert_eq!(output["output_kind"], "resolve", "{output}");
-        assert_eq!(output["conflicts"][0], "file.txt", "{output}");
+        assert_eq!(output["conflict_paths"][0], "file.txt", "{output}");
+        let conflict = &output["conflicts"][0];
+        assert_eq!(conflict["path"], "file.txt", "{output}");
+        assert!(
+            conflict["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("conflict-")),
+            "{output}"
+        );
+        for side in ["base", "ours", "theirs"] {
+            assert!(conflict[side]["source_state"].is_string(), "{output}");
+            assert!(conflict[side]["blob_id"].is_string(), "{output}");
+            assert!(conflict[side]["hunk_hash"].is_string(), "{output}");
+            assert!(
+                conflict[side]["range"]["start_line"].is_number(),
+                "{output}"
+            );
+            assert!(conflict[side]["range"]["end_line"].is_number(), "{output}");
+        }
+
+        let repo = Repository::open(temp.path()).unwrap();
+        let merge_state = repo.merge_state_manager().load().unwrap().unwrap();
+        let payload_id = merge_state
+            .structured_conflicts
+            .expect("structured conflict payload id");
+        let payload_blob = repo.require_blob(&payload_id).unwrap();
+        assert_eq!(payload_blob.hash(), payload_id);
+        let payload = StructuredConflict::decode(payload_blob.content()).unwrap();
+        assert_eq!(payload.conflicts.len(), 1);
+        for side in [
+            &payload.conflicts[0].base,
+            &payload.conflicts[0].ours,
+            &payload.conflicts[0].theirs,
+        ] {
+            let blob = repo.require_blob(&side.blob_id.unwrap()).unwrap();
+            side.verify_blob(blob.content()).unwrap();
+        }
+    }
+
+    #[test]
+    #[timeout(15000)]
+    fn resolve_schema_exposes_structured_regions_and_resolution_records() {
+        let schema = heddle(&["schemas", "resolve"], None).expect("resolve schema");
+        let schema: Value = serde_json::from_str(&schema).expect("resolve JSON Schema");
+        let properties = &schema["properties"];
+        assert_eq!(properties["conflicts"]["type"], "array", "{schema}");
+        assert_eq!(properties["resolutions"]["type"], "array", "{schema}");
+        let defs = schema["$defs"].as_object().expect("schema definitions");
+        assert!(defs.contains_key("ConflictRegionReport"), "{schema}");
+        assert!(defs.contains_key("ConflictResolutionReport"), "{schema}");
     }
 
     #[test]
@@ -305,7 +378,7 @@ mod resolve {
                 resolution,
                 mode: ConflictResolutionMode::Ours,
                 ..
-            } if conflict_id == "file.txt" && resolution == "ours"
+            } if conflict_id.starts_with("conflict-") && resolution == "ours"
         )));
     }
 
@@ -332,7 +405,7 @@ mod resolve {
                 resolution,
                 mode: ConflictResolutionMode::Theirs,
                 ..
-            } if conflict_id == "file.txt" && resolution == "theirs"
+            } if conflict_id.starts_with("conflict-") && resolution == "theirs"
         )));
     }
 

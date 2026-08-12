@@ -7407,13 +7407,13 @@ the `discuss_show` discriminator:
 {"valid": true, "errors": [], "warnings": [], "objects_checked": 42, "git_projection_checked": false, "repair_target": null, "repaired": false, "repairs": []}
 ```
 
-`heddle oplog recover --output json` emits a non-mutating health report for a
-repository whose V5 manifest-selected oplog containers pass strict repository
-open validation. Damaged selected generations fail at that validation boundary
-instead of relying on the removed single-file `oplog.bin` auto-salvage path:
+`heddle oplog recover --output json` emits the health or explicit salvage
+report for the manifest-selected oplog containers. Optional recovery detail
+fields appear when the invocation repaired damage or found a durable report
+from an earlier recovery:
 
 ```json
-{"output_kind":"oplog_recover","already_healthy":true,"prior_recovery":false,"entries_recovered":0,"damaged_byte_start":0,"damaged_byte_end":0}
+{"output_kind":"oplog_recover","already_healthy":true,"prior_recovery":true,"strategy":"forward-greedy","entries_recovered":2,"entries_lost":1,"damaged_byte_start":256,"damaged_byte_end":320,"sidecar_path":".heddle/oplog/oplog.segments/0000000000000001.bin.oplog.recovery","suffix_segments_discarded":0,"suffix_entries_discarded":0}
 ```
 
 `heddle hook list|install|uninstall|events --output json` emit:
@@ -7531,8 +7531,14 @@ no record exists — public-by-absence):
 `heddle resolve --output json` emits:
 
 ```json
-{"output_kind": "resolve", "message": "Resolved src/lib.rs; completed integration", "resolved": ["src/lib.rs"], "remaining": [], "continued": true, "continuation_status": "continued", "continuation_message": "Completed the in-progress Heddle integration", "next_action": "heddle land --thread feature/auth", "recommended_action": "heddle land --thread feature/auth"}
+{"output_kind": "resolve", "message": "Resolved src/lib.rs; completed integration", "resolved": ["src/lib.rs"], "remaining": [], "conflict_paths": ["src/lib.rs"], "conflicts": [{"id": "conflict-1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "path": "src/lib.rs", "symbol": "merge_target", "occurrence": 0, "merged_range": {"start_line": 8, "end_line": 13}, "base": {"source_state": "hs-0000000000000000000000000000000000000000000000000000", "blob_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "range": {"start_line": 8, "end_line": 9}, "hunk_hash": "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}, "ours": {"source_state": "hs-1111111111111111111111111111111111111111111111111111", "blob_id": "2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "range": {"start_line": 8, "end_line": 9}, "hunk_hash": "3123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}, "theirs": {"source_state": "hs-2222222222222222222222222222222222222222222222222222", "blob_id": "4123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "range": {"start_line": 8, "end_line": 9}, "hunk_hash": "5123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}], "resolutions": [{"conflict_id": "conflict-1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "path": "src/lib.rs", "resolution": "edit", "mode": "edit", "resolver": {"kind": "agent", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "openai", "model": "gpt-5", "session_id": null, "segment_id": null, "policy_id": null}}}], "continued": true, "continuation_status": "continued", "continuation_message": "Completed the in-progress Heddle integration", "next_action": "heddle land --thread feature/auth", "recommended_action": "heddle land --thread feature/auth"}
 ```
+
+`conflicts` is the verified, content-addressed payload for the paths touched by
+the command. Ranges are zero-based and half-open; every side names its source
+state, source blob (or `null` when absent), and BLAKE3 hunk hash. `resolutions`
+records the stable region id, resolution mode (`ours`, `theirs`, `edit`, or
+`auto`), and complete human/agent attribution written to the operation log.
 
 `heddle retro --output json` emits the same shape with bounded session data;
 `timeline_steps` is `[]` unless expanded with `--full`. `heddle retro

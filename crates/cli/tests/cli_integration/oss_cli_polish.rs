@@ -6100,7 +6100,7 @@ fn resolve_with_no_remaining_conflicts_keeps_full_typed_advice() {
     let head = repo.current_state().unwrap().unwrap().state_id;
     let merge_state = repo.merge_state_manager();
     merge_state
-        .start(head, head, None, vec!["tracked.txt".to_string()])
+        .start(head, head, None, vec!["tracked.txt".to_string()], None)
         .unwrap();
     merge_state.resolve("tracked.txt").unwrap();
 

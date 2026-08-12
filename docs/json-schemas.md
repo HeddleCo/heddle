@@ -3499,8 +3499,14 @@ no record exists — public-by-absence):
 `heddle resolve --output json` emits:
 
 ```json
-{"output_kind": "resolve", "message": "Resolved src/lib.rs; completed integration", "resolved": ["src/lib.rs"], "remaining": [], "continued": true, "continuation_status": "continued", "continuation_message": "Completed the in-progress Heddle integration", "next_action": "heddle land --thread feature/auth", "recommended_action": "heddle land --thread feature/auth"}
+{"output_kind": "resolve", "message": "Resolved src/lib.rs; completed integration", "resolved": ["src/lib.rs"], "remaining": [], "conflict_paths": ["src/lib.rs"], "conflicts": [{"id": "conflict-1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "path": "src/lib.rs", "symbol": "merge_target", "occurrence": 0, "merged_range": {"start_line": 8, "end_line": 13}, "base": {"source_state": "hs-0000000000000000000000000000000000000000000000000000", "blob_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "range": {"start_line": 8, "end_line": 9}, "hunk_hash": "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}, "ours": {"source_state": "hs-1111111111111111111111111111111111111111111111111111", "blob_id": "2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "range": {"start_line": 8, "end_line": 9}, "hunk_hash": "3123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}, "theirs": {"source_state": "hs-2222222222222222222222222222222222222222222222222222", "blob_id": "4123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "range": {"start_line": 8, "end_line": 9}, "hunk_hash": "5123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}], "resolutions": [{"conflict_id": "conflict-1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", "path": "src/lib.rs", "resolution": "edit", "mode": "edit", "resolver": {"kind": "agent", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "openai", "model": "gpt-5", "session_id": null, "segment_id": null, "policy_id": null}}}], "continued": true, "continuation_status": "continued", "continuation_message": "Completed the in-progress Heddle integration", "next_action": "heddle land --thread feature/auth", "recommended_action": "heddle land --thread feature/auth"}
 ```
+
+`conflicts` is the verified, content-addressed payload for the paths touched by
+the command. Ranges are zero-based and half-open; every side names its source
+state, source blob (or `null` when absent), and BLAKE3 hunk hash. `resolutions`
+records the stable region id, resolution mode (`ours`, `theirs`, `edit`, or
+`auto`), and complete human/agent attribution written to the operation log.
 
 `heddle retro --output json` emits the same shape with bounded session data;
 `timeline_steps` is `[]` unless expanded with `--full`. `heddle retro

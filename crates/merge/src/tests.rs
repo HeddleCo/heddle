@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Unit tests for the native hunk-level merge engine.
 
-use super::{ConflictMarkers, MergeOutcome, text_hunk_merge, text_hunk_merge_with_markers};
+use super::{
+    ConflictLineRange, ConflictMarkers, MergeOutcome, text_conflict_regions, text_hunk_merge,
+    text_hunk_merge_with_markers,
+};
 
 /// Count `<<<<<<<` marker occurrences at column 0 (one per conflict triple).
 fn count_conflicts(bytes: &[u8]) -> usize {
@@ -511,4 +514,21 @@ fn same_anchor_eof_appends_concat() {
         }
         other => panic!("expected Clean (concat EOF appends), got {other:?}"),
     }
+}
+
+#[test]
+fn conflict_regions_preserve_each_source_and_rendered_hunk_range() {
+    let base = b"keep-0\nbase-a\nkeep-1\nbase-b\nkeep-2\n";
+    let ours = b"keep-0\nours-a\nkeep-1\nours-b\nkeep-2\n";
+    let theirs = b"keep-0\ntheirs-a\nkeep-1\ntheirs-b\nkeep-2\n";
+
+    let regions = text_conflict_regions(base, ours, theirs);
+
+    assert_eq!(regions.len(), 2);
+    assert_eq!(regions[0].base, ConflictLineRange { start: 1, end: 2 });
+    assert_eq!(regions[0].ours, regions[0].base);
+    assert_eq!(regions[0].theirs, regions[0].base);
+    assert_eq!(regions[0].merged, ConflictLineRange { start: 1, end: 6 });
+    assert_eq!(regions[1].base, ConflictLineRange { start: 3, end: 4 });
+    assert_eq!(regions[1].merged, ConflictLineRange { start: 7, end: 12 });
 }

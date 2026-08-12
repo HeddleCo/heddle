@@ -315,6 +315,7 @@ fn merge_state_start_persists_initial_conflict_set() {
             theirs,
             Some(base),
             vec!["a.txt".into(), "b.txt".into()],
+            None,
         )
         .unwrap();
 
@@ -334,7 +335,13 @@ fn merge_state_resolve_one_path_at_a_time() {
     let (ours, theirs, _) = sample_ids();
 
     manager
-        .start(ours, theirs, None, vec!["a.txt".into(), "b.txt".into()])
+        .start(
+            ours,
+            theirs,
+            None,
+            vec!["a.txt".into(), "b.txt".into()],
+            None,
+        )
         .unwrap();
 
     manager.resolve("a.txt").unwrap();
@@ -350,7 +357,7 @@ fn merge_state_finish_fails_when_anything_unresolved() {
     let (ours, theirs, _) = sample_ids();
 
     manager
-        .start(ours, theirs, None, vec!["a.txt".into()])
+        .start(ours, theirs, None, vec!["a.txt".into()], None)
         .unwrap();
     let err = manager.finish().unwrap_err();
     assert!(
@@ -370,7 +377,7 @@ fn merge_state_finish_clears_state_when_everything_resolved() {
     let (ours, theirs, _) = sample_ids();
 
     manager
-        .start(ours, theirs, None, vec!["a.txt".into()])
+        .start(ours, theirs, None, vec!["a.txt".into()], None)
         .unwrap();
     manager.resolve("a.txt").unwrap();
     let final_state = manager.finish().unwrap();
@@ -385,7 +392,13 @@ fn merge_state_abort_drops_state_without_requiring_resolution() {
     let (ours, theirs, _) = sample_ids();
 
     manager
-        .start(ours, theirs, None, vec!["a.txt".into(), "b.txt".into()])
+        .start(
+            ours,
+            theirs,
+            None,
+            vec!["a.txt".into(), "b.txt".into()],
+            None,
+        )
         .unwrap();
     let aborted = manager.abort().unwrap();
     assert_eq!(aborted.theirs, theirs);
@@ -408,6 +421,7 @@ fn merge_state_carry_forward_repoints_ours_without_ending_merge() {
             theirs,
             Some(base),
             vec!["a.txt".into(), "b.txt".into()],
+            None,
         )
         .unwrap();
     // Resolve one path so we can verify it survives the carry-forward.
@@ -438,6 +452,7 @@ fn merge_state_resolve_all_marks_remaining_paths() {
             theirs,
             None,
             vec!["a.txt".into(), "b.txt".into(), "c.txt".into()],
+            None,
         )
         .unwrap();
     manager.resolve("b.txt").unwrap();

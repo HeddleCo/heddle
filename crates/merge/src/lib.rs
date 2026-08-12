@@ -63,6 +63,22 @@ pub use tree_merge::{
     detect_renames_between_trees, merge_trees,
 };
 
+/// Zero-based, half-open line range in a merge input or rendered output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConflictLineRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Source and marker ranges for one diff3 conflict hunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextConflictRegion {
+    pub base: ConflictLineRange,
+    pub ours: ConflictLineRange,
+    pub theirs: ConflictLineRange,
+    pub merged: ConflictLineRange,
+}
+
 /// Outcome of a three-way line-based merge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeOutcome {
@@ -113,4 +129,15 @@ pub fn text_hunk_merge_with_markers(
         return MergeOutcome::Binary;
     }
     diff3::run(base, ours, theirs, markers)
+}
+
+/// Analyze the independently conflicting regions selected by the diff3 engine.
+///
+/// The returned ranges use the same zero-based, half-open convention as slices.
+/// Binary inputs have no line-level diff3 regions and return an empty vector.
+pub fn text_conflict_regions(base: &[u8], ours: &[u8], theirs: &[u8]) -> Vec<TextConflictRegion> {
+    if preflight::any_binary(base, ours, theirs) {
+        return Vec::new();
+    }
+    diff3::regions(base, ours, theirs)
 }

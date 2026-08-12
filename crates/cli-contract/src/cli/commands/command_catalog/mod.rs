@@ -7,7 +7,7 @@ use clap::{ArgAction, CommandFactory};
 pub use heddle_core::ActionTemplate;
 use heddle_core::{
     DiffReport, FsckReport, MachineOutputKind, QueryReport, ReportContract as CoreReportContract,
-    StatusReport, VerifyReport,
+    ResolveReport, StatusReport, VerifyReport,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -2406,14 +2406,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["resolve"],
         front_door(
-            json_discriminators(
-                documented_schemas(REF_MUTATION, &["resolve"]),
-                &[json_discriminator(
-                    Some("resolve"),
-                    "output_kind",
-                    "resolve",
-                )],
-            ),
+            documented_core_report_schema(REF_MUTATION, ResolveReport::CONTRACT),
             300,
         ),
     ),

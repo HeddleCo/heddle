@@ -5,41 +5,21 @@ use std::fs;
 
 use anyhow::{Context, Result, anyhow};
 use heddle_core::{
+    ConflictRegionReport, ConflictResolutionReport, ResolveReport,
     contains_line_start_conflict_markers, path_is_active_conflict, unresolved_conflict_paths,
 };
-use objects::{object::Attribution, store::ObjectStore};
+use objects::{
+    object::{Attribution, StructuredConflict},
+    store::ObjectStore,
+};
 use oplog::{ConflictResolutionMode, OpLogBackend, OpRecord};
 use repo::{MergeState, Repository};
-use serde::Serialize;
 
 use super::{action_line::print_next_step, advice::RecoveryAdvice, snapshot::resolve_attribution};
 use crate::{
     cli::{Cli, should_output_json},
     config::UserConfig,
 };
-
-#[derive(Serialize)]
-struct ResolveOutput {
-    output_kind: &'static str,
-    message: String,
-    resolved: Vec<String>,
-    remaining: Vec<String>,
-    continued: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    continuation_status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    continuation_message: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    next_action: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    recommended_action: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ConflictList {
-    output_kind: &'static str,
-    conflicts: Vec<String>,
-}
 
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_resolve(
@@ -86,11 +66,14 @@ fn cmd_resolve_abort(
     if should_output_json(cli, Some(repo.config())) {
         println!(
             "{}",
-            serde_json::to_string(&ResolveOutput {
-                output_kind: "resolve",
-                message: "Merge aborted".to_string(),
+            serde_json::to_string(&ResolveReport {
+                output_kind: "resolve".to_string(),
+                message: Some("Merge aborted".to_string()),
                 resolved: vec![],
                 remaining: vec![],
+                conflict_paths: vec![],
+                conflicts: vec![],
+                resolutions: vec![],
                 continued: false,
                 continuation_status: None,
                 continuation_message: None,
@@ -133,13 +116,24 @@ fn cmd_resolve_list(
 ) -> Result<()> {
     let merge_state = load_merge_state_or_advice(merge_manager, "list merge conflicts")?;
     let unresolved = unresolved_paths(&merge_state);
+    let conflicts = structured_conflicts_for_paths(repo, &merge_state, &unresolved)?;
 
     if should_output_json(cli, Some(repo.config())) {
         println!(
             "{}",
-            serde_json::to_string(&ConflictList {
-                output_kind: "resolve",
-                conflicts: unresolved.clone(),
+            serde_json::to_string(&ResolveReport {
+                output_kind: "resolve".to_string(),
+                message: None,
+                resolved: Vec::new(),
+                remaining: unresolved.clone(),
+                conflict_paths: unresolved.clone(),
+                conflicts,
+                resolutions: Vec::new(),
+                continued: false,
+                continuation_status: None,
+                continuation_message: None,
+                next_action: None,
+                recommended_action: None,
             })?
         );
     } else if unresolved.is_empty() {
@@ -147,6 +141,9 @@ fn cmd_resolve_list(
     } else {
         for path in &unresolved {
             println!("{}", path);
+            for conflict in conflicts.iter().filter(|conflict| &conflict.path == path) {
+                print_conflict_region(conflict);
+            }
         }
     }
 
@@ -169,12 +166,16 @@ fn cmd_resolve_all(
     }
     let resolver = resolve_attribution(repo, &UserConfig::load_default()?)?;
     let mode = manual_resolution_mode(ours, theirs);
+    let conflicts = structured_conflicts_for_paths(repo, &merge_state, &unresolved)?;
+    let mut resolutions = Vec::new();
 
     for path in &unresolved {
         resolve_file_with_version(repo, &merge_state, path, ours, theirs)?;
         ensure_resolved_file_has_no_conflict_markers(repo, path, ours || theirs, force)?;
         merge_manager.resolve(path)?;
-        record_conflict_resolved(repo, path, &resolver, mode)?;
+        resolutions.extend(record_conflicts_resolved(
+            repo, path, &conflicts, &resolver, mode,
+        )?);
     }
 
     let remaining = merge_manager.unresolved()?;
@@ -183,15 +184,21 @@ fn cmd_resolve_all(
         format!("Resolved {} conflict(s)", unresolved.len()),
         unresolved.clone(),
         remaining.clone(),
+        unresolved.clone(),
+        conflicts,
+        resolutions,
         continuation,
     );
 
     if should_output_json(cli, Some(repo.config())) {
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        println!("{}", output.message);
+        println!("{}", output.message.as_deref().unwrap_or_default());
         for path in &unresolved {
             println!("  {}", path);
+        }
+        for resolution in &output.resolutions {
+            print_resolution(resolution);
         }
         if !remaining.is_empty() {
             println!("Remaining: {} conflict(s)", remaining.len());
@@ -217,10 +224,12 @@ fn cmd_resolve_file(
     }
     let resolver = resolve_attribution(repo, &UserConfig::load_default()?)?;
     let mode = manual_resolution_mode(ours, theirs);
+    let conflict_paths = vec![path.to_string()];
+    let conflicts = structured_conflicts_for_paths(repo, &merge_state, &conflict_paths)?;
     resolve_file_with_version(repo, &merge_state, path, ours, theirs)?;
     ensure_resolved_file_has_no_conflict_markers(repo, path, ours || theirs, force)?;
     merge_manager.resolve(path)?;
-    record_conflict_resolved(repo, path, &resolver, mode)?;
+    let resolutions = record_conflicts_resolved(repo, path, &conflicts, &resolver, mode)?;
 
     let remaining = merge_manager.unresolved()?;
     let continuation = continue_if_resolution_complete(repo, remaining.is_empty())?;
@@ -228,15 +237,21 @@ fn cmd_resolve_file(
         format!("Resolved {}", path),
         vec![path.to_string()],
         remaining.clone(),
+        conflict_paths,
+        conflicts,
+        resolutions,
         continuation,
     );
 
     if should_output_json(cli, Some(repo.config())) {
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        println!("{}", output.message);
+        println!("{}", output.message.as_deref().unwrap_or_default());
         if !remaining.is_empty() {
             println!("{} conflict(s) remaining", remaining.len());
+        }
+        for resolution in &output.resolutions {
+            print_resolution(resolution);
         }
         print_continuation(&output);
     }
@@ -265,29 +280,122 @@ fn manual_resolution_mode(ours: bool, theirs: bool) -> ConflictResolutionMode {
     }
 }
 
-fn record_conflict_resolved(
+fn record_conflicts_resolved(
     repo: &Repository,
-    conflict_id: &str,
+    path: &str,
+    conflicts: &[ConflictRegionReport],
     resolver: &Attribution,
     mode: ConflictResolutionMode,
-) -> Result<()> {
+) -> Result<Vec<ConflictResolutionReport>> {
+    let conflict_ids: Vec<String> = conflicts
+        .iter()
+        .filter(|conflict| conflict.path == path)
+        .map(|conflict| conflict.id.clone())
+        .collect();
+    let conflict_ids = if conflict_ids.is_empty() {
+        vec![path.to_string()]
+    } else {
+        conflict_ids
+    };
     repo.oplog().record_batch_scoped(
-        vec![OpRecord::conflict_resolved(
-            conflict_id,
-            resolver.clone(),
-            mode,
-        )],
+        conflict_ids
+            .iter()
+            .map(|conflict_id| OpRecord::conflict_resolved(conflict_id, resolver.clone(), mode))
+            .collect(),
         Some(&repo.op_scope()),
     )?;
+    Ok(conflict_ids
+        .into_iter()
+        .map(|conflict_id| ConflictResolutionReport::new(conflict_id, path, resolver, mode))
+        .collect())
+}
+
+fn structured_conflicts_for_paths(
+    repo: &Repository,
+    merge_state: &MergeState,
+    paths: &[String],
+) -> Result<Vec<ConflictRegionReport>> {
+    let Some(payload_id) = merge_state.structured_conflicts else {
+        return Ok(Vec::new());
+    };
+    let blob = repo.require_blob(&payload_id)?;
+    if blob.hash() != payload_id {
+        return Err(anyhow!(
+            "structured conflict payload {} failed BLAKE3 verification",
+            payload_id
+        ));
+    }
+    let payload = StructuredConflict::decode(blob.content())?;
+    for conflict in &payload.conflicts {
+        verify_conflict_side(repo, &conflict.base)?;
+        verify_conflict_side(repo, &conflict.ours)?;
+        verify_conflict_side(repo, &conflict.theirs)?;
+    }
+    Ok(payload
+        .conflicts
+        .iter()
+        .filter(|conflict| paths.contains(&conflict.path))
+        .map(Into::into)
+        .collect())
+}
+
+fn verify_conflict_side(repo: &Repository, side: &objects::object::ConflictSide) -> Result<()> {
+    let bytes = match side.blob_id {
+        Some(blob_id) => repo.require_blob(&blob_id)?.content().to_vec(),
+        None => Vec::new(),
+    };
+    side.verify_blob(&bytes)?;
     Ok(())
+}
+
+fn print_conflict_region(conflict: &ConflictRegionReport) {
+    let symbol = conflict
+        .symbol
+        .as_deref()
+        .map(|symbol| format!(" ({symbol})"))
+        .unwrap_or_default();
+    println!(
+        "  {}{} lines {}..{}",
+        conflict.id, symbol, conflict.merged_range.start_line, conflict.merged_range.end_line
+    );
+    print_conflict_side("base", &conflict.base);
+    print_conflict_side("ours", &conflict.ours);
+    print_conflict_side("theirs", &conflict.theirs);
+}
+
+fn print_conflict_side(label: &str, side: &heddle_core::ConflictSideReport) {
+    println!(
+        "    {label}: state {} blob {} lines {}..{} hunk {}",
+        side.source_state,
+        side.blob_id.as_deref().unwrap_or("<absent>"),
+        side.range.start_line,
+        side.range.end_line,
+        side.hunk_hash
+    );
+}
+
+fn print_resolution(resolution: &ConflictResolutionReport) {
+    let actor = resolution
+        .resolver
+        .agent
+        .as_ref()
+        .map(|agent| format!("{}/{}", agent.provider, agent.model))
+        .unwrap_or_else(|| resolution.resolver.principal.name.clone());
+    println!(
+        "  {}: {} by {}",
+        resolution.conflict_id, resolution.mode, actor
+    );
 }
 
 fn resolve_output(
     message: String,
     resolved: Vec<String>,
     remaining: Vec<String>,
+    conflict_paths: Vec<String>,
+    conflicts: Vec<ConflictRegionReport>,
+    resolutions: Vec<ConflictResolutionReport>,
     continuation: Option<super::operator_core::OperatorCommandOutput>,
-) -> ResolveOutput {
+) -> ResolveReport {
     let continued = continuation.is_some();
     let continuation_status = continuation.as_ref().map(|output| output.status.clone());
     let continuation_message = continuation.as_ref().map(|output| output.message.clone());
@@ -302,11 +410,14 @@ fn resolve_output(
     } else {
         message
     };
-    ResolveOutput {
-        output_kind: "resolve",
-        message,
+    ResolveReport {
+        output_kind: "resolve".to_string(),
+        message: Some(message),
         resolved,
         remaining,
+        conflict_paths,
+        conflicts,
+        resolutions,
         continued,
         continuation_status,
         continuation_message,
@@ -315,7 +426,7 @@ fn resolve_output(
     }
 }
 
-fn print_continuation(output: &ResolveOutput) {
+fn print_continuation(output: &ResolveReport) {
     if let Some(message) = output.continuation_message.as_deref() {
         println!("{message}");
     }

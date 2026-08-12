@@ -1099,6 +1099,15 @@ impl Repository {
                         true,
                         None,
                     )?;
+                    if let Some(conflicts) = merge_state.structured_conflicts {
+                        self.store.put_state_attachment(&StateAttachment {
+                            state_id: state.id(),
+                            body: StateAttachmentBody::StructuredConflicts(conflicts),
+                            attribution: attribution.clone(),
+                            created_at: chrono::Utc::now(),
+                            supersedes: None,
+                        })?;
+                    }
                     self.merge_state_manager().finish()?;
                     let tree = self.store.get_tree(&state.tree)?.ok_or_else(|| {
                         HeddleError::NotFound("merge snapshot tree missing".to_string())

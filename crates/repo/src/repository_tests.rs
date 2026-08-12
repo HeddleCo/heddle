@@ -783,6 +783,7 @@ fn snapshot_failure_leaves_ref_unchanged() {
             theirs,
             None,
             vec!["unresolved.txt".to_string()],
+            None,
         )
         .unwrap();
 

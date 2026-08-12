@@ -25,7 +25,7 @@
 use similar::{Algorithm, DiffOp};
 
 use super::{
-    MergeOutcome,
+    ConflictLineRange, MergeOutcome, TextConflictRegion,
     lines::{build_alignment, split_lines},
     markers::{ConflictMarkers, emit_conflict, emit_lines},
     whitespace::compare_trailing_ws,
@@ -66,6 +66,27 @@ pub(super) fn run(
         &their_align,
         markers,
     )
+    .0
+}
+
+pub(super) fn regions(base: &[u8], ours: &[u8], theirs: &[u8]) -> Vec<TextConflictRegion> {
+    if base == ours || base == theirs || ours == theirs {
+        return Vec::new();
+    }
+    let base_lines = split_lines(base);
+    let our_lines = split_lines(ours);
+    let their_lines = split_lines(theirs);
+    let our_align = build_alignment(&base_lines, &our_lines);
+    let their_align = build_alignment(&base_lines, &their_lines);
+    walk_and_emit(
+        &base_lines,
+        &our_lines,
+        &their_lines,
+        &our_align,
+        &their_align,
+        ConflictMarkers::DEFAULT,
+    )
+    .1
 }
 
 fn walk_and_emit(
@@ -75,9 +96,9 @@ fn walk_and_emit(
     our_align: &[Option<usize>],
     their_align: &[Option<usize>],
     markers: ConflictMarkers<'_>,
-) -> MergeOutcome {
+) -> (MergeOutcome, Vec<TextConflictRegion>) {
     let mut output = Vec::new();
-    let mut conflicts = 0usize;
+    let mut regions = Vec::new();
     let mut i = 0usize;
     let mut our_pos = 0usize;
     let mut their_pos = 0usize;
@@ -110,10 +131,25 @@ fn walk_and_emit(
 
         emit_hunk(
             &mut output,
-            &mut conflicts,
+            &mut regions,
             &base[hunk_start..j],
             &ours[our_pos..end_our],
             &theirs[their_pos..end_their],
+            TextConflictRegion {
+                base: ConflictLineRange {
+                    start: hunk_start,
+                    end: j,
+                },
+                ours: ConflictLineRange {
+                    start: our_pos,
+                    end: end_our,
+                },
+                theirs: ConflictLineRange {
+                    start: their_pos,
+                    end: end_their,
+                },
+                merged: ConflictLineRange { start: 0, end: 0 },
+            },
             markers,
         );
 
@@ -126,30 +162,47 @@ fn walk_and_emit(
     if our_pos < ours.len() || their_pos < theirs.len() {
         emit_hunk(
             &mut output,
-            &mut conflicts,
+            &mut regions,
             &[],
             &ours[our_pos..],
             &theirs[their_pos..],
+            TextConflictRegion {
+                base: ConflictLineRange {
+                    start: base.len(),
+                    end: base.len(),
+                },
+                ours: ConflictLineRange {
+                    start: our_pos,
+                    end: ours.len(),
+                },
+                theirs: ConflictLineRange {
+                    start: their_pos,
+                    end: theirs.len(),
+                },
+                merged: ConflictLineRange { start: 0, end: 0 },
+            },
             markers,
         );
     }
 
-    if conflicts == 0 {
+    let outcome = if regions.is_empty() {
         MergeOutcome::Clean(output)
     } else {
         MergeOutcome::Conflicts {
             merged_bytes_with_markers: output,
-            conflict_count: conflicts,
+            conflict_count: regions.len(),
         }
-    }
+    };
+    (outcome, regions)
 }
 
 fn emit_hunk(
     out: &mut Vec<u8>,
-    conflicts: &mut usize,
+    regions: &mut Vec<TextConflictRegion>,
     base_slice: &[&[u8]],
     our_slice: &[&[u8]],
     their_slice: &[&[u8]],
+    mut region: TextConflictRegion,
     markers: ConflictMarkers<'_>,
 ) {
     if our_slice == base_slice {
@@ -174,9 +227,19 @@ fn emit_hunk(
         emit_lines(out, our_slice);
         emit_lines(out, their_slice);
     } else {
+        let merged_start = output_line_count(out);
         emit_conflict(out, our_slice, their_slice, markers);
-        *conflicts += 1;
+        region.merged = ConflictLineRange {
+            start: merged_start,
+            end: output_line_count(out),
+        };
+        regions.push(region);
     }
+}
+
+fn output_line_count(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|byte| **byte == b'\n').count()
+        + usize::from(bytes.last().is_some_and(|byte| *byte != b'\n'))
 }
 
 /// Classification of what a side does to a single base line.
