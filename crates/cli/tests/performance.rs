@@ -607,16 +607,18 @@ fn test_fs_pack_build_and_read_benchmark() {
 fn encode_native_pack(objects: &[ObjectData]) -> (Vec<u8>, Vec<u8>) {
     let mut builder = PackBuilder::new(CompressionConfig::default());
     for object in objects {
-        let id = match &object.id {
-            ObjectId::Hash(hash) => PackObjectId::Hash(*hash),
-            ObjectId::StateId(state_id) => PackObjectId::StateId(*state_id),
-            ObjectId::StateAttachment { id, .. } => PackObjectId::Hash(*id.as_hash()),
+        let id = match (&object.id, object.obj_type) {
+            (ObjectId::Hash(hash), ObjectType::AnnotatedTag) => PackObjectId::AnnotatedTag(*hash),
+            (ObjectId::Hash(hash), _) => PackObjectId::Hash(*hash),
+            (ObjectId::StateId(state_id), _) => PackObjectId::StateId(*state_id),
+            (ObjectId::StateAttachment { id, .. }, _) => PackObjectId::Hash(*id.as_hash()),
         };
         let obj_type = match object.obj_type {
             ObjectType::Blob => PackObjectType::Blob,
             ObjectType::Tree => PackObjectType::Tree,
             ObjectType::State => PackObjectType::State,
             ObjectType::Action => PackObjectType::Action,
+            ObjectType::AnnotatedTag => PackObjectType::AnnotatedTag,
             ObjectType::StateAttachment => PackObjectType::StateAttachment,
             ObjectType::Redaction => {
                 // Redaction sidecars never enter the content-addressed
@@ -660,12 +662,14 @@ fn decode_native_pack(pack_data: &[u8], index_data: &[u8]) -> Vec<ObjectData> {
                 }
                 (PackObjectId::Hash(hash), _) => ObjectId::Hash(hash),
                 (PackObjectId::StateId(state_id), _) => ObjectId::StateId(state_id),
+                (PackObjectId::AnnotatedTag(hash), _) => ObjectId::Hash(hash),
             };
             let object_type = match obj_type {
                 PackObjectType::Blob => ObjectType::Blob,
                 PackObjectType::Tree => ObjectType::Tree,
                 PackObjectType::State => ObjectType::State,
                 PackObjectType::Action => ObjectType::Action,
+                PackObjectType::AnnotatedTag => ObjectType::AnnotatedTag,
                 PackObjectType::StateAttachment => ObjectType::StateAttachment,
                 PackObjectType::Delta => {
                     panic!("decoded native pack should not surface delta type")

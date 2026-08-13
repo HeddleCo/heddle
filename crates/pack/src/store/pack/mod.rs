@@ -35,6 +35,7 @@ pub use shared::{
     try_decode_tagged_entry_header, verify_container, verify_container_layout,
     write_container_header,
 };
+pub(crate) use shared::{verify_supported_container, verify_supported_container_layout};
 pub use streaming_builder::{StreamingPackBuilder, SyncData};
 
 /// Object type for pack entries.
@@ -49,9 +50,17 @@ pub enum ObjectType {
     StateAttachment = 5,
     SnapshotCommit = 6,
     TimelineOperation = 7,
+    AnnotatedTag = 8,
 }
 
 pub(crate) fn pack_container_spec() -> PackContainerSpec {
+    PackContainerSpec {
+        magic: b"LMPK",
+        version: 4,
+    }
+}
+
+pub(crate) fn legacy_pack_container_spec() -> PackContainerSpec {
     PackContainerSpec {
         magic: b"LMPK",
         version: 3,
@@ -69,6 +78,7 @@ impl ObjectType {
             5 => Some(ObjectType::StateAttachment),
             6 => Some(ObjectType::SnapshotCommit),
             7 => Some(ObjectType::TimelineOperation),
+            8 => Some(ObjectType::AnnotatedTag),
             _ => None,
         }
     }

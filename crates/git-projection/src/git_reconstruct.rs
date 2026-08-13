@@ -18,7 +18,7 @@
 //! a ref at the commit).
 
 use objects::{
-    object::{Principal, State},
+    object::{AnnotatedTag, Principal, State},
     store::{ObjectStore, StoreError},
 };
 use repo::Repository as HeddleRepository;
@@ -97,6 +97,41 @@ pub fn reconstruct_commit_bytes(
 pub fn write_commit_object(repo: &SleyRepository, content: &[u8]) -> GitProjectionResult<ObjectId> {
     repo.write_object(EncodedObject::new(GitObjectType::Commit, content.to_vec()))
         .map_err(git_err)
+}
+
+/// Reconstruct the exact unframed bytes of a stored annotated Git tag.
+pub fn reconstruct_tag_bytes(tag: &AnnotatedTag) -> Vec<u8> {
+    tag.body().to_vec()
+}
+
+/// Frame, hash, and write a reconstructed annotated tag through sley's raw sink.
+pub fn write_tag_object(
+    repo: &SleyRepository,
+    tag: &AnnotatedTag,
+) -> GitProjectionResult<ObjectId> {
+    if tag.git_format().map_err(|error| {
+        GitProjectionError::Git(format!("invalid stored annotated tag: {error}"))
+    })? != repo.object_format()
+    {
+        return Err(GitProjectionError::Git(
+            "stored annotated tag uses a different Git object format".to_string(),
+        ));
+    }
+    let oid = repo
+        .write_object(EncodedObject::new(
+            GitObjectType::Tag,
+            reconstruct_tag_bytes(tag),
+        ))
+        .map_err(git_err)?;
+    let expected = tag
+        .git_oid()
+        .map_err(|error| GitProjectionError::Git(error.to_string()))?;
+    if oid != expected {
+        return Err(GitProjectionError::Git(format!(
+            "reconstructed annotated tag wrote {oid}, expected {expected}"
+        )));
+    }
+    Ok(oid)
 }
 
 /// Assemble the commit content bytes from already-resolved OIDs. Pure (no repo,

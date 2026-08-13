@@ -21,6 +21,7 @@ pub(super) const PACK_DECOMPRESSION_INITIAL_CAP: usize = 4 * 1024 * 1024;
 pub enum PackObjectId {
     Hash(ContentHash),
     StateId(StateId),
+    AnnotatedTag(ContentHash),
 }
 
 impl PackObjectId {
@@ -33,6 +34,10 @@ impl PackObjectId {
             Self::StateId(state_id) => {
                 buf.push(1);
                 buf.extend_from_slice(state_id.as_bytes());
+            }
+            Self::AnnotatedTag(hash) => {
+                buf.push(2);
+                buf.extend_from_slice(hash.as_bytes());
             }
         }
     }
@@ -65,6 +70,17 @@ impl PackObjectId {
                     StoreError::InvalidObject("invalid state id length".to_string())
                 })?);
                 Ok((Self::StateId(state_id), 33))
+            }
+            2 => {
+                if data.len() < 33 {
+                    return Err(StoreError::InvalidObject(
+                        "annotated-tag pack object id truncated".to_string(),
+                    ));
+                }
+                let hash = ContentHash::from_bytes(data[1..33].try_into().map_err(|_| {
+                    StoreError::InvalidObject("invalid annotated-tag id length".to_string())
+                })?);
+                Ok((Self::AnnotatedTag(hash), 33))
             }
             _ => Err(StoreError::InvalidObject(format!(
                 "unknown pack object id tag {tag}"
@@ -115,6 +131,49 @@ pub fn verify_container_layout(
     Ok((header.count, header.header_len, header.content_end))
 }
 
+pub(crate) fn verify_supported_container(data: &[u8]) -> Result<(u64, usize, usize)> {
+    verify_supported_container_with(data, false)
+}
+
+pub(crate) fn verify_supported_container_layout(data: &[u8]) -> Result<(u64, usize, usize)> {
+    verify_supported_container_with(data, true)
+}
+
+fn verify_supported_container_with(data: &[u8], layout_only: bool) -> Result<(u64, usize, usize)> {
+    let current = super::pack_container_spec();
+    if data.len() < 8 || &data[..4] != current.magic {
+        return if layout_only {
+            verify_container_layout(data, current)
+        } else {
+            verify_container(data, current)
+        };
+    }
+    let version =
+        u32::from_be_bytes(data[4..8].try_into().map_err(|_| {
+            StoreError::InvalidObject("Pack version field is truncated".to_string())
+        })?);
+    let spec = match version {
+        3 => super::legacy_pack_container_spec(),
+        4 => current,
+        newer if newer > current.version => {
+            return Err(StoreError::InvalidObject(format!(
+                "pack uses format version {newer}, but this binary supports {}; upgrade heddle",
+                current.version
+            )));
+        }
+        older => {
+            return Err(StoreError::InvalidObject(format!(
+                "pack uses unsupported legacy format version {older}; run `heddle migrate` with a compatible binary"
+            )));
+        }
+    };
+    if layout_only {
+        verify_container_layout(data, spec)
+    } else {
+        verify_container(data, spec)
+    }
+}
+
 pub fn append_container_checksum(buf: &mut Vec<u8>) {
     HeaderChecksum::Blake3Trailer.append(buf);
 }
@@ -156,7 +215,12 @@ pub fn encode_tagged_entry_parts(
     compressed: &[u8],
 ) -> Result<()> {
     id.encode_tagged(buf);
-    varint::encode_type_and_size(stored_type, uncompressed_size as u64, buf);
+    let encoded_type = if stored_type == ObjectType::AnnotatedTag {
+        ObjectType::Blob
+    } else {
+        stored_type
+    };
+    varint::encode_type_and_size(encoded_type, uncompressed_size as u64, buf);
     varint::encode_varint(compressed.len() as u64, buf);
     if stored_type == ObjectType::Delta {
         let Some(base) = delta_base else {
@@ -172,8 +236,16 @@ pub fn encode_tagged_entry_parts(
 
 pub fn decode_tagged_entry_header(data: &[u8]) -> Result<PackEntryHeader> {
     let (id, id_len) = PackObjectId::decode_tagged(data)?;
-    let (obj_type, uncompressed_size, type_len) = varint::decode_type_and_size(&data[id_len..])
+    let (mut obj_type, uncompressed_size, type_len) = varint::decode_type_and_size(&data[id_len..])
         .ok_or_else(|| StoreError::InvalidObject("Truncated type+size varint".to_string()))?;
+    if matches!(id, PackObjectId::AnnotatedTag(_)) {
+        if obj_type != ObjectType::Blob {
+            return Err(StoreError::InvalidObject(
+                "annotated-tag pack entry has invalid encoded type".to_string(),
+            ));
+        }
+        obj_type = ObjectType::AnnotatedTag;
+    }
     let varint_start = id_len + type_len;
     let (compressed_size, comp_len) = varint::decode_varint(&data[varint_start..])
         .ok_or_else(|| StoreError::InvalidObject("Truncated compressed_size varint".to_string()))?;
@@ -222,6 +294,15 @@ pub fn try_decode_tagged_entry_header(data: &[u8]) -> Result<Option<PackEntryHea
                 })?);
                 (PackObjectId::StateId(state_id), 33)
             }
+            2 => {
+                if data.len() < 33 {
+                    return Ok(None);
+                }
+                let hash = ContentHash::from_bytes(data[1..33].try_into().map_err(|_| {
+                    StoreError::InvalidObject("invalid annotated-tag id length".to_string())
+                })?);
+                (PackObjectId::AnnotatedTag(hash), 33)
+            }
             _ => {
                 return Err(StoreError::InvalidObject(format!(
                     "unknown pack object id tag {tag}"
@@ -229,11 +310,19 @@ pub fn try_decode_tagged_entry_header(data: &[u8]) -> Result<Option<PackEntryHea
             }
         };
 
-    let Some((obj_type, uncompressed_size, type_len)) =
+    let Some((mut obj_type, uncompressed_size, type_len)) =
         varint::decode_type_and_size(&data[id_len..])
     else {
         return Ok(None);
     };
+    if matches!(id, PackObjectId::AnnotatedTag(_)) {
+        if obj_type != ObjectType::Blob {
+            return Err(StoreError::InvalidObject(
+                "annotated-tag pack entry has invalid encoded type".to_string(),
+            ));
+        }
+        obj_type = ObjectType::AnnotatedTag;
+    }
     let varint_start = id_len + type_len;
     let Some((compressed_size, comp_len)) = varint::decode_varint(&data[varint_start..]) else {
         return Ok(None);

@@ -171,6 +171,7 @@ pub(super) fn parse_object_id(
         ObjectType::Blob
         | ObjectType::Tree
         | ObjectType::Action
+        | ObjectType::AnnotatedTag
         | ObjectType::Redaction
         | ObjectType::KeyBinding => Ok(ObjectId::Hash(
             ContentHash::from_hex(value)
@@ -185,6 +186,9 @@ pub(super) fn parse_object_type(value: i32) -> Result<ObjectType, ProtocolError>
     // next value before asking the generated enum to decode it.
     if value == HOSTED_OBJECT_TYPE_KEY_BINDING {
         return Ok(ObjectType::KeyBinding);
+    }
+    if value == HOSTED_OBJECT_TYPE_ANNOTATED_TAG {
+        return Ok(ObjectType::AnnotatedTag);
     }
     match HostedObjectType::try_from(value).unwrap_or_default() {
         HostedObjectType::Blob => Ok(ObjectType::Blob),
@@ -201,6 +205,7 @@ pub(super) fn parse_object_type(value: i32) -> Result<ObjectType, ProtocolError>
 }
 
 const HOSTED_OBJECT_TYPE_KEY_BINDING: i32 = 8;
+const HOSTED_OBJECT_TYPE_ANNOTATED_TAG: i32 = 9;
 
 fn object_type_to_proto(obj_type: ObjectType) -> i32 {
     match obj_type {
@@ -208,6 +213,7 @@ fn object_type_to_proto(obj_type: ObjectType) -> i32 {
         ObjectType::Tree => HostedObjectType::Tree as i32,
         ObjectType::State => HostedObjectType::State as i32,
         ObjectType::Action => HostedObjectType::Action as i32,
+        ObjectType::AnnotatedTag => HOSTED_OBJECT_TYPE_ANNOTATED_TAG,
         ObjectType::Redaction => HostedObjectType::Redaction as i32,
         ObjectType::StateVisibility => HostedObjectType::StateVisibility as i32,
         ObjectType::StateAttachment => HostedObjectType::StateAttachment as i32,

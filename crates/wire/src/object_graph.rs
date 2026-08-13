@@ -3,9 +3,9 @@ use std::collections::{HashSet, VecDeque};
 
 use objects::{
     object::{
-        BindingDelta, ContentHash, SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode, State,
-        StateAttachment, StateAttachmentBody, StateAttachmentId, StateAttachmentKind, StateId,
-        TreeEntryTarget,
+        AnnotatedTag, BindingDelta, ContentHash, SemanticEntryKind, SemanticIndexRoot,
+        SemanticTreeNode, State, StateAttachment, StateAttachmentBody, StateAttachmentId,
+        StateAttachmentKind, StateId, TreeEntryTarget,
     },
     store::{ObjectStore, pack::ObjectType as PackObjectType},
 };
@@ -55,6 +55,7 @@ pub enum ObjectType {
     Tree,
     State,
     Action,
+    AnnotatedTag,
     /// A `RedactionsBlob` sidecar — the rmp-encoded record(s) declaring
     /// that a specific blob has been redacted (and possibly purged) by
     /// an authorized operator. Keyed on the wire by `ObjectId::Hash` of
@@ -82,6 +83,7 @@ pub enum ObjectTypeBucket {
     Tree,
     State,
     Action,
+    AnnotatedTag,
     Redaction,
     StateVisibility,
     StateAttachment,
@@ -95,6 +97,7 @@ impl ObjectType {
             ObjectType::Tree => "tree",
             ObjectType::State => "state",
             ObjectType::Action => "action",
+            ObjectType::AnnotatedTag => "annotated_tag",
             ObjectType::Redaction => "redaction",
             ObjectType::StateVisibility => "state_visibility",
             ObjectType::StateAttachment => "state_attachment",
@@ -108,6 +111,7 @@ impl ObjectType {
             "tree" => Ok(ObjectType::Tree),
             "state" => Ok(ObjectType::State),
             "action" => Ok(ObjectType::Action),
+            "annotated_tag" => Ok(ObjectType::AnnotatedTag),
             "redaction" => Ok(ObjectType::Redaction),
             "state_visibility" => Ok(ObjectType::StateVisibility),
             "state_attachment" => Ok(ObjectType::StateAttachment),
@@ -164,6 +168,7 @@ impl ObjectType {
             ObjectType::Tree => Ok(PackObjectType::Tree),
             ObjectType::State => Ok(PackObjectType::State),
             ObjectType::Action => Ok(PackObjectType::Action),
+            ObjectType::AnnotatedTag => Ok(PackObjectType::AnnotatedTag),
             ObjectType::StateAttachment => Ok(PackObjectType::StateAttachment),
             ObjectType::Redaction => Err(ProtocolError::InvalidState(
                 "Redaction sidecar records cannot be packed into the content-addressed object pack"
@@ -186,6 +191,7 @@ impl ObjectType {
             ObjectType::Tree => ObjectTypeBucket::Tree,
             ObjectType::State => ObjectTypeBucket::State,
             ObjectType::Action => ObjectTypeBucket::Action,
+            ObjectType::AnnotatedTag => ObjectTypeBucket::AnnotatedTag,
             ObjectType::Redaction => ObjectTypeBucket::Redaction,
             ObjectType::StateVisibility => ObjectTypeBucket::StateVisibility,
             ObjectType::StateAttachment => ObjectTypeBucket::StateAttachment,
@@ -219,6 +225,9 @@ pub fn enumerate_state_closure_with_options(
         }
         Ok(())
     })?;
+    for (hash, tag) in annotated_tags_for_state(store, state_id)? {
+        out.push(annotated_tag_info(hash, &tag));
+    }
 
     Ok(out)
 }
@@ -242,6 +251,14 @@ pub fn enumerate_state_closure_plan_with_options(
         }
         Ok(())
     })?;
+    out.extend(
+        annotated_tags_for_state(store, state_id)?
+            .into_iter()
+            .map(|(hash, _)| PlannedObject {
+                id: ObjectId::Hash(hash),
+                obj_type: ObjectType::AnnotatedTag,
+            }),
+    );
 
     Ok(out)
 }
@@ -271,11 +288,71 @@ pub fn enumerate_state_closure_transfer_with_options(
 
         Ok(())
     })?;
+    let tags = annotated_tags_for_state(store, state_id)?;
+    planned_objects.extend(tags.iter().map(|(hash, _)| PlannedObject {
+        id: ObjectId::Hash(*hash),
+        obj_type: ObjectType::AnnotatedTag,
+    }));
+    if full_objects.is_some() && planned_objects.len() > full_descriptor_object_threshold {
+        full_objects = None;
+    }
+    if let Some(objects) = full_objects.as_mut() {
+        objects.extend(
+            tags.iter()
+                .map(|(hash, tag)| annotated_tag_info(*hash, tag)),
+        );
+    }
 
     Ok(StateClosureTransferObjects {
         planned_objects,
         full_objects,
     })
+}
+
+fn annotated_tags_for_state(
+    store: &impl ObjectStore,
+    state_id: StateId,
+) -> Result<Vec<(ContentHash, AnnotatedTag)>> {
+    let mut roots = Vec::new();
+    for hash in store.list_annotated_tags()? {
+        let Some(tag) = store.get_annotated_tag(&hash)? else {
+            continue;
+        };
+        if tag
+            .marker()
+            .is_some_and(|marker| marker.peeled_state == state_id)
+        {
+            roots.push((hash, tag));
+        }
+    }
+
+    let mut tags = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack = roots;
+    while let Some((hash, tag)) = stack.pop() {
+        if !seen.insert(hash) {
+            continue;
+        }
+        if let Some(inner_hash) = tag.target_tag() {
+            let inner = store.get_annotated_tag(&inner_hash)?.ok_or_else(|| {
+                ProtocolError::ObjectNotFound(format!(
+                    "annotated tag {hash} references missing inner tag {inner_hash}"
+                ))
+            })?;
+            stack.push((inner_hash, inner));
+        }
+        tags.push((hash, tag));
+    }
+    Ok(tags)
+}
+
+fn annotated_tag_info(hash: ContentHash, tag: &AnnotatedTag) -> ObjectInfo {
+    ObjectInfo {
+        id: ObjectId::Hash(hash),
+        obj_type: ObjectType::AnnotatedTag,
+        size: tag.encode_current_msgpack().len() as u64,
+        delta_base: None,
+    }
 }
 
 /// Enumerate a transfer delta while treating `boundary_states` as complete
@@ -1014,15 +1091,15 @@ mod tests {
     use chrono::Utc;
     use objects::{
         object::{
-            Action, ActionId, Attribution, Blob, ContentHash, Discussion, DiscussionResolution,
-            DiscussionTurn, DiscussionsBlob, Principal, Redaction, State, StateAttachment,
-            StateAttachmentBody, StateId, StateVisibility, SymbolAnchor, Tree, TreeEntry,
-            VisibilityTier,
+            Action, ActionId, AnnotatedTag, AnnotatedTagMarker, Attribution, Blob, ContentHash,
+            Discussion, DiscussionResolution, DiscussionTurn, DiscussionsBlob, Principal,
+            Redaction, State, StateAttachment, StateAttachmentBody, StateId, StateVisibility,
+            SymbolAnchor, Tree, TreeEntry, VisibilityTier,
         },
         store::{ObjectStore, Result as StoreResult},
     };
     use repo::Repository;
-    use sley::ObjectId as GitObjectId;
+    use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
     use tempfile::TempDir;
 
     use super::{
@@ -1204,6 +1281,44 @@ mod tests {
             full_pairs
                 .iter()
                 .any(|(id, _)| matches!(id, ObjectId::StateId(_)))
+        );
+    }
+
+    #[test]
+    fn state_closure_includes_annotated_tag_chain() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let state = repo.snapshot(Some("tagged".to_string()), None).unwrap();
+        let inner = AnnotatedTag::new(
+            GitObjectFormat::Sha1,
+            b"object 1111111111111111111111111111111111111111\ntype commit\ntag inner\ntagger Test <test@example.com> 1700000000 +0100\n\ninner\n".to_vec(),
+            None,
+            None,
+        )
+        .unwrap();
+        let inner_hash = repo.store().put_annotated_tag(&inner).unwrap();
+        let outer = AnnotatedTag::new(
+            GitObjectFormat::Sha1,
+            b"object 2222222222222222222222222222222222222222\ntype tag\ntag outer\ntagger Test <test@example.com> 1700000001 -0730\n\nouter\n".to_vec(),
+            Some(inner_hash),
+            Some(AnnotatedTagMarker {
+                name: "outer".to_string(),
+                peeled_state: state.state_id,
+            }),
+        )
+        .unwrap();
+        let outer_hash = repo.store().put_annotated_tag(&outer).unwrap();
+
+        let closure = assert_plan_parity(&repo, state.state_id, StateClosureOptions::default());
+        assert_contains_object(
+            &closure,
+            ObjectId::Hash(inner_hash),
+            ObjectType::AnnotatedTag,
+        );
+        assert_contains_object(
+            &closure,
+            ObjectId::Hash(outer_hash),
+            ObjectType::AnnotatedTag,
         );
     }
 

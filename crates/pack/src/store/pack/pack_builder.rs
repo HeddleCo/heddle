@@ -111,7 +111,10 @@ impl PackBuilder {
 
         for (obj_type, mut objects) in grouped {
             if objects.len() < 2
-                || matches!(obj_type, ObjectType::State | ObjectType::StateAttachment)
+                || matches!(
+                    obj_type,
+                    ObjectType::State | ObjectType::StateAttachment | ObjectType::AnnotatedTag
+                )
                 || self.compression.max_delta_size == 0
                 || objects
                     .iter()
@@ -213,7 +216,7 @@ impl PackBuilder {
         for record in objects {
             let hash = match record.id {
                 PackObjectId::Hash(hash) => hash,
-                PackObjectId::StateId(_) => {
+                PackObjectId::StateId(_) | PackObjectId::AnnotatedTag(_) => {
                     let offset = pack_data.len() as u64;
                     index.add(record.id, offset);
                     *total_uncompressed += record.data.len() as u64;
