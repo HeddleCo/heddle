@@ -217,9 +217,9 @@ fn write_actor_line(
     let seconds = checked_actor_timestamp(label, seconds, tz_offset_secs)?;
     out.extend_from_slice(label);
     out.push(b' ');
-    out.extend_from_slice(who.name.as_bytes());
+    out.extend_from_slice(&who.name);
     out.extend_from_slice(b" <");
-    out.extend_from_slice(who.email.as_bytes());
+    out.extend_from_slice(&who.email);
     out.extend_from_slice(b"> ");
     out.extend_from_slice(seconds.to_string().as_bytes());
     out.push(b' ');

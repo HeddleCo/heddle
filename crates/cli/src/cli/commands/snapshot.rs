@@ -123,8 +123,8 @@ pub(crate) struct SnapshotAgentOutput {
 impl From<&Principal> for SnapshotPrincipalOutput {
     fn from(principal: &Principal) -> Self {
         Self {
-            name: principal.name.clone(),
-            email: principal.email.clone(),
+            name: principal.name_lossy().into_owned(),
+            email: principal.email_lossy().into_owned(),
         }
     }
 }
@@ -1231,8 +1231,10 @@ pub(crate) fn resolve_principal(repo: &Repository, user_config: &UserConfig) -> 
 }
 
 pub(crate) fn is_placeholder_principal(principal: &Principal) -> bool {
-    let name = principal.name.trim();
-    let email = principal.email.trim().to_ascii_lowercase();
+    let name = principal.name_lossy();
+    let email = principal.email_lossy();
+    let name = name.trim();
+    let email = email.trim().to_ascii_lowercase();
     name.is_empty()
         || email.is_empty()
         || (name == "T" && email == "t@e.c")
@@ -1246,7 +1248,7 @@ pub(crate) fn placeholder_principal_warning(principal: &Principal) -> String {
 }
 
 fn is_default_unknown_principal(principal: &Principal) -> bool {
-    principal_lacks_accountable_identity(&principal.name, &principal.email)
+    principal_lacks_accountable_identity(&principal.name_lossy(), &principal.email_lossy())
 }
 
 /// Walks the `anyhow::Error` source chain looking for an underlying

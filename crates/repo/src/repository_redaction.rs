@@ -531,10 +531,7 @@ impl Repository {
             // since the redaction's identity is carried in the record
             // itself, use that — receiver doesn't have its own
             // operator context here.
-            let purger = Principal {
-                name: "<wire-replay>".to_string(),
-                email: "".to_string(),
-            };
+            let purger = Principal::new("<wire-replay>", "");
             let purge_outcome = self.purge_blob(&blob, &purger)?;
             if purge_outcome.blob_bytes_removed {
                 outcome.blobs_purged += 1;

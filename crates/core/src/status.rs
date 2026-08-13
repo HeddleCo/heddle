@@ -2887,7 +2887,7 @@ fn first_capture_identity_notice(
 
 /// Whether principal is the built-in unknown placeholder (exact match).
 pub fn principal_is_default_unknown(principal: &Principal) -> bool {
-    principal.name == "Unknown" && principal.email == "unknown@example.com"
+    principal.name == b"Unknown" && principal.email == b"unknown@example.com"
 }
 
 /// Broader refuse-to-capture identity check: empty fields or default unknown.

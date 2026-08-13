@@ -854,9 +854,9 @@ fn snapshot_transaction_id(
         hasher.update(&confidence.to_bits().to_le_bytes());
     }
     hasher.update(b"\0");
-    hasher.update(details.attribution.principal.name.as_bytes());
+    hasher.update(&details.attribution.principal.name);
     hasher.update(b"\0");
-    hasher.update(details.attribution.principal.email.as_bytes());
+    hasher.update(&details.attribution.principal.email);
     if let Some(agent) = &details.attribution.agent {
         hasher.update(b"\0agent\0");
         hasher.update(agent.provider.as_bytes());

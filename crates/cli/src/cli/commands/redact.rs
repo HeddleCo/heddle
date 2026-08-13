@@ -187,7 +187,7 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
         state: state.short(),
         path: args.path,
         reason: args.reason,
-        redactor: format!("{} <{}>", principal.name, principal.email),
+        redactor: principal.to_string(),
         redacted_at: now.to_rfc3339(),
         all_states: args.all_states,
         states_redacted,
@@ -323,7 +323,7 @@ fn cmd_redact_list(cli: &Cli, repo: &Repository, _args: RedactListArgs) -> Resul
                 state: redaction.state.short(),
                 path: redaction.path.clone(),
                 reason: redaction.reason.clone(),
-                redactor: format!("{} <{}>", redaction.redactor.name, redaction.redactor.email),
+                redactor: redaction.redactor.to_string(),
                 redacted_at: redaction.redacted_at.to_rfc3339(),
                 purged: redaction.is_purged(),
                 purged_at: redaction.purged_at.map(|t| t.to_rfc3339()),
@@ -403,7 +403,7 @@ fn cmd_redact_show(cli: &Cli, repo: &Repository, args: RedactShowArgs) -> Result
         state: redaction.state.short(),
         path: &redaction.path,
         reason: &redaction.reason,
-        redactor: format!("{} <{}>", redaction.redactor.name, redaction.redactor.email),
+        redactor: redaction.redactor.to_string(),
         redacted_at: redaction.redacted_at.to_rfc3339(),
         purged_at: redaction.purged_at.map(|t| t.to_rfc3339()),
         supersedes: redaction.supersedes.map(|h| h.short()),
@@ -864,7 +864,7 @@ mod tree_path_tests {
         let state = State::new(
             root_hash,
             Vec::new(),
-            Attribution::human(Principal::new("tester".to_string(), "tester@example.com")),
+            Attribution::human(Principal::new("tester", "tester@example.com")),
         );
         repo.store().put_state(&state).unwrap();
         state.state_id

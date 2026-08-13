@@ -223,8 +223,8 @@ fn collect_local_turns(
         turns.push(LocalTurn {
             turn_id: turn_identity(op_id, index_within_op),
             body: turn.body.clone(),
-            author_name: principal.name.clone(),
-            author_email: principal.email.clone(),
+            author_name: principal.name_lossy().into_owned(),
+            author_email: principal.email_lossy().into_owned(),
             occurred_at_ms,
             is_self,
         });
@@ -517,8 +517,8 @@ fn hosted_discussion_from_bootstrap(discussion: Discussion) -> HostedDiscussion 
             .turns
             .into_iter()
             .map(|turn| HostedDiscussionTurn {
-                author_name: turn.author.name,
-                author_email: turn.author.email,
+                author_name: turn.author.name_lossy().into_owned(),
+                author_email: turn.author.email_lossy().into_owned(),
                 body: turn.body,
                 posted_at_secs: turn.posted_at,
             })

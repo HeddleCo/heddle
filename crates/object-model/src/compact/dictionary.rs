@@ -71,10 +71,7 @@ impl StateDictionaries {
 }
 
 fn principal_key(value: &Principal) -> PrincipalKey {
-    PrincipalKey(
-        value.name.as_bytes().to_vec(),
-        value.email.as_bytes().to_vec(),
-    )
+    PrincipalKey(value.name.clone(), value.email.clone())
 }
 
 fn agent_key(value: &Agent) -> AgentKey {
