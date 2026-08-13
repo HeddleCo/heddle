@@ -6,18 +6,21 @@ use chrono::{TimeZone, Utc};
 use crypto::{Ed25519Signer, Signer, state_signature_from_signer};
 use objects::{
     object::{
-        Attribution, Blob, KeyBinding, KeyBindingRegistry, Principal, ReviewKind, ReviewScope,
-        ReviewSignature, ReviewSignaturesBlob, State, StateAttachment, StateAttachmentBody,
-        StateSignature, Tree, TreeEntry, signing_payload,
+        Attribution, Blob, KeyBinding, Principal, State, StateAttachment, StateAttachmentBody,
+        StateSignature, Tree, TreeEntry,
     },
     store::ObjectStore,
 };
 use repo::Repository;
 use tempfile::TempDir;
 
-use super::{StateProvenanceVerification, verify_repository_provenance};
+use super::{
+    StateProvenanceVerification,
+    registry_tests::{anchor, checkpoint, store_registry},
+    verify_repository_provenance,
+};
 
-fn setup() -> (TempDir, Repository) {
+pub(super) fn setup() -> (TempDir, Repository) {
     let temp = TempDir::new().expect("temp dir");
     let repo = Repository::init_default(temp.path()).expect("init repo");
     (temp, repo)
@@ -27,7 +30,7 @@ fn alice() -> Attribution {
     Attribution::human(Principal::new("Alice", "alice@example.com"))
 }
 
-fn state_with_blob(repo: &Repository, blob_hash: objects::object::ContentHash) -> State {
+pub(super) fn state_with_blob(repo: &Repository, blob_hash: objects::object::ContentHash) -> State {
     let tree = Tree::from_entries(vec![
         TreeEntry::file("proof.txt", blob_hash, false).expect("tree entry"),
     ]);
@@ -35,7 +38,7 @@ fn state_with_blob(repo: &Repository, blob_hash: objects::object::ContentHash) -
     State::new(tree_hash, Vec::new(), alice()).with_timestamp(Utc.timestamp_opt(2_000, 0).unwrap())
 }
 
-fn attach_signature(
+pub(super) fn attach_signature(
     repo: &Repository,
     state: &State,
     signature: StateSignature,
@@ -52,7 +55,11 @@ fn attach_signature(
         .expect("put signature attachment");
 }
 
-fn binding(signer: &Ed25519Signer, identity: &str, revoked_at: Option<i64>) -> KeyBinding {
+pub(super) fn binding(
+    signer: &Ed25519Signer,
+    identity: &str,
+    revoked_at: Option<i64>,
+) -> KeyBinding {
     let public_key = hex::encode(signer.public_key());
     let mut binding = KeyBinding {
         algorithm: signer.algorithm().to_string(),
@@ -76,16 +83,17 @@ fn binding(signer: &Ed25519Signer, identity: &str, revoked_at: Option<i64>) -> K
     binding
 }
 
-fn put_registry(repo: &Repository, bindings: Vec<KeyBinding>) {
-    let bytes = KeyBindingRegistry::new(bindings)
-        .encode()
-        .expect("encode registry");
-    repo.store()
-        .put_blob(&Blob::new(bytes))
-        .expect("put registry blob");
+pub(super) fn put_registry(
+    repo: &Repository,
+    authority: &Ed25519Signer,
+    bindings: Vec<KeyBinding>,
+) {
+    let registry = checkpoint(authority, 0, None, bindings);
+    store_registry(repo, &registry);
+    anchor(repo, &registry, authority);
 }
 
-fn result_for(repo: &Repository, state: &State) -> StateProvenanceVerification {
+pub(super) fn result_for(repo: &Repository, state: &State) -> StateProvenanceVerification {
     verify_repository_provenance(repo)
         .expect("verify provenance")
         .states
@@ -108,7 +116,11 @@ fn flipped_tree_byte_fails_content_link() {
         state_signature_from_signer(&state.compute_hash(), &signer).unwrap(),
         state.attribution.clone(),
     );
-    put_registry(&repo, vec![binding(&signer, "identity:alice", None)]);
+    put_registry(
+        &repo,
+        &signer,
+        vec![binding(&signer, "identity:alice", None)],
+    );
     repo.store().put_blob(&expected_blob).unwrap();
     let tree_hex = state.tree.to_hex();
     let path = repo
@@ -141,7 +153,11 @@ fn swapped_attribution_fails_identity_link() {
         signature,
         Attribution::human(Principal::new("Mallory", "mallory@example.com")),
     );
-    put_registry(&repo, vec![binding(&signer, "identity:alice", None)]);
+    put_registry(
+        &repo,
+        &signer,
+        vec![binding(&signer, "identity:alice", None)],
+    );
 
     let result = result_for(&repo, &original);
     assert_eq!(result.display_status(), "FAILED(identity)");
@@ -162,7 +178,7 @@ fn unregistered_key_fails_identity_as_unknown_key() {
         state_signature_from_signer(&state.compute_hash(), &signer).unwrap(),
         state.attribution.clone(),
     );
-    put_registry(&repo, vec![binding(&other, "identity:other", None)]);
+    put_registry(&repo, &other, vec![binding(&other, "identity:other", None)]);
 
     let result = result_for(&repo, &state);
     assert_eq!(result.display_status(), "FAILED(identity)");
@@ -182,7 +198,11 @@ fn revoked_key_fails_identity_as_revoked() {
         state_signature_from_signer(&state.compute_hash(), &signer).unwrap(),
         state.attribution.clone(),
     );
-    put_registry(&repo, vec![binding(&signer, "identity:alice", Some(1_999))]);
+    put_registry(
+        &repo,
+        &signer,
+        vec![binding(&signer, "identity:alice", Some(1_999))],
+    );
 
     let result = result_for(&repo, &state);
     assert_eq!(result.display_status(), "FAILED(identity)");
@@ -211,101 +231,4 @@ fn untagged_signature_is_legacy_and_not_clean() {
         .unwrap();
     assert_eq!(result.display_status(), "Legacy");
     assert!(!report.clean);
-}
-
-#[test]
-fn verifies_authorship_and_review_chain_by_registry_identity() {
-    let (_temp, repo) = setup();
-    let blob_hash = repo.store().put_blob(&Blob::from("hello")).unwrap();
-    let state = state_with_blob(&repo, blob_hash);
-    let author = Ed25519Signer::generate().unwrap();
-    let reviewer = Ed25519Signer::generate().unwrap();
-    repo.store().put_state(&state).unwrap();
-    attach_signature(
-        &repo,
-        &state,
-        state_signature_from_signer(&state.compute_hash(), &author).unwrap(),
-        state.attribution.clone(),
-    );
-    attach_review(&repo, &state, &reviewer, false);
-    put_registry(
-        &repo,
-        vec![
-            binding(&author, "identity:alice", None),
-            binding(&reviewer, "identity:bob", None),
-        ],
-    );
-
-    let result = result_for(&repo, &state);
-    assert_eq!(result.display_status(), "Verified(identity:alice)");
-    assert_eq!(result.reviewer_identities, vec!["identity:bob"]);
-}
-
-#[test]
-fn tampered_review_signature_fails_review_link() {
-    let (_temp, repo) = setup();
-    let blob_hash = repo.store().put_blob(&Blob::from("hello")).unwrap();
-    let state = state_with_blob(&repo, blob_hash);
-    let author = Ed25519Signer::generate().unwrap();
-    let reviewer = Ed25519Signer::generate().unwrap();
-    repo.store().put_state(&state).unwrap();
-    attach_signature(
-        &repo,
-        &state,
-        state_signature_from_signer(&state.compute_hash(), &author).unwrap(),
-        state.attribution.clone(),
-    );
-    attach_review(&repo, &state, &reviewer, true);
-    put_registry(
-        &repo,
-        vec![
-            binding(&author, "identity:alice", None),
-            binding(&reviewer, "identity:bob", None),
-        ],
-    );
-
-    let result = result_for(&repo, &state);
-    assert_eq!(result.display_status(), "FAILED(review)");
-    assert!(result.detail.contains("did not verify"));
-}
-
-fn attach_review(repo: &Repository, state: &State, signer: &Ed25519Signer, tamper: bool) {
-    let signed_at = 2_001;
-    let payload = signing_payload(
-        state.state_id,
-        ReviewKind::Read,
-        &ReviewScope::WholeChange,
-        signed_at,
-        None,
-    );
-    let mut review = ReviewSignature {
-        actor: Principal::new("Unverified label", "claim@example.com"),
-        kind: ReviewKind::Read,
-        scope: ReviewScope::WholeChange,
-        justification: None,
-        signed_at,
-        algorithm: signer.algorithm().to_string(),
-        public_key: hex::encode(signer.public_key()),
-        signature: hex::encode(signer.sign(&payload).unwrap()),
-    };
-    if tamper {
-        let mut signature = hex::decode(&review.signature).unwrap();
-        signature[0] ^= 1;
-        review.signature = hex::encode(signature);
-    }
-    let hash = repo
-        .store()
-        .put_blob(&Blob::new(
-            ReviewSignaturesBlob::new(vec![review]).encode().unwrap(),
-        ))
-        .unwrap();
-    repo.store()
-        .put_state_attachment(&StateAttachment {
-            state_id: state.state_id,
-            body: StateAttachmentBody::ReviewSignatures(hash),
-            attribution: state.attribution.clone(),
-            created_at: state.created_at,
-            supersedes: None,
-        })
-        .unwrap();
 }

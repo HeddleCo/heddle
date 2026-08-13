@@ -11,7 +11,7 @@ use heddle_core::{
     PushPath, PushPlan, PushPlanRequest, RemotePreflightBlocker, build_push_outcome,
     first_multi_thread_push_failure, format_multi_ref_push_progress, format_push_outcome_text,
     format_pushing_to, git_overlay_push_execution_facts,
-    heddle_single_push_execution_facts_from_local, is_native_transport_mismatch,
+    heddle_single_push_execution_facts_from_local, is_native_transport_mismatch, list_remotes,
     looks_like_git_remote_url, looks_like_remote_location, multi_ref_push_begin,
     multi_ref_thread_failed, multi_ref_thread_succeeded_local, multi_thread_push_execution_facts,
     named_thread_tip_mismatch_failure, plan_push, refuse_named_thread_tip_overwrite,
@@ -250,6 +250,7 @@ pub async fn cmd_push(
     if repo.capability() == RepositoryCapability::GitOverlay && state.is_some() {
         return Err(git_overlay_push_state_advice());
     }
+    let remote = select_push_remote_if_ambiguous(&repo, remote)?;
     if let Some(remote_name) = remote.as_deref() {
         ensure_remote_arg_resolves(&repo, remote_name)?;
     }
@@ -947,6 +948,62 @@ pub(super) fn classify_pull_remote_spec(
 enum RemoteAccess {
     Fetch,
     Push,
+}
+
+fn select_push_remote_if_ambiguous(
+    repo: &Repository,
+    requested: Option<String>,
+) -> Result<Option<String>> {
+    select_remote_if_ambiguous(repo, requested, RemoteAccess::Push, "heddle push <REMOTE>")
+}
+
+pub(super) fn select_pull_remote_if_ambiguous(
+    repo: &Repository,
+    requested: Option<String>,
+) -> Result<Option<String>> {
+    select_remote_if_ambiguous(repo, requested, RemoteAccess::Fetch, "heddle pull <REMOTE>")
+}
+
+fn select_remote_if_ambiguous(
+    repo: &Repository,
+    requested: Option<String>,
+    access: RemoteAccess,
+    command_template: &str,
+) -> Result<Option<String>> {
+    if requested.is_some() {
+        return Ok(requested);
+    }
+    let has_default = match access {
+        RemoteAccess::Fetch => resolved_default_remote_name(repo)?.is_some(),
+        RemoteAccess::Push if repo.capability() == RepositoryCapability::GitOverlay => {
+            resolve_default_push_remote_name(repo, None).is_ok()
+        }
+        RemoteAccess::Push => resolved_default_remote_name(repo)?.is_some(),
+    };
+    if has_default {
+        return Ok(None);
+    }
+
+    let choices = list_remotes(repo)?
+        .remotes
+        .into_iter()
+        .map(|remote| {
+            super::interactive_select::SelectionChoice::new(
+                remote.name.clone(),
+                format!("{} ({})", remote.name, remote.url),
+            )
+        })
+        .collect::<Vec<_>>();
+    if choices.len() <= 1 {
+        return Ok(None);
+    }
+    super::interactive_select::select_ambiguous_target(
+        "remote",
+        "<REMOTE>",
+        command_template,
+        choices,
+    )
+    .map(Some)
 }
 
 fn classify_remote_spec(

@@ -18,6 +18,14 @@ pub fn is_tty() -> bool {
     std::io::stdout().is_terminal()
 }
 
+/// Check whether the process has a real interactive terminal on every stream
+/// needed by a selection prompt.
+pub fn is_interactive_tty() -> bool {
+    std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+        && std::io::stderr().is_terminal()
+}
+
 pub fn execution_context_from_cli(cli: &Cli) -> anyhow::Result<heddle_core::ExecutionContext> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();

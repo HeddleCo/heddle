@@ -10,11 +10,11 @@ use objects::{
     },
     store::ObjectStore,
 };
-use repo::Repository;
+use repo::{KeyBindingRegistryAnchor, Repository, TrustedKey};
 use serde_json::Value;
 use tempfile::TempDir;
 
-fn signed_repository() -> (TempDir, Repository) {
+fn signed_repository(anchored: bool) -> (TempDir, Repository) {
     let temp = TempDir::new().expect("temp dir");
     let repo = Repository::init_default(temp.path()).expect("init repo");
     let state = repo
@@ -54,10 +54,44 @@ fn signed_repository() -> (TempDir, Repository) {
             .sign(&binding.canonical_signing_payload())
             .expect("sign binding"),
     );
-    let registry = KeyBindingRegistry::new(vec![binding]);
+    let mut registry = KeyBindingRegistry::new(
+        0,
+        None,
+        StateSignature {
+            algorithm: signer.algorithm().to_string(),
+            public_key: hex::encode(signer.public_key()),
+            signature: String::new(),
+        },
+        vec![binding],
+    );
+    registry.authority_signature.signature = hex::encode(
+        signer
+            .sign(
+                &registry
+                    .canonical_checkpoint_signing_payload()
+                    .expect("registry payload"),
+            )
+            .expect("sign registry"),
+    );
+    let registry_hash = registry.content_hash().expect("registry hash");
     repo.store()
         .put_blob(&Blob::new(registry.encode().expect("encode registry")))
         .expect("store registry");
+    if anchored {
+        let mut config = repo.config().clone();
+        config.provenance.key_binding_registry = Some(KeyBindingRegistryAnchor {
+            registry_hash: registry_hash.to_hex(),
+            epoch: 0,
+            authority: TrustedKey {
+                algorithm: signer.algorithm().to_string(),
+                public_key: hex::encode(signer.public_key()),
+                label: None,
+            },
+        });
+        config
+            .save(&repo.heddle_dir().join("config.toml"))
+            .expect("save registry anchor");
+    }
     (temp, repo)
 }
 
@@ -79,7 +113,7 @@ fn run_json(repo: &Repository, args: &[&str]) -> Value {
 
 #[test]
 fn verify_and_fsck_render_verified_registry_identity_end_to_end() {
-    let (_temp, repo) = signed_repository();
+    let (_temp, repo) = signed_repository(true);
 
     let verify = run_json(&repo, &["--output", "json", "verify", "--provenance"]);
     assert_eq!(verify["clean"], true, "{verify}");
@@ -100,5 +134,24 @@ fn verify_and_fsck_render_verified_registry_identity_end_to_end() {
     assert_eq!(
         fsck["provenance"]["states"][0]["status"], "Verified(identity:alice)",
         "{fsck}"
+    );
+}
+
+#[test]
+fn verify_rejects_self_signed_registry_without_trusted_anchor() {
+    let (_temp, repo) = signed_repository(false);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(["--output", "json", "verify", "--provenance"])
+        .current_dir(repo.root())
+        .env_remove("CODEX_THREAD_ID")
+        .output()
+        .expect("run heddle");
+
+    assert!(
+        !output.status.success(),
+        "an unanchored self-signed registry must fail closed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
