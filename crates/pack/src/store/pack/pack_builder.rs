@@ -15,8 +15,8 @@ use crate::{object::ContentHash, store::Result};
 const MIN_DELTA_SIZE: usize = 64;
 /// Maximum depth for delta chains (matches Git's default).
 const MAX_DELTA_CHAIN_DEPTH: usize = 50;
-/// Number of recent objects to try as delta bases (Git default: 10).
-const WINDOW_SIZE: usize = 10;
+/// Default number of recent objects to try as delta bases (Git default: 10).
+const DEFAULT_DELTA_WINDOW: usize = 10;
 
 type GroupedPackMap = HashMap<ObjectType, Vec<PackObjectRecord>>;
 
@@ -24,6 +24,7 @@ type GroupedPackMap = HashMap<ObjectType, Vec<PackObjectRecord>>;
 pub struct PackBuilder {
     objects: Vec<PackObjectRecord>,
     compression: CompressionConfig,
+    delta_window: usize,
 }
 
 /// A recent object in the sliding window, with cached hash index for fast delta estimation.
@@ -40,6 +41,19 @@ impl PackBuilder {
         Self {
             objects: Vec::new(),
             compression,
+            delta_window: DEFAULT_DELTA_WINDOW,
+        }
+    }
+
+    /// Create a pack builder tuned for repacking an existing object corpus.
+    ///
+    /// `delta_window` controls how many recently sorted objects are considered
+    /// as delta bases. A zero-sized window disables delta-base selection.
+    pub fn for_repack(compression: CompressionConfig, delta_window: usize) -> Self {
+        Self {
+            objects: Vec::new(),
+            compression,
+            delta_window,
         }
     }
 
@@ -141,6 +155,7 @@ impl PackBuilder {
                     obj_type,
                     objects,
                     &self.compression,
+                    self.delta_window,
                 )?;
             }
         }
@@ -207,8 +222,10 @@ impl PackBuilder {
         obj_type: ObjectType,
         objects: Vec<PackObjectRecord>,
         compression: &CompressionConfig,
+        delta_window: usize,
     ) -> Result<()> {
-        let mut window: VecDeque<WindowEntry> = VecDeque::with_capacity(WINDOW_SIZE);
+        let mut window: VecDeque<WindowEntry> =
+            VecDeque::with_capacity(delta_window.min(objects.len()));
 
         for record in objects {
             let hash = match record.id {
@@ -289,17 +306,19 @@ impl PackBuilder {
                 &final_data,
             )?;
 
-            // Add to window (build index once, reuse for all future comparisons)
-            let entry_index = DeltaEncoder::build_index(&data);
-            if window.len() >= WINDOW_SIZE {
-                window.pop_front();
+            if delta_window > 0 {
+                // Build the index once, then reuse it for all future comparisons.
+                let entry_index = DeltaEncoder::build_index(&data);
+                if window.len() >= delta_window {
+                    window.pop_front();
+                }
+                window.push_back(WindowEntry {
+                    hash,
+                    data,
+                    index: entry_index,
+                    chain_depth,
+                });
             }
-            window.push_back(WindowEntry {
-                hash,
-                data,
-                index: entry_index,
-                chain_depth,
-            });
         }
 
         Ok(())
