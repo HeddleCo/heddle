@@ -13,6 +13,13 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+### Fixed
+
+- **Offline identity registries require an authenticated current head.**
+  Provenance verification now pins a verifier-local authority, registry digest,
+  and monotonic epoch; validates the authority-signed checkpoint chain to
+  genesis; and rejects unanchored identity claims, substitutions, and rollback.
+
 ## 0.12.0 - 2026-08-12
 
 ### Added

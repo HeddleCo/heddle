@@ -34,6 +34,9 @@ pub struct WireKeyBinding {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireKeyBindingRegistry {
     pub format_version: u8,
+    pub epoch: u64,
+    pub previous_registry: Option<ContentHash>,
+    pub authority_signature: StateSignature,
     pub bindings: Vec<WireKeyBinding>,
 }
 
@@ -73,6 +76,9 @@ impl From<&KeyBindingRegistry> for WireKeyBindingRegistry {
     fn from(registry: &KeyBindingRegistry) -> Self {
         Self {
             format_version: registry.format_version,
+            epoch: registry.epoch,
+            previous_registry: registry.previous_registry,
+            authority_signature: registry.authority_signature.clone(),
             bindings: registry.bindings.iter().map(WireKeyBinding::from).collect(),
         }
     }
@@ -82,6 +88,9 @@ impl From<WireKeyBindingRegistry> for KeyBindingRegistry {
     fn from(registry: WireKeyBindingRegistry) -> Self {
         Self {
             format_version: registry.format_version,
+            epoch: registry.epoch,
+            previous_registry: registry.previous_registry,
+            authority_signature: registry.authority_signature,
             bindings: registry
                 .bindings
                 .into_iter()
@@ -165,7 +174,16 @@ mod tests {
         let wire_binding = WireKeyBinding::from(&binding);
         assert_eq!(wire_binding.liveness.revoked_at, binding.revoked_at);
         assert_eq!(KeyBinding::from(wire_binding), binding);
-        let registry = KeyBindingRegistry::new(vec![binding]);
+        let registry = KeyBindingRegistry::new(
+            1,
+            Some(ContentHash::from_bytes([0x55; 32])),
+            StateSignature {
+                algorithm: "ed25519".to_string(),
+                public_key: "66".repeat(32),
+                signature: "77".repeat(64),
+            },
+            vec![binding],
+        );
 
         let wire = encode_key_binding_registry(&registry).expect("encode wire registry");
         assert_eq!(wire.obj_type, ObjectType::KeyBinding);
@@ -188,7 +206,16 @@ mod tests {
 
     #[test]
     fn key_binding_registry_rejects_a_mismatched_content_address() {
-        let registry = KeyBindingRegistry::empty();
+        let registry = KeyBindingRegistry::new(
+            0,
+            None,
+            StateSignature {
+                algorithm: "ed25519".to_string(),
+                public_key: "66".repeat(32),
+                signature: "77".repeat(64),
+            },
+            Vec::new(),
+        );
         let mut wire = encode_key_binding_registry(&registry).expect("encode wire registry");
         wire.id = crate::ObjectId::Hash(ContentHash::from_bytes([0x55; 32]));
 
