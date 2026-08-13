@@ -6,8 +6,9 @@ use std::collections::{HashMap, VecDeque};
 use heddle_format::{compression::CompressionConfig, delta::DeltaEncoder};
 
 use super::{
-    ObjectType, PackObjectId, PackObjectRecord, PackStats, append_container_checksum,
-    compress_pack_payload, encode_tagged_entry, encode_tagged_entry_parts, pack_container_spec,
+    ObjectType, PackLogicalId, PackObjectId, PackObjectRecord, PackStats,
+    append_container_checksum, compress_pack_payload, encode_tagged_entry,
+    encode_tagged_entry_parts, pack_container_spec, pack_identity::logical_id_from_objects,
     pack_index::PackIndex, write_container_header,
 };
 use crate::{object::ContentHash, store::Result};
@@ -87,6 +88,18 @@ impl PackBuilder {
             delta_base: None,
             path_hint: path,
         });
+    }
+
+    /// Compute the logical identity of the objects currently in this builder.
+    ///
+    /// Path hints, compression, output order, and later delta-base selection do
+    /// not participate in this root-spool-scoped identity.
+    pub fn logical_id(&self) -> PackLogicalId {
+        logical_id_from_objects(
+            self.objects
+                .iter()
+                .map(|record| (record.id, record.obj_type, record.data.as_slice())),
+        )
     }
 
     /// Build the packfile and index.

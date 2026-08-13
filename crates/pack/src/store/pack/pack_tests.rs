@@ -4,7 +4,10 @@
 use heddle_format::{compression::CompressionConfig, delta::MAX_DELTA_OUTPUT_SIZE};
 use tempfile::TempDir;
 
-use super::{ObjectType, PackBuilder, PackObjectId, PackReader, pack_index::PackIndex};
+use super::{
+    ObjectType, PackBuilder, PackObjectId, PackReader, PackRepresentationHash,
+    decode_tagged_entry_header, pack_index::PackIndex,
+};
 use crate::{
     object::{ContentHash, StateId},
     store::{StoreError, pack::pack_container_spec},
@@ -184,6 +187,87 @@ fn test_pack_reader() {
 
     assert_eq!(obj_type, ObjectType::Blob);
     assert_eq!(retrieved, data1);
+}
+
+#[test]
+fn re_representation_preserves_logical_id_and_changes_representation_hash() {
+    let base_data = b"shared base body for pack identity ".repeat(32);
+    let mut target_data = base_data.clone();
+    target_data.extend_from_slice(b"target suffix");
+    let base_a = create_test_hash(0xA1);
+    let base_b = create_test_hash(0xB2);
+    let target = create_test_hash(0xC3);
+
+    let build = |base_a_path: &str, base_b_path: &str| {
+        let mut builder = PackBuilder::new(CompressionConfig {
+            enabled: false,
+            level: 0,
+            min_size: usize::MAX,
+            max_delta_size: usize::MAX,
+        });
+        builder.add_with_path(
+            base_a,
+            ObjectType::Blob,
+            base_data.clone(),
+            Some(base_a_path.to_string()),
+        );
+        builder.add_with_path(
+            base_b,
+            ObjectType::Blob,
+            base_data.clone(),
+            Some(base_b_path.to_string()),
+        );
+        builder.add_with_path(
+            target,
+            ObjectType::Blob,
+            target_data.clone(),
+            Some("src/z.rs".to_string()),
+        );
+        let logical_id = builder.logical_id();
+        let (pack, index, stats) = builder.build().unwrap();
+        assert!(stats.delta_count > 0);
+        (logical_id, pack, index)
+    };
+
+    let (logical_a, pack_a, index_a) = build("src/a.rs", "src/b.rs");
+    let (logical_b, pack_b, index_b) = build("src/b.rs", "src/a.rs");
+    let target_base = |pack: &[u8], index: &[u8]| {
+        let index = PackIndex::from_bytes(index).unwrap();
+        let offset = index.find(&PackObjectId::Hash(target)).unwrap().unwrap() as usize;
+        decode_tagged_entry_header(&pack[offset..])
+            .unwrap()
+            .delta_base
+            .unwrap()
+    };
+
+    assert_eq!(target_base(&pack_a, &index_a), PackObjectId::Hash(base_a));
+    assert_eq!(target_base(&pack_b, &index_b), PackObjectId::Hash(base_b));
+    assert_eq!(logical_a, logical_b);
+    assert_eq!(
+        logical_a.to_hex(),
+        "fc4500a1c4a0a38795c64ed6400dccbebe978112cb1b550a1e00c2f324a69a19"
+    );
+
+    let representation_a = PackRepresentationHash::compute(&pack_a);
+    let representation_b = PackRepresentationHash::compute(&pack_b);
+    assert_ne!(representation_a, representation_b);
+
+    let reader_a = PackReader::from_bytes(pack_a, index_a).unwrap();
+    let reader_b = PackReader::from_bytes(pack_b, index_b).unwrap();
+    assert_eq!(reader_a.logical_id().unwrap(), logical_a);
+    assert_eq!(reader_b.logical_id().unwrap(), logical_b);
+    assert_eq!(reader_a.representation_hash(), representation_a);
+    assert_eq!(reader_b.representation_hash(), representation_b);
+
+    let mut changed = PackBuilder::new(CompressionConfig::default());
+    changed.add(base_a, ObjectType::Blob, base_data);
+    changed.add(
+        base_b,
+        ObjectType::Blob,
+        b"different logical object".to_vec(),
+    );
+    changed.add(target, ObjectType::Blob, target_data);
+    assert_ne!(changed.logical_id(), logical_a);
 }
 
 #[test]
