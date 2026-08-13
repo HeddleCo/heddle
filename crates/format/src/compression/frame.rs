@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Compression-wrapper framing shared by plain and dictionary zstd objects.
+//! Compression-wrapper framing for zstd objects.
 
 pub(super) const HEADER_LEN: usize = 9;
 pub(super) const DICTIONARY_HEADER_LEN: usize = HEADER_LEN + size_of::<u32>();
@@ -11,6 +11,11 @@ const ZSTD_TYPE: u8 = 1;
 pub(super) struct ZstdHeader {
     pub(super) len: usize,
     pub(super) uncompressed_size: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct DictionaryZstdHeader {
+    pub(super) uncompressed_size: u64,
     pub(super) dictionary_id: u32,
 }
 
@@ -19,21 +24,23 @@ pub(super) fn parse_zstd(data: &[u8]) -> Option<ZstdHeader> {
         return None;
     }
     let uncompressed_size = u64::from_be_bytes(data[1..HEADER_LEN].try_into().ok()?);
-    if has_magic_at(data, HEADER_LEN) {
-        return Some(ZstdHeader {
-            len: HEADER_LEN,
-            uncompressed_size,
-            dictionary_id: 0,
-        });
-    }
+    has_magic_at(data, HEADER_LEN).then_some(ZstdHeader {
+        len: HEADER_LEN,
+        uncompressed_size,
+    })
+}
 
+pub(super) fn parse_dictionary_zstd(data: &[u8]) -> Option<DictionaryZstdHeader> {
+    if data.len() < DICTIONARY_HEADER_LEN || data[0] != ZSTD_TYPE {
+        return None;
+    }
+    let uncompressed_size = u64::from_be_bytes(data[1..HEADER_LEN].try_into().ok()?);
     let dictionary_id = u32::from_be_bytes(
         data.get(HEADER_LEN..DICTIONARY_HEADER_LEN)?
             .try_into()
             .ok()?,
     );
-    (dictionary_id != 0 && has_magic_at(data, DICTIONARY_HEADER_LEN)).then_some(ZstdHeader {
-        len: DICTIONARY_HEADER_LEN,
+    has_magic_at(data, DICTIONARY_HEADER_LEN).then_some(DictionaryZstdHeader {
         uncompressed_size,
         dictionary_id,
     })

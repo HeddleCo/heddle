@@ -9,24 +9,34 @@ use super::CompressionError;
 const MAX_DECOMPRESSED_SIZE: u64 = 256 * 1024 * 1024;
 
 #[cfg(feature = "zstd")]
-pub(super) fn compress(
+pub(super) fn compress(data: &[u8], level: i32) -> Result<Vec<u8>, CompressionError> {
+    zstd::encode_all(data, level)
+        .map_err(|error| CompressionError::CompressionFailed(error.to_string()))
+}
+
+#[cfg(feature = "zstd")]
+pub(super) fn compress_with_dictionary(
     data: &[u8],
     level: i32,
-    dictionary: Option<&[u8]>,
+    dictionary: &[u8],
 ) -> Result<Vec<u8>, CompressionError> {
-    match dictionary {
-        None => zstd::encode_all(data, level),
-        Some(dictionary) => zstd::bulk::Compressor::with_dictionary(level, dictionary)
-            .and_then(|mut compressor| compressor.compress(data)),
-    }
-    .map_err(|error| CompressionError::CompressionFailed(error.to_string()))
+    zstd::bulk::Compressor::with_dictionary(level, dictionary)
+        .and_then(|mut compressor| compressor.compress(data))
+        .map_err(|error| CompressionError::CompressionFailed(error.to_string()))
 }
 
 #[cfg(not(feature = "zstd"))]
-pub(super) fn compress(
+pub(super) fn compress(_data: &[u8], _level: i32) -> Result<Vec<u8>, CompressionError> {
+    Err(CompressionError::InvalidOperation(
+        "zstd compression support not compiled into this build".to_string(),
+    ))
+}
+
+#[cfg(not(feature = "zstd"))]
+pub(super) fn compress_with_dictionary(
     _data: &[u8],
     _level: i32,
-    _dictionary: Option<&[u8]>,
+    _dictionary: &[u8],
 ) -> Result<Vec<u8>, CompressionError> {
     Err(CompressionError::InvalidOperation(
         "zstd compression support not compiled into this build".to_string(),
@@ -34,20 +44,29 @@ pub(super) fn compress(
 }
 
 #[cfg(feature = "zstd")]
-pub(super) fn decompress(
+pub(super) fn decompress(data: &[u8], expected_size: u64) -> Result<Vec<u8>, CompressionError> {
+    let decoder = zstd::stream::read::Decoder::new(BufReader::new(data))
+        .map_err(|error| CompressionError::DecompressionFailed(error.to_string()))?;
+    read_bounded(decoder, expected_size)
+}
+
+#[cfg(feature = "zstd")]
+pub(super) fn decompress_with_dictionary(
     data: &[u8],
     expected_size: u64,
-    dictionary: Option<&[u8]>,
+    dictionary: &[u8],
 ) -> Result<Vec<u8>, CompressionError> {
+    let decoder = zstd::stream::read::Decoder::with_dictionary(BufReader::new(data), dictionary)
+        .map_err(|error| CompressionError::DecompressionFailed(error.to_string()))?;
+    read_bounded(decoder, expected_size)
+}
+
+#[cfg(feature = "zstd")]
+fn read_bounded<R: Read>(mut decoder: R, expected_size: u64) -> Result<Vec<u8>, CompressionError> {
     validate_size(expected_size)?;
     let expected_capacity = usize::try_from(expected_size).map_err(|_| {
         CompressionError::CorruptedData("zstd expected size exceeds platform limits".to_string())
     })?;
-    let mut decoder = zstd::stream::read::Decoder::with_dictionary(
-        BufReader::new(data),
-        dictionary.unwrap_or_default(),
-    )
-    .map_err(|error| CompressionError::DecompressionFailed(error.to_string()))?;
     let mut decompressed = Vec::with_capacity(expected_capacity);
     let mut buffer = [0_u8; 8192];
 
@@ -77,10 +96,18 @@ pub(super) fn decompress(
 }
 
 #[cfg(not(feature = "zstd"))]
-pub(super) fn decompress(
+pub(super) fn decompress(_data: &[u8], expected_size: u64) -> Result<Vec<u8>, CompressionError> {
+    validate_size(expected_size)?;
+    Err(CompressionError::InvalidOperation(
+        "zstd-compressed data is unsupported in this build".to_string(),
+    ))
+}
+
+#[cfg(not(feature = "zstd"))]
+pub(super) fn decompress_with_dictionary(
     _data: &[u8],
     expected_size: u64,
-    _dictionary: Option<&[u8]>,
+    _dictionary: &[u8],
 ) -> Result<Vec<u8>, CompressionError> {
     validate_size(expected_size)?;
     Err(CompressionError::InvalidOperation(

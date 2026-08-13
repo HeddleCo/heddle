@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Immutable dictionaries bundled with the storage-format decoder.
 
-/// The application-level ID reserved for dictionary-less zstd frames.
-pub(crate) const PLAIN_ZSTD_DICTIONARY_ID: u32 = 0;
-
 const TREE_STATE_V1_ID: u32 = 1;
 const TREE_STATE_V1: &[u8] = include_bytes!("dictionaries/tree-state-v1.zdict");
 
@@ -43,10 +40,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dictionary_ids_are_nonzero_and_registered() {
+    fn dictionary_id_is_registered() {
         let dictionary = CompressionDictionary::TreeStateV1;
 
-        assert_ne!(dictionary.id(), PLAIN_ZSTD_DICTIONARY_ID);
         assert_eq!(lookup(dictionary.id()), Some(dictionary.bytes()));
     }
 

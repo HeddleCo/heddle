@@ -3,7 +3,7 @@
 
 use heddle_format::compression::{
     CompressionConfig, CompressionDictionary, compress, compress_with_dictionary, decompress,
-    is_compressed,
+    decompress_with_dictionary, is_compressed,
 };
 
 use crate::{
@@ -47,7 +47,7 @@ pub fn decode_tree_serialized(data: &[u8]) -> Result<Tree> {
 /// only the loose-object wrapper. Migration code uses this to decode older
 /// tree schemas without teaching the current [`Tree`] reader to accept them.
 pub fn decode_tree_body(data: &[u8]) -> Result<Vec<u8>> {
-    decode_body(data)
+    Ok(decompress_with_dictionary(data)?)
 }
 
 pub fn encode_state(state: &State, config: &CompressionConfig) -> Result<Vec<u8>> {
@@ -59,7 +59,7 @@ pub fn encode_state(state: &State, config: &CompressionConfig) -> Result<Vec<u8>
 }
 
 pub fn decode_state(data: &[u8]) -> Result<State> {
-    let decoded = decode_body(data)?;
+    let decoded = decompress_with_dictionary(data)?;
     let mut state: State = rmp_serde::from_slice(&decoded)?;
     state.state_id = state.id();
     Ok(state)
@@ -105,16 +105,13 @@ mod tests {
     }
 
     #[test]
-    fn encode_decode_tree_and_old_dictionary_less_body() {
+    fn encode_decode_tree() {
         let blob_hash = ContentHash::compute(b"codec-tree-blob");
         let tree = Tree::from_entries(vec![TreeEntry::file("file.txt", blob_hash, false).unwrap()]);
         for config in compression_configs() {
-            let serialized = rmp_serde::to_vec(&tree).unwrap();
-            let expected = old_encode_raw(&serialized, &config).unwrap();
             let (hash, encoded) = encode_tree(&tree, &config).unwrap();
             assert_eq!(hash, tree.hash());
             assert_eq!(decode_tree(&encoded).unwrap(), tree);
-            assert_eq!(decode_tree(&expected).unwrap(), tree);
         }
     }
 
@@ -182,21 +179,21 @@ mod tests {
             ));
             let serialized_state = rmp_serde::to_vec(&state).unwrap();
             let encoded_state = encode_state(&state, &config).unwrap();
-            assert_eq!(decode_body(&encoded_state).unwrap(), serialized_state);
+            assert_eq!(
+                decompress_with_dictionary(&encoded_state).unwrap(),
+                serialized_state
+            );
         }
     }
 
     #[test]
-    fn encode_decode_state_and_old_dictionary_less_body() {
+    fn encode_decode_state() {
         let attribution = sample_attribution();
         let state = State::new(ContentHash::compute(b"codec-tree"), vec![], attribution)
             .with_intent("codec state");
         for config in compression_configs() {
-            let serialized = rmp_serde::to_vec(&state).unwrap();
-            let expected = old_encode_raw(&serialized, &config).unwrap();
             let encoded = encode_state(&state, &config).unwrap();
             assert_eq!(decode_state(&encoded).unwrap(), state);
-            assert_eq!(decode_state(&expected).unwrap(), state);
         }
     }
 

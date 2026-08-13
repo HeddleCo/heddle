@@ -12,9 +12,6 @@ mod frame;
 mod zstd_codec;
 
 pub use dictionaries::CompressionDictionary;
-use dictionaries::PLAIN_ZSTD_DICTIONARY_ID;
-#[cfg(all(test, feature = "zstd"))]
-use frame::ZSTD_MAGIC;
 use frame::{
     DICTIONARY_HEADER_LEN as DICTIONARY_COMPRESSED_HEADER_LEN, HEADER_LEN as COMPRESSED_HEADER_LEN,
 };
@@ -120,13 +117,13 @@ pub enum CompressionError {
 #[cfg(feature = "bench")]
 /// Compress data using zstd.
 pub fn compress_zstd(data: &[u8], level: i32) -> Result<Vec<u8>, CompressionError> {
-    zstd_codec::compress(data, level, None)
+    zstd_codec::compress(data, level)
 }
 
 #[cfg(feature = "bench")]
 /// Decompress zstd data while enforcing the recorded output size.
 pub fn decompress_zstd(data: &[u8], expected_size: u64) -> Result<Vec<u8>, CompressionError> {
-    zstd_codec::decompress(data, expected_size, None)
+    zstd_codec::decompress(data, expected_size)
 }
 
 /// Compress data with automatic algorithm selection.
@@ -137,56 +134,49 @@ pub fn compress(
     data: &[u8],
     config: &CompressionConfig,
 ) -> Result<Option<Vec<u8>>, CompressionError> {
-    compress_impl(data, config, None)
+    if !config.enabled || data.len() < config.min_size {
+        return Ok(None);
+    }
+
+    zstd_codec::validate_size(data.len() as u64)?;
+    let compressed = zstd_codec::compress(data, config.level)?;
+
+    if compressed.len() >= data.len() {
+        return Ok(None);
+    }
+
+    let mut result = Vec::with_capacity(COMPRESSED_HEADER_LEN + compressed.len());
+    result.push(CompressionType::Zstd as u8);
+    result.extend_from_slice(&(data.len() as u64).to_be_bytes());
+    result.extend_from_slice(&compressed);
+    Ok(Some(result))
 }
 
 /// Compress data with a durable, versioned dictionary.
 ///
-/// The dictionary ID is embedded in the compression wrapper, so [`decompress`]
-/// can select the exact bundled dictionary without object-kind context.
+/// The dictionary ID is embedded in the compression wrapper so the matching
+/// dictionary decoder can select the exact bundled bytes.
 pub fn compress_with_dictionary(
     data: &[u8],
     config: &CompressionConfig,
     dictionary: CompressionDictionary,
-) -> Result<Option<Vec<u8>>, CompressionError> {
-    compress_impl(data, config, Some(dictionary))
-}
-
-fn compress_impl(
-    data: &[u8],
-    config: &CompressionConfig,
-    dictionary: Option<CompressionDictionary>,
 ) -> Result<Option<Vec<u8>>, CompressionError> {
     if !config.enabled || data.len() < config.min_size {
         return Ok(None);
     }
 
     zstd_codec::validate_size(data.len() as u64)?;
-
-    let compressed = zstd_codec::compress(
-        data,
-        config.level,
-        dictionary.map(CompressionDictionary::bytes),
-    )?;
+    let compressed = zstd_codec::compress_with_dictionary(data, config.level, dictionary.bytes())?;
 
     // Only use compression if it actually helps
     if compressed.len() >= data.len() {
         return Ok(None);
     }
 
-    // Legacy/plain: [type][size][zstd frame]
-    // Dictionary:   [type][size][dictionary id][zstd frame]
-    let header_len = if dictionary.is_some() {
-        DICTIONARY_COMPRESSED_HEADER_LEN
-    } else {
-        COMPRESSED_HEADER_LEN
-    };
-    let mut result = Vec::with_capacity(header_len + compressed.len());
+    let mut result = Vec::with_capacity(DICTIONARY_COMPRESSED_HEADER_LEN + compressed.len());
     result.push(CompressionType::Zstd as u8);
     result.extend_from_slice(&(data.len() as u64).to_be_bytes());
-    if let Some(dictionary) = dictionary {
-        result.extend_from_slice(&dictionary.id().to_be_bytes());
-    }
+    result.extend_from_slice(&dictionary.id().to_be_bytes());
     result.extend_from_slice(&compressed);
 
     Ok(Some(result))
@@ -230,8 +220,7 @@ pub fn is_compressed(data: &[u8]) -> bool {
 ///
 /// Used by header-only size queries (e.g. [`ObjectStore::blob_size`])
 /// where reading the full blob would dominate. Only the first 9 bytes
-/// plus enough bytes to identify the following zstd frame are consulted
-/// (13 bytes for plain zstd, 17 for dictionary zstd).
+/// of the input are consulted.
 pub fn header_uncompressed_size(data: &[u8]) -> Option<u64> {
     if data.len() < COMPRESSED_HEADER_LEN {
         return None;
@@ -257,15 +246,28 @@ fn decompress_zstd_with_header(data: &[u8]) -> Result<Vec<u8>, CompressionError>
     let header = frame::parse_zstd(data).ok_or_else(|| {
         CompressionError::CorruptedData("zstd compression header is invalid".to_string())
     })?;
-    let dictionary = if header.dictionary_id == PLAIN_ZSTD_DICTIONARY_ID {
-        None
-    } else {
-        Some(
-            dictionaries::lookup(header.dictionary_id)
-                .ok_or(CompressionError::UnknownDictionary(header.dictionary_id))?,
-        )
+    zstd_codec::decompress(&data[header.len..], header.uncompressed_size)
+}
+
+/// Decompress data that uses the dictionary compression wrapper.
+///
+/// Returns the original data when it does not have a dictionary compression
+/// header.
+pub fn decompress_with_dictionary(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
+    if data.len() < DICTIONARY_COMPRESSED_HEADER_LEN {
+        return Ok(data.to_vec());
+    }
+
+    let Some(header) = frame::parse_dictionary_zstd(data) else {
+        return Ok(data.to_vec());
     };
-    zstd_codec::decompress(&data[header.len..], header.uncompressed_size, dictionary)
+    let dictionary = dictionaries::lookup(header.dictionary_id)
+        .ok_or(CompressionError::UnknownDictionary(header.dictionary_id))?;
+    zstd_codec::decompress_with_dictionary(
+        &data[DICTIONARY_COMPRESSED_HEADER_LEN..],
+        header.uncompressed_size,
+        dictionary,
+    )
 }
 
 #[cfg(test)]

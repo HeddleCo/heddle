@@ -27,23 +27,18 @@ fn test_dictionary_zstd_roundtrip() {
         .unwrap();
 
     assert_eq!(&compressed[9..13], &1_u32.to_be_bytes());
-    assert_eq!(decompress(&compressed).unwrap(), data);
-    assert_eq!(
-        header_uncompressed_size(&compressed),
-        Some(data.len() as u64)
-    );
+    assert_eq!(decompress_with_dictionary(&compressed).unwrap(), data);
 }
 
 #[test]
 #[cfg(feature = "zstd")]
-fn test_old_dictionary_less_zstd_frame_stays_decodable() {
-    let data = b"legacy dictionary-less object ".repeat(100);
+fn test_dictionary_decoder_does_not_decode_plain_zstd() {
+    let data = b"tree entry hash state parent attribution intent ".repeat(100);
     let compressed = compress(&data, &CompressionConfig::default())
         .unwrap()
         .unwrap();
 
-    assert_eq!(&compressed[9..13], &ZSTD_MAGIC);
-    assert_eq!(decompress(&compressed).unwrap(), data);
+    assert_eq!(decompress_with_dictionary(&compressed).unwrap(), compressed);
 }
 
 #[test]
@@ -59,9 +54,8 @@ fn test_unknown_dictionary_id_fails_explicitly() {
     .unwrap();
     compressed[9..13].copy_from_slice(&99_u32.to_be_bytes());
 
-    assert!(is_compressed(&compressed));
     assert!(matches!(
-        decompress(&compressed),
+        decompress_with_dictionary(&compressed),
         Err(CompressionError::UnknownDictionary(99))
     ));
 }
