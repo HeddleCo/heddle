@@ -170,7 +170,12 @@ pub async fn list(cli: &Cli, active_only: bool) -> Result<()> {
 pub async fn show(cli: &Cli, session_id: Option<String>) -> Result<()> {
     let repo = cli.open_repo()?;
     let registry = ActorPresenceStore::new(repo.heddle_dir());
-    let entry = resolve_actor_entry(&repo, &registry, session_id.as_deref())?;
+    let entry = resolve_actor_entry(
+        &repo,
+        &registry,
+        session_id.as_deref(),
+        "heddle agent presence show <SESSION>",
+    )?;
     let show = show_actor_from_entry(&registry, &entry)?;
 
     if should_output_json(cli, None) {
@@ -272,7 +277,12 @@ fn render_actor_show(actor: &ActorEntryReport) {
 pub async fn complete(cli: &Cli, session_id: Option<String>) -> Result<()> {
     let repo = cli.open_repo()?;
     let registry = ActorPresenceStore::new(repo.heddle_dir());
-    let entry = resolve_actor_entry(&repo, &registry, session_id.as_deref())?;
+    let entry = resolve_actor_entry(
+        &repo,
+        &registry,
+        session_id.as_deref(),
+        "heddle agent presence complete --session <SESSION>",
+    )?;
     let plan = plan_actor_done(&entry);
     mark_actor_done(&registry, &plan.session_id)?;
     let summary = find_thread_summary(&repo, &plan.thread)?;
@@ -319,7 +329,12 @@ fn actor_done_recommended_action(thread: &str, coordination_status: &str) -> Opt
 pub async fn explain(cli: &Cli, session_id: Option<String>) -> Result<()> {
     let repo = cli.open_repo()?;
     let registry = ActorPresenceStore::new(repo.heddle_dir());
-    let entry = match resolve_actor_entry(&repo, &registry, session_id.as_deref()) {
+    let entry = match resolve_actor_entry(
+        &repo,
+        &registry,
+        session_id.as_deref(),
+        "heddle agent presence explain <SESSION>",
+    ) {
         Ok(entry) => entry,
         Err(err) if session_id.is_none() && is_no_active_actor_error(&err) => {
             return explain_detected_actor_identity(cli, &repo);
@@ -503,6 +518,7 @@ fn resolve_actor_entry(
     repo: &Repository,
     registry: &ActorPresenceStore,
     session_id: Option<&str>,
+    command_template: &str,
 ) -> Result<ActorPresence> {
     if let Some(session_id) = session_id {
         return registry
@@ -517,30 +533,94 @@ fn resolve_actor_entry(
     // `head_ref()` / `.heddle/HEAD` directly. There must be exactly one answer
     // to "current lane?".
     let current_lane = repo.current_lane()?;
+    let active_entries = registry.active_entries()?;
+    let canonical_root = repo
+        .root()
+        .canonicalize()
+        .unwrap_or_else(|_| repo.root().to_path_buf());
 
-    if let Some(thread) = current_lane.as_deref()
-        && let Some(entry) = registry
-            .active_entries()?
-            .into_iter()
+    if let Some(thread) = current_lane.as_deref() {
+        let matching_thread = active_entries
+            .iter()
             .filter(|entry| entry.thread == thread)
-            .max_by_key(|entry| entry.started_at)
-    {
-        return Ok(entry);
+            .cloned()
+            .collect::<Vec<_>>();
+        let matching_thread_and_path = matching_thread
+            .iter()
+            .filter(|entry| actor_path_matches(entry, &canonical_root))
+            .cloned()
+            .collect::<Vec<_>>();
+        let preferred = if matching_thread_and_path.is_empty() {
+            matching_thread
+        } else {
+            matching_thread_and_path
+        };
+        if let Some(entry) = select_actor_candidate(preferred, command_template)? {
+            return Ok(entry);
+        }
     }
 
-    if let Some(entry) = registry.find_active_by_path(repo.root())? {
+    let matching_path = active_entries
+        .iter()
+        .filter(|entry| actor_path_matches(entry, &canonical_root))
+        .cloned()
+        .collect();
+    if let Some(entry) = select_actor_candidate(matching_path, command_template)? {
         return Ok(entry);
     }
 
     // The "any active actor" fallback only applies when this checkout is on a
     // lane. A detached checkout must not inherit unrelated active presence.
     if current_lane.is_some()
-        && let Some(entry) = registry.active_entries()?.into_iter().next()
+        && let Some(entry) = select_actor_candidate(active_entries, command_template)?
     {
         return Ok(entry);
     }
 
     Err(anyhow!(no_active_actor_advice()))
+}
+
+fn actor_path_matches(entry: &ActorPresence, canonical_root: &std::path::Path) -> bool {
+    entry
+        .path
+        .as_ref()
+        .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()) == canonical_root)
+        .unwrap_or(false)
+}
+
+fn select_actor_candidate(
+    mut candidates: Vec<ActorPresence>,
+    command_template: &str,
+) -> Result<Option<ActorPresence>> {
+    match candidates.len() {
+        0 => return Ok(None),
+        1 => return Ok(candidates.pop()),
+        _ => {}
+    }
+    candidates.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    let choices = candidates
+        .iter()
+        .map(|entry| {
+            let actor = match (&entry.provider, &entry.model) {
+                (Some(provider), Some(model)) => format!(" {provider}/{model}"),
+                (Some(provider), None) => format!(" {provider}"),
+                _ => String::new(),
+            };
+            super::interactive_select::SelectionChoice::new(
+                entry.session_id.clone(),
+                format!("{} (thread: {}){actor}", entry.session_id, entry.thread),
+            )
+        })
+        .collect();
+    let selected = super::interactive_select::select_ambiguous_target(
+        "actor",
+        "<SESSION>",
+        command_template,
+        choices,
+    )?;
+    Ok(candidates
+        .into_iter()
+        .find(|entry| entry.session_id == selected))
 }
 
 fn is_no_active_actor_error(err: &anyhow::Error) -> bool {

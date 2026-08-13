@@ -314,6 +314,8 @@ mod hydrate;
 mod identity_resolution;
 #[path = "cli_integration/ignore_mechanics.rs"]
 mod ignore_mechanics;
+#[path = "cli_integration/interactive_selection.rs"]
+mod interactive_selection;
 #[path = "cli_integration/misc.rs"]
 mod misc;
 #[path = "cli_integration/native_scope_boundary.rs"]

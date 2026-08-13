@@ -36,6 +36,7 @@ mod hook;
 mod import_progress;
 mod init;
 mod integration;
+mod interactive_select;
 mod log;
 mod maintenance;
 mod marker;
