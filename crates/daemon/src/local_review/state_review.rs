@@ -934,8 +934,8 @@ mod tests {
         assert_eq!(signatures[0].id, "rs-0");
         assert_eq!(signatures[0].signature.kind, ReviewKind::Read);
         assert_eq!(signatures[0].signature.scope, ReviewScope::WholeChange);
-        assert_eq!(signatures[0].signature.actor.name, "Alice Tester");
-        assert_eq!(signatures[0].signature.actor.email, "alice@example.com");
+        assert_eq!(signatures[0].signature.actor.name, b"Alice Tester");
+        assert_eq!(signatures[0].signature.actor.email, b"alice@example.com");
     }
 
     #[tokio::test]
@@ -1085,8 +1085,8 @@ mod tests {
             .pop()
             .expect("signature")
             .signature;
-        assert_eq!(signature.actor.name, "Bob Signer");
-        assert_eq!(signature.actor.email, "bob@example.com");
+        assert_eq!(signature.actor.name, b"Bob Signer");
+        assert_eq!(signature.actor.email, b"bob@example.com");
     }
 
     #[tokio::test]

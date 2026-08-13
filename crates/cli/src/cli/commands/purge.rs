@@ -103,7 +103,7 @@ fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result
         redactions_marked: outcome.redactions_marked,
         blob_bytes_removed: outcome.blob_bytes_removed,
         blob_remains_in_pack: outcome.blob_remains_in_pack,
-        purger: format!("{} <{}>", principal.name, principal.email),
+        purger: principal.to_string(),
         message,
         ignore_hint,
     };
@@ -152,7 +152,7 @@ fn cmd_purge_list(cli: &Cli, repo: &Repository, _args: PurgeListArgs) -> Result<
                     state: redaction.state.short(),
                     path: redaction.path.clone(),
                     purged_at: purged_at.to_rfc3339(),
-                    purger: format!("{} <{}>", redaction.redactor.name, redaction.redactor.email),
+                    purger: redaction.redactor.to_string(),
                 });
             }
         }

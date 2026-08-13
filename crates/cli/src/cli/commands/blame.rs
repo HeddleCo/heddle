@@ -46,8 +46,8 @@ struct AgentInfo {
 /// never have to string-parse `"Name <email> (via provider/model)"`.
 fn attribution_parts(attribution: &Attribution) -> (PrincipalInfo, Option<AgentInfo>) {
     let principal = PrincipalInfo {
-        name: attribution.principal.name.clone(),
-        email: attribution.principal.email.clone(),
+        name: attribution.principal.name_lossy().into_owned(),
+        email: attribution.principal.email_lossy().into_owned(),
     };
     let agent = attribution.agent.as_ref().map(|a| AgentInfo {
         provider: a.provider.clone(),

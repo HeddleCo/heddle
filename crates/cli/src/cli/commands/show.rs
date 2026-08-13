@@ -132,8 +132,8 @@ fn cmd_show_with_output_kind(
         intent: state.intent.clone(),
         confidence: state.confidence,
         principal: PrincipalInfo {
-            name: state.attribution.principal.name.clone(),
-            email: state.attribution.principal.email.clone(),
+            name: state.attribution.principal.name_lossy().into_owned(),
+            email: state.attribution.principal.email_lossy().into_owned(),
         },
         agent: state.attribution.agent.as_ref().map(|a| AgentInfo {
             provider: a.provider.clone(),
@@ -199,8 +199,8 @@ fn render_unbound_overlay_show(
         intent: state.intent.clone(),
         confidence: state.confidence,
         principal: PrincipalInfo {
-            name: state.attribution.principal.name.clone(),
-            email: state.attribution.principal.email.clone(),
+            name: state.attribution.principal.name_lossy().into_owned(),
+            email: state.attribution.principal.email_lossy().into_owned(),
         },
         agent: state.attribution.agent.as_ref().map(|agent| AgentInfo {
             provider: agent.provider.clone(),

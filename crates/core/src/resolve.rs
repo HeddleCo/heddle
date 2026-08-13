@@ -201,8 +201,8 @@ pub struct PrincipalReport {
 impl From<&Principal> for PrincipalReport {
     fn from(principal: &Principal) -> Self {
         Self {
-            name: principal.name.clone(),
-            email: principal.email.clone(),
+            name: principal.name_lossy().into_owned(),
+            email: principal.email_lossy().into_owned(),
         }
     }
 }

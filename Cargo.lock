@@ -2185,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2264,7 +2264,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli-args"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2277,7 +2277,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli-contract"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2298,7 +2298,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli-render"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -2319,7 +2319,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli-shared"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2340,7 +2340,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-core"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2367,7 +2367,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-crypto"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek 3.0.0",
@@ -2383,7 +2383,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-daemon"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "heddle-crypto",
@@ -2402,7 +2402,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-devtools"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2415,7 +2415,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-format"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "thiserror 2.0.18",
  "zstd",
@@ -2423,7 +2423,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-fs-prims"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "fs2",
  "heddle-object-model",
@@ -2434,7 +2434,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-git-projection"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "heddle-ingest",
  "heddle-objects",
@@ -2452,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-ingest"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-iroh-transport-experiment"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "bytes",
  "heddle-api 0.2.1",
@@ -2489,7 +2489,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-merge"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "heddle-format",
@@ -2501,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-mount"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2532,7 +2532,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-object-model"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "base32",
@@ -2545,6 +2545,7 @@ dependencies = [
  "rand 0.10.2",
  "rmp-serde",
  "serde",
+ "serde_bytes",
  "serde_json",
  "sley",
  "thiserror 2.0.18",
@@ -2554,7 +2555,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-objects"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "base32",
@@ -2589,7 +2590,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-oplog"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -2610,7 +2611,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-pack"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -2626,11 +2627,11 @@ dependencies = [
 
 [[package]]
 name = "heddle-perf-contract"
-version = "0.11.0"
+version = "0.12.0"
 
 [[package]]
 name = "heddle-refs"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "fs2",
@@ -2652,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-repo"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2685,14 +2686,14 @@ dependencies = [
 
 [[package]]
 name = "heddle-runtime-bridge"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "heddle-schema"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "heddle-objects",
@@ -2703,7 +2704,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-semantic"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -2725,7 +2726,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-semantic-recovery"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "blake3",
  "fastembed",
@@ -2739,7 +2740,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-state-review"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "heddle-objects",
  "heddle-semantic",
@@ -2748,7 +2749,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-wire"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -8019,7 +8020,7 @@ dependencies = [
 
 [[package]]
 name = "weft-client-shim"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",

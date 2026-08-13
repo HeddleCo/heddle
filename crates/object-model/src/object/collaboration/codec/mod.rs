@@ -245,67 +245,67 @@ mod tests {
         let expected = [
             (
                 "open_repository",
-                "e7c3f3e61da7272d9dd32bde3c25c3db0d0aa7259ec17eb3aa0af78d4d7954d4",
+                "6c4929bfebf65a906406b48957440c591eb8c4f0f7306aea37aca01016c7c256",
             ),
             (
                 "open_state",
-                "478b51c28064b6c8085bfd7e81d70cb2824fd0aca889bd0ee7d84b59bf7a9caa",
+                "3733767e55beab34c5add4fa6ad514846320151cab84b8c077ee31456db14e94",
             ),
             (
                 "open_change",
-                "18129f50b4ef581b050b17c6e7e1e1328b1e698249884f7ad02c669ced662672",
+                "0504854868da192b823626573c041b53394217db9a1adb3eb290e913e2471c29",
             ),
             (
                 "open_path",
-                "e3f332e030f3c472d0777ea308a22bcbbeb57b0c620d5395448046674248638c",
+                "39e55ce36dbc40d6bcad094825366eb962fe5e6170bf7a8a53b0a972679cc4ae",
             ),
             (
                 "open_symbol",
-                "f68b0bd1ffd107ca9ace80ac8520c988fa92d68c681a6d8748e9231af98b9e0c",
+                "a3ec2abb9288b42ab57cb2b1095ebb4b87fcf51bce6e7d57ec60838908fb81e4",
             ),
             (
                 "append_turn",
-                "1a1fce360b5ab50ab74c7b58790820f46a7f153b79cf6b00b57b31d57797afb5",
+                "b542d7f781fed9266dd557a8a422af1f3fce98b4fd834c0e88cc867787e32d1f",
             ),
             (
                 "resolve_state",
-                "689f69143df9e0513b41b5d6a53c47ec610b1e75ceac41a7a6553690616a0ba2",
+                "7646fc4ed8e8975805491f7760c652514191bd07b7b15eabdcf6b5c8f068439f",
             ),
             (
                 "resolve_change",
-                "a1158654efb9d351b9ff56d74c59e5b4c1c9705afc9c704621224ba196892701",
+                "e5021f4da168fef2bb26297c6fe554cc545a3a3b7dd5a056a23d0de2bdda38b0",
             ),
             (
                 "resolve_dismissed",
-                "da1a17112cf975035e2ec8ac124648926937600039bba6f117b85ead73f6f510",
+                "e81909c0875c57ac3920109d2291aec767595952f883b4ca4390e0af61bce9f3",
             ),
             (
                 "resolve_annotation",
-                "5bfbaec8982a10865950109c4357d80099fde41afff07d75df7a31b595636f40",
+                "9ca40f41cc72bbf6208a22f9dcbfeaa3773d1669366864b704e2251fd012bb39",
             ),
             (
                 "reopen",
-                "79386d06f7b7ef6f7ae47f9c4461674dc435121f912e1e0fca6f664c1c951f25",
+                "2b997fdd5a1011255a4b85aa4f3cca3f2d0f97b2ce35d7cdcbb76a5349eeffd0",
             ),
             (
                 "resolve_conflict",
-                "c3e3a161fa47a83e06873135cc8067478a8e4e2a00d6c39fd2b1b35659ebed73",
+                "01e63b8dbb33f11e1fa8b630e045f73030ff99db66a628fe13e84d5f9e9007b2",
             ),
             (
                 "legacy_open",
-                "4428a385ca518c899d0dc3b34241d06b4dc6a1d327bb50c586c3b74890c90904",
+                "ada646a3ab1feb54cb0b70a682079a8af0a603930f73ae0716cb861107fc4af3",
             ),
             (
                 "legacy_state",
-                "3053742d3d3cdf30ae2586f5bc615bcf26b44539693141f04974d0babd951745",
+                "83a69502c2aa2d32606c2d1d5b568ddc4c555933960921e4a4f8b2e375a70e66",
             ),
             (
                 "legacy_dismissed",
-                "6280ef6b44c8eb27a57bb0ea9d72b220c6223505d56fb2161999dde3be964ed6",
+                "69cb8998b89d44d77e9851d2eaa619dd550ecf78e6212b07b18c3c1fd5d47989",
             ),
             (
                 "legacy_annotation",
-                "2e184a2ab41d4a7762808f7ec4e917ec474e667c048e9a1bfdaea9677e9b18f0",
+                "368a60c692b5e50bfb542f5654eccc3c62a4f65442e7404c48734386da141d32",
             ),
         ];
         let actual = golden_vectors()

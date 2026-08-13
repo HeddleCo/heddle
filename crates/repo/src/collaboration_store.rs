@@ -411,7 +411,7 @@ fn idempotency_scope(operation: &CollaborationOperationEnvelope) -> IdempotencyS
     IdempotencyScope {
         discussion_id: operation.discussion_id,
         operation_kind: operation.body.kind_name().to_string(),
-        principal_email: operation.author.principal.email.clone(),
+        principal_email: operation.author.principal.email_lossy().into_owned(),
         key: operation.idempotency_key.clone(),
     }
 }
