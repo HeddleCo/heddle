@@ -36,6 +36,8 @@ pub struct RepoConfig {
     #[serde(default)]
     pub review: ReviewConfig,
     #[serde(default)]
+    pub provenance: ProvenanceConfig,
+    #[serde(default)]
     pub redact: RedactConfig,
     #[serde(default)]
     pub metadata: MetadataConfig,
@@ -75,6 +77,29 @@ pub struct TrustedKey {
     /// semantics. Optional; doesn't affect matching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+}
+
+/// `[provenance]` trust configuration for offline identity verification.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProvenanceConfig {
+    /// Out-of-band authenticated head of the key-binding registry.
+    #[serde(default)]
+    pub key_binding_registry: Option<KeyBindingRegistryAnchor>,
+}
+
+/// Pinned authority and current checkpoint selected by the verifier.
+///
+/// This anchor is local verifier policy, not closure content. A registry can
+/// establish identities only when its digest, epoch, and authority signature
+/// agree with this independently provisioned value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeyBindingRegistryAnchor {
+    /// Hex-encoded content hash of the current registry checkpoint.
+    pub registry_hash: String,
+    /// Monotonic epoch of the current registry checkpoint.
+    pub epoch: u64,
+    /// Authority allowed to endorse registry checkpoints and root bindings.
+    pub authority: TrustedKey,
 }
 
 /// Trust anchors for client-authored metadata received from a remote host.
@@ -447,6 +472,7 @@ impl Default for RepoConfig {
             storage: StorageConfig::default(),
             hosted: HostedConfig::default(),
             review: ReviewConfig::default(),
+            provenance: ProvenanceConfig::default(),
             redact: RedactConfig::default(),
             metadata: MetadataConfig::default(),
         }

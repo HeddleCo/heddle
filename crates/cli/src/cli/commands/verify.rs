@@ -442,11 +442,9 @@ fn verify_failed_advice(output: &VerifyReport) -> RecoveryAdvice {
     if verification.verified
         && let Some(provenance) = output.provenance.as_ref().filter(|report| !report.clean)
     {
-        let blocker = provenance
-            .states
-            .iter()
-            .find(|state| !state.is_clean())
-            .expect("an unclean provenance report has a blocker");
+        let Some(blocker) = provenance.states.iter().find(|state| !state.is_clean()) else {
+            return provenance_registry_failed_advice(provenance);
+        };
         let primary_command = "heddle verify --provenance".to_string();
         let mut advice = RecoveryAdvice::safety_refusal(
             "provenance_verify_failed",
@@ -500,6 +498,23 @@ fn verify_failed_advice(output: &VerifyReport) -> RecoveryAdvice {
             .insert("provenance".to_string(), value);
     }
     advice
+}
+
+fn provenance_registry_failed_advice(report: &heddle_core::ProvenanceReport) -> RecoveryAdvice {
+    let primary_command = "heddle verify --provenance".to_string();
+    RecoveryAdvice::safety_refusal(
+        "provenance_registry_verify_failed",
+        format!(
+            "Provenance verification failed: key-binding registry is {}",
+            report.registry_status
+        ),
+        format!("Inspect the registry trust chain with `{primary_command} --verbose`."),
+        "the trusted key-binding registry head is absent or invalid",
+        "accepting this repository would treat an unanchored identity registry as trusted",
+        "verify is observe-only; repository objects, refs, index, and worktree files were left unchanged",
+        primary_command.clone(),
+        vec![primary_command],
+    )
 }
 
 fn human_clean_summary(output: &VerifyReport) -> &str {
