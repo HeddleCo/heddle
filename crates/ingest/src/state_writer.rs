@@ -437,7 +437,7 @@ mod tests {
 
         assert!(state.parents.is_empty());
         assert!(state.attribution.agent.is_none());
-        assert_eq!(state.attribution.principal.name, "Alice");
+        assert_eq!(state.attribution.principal.name, b"Alice");
         assert_eq!(state.intent.as_deref(), Some("chore: initial"));
     }
 
@@ -447,7 +447,7 @@ mod tests {
         let a = parse_attribution(&sig("Luke", "l@example.com"), msg);
         let agent = a.agent.expect("agent detected");
         assert_eq!(agent.provider, "anthropic");
-        assert_eq!(a.principal.name, "Luke");
+        assert_eq!(a.principal.name, b"Luke");
     }
 
     #[test]
@@ -498,8 +498,8 @@ mod tests {
         assert_eq!(state.change_id, expected_id);
         assert_eq!(state.status, Status::Published);
         assert_eq!(state.confidence, Some(0.875));
-        assert_eq!(state.attribution.principal.name, "Luke");
-        assert_eq!(state.attribution.principal.email, "luke@example.com");
+        assert_eq!(state.attribution.principal.name, b"Luke");
+        assert_eq!(state.attribution.principal.email, b"luke@example.com");
         let agent = state.attribution.agent.expect("note agent preserved");
         assert_eq!(agent.provider, "anthropic");
         assert_eq!(agent.model, "claude-opus");
@@ -542,8 +542,8 @@ mod tests {
         let state = state_from_commit(&commit, tree, vec![], false).unwrap();
 
         let committer = state.committer.expect("committer preserved");
-        assert_eq!(committer.name, "Committer");
-        assert_eq!(committer.email, "committer@example.com");
+        assert_eq!(committer.name, b"Committer");
+        assert_eq!(committer.email, b"committer@example.com");
         assert_eq!(state.authored_tz_offset, -7 * 3600);
         assert_eq!(state.committer_tz_offset, 2 * 3600);
         assert_eq!(

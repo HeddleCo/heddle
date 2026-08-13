@@ -106,8 +106,8 @@ async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
                 ),
             };
             SignatureView {
-                actor_name: signature.actor.name.clone(),
-                actor_email: signature.actor.email.clone(),
+                actor_name: signature.actor.name_lossy().into_owned(),
+                actor_email: signature.actor.email_lossy().into_owned(),
                 kind: kind.as_str().to_string(),
                 glyph: if is_agent { AGENT_GLYPH } else { HUMAN_GLYPH },
                 is_agent,
@@ -301,7 +301,11 @@ async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
 
         let satisfied = signatures.iter().any(|s| {
             let actor_match = match actor_email.as_deref() {
-                Some(email) => s.signature.actor.email.eq_ignore_ascii_case(email),
+                Some(email) => s
+                    .signature
+                    .actor
+                    .email
+                    .eq_ignore_ascii_case(email.as_bytes()),
                 None => true,
             };
             let kind_match = match args.kind.as_deref() {

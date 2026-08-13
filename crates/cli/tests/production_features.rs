@@ -164,8 +164,8 @@ mod resolve {
         assert_eq!(event.0, resolution["conflict_id"].as_str().unwrap());
         assert_eq!(event.1, "edit");
         assert_eq!(*event.3, ConflictResolutionMode::Edit);
-        assert_eq!(event.2.principal.name, "Resolution Owner");
-        assert_eq!(event.2.principal.email, "owner@example.com");
+        assert_eq!(event.2.principal.name, b"Resolution Owner");
+        assert_eq!(event.2.principal.email, b"owner@example.com");
         let agent = event.2.agent.as_ref().expect("resolver agent attribution");
         assert_eq!(agent.provider, "openai");
         assert_eq!(agent.model, "gpt-resolver");
@@ -219,8 +219,8 @@ mod resolve {
             .expect("rebase auto-merge must append ConflictResolved");
         assert_eq!(event.0, "file.txt");
         assert_eq!(event.1, "auto");
-        assert_eq!(event.2.principal.name, "Automation Owner");
-        assert_eq!(event.2.principal.email, "automation@example.com");
+        assert_eq!(event.2.principal.name, b"Automation Owner");
+        assert_eq!(event.2.principal.email, b"automation@example.com");
         let agent = event
             .2
             .agent

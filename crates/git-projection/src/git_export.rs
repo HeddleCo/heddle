@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use objects::{
     error::HeddleError,
-    object::{ContentHash, MarkerName, Principal, State, StateId, ThreadName, TreeEntryTarget},
+    object::{ContentHash, MarkerName, State, StateId, ThreadName, TreeEntryTarget},
     store::ObjectStore,
 };
 use repo::{AudienceTier, Repository as HeddleRepository, visible};
@@ -45,24 +45,12 @@ fn has_git_fidelity(state: &State) -> bool {
     state.raw_message.is_some()
 }
 
-/// Whether `who`'s name/email round-trip byte-exactly through reconstruction.
-/// `Principal.name/email` are `String`, so the git importer replaced any non-UTF8
-/// identity byte with U+FFFD when it called `to_string()` on the raw actor bytes
-/// (the #565-deferred gap; `Principal` is still `String`, see #564). Those
-/// replaced bytes can't be regenerated, so reconstruction would hash off the
-/// original SHA. A literal U+FFFD that was itself valid UTF-8 in the original
-/// survives fine — so this can only FALSE-POSITIVE into the safe verbatim
-/// fallback, never a wrong-SHA mint.
-fn identity_is_byte_faithful(who: &Principal) -> bool {
-    !who.name.contains('\u{FFFD}') && !who.email.contains('\u{FFFD}')
-}
-
 /// Whether reconstructing `state`'s commit object from Heddle state alone is
 /// guaranteed byte-exact to the original commit — the precondition for the #567
-/// reconstruct-from-state path. False for the two #564 lossy gaps:
-///   1. non-UTF8 author/committer identity bytes (see [`identity_is_byte_faithful`]);
-///   2. lossy imports, where unrepresentable tree entries were dropped/converted
-///      so the rebuilt tree — hence commit — OID diverges.
+/// reconstruct-from-state path. False for lossy imports where unrepresentable
+/// tree entries were dropped or converted, so the rebuilt tree — hence commit —
+/// OID diverges. Principal identities are stored as raw bytes and are always
+/// reconstructable.
 ///
 /// (2) is read off ONE canonical signal — [`State::git_lossy`] — that lossy
 /// import population paths set, rather than enumerating import surfaces or
@@ -80,14 +68,7 @@ fn identity_is_byte_faithful(who: &Principal) -> bool {
 /// Keeping ONE chokepoint for the decision means a new consumer cannot drift to a
 /// different (wrong-SHA) rule.
 pub fn commit_is_byte_faithful(state: &State) -> bool {
-    has_git_fidelity(state)
-        && !state.git_lossy
-        && identity_is_byte_faithful(&state.attribution.principal)
-        && state
-            .committer
-            .as_ref()
-            .map(identity_is_byte_faithful)
-            .unwrap_or(true)
+    has_git_fidelity(state) && !state.git_lossy
 }
 
 /// Whether an imported state's mapped Git commit must be backed by residual
@@ -1476,18 +1457,17 @@ fn reachable_states(
 
 fn state_to_signature(state: &objects::object::State) -> Signature {
     let seconds = state.created_at.timestamp();
-    let raw = format!(
-        "{} <{}> {} +0000",
-        state.attribution.principal.name, state.attribution.principal.email, seconds
-    )
-    .into_bytes();
+    let principal = &state.attribution.principal;
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&principal.name);
+    raw.extend_from_slice(b" <");
+    raw.extend_from_slice(&principal.email);
+    raw.extend_from_slice(b"> ");
+    raw.extend_from_slice(seconds.to_string().as_bytes());
+    raw.extend_from_slice(b" +0000");
     Signature {
-        name: sley::plumbing::sley_core::ByteString::new(
-            state.attribution.principal.name.as_bytes().to_vec(),
-        ),
-        email: sley::plumbing::sley_core::ByteString::new(
-            state.attribution.principal.email.as_bytes().to_vec(),
-        ),
+        name: sley::plumbing::sley_core::ByteString::new(principal.name.clone()),
+        email: sley::plumbing::sley_core::ByteString::new(principal.email.clone()),
         time: sley::GitTime::new(seconds, 0),
         raw,
     }
