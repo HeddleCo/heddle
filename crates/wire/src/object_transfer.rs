@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use objects::{
-    object::{State, Tree},
+    object::{AnnotatedTag, State, Tree},
     store::ObjectStore,
 };
 
@@ -173,6 +173,10 @@ pub fn load_object_data(
                 .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
             rmp_serde::to_vec_named(&tree)?
         }
+        (ObjectId::Hash(hash), ObjectType::AnnotatedTag) => store
+            .get_annotated_tag(hash)?
+            .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?
+            .encode_current_msgpack(),
         (ObjectId::StateId(state_id), ObjectType::State) => {
             let state = store
                 .get_state(state_id)?
@@ -228,6 +232,16 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
                 ));
             }
             store.put_tree_serialized(&data.data, *hash)?;
+        }
+        (ObjectId::Hash(hash), ObjectType::AnnotatedTag) => {
+            let tag = AnnotatedTag::decode_current_msgpack(&data.data)
+                .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+            if tag.hash() != *hash {
+                return Err(ProtocolError::InvalidState(
+                    "annotated tag hash mismatch".to_string(),
+                ));
+            }
+            store.put_annotated_tag(&tag)?;
         }
         (ObjectId::StateId(state_id), ObjectType::State) => {
             let state: State = rmp_serde::from_slice(&data.data)?;

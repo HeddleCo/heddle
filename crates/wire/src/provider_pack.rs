@@ -20,7 +20,7 @@ const PACK_HEADER_LEN: usize = 16;
 const PACK_TRAILER_LEN: usize = 32;
 const PACK_SPEC: PackContainerSpec = PackContainerSpec {
     magic: b"LMPK",
-    version: 3,
+    version: 4,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

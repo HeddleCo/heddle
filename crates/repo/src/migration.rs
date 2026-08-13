@@ -90,6 +90,7 @@ pub enum SchemaTarget {
     PullPlannerCache,
     ColdCloneManifest,
     Trees,
+    AnnotatedTags,
     /// Catch-all for migrations that touch multiple stores.
     Mixed,
 }
@@ -199,6 +200,12 @@ pub static MIGRATIONS: &[Migration] = &[
         description: "Rewrite removed V1 tree entries into the current first-class gitlink tree envelope",
         applies_to: SchemaTarget::Trees,
         run: run_canonicalize_tree_entries,
+    },
+    Migration {
+        id: "0004_first_class_annotated_tags",
+        description: "Record the first-class content-addressed annotated-tag storage boundary",
+        applies_to: SchemaTarget::AnnotatedTags,
+        run: run_first_class_annotated_tags,
     },
 ];
 
@@ -332,6 +339,13 @@ fn run_canonicalize_tree_entries(ctx: &mut MigrationCtx<'_>) -> Result<()> {
             })?;
     }
 
+    Ok(())
+}
+
+fn run_first_class_annotated_tags(ctx: &mut MigrationCtx<'_>) -> Result<()> {
+    // Format v3 repositories never stored annotated tags in the native object
+    // graph. Existing Git-authority repositories are re-adopted at the v4
+    // boundary, while native repositories have no tag bytes to transform.
     bump_repo_format_to_supported(ctx.repo)
 }
 
@@ -553,6 +567,7 @@ mod tests {
             vec![
                 "0002_canonicalize_thread_records",
                 "0003_canonicalize_tree_entries",
+                "0004_first_class_annotated_tags",
             ],
             "the deletion-wave migration ids must stay ordered and reviewable",
         );

@@ -14,10 +14,11 @@ use crate::store::{
 };
 
 pub(super) const INDEX_MAGIC: &[u8; 4] = b"LMI\0";
-pub(super) const INDEX_VERSION: u32 = 3;
+pub(super) const INDEX_VERSION: u32 = 4;
 pub(super) const INDEX_ENTRY_LEN: usize = 32 + 8;
 const STATE_ID_OFFSET_TAG: u64 = 1 << 63;
-const PACK_OFFSET_MASK: u64 = !STATE_ID_OFFSET_TAG;
+const ANNOTATED_TAG_OFFSET_TAG: u64 = 1 << 62;
+const PACK_OFFSET_MASK: u64 = !(STATE_ID_OFFSET_TAG | ANNOTATED_TAG_OFFSET_TAG);
 
 /// Entry in the pack index.
 #[derive(Debug, Clone, Copy)]
@@ -103,6 +104,7 @@ impl PackIndex {
     }
 
     pub fn from_owned_bytes(data: Bytes) -> Result<Self> {
+        verify_index_version(&data)?;
         let header = index_header().verify(&data)?;
         let count = header.count;
         let max_entries = ((data.len() - header.header_len) / INDEX_ENTRY_LEN) as u64;
@@ -142,7 +144,7 @@ impl EncodedIndex {
 pub(super) fn encode_index_entry(id: PackObjectId, offset: u64) -> [u8; INDEX_ENTRY_LEN] {
     assert!(
         offset <= PACK_OFFSET_MASK,
-        "pack index offset exceeds the 63-bit format limit"
+        "pack index offset exceeds the 62-bit format limit"
     );
     let mut bytes = [0u8; INDEX_ENTRY_LEN];
     let tagged_offset = match id {
@@ -153,6 +155,10 @@ pub(super) fn encode_index_entry(id: PackObjectId, offset: u64) -> [u8; INDEX_EN
         PackObjectId::StateId(state_id) => {
             bytes[..32].copy_from_slice(state_id.as_bytes());
             offset | STATE_ID_OFFSET_TAG
+        }
+        PackObjectId::AnnotatedTag(hash) => {
+            bytes[..32].copy_from_slice(hash.as_bytes());
+            offset | ANNOTATED_TAG_OFFSET_TAG
         }
     };
     bytes[32..].copy_from_slice(&tagged_offset.to_be_bytes());
@@ -166,10 +172,12 @@ fn decode_index_entry(bytes: &[u8]) -> Result<IndexEntry> {
     let tagged_offset = u64::from_be_bytes(bytes[32..].try_into().map_err(|_| {
         crate::store::StoreError::InvalidObject("Invalid offset length".to_string())
     })?);
-    let id = if tagged_offset & STATE_ID_OFFSET_TAG == 0 {
-        PackObjectId::Hash(crate::object::ContentHash::from_bytes(raw_id))
-    } else {
+    let id = if tagged_offset & STATE_ID_OFFSET_TAG != 0 {
         PackObjectId::StateId(crate::object::StateId::from_bytes(raw_id))
+    } else if tagged_offset & ANNOTATED_TAG_OFFSET_TAG != 0 {
+        PackObjectId::AnnotatedTag(crate::object::ContentHash::from_bytes(raw_id))
+    } else {
+        PackObjectId::Hash(crate::object::ContentHash::from_bytes(raw_id))
     };
     Ok(IndexEntry {
         id,
@@ -208,6 +216,27 @@ impl PackIndex {
 impl Default for PackIndex {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn verify_index_version(data: &[u8]) -> Result<()> {
+    if data.len() < 8 || &data[..4] != INDEX_MAGIC {
+        index_header().verify_layout(data)?;
+        unreachable!("invalid index header must have returned an error")
+    }
+    let version = u32::from_be_bytes(data[4..8].try_into().map_err(|_| {
+        crate::store::StoreError::InvalidObject("Index version field is truncated".to_string())
+    })?);
+    if version == INDEX_VERSION {
+        Ok(())
+    } else if version > INDEX_VERSION {
+        Err(crate::store::StoreError::InvalidObject(format!(
+            "pack index uses format version {version}, but this binary supports {INDEX_VERSION}; upgrade heddle"
+        )))
+    } else {
+        Err(crate::store::StoreError::InvalidObject(format!(
+            "pack index uses unsupported format version {version}; run `heddle migrate`"
+        )))
     }
 }
 

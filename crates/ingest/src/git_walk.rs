@@ -60,8 +60,17 @@ pub struct RefHead {
     pub full_name: String,
     /// Whether this is a branch or a tag.
     pub namespace: RefNamespace,
+    /// Object id stored directly in the Git ref, before annotated-tag peeling.
+    pub object_sha: String,
     /// Commit SHA the ref resolves to (40-char lowercase hex).
     pub target_sha: String,
+}
+
+/// Exact annotated-tag object bytes in one tag-of-tag chain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnnotatedTagEntry {
+    pub sha: String,
+    pub body: Vec<u8>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -306,6 +315,42 @@ impl GitSource {
         self.repo.object_format()
     }
 
+    /// Read an annotated-tag chain in inner-to-outer order.
+    pub fn read_annotated_tag_chain(
+        &self,
+        root_sha: &str,
+    ) -> crate::Result<Vec<AnnotatedTagEntry>> {
+        let mut oid =
+            SleyObjectId::from_hex(self.repo.object_format(), root_sha).map_err(|error| {
+                IngestError::Git(format!("parse tag object id {root_sha}: {error}"))
+            })?;
+        let mut chain = Vec::new();
+        let mut seen = HashSet::new();
+        loop {
+            if !seen.insert(oid) {
+                return Err(IngestError::Git(format!(
+                    "annotated tag cycle while reading {root_sha}"
+                )));
+            }
+            let object = self
+                .repo
+                .read_object(&oid)
+                .map_err(|error| IngestError::Git(format!("read tag object {oid}: {error}")))?;
+            if object.object_type != GitObjectType::Tag {
+                break;
+            }
+            chain.push(AnnotatedTagEntry {
+                sha: oid.to_string(),
+                body: object.body.clone(),
+            });
+            oid = sley::TagObject::parse_ref(self.repo.object_format(), &object.body)
+                .map_err(|error| IngestError::Git(format!("parse tag object {oid}: {error}")))?
+                .object;
+        }
+        chain.reverse();
+        Ok(chain)
+    }
+
     /// Whether `refs/notes/heddle` exists in the source repo, resolved once and
     /// memoized. Absence is the common case (most imports have no heddle notes),
     /// and lets [`Self::read_heddle_note_bytes`] skip the per-commit notes walk.
@@ -381,6 +426,9 @@ impl GitSource {
                     continue;
                 }
             };
+            let object = self.repo.rev_parse(&full_name).map_err(|error| {
+                IngestError::Git(format!("resolve Git ref '{full_name}': {error}"))
+            })?;
 
             match namespace {
                 RefNamespace::Branch => stats.local_branches += 1,
@@ -391,6 +439,7 @@ impl GitSource {
                 short_name,
                 full_name,
                 namespace,
+                object_sha: object.to_string(),
                 target_sha: target.to_string(),
             });
         }

@@ -24,7 +24,9 @@ use crate::{
         read_or_seed_projection_managed_refs, set_reference, write_projection_managed_refs,
     },
     git_notes,
-    git_reconstruct::{commit_object_id, reconstruct_commit_bytes, write_commit_object},
+    git_reconstruct::{
+        commit_object_id, reconstruct_commit_bytes, write_commit_object, write_tag_object,
+    },
     git_residual::ResidualStore,
     git_sync::{force_rewind_track_to_branch, sync_marker_to_tag, sync_track_to_branch},
     git_util::{ExportStats, ExportedRef, FailedRefExportReason},
@@ -466,7 +468,7 @@ fn export_scoped(
     // boundary (absent from both).
     let reachable: HashSet<StateId> = sorted_states.iter().copied().collect();
     let repo = bridge.open_git_repo()?;
-    residual_store.install_tag_residuals_into(&repo)?;
+    install_native_annotated_tags(bridge.heddle_repo, &repo)?;
     for note_ref in residual_store.list_note_refs(repo.object_format())? {
         if !residual_store.install_object_closure_into(&repo, &note_ref.oid)? {
             return Err(GitProjectionError::Git(format!(
@@ -807,27 +809,6 @@ fn export_scoped(
         .filter(|oid| !served_note_oids.contains(oid))
         .collect();
     git_notes::remove_notes(&repo, &notes_to_retract)?;
-
-    // A native marker remembers the peeled StateId, while this residual
-    // sidecar remembers the original annotated wrapper OID. Restore a wrapper
-    // only when it still peels to the marker's current mapped commit; a moved
-    // marker must become an ordinary projected tag instead of resurrecting an
-    // obsolete annotation.
-    for tag_ref in residual_store.list_tag_refs(repo.object_format())? {
-        let Some(state_id) = bridge
-            .heddle_repo
-            .refs()
-            .get_marker(&MarkerName::new(tag_ref.name.as_str()))?
-        else {
-            continue;
-        };
-        let Some(mapped_oid) = bridge.mapping.get_git(&state_id) else {
-            continue;
-        };
-        if peel_to_commit_oid(&repo, tag_ref.oid) == Some(mapped_oid) {
-            sync_marker_to_tag(&repo, &tag_ref.name, tag_ref.oid)?;
-        }
-    }
 
     // THE PROJECTION (heddle#316 r13): the desired heddle-owned ref-set for this
     // audience — heads lagged to the served frontier, tags at served markers — as
@@ -1391,10 +1372,49 @@ fn project_desired_refs(
             continue;
         };
         if let Some(git_oid) = mapping.get_git(&state_id) {
-            desired.insert(format!("refs/tags/{marker_name}"), git_oid);
+            let target =
+                native_annotated_tag_oid(heddle_repo, marker_name, state_id)?.unwrap_or(git_oid);
+            desired.insert(format!("refs/tags/{marker_name}"), target);
         }
     }
     Ok(desired)
+}
+
+fn install_native_annotated_tags(
+    heddle_repo: &HeddleRepository,
+    git_repo: &SleyRepository,
+) -> GitProjectionResult<()> {
+    for hash in heddle_repo.store().list_annotated_tags()? {
+        let tag = heddle_repo
+            .store()
+            .get_annotated_tag(&hash)?
+            .ok_or_else(|| {
+                GitProjectionError::Git(format!("annotated tag {hash} disappeared while exporting"))
+            })?;
+        write_tag_object(git_repo, &tag)?;
+    }
+    Ok(())
+}
+
+fn native_annotated_tag_oid(
+    heddle_repo: &HeddleRepository,
+    marker_name: &MarkerName,
+    state_id: StateId,
+) -> GitProjectionResult<Option<ObjectId>> {
+    for hash in heddle_repo.store().list_annotated_tags()? {
+        let Some(tag) = heddle_repo.store().get_annotated_tag(&hash)? else {
+            continue;
+        };
+        if tag.marker().is_some_and(|marker| {
+            marker.name == marker_name.as_str() && marker.peeled_state == state_id
+        }) {
+            return tag
+                .git_oid()
+                .map(Some)
+                .map_err(|error| GitProjectionError::Git(error.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 /// The Git OID the public branch should lag to for a thread whose raw tip is

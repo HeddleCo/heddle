@@ -87,8 +87,8 @@ use crate::{
 /// minor) so the concatenated bucket output matches what
 /// `PackIndex::sort()` would have produced.
 const BUCKETS_PER_VARIANT: usize = 256;
-/// 256 for Hash ids + 256 for StateId ids.
-const TOTAL_BUCKETS: usize = BUCKETS_PER_VARIANT * 2;
+/// 256 each for Hash, StateId, and AnnotatedTag ids.
+const TOTAL_BUCKETS: usize = BUCKETS_PER_VARIANT * 3;
 /// Cap concurrently-open index-bucket files. macOS GUI-launched
 /// processes commonly inherit a 256-fd soft limit; imports also need
 /// room for Git pack/index files, sqlite maps, the output pack, etc.
@@ -99,6 +99,7 @@ const MAX_OPEN_BUCKET_WRITERS: usize = 32;
 /// `Hash(_) < StateId(_)`).
 const HASH_VARIANT: usize = 0;
 const CHANGEID_VARIANT: usize = 1;
+const ANNOTATED_TAG_VARIANT: usize = 2;
 
 /// Fsync staged pack bytes after finalize flush (Wave 5 L7).
 ///
@@ -302,7 +303,12 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
 
         let bucket_paths: Vec<PathBuf> = (0..TOTAL_BUCKETS)
             .map(|i| {
-                let variant = if i < BUCKETS_PER_VARIANT { 'h' } else { 'c' };
+                let variant = match i / BUCKETS_PER_VARIANT {
+                    HASH_VARIANT => 'h',
+                    CHANGEID_VARIANT => 's',
+                    ANNOTATED_TAG_VARIANT => 't',
+                    _ => unreachable!("bucket variant is bounded by TOTAL_BUCKETS"),
+                };
                 let prefix = i % BUCKETS_PER_VARIANT;
                 bucket_dir.join(format!("bucket-{variant}-{prefix:02x}"))
             })
@@ -390,7 +396,12 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         // compressed-size varint. Always small, fits in `entry_header_buf`.
         let mut header_buf = Vec::with_capacity(40);
         id.encode_tagged(&mut header_buf);
-        super::varint::encode_type_and_size(obj_type, data.len() as u64, &mut header_buf);
+        let encoded_type = if obj_type == ObjectType::AnnotatedTag {
+            ObjectType::Blob
+        } else {
+            obj_type
+        };
+        super::varint::encode_type_and_size(encoded_type, data.len() as u64, &mut header_buf);
         pw.write_all(&header_buf).map_err(StoreError::from)?;
         self.pack_position = self
             .pack_position
@@ -870,6 +881,9 @@ fn bucket_index_for(id: &PackObjectId) -> usize {
         PackObjectId::StateId(c) => {
             CHANGEID_VARIANT * BUCKETS_PER_VARIANT + c.as_bytes()[0] as usize
         }
+        PackObjectId::AnnotatedTag(hash) => {
+            ANNOTATED_TAG_VARIANT * BUCKETS_PER_VARIANT + hash.as_bytes()[0] as usize
+        }
     }
 }
 
@@ -1326,6 +1340,22 @@ mod tests {
                 PackObjectId::StateId(cid),
                 ObjectType::State,
                 format!("state-{i}").into_bytes(),
+            )
+            .unwrap();
+            assert!(
+                b.open_bucket_writers <= MAX_OPEN_BUCKET_WRITERS,
+                "open bucket writers should stay capped"
+            );
+        }
+
+        for i in 0..BUCKETS_PER_VARIANT {
+            let hash = deterministic_hash(i as u8);
+            let id = PackObjectId::AnnotatedTag(hash);
+            ids.push(id);
+            b.add_id(
+                id,
+                ObjectType::AnnotatedTag,
+                format!("tag-{i}").into_bytes(),
             )
             .unwrap();
             assert!(

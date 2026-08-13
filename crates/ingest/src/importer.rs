@@ -22,7 +22,7 @@ use std::{
 };
 
 use objects::{
-    object::{Blob, ContentHash, Tree, TreeEntry},
+    object::{AnnotatedTag, AnnotatedTagMarker, Blob, ContentHash, Tree, TreeEntry},
     store::{
         CompressionConfig, ObjectStore,
         pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId, StreamingPackBuilder},
@@ -353,7 +353,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
         //
         // We use [`StreamingPackBuilder`] so the pack data streams to a
         // single staging file on disk while the index entries are
-        // bucketed across 512 small files (sorted at finalize). Peak
+        // bucketed across 768 small files (sorted at finalize). Peak
         // memory therefore stays bounded ~10s of MB regardless of
         // repo size, modulo the largest single object's compressed
         // payload (limited by the non-streaming zstd API).
@@ -448,6 +448,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
                     last_log = idx;
                 }
             }
+            packed.write_annotated_tags(&heads)?;
             let mut stats = packed.stats;
             if stats.object_count > 0 {
                 let state_store_write_start = std::time::Instant::now();
@@ -919,6 +920,45 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
         self.stats.object_count += 1;
         self.stats.blobs += 1;
         Ok(hash)
+    }
+
+    fn write_annotated_tags(&mut self, heads: &[RefHead]) -> crate::Result<()> {
+        for head in heads.iter().filter(|head| {
+            head.namespace == RefNamespace::Tag && head.object_sha != head.target_sha
+        }) {
+            let peeled_state = self.map.get_commit(&head.target_sha).ok_or_else(|| {
+                IngestError::Other(format!(
+                    "annotated tag {} peels to unmapped commit {}",
+                    head.full_name, head.target_sha
+                ))
+            })?;
+            let chain = self.git.read_annotated_tag_chain(&head.object_sha)?;
+            let outer_index = chain.len().checked_sub(1).ok_or_else(|| {
+                IngestError::Git(format!(
+                    "ref {} changed while importing and no longer names an annotated tag",
+                    head.full_name
+                ))
+            })?;
+            let mut target_tag = None;
+            for (index, entry) in chain.into_iter().enumerate() {
+                let marker = (index == outer_index).then(|| AnnotatedTagMarker {
+                    name: head.short_name.clone(),
+                    peeled_state,
+                });
+                let tag =
+                    AnnotatedTag::new(self.git.object_format(), entry.body, target_tag, marker)
+                        .map_err(|error| IngestError::Git(error.to_string()))?;
+                let hash = tag.hash();
+                self.builder.add_id(
+                    PackObjectId::AnnotatedTag(hash),
+                    PackObjectType::AnnotatedTag,
+                    tag.encode_current_msgpack(),
+                )?;
+                self.stats.object_count += 1;
+                target_tag = Some(hash);
+            }
+        }
+        Ok(())
     }
 
     /// Write a commit state and return its physical Heddle state id (existing or new).
