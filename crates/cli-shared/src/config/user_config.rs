@@ -665,8 +665,10 @@ pub fn principal_source_display(source: &str) -> &str {
 }
 
 fn principal_is_accountable(principal: &Principal) -> bool {
-    let name = principal.name.trim();
-    let email = principal.email.trim();
+    let name = principal.name_lossy();
+    let email = principal.email_lossy();
+    let name = name.trim();
+    let email = email.trim();
     !name.is_empty() && !email.is_empty() && !(name == "Unknown" && email == "unknown@example.com")
 }
 

@@ -157,7 +157,7 @@ fn indexed_from_oplog_entry(entry: &OpEntry) -> IndexedOperation {
         seq: entry.id,
         timestamp_secs: entry.timestamp.timestamp(),
         verb: entry.operation.verb().to_string(),
-        actor_email: entry.actor.email.clone(),
+        actor_email: entry.actor.email_lossy().into_owned(),
         operation_id: entry.operation_id,
         thread: thread_for(&entry.operation),
         symbols: Vec::new(),

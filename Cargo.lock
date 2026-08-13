@@ -2294,6 +2294,7 @@ dependencies = [
 name = "heddle-format"
 version = "0.12.0"
 dependencies = [
+ "blake3",
  "thiserror 2.0.18",
  "zstd",
 ]
@@ -2315,6 +2316,7 @@ version = "0.12.0"
 dependencies = [
  "heddle-ingest",
  "heddle-objects",
+ "heddle-perf-contract",
  "heddle-refs",
  "heddle-repo",
  "heddle-wire",
@@ -2422,6 +2424,7 @@ dependencies = [
  "rand 0.10.2",
  "rmp-serde",
  "serde",
+ "serde_bytes",
  "serde_json",
  "sley",
  "thiserror 2.0.18",

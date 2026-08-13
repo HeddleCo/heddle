@@ -9,6 +9,10 @@ use super::{ContentHash, StateSignature};
 /// Domain separator for signatures that authorize a [`KeyBinding`].
 pub const KEY_BINDING_SIGNING_PAYLOAD_VERSION_TAG: &[u8] = b"hd-key-binding-v1\x00";
 
+/// Domain separator for authority signatures over registry checkpoints.
+pub const KEY_BINDING_REGISTRY_SIGNING_PAYLOAD_VERSION_TAG: &[u8] =
+    b"hd-key-binding-registry-v2\x00";
+
 /// A signing key's role within an identity's provenance chain.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyBinding {
@@ -85,25 +89,49 @@ impl KeyBinding {
     }
 }
 
-/// Versioned, content-addressed flat set of key bindings.
+/// Versioned, authority-signed checkpoint of the key-binding registry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyBindingRegistry {
     pub format_version: u8,
+    /// Monotonic checkpoint number. Genesis is epoch zero.
+    pub epoch: u64,
+    /// Content hash of the immediately preceding checkpoint.
+    pub previous_registry: Option<ContentHash>,
+    /// Trusted repository/identity-authority signature over this checkpoint.
+    pub authority_signature: StateSignature,
     pub bindings: Vec<KeyBinding>,
 }
 
 impl KeyBindingRegistry {
-    pub const FORMAT_VERSION: u8 = 1;
+    pub const FORMAT_VERSION: u8 = 2;
 
-    pub fn new(bindings: Vec<KeyBinding>) -> Self {
+    pub fn new(
+        epoch: u64,
+        previous_registry: Option<ContentHash>,
+        authority_signature: StateSignature,
+        bindings: Vec<KeyBinding>,
+    ) -> Self {
         Self {
             format_version: Self::FORMAT_VERSION,
+            epoch,
+            previous_registry,
+            authority_signature,
             bindings,
         }
     }
 
-    pub fn empty() -> Self {
-        Self::new(Vec::new())
+    /// Deterministic bytes covered by [`Self::authority_signature`].
+    pub fn canonical_checkpoint_signing_payload(&self) -> Result<Vec<u8>, KeyBindingError> {
+        let mut payload = Vec::with_capacity(128 + self.bindings.len() * 32);
+        payload.extend_from_slice(KEY_BINDING_REGISTRY_SIGNING_PAYLOAD_VERSION_TAG);
+        payload.push(self.format_version);
+        payload.extend_from_slice(&self.epoch.to_le_bytes());
+        push_optional_hash(&mut payload, self.previous_registry);
+        payload.extend_from_slice(&(self.bindings.len() as u64).to_le_bytes());
+        for binding in &self.bindings {
+            payload.extend_from_slice(binding.content_hash()?.as_bytes());
+        }
+        Ok(payload)
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, KeyBindingError> {
@@ -130,6 +158,23 @@ impl KeyBindingRegistry {
         if self.format_version != Self::FORMAT_VERSION {
             return Err(KeyBindingError::UnsupportedVersion(self.format_version));
         }
+        match (self.epoch, self.previous_registry) {
+            (0, Some(_)) => return Err(KeyBindingError::GenesisHasPrevious),
+            (1.., None) => return Err(KeyBindingError::MissingPreviousRegistry(self.epoch)),
+            _ => {}
+        }
+        require_non_empty(
+            &self.authority_signature.algorithm,
+            KeyBindingError::EmptyAuthorityAlgorithm,
+        )?;
+        require_hex(
+            &self.authority_signature.public_key,
+            KeyBindingError::InvalidAuthorityPublicKey,
+        )?;
+        require_hex(
+            &self.authority_signature.signature,
+            KeyBindingError::InvalidAuthoritySignature,
+        )?;
         for (index, binding) in self.bindings.iter().enumerate() {
             binding.validate()?;
             if self.bindings[..index].iter().any(|prior| {
@@ -195,6 +240,16 @@ pub enum KeyBindingError {
     UnsupportedVersion(u8),
     #[error("key-binding registry codec error: {0}")]
     Codec(String),
+    #[error("genesis key-binding registry must not reference a previous checkpoint")]
+    GenesisHasPrevious,
+    #[error("key-binding registry epoch {0} must reference its previous checkpoint")]
+    MissingPreviousRegistry(u64),
+    #[error("key-binding registry authority signature algorithm must not be empty")]
+    EmptyAuthorityAlgorithm,
+    #[error("key-binding registry authority public key must be non-empty hexadecimal bytes")]
+    InvalidAuthorityPublicKey,
+    #[error("key-binding registry authority signature must be non-empty hexadecimal bytes")]
+    InvalidAuthoritySignature,
     #[error("key binding algorithm must not be empty")]
     EmptyAlgorithm,
     #[error("key binding public key must be non-empty hexadecimal bytes")]

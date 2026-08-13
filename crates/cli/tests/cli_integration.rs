@@ -314,6 +314,8 @@ mod hydrate;
 mod identity_resolution;
 #[path = "cli_integration/ignore_mechanics.rs"]
 mod ignore_mechanics;
+#[path = "cli_integration/interactive_selection.rs"]
+mod interactive_selection;
 #[path = "cli_integration/misc.rs"]
 mod misc;
 #[path = "cli_integration/native_scope_boundary.rs"]
@@ -330,6 +332,8 @@ mod output_kind_invariant;
 mod output_kind_runtime;
 #[path = "cli_integration/output_mode_no_auto.rs"]
 mod output_mode_no_auto;
+#[path = "cli_integration/perf_adopt.rs"]
+mod perf_adopt;
 #[path = "cli_integration/perf_core_loop/mod.rs"]
 mod perf_core_loop;
 #[path = "cli_integration/perf_trace.rs"]

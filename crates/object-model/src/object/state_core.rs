@@ -669,9 +669,9 @@ impl State {
             hasher.update(parent.as_bytes());
         }
 
-        hasher.update(principal.name.as_bytes());
+        hasher.update(&principal.name);
         hasher.update(&[0]);
-        hasher.update(principal.email.as_bytes());
+        hasher.update(&principal.email);
         hasher.update(&[0]);
 
         if let Some(agent) = &self.attribution.agent {
@@ -731,9 +731,9 @@ impl State {
     fn update_hash_fidelity(&self, hasher: &mut blake3::Hasher) {
         if let Some(committer) = &self.committer {
             hasher.update(&[1]);
-            hasher.update(committer.name.as_bytes());
+            hasher.update(&committer.name);
             hasher.update(&[0]);
-            hasher.update(committer.email.as_bytes());
+            hasher.update(&committer.email);
             hasher.update(&[0]);
         } else {
             hasher.update(&[0]);

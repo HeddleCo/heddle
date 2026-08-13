@@ -220,8 +220,8 @@ fn decode_dictionaries(input: &mut Reader<'_>) -> Result<(Vec<Principal>, Vec<Ag
 
 fn principal_from_key(value: PrincipalKey) -> Result<Principal> {
     Ok(Principal {
-        name: String::from_utf8(value.0).map_err(|_| invalid("principal name is not UTF-8"))?,
-        email: String::from_utf8(value.1).map_err(|_| invalid("principal email is not UTF-8"))?,
+        name: value.0,
+        email: value.1,
     })
 }
 

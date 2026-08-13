@@ -224,6 +224,7 @@ pub(crate) fn resolve_thread_name_or_current(
     command: &'static str,
     primary_command: impl Into<String>,
 ) -> Result<String> {
+    let primary_command = primary_command.into();
     if let Some(name) = name {
         return Ok(name);
     }
@@ -232,6 +233,23 @@ pub(crate) fn resolve_thread_name_or_current(
     }
     if let Some(thread) = current_thread(repo)? {
         return Ok(thread.thread);
+    }
+    let choices = repo
+        .refs()
+        .list_threads()?
+        .into_iter()
+        .map(|thread| {
+            let name = thread.to_string();
+            super::interactive_select::SelectionChoice::new(name.clone(), name)
+        })
+        .collect::<Vec<_>>();
+    if choices.len() > 1 {
+        return super::interactive_select::select_ambiguous_target(
+            "thread",
+            "<THREAD>",
+            &primary_command,
+            choices,
+        );
     }
     Err(anyhow!(RecoveryAdvice::no_current_thread(
         command,

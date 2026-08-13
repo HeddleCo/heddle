@@ -484,7 +484,7 @@ mod tests {
     use super::*;
 
     fn principal(label: &str) -> Principal {
-        Principal::new(label.to_string(), format!("{label}@example.com"))
+        Principal::new(label, format!("{label}@example.com"))
     }
 
     /// Build a tiny chain `A → B → C` (C is HEAD) with a single file

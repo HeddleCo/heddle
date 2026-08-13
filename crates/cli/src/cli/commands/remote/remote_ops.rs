@@ -229,6 +229,7 @@ pub async fn cmd_pull(
     insecure: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
+    let remote = super::select_pull_remote_if_ambiguous(&repo, remote)?;
     let default_remote = resolved_default_remote_name(&repo)?;
     let has_default_remote = default_remote.is_some();
     let configured_remote_name = match remote.as_deref() {

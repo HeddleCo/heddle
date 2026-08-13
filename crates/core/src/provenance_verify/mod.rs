@@ -2,7 +2,11 @@
 //! Offline verification of the state authorship and review-signature chain.
 
 mod content;
+#[cfg(test)]
+mod registry_tests;
 mod result;
+#[cfg(test)]
+mod review_tests;
 #[cfg(test)]
 mod tests;
 
@@ -11,65 +15,29 @@ use crypto::verify_payload_signature;
 use objects::{
     error::Result,
     object::{
-        ContentHash, KeyBindingRegistry, ReviewSignature, ReviewSignaturesBlob, SignatureStatus,
-        State, StateAttachmentBody, StateAttachmentKind, StateId, signing_payload,
+        KeyBindingRegistry, ReviewSignature, ReviewSignaturesBlob, SignatureStatus, State,
+        StateAttachmentBody, StateAttachmentKind, StateId, signing_payload,
     },
     store::ObjectStore,
 };
-use repo::{AuthorshipVerification, Repository};
-use schemars::JsonSchema;
-use serde::Serialize;
+use repo::{AuthorshipVerification, Repository, TrustedKey};
 
+pub use self::result::{ProvenanceReport, StateProvenanceVerification};
 use self::{
     content::verify_tree_content,
-    result::{discover_registry, failed, identity_error, integrity_only, legacy},
+    result::{
+        RegistryDiscovery, discover_registry, failed, identity_error, integrity_only, legacy,
+    },
 };
 
 const MAX_REGISTRY_BLOB_BYTES: usize = 16 * 1024 * 1024;
 
-#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
-pub struct ProvenanceReport {
-    pub clean: bool,
-    pub registry_status: String,
-    pub registry_hash: Option<String>,
-    pub states: Vec<StateProvenanceVerification>,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
-pub struct StateProvenanceVerification {
-    pub state_id: String,
-    pub status: String,
-    pub identity: Option<String>,
-    pub failed_link: Option<String>,
-    pub detail: String,
-    pub reviews_verified: usize,
-    pub reviewer_identities: Vec<String>,
-}
-
-impl StateProvenanceVerification {
-    pub fn display_status(&self) -> String {
-        self.status.clone()
-    }
-
-    pub fn is_clean(&self) -> bool {
-        self.status == "IntegrityOnly" || self.status.starts_with("Verified(")
-    }
-}
-
-enum RegistryDiscovery {
-    Absent,
-    Available {
-        registry: KeyBindingRegistry,
-        hash: ContentHash,
-    },
-    Invalid(String),
-}
-
 pub fn verify_repository_provenance(repo: &Repository) -> Result<ProvenanceReport> {
     let registry = discover_registry(repo)?;
+    let registry_is_anchored = matches!(&registry, RegistryDiscovery::Available { .. });
     let (registry_status, registry_hash) = match &registry {
         RegistryDiscovery::Absent => ("absent", None),
-        RegistryDiscovery::Available { hash, .. } => ("available", Some(hash.to_string())),
+        RegistryDiscovery::Available { hash, .. } => ("anchored", Some(hash.to_string())),
         RegistryDiscovery::Invalid(_) => ("invalid", None),
     };
     let mut state_ids = repo.store().list_states()?;
@@ -87,7 +55,7 @@ pub fn verify_repository_provenance(repo: &Repository) -> Result<ProvenanceRepor
         }
     }
     Ok(ProvenanceReport {
-        clean: states.iter().all(StateProvenanceVerification::is_clean),
+        clean: registry_is_anchored && states.iter().all(StateProvenanceVerification::is_clean),
         registry_status: registry_status.to_string(),
         registry_hash,
         states,
@@ -123,10 +91,32 @@ fn verify_state(
 
     let verification = match repo.verify_state_signature(&state.state_id)? {
         SignatureStatus::Unsigned => match registry {
-            RegistryDiscovery::Available { registry, .. } => {
-                verify_reviews(repo, state, Some(registry), None)
+            RegistryDiscovery::Available {
+                registry,
+                authority,
+                ..
+            } => verify_reviews(repo, state, Some(registry.as_ref()), Some(authority), None),
+            RegistryDiscovery::Absent => {
+                if repo
+                    .latest_state_attachment(
+                        &state.state_id,
+                        StateAttachmentKind::ReviewSignatures,
+                    )?
+                    .is_some()
+                {
+                    failed(
+                        state.state_id,
+                        "review",
+                        "trusted key-binding registry anchor is missing",
+                    )
+                } else {
+                    failed(
+                        state.state_id,
+                        "identity",
+                        "trusted key-binding registry anchor is missing",
+                    )
+                }
             }
-            RegistryDiscovery::Absent => verify_reviews(repo, state, None, None),
             RegistryDiscovery::Invalid(detail) => {
                 if repo
                     .latest_state_attachment(
@@ -137,7 +127,7 @@ fn verify_state(
                 {
                     failed(state.state_id, "review", detail)
                 } else {
-                    integrity_only(state.state_id, "state has no authorship signature")
+                    failed(state.state_id, "identity", detail)
                 }
             }
         },
@@ -156,25 +146,35 @@ fn verify_state(
                 )
             } else {
                 match registry {
-                    RegistryDiscovery::Absent => verify_reviews(repo, state, None, None),
+                    RegistryDiscovery::Absent => failed(
+                        state.state_id,
+                        "identity",
+                        "trusted key-binding registry anchor is missing",
+                    ),
                     RegistryDiscovery::Invalid(detail) => {
                         failed(state.state_id, "identity", detail)
                     }
-                    RegistryDiscovery::Available { registry, .. } => {
-                        match repo.verify_authored_by_known_actor(state, registry)? {
-                            AuthorshipVerification::Verified(identity) => {
-                                verify_reviews(repo, state, Some(registry), Some(identity))
-                            }
-                            other => failed(
-                                state.state_id,
-                                "identity",
-                                &format!(
-                                    "authorship key resolution returned {}",
-                                    identity_error(&other)
-                                ),
+                    RegistryDiscovery::Available {
+                        registry,
+                        authority,
+                        ..
+                    } => match repo.verify_authored_by_known_actor(state, registry, authority)? {
+                        AuthorshipVerification::Verified(identity) => verify_reviews(
+                            repo,
+                            state,
+                            Some(registry.as_ref()),
+                            Some(authority),
+                            Some(identity),
+                        ),
+                        other => failed(
+                            state.state_id,
+                            "identity",
+                            &format!(
+                                "authorship key resolution returned {}",
+                                identity_error(&other)
                             ),
-                        }
-                    }
+                        ),
+                    },
                 }
             }
         }
@@ -186,9 +186,10 @@ fn verify_reviews(
     repo: &Repository,
     state: &State,
     registry: Option<&KeyBindingRegistry>,
+    trusted_authority: Option<&TrustedKey>,
     author_identity: Option<String>,
 ) -> StateProvenanceVerification {
-    match verify_review_chain(repo, state, registry) {
+    match verify_review_chain(repo, state, registry, trusted_authority) {
         Ok((count, reviewer_identities)) => match author_identity {
             Some(identity) => StateProvenanceVerification {
                 state_id: state.state_id.to_string_full(),
@@ -223,6 +224,7 @@ fn verify_review_chain(
     repo: &Repository,
     state: &State,
     registry: Option<&KeyBindingRegistry>,
+    trusted_authority: Option<&TrustedKey>,
 ) -> std::result::Result<(usize, Vec<String>), String> {
     let attachment = repo
         .latest_state_attachment(&state.state_id, StateAttachmentKind::ReviewSignatures)
@@ -249,7 +251,7 @@ fn verify_review_chain(
     let mut identities = Vec::with_capacity(reviews.signatures.len());
     for review in &reviews.signatures {
         verify_review_signature(state.state_id, review)?;
-        if let Some(registry) = registry {
+        if let Some((registry, trusted_authority)) = registry.zip(trusted_authority) {
             let signed_at = DateTime::<Utc>::from_timestamp(review.signed_at, 0)
                 .ok_or_else(|| "review signature has an invalid signed_at".to_string())?;
             match repo.verify_known_actor_key(
@@ -257,6 +259,7 @@ fn verify_review_chain(
                 &review.public_key,
                 signed_at,
                 registry,
+                trusted_authority,
             ) {
                 AuthorshipVerification::Verified(identity) => identities.push(identity),
                 other => {

@@ -74,9 +74,9 @@ impl Redaction {
         buf.push(0);
         buf.extend_from_slice(self.reason.as_bytes());
         buf.push(0);
-        buf.extend_from_slice(self.redactor.name.as_bytes());
+        buf.extend_from_slice(&self.redactor.name);
         buf.push(0);
-        buf.extend_from_slice(self.redactor.email.as_bytes());
+        buf.extend_from_slice(&self.redactor.email);
         buf.push(0);
         buf.extend_from_slice(self.redacted_at.to_rfc3339().as_bytes());
         buf.push(0);
@@ -122,7 +122,8 @@ impl Redaction {
         ));
         out.push_str(&format!(
             "# redactor:    {} <{}>\n",
-            self.redactor.name, self.redactor.email
+            self.redactor.name_lossy(),
+            self.redactor.email_lossy()
         ));
         out.push_str(&format!("# reason:      {}\n", self.reason));
         out.push_str(&format!("# redaction:   {}\n", redaction_id.short()));
@@ -354,7 +355,7 @@ mod proptests {
         // we want determinism, not exhaustive locale coverage.
         let name = "[A-Za-z][A-Za-z0-9 _-]{0,30}";
         let email = "[a-z][a-z0-9_-]{0,15}@[a-z0-9.-]{1,30}\\.[a-z]{2,4}";
-        (name, email).prop_map(|(name, email)| Principal { name, email })
+        (name, email).prop_map(|(name, email)| Principal::new(name, email))
     }
 
     fn arb_blob_hash() -> impl Strategy<Value = ContentHash> {
@@ -466,9 +467,9 @@ mod proptests {
             // name might be a display label, but the email survives
             // rename and is what auditors trace back to.
             prop_assert!(
-                stub.contains(&r.redactor.email),
+                stub.contains(r.redactor.email_lossy().as_ref()),
                 "stub must carry redactor email '{}'; got: {stub}",
-                r.redactor.email
+                r.redactor.email_lossy()
             );
         }
 

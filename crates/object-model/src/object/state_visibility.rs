@@ -75,9 +75,9 @@ impl StateVisibility {
             buf.extend_from_slice(embargo_until.to_rfc3339().as_bytes());
         }
         buf.push(0);
-        buf.extend_from_slice(self.declarer.name.as_bytes());
+        buf.extend_from_slice(&self.declarer.name);
         buf.push(0);
-        buf.extend_from_slice(self.declarer.email.as_bytes());
+        buf.extend_from_slice(&self.declarer.email);
         buf.push(0);
         buf.extend_from_slice(self.declared_at.to_rfc3339().as_bytes());
         if let Some(supersedes) = &self.supersedes {

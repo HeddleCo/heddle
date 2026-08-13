@@ -11,7 +11,7 @@ use objects::{
 };
 use tempfile::TempDir;
 
-use super::{AuthorshipVerification, Repository};
+use super::{AuthorshipVerification, Repository, TrustedKey};
 
 fn setup() -> (TempDir, Repository, State) {
     let temp = TempDir::new().expect("temp dir");
@@ -94,15 +94,47 @@ fn signed_state(state: &State, signer: &Ed25519Signer) -> StateSignature {
     state_signature_from_signer(&state.compute_hash(), signer).expect("sign state")
 }
 
+fn trusted_key(signer: &Ed25519Signer) -> TrustedKey {
+    TrustedKey {
+        algorithm: signer.algorithm().to_string(),
+        public_key: hex::encode(signer.public_key()),
+        label: None,
+    }
+}
+
+fn signed_registry(authority: &Ed25519Signer, bindings: Vec<KeyBinding>) -> KeyBindingRegistry {
+    let mut registry = KeyBindingRegistry::new(
+        0,
+        None,
+        StateSignature {
+            algorithm: authority.algorithm().to_string(),
+            public_key: hex::encode(authority.public_key()),
+            signature: String::new(),
+        },
+        bindings,
+    );
+    registry.authority_signature.signature = hex::encode(
+        authority
+            .sign(
+                &registry
+                    .canonical_checkpoint_signing_payload()
+                    .expect("registry payload"),
+            )
+            .expect("sign registry"),
+    );
+    registry
+}
+
 #[test]
 fn resolves_registered_active_key_as_verified_identity() {
     let (_temp, repo, state) = setup();
     let signer = Ed25519Signer::generate().expect("signer");
     attach_signature(&repo, &state, signed_state(&state, &signer));
-    let registry = KeyBindingRegistry::new(vec![binding(&signer, 1_000, None)]);
+    let registry = signed_registry(&signer, vec![binding(&signer, 1_000, None)]);
+    let authority = trusted_key(&signer);
 
     assert_eq!(
-        repo.verify_authored_by_known_actor(&state, &registry)
+        repo.verify_authored_by_known_actor(&state, &registry, &authority)
             .unwrap(),
         AuthorshipVerification::Verified("identity:alice".to_string())
     );
@@ -116,10 +148,11 @@ fn resolves_one_hop_identity_delegation() {
     let root = binding(&root_signer, 1_000, None);
     let delegated = delegated_binding(&state_signer, &root_signer, &root);
     attach_signature(&repo, &state, signed_state(&state, &state_signer));
-    let registry = KeyBindingRegistry::new(vec![root, delegated]);
+    let registry = signed_registry(&root_signer, vec![root, delegated]);
+    let authority = trusted_key(&root_signer);
 
     assert_eq!(
-        repo.verify_authored_by_known_actor(&state, &registry)
+        repo.verify_authored_by_known_actor(&state, &registry, &authority)
             .unwrap(),
         AuthorshipVerification::Verified("identity:alice".to_string())
     );
@@ -131,15 +164,18 @@ fn valid_signature_from_unregistered_key_is_unknown_not_verified() {
     let signer = Ed25519Signer::generate().expect("signer");
     let other_signer = Ed25519Signer::generate().expect("registered signer");
     attach_signature(&repo, &state, signed_state(&state, &signer));
-    let non_matching_registry = KeyBindingRegistry::new(vec![binding(&other_signer, 1_000, None)]);
+    let authority = trusted_key(&other_signer);
+    let non_matching_registry =
+        signed_registry(&other_signer, vec![binding(&other_signer, 1_000, None)]);
+    let empty_registry = signed_registry(&other_signer, Vec::new());
 
     assert_eq!(
-        repo.verify_authored_by_known_actor(&state, &non_matching_registry)
+        repo.verify_authored_by_known_actor(&state, &non_matching_registry, &authority)
             .unwrap(),
         AuthorshipVerification::UnknownKey
     );
     assert_eq!(
-        repo.verify_authored_by_known_actor(&state, &KeyBindingRegistry::empty())
+        repo.verify_authored_by_known_actor(&state, &empty_registry, &authority)
             .unwrap(),
         AuthorshipVerification::UnknownKey,
         "an empty registry must also fail closed"
@@ -151,10 +187,11 @@ fn registered_key_past_revoked_at_is_revoked() {
     let (_temp, repo, state) = setup();
     let signer = Ed25519Signer::generate().expect("signer");
     attach_signature(&repo, &state, signed_state(&state, &signer));
-    let registry = KeyBindingRegistry::new(vec![binding(&signer, 1_000, Some(1_999))]);
+    let registry = signed_registry(&signer, vec![binding(&signer, 1_000, Some(1_999))]);
+    let authority = trusted_key(&signer);
 
     assert_eq!(
-        repo.verify_authored_by_known_actor(&state, &registry)
+        repo.verify_authored_by_known_actor(&state, &registry, &authority)
             .unwrap(),
         AuthorshipVerification::Revoked
     );
@@ -169,10 +206,11 @@ fn registered_key_with_bad_state_signature_is_invalid() {
     bytes[0] ^= 0xff;
     signature.signature = hex::encode(bytes);
     attach_signature(&repo, &state, signature);
-    let registry = KeyBindingRegistry::new(vec![binding(&signer, 1_000, None)]);
+    let registry = signed_registry(&signer, vec![binding(&signer, 1_000, None)]);
+    let authority = trusted_key(&signer);
 
     assert_eq!(
-        repo.verify_authored_by_known_actor(&state, &registry)
+        repo.verify_authored_by_known_actor(&state, &registry, &authority)
             .unwrap(),
         AuthorshipVerification::Invalid
     );
@@ -183,10 +221,11 @@ fn registered_key_before_valid_from_is_invalid() {
     let (_temp, repo, state) = setup();
     let signer = Ed25519Signer::generate().expect("signer");
     attach_signature(&repo, &state, signed_state(&state, &signer));
-    let registry = KeyBindingRegistry::new(vec![binding(&signer, 2_001, None)]);
+    let registry = signed_registry(&signer, vec![binding(&signer, 2_001, None)]);
+    let authority = trusted_key(&signer);
 
     assert_eq!(
-        repo.verify_authored_by_known_actor(&state, &registry)
+        repo.verify_authored_by_known_actor(&state, &registry, &authority)
             .unwrap(),
         AuthorshipVerification::Invalid
     );
@@ -199,10 +238,11 @@ fn invalid_binding_signature_makes_registry_invalid() {
     attach_signature(&repo, &state, signed_state(&state, &signer));
     let mut invalid_binding = binding(&signer, 1_000, None);
     invalid_binding.added_by_sig.signature = hex::encode([0; 64]);
-    let registry = KeyBindingRegistry::new(vec![invalid_binding]);
+    let registry = signed_registry(&signer, vec![invalid_binding]);
+    let authority = trusted_key(&signer);
 
     assert_eq!(
-        repo.verify_authored_by_known_actor(&state, &registry)
+        repo.verify_authored_by_known_actor(&state, &registry, &authority)
             .unwrap(),
         AuthorshipVerification::Invalid
     );
@@ -211,7 +251,7 @@ fn invalid_binding_signature_makes_registry_invalid() {
 #[test]
 fn registry_encoding_is_content_addressed() {
     let signer = Ed25519Signer::generate().expect("signer");
-    let registry = KeyBindingRegistry::new(vec![binding(&signer, 1_000, None)]);
+    let registry = signed_registry(&signer, vec![binding(&signer, 1_000, None)]);
     let encoded = registry.encode().expect("encode registry");
     let decoded = KeyBindingRegistry::decode(&encoded).expect("decode registry");
 

@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Object body codecs for loose-object backends.
 
-use heddle_format::compression::{CompressionConfig, compress, decompress, is_compressed};
+use heddle_format::compression::{
+    CompressionConfig, CompressionDictionary, compress, compress_with_dictionary, decompress,
+    decompress_with_dictionary, is_compressed,
+};
 
 use crate::{
     object::{Action, ActionId, ContentHash, State, Tree, TreeDecodeError},
@@ -23,7 +26,8 @@ pub fn decode_blob_content(data: &[u8]) -> Result<Vec<u8>> {
 pub fn encode_tree(tree: &Tree, config: &CompressionConfig) -> Result<(ContentHash, Vec<u8>)> {
     let hash = tree.hash();
     let serialized = rmp_serde::to_vec(tree)?;
-    let data = compress(&serialized, config)?.unwrap_or(serialized);
+    let data = compress_with_dictionary(&serialized, config, CompressionDictionary::TreeStateV1)?
+        .unwrap_or(serialized);
     Ok((hash, data))
 }
 
@@ -43,16 +47,19 @@ pub fn decode_tree_serialized(data: &[u8]) -> Result<Tree> {
 /// only the loose-object wrapper. Migration code uses this to decode older
 /// tree schemas without teaching the current [`Tree`] reader to accept them.
 pub fn decode_tree_body(data: &[u8]) -> Result<Vec<u8>> {
-    decode_body(data)
+    Ok(decompress_with_dictionary(data)?)
 }
 
 pub fn encode_state(state: &State, config: &CompressionConfig) -> Result<Vec<u8>> {
     let serialized = rmp_serde::to_vec(state)?;
-    Ok(compress(&serialized, config)?.unwrap_or(serialized))
+    Ok(
+        compress_with_dictionary(&serialized, config, CompressionDictionary::TreeStateV1)?
+            .unwrap_or(serialized),
+    )
 }
 
 pub fn decode_state(data: &[u8]) -> Result<State> {
-    let decoded = decode_body(data)?;
+    let decoded = decompress_with_dictionary(data)?;
     let mut state: State = rmp_serde::from_slice(&decoded)?;
     state.state_id = state.id();
     Ok(state)
@@ -98,29 +105,94 @@ mod tests {
     }
 
     #[test]
-    fn encode_decode_tree_matches_old_recipe() {
+    fn encode_decode_tree() {
         let blob_hash = ContentHash::compute(b"codec-tree-blob");
         let tree = Tree::from_entries(vec![TreeEntry::file("file.txt", blob_hash, false).unwrap()]);
         for config in compression_configs() {
-            let serialized = rmp_serde::to_vec(&tree).unwrap();
-            let expected = old_encode_raw(&serialized, &config).unwrap();
             let (hash, encoded) = encode_tree(&tree, &config).unwrap();
             assert_eq!(hash, tree.hash());
-            assert_eq!(encoded, expected);
             assert_eq!(decode_tree(&encoded).unwrap(), tree);
         }
     }
 
     #[test]
-    fn encode_decode_state_matches_old_recipe() {
+    #[cfg(feature = "zstd")]
+    fn tree_and_state_use_versioned_dictionary_frames() {
+        let tree = Tree::from_entries(
+            (0..24)
+                .map(|index| {
+                    TreeEntry::file(
+                        format!("module_{index:02}.rs"),
+                        ContentHash::compute(format!("blob-{index}").as_bytes()),
+                        false,
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        );
+        let state = State::new(
+            tree.hash(),
+            vec![StateId::from_bytes([7; 32])],
+            sample_attribution(),
+        )
+        .with_intent("dictionary frame verification ".repeat(32));
+
+        let (_, encoded_tree) = encode_tree(&tree, &CompressionConfig::default()).unwrap();
+        let encoded_state = encode_state(&state, &CompressionConfig::default()).unwrap();
+
+        assert_eq!(&encoded_tree[9..13], &1_u32.to_be_bytes());
+        assert_eq!(&encoded_state[9..13], &1_u32.to_be_bytes());
+    }
+
+    #[test]
+    #[cfg(feature = "zstd")]
+    fn tree_state_dictionary_corpus_roundtrips_byte_identically() {
+        let config = CompressionConfig::default();
+
+        for revision in 0..64 {
+            let tree = Tree::from_entries(
+                (0..32)
+                    .map(|entry| {
+                        TreeEntry::file(
+                            format!("module_{entry:02}.rs"),
+                            ContentHash::compute(
+                                format!("revision-{revision}-blob-{entry}").as_bytes(),
+                            ),
+                            entry % 11 == 0,
+                        )
+                        .unwrap()
+                    })
+                    .collect(),
+            );
+            let serialized_tree = rmp_serde::to_vec(&tree).unwrap();
+            let (_, encoded_tree) = encode_tree(&tree, &config).unwrap();
+            assert_eq!(decode_tree_body(&encoded_tree).unwrap(), serialized_tree);
+
+            let state = State::new(
+                tree.hash(),
+                vec![StateId::from_bytes([revision; 32])],
+                sample_attribution(),
+            )
+            .with_intent(format!(
+                "Update the representative tree/state corpus at revision {revision}. {}",
+                "Preserve byte-identical object bodies. ".repeat(12)
+            ));
+            let serialized_state = rmp_serde::to_vec(&state).unwrap();
+            let encoded_state = encode_state(&state, &config).unwrap();
+            assert_eq!(
+                decompress_with_dictionary(&encoded_state).unwrap(),
+                serialized_state
+            );
+        }
+    }
+
+    #[test]
+    fn encode_decode_state() {
         let attribution = sample_attribution();
         let state = State::new(ContentHash::compute(b"codec-tree"), vec![], attribution)
             .with_intent("codec state");
         for config in compression_configs() {
-            let serialized = rmp_serde::to_vec(&state).unwrap();
-            let expected = old_encode_raw(&serialized, &config).unwrap();
             let encoded = encode_state(&state, &config).unwrap();
-            assert_eq!(encoded, expected);
             assert_eq!(decode_state(&encoded).unwrap(), state);
         }
     }

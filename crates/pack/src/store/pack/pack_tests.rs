@@ -845,6 +845,110 @@ fn test_delta_window_pack_bytes_are_stable() {
     );
 }
 
+#[derive(Clone)]
+struct RepackCorpusObject {
+    hash: ContentHash,
+    data: Vec<u8>,
+    path: String,
+}
+
+fn repack_window_corpus() -> Vec<RepackCorpusObject> {
+    const PATH_COUNT: usize = 19;
+    const VARIANT_COUNT: usize = 11;
+    const OBJECT_SIZE: usize = 512;
+
+    let mut objects = Vec::with_capacity(PATH_COUNT * VARIANT_COUNT * 2);
+    for generation in 0..2 {
+        for variant in 0..VARIANT_COUNT {
+            for path_index in 0..PATH_COUNT {
+                let mut data = Vec::with_capacity(OBJECT_SIZE);
+                for block_index in 0..(OBJECT_SIZE / 32) {
+                    let seed = format!("{path_index}:{variant}:{block_index}");
+                    data.extend_from_slice(blake3::hash(seed.as_bytes()).as_bytes());
+                }
+                if generation == 1 {
+                    for offset in (variant..OBJECT_SIZE).step_by(127) {
+                        data[offset] ^= 0x5a;
+                    }
+                }
+                objects.push(RepackCorpusObject {
+                    hash: ContentHash::compute(&data),
+                    data,
+                    path: format!("src/file_{path_index:02}.bin"),
+                });
+            }
+        }
+    }
+    objects
+}
+
+fn build_repack_corpus(
+    objects: &[RepackCorpusObject],
+    delta_window: usize,
+    with_path_hints: bool,
+) -> (Vec<u8>, Vec<u8>, super::PackStats) {
+    let compression = CompressionConfig {
+        enabled: false,
+        level: 0,
+        min_size: usize::MAX,
+        max_delta_size: usize::MAX,
+    };
+    let mut builder = PackBuilder::for_repack(compression, delta_window);
+    for object in objects {
+        builder.add_with_path_id(
+            PackObjectId::Hash(object.hash),
+            ObjectType::Blob,
+            object.data.clone(),
+            with_path_hints.then(|| object.path.clone()),
+        );
+    }
+    builder.build().unwrap()
+}
+
+#[test]
+fn repack_window_and_path_hints_improve_ratio_and_roundtrip() {
+    let objects = repack_window_corpus();
+    let (baseline_pack, _, baseline) = build_repack_corpus(&objects, 10, false);
+    let (wide_pack, wide_index, wide) = build_repack_corpus(&objects, 200, true);
+    let (no_hints_pack, _, no_hints) = build_repack_corpus(&objects, 200, false);
+    let (narrow_pack, _, narrow) = build_repack_corpus(&objects, 10, true);
+
+    eprintln!(
+        "baseline: deltas={}, bytes={}, ratio={:.6}; wide+hints: deltas={}, bytes={}, ratio={:.6}; no-hints: deltas={}, bytes={}, ratio={:.6}; narrow: deltas={}, bytes={}, ratio={:.6}",
+        baseline.delta_count,
+        baseline_pack.len(),
+        baseline.compression_ratio,
+        wide.delta_count,
+        wide_pack.len(),
+        wide.compression_ratio,
+        no_hints.delta_count,
+        no_hints_pack.len(),
+        no_hints.compression_ratio,
+        narrow.delta_count,
+        narrow_pack.len(),
+        narrow.compression_ratio,
+    );
+
+    assert!(wide.delta_count > baseline.delta_count);
+    assert!(wide_pack.len() < baseline_pack.len());
+    assert!(wide.compression_ratio < baseline.compression_ratio);
+    assert!(no_hints.compression_ratio > wide.compression_ratio);
+    assert!(no_hints_pack.len() > wide_pack.len());
+    assert!(narrow.compression_ratio > wide.compression_ratio);
+    assert!(narrow_pack.len() > wide_pack.len());
+
+    let reader = PackReader::from_bytes(wide_pack, wide_index).unwrap();
+    for object in &objects {
+        let (obj_type, data) = reader
+            .get_hashed_object(&object.hash)
+            .unwrap()
+            .expect("corpus object must be present");
+        assert_eq!(obj_type, ObjectType::Blob);
+        assert_eq!(ContentHash::compute(&data), object.hash);
+        assert_eq!(data, object.data);
+    }
+}
+
 #[test]
 fn test_single_object_no_delta() {
     // A single object should not produce any deltas

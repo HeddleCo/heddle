@@ -56,7 +56,8 @@ pub use discussion::{
 pub use hash::{ChangeId, ChangeIdParseError, ContentHash, StateId, StateIdParseError};
 pub use identifiers::{MarkerName, Scope, ThreadName};
 pub use key_binding::{
-    KEY_BINDING_SIGNING_PAYLOAD_VERSION_TAG, KeyBinding, KeyBindingError, KeyBindingRegistry,
+    KEY_BINDING_REGISTRY_SIGNING_PAYLOAD_VERSION_TAG, KEY_BINDING_SIGNING_PAYLOAD_VERSION_TAG,
+    KeyBinding, KeyBindingError, KeyBindingRegistry,
 };
 pub use manifest::{
     BuiltManifest, FsckFinding, FsckOptions, FsckReport, FsckRule, ManifestBinding,

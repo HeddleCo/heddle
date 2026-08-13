@@ -14,13 +14,14 @@
 //!   * C4 CRLF in the message (preserved verbatim)
 //!   * C5 unusual/negative timezones with author time/tz != committer time/tz
 //!   * C6 non-UTF8 (`encoding ISO-8859-1`) message — a raw `0xe9` latin-1 byte
-//!   * C7 octopus (3-parent) merge
+//!   * C7 non-UTF8 author and committer identities (raw `0xff` / `0xfe` bytes)
+//!   * C8 octopus (3-parent) merge
 //!
 //! The two cases that need a GPG key live in a checked-in bundle (generated
 //! offline by `tests/commit_conformance_fixtures/gen-commit-corpus.sh`, exactly
 //! like the round-trip gate's signed-objects bundle, so CI never needs gpg):
-//!   * C8 signed commit (folded `gpgsig` header)
-//!   * C9 signed merge carrying a `mergetag` header (mergetag + gpgsig ordering)
+//!   * C9 signed commit (folded `gpgsig` header)
+//!   * C10 signed merge carrying a `mergetag` header (mergetag + gpgsig ordering)
 //!
 //! For every commit reachable in the source, the harness imports it through the
 //! real `GitProjection`, calls `reconstruct_commit_bytes`, then asserts BOTH:
@@ -121,6 +122,43 @@ fn cat_commit(dir: &Path, sha: &str) -> Vec<u8> {
     run_git(dir, &["cat-file", "commit", sha], None)
 }
 
+/// Write raw object content through `git hash-object --stdin` and return its id.
+fn hash_object(dir: &Path, object_type: &str, content: &[u8]) -> String {
+    use std::{io::Write, process::Stdio};
+
+    let mut child = Command::new("git")
+        .args([
+            "hash-object",
+            "--literally",
+            "-w",
+            "-t",
+            object_type,
+            "--stdin",
+        ])
+        .current_dir(dir)
+        .envs(ENV.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("failed to spawn git hash-object: {error}"));
+    child
+        .stdin
+        .as_mut()
+        .expect("hash-object stdin")
+        .write_all(content)
+        .expect("write hash-object stdin");
+    let output = child.wait_with_output().expect("wait for git hash-object");
+    assert!(
+        output.status.success(),
+        "git hash-object failed in {}:\nstdout: {}\nstderr: {}",
+        dir.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
@@ -140,7 +178,7 @@ fn all_commit_shas(source: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Build the plain (no-GPG) §9 corpus C1..C7 in a single fresh repo.
+/// Build the plain (no-GPG) §9 corpus C1..C8 in a single fresh repo.
 fn build_plain_corpus(dir: &Path) {
     git(dir, &["init", "-q", "--initial-branch=main"]);
 
@@ -220,7 +258,20 @@ fn build_plain_corpus(dir: &Path) {
     );
     git(dir, &["config", "--unset", "i18n.commitEncoding"]);
 
-    // C7 — octopus (3-parent) merge of two sibling branches off main.
+    // C7 — raw non-UTF8 bytes in both author and committer identities. This
+    // must be reconstructed from Principal bytes, never a residual or mirror.
+    let tree = git(dir, &["rev-parse", "HEAD^{tree}"]);
+    let parent = git(dir, &["rev-parse", "HEAD"]);
+    let mut identity_commit = Vec::new();
+    identity_commit.extend_from_slice(format!("tree {tree}\nparent {parent}\n").as_bytes());
+    identity_commit.extend_from_slice(b"author Sven \xff <sven@example.com> 1700000550 +0000\n");
+    identity_commit
+        .extend_from_slice(b"committer Lars \xfe <lars@example.com> 1700000551 +0000\n\n");
+    identity_commit.extend_from_slice(b"non-UTF8 identity bytes\n");
+    let identity_sha = hash_object(dir, "commit", &identity_commit);
+    git(dir, &["update-ref", "refs/heads/main", &identity_sha]);
+
+    // C8 — octopus (3-parent) merge of two sibling branches off main.
     git(dir, &["checkout", "-q", "-b", "a", "main"]);
     std::fs::write(dir.join("a"), b"a\n").unwrap();
     git(dir, &["add", "a"]);
@@ -438,6 +489,13 @@ fn commit_conformance_plain_corpus_survives_native_repack() {
         "C6 raw latin-1 0xe9 message byte missing"
     );
     assert!(
+        bodies.iter().any(|b| {
+            contains(b, b"author Sven \xff <sven@example.com>")
+                && contains(b, b"committer Lars \xfe <lars@example.com>")
+        }),
+        "C7 raw non-UTF8 author/committer identity bytes missing"
+    );
+    assert!(
         bodies.iter().any(|b| b.ends_with(b"\n\n")),
         "C2 empty-message case missing"
     );
@@ -457,7 +515,7 @@ fn commit_conformance_plain_corpus_survives_native_repack() {
     );
     assert!(
         bodies.iter().any(|b| count(b, b"\nparent ") >= 3),
-        "C7 octopus (3-parent) case missing"
+        "C8 octopus (3-parent) case missing"
     );
 
     assert_all_commits_reconstruct("plain-corpus", dir);
@@ -475,28 +533,28 @@ fn commit_conformance_signed_and_mergetag() {
     let merge = cat_commit(&source, &main);
     assert!(
         contains(&merge, b"\nmergetag "),
-        "C9 fixture lost the mergetag header:\n{}",
+        "C10 fixture lost the mergetag header:\n{}",
         String::from_utf8_lossy(&merge)
     );
     assert!(
         contains(&merge, b"\ngpgsig "),
-        "C9 fixture lost the gpgsig header on the merge"
+        "C10 fixture lost the gpgsig header on the merge"
     );
     let has_signed_commit = all_commit_shas(&source)
         .iter()
         .any(|sha| contains(&cat_commit(&source, sha), b"\ngpgsig "));
     assert!(
         has_signed_commit,
-        "C8 fixture lost a signed commit (no gpgsig header in any commit)"
+        "C9 fixture lost a signed commit (no gpgsig header in any commit)"
     );
 
     assert_all_commits_reconstruct("signed-and-mergetag", &source);
 }
 
-/// #567: the plain §9 corpus (C1..C7) must export-FROM-STATE — every commit
+/// #567/#593: the plain §9 corpus (C1..C8) must export-FROM-STATE — every commit
 /// regenerated into a fresh repo at its original SHA, byte-identical — covering
 /// empty message, no-trailing-newline, CRLF, weird/negative tz, non-UTF8
-/// encoding, and an octopus merge.
+/// message and identity bytes, and an octopus merge.
 #[test]
 fn export_from_state_plain_corpus() {
     let tmp = TempDir::new().unwrap();

@@ -4,7 +4,7 @@
 use crypto::{verify_payload_signature, verify_state_signature_bytes};
 use objects::object::{KeyBinding, KeyBindingRegistry, State, StateAttachmentBody, StateSignature};
 
-use crate::{Repository, Result};
+use crate::{HeddleError, KeyBindingRegistryAnchor, RepoConfig, Repository, Result, TrustedKey};
 
 /// Identity resolution result for a state's detached authorship signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,6 +20,34 @@ pub enum AuthorshipVerification {
 }
 
 impl Repository {
+    /// Load the verifier-local registry anchor from repository configuration.
+    ///
+    /// This deliberately reloads the file so a long-lived repository handle
+    /// never verifies against a stale trust decision.
+    pub fn key_binding_registry_anchor(&self) -> Result<Option<KeyBindingRegistryAnchor>> {
+        Ok(
+            RepoConfig::load_for_repository(&self.heddle_dir().join("config.toml"))?
+                .provenance
+                .key_binding_registry,
+        )
+    }
+
+    /// Verify one registry checkpoint against an out-of-band trusted authority.
+    pub fn verify_key_binding_registry_checkpoint(
+        &self,
+        registry: &KeyBindingRegistry,
+        trusted_authority: &TrustedKey,
+    ) -> Result<()> {
+        if registry_checkpoint_is_authorized(registry, trusted_authority) {
+            Ok(())
+        } else {
+            Err(HeddleError::InvalidObject(
+                "key-binding registry checkpoint is not signed by the trusted authority"
+                    .to_string(),
+            ))
+        }
+    }
+
     /// Resolve a signing key through an offline registry at a claimed signing time.
     ///
     /// This verifies the registry's signed binding chain and validity window. It
@@ -31,8 +59,9 @@ impl Repository {
         public_key: &str,
         signed_at: chrono::DateTime<chrono::Utc>,
         registry: &KeyBindingRegistry,
+        trusted_authority: &TrustedKey,
     ) -> AuthorshipVerification {
-        if !registry_is_authorized(registry) {
+        if !registry_is_authorized(registry, trusted_authority) {
             return AuthorshipVerification::Invalid;
         }
         let Some(binding) = find_binding_by_key(registry, algorithm, public_key) else {
@@ -60,6 +89,7 @@ impl Repository {
         &self,
         state: &State,
         registry: &KeyBindingRegistry,
+        trusted_authority: &TrustedKey,
     ) -> Result<AuthorshipVerification> {
         let signatures: Vec<_> = self
             .list_state_attachments(&state.id())?
@@ -87,6 +117,7 @@ impl Repository {
                 &signature.public_key,
                 state.created_at,
                 registry,
+                trusted_authority,
             ) {
                 AuthorshipVerification::Verified(identity) => match &verified_identity {
                     Some(prior) if *prior != identity => saw_invalid = true,
@@ -110,12 +141,29 @@ impl Repository {
     }
 }
 
-fn registry_is_authorized(registry: &KeyBindingRegistry) -> bool {
-    registry.validate().is_ok()
+fn registry_is_authorized(registry: &KeyBindingRegistry, trusted_authority: &TrustedKey) -> bool {
+    registry_checkpoint_is_authorized(registry, trusted_authority)
         && registry
             .bindings
             .iter()
             .all(|binding| binding_is_authorized(binding, registry))
+}
+
+fn registry_checkpoint_is_authorized(
+    registry: &KeyBindingRegistry,
+    trusted_authority: &TrustedKey,
+) -> bool {
+    let signature = &registry.authority_signature;
+    registry.validate().is_ok()
+        && key_matches(
+            &signature.algorithm,
+            &signature.public_key,
+            &trusted_authority.algorithm,
+            &trusted_authority.public_key,
+        )
+        && registry
+            .canonical_checkpoint_signing_payload()
+            .is_ok_and(|payload| signature_verifies(&payload, signature))
 }
 
 fn binding_is_authorized(binding: &KeyBinding, registry: &KeyBindingRegistry) -> bool {

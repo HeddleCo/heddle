@@ -19,6 +19,7 @@ static REPOSITORY_OPENS: AtomicU64 = AtomicU64::new(0);
 static NETWORK_CLIENT_INITIALIZATIONS: AtomicU64 = AtomicU64::new(0);
 static ANCESTORS_VISITED: AtomicU64 = AtomicU64::new(0);
 static HISTORY_OBJECTS_DECODED: AtomicU64 = AtomicU64::new(0);
+static GIT_REACHABLE_COPY_OPERATIONS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct StructuralCounters {
@@ -34,6 +35,7 @@ pub struct StructuralCounters {
     pub network_client_initialized: bool,
     pub ancestors_visited: u64,
     pub history_objects_decoded: u64,
+    pub git_reachable_copy_operations: u64,
 }
 
 fn enabled() -> bool {
@@ -95,6 +97,10 @@ pub fn record_history_object_decode() {
     add(&HISTORY_OBJECTS_DECODED, 1);
 }
 
+pub fn record_git_reachable_copy_operation() {
+    add(&GIT_REACHABLE_COPY_OPERATIONS, 1);
+}
+
 pub fn snapshot() -> StructuralCounters {
     StructuralCounters {
         directories_scanned: DIRECTORIES_SCANNED.load(Ordering::Relaxed),
@@ -109,5 +115,6 @@ pub fn snapshot() -> StructuralCounters {
         network_client_initialized: NETWORK_CLIENT_INITIALIZATIONS.load(Ordering::Relaxed) > 0,
         ancestors_visited: ANCESTORS_VISITED.load(Ordering::Relaxed),
         history_objects_decoded: HISTORY_OBJECTS_DECODED.load(Ordering::Relaxed),
+        git_reachable_copy_operations: GIT_REACHABLE_COPY_OPERATIONS.load(Ordering::Relaxed),
     }
 }
