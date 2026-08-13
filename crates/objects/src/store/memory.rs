@@ -8,8 +8,8 @@ use std::{collections::HashMap, sync::RwLock};
 
 use crate::{
     object::{
-        Action, ActionId, Blob, ContentHash, State, StateAttachment, StateAttachmentId, StateId,
-        Tree,
+        Action, ActionId, AnnotatedTag, Blob, ContentHash, State, StateAttachment,
+        StateAttachmentId, StateId, Tree,
     },
     store::{HeddleError, ObjectStore, Result},
     sync::RwLockExt,
@@ -34,6 +34,7 @@ use crate::{
 /// ```
 #[derive(Default)]
 pub struct InMemoryStore {
+    annotated_tags: RwLock<HashMap<ContentHash, Vec<u8>>>,
     blobs: RwLock<HashMap<ContentHash, Vec<u8>>>,
     trees: RwLock<HashMap<ContentHash, Vec<u8>>>,
     states: RwLock<HashMap<StateId, Vec<u8>>>,
@@ -51,6 +52,34 @@ impl InMemoryStore {
 }
 
 impl ObjectStore for InMemoryStore {
+    fn get_annotated_tag(&self, hash: &ContentHash) -> Result<Option<AnnotatedTag>> {
+        self.annotated_tags
+            .read_or_poisoned()
+            .get(hash)
+            .map(|bytes| {
+                AnnotatedTag::decode_current_msgpack(bytes)
+                    .map_err(|error| HeddleError::InvalidObject(error.to_string()))
+            })
+            .transpose()
+    }
+
+    fn put_annotated_tag(&self, tag: &AnnotatedTag) -> Result<ContentHash> {
+        let hash = tag.hash();
+        self.annotated_tags
+            .write_or_poisoned()
+            .insert(hash, tag.encode_current_msgpack());
+        Ok(hash)
+    }
+
+    fn list_annotated_tags(&self) -> Result<Vec<ContentHash>> {
+        Ok(self
+            .annotated_tags
+            .read_or_poisoned()
+            .keys()
+            .copied()
+            .collect())
+    }
+
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
         Ok(self
             .blobs

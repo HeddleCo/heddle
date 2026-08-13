@@ -25,5 +25,5 @@ pub use git_core::{
 };
 pub use git_residual::{
     BridgeMirrorRetirementStatus, RESIDUALS_DIR_NAME, ResidualObject, ResidualStore,
-    ResidualTagRef, bridge_mirror_retirement_status, resolve_lossy_object,
+    bridge_mirror_retirement_status, resolve_lossy_object,
 };

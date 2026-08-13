@@ -47,10 +47,10 @@ fn assert_invalid_object_message_contains(error: StoreError, expected: &str) {
 }
 
 #[test]
-fn test_pack_container_header_codec_matches_v3_bytes() {
+fn test_pack_container_header_codec_matches_v4_bytes() {
     let mut canonical = Vec::new();
     canonical.extend_from_slice(b"LMPK");
-    canonical.extend_from_slice(&3_u32.to_be_bytes());
+    canonical.extend_from_slice(&4_u32.to_be_bytes());
     canonical.extend_from_slice(&0_u64.to_be_bytes());
     let checksum = blake3::hash(&canonical);
     canonical.extend_from_slice(checksum.as_bytes());
@@ -69,7 +69,7 @@ fn test_pack_container_header_codec_matches_v3_bytes() {
 #[test]
 fn test_pack_index_header_codec_matches_current_bytes() {
     let current = b"LMI\0\
-        \0\0\0\x03\
+        \0\0\0\x04\
         \0\0\0\0\0\0\0\0"
         .to_vec();
 
@@ -86,15 +86,90 @@ fn test_pack_index_header_codec_matches_current_bytes() {
 }
 
 #[test]
+fn test_pack_reader_refuses_v3_pack_with_migration_advice() {
+    let hash = create_test_hash(77);
+    let payload = b"legacy-v3-pack".to_vec();
+    let (mut pack_data, index_data) = single_record_pack(hash, |record| {
+        super::varint::encode_type_and_size(ObjectType::Blob, payload.len() as u64, record);
+        super::varint::encode_varint(payload.len() as u64, record);
+        record.extend_from_slice(&payload);
+    });
+
+    pack_data[4..8].copy_from_slice(&3_u32.to_be_bytes());
+    pack_data.truncate(pack_data.len() - super::PACK_CHECKSUM_LEN);
+    super::append_container_checksum(&mut pack_data);
+
+    let error = match PackReader::from_bytes(pack_data, index_data) {
+        Ok(_) => panic!("legacy pack version must be refused"),
+        Err(error) => error,
+    };
+    assert_invalid_object_message_contains(error, "run `heddle migrate`");
+}
+
+#[test]
+fn test_pack_reader_refuses_v3_index_with_migration_advice() {
+    let hash = create_test_hash(77);
+    let payload = b"legacy-v3-index".to_vec();
+    let (pack_data, mut index_data) = single_record_pack(hash, |record| {
+        super::varint::encode_type_and_size(ObjectType::Blob, payload.len() as u64, record);
+        super::varint::encode_varint(payload.len() as u64, record);
+        record.extend_from_slice(&payload);
+    });
+    index_data[4..8].copy_from_slice(&3_u32.to_be_bytes());
+
+    let error = match PackReader::from_bytes(pack_data, index_data) {
+        Ok(_) => panic!("legacy pack index version must be refused"),
+        Err(error) => error,
+    };
+    assert_invalid_object_message_contains(error, "run `heddle migrate`");
+}
+
+#[test]
+fn test_pack_reader_refuses_newer_version_with_upgrade_advice() {
+    let mut pack_data = Vec::new();
+    super::write_container_header(&mut pack_data, pack_container_spec(), 0);
+    pack_data[4..8].copy_from_slice(&5_u32.to_be_bytes());
+    super::append_container_checksum(&mut pack_data);
+
+    let error = match PackReader::from_bytes(pack_data, PackIndex::new().to_bytes()) {
+        Ok(_) => panic!("future pack version must be refused"),
+        Err(error) => error,
+    };
+    assert_invalid_object_message_contains(error, "upgrade heddle");
+}
+
+#[test]
+fn test_annotated_tag_pack_entry_roundtrips_with_distinct_id_kind() {
+    let hash = create_test_hash(78);
+    let payload = b"annotated-tag-msgpack".to_vec();
+    let mut builder = PackBuilder::new(CompressionConfig::default());
+    builder.add_id(
+        PackObjectId::AnnotatedTag(hash),
+        ObjectType::AnnotatedTag,
+        payload.clone(),
+    );
+    let (pack_data, index_data, _) = builder.build().unwrap();
+
+    let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
+    assert_eq!(
+        reader
+            .get_object(&PackObjectId::AnnotatedTag(hash))
+            .unwrap(),
+        Some((ObjectType::AnnotatedTag, payload))
+    );
+}
+
+#[test]
 fn test_pack_index_roundtrip() {
     let mut index = PackIndex::new();
     index.add(PackObjectId::Hash(create_test_hash(1)), 100);
     index.add(PackObjectId::Hash(create_test_hash(2)), 200);
     index.add(PackObjectId::StateId(StateId::from_bytes([3; 32])), 300);
+    index.add(PackObjectId::AnnotatedTag(create_test_hash(4)), 400);
     index.sort();
 
     let bytes = index.to_bytes();
-    assert_eq!(bytes.len(), 16 + 3 * 40);
+    assert_eq!(bytes.len(), 16 + 4 * 40);
     let restored = PackIndex::from_bytes(&bytes).expect("Failed to deserialize index");
 
     assert_eq!(
@@ -117,7 +192,13 @@ fn test_pack_index_roundtrip() {
     );
     assert_eq!(
         restored
-            .find(&PackObjectId::Hash(create_test_hash(4)))
+            .find(&PackObjectId::AnnotatedTag(create_test_hash(4)))
+            .unwrap(),
+        Some(400)
+    );
+    assert_eq!(
+        restored
+            .find(&PackObjectId::Hash(create_test_hash(5)))
             .unwrap(),
         None
     );
@@ -837,11 +918,11 @@ fn test_delta_window_pack_bytes_are_stable() {
     assert!(stats.delta_count > 0);
     assert_eq!(
         blake3::hash(&pack_data).to_string(),
-        "98c8d82f9aad4dab4e7ff441e0b4faaf74b19682846bfd8b7b3bf31d4007939f"
+        "43e7db46c9bdbbc13c320c5ed1de1d28e3793beb4a3a5f1d73424eba536ee514"
     );
     assert_eq!(
         blake3::hash(&index_data).to_string(),
-        "bd27a0fc4ce6c2614fcaef304b01472e98007d121041ffbe4961b275ea44c540"
+        "0d505a9c037871e263ce1839e8721a99d1e41675d7709d4b8f3286d5d9f2febd"
     );
 }
 

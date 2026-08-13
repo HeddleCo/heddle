@@ -57,24 +57,12 @@ use crate::git_core::{GitProjectionError, GitProjectionResult, git_err};
 pub const RESIDUALS_DIR_NAME: &str = "git-residuals";
 
 const RESIDUAL_MAGIC: &[u8; 4] = b"HR01";
-const TAG_REFS_FILE_NAME: &str = "tag-refs.json";
 const NOTE_REFS_FILE_NAME: &str = "note-refs.json";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResidualTagRef {
-    pub name: String,
-    pub oid: ObjectId,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResidualNoteRef {
     pub name: String,
     pub oid: ObjectId,
-}
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-struct TagRefFile {
-    refs: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -325,36 +313,6 @@ impl ResidualStore {
         Ok(())
     }
 
-    /// Capture an annotated tag wrapper and any tag-of-tag wrappers beneath it.
-    ///
-    /// The eventual commit/tree/blob target is captured by its own import
-    /// classification. This method preserves only the tag objects that native
-    /// markers cannot reconstruct.
-    pub fn capture_tag_chain_from_git_repo(
-        &self,
-        source: &SleyRepository,
-        tag_oid: &ObjectId,
-    ) -> GitProjectionResult<()> {
-        let format = source.object_format();
-        let mut oid = *tag_oid;
-        let mut seen = HashSet::new();
-        loop {
-            if !seen.insert(oid) {
-                return Err(GitProjectionError::Git(format!(
-                    "annotated tag cycle while capturing {tag_oid}"
-                )));
-            }
-            let object = source.read_object(&oid).map_err(git_err)?;
-            if object.object_type != GitObjectType::Tag {
-                return Ok(());
-            }
-            self.put_residual_verified(oid, format, GitObjectType::Tag, object.body.clone())?;
-            oid = sley::TagObject::parse(format, &object.body)
-                .map_err(git_err)?
-                .object;
-        }
-    }
-
     /// Capture the complete object closure rooted at an imported auxiliary ref.
     pub fn capture_object_closure_from_git_repo(
         &self,
@@ -397,57 +355,6 @@ impl ResidualStore {
             }
         }
         Ok(())
-    }
-
-    /// Persist the raw annotated-tag object targeted by an imported tag ref.
-    /// Native markers retain the peeled state identity; this sidecar retains the
-    /// wrapper identity needed to recreate an annotated ref in a fresh projection.
-    pub fn record_tag_ref(&self, name: &str, oid: ObjectId) -> GitProjectionResult<()> {
-        let path = self.residuals_dir().join(TAG_REFS_FILE_NAME);
-        let mut file = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<TagRefFile>(&bytes).map_err(|error| {
-                GitProjectionError::Git(format!(
-                    "invalid Raw Git Object Residual tag-ref mapping: {error}"
-                ))
-            })?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => TagRefFile::default(),
-            Err(error) => return Err(error.into()),
-        };
-        file.refs.insert(name.to_string(), oid.to_string());
-        let bytes = serde_json::to_vec_pretty(&file).map_err(|error| {
-            GitProjectionError::Git(format!(
-                "serialize Raw Git Object Residual tag-ref mapping: {error}"
-            ))
-        })?;
-        write_file_atomic(&path, &bytes)?;
-        Ok(())
-    }
-
-    /// Read the durable imported annotated-tag ref identities.
-    pub fn list_tag_refs(&self, format: ObjectFormat) -> GitProjectionResult<Vec<ResidualTagRef>> {
-        let path = self.residuals_dir().join(TAG_REFS_FILE_NAME);
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(error.into()),
-        };
-        let file = serde_json::from_slice::<TagRefFile>(&bytes).map_err(|error| {
-            GitProjectionError::Git(format!(
-                "invalid Raw Git Object Residual tag-ref mapping: {error}"
-            ))
-        })?;
-        file.refs
-            .into_iter()
-            .map(|(name, oid)| {
-                ObjectId::from_hex(format, &oid)
-                    .map(|oid| ResidualTagRef { name, oid })
-                    .map_err(|error| {
-                        GitProjectionError::Git(format!(
-                            "invalid annotated-tag residual oid {oid}: {error}"
-                        ))
-                    })
-            })
-            .collect()
     }
 
     /// Persist an imported note ref independently of a Git mirror.
@@ -695,35 +602,6 @@ impl ResidualStore {
             }
         }
         Ok(true)
-    }
-
-    /// Install every captured annotated-tag object into a Git object database.
-    /// Ref reconciliation remains name/ownership based; this only replaces the
-    /// Bridge Mirror's former role as the tag byte warehouse.
-    pub fn install_tag_residuals_into(
-        &self,
-        target: &SleyRepository,
-    ) -> GitProjectionResult<usize> {
-        let format = target.object_format();
-        let mut installed = 0;
-        for oid in self.list_residual_oids(format)? {
-            let Some(residual) = self.get_residual(format, &oid)? else {
-                continue;
-            };
-            if residual.object_type != GitObjectType::Tag {
-                continue;
-            }
-            let written = target
-                .write_object(EncodedObject::new(residual.object_type, residual.body))
-                .map_err(git_err)?;
-            if written != oid {
-                return Err(GitProjectionError::Git(format!(
-                    "installing annotated-tag residual wrote {written}, expected {oid}"
-                )));
-            }
-            installed += 1;
-        }
-        Ok(installed)
     }
 
     fn residual_path(&self, object_format: ObjectFormat, oid: &ObjectId) -> PathBuf {

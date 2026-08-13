@@ -81,6 +81,23 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .envs(ENV.iter().copied())
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} failed in {}:\nstdout: {}\nstderr: {}",
+        dir.display(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    out.stdout
+}
+
 /// Initialise a non-bare repo with a fixed initial branch (so HEAD and the
 /// default branch name don't depend on the runner's git config).
 fn init_repo(dir: &Path) {
@@ -131,14 +148,10 @@ fn object_set(dir: &Path) -> Vec<String> {
 /// repo, and assert byte-identical SHAs + fsck-clean. `case` names the
 /// fixture for failure messages.
 fn assert_roundtrip_fidelity(case: &str, source: &Path) {
-    assert_roundtrip_fidelity_opts(case, source, false);
+    assert_roundtrip_fidelity_opts_via(case, source, false, false);
 }
 
-/// As [`assert_roundtrip_fidelity`], but `lossy` opts into the explicit
-/// `--lossy` import surface for fixtures that intentionally exercise
-/// unrepresentable git tree data. The fidelity bar is unchanged: the
-/// round-trip must still be byte-identical whenever the source is representable.
-fn assert_roundtrip_fidelity_opts(case: &str, source: &Path, lossy: bool) {
+fn assert_roundtrip_fidelity_opts_via(case: &str, source: &Path, lossy: bool, direct_ingest: bool) {
     // git fsck the source first: a corrupt fixture would make the whole
     // comparison meaningless.
     git(source, &["fsck", "--full", "--strict"]);
@@ -149,16 +162,63 @@ fn assert_roundtrip_fidelity_opts(case: &str, source: &Path, lossy: bool) {
         "[{case}] fixture has no refs to round-trip"
     );
     let source_objects = object_set(source);
+    let annotated_refs = source_refs
+        .iter()
+        .filter(|(name, oid)| {
+            name.starts_with("refs/tags/") && git(source, &["cat-file", "-t", oid]).trim() == "tag"
+        })
+        .map(|(name, oid)| (name.clone(), oid.clone()))
+        .collect::<Vec<_>>();
 
     let heddle_home = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
     let mut bridge = GitProjection::new(&repo);
-    ingest_into_bridge(&mut bridge, source, lossy)
-        .unwrap_or_else(|e| panic!("[{case}] import from git failed: {e}"));
+    if direct_ingest {
+        ingest::import_git_into_scoped_with_options(
+            source,
+            repo.root(),
+            ingest::ImportOptions {
+                lossy,
+                ..ingest::ImportOptions::default()
+            },
+            ingest::ImportScope::all(),
+        )
+        .unwrap_or_else(|error| panic!("[{case}] direct ingest failed: {error}"));
+        bridge
+            .build_existing_mapping(Some(source))
+            .unwrap_or_else(|error| panic!("[{case}] direct mapping build failed: {error}"));
+        bridge
+            .seed_ingest_identity_mappings_from_store()
+            .unwrap_or_else(|error| panic!("[{case}] direct mapping seed failed: {error}"));
+        bridge
+            .save_mapping_to_disk()
+            .unwrap_or_else(|error| panic!("[{case}] direct mapping save failed: {error}"));
+    } else {
+        ingest_into_bridge(&mut bridge, source, lossy)
+            .unwrap_or_else(|e| panic!("[{case}] bridge import from git failed: {e}"));
+    }
     assert!(
         !repo.heddle_dir().join("git").exists(),
         "[{case}] import must not create the retired eager Git mirror"
     );
+    assert!(
+        !repo
+            .heddle_dir()
+            .join("git-residuals")
+            .join("tag-refs.json")
+            .exists(),
+        "[{case}] annotated tags must not use the retired tag-ref sidecar"
+    );
+    if !annotated_refs.is_empty() {
+        let stored = repo
+            .store()
+            .list_annotated_tags()
+            .expect("list native annotated tags");
+        assert!(
+            stored.len() >= annotated_refs.len(),
+            "[{case}] annotated refs were not stored as first-class native objects"
+        );
+    }
 
     let dest_home = TempDir::new().expect("dest temp");
     let dest = dest_home.path().join("export");
@@ -188,6 +248,14 @@ fn assert_roundtrip_fidelity_opts(case: &str, source: &Path, lossy: bool) {
                  export refs: {export_refs:?}"
             ),
         }
+    }
+    for (name, source_oid) in &annotated_refs {
+        let exported_oid = export_refs.get(name).expect("exported annotated tag ref");
+        assert_eq!(
+            git_bytes(source, &["cat-file", "tag", source_oid]),
+            git_bytes(&dest, &["cat-file", "tag", exported_oid]),
+            "[{case}] git cat-file tag bytes differ for {name}"
+        );
     }
 
     // (2) explicit per-object check: every reachable commit/tree/blob in
@@ -453,7 +521,20 @@ fn roundtrip_annotated_and_lightweight_tags() {
     write_and_commit(dir, "f.txt", b"v2\n", "release follow-up");
     // Annotated tag (objectname == tag-object SHA; must round-trip verbatim).
     git(dir, &["tag", "-a", "v2.0", "-m", "annotated release v2.0"]);
+    let inner = git(dir, &["rev-parse", "refs/tags/v2.0"]);
+    git(
+        dir,
+        &[
+            "tag",
+            "-a",
+            "v2.0-chain",
+            "-m",
+            "outer annotated tag",
+            inner.trim(),
+        ],
+    );
     assert_roundtrip_fidelity("tags", dir);
+    assert_roundtrip_fidelity_opts_via("tags-direct-ingest", dir, false, true);
 }
 
 /// Materialize the checked-in signed-object bundle into a fresh working repo
@@ -532,6 +613,7 @@ fn roundtrip_signed_commit_and_tag() {
     );
 
     assert_roundtrip_fidelity("signed-commit-and-tag", &source);
+    assert_roundtrip_fidelity_opts_via("signed-commit-and-tag-direct-ingest", &source, false, true);
 }
 
 #[test]

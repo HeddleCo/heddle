@@ -2847,7 +2847,7 @@ mod tests {
     ) -> (ProviderPackSpool, ProviderPackWriter) {
         let mut header = [0_u8; 16];
         header[..4].copy_from_slice(b"LMPK");
-        header[4..8].copy_from_slice(&3_u32.to_be_bytes());
+        header[4..8].copy_from_slice(&4_u32.to_be_bytes());
         let spool = ProviderPackSpool::new_in(
             root,
             ProviderPackManifest {

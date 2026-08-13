@@ -15,16 +15,16 @@ use super::{
     FsStore,
     fs_io::{list_hashes_from_dir, read_file_bytes, read_file_header},
     fs_paths::{
-        action_path, actions_dir, blobs_dir, hash_path, redaction_path, redactions_dir,
-        state_attachment_index_lock_path, state_attachment_index_path, state_attachment_path,
-        state_attachments_dir, state_path, state_visibility_dir, state_visibility_path, states_dir,
-        trees_dir,
+        action_path, actions_dir, annotated_tags_dir, blobs_dir, hash_path, redaction_path,
+        redactions_dir, state_attachment_index_lock_path, state_attachment_index_path,
+        state_attachment_path, state_attachments_dir, state_path, state_visibility_dir,
+        state_visibility_path, states_dir, trees_dir,
     },
 };
 use crate::{
     object::{
-        Action, ActionId, Blob, ContentHash, State, StateAttachment, StateAttachmentId, StateId,
-        Tree,
+        Action, ActionId, AnnotatedTag, Blob, ContentHash, State, StateAttachment,
+        StateAttachmentId, StateId, Tree,
     },
     store::{
         HeddleError, ObjectStore, Result, SnapshotCommitDescriptor, codec,
@@ -72,6 +72,18 @@ fn validate_tree_serialized(data: &[u8], hash: ContentHash) -> Result<Tree> {
     }
 
     Ok(tree)
+}
+
+fn validate_annotated_tag(data: &[u8], hash: ContentHash) -> Result<AnnotatedTag> {
+    let tag = AnnotatedTag::decode_current_msgpack(data)
+        .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+    if tag.hash() != hash {
+        return Err(HeddleError::Corruption {
+            expected: hash,
+            found: tag.hash(),
+        });
+    }
+    Ok(tag)
 }
 
 fn validate_loaded_state(requested_id: &StateId, mut state: State) -> Result<State> {
@@ -127,15 +139,26 @@ fn append_packed_hashes_with_counter(
 ) -> Result<()> {
     let mut known: HashSet<_> = hashes.iter().copied().collect();
     for id in manager.list_all_ids()? {
-        let PackObjectId::Hash(hash) = id else {
-            continue;
+        let hash = match id {
+            PackObjectId::Hash(hash) if expected_type != ObjectType::AnnotatedTag => hash,
+            PackObjectId::AnnotatedTag(hash) if expected_type == ObjectType::AnnotatedTag => hash,
+            PackObjectId::Hash(_) | PackObjectId::StateId(_) | PackObjectId::AnnotatedTag(_) => {
+                continue;
+            }
         };
         counter.membership_check();
         if known.contains(&hash) {
             continue;
         }
         counter.header_read();
-        if manager.get_hashed_object_type(&hash)? == Some(expected_type) {
+        let found_type = if expected_type == ObjectType::AnnotatedTag {
+            manager
+                .get_object(&PackObjectId::AnnotatedTag(hash))?
+                .map(|(object_type, _)| object_type)
+        } else {
+            manager.get_hashed_object_type(&hash)?
+        };
+        if found_type == Some(expected_type) {
             known.insert(hash);
             hashes.push(hash);
         }
@@ -349,6 +372,9 @@ pub(super) fn validate_pack_entry(
 ) -> Result<()> {
     match (id, obj_type) {
         (PackObjectId::Hash(hash), ObjectType::Blob) => validate_blob_bytes(data, *hash),
+        (PackObjectId::AnnotatedTag(hash), ObjectType::AnnotatedTag) => {
+            validate_annotated_tag(data, *hash).map(|_| ())
+        }
         (PackObjectId::Hash(hash), ObjectType::Tree) => {
             validate_tree_serialized(data, *hash).map(|_| ())
         }
@@ -749,6 +775,39 @@ impl FsStore {
 }
 
 impl ObjectStore for FsStore {
+    fn get_annotated_tag(&self, hash: &ContentHash) -> Result<Option<AnnotatedTag>> {
+        let path = hash_path(&annotated_tags_dir(&self.root), hash);
+        if let Some(data) = read_file_bytes(&path)? {
+            return validate_annotated_tag(data.as_slice(), *hash).map(Some);
+        }
+        self.reload_packs_if_stale()?;
+        if let Ok(manager) = self.pack_manager().read()
+            && let Some((ObjectType::AnnotatedTag, data)) =
+                manager.get_object(&PackObjectId::AnnotatedTag(*hash))?
+        {
+            return validate_annotated_tag(&data, *hash).map(Some);
+        }
+        Ok(None)
+    }
+
+    fn put_annotated_tag(&self, tag: &AnnotatedTag) -> Result<ContentHash> {
+        let hash = tag.hash();
+        let path = hash_path(&annotated_tags_dir(&self.root), &hash);
+        if !path.exists() {
+            self.write_loose_object_atomic(&path, &tag.encode_current_msgpack())?;
+        }
+        Ok(hash)
+    }
+
+    fn list_annotated_tags(&self) -> Result<Vec<ContentHash>> {
+        self.reload_packs_if_stale()?;
+        let mut hashes = list_hashes_from_dir(&annotated_tags_dir(&self.root))?;
+        if let Ok(manager) = self.pack_manager().read() {
+            append_packed_hashes(&mut hashes, &manager, ObjectType::AnnotatedTag)?;
+        }
+        Ok(hashes)
+    }
+
     fn clear_recent_caches(&self) {
         self.clear_recent_object_caches();
     }
@@ -1251,7 +1310,7 @@ impl ObjectStore for FsStore {
                     .into_iter()
                     .filter_map(|id| match id {
                         PackObjectId::StateId(state) => Some(state),
-                        PackObjectId::Hash(_) => None,
+                        PackObjectId::Hash(_) | PackObjectId::AnnotatedTag(_) => None,
                     }),
             );
         }
@@ -1416,6 +1475,9 @@ impl ObjectStore for FsStore {
         }
 
         match id {
+            PackObjectId::AnnotatedTag(hash) => Ok(self
+                .get_annotated_tag(hash)?
+                .map(|tag| (ObjectType::AnnotatedTag, tag.encode_current_msgpack()))),
             PackObjectId::Hash(hash) => {
                 if let Some(blob) = self.get_blob(hash)? {
                     return Ok(Some((ObjectType::Blob, blob.content().to_vec())));
@@ -1811,7 +1873,7 @@ mod enumeration_tests {
     fn delta_chain_manager() -> (TempDir, PackManager, Vec<ContentHash>) {
         const SPEC: PackContainerSpec = PackContainerSpec {
             magic: b"LMPK",
-            version: 3,
+            version: 4,
         };
         let dir = TempDir::new().unwrap();
         let base = b"delta-chain base payload ".repeat(64);

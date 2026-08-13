@@ -17,6 +17,10 @@ pub(super) fn trees_dir(root: &Path) -> PathBuf {
     objects_dir(root).join("trees")
 }
 
+pub(super) fn annotated_tags_dir(root: &Path) -> PathBuf {
+    objects_dir(root).join("annotated-tags")
+}
+
 pub(super) fn states_dir(root: &Path) -> PathBuf {
     objects_dir(root).join("states")
 }

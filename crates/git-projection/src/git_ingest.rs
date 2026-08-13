@@ -4,7 +4,7 @@
 use std::{collections::HashSet, path::Path};
 
 use objects::store::ObjectStore;
-use sley::{GitObjectType, ObjectId};
+use sley::ObjectId;
 
 use super::{
     git_core::{
@@ -77,15 +77,9 @@ fn capture_import_residuals(
 
     for update in updates {
         match update.namespace {
-            RefNamespace::Tag => {
-                let object = source_repo
-                    .read_object(&update.target)
-                    .map_err(super::git_core::git_err)?;
-                if object.object_type == GitObjectType::Tag {
-                    residuals.capture_tag_chain_from_git_repo(&source_repo, &update.target)?;
-                    residuals.record_tag_ref(&update.name, update.target)?;
-                }
-            }
+            // The ingest pack writes annotated tags directly into the native
+            // object store. No bridge-only residual/sidecar path is needed.
+            RefNamespace::Tag => {}
             RefNamespace::Note => {
                 residuals.capture_object_closure_from_git_repo(&source_repo, &update.target)?;
                 residuals.record_note_ref(&update.name, update.target)?;

@@ -268,6 +268,9 @@ fn timeline_id_from_pack_id(id: PackObjectId) -> Result<TimelineOperationId> {
         PackObjectId::StateId(_) => Err(HeddleError::InvalidObject(
             "timeline pack contains a state-id entry".to_string(),
         )),
+        PackObjectId::AnnotatedTag(_) => Err(HeddleError::InvalidObject(
+            "timeline pack contains an annotated-tag entry".to_string(),
+        )),
     }
 }
 

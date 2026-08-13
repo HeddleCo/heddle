@@ -78,6 +78,7 @@ impl LogicalInventoryEntry {
         let (id_tag, id_bytes) = match &id {
             PackObjectId::Hash(hash) => (0, hash.as_bytes()),
             PackObjectId::StateId(state_id) => (1, state_id.as_bytes()),
+            PackObjectId::AnnotatedTag(hash) => (2, hash.as_bytes()),
         };
         canonical[0] = id_tag;
         canonical[1..33].copy_from_slice(id_bytes);
@@ -152,5 +153,31 @@ impl fmt::Debug for PackRepresentationHash {
 impl fmt::Display for PackRepresentationHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.to_hex())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object::ContentHash;
+
+    #[test]
+    fn logical_id_distinguishes_annotated_tag_and_hash_id_kinds() {
+        let bytes = [7; 32];
+        let data = b"same object bytes";
+        let hash = ContentHash::from_bytes(bytes);
+
+        let content_id = logical_id_from_objects([(
+            PackObjectId::Hash(hash),
+            ObjectType::Blob,
+            data.as_slice(),
+        )]);
+        let annotated_tag_id = logical_id_from_objects([(
+            PackObjectId::AnnotatedTag(hash),
+            ObjectType::Blob,
+            data.as_slice(),
+        )]);
+
+        assert_ne!(content_id, annotated_tag_id);
     }
 }

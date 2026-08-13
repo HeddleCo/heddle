@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::Result;
 use crate::FsMonitorConfig;
 
-pub(crate) const SUPPORTED_REPO_FORMAT: u32 = 3;
+pub(crate) const SUPPORTED_REPO_FORMAT: u32 = 4;
 
 /// Repository configuration stored in `.heddle/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
