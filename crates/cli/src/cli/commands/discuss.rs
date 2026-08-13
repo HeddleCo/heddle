@@ -415,8 +415,8 @@ fn to_view(store: &CollaborationStore, value: &MaterializedDiscussion) -> Result
         let author = decoded.operation.author;
         turns.push(TurnOutput {
             operation_id: operation_id.to_string_full(),
-            author_name: author.principal.name,
-            author_email: author.principal.email,
+            author_name: author.principal.name_lossy().into_owned(),
+            author_email: author.principal.email_lossy().into_owned(),
             agent: author.agent.map(|agent| agent.to_string()),
             occurred_at_ms: decoded.operation.occurred_at_ms,
             body: turn.body.clone(),

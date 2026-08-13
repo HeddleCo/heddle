@@ -1529,10 +1529,7 @@ fn step_nonatomic_restores_redaction_sidecar_when_a_later_batch_fails() {
         state: s1,
         path: "config/secrets.toml".to_string(),
         reason: "leaked credential".to_string(),
-        redactor: Principal {
-            name: "Grace Hopper".to_string(),
-            email: "grace@example.com".to_string(),
-        },
+        redactor: Principal::new("Grace Hopper", "grace@example.com"),
         redacted_at: chrono::Utc::now(),
         signature: None,
         purged_at: None,
@@ -1621,10 +1618,7 @@ fn visibility_record(
         state,
         tier,
         embargo_until: None,
-        declarer: objects::object::Principal {
-            name: "Grace Hopper".to_string(),
-            email: "grace@example.com".to_string(),
-        },
+        declarer: objects::object::Principal::new("Grace Hopper", "grace@example.com"),
         declared_at: chrono::DateTime::from_timestamp(ts, 0).unwrap(),
         signature: None,
         supersedes: None,

@@ -96,7 +96,7 @@ fn cmd_visibility_set(cli: &Cli, repo: &Repository, args: VisibilitySetArgs) -> 
         tier: tier.as_str().to_string(),
         label: tier_label(&tier).map(str::to_string),
         record_id: outcome.put.id.short(),
-        declarer: format!("{} <{}>", declarer.name, declarer.email),
+        declarer: declarer.to_string(),
         declared_at: outcome.declared_at.to_rfc3339(),
         supersedes: None,
     };
@@ -150,7 +150,7 @@ fn cmd_visibility_promote(cli: &Cli, repo: &Repository, args: VisibilityPromoteA
         tier: tier.as_str().to_string(),
         label: tier_label(&tier).map(str::to_string),
         record_id: outcome.put.id.short(),
-        declarer: format!("{} <{}>", declarer.name, declarer.email),
+        declarer: declarer.to_string(),
         declared_at: outcome.declared_at.to_rfc3339(),
         supersedes: Some(superseded.short()),
     };
@@ -186,7 +186,7 @@ fn cmd_visibility_show(cli: &Cli, repo: &Repository, args: VisibilityShowArgs) -
         tier: tier.as_str().to_string(),
         label: tier_label(&tier).map(str::to_string),
         effective_public,
-        declarer: effective.map(|r| format!("{} <{}>", r.declarer.name, r.declarer.email)),
+        declarer: effective.map(|r| r.declarer.to_string()),
         declared_at: effective.map(|r| r.declared_at.to_rfc3339()),
         record_count: blob.records.len(),
     };
@@ -246,7 +246,7 @@ fn cmd_visibility_list(cli: &Cli, repo: &Repository, _args: VisibilityListArgs) 
             state: state.short(),
             tier: latest.tier.as_str().to_string(),
             label: tier_label(&latest.tier).map(str::to_string),
-            declarer: format!("{} <{}>", latest.declarer.name, latest.declarer.email),
+            declarer: latest.declarer.to_string(),
             declared_at: latest.declared_at.to_rfc3339(),
         });
     }
