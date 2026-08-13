@@ -1873,7 +1873,7 @@ mod enumeration_tests {
     fn delta_chain_manager() -> (TempDir, PackManager, Vec<ContentHash>) {
         const SPEC: PackContainerSpec = PackContainerSpec {
             magic: b"LMPK",
-            version: 3,
+            version: 4,
         };
         let dir = TempDir::new().unwrap();
         let base = b"delta-chain base payload ".repeat(64);
