@@ -41,7 +41,7 @@ fn put_state_with_file(
         tree_hash,
         parents,
         Attribution::human(Principal::new(
-            principal_name.to_string(),
+            principal_name,
             format!("{principal_name}@example.com"),
         )),
     );
@@ -116,8 +116,8 @@ fn merge_provenance_credits_each_parent_for_its_lines() {
                 provenance.origins[*i as usize]
                     .attribution
                     .principal
-                    .name
-                    .clone()
+                    .name_lossy()
+                    .into_owned()
             })
             .collect()
     };
@@ -192,8 +192,8 @@ fn merge_with_genuinely_new_line_attributes_to_merger() {
                 provenance.origins[*i as usize]
                     .attribution
                     .principal
-                    .name
-                    .clone()
+                    .name_lossy()
+                    .into_owned()
             })
             .collect()
     };
@@ -235,8 +235,8 @@ fn linear_commit_provenance_unchanged_under_n_parent_path() {
                 provenance.origins[*i as usize]
                     .attribution
                     .principal
-                    .name
-                    .clone()
+                    .name_lossy()
+                    .into_owned()
             })
             .collect()
     };
@@ -306,8 +306,8 @@ fn diamond_merge_provenance_walks_each_ancestor_once() {
                 provenance.origins[*i as usize]
                     .attribution
                     .principal
-                    .name
-                    .clone()
+                    .name_lossy()
+                    .into_owned()
             })
             .collect()
     };

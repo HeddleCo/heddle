@@ -399,7 +399,7 @@ mod tests {
         let repo = Repository::init_default(temp.path()).unwrap();
         let principal = Principal::new("Reviewer", "reviewer@example.com");
         let mut config = repo.config().clone();
-        config.set_principal(principal.name.clone(), principal.email.clone());
+        config.set_principal(principal.name_lossy(), principal.email_lossy());
         config.save(&repo.heddle_dir().join("config.toml")).unwrap();
         let repo = Repository::open(temp.path()).unwrap();
         std::fs::write(temp.path().join("reviewed.txt"), "reviewed\n").unwrap();

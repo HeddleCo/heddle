@@ -1965,11 +1965,9 @@ fn parse_current_entry(cursor: &mut Cursor<'_>) -> Result<OpEntry> {
     let operation = decode_current_record(&op_data)?;
 
     let actor_name_len = cursor.read_u16()? as usize;
-    let actor_name = String::from_utf8(cursor.read_bytes(actor_name_len)?)
-        .map_err(|_| HeddleError::InvalidObject("invalid UTF-8 in actor.name".to_string()))?;
+    let actor_name = cursor.read_bytes(actor_name_len)?;
     let actor_email_len = cursor.read_u16()? as usize;
-    let actor_email = String::from_utf8(cursor.read_bytes(actor_email_len)?)
-        .map_err(|_| HeddleError::InvalidObject("invalid UTF-8 in actor.email".to_string()))?;
+    let actor_email = cursor.read_bytes(actor_email_len)?;
     let actor = std::sync::Arc::new(objects::object::Principal {
         name: actor_name,
         email: actor_email,
@@ -2042,11 +2040,9 @@ fn read_entry_at(file: &mut File, offset: u64) -> Result<OpEntry> {
     let operation = decode_current_record(&op_data)?;
 
     let actor_name_len = read_u16_from_file(file)? as usize;
-    let actor_name = String::from_utf8(read_vec_from_file(file, actor_name_len)?)
-        .map_err(|_| HeddleError::InvalidObject("invalid UTF-8 in actor.name".to_string()))?;
+    let actor_name = read_vec_from_file(file, actor_name_len)?;
     let actor_email_len = read_u16_from_file(file)? as usize;
-    let actor_email = String::from_utf8(read_vec_from_file(file, actor_email_len)?)
-        .map_err(|_| HeddleError::InvalidObject("invalid UTF-8 in actor.email".to_string()))?;
+    let actor_email = read_vec_from_file(file, actor_email_len)?;
     let actor = std::sync::Arc::new(objects::object::Principal {
         name: actor_name,
         email: actor_email,
@@ -2115,10 +2111,10 @@ fn encode_entry_with(
     out.extend_from_slice(&(op_data.len() as u32).to_le_bytes());
     out.extend_from_slice(&op_data);
 
-    let actor_name = entry.actor.name.as_bytes();
+    let actor_name = &entry.actor.name;
     out.extend_from_slice(&(actor_name.len() as u16).to_le_bytes());
     out.extend_from_slice(actor_name);
-    let actor_email = entry.actor.email.as_bytes();
+    let actor_email = &entry.actor.email;
     out.extend_from_slice(&(actor_email.len() as u16).to_le_bytes());
     out.extend_from_slice(actor_email);
     match entry.operation_id {

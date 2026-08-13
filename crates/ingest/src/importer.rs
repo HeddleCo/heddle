@@ -427,7 +427,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
                     git_lossy,
                     ParentMapPolicy::RequireMapped,
                 )?;
-                if git_lossy || commit_has_lossy_identity(commit) {
+                if git_lossy {
                     packed
                         .stats
                         .non_reconstructable_commits
@@ -558,12 +558,6 @@ struct PackedImportStats {
     lossy_entries: Vec<LossyImportEntry>,
     non_reconstructable_commits: HashSet<String>,
     lossy_trees: HashSet<String>,
-}
-
-fn commit_has_lossy_identity(commit: &CommitEntry) -> bool {
-    [&commit.author, &commit.committer].iter().any(|signature| {
-        signature.name.contains('\u{FFFD}') || signature.email.contains('\u{FFFD}')
-    })
 }
 
 trait ImportPackSink {

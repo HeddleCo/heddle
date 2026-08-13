@@ -26,8 +26,8 @@ impl InitPrincipalPlan {
         Self {
             status: "configured",
             source: Some(source),
-            name: Some(principal.name.clone()),
-            email: Some(principal.email.clone()),
+            name: Some(principal.name_lossy().into_owned()),
+            email: Some(principal.email_lossy().into_owned()),
             recommended_action: None,
         }
     }
@@ -45,7 +45,7 @@ impl InitPrincipalPlan {
 
 /// Whether a principal lacks accountable identity (same policy as capture).
 pub fn principal_is_unconfigured(principal: &Principal) -> bool {
-    principal_lacks_accountable_identity(&principal.name, &principal.email)
+    principal_lacks_accountable_identity(&principal.name_lossy(), &principal.email_lossy())
 }
 
 /// Prefer the first configured principal among ordered candidates.

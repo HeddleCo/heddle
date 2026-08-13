@@ -16,10 +16,11 @@ blake3.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 hex.workspace = true
-heddle-format = { path = "../format", version = "0.11" }
+heddle-format = { path = "../format", version = "0.12" }
 rand.workspace = true
 rmp-serde.workspace = true
 serde.workspace = true
+serde_bytes.workspace = true
 serde_json.workspace = true
 sley.workspace = true
 thiserror.workspace = true

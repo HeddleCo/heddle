@@ -110,8 +110,8 @@ pub struct CommitEntry {
 /// Author/committer identity + timestamp.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitSignature {
-    pub name: String,
-    pub email: String,
+    pub name: Vec<u8>,
+    pub email: Vec<u8>,
     pub time: DateTime<Utc>,
     /// Timezone offset in seconds east of UTC (git's `+HHMM`). Heddle used
     /// to discard this; #564 step 1 preserves it for byte-reconstruction.
@@ -884,8 +884,8 @@ fn signature_from_raw(raw: &[u8]) -> Option<GitSignature> {
     let time = sig.time;
     let tz_offset = i32::from(time.timezone_offset_minutes) * 60;
     Some(GitSignature {
-        name: String::from_utf8_lossy(sig.name.as_bytes()).into_owned(),
-        email: String::from_utf8_lossy(sig.email.as_bytes()).into_owned(),
+        name: sig.name.as_bytes().to_vec(),
+        email: sig.email.as_bytes().to_vec(),
         time: Utc
             .timestamp_opt(time.seconds, 0)
             .single()
@@ -1064,8 +1064,8 @@ mod tests {
 
         assert_eq!(commit.sha, head);
         assert_eq!(commit.parents.len(), 1, "second commit has one parent");
-        assert_eq!(commit.author.name, "Test");
-        assert_eq!(commit.author.email, "test@example.com");
+        assert_eq!(commit.author.name, b"Test");
+        assert_eq!(commit.author.email, b"test@example.com");
         assert!(String::from_utf8_lossy(&commit.message).contains("second commit"));
     }
 

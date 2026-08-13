@@ -6,19 +6,31 @@ use serde::{Deserialize, Serialize};
 /// Human identity accountable for changes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Principal {
-    /// Human-readable name.
-    pub name: String,
-    /// Email address.
-    pub email: String,
+    /// Human-readable name bytes, preserved exactly from the source identity.
+    #[serde(with = "serde_bytes")]
+    pub name: Vec<u8>,
+    /// Email address bytes, preserved exactly from the source identity.
+    #[serde(with = "serde_bytes")]
+    pub email: Vec<u8>,
 }
 
 impl Principal {
     /// Create a new principal.
-    pub fn new(name: impl Into<String>, email: impl Into<String>) -> Self {
+    pub fn new(name: impl AsRef<[u8]>, email: impl AsRef<[u8]>) -> Self {
         Self {
-            name: name.into(),
-            email: email.into(),
+            name: name.as_ref().to_vec(),
+            email: email.as_ref().to_vec(),
         }
+    }
+
+    /// Return the name as text for display or text-only API boundaries.
+    pub fn name_lossy(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.name)
+    }
+
+    /// Return the email as text for display or text-only API boundaries.
+    pub fn email_lossy(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.email)
     }
 
     /// Create from environment variables.
@@ -28,13 +40,16 @@ impl Principal {
         if name.trim().is_empty() || email.trim().is_empty() {
             return None;
         }
-        Some(Self { name, email })
+        Some(Self {
+            name: name.into_bytes(),
+            email: email.into_bytes(),
+        })
     }
 }
 
 impl std::fmt::Display for Principal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} <{}>", self.name, self.email)
+        write!(f, "{} <{}>", self.name_lossy(), self.email_lossy())
     }
 }
 

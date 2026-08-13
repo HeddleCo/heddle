@@ -392,8 +392,8 @@ pub struct LocalGitIdentity {
 impl LocalGitIdentity {
     pub fn from_principal(principal: &Principal) -> Self {
         Self {
-            name: principal.name.clone(),
-            email: principal.email.clone(),
+            name: principal.name_lossy().into_owned(),
+            email: principal.email_lossy().into_owned(),
         }
     }
 
@@ -2253,9 +2253,11 @@ pub fn git_config_identity_with_global_fallback(
 }
 
 pub fn principal_is_default_unknown(principal: &Principal) -> bool {
-    principal.name.trim().is_empty()
-        || principal.email.trim().is_empty()
-        || (principal.name.trim() == "Unknown" && principal.email.trim() == "unknown@example.com")
+    let name = principal.name_lossy();
+    let email = principal.email_lossy();
+    name.trim().is_empty()
+        || email.trim().is_empty()
+        || (name.trim() == "Unknown" && email.trim() == "unknown@example.com")
 }
 
 fn git_config_value_with_global_fallback(
