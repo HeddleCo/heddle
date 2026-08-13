@@ -119,7 +119,7 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
         redactor: principal.clone(),
         redacted_at: now,
         signature: None,
-        purged_at: None,
+        purge: None,
         supersedes: None,
     };
     if let Some(signer) = &signer {
@@ -163,7 +163,7 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
                     redactor: principal.clone(),
                     redacted_at: now,
                     signature: None,
-                    purged_at: None,
+                    purge: None,
                     supersedes: Some(primary_id),
                 };
                 if let Some(signer) = &signer {
@@ -326,7 +326,10 @@ fn cmd_redact_list(cli: &Cli, repo: &Repository, _args: RedactListArgs) -> Resul
                 redactor: redaction.redactor.to_string(),
                 redacted_at: redaction.redacted_at.to_rfc3339(),
                 purged: redaction.is_purged(),
-                purged_at: redaction.purged_at.map(|t| t.to_rfc3339()),
+                purged_at: redaction
+                    .purge
+                    .as_ref()
+                    .map(|evidence| evidence.purged_at.to_rfc3339()),
             });
         }
     }
@@ -405,7 +408,10 @@ fn cmd_redact_show(cli: &Cli, repo: &Repository, args: RedactShowArgs) -> Result
         reason: &redaction.reason,
         redactor: redaction.redactor.to_string(),
         redacted_at: redaction.redacted_at.to_rfc3339(),
-        purged_at: redaction.purged_at.map(|t| t.to_rfc3339()),
+        purged_at: redaction
+            .purge
+            .as_ref()
+            .map(|evidence| evidence.purged_at.to_rfc3339()),
         supersedes: redaction.supersedes.map(|h| h.short()),
         signed: redaction.signature.is_some(),
         signature_status: signature_status.label(),
@@ -606,14 +612,86 @@ struct TrustRemoveOutput {
 }
 
 fn cmd_redact_trust(cli: &Cli, repo: &Repository, command: RedactTrustCommands) -> Result<()> {
-    match command {
-        RedactTrustCommands::Add(args) => cmd_redact_trust_add(cli, repo, args),
-        RedactTrustCommands::List(args) => cmd_redact_trust_list(cli, repo, args),
-        RedactTrustCommands::Remove(args) => cmd_redact_trust_remove(cli, repo, args),
+    cmd_trust(cli, repo, command, TrustCapability::Redact)
+}
+
+pub(super) fn cmd_purge_trust(
+    cli: &Cli,
+    repo: &Repository,
+    command: RedactTrustCommands,
+) -> Result<()> {
+    cmd_trust(cli, repo, command, TrustCapability::Purge)
+}
+
+#[derive(Clone, Copy)]
+enum TrustCapability {
+    Redact,
+    Purge,
+}
+
+impl TrustCapability {
+    fn section(self) -> &'static str {
+        match self {
+            Self::Redact => "redact",
+            Self::Purge => "purge",
+        }
+    }
+
+    fn command(self) -> &'static str {
+        match self {
+            Self::Redact => "heddle redact trust",
+            Self::Purge => "heddle redact purge trust",
+        }
+    }
+
+    fn output_kind(self, operation: &str) -> &'static str {
+        match (self, operation) {
+            (Self::Redact, "add") => "redact_trust_add",
+            (Self::Redact, "list") => "redact_trust_list",
+            (Self::Redact, "remove") => "redact_trust_remove",
+            (Self::Purge, "add") => "purge_trust_add",
+            (Self::Purge, "list") => "purge_trust_list",
+            (Self::Purge, "remove") => "purge_trust_remove",
+            _ => unreachable!("known trust operation"),
+        }
+    }
+
+    fn error_kind(self, operation: &str) -> &'static str {
+        match (self, operation) {
+            (Self::Redact, "key_source_required") => "redact_trust_key_source_required",
+            (Self::Redact, "key_duplicate") => "redact_trust_key_duplicate",
+            (Self::Redact, "config_missing") => "redact_trust_config_missing",
+            (Self::Redact, "keys_missing") => "redact_trust_keys_missing",
+            (Self::Redact, "key_not_found") => "redact_trust_key_not_found",
+            (Self::Purge, "key_source_required") => "purge_trust_key_source_required",
+            (Self::Purge, "key_duplicate") => "purge_trust_key_duplicate",
+            (Self::Purge, "config_missing") => "purge_trust_config_missing",
+            (Self::Purge, "keys_missing") => "purge_trust_keys_missing",
+            (Self::Purge, "key_not_found") => "purge_trust_key_not_found",
+            _ => unreachable!("known trust error"),
+        }
     }
 }
 
-fn cmd_redact_trust_add(cli: &Cli, repo: &Repository, args: RedactTrustAddArgs) -> Result<()> {
+fn cmd_trust(
+    cli: &Cli,
+    repo: &Repository,
+    command: RedactTrustCommands,
+    capability: TrustCapability,
+) -> Result<()> {
+    match command {
+        RedactTrustCommands::Add(args) => cmd_trust_add(cli, repo, args, capability),
+        RedactTrustCommands::List(args) => cmd_trust_list(cli, repo, args, capability),
+        RedactTrustCommands::Remove(args) => cmd_trust_remove(cli, repo, args, capability),
+    }
+}
+
+fn cmd_trust_add(
+    cli: &Cli,
+    repo: &Repository,
+    args: RedactTrustAddArgs,
+    capability: TrustCapability,
+) -> Result<()> {
     let (algorithm, public_key) = match (args.from_pem, args.algorithm, args.public_key) {
         (Some(pem_path), _, _) => {
             // Reuse the existing PEM loader — same code path operators
@@ -629,10 +707,13 @@ fn cmd_redact_trust_add(cli: &Cli, repo: &Repository, args: RedactTrustAddArgs) 
         (None, Some(algorithm), Some(public_key)) => (algorithm, public_key),
         (None, _, _) => {
             return Err(anyhow!(RecoveryAdvice::invalid_usage(
-                "redact_trust_key_source_required",
+                capability.error_kind("key_source_required"),
                 "supply either `--from-pem <PATH>` or both `--algorithm` and `--public-key`",
-                "Use `heddle redact trust add --from-pem <PATH>` or pass both raw key fields.",
-                "heddle redact trust add --from-pem <PATH>",
+                format!(
+                    "Use `{} add --from-pem <PATH>` or pass both raw key fields.",
+                    capability.command()
+                ),
+                format!("{} add --from-pem <PATH>", capability.command()),
             )));
         }
     };
@@ -647,12 +728,12 @@ fn cmd_redact_trust_add(cli: &Cli, repo: &Repository, args: RedactTrustAddArgs) 
     let root = value
         .as_table_mut()
         .ok_or_else(|| anyhow!("repo config root must be a TOML table"))?;
-    let redact = root
-        .entry("redact".to_string())
+    let trust_section = root
+        .entry(capability.section().to_string())
         .or_insert_with(|| toml::Value::Table(Default::default()))
         .as_table_mut()
-        .ok_or_else(|| anyhow!("[redact] section must be a table"))?;
-    let trusted_keys = redact
+        .ok_or_else(|| anyhow!("[{}] section must be a table", capability.section()))?;
+    let trusted_keys = trust_section
         .entry("trusted_keys".to_string())
         .or_insert_with(|| toml::Value::Array(Vec::new()))
         .as_array_mut()
@@ -676,14 +757,14 @@ fn cmd_redact_trust_add(cli: &Cli, repo: &Repository, args: RedactTrustAddArgs) 
     });
     if already_trusted {
         return Err(anyhow!(RecoveryAdvice::safety_refusal(
-            "redact_trust_key_duplicate",
+            capability.error_kind("key_duplicate"),
             format!("key {algorithm}:{public_key} is already in the trust list"),
-            "Inspect trusted redaction keys with `heddle redact trust list`.",
+            format!("Inspect trusted keys with `{} list`.", capability.command()),
             format!("the trust list already contains key {algorithm}:{public_key}"),
             "adding it again would create duplicate trust metadata without changing trust",
             "repo config, trust entries, objects, refs, and worktree files were left unchanged",
-            "heddle redact trust list",
-            vec!["heddle redact trust list".to_string()],
+            format!("{} list", capability.command()),
+            vec![format!("{} list", capability.command())],
         )));
     }
 
@@ -711,7 +792,7 @@ fn cmd_redact_trust_add(cli: &Cli, repo: &Repository, args: RedactTrustAddArgs) 
         label: args.label,
     };
     let output = TrustAddOutput {
-        output_kind: "redact_trust_add",
+        output_kind: capability.output_kind("add"),
         entry,
     };
     if should_output_json(cli, None) {
@@ -727,11 +808,17 @@ fn cmd_redact_trust_add(cli: &Cli, repo: &Repository, args: RedactTrustAddArgs) 
     Ok(())
 }
 
-fn cmd_redact_trust_list(cli: &Cli, repo: &Repository, _args: RedactTrustListArgs) -> Result<()> {
-    let keys: Vec<TrustEntryOutput> = repo
-        .config()
-        .redact
-        .trusted_keys
+fn cmd_trust_list(
+    cli: &Cli,
+    repo: &Repository,
+    _args: RedactTrustListArgs,
+    capability: TrustCapability,
+) -> Result<()> {
+    let trusted_keys = match capability {
+        TrustCapability::Redact => &repo.config().redact.trusted_keys,
+        TrustCapability::Purge => &repo.config().purge.trusted_keys,
+    };
+    let keys: Vec<TrustEntryOutput> = trusted_keys
         .iter()
         .map(|k| TrustEntryOutput {
             algorithm: k.algorithm.clone(),
@@ -741,7 +828,7 @@ fn cmd_redact_trust_list(cli: &Cli, repo: &Repository, _args: RedactTrustListArg
         .collect();
     let count = keys.len();
     let output = TrustListOutput {
-        output_kind: "redact_trust_list",
+        output_kind: capability.output_kind("list"),
         trusted_keys: keys,
         count,
     };
@@ -763,10 +850,11 @@ fn cmd_redact_trust_list(cli: &Cli, repo: &Repository, _args: RedactTrustListArg
     Ok(())
 }
 
-fn cmd_redact_trust_remove(
+fn cmd_trust_remove(
     cli: &Cli,
     repo: &Repository,
     args: RedactTrustRemoveArgs,
+    capability: TrustCapability,
 ) -> Result<()> {
     let config_path = repo.heddle_dir().join("config.toml");
     let raw = std::fs::read_to_string(&config_path)
@@ -775,21 +863,32 @@ fn cmd_redact_trust_remove(
     let root = value
         .as_table_mut()
         .ok_or_else(|| anyhow!("repo config root must be a TOML table"))?;
-    let Some(redact) = root.get_mut("redact").and_then(|v| v.as_table_mut()) else {
-        return Err(anyhow!(redact_trust_nothing_to_remove_advice(
-            "redact_trust_config_missing",
-            "no [redact] section in config; nothing to remove",
+    let Some(trust_section) = root
+        .get_mut(capability.section())
+        .and_then(|v| v.as_table_mut())
+    else {
+        return Err(anyhow!(trust_nothing_to_remove_advice(
+            capability.error_kind("config_missing"),
+            format!(
+                "no [{}] section in config; nothing to remove",
+                capability.section()
+            ),
             &args.public_key,
+            capability,
         )));
     };
-    let Some(trusted_keys) = redact
+    let Some(trusted_keys) = trust_section
         .get_mut("trusted_keys")
         .and_then(|v| v.as_array_mut())
     else {
-        return Err(anyhow!(redact_trust_nothing_to_remove_advice(
-            "redact_trust_keys_missing",
-            "no `trusted_keys` array in [redact]; nothing to remove",
+        return Err(anyhow!(trust_nothing_to_remove_advice(
+            capability.error_kind("keys_missing"),
+            format!(
+                "no `trusted_keys` array in [{}]; nothing to remove",
+                capability.section()
+            ),
             &args.public_key,
+            capability,
         )));
     };
 
@@ -803,13 +902,14 @@ fn cmd_redact_trust_remove(
     });
     let removed = before - trusted_keys.len();
     if removed == 0 {
-        return Err(anyhow!(redact_trust_nothing_to_remove_advice(
-            "redact_trust_key_not_found",
+        return Err(anyhow!(trust_nothing_to_remove_advice(
+            capability.error_kind("key_not_found"),
             format!(
                 "no trusted key matched `{}`; nothing removed",
                 args.public_key
             ),
             &args.public_key,
+            capability,
         )));
     }
 
@@ -819,7 +919,7 @@ fn cmd_redact_trust_remove(
 
     if should_output_json(cli, None) {
         let output = TrustRemoveOutput {
-            output_kind: "redact_trust_remove",
+            output_kind: capability.output_kind("remove"),
             removed,
         };
         println!("{}", serde_json::to_string(&output)?);
@@ -832,20 +932,21 @@ fn cmd_redact_trust_remove(
     Ok(())
 }
 
-fn redact_trust_nothing_to_remove_advice(
+fn trust_nothing_to_remove_advice(
     kind: &'static str,
     error: impl Into<String>,
     public_key: &str,
+    capability: TrustCapability,
 ) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         kind,
         error,
-        "Inspect trusted redaction keys with `heddle redact trust list`.",
+        format!("Inspect trusted keys with `{} list`.", capability.command()),
         format!("the trust list does not contain key `{public_key}`"),
         "removing a missing key would imply a trust change that did not occur",
         "repo config, trust entries, objects, refs, and worktree files were left unchanged",
-        "heddle redact trust list",
-        vec!["heddle redact trust list".to_string()],
+        format!("{} list", capability.command()),
+        vec![format!("{} list", capability.command())],
     )
 }
 

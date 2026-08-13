@@ -57,7 +57,7 @@ pub use hash::{ChangeId, ChangeIdParseError, ContentHash, StateId, StateIdParseE
 pub use identifiers::{MarkerName, Scope, ThreadName};
 pub use key_binding::{
     KEY_BINDING_REGISTRY_SIGNING_PAYLOAD_VERSION_TAG, KEY_BINDING_SIGNING_PAYLOAD_VERSION_TAG,
-    KeyBinding, KeyBindingError, KeyBindingRegistry,
+    KeyBinding, KeyBindingError, KeyBindingRegistry, KeyRole,
 };
 pub use manifest::{
     BuiltManifest, FsckFinding, FsckOptions, FsckReport, FsckRule, ManifestBinding,
@@ -68,7 +68,8 @@ pub use manifest::{
 };
 pub use operation_id::{OperationId, OperationIdParseError};
 pub use redaction::{
-    REDACTION_SIGNING_PAYLOAD_VERSION_TAG, Redaction, RedactionError, RedactionsBlob,
+    PURGE_SIGNING_PAYLOAD_VERSION_TAG, PurgeEvidence, REDACTION_SIGNING_PAYLOAD_VERSION_TAG,
+    Redaction, RedactionError, RedactionsBlob,
 };
 pub use risk_signal::{
     MAX_REASON_LEN, ProducerId, RiskSignal, RiskSignalBlob, RiskSignalError, RiskSignalKind,

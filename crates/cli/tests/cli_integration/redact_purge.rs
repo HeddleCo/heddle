@@ -28,6 +28,35 @@ fn write_test_private_key(path: &std::path::Path, pem: &str) {
         .expect("write test private key");
 }
 
+fn local_identity_public_key(path: &std::path::Path) -> String {
+    let identity_raw =
+        fs::read_to_string(path.join(".heddle/identity.toml")).expect("read local identity");
+    let identity: toml::Value = toml::from_str(&identity_raw).expect("parse local identity");
+    identity
+        .get("public_key")
+        .and_then(toml::Value::as_str)
+        .expect("local identity public key")
+        .to_string()
+}
+
+fn trust_local_purge_identity(path: &std::path::Path) {
+    let public_key = local_identity_public_key(path);
+    heddle(
+        &[
+            "redact",
+            "purge",
+            "trust",
+            "add",
+            "--algorithm",
+            "ed25519",
+            "--public-key",
+            &public_key,
+        ],
+        Some(path),
+    )
+    .expect("authorize local purge identity");
+}
+
 /// Bootstrap a repo containing a fake-secret file in a captured state.
 /// Returns the temp dir and the short change-id of the capture.
 fn setup_repo_with_secret() -> (TempDir, String) {
@@ -317,6 +346,7 @@ fn undo_redact_refusal_uses_json_error_envelope() {
 #[test]
 fn purge_apply_with_force_records_and_marks_redaction_purged() {
     let (temp, state) = setup_repo_with_secret();
+    trust_local_purge_identity(temp.path());
     heddle(
         &[
             "redact",
@@ -366,6 +396,62 @@ fn purge_apply_with_force_records_and_marks_redaction_purged() {
         purge_list["count"].as_u64().unwrap(),
         1,
         "purge list must surface exactly one entry after one purge"
+    );
+}
+
+#[test]
+fn redaction_trust_does_not_authorize_local_purge() {
+    let (temp, state) = setup_repo_with_secret();
+    let public_key = local_identity_public_key(temp.path());
+    heddle(
+        &[
+            "redact",
+            "trust",
+            "add",
+            "--algorithm",
+            "ed25519",
+            "--public-key",
+            &public_key,
+        ],
+        Some(temp.path()),
+    )
+    .expect("grant declaration-only trust");
+    heddle(
+        &[
+            "redact",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "leaked credential",
+        ],
+        Some(temp.path()),
+    )
+    .expect("declare redaction");
+
+    let error = heddle(
+        &[
+            "redact",
+            "purge",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--force",
+        ],
+        Some(temp.path()),
+    )
+    .expect_err("redaction trust must not grant destructive authority");
+    assert!(error.contains("[purge].trusted_keys"), "{error}");
+
+    let list: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "redact", "list"], Some(temp.path())).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !list["redactions"][0]["purged"].as_bool().unwrap(),
+        "failed authorization must not write a false purged status"
     );
 }
 
@@ -732,6 +818,7 @@ fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
     let pem_path = a.path().join("ed25519.pem");
     write_test_private_key(&pem_path, &pem);
     let _ = signed_redact_on_repo_a(&a, &state, &pem_path);
+    trust_local_purge_identity(a.path());
 
     heddle(
         &[
@@ -780,6 +867,7 @@ fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
     heddle(
         &[
             "redact",
+            "purge",
             "trust",
             "add",
             "--algorithm",
@@ -789,7 +877,7 @@ fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
         ],
         Some(&b_path),
     )
-    .expect("B trusts A's client metadata identity");
+    .expect("B grants A's client identity purge authority");
     heddle(
         &["remote", "add", "origin", a.path().to_str().unwrap()],
         Some(&b_path),
@@ -814,7 +902,7 @@ fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
     // The wire path goes through accept_wire_redactions, which (a)
     // verifies the signature, (b) persists the record, and (c) drops
     // the local blob bytes because the incoming record carries
-    // `purged_at: Some(_)`. That last step is the byte-removal half of
+    // separately signed purge evidence. That last step is the byte-removal half of
     // "purge propagation."
 }
 
@@ -1024,6 +1112,7 @@ fn purge_apply_also_emits_ignore_hint() {
     // working-tree leak is the same problem regardless of which
     // verb you reach for.
     let (temp, state) = setup_repo_with_secret();
+    trust_local_purge_identity(temp.path());
     // Redact first (purge refuses without a prior redaction).
     heddle(
         &[

@@ -21,9 +21,23 @@ use crate::object::{ContentHash, Principal, StateId, StateSignature};
 
 /// Stable byte prefix the signing payload begins with. Bumping this invalidates
 /// signatures written with an older prefix unless verification also gains
-/// explicit version dispatch. Version 2 intentionally makes a clean break from
-/// the unused version 1 format.
-pub const REDACTION_SIGNING_PAYLOAD_VERSION_TAG: &[u8] = b"hd-redact-v2\x00";
+/// explicit version dispatch. Version 3 separates reversible redaction
+/// authority from destructive purge authority.
+pub const REDACTION_SIGNING_PAYLOAD_VERSION_TAG: &[u8] = b"hd-redact-v3\x00";
+
+/// Domain separator for a destructive purge authorization.
+pub const PURGE_SIGNING_PAYLOAD_VERSION_TAG: &[u8] = b"hd-purge-v1\x00";
+
+/// Separately signed evidence authorizing irreversible byte deletion.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurgeEvidence {
+    /// Principal that authorized the purge.
+    pub purger: Principal,
+    /// Time at which the purger authorized deletion.
+    pub purged_at: DateTime<Utc>,
+    /// Signature over the redaction declaration, purger, and purge time.
+    pub signature: StateSignature,
+}
 
 /// A redaction declaration on a single blob in a single state.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,10 +63,9 @@ pub struct Redaction {
     /// reviewers will see them flagged unsigned).
     #[serde(default)]
     pub signature: Option<StateSignature>,
-    /// When `heddle purge` removed the underlying blob bytes. `None` while
-    /// the redaction is declared-but-bytes-still-on-disk.
+    /// Independent authority for destructive byte deletion.
     #[serde(default)]
-    pub purged_at: Option<DateTime<Utc>>,
+    pub purge: Option<PurgeEvidence>,
     /// The redaction this one supersedes, if any — for chains where the
     /// reason or scope was updated. Identified by the prior redaction's
     /// content hash.
@@ -63,8 +76,8 @@ pub struct Redaction {
 impl Redaction {
     /// Build the canonical bytes a signer covers. Anything outside this
     /// payload (the `signature` itself) is intentionally excluded because a
-    /// signature cannot sign itself. Lifecycle state, including `purged_at`,
-    /// is covered so a relay cannot forge a destructive purge transition.
+    /// signature cannot sign itself. Purge authorization uses a distinct
+    /// payload and signature so redaction trust never implies deletion rights.
     pub fn canonical_signing_payload(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(256);
         buf.extend_from_slice(REDACTION_SIGNING_PAYLOAD_VERSION_TAG);
@@ -80,34 +93,47 @@ impl Redaction {
         buf.push(0);
         buf.extend_from_slice(self.redacted_at.to_rfc3339().as_bytes());
         buf.push(0);
-        match self.purged_at {
-            Some(purged_at) => {
-                buf.push(1);
-                buf.extend_from_slice(purged_at.to_rfc3339().as_bytes());
-            }
-            None => buf.push(0),
-        }
-        buf.push(0);
         if let Some(supersedes) = &self.supersedes {
             buf.extend_from_slice(supersedes.as_bytes());
         }
         buf
     }
 
-    /// Mark the redaction as purged. Returns `true` if the state changed
-    /// (`false` if already purged — callers can use this for idempotency).
-    pub fn mark_purged(&mut self, at: DateTime<Utc>) -> bool {
-        if self.purged_at.is_some() {
+    /// Deterministic bytes covered by a [`PurgeEvidence`] signature.
+    pub fn canonical_purge_signing_payload(
+        &self,
+        purger: &Principal,
+        purged_at: DateTime<Utc>,
+    ) -> Vec<u8> {
+        let declaration = ContentHash::compute_typed(
+            "redaction-declaration-v3",
+            &self.canonical_signing_payload(),
+        );
+        let mut buf = Vec::with_capacity(192);
+        buf.extend_from_slice(PURGE_SIGNING_PAYLOAD_VERSION_TAG);
+        buf.extend_from_slice(declaration.as_bytes());
+        buf.extend_from_slice(&purger.name);
+        buf.push(0);
+        buf.extend_from_slice(&purger.email);
+        buf.push(0);
+        buf.extend_from_slice(purged_at.to_rfc3339().as_bytes());
+        buf
+    }
+
+    /// Attach separately signed purge authority. Returns `false` when the
+    /// record was already purged so retries remain idempotent.
+    pub fn mark_purged(&mut self, evidence: PurgeEvidence) -> bool {
+        if self.purge.is_some() {
             false
         } else {
-            self.purged_at = Some(at);
+            self.purge = Some(evidence);
             true
         }
     }
 
     /// Whether the blob bytes are gone from local storage.
     pub fn is_purged(&self) -> bool {
-        self.purged_at.is_some()
+        self.purge.is_some()
     }
 
     /// Format the stub a reader sees instead of the redacted blob content.
@@ -127,8 +153,12 @@ impl Redaction {
         ));
         out.push_str(&format!("# reason:      {}\n", self.reason));
         out.push_str(&format!("# redaction:   {}\n", redaction_id.short()));
-        if let Some(purged_at) = self.purged_at {
-            out.push_str(&format!("# purged-at:   {}\n", purged_at.to_rfc3339()));
+        if let Some(purge) = &self.purge {
+            out.push_str(&format!(
+                "# purged-at:   {}\n",
+                purge.purged_at.to_rfc3339()
+            ));
+            out.push_str(&format!("# purger:      {}\n", purge.purger));
             out.push_str("# The original bytes have been purged from local storage.\n");
         } else {
             out.push_str("# The original bytes remain on disk pending purge.\n");
@@ -147,7 +177,7 @@ pub struct RedactionsBlob {
 }
 
 impl RedactionsBlob {
-    pub const FORMAT_VERSION: u8 = 1;
+    pub const FORMAT_VERSION: u8 = 2;
 
     pub fn new(redactions: Vec<Redaction>) -> Self {
         Self {
@@ -161,11 +191,22 @@ impl RedactionsBlob {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, RedactionError> {
+        self.validate()?;
         rmp_serde::to_vec(self).map_err(|err| RedactionError::Encoding(err.to_string()))
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, RedactionError> {
-        rmp_serde::from_slice(bytes).map_err(|err| RedactionError::Decoding(err.to_string()))
+        let blob: Self = rmp_serde::from_slice(bytes)
+            .map_err(|err| RedactionError::Decoding(err.to_string()))?;
+        blob.validate()?;
+        Ok(blob)
+    }
+
+    pub fn validate(&self) -> Result<(), RedactionError> {
+        if self.format_version != Self::FORMAT_VERSION {
+            return Err(RedactionError::UnsupportedVersion(self.format_version));
+        }
+        Ok(())
     }
 
     pub fn push(&mut self, redaction: Redaction) {
@@ -188,20 +229,30 @@ impl RedactionsBlob {
 
     /// Mark every redaction in this blob as purged. Returns the count that
     /// actually transitioned (others were already purged).
-    pub fn mark_all_purged(&mut self, at: DateTime<Utc>) -> usize {
+    pub fn mark_all_purged(
+        &mut self,
+        evidence: Vec<PurgeEvidence>,
+    ) -> Result<usize, RedactionError> {
+        if self.redactions.len() != evidence.len() {
+            return Err(RedactionError::PurgeEvidenceCountMismatch);
+        }
         let mut transitioned = 0;
-        for redaction in &mut self.redactions {
-            if redaction.mark_purged(at) {
+        for (redaction, evidence) in self.redactions.iter_mut().zip(evidence) {
+            if redaction.mark_purged(evidence) {
                 transitioned += 1;
             }
         }
-        transitioned
+        Ok(transitioned)
     }
 }
 
 /// Errors produced while encoding/decoding redactions.
 #[derive(Debug, thiserror::Error)]
 pub enum RedactionError {
+    #[error("unsupported redactions blob version {0}; run the redaction migration")]
+    UnsupportedVersion(u8),
+    #[error("purge evidence count does not match redaction count")]
+    PurgeEvidenceCountMismatch,
     #[error("encoding redaction: {0}")]
     Encoding(String),
     #[error("decoding redaction: {0}")]
@@ -234,8 +285,20 @@ mod tests {
             redactor: principal(),
             redacted_at: Utc.with_ymd_and_hms(2026, 5, 10, 14, 33, 0).unwrap(),
             signature: None,
-            purged_at: None,
+            purge: None,
             supersedes: None,
+        }
+    }
+
+    fn purge_evidence(at: DateTime<Utc>) -> PurgeEvidence {
+        PurgeEvidence {
+            purger: Principal::new("Repository Owner", "owner@example.com"),
+            purged_at: at,
+            signature: StateSignature {
+                algorithm: "ed25519".to_string(),
+                public_key: "11".repeat(32),
+                signature: "22".repeat(64),
+            },
         }
     }
 
@@ -248,6 +311,19 @@ mod tests {
         assert_eq!(decoded, original);
         // Format-version is load-bearing: future readers branch on it.
         assert_eq!(decoded.format_version, RedactionsBlob::FORMAT_VERSION);
+    }
+
+    #[test]
+    fn prior_blob_format_is_rejected_instead_of_dual_read() {
+        let legacy = RedactionsBlob {
+            format_version: 1,
+            redactions: vec![redaction(blob_hash(), "legacy declaration")],
+        };
+        let bytes = rmp_serde::to_vec(&legacy).expect("encode unsupported fixture");
+        assert!(matches!(
+            RedactionsBlob::decode(&bytes),
+            Err(RedactionError::UnsupportedVersion(1))
+        ));
     }
 
     #[test]
@@ -277,16 +353,21 @@ mod tests {
         let before = r.canonical_signing_payload();
         let at = Utc.with_ymd_and_hms(2026, 5, 11, 0, 0, 0).unwrap();
         assert!(!r.is_purged());
-        assert!(r.mark_purged(at));
+        assert!(r.mark_purged(purge_evidence(at)));
         assert!(r.is_purged());
         // Second call is a no-op — operators can safely retry purge
         // without distorting the `purged_at` audit trail.
-        assert!(!r.mark_purged(Utc.with_ymd_and_hms(2026, 5, 12, 0, 0, 0).unwrap()));
-        assert_eq!(r.purged_at, Some(at));
-        assert_ne!(
+        assert!(!r.mark_purged(purge_evidence(
+            Utc.with_ymd_and_hms(2026, 5, 12, 0, 0, 0).unwrap()
+        )));
+        assert_eq!(
+            r.purge.as_ref().map(|evidence| evidence.purged_at),
+            Some(at)
+        );
+        assert_eq!(
             before,
             r.canonical_signing_payload(),
-            "purge lifecycle must be covered by the signed payload"
+            "purge authority must not mutate the redaction signing payload"
         );
     }
 
@@ -306,7 +387,9 @@ mod tests {
         assert!(stub.contains("remain on disk pending purge"));
 
         let mut purged = r.clone();
-        purged.mark_purged(Utc.with_ymd_and_hms(2026, 5, 11, 0, 0, 0).unwrap());
+        purged.mark_purged(purge_evidence(
+            Utc.with_ymd_and_hms(2026, 5, 11, 0, 0, 0).unwrap(),
+        ));
         let purged_stub = purged.stub_text(&blob_hash());
         assert!(purged_stub.contains("# purged-at:"));
         assert!(purged_stub.contains("purged from local storage"));
@@ -390,7 +473,7 @@ mod proptests {
                     redacted_at: chrono::DateTime::<Utc>::from_timestamp(secs, 0)
                         .expect("in-range timestamp"),
                     signature: None,
-                    purged_at: None,
+                    purge: None,
                     supersedes,
                 }
             })
@@ -433,12 +516,21 @@ mod proptests {
         ) {
             let t1 = chrono::DateTime::<Utc>::from_timestamp(t1_secs, 0).unwrap();
             let t2 = chrono::DateTime::<Utc>::from_timestamp(t1_secs + t2_offset, 0).unwrap();
-            prop_assert!(r.mark_purged(t1));
+            let evidence = |purged_at| PurgeEvidence {
+                purger: Principal::new("Owner", "owner@example.com"),
+                purged_at,
+                signature: StateSignature {
+                    algorithm: "ed25519".to_string(),
+                    public_key: "11".repeat(32),
+                    signature: "22".repeat(64),
+                },
+            };
+            prop_assert!(r.mark_purged(evidence(t1)));
             prop_assert!(r.is_purged());
-            prop_assert_eq!(r.purged_at, Some(t1));
+            prop_assert_eq!(r.purge.as_ref().map(|purge| purge.purged_at), Some(t1));
             // Second purge with a later timestamp is a no-op.
-            prop_assert!(!r.mark_purged(t2));
-            prop_assert_eq!(r.purged_at, Some(t1));
+            prop_assert!(!r.mark_purged(evidence(t2)));
+            prop_assert_eq!(r.purge.as_ref().map(|purge| purge.purged_at), Some(t1));
         }
 
         /// The stub a reader sees must always identify the redaction.

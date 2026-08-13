@@ -127,14 +127,17 @@ pub enum PurgeCommands {
     /// Physically remove the blob bytes referenced by an existing
     /// redaction. Refuses if no redaction declared the blob first.
     ///
-    /// Workspace-owner capability today; the surface is documented in
-    /// the build brief at `.agents/redaction-primitive.md`. The
-    /// capability check is a TODO until Biscuit wiring lands; for now
-    /// `--force` is the explicit confirmation step.
+    /// The active signing key must be authorized by
+    /// `[purge].trusted_keys`; `--force` confirms intent but does not
+    /// grant destructive authority.
     Apply(PurgeApplyArgs),
     /// List every `Purge` oplog entry — who removed bytes, when, and
     /// which redaction the purge acted on.
     List(PurgeListArgs),
+    /// Manage the independent list of keys authorized to destroy bytes.
+    /// Redaction trust does not imply purge trust.
+    #[command(subcommand)]
+    Trust(RedactTrustCommands),
 }
 
 #[derive(Clone, Debug, Args)]

@@ -2,9 +2,9 @@
 //! `heddle redact purge` — physically remove the bytes referenced by an
 //! existing redaction. Irreversible by design.
 //!
-//! Workspace-owner capability is a documented constraint in the build
-//! brief; the Biscuit verifier rule is a future-work item. For now,
-//! `--force` is the explicit confirmation step.
+//! The active repository signing key must be explicitly authorized in
+//! `[purge].trusted_keys`. This destructive authority is independent from
+//! `[redact].trusted_keys`; `--force` confirms intent but grants no authority.
 
 use anyhow::{Context, Result, anyhow};
 use heddle_core::{PurgeApplyPlan, plan_purge_apply, purge_apply_message, purge_force_command};
@@ -25,6 +25,7 @@ pub fn cmd_purge(cli: &Cli, command: PurgeCommands) -> Result<()> {
     match command {
         PurgeCommands::Apply(args) => cmd_purge_apply(cli, &repo, args),
         PurgeCommands::List(args) => cmd_purge_list(cli, &repo, args),
+        PurgeCommands::Trust(command) => super::redact::cmd_purge_trust(cli, &repo, command),
     }
 }
 
@@ -37,9 +38,8 @@ struct PurgeApplyOutput {
     path: String,
     redactions_marked: usize,
     blob_bytes_removed: bool,
-    /// Future-work flag: the loose-bytes purge today doesn't repack
-    /// pack files. `true` means the bytes survive in a packfile and an
-    /// operator must rerun a pack rewrite to fully eliminate them.
+    /// Always `false` after a successful purge. Retained packed bytes are an
+    /// error, never a successful outcome.
     blob_remains_in_pack: bool,
     purger: String,
     message: String,
@@ -75,7 +75,7 @@ fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result
         )));
     }
 
-    let outcome = repo.purge_blob(&blob, &principal)?;
+    let outcome = repo.purge_blob(&blob)?;
 
     if let Some(redaction_id) = &outcome.redaction_id {
         let scope = repo.op_scope();
@@ -144,15 +144,15 @@ fn cmd_purge_list(cli: &Cli, repo: &Repository, _args: PurgeListArgs) -> Result<
     let mut rows: Vec<Row> = Vec::new();
     for (blob, redactions_blob) in &listing {
         for redaction in &redactions_blob.redactions {
-            if let Some(purged_at) = redaction.purged_at {
+            if let Some(purge) = &redaction.purge {
                 let id = super::redact::canonical_id_for(redaction)?;
                 rows.push(Row {
                     redaction_id: id.short(),
                     blob: blob.short(),
                     state: redaction.state.short(),
                     path: redaction.path.clone(),
-                    purged_at: purged_at.to_rfc3339(),
-                    purger: redaction.redactor.to_string(),
+                    purged_at: purge.purged_at.to_rfc3339(),
+                    purger: purge.purger.to_string(),
                 });
             }
         }

@@ -4,7 +4,8 @@ use chrono::{Duration, Utc};
 use crypto::{Ed25519Signer, Signer, state_signature_from_signer};
 use objects::{
     object::{
-        Blob, KeyBinding, KeyBindingRegistry, StateAttachment, StateAttachmentBody, StateSignature,
+        Blob, KeyBinding, KeyBindingRegistry, KeyRole, StateAttachment, StateAttachmentBody,
+        StateSignature,
     },
     store::ObjectStore,
 };
@@ -40,7 +41,7 @@ fn binding(signer: &Ed25519Signer, identity: &str) -> KeyBinding {
         algorithm: signer.algorithm().to_string(),
         public_key: public_key.clone(),
         identity_ref: identity.to_string(),
-        role: "author".to_string(),
+        role: KeyRole::Author,
         added_by_sig: StateSignature {
             algorithm: signer.algorithm().to_string(),
             public_key,

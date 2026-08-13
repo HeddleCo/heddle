@@ -2,7 +2,7 @@
 //! Wire representation of the offline key-binding registry.
 
 use chrono::{DateTime, Utc};
-use objects::object::{ContentHash, KeyBinding, KeyBindingRegistry, StateSignature};
+use objects::object::{ContentHash, KeyBinding, KeyBindingRegistry, KeyRole, StateSignature};
 use serde::{Deserialize, Serialize};
 
 use crate::{ObjectData, ObjectId, ObjectType, ProtocolError, Result};
@@ -23,7 +23,7 @@ pub struct WireKeyBinding {
     pub algorithm: String,
     pub public_key: String,
     pub identity_ref: String,
-    pub role: String,
+    pub role: KeyRole,
     pub added_by_sig: StateSignature,
     pub valid_from: DateTime<Utc>,
     pub delegated_from: Option<ContentHash>,
@@ -46,7 +46,7 @@ impl From<&KeyBinding> for WireKeyBinding {
             algorithm: binding.algorithm.clone(),
             public_key: binding.public_key.clone(),
             identity_ref: binding.identity_ref.clone(),
-            role: binding.role.clone(),
+            role: binding.role,
             added_by_sig: binding.added_by_sig.clone(),
             valid_from: binding.valid_from,
             delegated_from: binding.delegated_from,
@@ -150,7 +150,7 @@ pub fn decode_key_binding_registry(data: &ObjectData) -> Result<KeyBindingRegist
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use objects::object::{ContentHash, KeyBinding, KeyBindingRegistry, StateSignature};
+    use objects::object::{ContentHash, KeyBinding, KeyBindingRegistry, KeyRole, StateSignature};
 
     use super::{WireKeyBinding, decode_key_binding_registry, encode_key_binding_registry};
     use crate::{ObjectData, ObjectType};
@@ -161,7 +161,7 @@ mod tests {
             algorithm: "ed25519".to_string(),
             public_key: "11".repeat(32),
             identity_ref: "user:01HZZZZZZZZZZZZZZZZZZZZZZZ".to_string(),
-            role: "author".to_string(),
+            role: KeyRole::Author,
             added_by_sig: StateSignature {
                 algorithm: "ed25519".to_string(),
                 public_key: "22".repeat(32),

@@ -1532,7 +1532,7 @@ fn step_nonatomic_restores_redaction_sidecar_when_a_later_batch_fails() {
         redactor: Principal::new("Grace Hopper", "grace@example.com"),
         redacted_at: chrono::Utc::now(),
         signature: None,
-        purged_at: None,
+        purge: None,
         supersedes: None,
     };
     let redaction_id = repo.put_redaction(redaction).unwrap();

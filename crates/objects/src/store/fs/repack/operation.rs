@@ -30,6 +30,7 @@ use crate::store::{
 /// scheduler itself has no native-pack knowledge.
 pub struct FsRepackOperation {
     store: FsStore,
+    excluded: HashSet<PackObjectId>,
     #[cfg(test)]
     corrupt_first_object: bool,
 }
@@ -39,9 +40,20 @@ impl FsRepackOperation {
     pub fn new(store: FsStore) -> Self {
         Self {
             store,
+            excluded: HashSet::new(),
             #[cfg(test)]
             corrupt_first_object: false,
         }
+    }
+
+    /// Exclude one blob from the replacement pack.
+    ///
+    /// This is the storage primitive used by purge: cutover retires every
+    /// source pack only after the replacement has been verified without the
+    /// excluded identity.
+    pub fn excluding_blob(mut self, hash: crate::object::ContentHash) -> Self {
+        self.excluded.insert(PackObjectId::Hash(hash));
+        self
     }
 
     #[cfg(test)]
@@ -176,6 +188,15 @@ impl FsRepackOperation {
             let reader = PackReader::open(pack, index)?;
             let mut checkpoint_error = None;
             let visit = reader.visit_objects(|id, object_type, data| {
+                if self.excluded.contains(&id) {
+                    if let Err(error) = context.checkpoint(data.len() as u64) {
+                        checkpoint_error = Some(error);
+                        return Err(HeddleError::InvalidObject(
+                            "repack source walk interrupted".to_string(),
+                        ));
+                    }
+                    return Ok(());
+                }
                 if !expected.insert(id) {
                     return Ok(());
                 }
@@ -210,6 +231,9 @@ impl FsRepackOperation {
         }
         for hash in &snapshot.loose_blobs {
             let id = PackObjectId::Hash(*hash);
+            if self.excluded.contains(&id) {
+                continue;
+            }
             if expected.insert(id) {
                 blob_hashes.push(*hash);
             }

@@ -650,7 +650,7 @@ fn ensure_redaction_undo_safe(
     let mut purged_redact_op_ids = Vec::new();
     for r in &facts.redacts {
         // Match by (blob, state, path) rather than oplog-stored redaction_id
-        // because setting purged_at shifts the on-disk record's content hash.
+        // because attaching purge evidence shifts the on-disk content hash.
         if repo.redaction_is_purged(&r.blob, &r.state, &r.path)? {
             purged_redact_op_ids.push(r.op_id);
         }

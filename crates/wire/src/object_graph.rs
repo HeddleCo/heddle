@@ -3,9 +3,9 @@ use std::collections::{HashSet, VecDeque};
 
 use objects::{
     object::{
-        BindingDelta, ContentHash, SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode, State,
-        StateAttachment, StateAttachmentBody, StateAttachmentId, StateAttachmentKind, StateId,
-        TreeEntryTarget,
+        BindingDelta, ContentHash, RedactionsBlob, SemanticEntryKind, SemanticIndexRoot,
+        SemanticTreeNode, State, StateAttachment, StateAttachmentBody, StateAttachmentId,
+        StateAttachmentKind, StateId, TreeEntryTarget,
     },
     store::{ObjectStore, pack::ObjectType as PackObjectType},
 };
@@ -324,12 +324,6 @@ pub fn enumerate_state_closure_transfer_from_boundaries(
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BlobSource {
-    Tree,
-    StateMetadata,
-}
-
 #[derive(Debug, Clone, Copy)]
 enum StateClosureEvent<'a> {
     State {
@@ -342,7 +336,6 @@ enum StateClosureEvent<'a> {
     },
     Blob {
         hash: ContentHash,
-        source: BlobSource,
     },
     Redaction {
         blob: ContentHash,
@@ -426,14 +419,9 @@ fn walk_state_closure_with_exclusions(
                 StateAttachmentBody::RiskSignals(hash)
                 | StateAttachmentBody::ReviewSignatures(hash)
                 | StateAttachmentBody::Discussions(hash)
-                | StateAttachmentBody::StructuredConflicts(hash) => walk_blob_filtered(
-                    store,
-                    hash,
-                    BlobSource::StateMetadata,
-                    &excluded_hashes,
-                    &mut seen_hashes,
-                    &mut visit,
-                )?,
+                | StateAttachmentBody::StructuredConflicts(hash) => {
+                    walk_blob_filtered(store, hash, &excluded_hashes, &mut seen_hashes, &mut visit)?
+                }
                 StateAttachmentBody::SemanticIndex(root) => walk_semantic_index_closure(
                     store,
                     root,
@@ -499,7 +487,7 @@ fn walk_tree_closure_filtered(
     for entry in tree.entries() {
         match entry.target() {
             TreeEntryTarget::Blob { hash, .. } | TreeEntryTarget::Symlink { hash } => {
-                walk_blob_filtered(store, *hash, BlobSource::Tree, excluded, seen, visit)?;
+                walk_blob_filtered(store, *hash, excluded, seen, visit)?;
             }
             TreeEntryTarget::Tree { hash } => {
                 walk_tree_closure_filtered(store, *hash, excluded, seen, visit)?;
@@ -517,7 +505,6 @@ fn walk_tree_closure_filtered(
 fn walk_blob_filtered(
     store: &impl ObjectStore,
     blob_hash: ContentHash,
-    source: BlobSource,
     excluded: &HashSet<ContentHash>,
     seen: &mut HashSet<ContentHash>,
     visit: &mut impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
@@ -529,10 +516,7 @@ fn walk_blob_filtered(
     if !seen.insert(blob_hash) {
         return Ok(());
     }
-    visit(StateClosureEvent::Blob {
-        hash: blob_hash,
-        source,
-    })?;
+    visit(StateClosureEvent::Blob { hash: blob_hash })?;
     if store.has_redactions_for_blob(&blob_hash)? {
         visit(StateClosureEvent::Redaction { blob: blob_hash })?;
     }
@@ -670,10 +654,7 @@ fn emit_semantic_blob(
     if store.get_blob(&hash)?.is_none() {
         return Err(ProtocolError::ObjectNotFound(hash.to_hex()));
     }
-    visit(StateClosureEvent::Blob {
-        hash,
-        source: BlobSource::StateMetadata,
-    })?;
+    visit(StateClosureEvent::Blob { hash })?;
     Ok(true)
 }
 
@@ -737,9 +718,12 @@ fn object_info_from_event(
             }))
         }
         StateClosureEvent::Blob { hash, .. } => {
-            let blob = store
-                .get_blob(&hash)?
-                .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
+            let Some(blob) = store.get_blob(&hash)? else {
+                if blob_has_purge_evidence(store, &hash)? {
+                    return Ok(None);
+                }
+                return Err(ProtocolError::ObjectNotFound(hash.to_hex()));
+            };
             Ok(Some(ObjectInfo {
                 id: ObjectId::Hash(hash),
                 obj_type: ObjectType::Blob,
@@ -800,8 +784,11 @@ fn planned_object_from_event(
             id: ObjectId::Hash(hash),
             obj_type: ObjectType::Tree,
         })),
-        StateClosureEvent::Blob { hash, source } => {
-            if source == BlobSource::StateMetadata && store.get_blob(&hash)?.is_none() {
+        StateClosureEvent::Blob { hash, .. } => {
+            if store.get_blob(&hash)?.is_none() {
+                if blob_has_purge_evidence(store, &hash)? {
+                    return Ok(None);
+                }
                 return Err(ProtocolError::ObjectNotFound(hash.to_hex()));
             }
             Ok(Some(PlannedObject {
@@ -834,6 +821,25 @@ fn planned_object_from_event(
             Ok(None)
         }
     }
+}
+
+/// A purged blob is intentionally absent from the object closure; its sidecar
+/// remains and is verified by the receiver before the absence is accepted.
+/// Mere redaction never excuses a missing blob.
+fn blob_has_purge_evidence(store: &impl ObjectStore, hash: &ContentHash) -> Result<bool> {
+    let Some(bytes) = store.get_redactions_bytes_for_blob(hash)? else {
+        return Ok(false);
+    };
+    let redactions = RedactionsBlob::decode(&bytes).map_err(|error| {
+        ProtocolError::InvalidState(format!(
+            "invalid redaction sidecar for missing blob {}: {error}",
+            hash.to_hex()
+        ))
+    })?;
+    Ok(redactions
+        .redactions
+        .iter()
+        .any(|redaction| redaction.redacted_blob == *hash && redaction.is_purged()))
 }
 
 pub fn missing_blobs_in_tree(
@@ -1015,18 +1021,18 @@ mod tests {
     use objects::{
         object::{
             Action, ActionId, Attribution, Blob, ContentHash, Discussion, DiscussionResolution,
-            DiscussionTurn, DiscussionsBlob, Principal, Redaction, State, StateAttachment,
-            StateAttachmentBody, StateId, StateVisibility, SymbolAnchor, Tree, TreeEntry,
-            VisibilityTier,
+            DiscussionTurn, DiscussionsBlob, Principal, PurgeEvidence, Redaction, State,
+            StateAttachment, StateAttachmentBody, StateId, StateSignature, StateVisibility,
+            SymbolAnchor, Tree, TreeEntry, VisibilityTier,
         },
-        store::{ObjectStore, Result as StoreResult},
+        store::{AnyStore, ObjectStore, Result as StoreResult},
     };
     use repo::Repository;
     use sley::ObjectId as GitObjectId;
     use tempfile::TempDir;
 
     use super::{
-        ObjectId, ObjectInfo, ObjectType, PlannedObject, StateClosureOptions,
+        ObjectId, ObjectInfo, ObjectType, PlannedObject, ProtocolError, StateClosureOptions,
         enumerate_state_closure_plan_with_options,
         enumerate_state_closure_transfer_from_boundaries,
         enumerate_state_closure_transfer_with_options, enumerate_state_closure_with_options,
@@ -1366,7 +1372,7 @@ mod tests {
             redactor: Principal::new("Tester", "tester@example.test"),
             redacted_at: Utc::now(),
             signature: None,
-            purged_at: None,
+            purge: None,
             supersedes: None,
         })
         .expect("put redaction");
@@ -1776,7 +1782,7 @@ mod tests {
             },
             redacted_at: Utc::now(),
             signature: None,
-            purged_at: None,
+            purge: None,
             supersedes: None,
         };
         repo.put_redaction(redaction).unwrap();
@@ -1805,6 +1811,99 @@ mod tests {
                 .any(|p| p.obj_type == ObjectType::Redaction && p.id == ObjectId::Hash(blob_hash)),
             "plan closure must include a Redaction entry for the redacted blob"
         );
+    }
+
+    #[test]
+    fn missing_merely_redacted_blob_still_fails_closure_planning() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("secret.toml"), "api_token = \"x\"\n").unwrap();
+        let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
+        let blob_hash = repo
+            .store()
+            .get_tree(&state.tree)
+            .unwrap()
+            .unwrap()
+            .iter()
+            .find(|entry| entry.name() == "secret.toml")
+            .unwrap()
+            .blob_hash()
+            .unwrap();
+        repo.put_redaction(Redaction {
+            redacted_blob: blob_hash,
+            state: state.state_id,
+            path: "secret.toml".to_string(),
+            reason: "test leak".to_string(),
+            redactor: Principal::new("Tester", "tester@heddle.sh"),
+            redacted_at: Utc::now(),
+            signature: None,
+            purge: None,
+            supersedes: None,
+        })
+        .unwrap();
+        let AnyStore::Fs(store) = repo.store();
+        store.remove_blob_everywhere(&blob_hash).unwrap();
+
+        let error = enumerate_state_closure_plan_with_options(
+            repo.store(),
+            state.state_id,
+            StateClosureOptions::default(),
+        )
+        .expect_err("redaction without purge authority must not excuse missing bytes");
+        assert!(matches!(error, ProtocolError::ObjectNotFound(_)));
+    }
+
+    #[test]
+    fn purged_blob_closure_carries_sidecar_without_deleted_bytes() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("secret.toml"), "api_token = \"x\"\n").unwrap();
+        let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
+        let blob_hash = repo
+            .store()
+            .get_tree(&state.tree)
+            .unwrap()
+            .unwrap()
+            .iter()
+            .find(|entry| entry.name() == "secret.toml")
+            .unwrap()
+            .blob_hash()
+            .unwrap();
+        repo.put_redaction(Redaction {
+            redacted_blob: blob_hash,
+            state: state.state_id,
+            path: "secret.toml".to_string(),
+            reason: "test leak".to_string(),
+            redactor: Principal::new("Tester", "tester@heddle.sh"),
+            redacted_at: Utc::now(),
+            signature: None,
+            purge: Some(PurgeEvidence {
+                purger: Principal::new("Owner", "owner@heddle.sh"),
+                purged_at: Utc::now(),
+                signature: StateSignature {
+                    algorithm: "ed25519".to_string(),
+                    public_key: "11".repeat(32),
+                    signature: "22".repeat(64),
+                },
+            }),
+            supersedes: None,
+        })
+        .unwrap();
+        let AnyStore::Fs(store) = repo.store();
+        store.remove_blob_everywhere(&blob_hash).unwrap();
+
+        let plan = enumerate_state_closure_plan_with_options(
+            repo.store(),
+            state.state_id,
+            StateClosureOptions::default(),
+        )
+        .expect("purge sidecar replaces intentionally deleted blob in closure");
+        assert!(!plan.iter().any(|object| {
+            object.id == ObjectId::Hash(blob_hash) && object.obj_type == ObjectType::Blob
+        }));
+        assert!(plan.iter().any(|object| {
+            object.id == ObjectId::Hash(blob_hash) && object.obj_type == ObjectType::Redaction
+        }));
     }
 
     #[test]

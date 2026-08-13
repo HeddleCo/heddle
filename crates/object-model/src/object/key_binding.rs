@@ -11,7 +11,29 @@ pub const KEY_BINDING_SIGNING_PAYLOAD_VERSION_TAG: &[u8] = b"hd-key-binding-v1\x
 
 /// Domain separator for authority signatures over registry checkpoints.
 pub const KEY_BINDING_REGISTRY_SIGNING_PAYLOAD_VERSION_TAG: &[u8] =
-    b"hd-key-binding-registry-v2\x00";
+    b"hd-key-binding-registry-v3\x00";
+
+/// Capability granted to a key by an authority-signed registry checkpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyRole {
+    /// May sign source-history states.
+    Author,
+    /// May sign human or agent co-review evidence.
+    Reviewer,
+    /// May sign automated preview evidence.
+    CiRunner,
+}
+
+impl KeyRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Author => "author",
+            Self::Reviewer => "reviewer",
+            Self::CiRunner => "ci_runner",
+        }
+    }
+}
 
 /// A signing key's role within an identity's provenance chain.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,8 +44,8 @@ pub struct KeyBinding {
     pub public_key: String,
     /// Durable identity subject resolved by this key.
     pub identity_ref: String,
-    /// Repository role granted to this key, such as `author` or `ci-runner`.
-    pub role: String,
+    /// Repository capability granted to this key.
+    pub role: KeyRole,
     /// Identity-key signature authorizing this binding.
     pub added_by_sig: StateSignature,
     /// First instant at which this binding may authenticate authored objects.
@@ -45,7 +67,7 @@ impl KeyBinding {
         push_field(&mut payload, self.algorithm.as_bytes());
         push_field(&mut payload, self.public_key.as_bytes());
         push_field(&mut payload, self.identity_ref.as_bytes());
-        push_field(&mut payload, self.role.as_bytes());
+        push_field(&mut payload, self.role.as_str().as_bytes());
         push_time(&mut payload, self.valid_from);
         push_optional_time(&mut payload, self.revoked_at);
         push_optional_hash(&mut payload, self.delegated_from);
@@ -66,7 +88,6 @@ impl KeyBinding {
         require_non_empty(&self.algorithm, KeyBindingError::EmptyAlgorithm)?;
         require_hex(&self.public_key, KeyBindingError::InvalidPublicKey)?;
         require_non_empty(&self.identity_ref, KeyBindingError::EmptyIdentityRef)?;
-        require_non_empty(&self.role, KeyBindingError::EmptyRole)?;
         require_non_empty(
             &self.added_by_sig.algorithm,
             KeyBindingError::EmptyAddedByAlgorithm,
@@ -103,7 +124,7 @@ pub struct KeyBindingRegistry {
 }
 
 impl KeyBindingRegistry {
-    pub const FORMAT_VERSION: u8 = 2;
+    pub const FORMAT_VERSION: u8 = 3;
 
     pub fn new(
         epoch: u64,
@@ -256,8 +277,6 @@ pub enum KeyBindingError {
     InvalidPublicKey,
     #[error("key binding identity_ref must not be empty")]
     EmptyIdentityRef,
-    #[error("key binding role must not be empty")]
-    EmptyRole,
     #[error("key binding authorizing signature algorithm must not be empty")]
     EmptyAddedByAlgorithm,
     #[error("key binding authorizing public key must be non-empty hexadecimal bytes")]
@@ -268,4 +287,29 @@ pub enum KeyBindingError {
     RevokedBeforeValid,
     #[error("key-binding registry contains a duplicate algorithm/public-key pair")]
     DuplicateKey,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prior_registry_format_is_rejected_instead_of_dual_read() {
+        let legacy = KeyBindingRegistry {
+            format_version: 2,
+            epoch: 0,
+            previous_registry: None,
+            authority_signature: StateSignature {
+                algorithm: "ed25519".to_string(),
+                public_key: "11".repeat(32),
+                signature: "22".repeat(64),
+            },
+            bindings: Vec::new(),
+        };
+        let bytes = rmp_serde::to_vec(&legacy).expect("encode unsupported fixture");
+        assert!(matches!(
+            KeyBindingRegistry::decode(&bytes),
+            Err(KeyBindingError::UnsupportedVersion(2))
+        ));
+    }
 }

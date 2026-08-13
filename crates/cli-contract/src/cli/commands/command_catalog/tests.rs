@@ -307,6 +307,27 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(&["redact", "purge", "list"], &["redact", "purge", "list"]),
     sample(
+        &["redact", "purge", "trust", "add"],
+        &[
+            "redact",
+            "purge",
+            "trust",
+            "add",
+            "--algorithm",
+            "ed25519",
+            "--public-key",
+            "abcd",
+        ],
+    ),
+    sample(
+        &["redact", "purge", "trust", "list"],
+        &["redact", "purge", "trust", "list"],
+    ),
+    sample(
+        &["redact", "purge", "trust", "remove"],
+        &["redact", "purge", "trust", "remove", "abcd"],
+    ),
+    sample(
         &["redact", "trust", "add"],
         &[
             "redact",
@@ -1409,6 +1430,8 @@ fn credential_and_trust_effect_sets_are_config_scoped() {
         &["auth", "logout"][..],
         &["redact", "trust", "add"],
         &["redact", "trust", "remove"],
+        &["redact", "purge", "trust", "add"],
+        &["redact", "purge", "trust", "remove"],
     ] {
         assert_command_effects(path, &[CommandSideEffect::WritesConfig]);
     }
@@ -1703,6 +1726,9 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "redact show",
             "redact purge apply",
             "redact purge list",
+            "redact purge trust add",
+            "redact purge trust list",
+            "redact purge trust remove",
             "redact trust add",
             "redact trust list",
             "redact trust remove",

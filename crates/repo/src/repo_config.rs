@@ -40,6 +40,8 @@ pub struct RepoConfig {
     #[serde(default)]
     pub redact: RedactConfig,
     #[serde(default)]
+    pub purge: PurgeConfig,
+    #[serde(default)]
     pub metadata: MetadataConfig,
 }
 
@@ -47,8 +49,8 @@ pub struct RepoConfig {
 /// that the receiver trusts when accepting redactions over the wire
 /// (`Repository::accept_wire_redactions`). The list is fail-closed:
 /// an empty list rejects every incoming signed redaction. Operators
-/// populate it via `heddle redact trust <pem>` (planned) or by
-/// hand-editing `.heddle/config.toml`.
+/// populate it via `heddle redact trust add` or by hand-editing
+/// `.heddle/config.toml`.
 ///
 /// The reason the trust list lives in repo config rather than in the
 /// signed payload itself: a signature only proves *who* declared the
@@ -61,6 +63,18 @@ pub struct RedactConfig {
     /// Trusted operator public keys. Every signed redaction received
     /// over the wire must match one of these (algorithm + hex-encoded
     /// public key) before the receiver persists the sidecar.
+    #[serde(default)]
+    pub trusted_keys: Vec<TrustedKey>,
+}
+
+/// `[purge]` destructive-capability trust configuration.
+///
+/// This list is intentionally independent from `[redact].trusted_keys`:
+/// authority to hide content never grants authority to destroy its bytes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PurgeConfig {
+    /// Keys allowed to authorize local or wire-replayed purge evidence.
+    /// Manage with `heddle redact purge trust`.
     #[serde(default)]
     pub trusted_keys: Vec<TrustedKey>,
 }
@@ -474,6 +488,7 @@ impl Default for RepoConfig {
             review: ReviewConfig::default(),
             provenance: ProvenanceConfig::default(),
             redact: RedactConfig::default(),
+            purge: PurgeConfig::default(),
             metadata: MetadataConfig::default(),
         }
     }
