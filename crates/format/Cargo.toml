@@ -13,6 +13,9 @@ categories.workspace = true
 thiserror.workspace = true
 zstd = { workspace = true, optional = true }
 
+[dev-dependencies]
+blake3.workspace = true
+
 [features]
 bench = ["zstd"]
 zstd = ["dep:zstd"]
