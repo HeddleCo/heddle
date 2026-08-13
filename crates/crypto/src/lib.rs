@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Cryptographic signing for Heddle states.
+//! Cryptographic signing for Heddle states and attestations.
 
+mod ci_verdict;
 mod ed25519;
 mod error;
 mod p256;
@@ -13,6 +14,10 @@ mod behavior_tests;
 
 use std::path::Path;
 
+pub use ci_verdict::{
+    CI_VERDICT_DOMAIN, SIGNED_VERDICT_FORMAT_VERSION, SignedVerdict, SignedVerdictError,
+    ci_verdict_signing_payload, signed_verdict_from_signer,
+};
 pub use ed25519::Ed25519Signer;
 pub use error::SignerError;
 use objects::object::ContentHash;

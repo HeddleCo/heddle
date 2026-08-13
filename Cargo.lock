@@ -2254,6 +2254,8 @@ dependencies = [
  "p256 0.14.0",
  "pkcs8 0.11.0",
  "sec1 0.8.1",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
 ]
