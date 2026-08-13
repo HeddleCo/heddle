@@ -826,7 +826,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
 /// big-endian version, 8-byte big-endian count) so the streaming and
 /// in-memory builders produce the same index container.
 fn write_index_header<W: Write>(out: &mut W, count: u64) -> Result<()> {
-    super::pack_index::index_header(super::pack_index::INDEX_VERSION).write_to(out, count)
+    super::pack_index::index_header().write_to(out, count)
 }
 
 /// Append one `(id, offset)` index entry to `out` using the compact

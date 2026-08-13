@@ -83,10 +83,10 @@ fn test_pack_index_header_codec_matches_current_bytes() {
 }
 
 #[test]
-fn test_pack_reader_accepts_v3_pack_and_index() {
+fn test_pack_reader_refuses_v3_pack_with_migration_advice() {
     let hash = create_test_hash(77);
     let payload = b"legacy-v3-pack".to_vec();
-    let (mut pack_data, mut index_data) = single_record_pack(hash, |record| {
+    let (mut pack_data, index_data) = single_record_pack(hash, |record| {
         super::varint::encode_type_and_size(ObjectType::Blob, payload.len() as u64, record);
         super::varint::encode_varint(payload.len() as u64, record);
         record.extend_from_slice(&payload);
@@ -95,13 +95,30 @@ fn test_pack_reader_accepts_v3_pack_and_index() {
     pack_data[4..8].copy_from_slice(&3_u32.to_be_bytes());
     pack_data.truncate(pack_data.len() - super::PACK_CHECKSUM_LEN);
     super::append_container_checksum(&mut pack_data);
+
+    let error = match PackReader::from_bytes(pack_data, index_data) {
+        Ok(_) => panic!("legacy pack version must be refused"),
+        Err(error) => error,
+    };
+    assert_invalid_object_message_contains(error, "run `heddle migrate`");
+}
+
+#[test]
+fn test_pack_reader_refuses_v3_index_with_migration_advice() {
+    let hash = create_test_hash(77);
+    let payload = b"legacy-v3-index".to_vec();
+    let (pack_data, mut index_data) = single_record_pack(hash, |record| {
+        super::varint::encode_type_and_size(ObjectType::Blob, payload.len() as u64, record);
+        super::varint::encode_varint(payload.len() as u64, record);
+        record.extend_from_slice(&payload);
+    });
     index_data[4..8].copy_from_slice(&3_u32.to_be_bytes());
 
-    let reader = PackReader::from_bytes(pack_data, index_data).expect("v3 remains readable");
-    assert_eq!(
-        reader.get_hashed_object(&hash).unwrap(),
-        Some((ObjectType::Blob, payload))
-    );
+    let error = match PackReader::from_bytes(pack_data, index_data) {
+        Ok(_) => panic!("legacy pack index version must be refused"),
+        Err(error) => error,
+    };
+    assert_invalid_object_message_contains(error, "run `heddle migrate`");
 }
 
 #[test]

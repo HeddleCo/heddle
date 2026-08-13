@@ -60,13 +60,6 @@ pub(crate) fn pack_container_spec() -> PackContainerSpec {
     }
 }
 
-pub(crate) fn legacy_pack_container_spec() -> PackContainerSpec {
-    PackContainerSpec {
-        magic: b"LMPK",
-        version: 3,
-    }
-}
-
 impl ObjectType {
     pub(crate) fn from_u8(value: u8) -> Option<Self> {
         match value {

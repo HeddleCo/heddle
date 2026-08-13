@@ -152,25 +152,21 @@ fn verify_supported_container_with(data: &[u8], layout_only: bool) -> Result<(u6
         u32::from_be_bytes(data[4..8].try_into().map_err(|_| {
             StoreError::InvalidObject("Pack version field is truncated".to_string())
         })?);
-    let spec = match version {
-        3 => super::legacy_pack_container_spec(),
-        4 => current,
-        newer if newer > current.version => {
-            return Err(StoreError::InvalidObject(format!(
-                "pack uses format version {newer}, but this binary supports {}; upgrade heddle",
-                current.version
-            )));
-        }
-        older => {
-            return Err(StoreError::InvalidObject(format!(
-                "pack uses unsupported legacy format version {older}; run `heddle migrate` with a compatible binary"
-            )));
-        }
-    };
+    if version > current.version {
+        return Err(StoreError::InvalidObject(format!(
+            "pack uses format version {version}, but this binary supports {}; upgrade heddle",
+            current.version
+        )));
+    }
+    if version < current.version {
+        return Err(StoreError::InvalidObject(format!(
+            "pack uses unsupported format version {version}; run `heddle migrate`"
+        )));
+    }
     if layout_only {
-        verify_container_layout(data, spec)
+        verify_container_layout(data, current)
     } else {
-        verify_container(data, spec)
+        verify_container(data, current)
     }
 }
 
