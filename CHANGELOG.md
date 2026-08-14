@@ -15,6 +15,10 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Fixed
 
+- **Land resolves the target checkout from isolated threads.** A clean
+  fast-forward now lands when invoked inside the source thread checkout, while
+  genuine readiness-policy blockers retain their concrete recovery guidance.
+
 - **Offline identity registries require an authenticated current head.**
   Provenance verification now pins a verifier-local authority, registry digest,
   and monotonic epoch; validates the authority-signed checkpoint chain to
