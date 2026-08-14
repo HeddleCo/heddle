@@ -143,6 +143,7 @@ impl HostedClient {
             discussion_id: discussion_id.to_string(),
             body: body.to_string(),
             client_operation_id,
+            references: Vec::new(),
         };
         let response = self
             .routes()
@@ -276,6 +277,7 @@ mod tests {
                 author_name: "alice".into(),
                 author_email: "a@x".into(),
                 body: "lgtm".into(),
+                references: Vec::new(),
                 posted_at: Some(prost_types::Timestamp {
                     seconds: 42,
                     nanos: 0,

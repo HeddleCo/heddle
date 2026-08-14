@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 
 use super::{
     HostedError, Result, VerifiedEndpointDescriptor,
-    claim_protocol::{CLAIM_ALPN_V1, ClaimProtocol, ClaimUnavailable},
+    claim_protocol::{CLAIM_ALPN_V1, ClaimProtocol},
     provider_transport::ProviderWebSocketTransport,
 };
 
@@ -182,10 +182,12 @@ async fn bind_endpoint(
 }
 
 fn claim_router(endpoint: Endpoint) -> Router {
+    let authorization =
+        Arc::new(crate::hosted_runtime::claim_authorization::StoredClaimAuthorization);
     Router::builder(endpoint)
         .accept(
             CLAIM_ALPN_V1,
-            ClaimProtocol::new(Arc::new(ClaimUnavailable), Arc::new(ClaimUnavailable)),
+            ClaimProtocol::new(Arc::clone(&authorization), authorization),
         )
         .spawn()
 }

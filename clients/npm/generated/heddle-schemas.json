@@ -17771,6 +17771,140 @@
       "title": "GenericJsonObjectSchema",
       "type": "object"
     },
+    "identity claim-link": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "claim_url": {
+          "description": "Short-lived heddle.sh bearer URL, present only on deliberate mint/reissue.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "node_id": {
+          "description": "Stable lowercase-hex Iroh NodeId, present when a claim link is minted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "description": "`reused`, `derived`, `created_on_behalf`, or `claim_link_reissued`.",
+          "type": "string"
+        },
+        "output_kind": {
+          "enum": [
+            "identity_claim_link"
+          ],
+          "type": "string"
+        },
+        "server": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "outcome",
+        "server",
+        "subject"
+      ],
+      "title": "IdentityOutputSchema",
+      "type": "object"
+    },
+    "identity ensure": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "claim_url": {
+          "description": "Short-lived heddle.sh bearer URL, present only on deliberate mint/reissue.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "node_id": {
+          "description": "Stable lowercase-hex Iroh NodeId, present when a claim link is minted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcome": {
+          "description": "`reused`, `derived`, `created_on_behalf`, or `claim_link_reissued`.",
+          "type": "string"
+        },
+        "output_kind": {
+          "enum": [
+            "identity_ensure"
+          ],
+          "type": "string"
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "server": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "outcome",
+        "server",
+        "subject"
+      ],
+      "title": "IdentityOutputSchema",
+      "type": "object"
+    },
     "import git": {
       "$defs": {
         "ActionTemplateSchema": {
@@ -24125,6 +24259,153 @@
             "purge_list"
           ],
           "type": "string"
+        }
+      },
+      "required": [
+        "output_kind"
+      ],
+      "title": "GenericJsonObjectSchema",
+      "type": "object"
+    },
+    "redact purge trust add": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "purge_trust_add"
+          ],
+          "type": "string"
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "output_kind"
+      ],
+      "title": "GenericJsonObjectSchema",
+      "type": "object"
+    },
+    "redact purge trust list": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "output_kind": {
+          "enum": [
+            "purge_trust_list"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind"
+      ],
+      "title": "GenericJsonObjectSchema",
+      "type": "object"
+    },
+    "redact purge trust remove": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "purge_trust_remove"
+          ],
+          "type": "string"
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "required": [

@@ -5,7 +5,8 @@ use api::heddle::api::v1alpha1::{
     DeleteRepositoryRequest, GetCurrentUserSpoolRequest, GrantSupportAccessRequest, GrantTargetRef,
     Invitation as ProtoInvitation, IssueServiceAccountCredentialRequest, IssuedCredentialResponse,
     ListGrantsRequest, ListSpoolsRequest, ListSupportAccessGrantsRequest,
-    ListThreadApprovalsRequest, MonorepoNode, ResolveMonorepoRequest, RevokeApprovalRequest,
+    ListThreadApprovalsRequest, MonorepoNode, ProvisionAgentRootedAccountRequest,
+    ProvisionAgentRootedAccountResponse, ResolveMonorepoRequest, RevokeApprovalRequest,
     RevokeSupportAccessRequest, ServiceAccountResponse, SpoolSummary, SpoolVisibility,
     SupportAccessGrant, ThreadApproval, UpdateGrantRequest, UpdateNamespaceRequest,
     UpdateRepositoryRequest, grant_target_ref::Target as GrantTargetKind,
@@ -60,6 +61,16 @@ macro_rules! workflow_call {
 }
 
 impl HostedClient {
+    pub async fn provision_agent_rooted_account(
+        &mut self,
+        request: ProvisionAgentRootedAccountRequest,
+    ) -> Result<ProvisionAgentRootedAccountResponse, ProtocolError> {
+        self.routes()
+            .provision_agent_rooted_account(&request)
+            .await
+            .map_err(hosted_to_protocol_error)
+    }
+
     /// Resolve the acting identity for the bound bearer (subject, staff/service
     /// markers, session, server-side scope, and directly-held resource roles).
     /// Read-only; drives `heddle whoami`.

@@ -3,8 +3,6 @@
 
 use clap::{Args, Subcommand};
 
-#[cfg(feature = "client")]
-use super::AuthCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
@@ -18,6 +16,8 @@ use super::{
         WatchArgs,
     },
 };
+#[cfg(feature = "client")]
+use super::{AuthCommands, IdentityCommands};
 #[cfg(feature = "git-overlay")]
 use super::{ExportCommands, ImportCommands};
 
@@ -446,6 +446,13 @@ Examples:
     Auth {
         #[command(subcommand)]
         command: AuthCommands,
+    },
+
+    /// Ensure and claim this machine's hosted agent identity.
+    #[cfg(feature = "client")]
+    Identity {
+        #[command(subcommand)]
+        command: IdentityCommands,
     },
 
     /// Report the acting identity (principal, token kind, scopes, operation

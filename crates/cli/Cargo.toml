@@ -20,6 +20,7 @@ exclude = [
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
+getrandom.workspace = true
 biscuit-auth = { workspace = true, optional = true }
 blake3.workspace = true
 bytes = { workspace = true, optional = true }
@@ -44,7 +45,7 @@ daemon = { path = "../daemon", package = "heddle-daemon", version = "0.12" }
 # text auto-merge. Always-on: the merge driver and rebase replay both call
 # into it unconditionally.
 merge = { path = "../merge", package = "heddle-merge", version = "0.12" }
-api = { package = "heddle-api", version = "0.5.0" }
+api = { package = "heddle-api", version = "0.6.4" }
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.12" }
 heddle-cli-args = { path = "../cli-args", version = "0.12", default-features = false }
 heddle-cli-contract = { path = "../cli-contract", version = "0.12", default-features = false }

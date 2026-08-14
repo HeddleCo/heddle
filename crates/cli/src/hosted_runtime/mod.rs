@@ -9,9 +9,17 @@
 mod agent_node_identity;
 pub(crate) mod auth;
 pub(crate) mod auth_requests;
+mod claim_authorization;
+#[cfg(test)]
+mod claim_authorization_tests;
 pub(crate) mod credential_file;
 pub(crate) mod device_flow;
 pub(crate) mod hosted;
+pub(crate) mod identity;
+mod identity_server;
+mod identity_state;
+#[cfg(test)]
+mod identity_tests;
 pub(crate) mod websocket;
 pub(crate) mod whoami;
 

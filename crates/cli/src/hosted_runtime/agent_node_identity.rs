@@ -186,6 +186,22 @@ mod tests {
     }
 
     #[test]
+    fn node_id_is_the_same_lower_hex_ed25519_public_key_used_for_consent() {
+        let temp = TempDir::new().expect("temp dir");
+        let identity = load_or_create_at(&temp.path().join(IDENTITY_FILE)).expect("identity");
+        let signer = crypto::Ed25519Signer::from_seed(&identity.secret_key().to_bytes())
+            .expect("consent signer");
+        let node_id = identity.node_id().to_string();
+        assert_eq!(node_id.len(), 64);
+        assert!(
+            node_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
+        assert_eq!(node_id, hex::encode(crypto::Signer::public_key(&signer)));
+    }
+
+    #[test]
     fn concurrent_first_loads_choose_one_identity() {
         let temp = TempDir::new().expect("temp dir");
         let path = Arc::new(temp.path().join(IDENTITY_FILE));
