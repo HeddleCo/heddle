@@ -87,7 +87,7 @@ pub fn reuse_native_pack_encoded_subset_in(
         .iter()
         .map(|object| {
             Ok((
-                to_pack_object_id(&object.id),
+                to_pack_object_id(&object.id, object.obj_type),
                 object.obj_type.pack_object_type()?,
                 object.size,
             ))
@@ -307,7 +307,7 @@ impl NativePackStreamingWriter {
         let builder = self.builder.as_mut().ok_or_else(|| {
             ProtocolError::InvalidState("native pack streaming writer is finalized".to_string())
         })?;
-        let pack_id = to_pack_object_id(&object.id);
+        let pack_id = to_pack_object_id(&object.id, object.obj_type);
         builder
             .add_id(pack_id, object.obj_type.pack_object_type()?, object.data)
             .map_err(ProtocolError::from)
@@ -626,7 +626,7 @@ pub fn build_native_pack(
             continue;
         }
         let object = load_object_data(store, &info.id, info.obj_type)?;
-        let pack_id = to_pack_object_id(&object.id);
+        let pack_id = to_pack_object_id(&object.id, object.obj_type);
         builder.add_id(pack_id, object.obj_type.pack_object_type()?, object.data);
     }
 
@@ -821,23 +821,25 @@ pub(crate) fn unique_spool_dir(base: &Path) -> Result<PathBuf> {
     ))
 }
 
-fn to_pack_object_id(id: &ObjectId) -> PackObjectId {
-    match id {
-        ObjectId::Hash(hash) => PackObjectId::Hash(*hash),
-        ObjectId::StateId(state_id) => PackObjectId::StateId(*state_id),
-        ObjectId::StateAttachment { id, .. } => PackObjectId::Hash(*id.as_hash()),
+fn to_pack_object_id(id: &ObjectId, object_type: ObjectType) -> PackObjectId {
+    match (id, object_type) {
+        (ObjectId::Hash(hash), ObjectType::AnnotatedTag) => PackObjectId::AnnotatedTag(*hash),
+        (ObjectId::Hash(hash), _) => PackObjectId::Hash(*hash),
+        (ObjectId::StateId(state_id), _) => PackObjectId::StateId(*state_id),
+        (ObjectId::StateAttachment { id, .. }, _) => PackObjectId::Hash(*id.as_hash()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use objects::{
-        object::{Blob, ContentHash, StateId},
+        object::{AnnotatedTag, Blob, ContentHash, StateId},
         store::{
             CompressionConfig, FsStore, ObjectStore,
             pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId, PackReader},
         },
     };
+    use sley::ObjectFormat as GitObjectFormat;
     use tempfile::TempDir;
 
     use super::{
@@ -1202,6 +1204,36 @@ mod tests {
         assert_eq!(installed_ids, vec![PackObjectId::Hash(hash)]);
         let installed_blob = dest_store.get_blob(&hash).unwrap().unwrap();
         assert_eq!(installed_blob.content(), blob.content());
+    }
+
+    #[test]
+    fn native_pack_transfers_first_class_annotated_tag() {
+        let (_source_temp, source_store) = create_test_store();
+        let (_dest_temp, dest_store) = create_test_store();
+        let tag = AnnotatedTag::new(
+            GitObjectFormat::Sha1,
+            b"object 1111111111111111111111111111111111111111\ntype commit\ntag v1\ntagger Test <test@example.com> 1700000000 +0100\n\nrelease\n".to_vec(),
+            None,
+            None,
+        )
+        .unwrap();
+        let hash = source_store.put_annotated_tag(&tag).unwrap();
+        let bundle = build_native_pack(
+            &source_store,
+            &[ObjectInfo {
+                id: ObjectId::Hash(hash),
+                obj_type: ObjectType::AnnotatedTag,
+                size: tag.encode_current_msgpack().len() as u64,
+                delta_base: None,
+            }],
+        )
+        .unwrap();
+
+        let installed = install_received_pack(&dest_store, &bundle.pack_data, &bundle.index_data)
+            .expect("install annotated-tag native pack");
+
+        assert_eq!(installed, vec![PackObjectId::AnnotatedTag(hash)]);
+        assert_eq!(dest_store.get_annotated_tag(&hash).unwrap(), Some(tag));
     }
 
     #[test]

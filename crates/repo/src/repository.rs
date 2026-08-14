@@ -73,8 +73,8 @@ use objects::{
     worktree::WorktreeStatus,
 };
 use oplog::{ConditionalCommitOutcome, IsolationPrecondition, OpLog, OpLogBackend, OpRecord};
+pub use refs::SpoolFacet;
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
-pub use refs::{RefSummaryIndexInspection, SpoolFacet};
 pub use repo_config::{
     HostedConfig, KeyBindingRegistryAnchor, MetadataConfig, OutputFormat, ProvenanceConfig,
     PurgeConfig, RedactConfig, RepoConfig, RepositorySourceAuthority, TrustedKey,

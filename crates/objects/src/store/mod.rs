@@ -4,7 +4,8 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crate::object::{
-    Action, ActionId, Blob, ContentHash, State, StateAttachment, StateAttachmentId, StateId, Tree,
+    Action, ActionId, AnnotatedTag, Blob, ContentHash, State, StateAttachment, StateAttachmentId,
+    StateId, Tree,
 };
 
 pub mod actor_presence;
@@ -104,6 +105,15 @@ macro_rules! any_store_dispatch {
 }
 
 impl ObjectStore for AnyStore {
+    fn get_annotated_tag(&self, hash: &ContentHash) -> Result<Option<AnnotatedTag>> {
+        any_store_dispatch!(self, get_annotated_tag(hash))
+    }
+    fn put_annotated_tag(&self, tag: &AnnotatedTag) -> Result<ContentHash> {
+        any_store_dispatch!(self, put_annotated_tag(tag))
+    }
+    fn list_annotated_tags(&self) -> Result<Vec<ContentHash>> {
+        any_store_dispatch!(self, list_annotated_tags())
+    }
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
         match self {
             AnyStore::Fs(inner) => ObjectStore::get_blob(inner, hash),
@@ -353,6 +363,17 @@ impl AnyStore {
 
 /// Trait for object storage backends.
 pub trait ObjectStore: Send + Sync {
+    fn get_annotated_tag(&self, _hash: &ContentHash) -> Result<Option<AnnotatedTag>> {
+        Ok(None)
+    }
+    fn put_annotated_tag(&self, _tag: &AnnotatedTag) -> Result<ContentHash> {
+        Err(HeddleError::InvalidObject(
+            "object store does not support annotated tags".to_string(),
+        ))
+    }
+    fn list_annotated_tags(&self) -> Result<Vec<ContentHash>> {
+        Ok(Vec::new())
+    }
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>>;
     fn put_blob(&self, blob: &Blob) -> Result<ContentHash>;
 
@@ -566,6 +587,9 @@ pub trait ObjectStore: Send + Sync {
         id: &pack::PackObjectId,
     ) -> Result<Option<(pack::ObjectType, Vec<u8>)>> {
         match id {
+            pack::PackObjectId::AnnotatedTag(hash) => Ok(self
+                .get_annotated_tag(hash)?
+                .map(|tag| (pack::ObjectType::AnnotatedTag, tag.encode_current_msgpack()))),
             pack::PackObjectId::Hash(hash) => {
                 if let Some(blob) = self.get_blob(hash)? {
                     return Ok(Some((pack::ObjectType::Blob, blob.content().to_vec())));
@@ -656,6 +680,16 @@ pub trait ObjectStore: Send + Sync {
             match (id, obj_type) {
                 (pack::PackObjectId::Hash(hash), pack::ObjectType::Blob) => {
                     self.put_blob_bytes_with_hash(&data, *hash)?;
+                }
+                (pack::PackObjectId::AnnotatedTag(hash), pack::ObjectType::AnnotatedTag) => {
+                    let tag = AnnotatedTag::decode_current_msgpack(&data)
+                        .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+                    if tag.hash() != *hash {
+                        return Err(HeddleError::InvalidObject(
+                            "annotated tag hash mismatch".to_string(),
+                        ));
+                    }
+                    self.put_annotated_tag(&tag)?;
                 }
                 (pack::PackObjectId::Hash(hash), pack::ObjectType::Tree) => {
                     self.put_tree_serialized(&data, *hash)?;
@@ -831,6 +865,7 @@ pub trait ObjectStore: Send + Sync {
 
 #[cfg(test)]
 mod any_store_tests {
+    use sley::ObjectFormat as GitObjectFormat;
     use tempfile::TempDir;
 
     use super::*;
@@ -851,6 +886,26 @@ mod any_store_tests {
     #[test]
     fn fs_variant_dispatches_every_object_store_method() {
         let (_temp, store) = fs_any_store();
+
+        // ── Annotated tags ──
+        let annotated_tag = AnnotatedTag::new(
+            GitObjectFormat::Sha1,
+            b"object 1111111111111111111111111111111111111111\ntype commit\ntag v1\ntagger Test <test@example.com> 1700000000 +0100\n\nrelease\n".to_vec(),
+            None,
+            None,
+        )
+        .unwrap();
+        let annotated_tag_hash = store.put_annotated_tag(&annotated_tag).unwrap();
+        assert_eq!(
+            store.get_annotated_tag(&annotated_tag_hash).unwrap(),
+            Some(annotated_tag)
+        );
+        assert!(
+            store
+                .list_annotated_tags()
+                .unwrap()
+                .contains(&annotated_tag_hash)
+        );
 
         // ── Blobs ──
         let blob = Blob::from("any-store dispatch blob");

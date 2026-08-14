@@ -347,6 +347,7 @@ mod tests {
             short_name: name.to_string(),
             full_name: full,
             namespace: ns,
+            object_sha: git_sha.to_string(),
             target_sha: git_sha.to_string(),
         }
     }

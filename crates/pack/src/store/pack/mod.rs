@@ -7,6 +7,7 @@
 mod compact_frame;
 mod manager;
 mod pack_builder;
+mod pack_identity;
 mod pack_index;
 mod pack_reader;
 mod repack;
@@ -21,6 +22,7 @@ mod pack_tests;
 pub use compact_frame::compress_compact_frame;
 pub use manager::PackManager;
 pub use pack_builder::PackBuilder;
+pub use pack_identity::{PACK_LOGICAL_ID_CONTEXT, PackLogicalId, PackRepresentationHash};
 pub use pack_index::PackIndex;
 pub use pack_reader::{EncodedPackSubset, PackReadTier, PackReader};
 pub use repack::{
@@ -35,6 +37,7 @@ pub use shared::{
     try_decode_tagged_entry_header, verify_container, verify_container_layout,
     write_container_header,
 };
+pub(crate) use shared::{verify_supported_container, verify_supported_container_layout};
 pub use streaming_builder::{StreamingPackBuilder, SyncData};
 
 /// Object type for pack entries.
@@ -49,12 +52,13 @@ pub enum ObjectType {
     StateAttachment = 5,
     SnapshotCommit = 6,
     TimelineOperation = 7,
+    AnnotatedTag = 8,
 }
 
 pub(crate) fn pack_container_spec() -> PackContainerSpec {
     PackContainerSpec {
         magic: b"LMPK",
-        version: 3,
+        version: 4,
     }
 }
 
@@ -69,6 +73,7 @@ impl ObjectType {
             5 => Some(ObjectType::StateAttachment),
             6 => Some(ObjectType::SnapshotCommit),
             7 => Some(ObjectType::TimelineOperation),
+            8 => Some(ObjectType::AnnotatedTag),
             _ => None,
         }
     }

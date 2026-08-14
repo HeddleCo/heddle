@@ -308,13 +308,13 @@ mod tests {
 
         assert_eq!(
             blake3::hash(&pack_data).to_hex().as_str(),
-            "332afc6e60a35973800c50e7599bcb41ed055b730d41acfc7f9f1cd574408ccd",
-            "pack bytes must match the pre-refactor main baseline"
+            "8a8f5a42787e958df6133989791f23363e7a736dca926fba5333aae1aee36c46",
+            "pack bytes must match the v4 format baseline"
         );
         assert_eq!(
             blake3::hash(&index_data).to_hex().as_str(),
-            "9ec20359e2a64121684af45f0dcabfdb726a9abfa4a7ce186904650a9f17c602",
-            "index bytes must match the v3 baseline after the v2-to-v3 format change in #1340"
+            "acd658d907bb8c561ec951ce149d4b93c60107640165d615e41c2411787db835",
+            "index bytes must match the v4 format baseline"
         );
 
         let pack_path = packs_dir.join("fixture.pack");

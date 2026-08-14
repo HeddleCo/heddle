@@ -14,10 +14,10 @@ use bytes::Bytes;
 use heddle_format::delta::{DeltaDecoder, MAX_DELTA_OUTPUT_SIZE};
 
 use super::{
-    ObjectType, PackObjectId, PackObjectRecord, append_container_checksum,
-    decode_tagged_entry_header, decompress_pack_payload, has_zstd_magic, pack_container_spec,
-    pack_index::PackIndex, varint, verify_container, verify_container_layout,
-    write_container_header,
+    ObjectType, PackLogicalId, PackObjectId, PackObjectRecord, PackRepresentationHash,
+    append_container_checksum, decode_tagged_entry_header, decompress_pack_payload, has_zstd_magic,
+    pack_container_spec, pack_identity::LogicalIdBuilder, pack_index::PackIndex, varint,
+    verify_supported_container, verify_supported_container_layout, write_container_header,
 };
 use crate::{
     object::ContentHash,
@@ -136,9 +136,9 @@ impl PackReader<'static> {
         let pack_bytes = read_file_bytes_for_pack(pack_path)?;
         let index_data = read_file_bytes_for_pack(index_path)?;
         let (_, _, content_end) = if verify_checksum {
-            verify_container(&pack_bytes, pack_container_spec())?
+            verify_supported_container(&pack_bytes)?
         } else {
-            verify_container_layout(&pack_bytes, pack_container_spec())?
+            verify_supported_container_layout(&pack_bytes)?
         };
         let index = PackIndex::from_owned_bytes(index_data)?;
         let aliased_offsets = index.aliased_offsets()?;
@@ -154,7 +154,7 @@ impl PackReader<'static> {
 
     pub fn from_bytes(pack_data: impl Into<Bytes>, index_data: impl AsRef<[u8]>) -> Result<Self> {
         let pack_data = pack_data.into();
-        let (_, _, content_end) = verify_container(&pack_data, pack_container_spec())?;
+        let (_, _, content_end) = verify_supported_container(&pack_data)?;
         let index = PackIndex::from_bytes(index_data.as_ref())?;
         let aliased_offsets = index.aliased_offsets()?;
         Ok(Self {
@@ -170,7 +170,7 @@ impl PackReader<'static> {
 
 impl<'a> PackReader<'a> {
     pub fn from_slice(pack_data: &'a [u8], index_data: impl AsRef<[u8]>) -> Result<Self> {
-        let (_, _, content_end) = verify_container(pack_data, pack_container_spec())?;
+        let (_, _, content_end) = verify_supported_container(pack_data)?;
         let index = PackIndex::from_bytes(index_data.as_ref())?;
         let aliased_offsets = index.aliased_offsets()?;
         Ok(Self {
@@ -186,6 +186,25 @@ impl<'a> PackReader<'a> {
     /// List all object ids in this pack.
     pub fn list_ids(&self) -> Result<Vec<PackObjectId>> {
         self.index.ids()
+    }
+
+    /// Compute this pack's root-spool-scoped logical identity.
+    ///
+    /// Every logical object is decoded so delta and compact-frame physical
+    /// choices cannot affect the result. The visit also validates exact index
+    /// membership before an identity is returned.
+    pub fn logical_id(&self) -> Result<PackLogicalId> {
+        let mut identity = LogicalIdBuilder::new();
+        self.visit_objects(|id, object_type, data| {
+            identity.push(id, object_type, data);
+            Ok(())
+        })?;
+        Ok(identity.finish())
+    }
+
+    /// Hash the exact finalized pack bytes used by this reader.
+    pub fn representation_hash(&self) -> PackRepresentationHash {
+        PackRepresentationHash::compute(self.data.as_slice())
     }
 
     /// List logical ids together with their physical read tier.
@@ -229,7 +248,7 @@ impl<'a> PackReader<'a> {
             .into_iter()
             .filter_map(|id| match id {
                 PackObjectId::Hash(hash) => Some(hash),
-                PackObjectId::StateId(_) => None,
+                PackObjectId::StateId(_) | PackObjectId::AnnotatedTag(_) => None,
             })
             .collect())
     }
@@ -466,10 +485,11 @@ impl<'a> PackReader<'a> {
         // compare; cheaper than the size+varint decode that follows.
         let (record_id, id_len) = PackObjectId::decode_tagged(self.content_from(offset)?)?;
         let header_start = checked_index_add(offset, id_len, "record header start")?;
-        let (obj_type, uncompressed_size, type_len) =
+        let (encoded_type, uncompressed_size, type_len) =
             varint::decode_type_and_size(self.content_from(header_start)?).ok_or_else(|| {
                 StoreError::InvalidObject("Truncated type+size varint".to_string())
             })?;
+        let obj_type = decoded_entry_type(record_id, encoded_type)?;
         let uncompressed_size = checked_decoded_size("uncompressed_size", uncompressed_size)?;
         let varint_start = checked_index_add(header_start, type_len, "compressed_size start")?;
         let (compressed_size, comp_len) = varint::decode_varint(self.content_from(varint_start)?)
@@ -599,10 +619,11 @@ impl<'a> PackReader<'a> {
         let (id, id_len) = PackObjectId::decode_tagged(self.content_from(offset)?)?;
         let header_start = checked_index_add(offset, id_len, "record header start")?;
 
-        let (obj_type, uncompressed_size, type_len) =
+        let (encoded_type, uncompressed_size, type_len) =
             varint::decode_type_and_size(self.content_from(header_start)?).ok_or_else(|| {
                 StoreError::InvalidObject("Truncated type+size varint".to_string())
             })?;
+        let obj_type = decoded_entry_type(id, encoded_type)?;
         let uncompressed_size = checked_decoded_size("uncompressed_size", uncompressed_size)?;
 
         let varint_start = checked_index_add(header_start, type_len, "compressed_size start")?;
@@ -762,9 +783,9 @@ impl<'a> PackReader<'a> {
     fn require_delta_base_hash(base_id: Option<PackObjectId>) -> Result<ContentHash> {
         match base_id {
             Some(PackObjectId::Hash(hash)) => Ok(hash),
-            Some(PackObjectId::StateId(_)) => Err(StoreError::InvalidObject(
-                "pack delta base must be hash-backed content".into(),
-            )),
+            Some(PackObjectId::StateId(_) | PackObjectId::AnnotatedTag(_)) => Err(
+                StoreError::InvalidObject("pack delta base must be hash-backed content".into()),
+            ),
             None => Err(StoreError::InvalidObject(
                 "pack object type is Delta but base hash is missing".into(),
             )),
@@ -823,6 +844,19 @@ fn checked_data_end(
 
 fn truncated_compressed_size_varint() -> StoreError {
     StoreError::InvalidObject("Truncated compressed_size varint".to_string())
+}
+
+fn decoded_entry_type(id: PackObjectId, encoded: ObjectType) -> Result<ObjectType> {
+    if matches!(id, PackObjectId::AnnotatedTag(_)) {
+        if encoded != ObjectType::Blob {
+            return Err(StoreError::InvalidObject(
+                "annotated-tag pack entry has invalid encoded type".to_string(),
+            ));
+        }
+        Ok(ObjectType::AnnotatedTag)
+    } else {
+        Ok(encoded)
+    }
 }
 
 /// Reject a record whose tagged id at the indexed offset doesn't

@@ -330,10 +330,13 @@ fn select_snapshot_pack_reuse_descriptor<'a>(
     }
     let wanted = objects
         .iter()
-        .map(|object| match &object.id {
-            wire::ObjectId::Hash(hash) => PackObjectId::Hash(*hash),
-            wire::ObjectId::StateId(state) => PackObjectId::StateId(*state),
-            wire::ObjectId::StateAttachment { id, .. } => PackObjectId::Hash(*id.as_hash()),
+        .map(|object| match (&object.id, object.obj_type) {
+            (wire::ObjectId::Hash(hash), ObjectType::AnnotatedTag) => {
+                PackObjectId::AnnotatedTag(*hash)
+            }
+            (wire::ObjectId::Hash(hash), _) => PackObjectId::Hash(*hash),
+            (wire::ObjectId::StateId(state), _) => PackObjectId::StateId(*state),
+            (wire::ObjectId::StateAttachment { id, .. }, _) => PackObjectId::Hash(*id.as_hash()),
         })
         .collect::<HashSet<_>>();
     if wanted.len() != objects.len() {
@@ -353,6 +356,7 @@ pub struct PullObjectMix {
     pub trees: usize,
     pub states: usize,
     pub actions: usize,
+    pub annotated_tags: usize,
     pub redactions: usize,
     pub state_visibilities: usize,
     pub state_attachments: usize,
@@ -375,6 +379,7 @@ impl PullObjectMix {
             ObjectTypeBucket::Tree => self.trees += 1,
             ObjectTypeBucket::State => self.states += 1,
             ObjectTypeBucket::Action => self.actions += 1,
+            ObjectTypeBucket::AnnotatedTag => self.annotated_tags += 1,
             ObjectTypeBucket::Redaction => self.redactions += 1,
             ObjectTypeBucket::StateVisibility => self.state_visibilities += 1,
             ObjectTypeBucket::StateAttachment => self.state_attachments += 1,
@@ -387,6 +392,7 @@ impl PullObjectMix {
             + self.trees
             + self.states
             + self.actions
+            + self.annotated_tags
             + self.redactions
             + self.state_visibilities
             + self.state_attachments
@@ -1943,6 +1949,9 @@ impl HostedClient {
                                         let inferred =
                                             infer_installed_hash_object_type(repo, &hash)?;
                                         profile.object_mix.record(inferred);
+                                    }
+                                    (PackObjectId::AnnotatedTag(_), None) => {
+                                        profile.object_mix.record(ObjectType::AnnotatedTag);
                                     }
                                 }
                             }
