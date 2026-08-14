@@ -14,10 +14,10 @@ use bytes::Bytes;
 use heddle_format::delta::{DeltaDecoder, MAX_DELTA_OUTPUT_SIZE};
 
 use super::{
-    ObjectType, PackObjectId, PackObjectRecord, append_container_checksum,
-    decode_tagged_entry_header, decompress_pack_payload, has_zstd_magic, pack_container_spec,
-    pack_index::PackIndex, varint, verify_supported_container, verify_supported_container_layout,
-    write_container_header,
+    ObjectType, PackLogicalId, PackObjectId, PackObjectRecord, PackRepresentationHash,
+    append_container_checksum, decode_tagged_entry_header, decompress_pack_payload, has_zstd_magic,
+    pack_container_spec, pack_identity::LogicalIdBuilder, pack_index::PackIndex, varint,
+    verify_supported_container, verify_supported_container_layout, write_container_header,
 };
 use crate::{
     object::ContentHash,
@@ -186,6 +186,25 @@ impl<'a> PackReader<'a> {
     /// List all object ids in this pack.
     pub fn list_ids(&self) -> Result<Vec<PackObjectId>> {
         self.index.ids()
+    }
+
+    /// Compute this pack's root-spool-scoped logical identity.
+    ///
+    /// Every logical object is decoded so delta and compact-frame physical
+    /// choices cannot affect the result. The visit also validates exact index
+    /// membership before an identity is returned.
+    pub fn logical_id(&self) -> Result<PackLogicalId> {
+        let mut identity = LogicalIdBuilder::new();
+        self.visit_objects(|id, object_type, data| {
+            identity.push(id, object_type, data);
+            Ok(())
+        })?;
+        Ok(identity.finish())
+    }
+
+    /// Hash the exact finalized pack bytes used by this reader.
+    pub fn representation_hash(&self) -> PackRepresentationHash {
+        PackRepresentationHash::compute(self.data.as_slice())
     }
 
     /// List logical ids together with their physical read tier.
