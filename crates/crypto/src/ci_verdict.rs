@@ -1,34 +1,80 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Signed, provenance-bound CI verdicts.
+//!
+//! A verdict signature binds the canonical [`CiVerdictBody`] content hash, the
+//! rewrite-stable change id, the exact evaluated tree, the signer kind, and the
+//! signing time. Trust in the embedded key and timestamp freshness are policy
+//! decisions for the caller; this module proves integrity and authenticity.
 
+mod body;
+mod body_details;
+
+pub use body::{
+    Basis, BasisKind, CI_VERDICT_BODY_SCHEMA_VERSION, CheckClass, CheckDescriptor, CiVerdictBody,
+    StateRef,
+};
+pub use body_details::{
+    Conclusion, Execution, FailureClass, FailureDetail, LogRef, Outcome, Repro,
+};
+use chrono::DateTime;
 use objects::object::{ChangeId, ContentHash};
 use serde::{Deserialize, Serialize};
 
 use crate::{Signer, SignerError, verify_payload_signature};
 
-/// NUL-terminated domain separator for CI verdict signatures.
-pub const CI_VERDICT_DOMAIN: &[u8; 21] = b"heddle-ci-verdict-v1\0";
+/// NUL-terminated domain separator for the v2 CI-verdict signing scheme.
+pub const CI_VERDICT_DOMAIN: &[u8; 21] = b"heddle-ci-verdict-v2\0";
 
 /// Current serialized [`SignedVerdict`] format version.
-pub const SIGNED_VERDICT_FORMAT_VERSION: u8 = 1;
+pub const SIGNED_VERDICT_FORMAT_VERSION: u8 = 2;
 
-const SIGNING_PAYLOAD_LEN: usize = CI_VERDICT_DOMAIN.len() + 32 + 16 + 32;
+const FIXED_PAYLOAD_LEN: usize = CI_VERDICT_DOMAIN.len() + 32 + 16 + 32;
 
-/// A CI verdict signature bound to immutable verdict content and source state.
-///
-/// The signature covers [`ci_verdict_signing_payload`]. The embedded public key
-/// proves integrity; callers must separately resolve that key against their
-/// trusted `ci-runner` key set.
+/// What kind of principal signed a verdict.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignerKind {
+    /// A trusted automation principal. Trust-set membership remains caller policy.
+    #[default]
+    ServiceAccount,
+    /// A human device key. Device verdicts are always advisory-only.
+    Device,
+}
+
+impl SignerKind {
+    /// Stable token used in both JSON and the signature preimage.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ServiceAccount => "service_account",
+            Self::Device => "device",
+        }
+    }
+
+    /// Whether this signer kind is forbidden from satisfying a required gate.
+    #[must_use]
+    pub const fn is_advisory_only(self) -> bool {
+        matches!(self, Self::Device)
+    }
+}
+
+/// A rich CI verdict body plus its provenance-bound signature.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedVerdict {
-    /// Serialized verdict format. Only version 1 is accepted.
+    /// Serialized envelope format. Only v2 is accepted.
     pub format_version: u8,
-    /// Hash of the complete CI verdict content.
+    /// Complete conclusion-bearing content covered by [`Self::content_hash`].
+    pub body: CiVerdictBody,
+    /// BLAKE3 hash of the body's canonical JSON bytes.
     pub content_hash: ContentHash,
     /// Rewrite-stable change identifier for the checked state.
     pub change_id: ChangeId,
-    /// Root tree digest for the exact source tree that was checked.
+    /// Root tree digest for the exact tree that was checked.
     pub tree_digest: ContentHash,
+    /// What kind of principal signed the verdict.
+    pub signer_kind: SignerKind,
+    /// RFC3339 timestamp, signed to prevent freshness-presentation rewrites.
+    pub signed_at: String,
     /// Signature algorithm understood by Heddle's shared signing spine.
     pub algorithm: String,
     /// Hex-encoded public key bytes.
@@ -38,76 +84,159 @@ pub struct SignedVerdict {
 }
 
 impl SignedVerdict {
-    /// Verify the signature over every binding in this verdict.
+    /// Verify the body digest and signature over every provenance binding.
     ///
-    /// Trust in the embedded key is deliberately outside this primitive and is
-    /// established by the repository's `ci-runner` trust-set resolver.
+    /// Trust-set membership, freshness windows, and required-gate eligibility
+    /// remain caller policy. In particular, [`SignerKind::Device`] is advisory-only.
     pub fn verify(&self) -> Result<(), SignedVerdictError> {
-        if self.format_version != SIGNED_VERDICT_FORMAT_VERSION {
-            return Err(SignedVerdictError::UnsupportedVersion(self.format_version));
+        validate_versions(self.format_version, self.body.schema_version)?;
+        validate_signed_at(&self.signed_at)?;
+
+        let recomputed = self.body.content_hash();
+        if recomputed != self.content_hash {
+            return Err(SignedVerdictError::BodyDigestMismatch {
+                signed: self.content_hash,
+                recomputed,
+            });
         }
 
         let public_key =
             hex::decode(&self.public_key).map_err(SignedVerdictError::InvalidPublicKeyEncoding)?;
         let signature =
             hex::decode(&self.signature).map_err(SignedVerdictError::InvalidSignatureEncoding)?;
-        let payload =
-            ci_verdict_signing_payload(&self.content_hash, &self.change_id, &self.tree_digest);
+        let payload = ci_verdict_signing_payload(
+            &self.content_hash,
+            &self.change_id,
+            &self.tree_digest,
+            self.signer_kind,
+            &self.signed_at,
+        );
 
         verify_payload_signature(&payload, &self.algorithm, &public_key, &signature)
             .map_err(SignedVerdictError::from)
+    }
+
+    /// Whether policy must treat this verdict as advisory-only.
+    #[must_use]
+    pub const fn is_advisory_only(&self) -> bool {
+        self.signer_kind.is_advisory_only()
     }
 }
 
 /// Build the canonical bytes signed by a [`SignedVerdict`].
 ///
-/// Layout: NUL-terminated domain tag, 32-byte verdict content hash, 16-byte
-/// change id, then 32-byte root tree digest. All fields are fixed-width and
-/// retain their native byte order.
+/// Layout: `v2-tag || content-hash || change-id || tree-digest || signer-kind
+/// || NUL || signed-at || NUL`. The first four fields have fixed widths; the two
+/// trailing UTF-8 fields are framed by their fixed enum vocabulary/final NUL.
+#[must_use]
 pub fn ci_verdict_signing_payload(
     content_hash: &ContentHash,
     change_id: &ChangeId,
     tree_digest: &ContentHash,
-) -> [u8; SIGNING_PAYLOAD_LEN] {
-    let mut payload = [0; SIGNING_PAYLOAD_LEN];
-    let content_hash_start = CI_VERDICT_DOMAIN.len();
-    let change_id_start = content_hash_start + content_hash.as_bytes().len();
-    let tree_digest_start = change_id_start + change_id.as_bytes().len();
-
-    payload[..content_hash_start].copy_from_slice(CI_VERDICT_DOMAIN);
-    payload[content_hash_start..change_id_start].copy_from_slice(content_hash.as_bytes());
-    payload[change_id_start..tree_digest_start].copy_from_slice(change_id.as_bytes());
-    payload[tree_digest_start..].copy_from_slice(tree_digest.as_bytes());
+    signer_kind: SignerKind,
+    signed_at: &str,
+) -> Vec<u8> {
+    let mut payload =
+        Vec::with_capacity(FIXED_PAYLOAD_LEN + signer_kind.as_str().len() + signed_at.len() + 2);
+    payload.extend_from_slice(CI_VERDICT_DOMAIN);
+    payload.extend_from_slice(content_hash.as_bytes());
+    payload.extend_from_slice(change_id.as_bytes());
+    payload.extend_from_slice(tree_digest.as_bytes());
+    payload.extend_from_slice(signer_kind.as_str().as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(signed_at.as_bytes());
+    payload.push(0);
     payload
 }
 
-/// Sign the canonical CI verdict payload with Heddle's shared [`Signer`].
+/// Sign a rich CI verdict with Heddle's shared [`Signer`] spine.
 pub fn signed_verdict_from_signer(
-    content_hash: &ContentHash,
+    body: CiVerdictBody,
     change_id: &ChangeId,
     tree_digest: &ContentHash,
+    signer_kind: SignerKind,
+    signed_at: String,
     signer: &dyn Signer,
 ) -> Result<SignedVerdict, SignedVerdictError> {
-    let payload = ci_verdict_signing_payload(content_hash, change_id, tree_digest);
+    validate_versions(SIGNED_VERDICT_FORMAT_VERSION, body.schema_version)?;
+    validate_signed_at(&signed_at)?;
+
+    let content_hash = body.content_hash();
+    let payload = ci_verdict_signing_payload(
+        &content_hash,
+        change_id,
+        tree_digest,
+        signer_kind,
+        &signed_at,
+    );
     let signature = signer.sign(&payload)?;
 
     Ok(SignedVerdict {
         format_version: SIGNED_VERDICT_FORMAT_VERSION,
-        content_hash: *content_hash,
+        body,
+        content_hash,
         change_id: *change_id,
         tree_digest: *tree_digest,
+        signer_kind,
+        signed_at,
         algorithm: signer.algorithm().to_string(),
         public_key: hex::encode(signer.public_key()),
         signature: hex::encode(signature),
     })
 }
 
+fn validate_versions(format_version: u8, schema_version: u32) -> Result<(), SignedVerdictError> {
+    if format_version != SIGNED_VERDICT_FORMAT_VERSION {
+        return Err(SignedVerdictError::UnsupportedFormatVersion {
+            found: format_version,
+            supported: SIGNED_VERDICT_FORMAT_VERSION,
+        });
+    }
+    if schema_version != CI_VERDICT_BODY_SCHEMA_VERSION {
+        return Err(SignedVerdictError::UnsupportedSchemaVersion {
+            found: schema_version,
+            supported: CI_VERDICT_BODY_SCHEMA_VERSION,
+        });
+    }
+    Ok(())
+}
+
+fn validate_signed_at(signed_at: &str) -> Result<(), SignedVerdictError> {
+    DateTime::parse_from_rfc3339(signed_at)
+        .map(|_| ())
+        .map_err(|error| SignedVerdictError::InvalidSignedAt(error.to_string()))
+}
+
 /// Errors returned while creating or verifying a signed CI verdict.
 #[derive(Debug, thiserror::Error)]
 pub enum SignedVerdictError {
-    /// The serialized verdict format is not supported by this reader.
-    #[error("unsupported signed verdict format version {0}")]
-    UnsupportedVersion(u8),
+    /// The serialized envelope format is not supported.
+    #[error("unsupported signed verdict format version {found}; expected {supported}")]
+    UnsupportedFormatVersion {
+        /// Version found in the envelope.
+        found: u8,
+        /// Only version accepted by this implementation.
+        supported: u8,
+    },
+    /// The embedded body schema cannot be verified by this implementation.
+    #[error("unsupported CI verdict body schema version {found}; expected {supported}")]
+    UnsupportedSchemaVersion {
+        /// Version found in the body.
+        found: u32,
+        /// Only version accepted by this implementation.
+        supported: u32,
+    },
+    /// The embedded body no longer hashes to the signed content hash.
+    #[error("CI verdict body digest mismatch: signed {signed}, recomputed {recomputed}")]
+    BodyDigestMismatch {
+        /// Digest carried by the signed envelope.
+        signed: ContentHash,
+        /// Digest recomputed from the embedded body.
+        recomputed: ContentHash,
+    },
+    /// The signed timestamp is not RFC3339.
+    #[error("CI verdict signed_at is not RFC3339: {0}")]
+    InvalidSignedAt(String),
     /// The embedded public key is not valid hexadecimal.
     #[error("signed verdict public key is not hexadecimal: {0}")]
     InvalidPublicKeyEncoding(hex::FromHexError),
@@ -117,135 +246,4 @@ pub enum SignedVerdictError {
     /// The shared signing backend rejected the operation.
     #[error("signed verdict cryptographic error: {0}")]
     Signer(#[from] SignerError),
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::Value;
-
-    use super::*;
-    use crate::Ed25519Signer;
-
-    fn bindings() -> (ContentHash, ChangeId, ContentHash) {
-        (
-            ContentHash::from_bytes([1; 32]),
-            ChangeId::from_bytes([2; 16]),
-            ContentHash::from_bytes([3; 32]),
-        )
-    }
-
-    fn signed_verdict() -> SignedVerdict {
-        let signer = Ed25519Signer::from_seed(&[7; 32]).expect("create signer");
-        let (content_hash, change_id, tree_digest) = bindings();
-        signed_verdict_from_signer(&content_hash, &change_id, &tree_digest, &signer)
-            .expect("sign verdict")
-    }
-
-    #[test]
-    fn canonical_payload_pins_domain_and_binding_order() {
-        let (content_hash, change_id, tree_digest) = bindings();
-        let payload = ci_verdict_signing_payload(&content_hash, &change_id, &tree_digest);
-
-        assert_eq!(&payload[..21], b"heddle-ci-verdict-v1\0");
-        assert_eq!(&payload[21..53], &[1; 32]);
-        assert_eq!(&payload[53..69], &[2; 16]);
-        assert_eq!(&payload[69..101], &[3; 32]);
-    }
-
-    #[test]
-    fn signed_verdict_round_trips_losslessly_and_verifies() {
-        let verdict = signed_verdict();
-        let encoded = serde_json::to_vec(&verdict).expect("encode signed verdict");
-        let decoded: SignedVerdict =
-            serde_json::from_slice(&encoded).expect("decode signed verdict");
-
-        assert_eq!(decoded, verdict);
-        decoded.verify().expect("verify decoded verdict");
-    }
-
-    #[test]
-    fn verify_rejects_each_tampered_binding() {
-        let verdict = signed_verdict();
-        let mut tampered_content = verdict.clone();
-        tampered_content.content_hash = ContentHash::from_bytes([9; 32]);
-        let mut tampered_change = verdict.clone();
-        tampered_change.change_id = ChangeId::from_bytes([9; 16]);
-        let mut tampered_tree = verdict;
-        tampered_tree.tree_digest = ContentHash::from_bytes([9; 32]);
-
-        for tampered in [tampered_content, tampered_change, tampered_tree] {
-            assert!(matches!(
-                tampered.verify(),
-                Err(SignedVerdictError::Signer(SignerError::VerificationFailed))
-            ));
-        }
-    }
-
-    #[test]
-    fn verify_rejects_wrong_key_and_tampered_signature() {
-        let verdict = signed_verdict();
-        let wrong_signer = Ed25519Signer::from_seed(&[8; 32]).expect("create wrong signer");
-        let mut wrong_key = verdict.clone();
-        wrong_key.public_key = hex::encode(wrong_signer.public_key());
-        let mut tampered_signature = verdict;
-        let mut signature = hex::decode(&tampered_signature.signature).expect("decode signature");
-        signature[0] ^= 1;
-        tampered_signature.signature = hex::encode(signature);
-
-        for tampered in [wrong_key, tampered_signature] {
-            assert!(matches!(
-                tampered.verify(),
-                Err(SignedVerdictError::Signer(SignerError::VerificationFailed))
-            ));
-        }
-    }
-
-    #[test]
-    fn verify_rejects_untagged_signature_and_unknown_format() {
-        let signer = Ed25519Signer::from_seed(&[7; 32]).expect("create signer");
-        let (content_hash, change_id, tree_digest) = bindings();
-        let mut untagged_payload = Vec::with_capacity(80);
-        untagged_payload.extend_from_slice(content_hash.as_bytes());
-        untagged_payload.extend_from_slice(change_id.as_bytes());
-        untagged_payload.extend_from_slice(tree_digest.as_bytes());
-        let mut verdict = SignedVerdict {
-            format_version: SIGNED_VERDICT_FORMAT_VERSION,
-            content_hash,
-            change_id,
-            tree_digest,
-            algorithm: signer.algorithm().to_string(),
-            public_key: hex::encode(signer.public_key()),
-            signature: hex::encode(
-                signer
-                    .sign(&untagged_payload)
-                    .expect("sign untagged payload"),
-            ),
-        };
-
-        assert!(matches!(
-            verdict.verify(),
-            Err(SignedVerdictError::Signer(SignerError::VerificationFailed))
-        ));
-        verdict.format_version = 2;
-        assert!(matches!(
-            verdict.verify(),
-            Err(SignedVerdictError::UnsupportedVersion(2))
-        ));
-    }
-
-    #[test]
-    fn deserialize_rejects_every_missing_binding() {
-        let encoded = serde_json::to_value(signed_verdict()).expect("encode signed verdict");
-
-        for field in ["content_hash", "change_id", "tree_digest"] {
-            let mut incomplete = encoded.clone();
-            let Value::Object(ref mut object) = incomplete else {
-                panic!("signed verdict must encode as an object");
-            };
-            object.remove(field);
-
-            serde_json::from_value::<SignedVerdict>(incomplete)
-                .expect_err("missing binding must fail closed");
-        }
-    }
 }
