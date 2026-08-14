@@ -15,8 +15,10 @@ mod behavior_tests;
 use std::path::Path;
 
 pub use ci_verdict::{
-    CI_VERDICT_DOMAIN, SIGNED_VERDICT_FORMAT_VERSION, SignedVerdict, SignedVerdictError,
-    ci_verdict_signing_payload, signed_verdict_from_signer,
+    Basis, BasisKind, CI_VERDICT_BODY_SCHEMA_VERSION, CI_VERDICT_DOMAIN, CheckClass,
+    CheckDescriptor, CiVerdictBody, Conclusion, Execution, FailureClass, FailureDetail, LogRef,
+    Outcome, Repro, SIGNED_VERDICT_FORMAT_VERSION, SignedVerdict, SignedVerdictError, SignerKind,
+    StateRef, ci_verdict_signing_payload, signed_verdict_from_signer,
 };
 pub use ed25519::Ed25519Signer;
 pub use error::SignerError;

@@ -1,0 +1,56 @@
+{
+  "$comment": [
+    "Golden signing vectors for Heddle CI verdict v2.",
+    "Canonical body bytes are declaration-ordered serde_json with sorted maps and omitted absent options.",
+    "content_hash is raw BLAKE3-256(canonical_bytes).",
+    "preimage = tag || content_hash[32] || change_id[16] || tree_digest[32] || signer_kind || NUL || signed_at || NUL.",
+    "The fixed ed25519 seed is for tests only and must never be used in production."
+  ],
+  "body_schema_version": 1,
+  "signed_verdict_format_version": 2,
+  "signing_payload_version_tag_ascii": "heddle-ci-verdict-v2",
+  "signing_payload_version_tag_hex": "686564646c652d63692d766572646963742d763200",
+  "test_key": {
+    "kind": "ed25519",
+    "seed_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+    "public_key_hex": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+  },
+  "vectors": [
+    {
+      "name": "minimal",
+      "fixture": "passing_body",
+      "signer_kind": "service_account",
+      "signed_at": "2026-06-11T18:05:54Z",
+      "change_id_hex": "02020202020202020202020202020202",
+      "tree_digest_hex": "0303030303030303030303030303030303030303030303030303030303030303",
+      "canonical_bytes_utf8": "{\"schema_version\":1,\"repo\":\"heddle/core/heddle\",\"state\":{\"content_hash\":\"b3:9af2c0de\",\"change_id\":\"hd-7m3k\"},\"basis\":{\"kind\":{\"merged_with\":{\"target_state\":\"b3:1c0dba5e\",\"behind_count\":3}},\"evaluated_tree_digest\":\"b3:deadbeef\"},\"check\":{\"name\":\"check.test\",\"class\":\"required\",\"definition_digest\":\"b3:c0ffee\",\"command\":[\"cargo\",\"test\",\"--workspace\"],\"toolchain\":\"rustc 1.96.0\",\"params\":{\"features\":\"default\"},\"services\":[]},\"outcome\":{\"conclusion\":\"success\"},\"execution\":{\"pick_id\":\"pk_01J\",\"attempt\":1,\"runner\":\"svc:runner-pool-a\",\"started_at\":\"2026-06-11T18:02:11Z\",\"finished_at\":\"2026-06-11T18:05:54Z\",\"duration_ms\":223000,\"ran_suites\":[\"workspace\"],\"skipped_suites\":[]},\"repro\":{\"command\":[\"cargo\",\"test\",\"--locked\",\"--workspace\"],\"env\":{},\"services\":[]}}",
+      "content_hash_hex": "07c0245b4d8a3ed469ed6045b1dbd6403fec96dc4ecc8689564186eee3d9f86b",
+      "signing_preimage_hex": "686564646c652d63692d766572646963742d76320007c0245b4d8a3ed469ed6045b1dbd6403fec96dc4ecc8689564186eee3d9f86b020202020202020202020202020202020303030303030303030303030303030303030303030303030303030303030303736572766963655f6163636f756e7400323032362d30362d31315431383a30353a35345a00",
+      "signature_hex": "87116991fe65bb02f111bf0b17e6c8284802efae34192afe66e97690da8275176871d17e25e086328e41d5ccf653b4647ba2f3bde016c561764eb28f1ef68c05"
+    },
+    {
+      "name": "maximal_device",
+      "fixture": "maximal_body",
+      "signer_kind": "device",
+      "signed_at": "2026-06-11T19:04:30Z",
+      "change_id_hex": "02020202020202020202020202020202",
+      "tree_digest_hex": "0303030303030303030303030303030303030303030303030303030303030303",
+      "canonical_bytes_utf8": "{\"schema_version\":1,\"repo\":\"heddle/core/weft\",\"state\":{\"content_hash\":\"b3:5e11a7c0\",\"change_id\":\"hd-9q2x\",\"logical_change_id\":\"lc-weft-postgres\"},\"basis\":{\"kind\":{\"merged_with\":{\"target_state\":\"hd-main-0001\",\"behind_count\":7,\"merge_algorithm_version\":\"recursive-v2\",\"conflict_policy\":\"refuse-on-conflict\"}},\"evaluated_tree_digest\":\"b3:7eaf00d5\"},\"check\":{\"name\":\"check.postgres\",\"class\":\"required\",\"definition_digest\":\"b3:def111\",\"command\":[\"cargo\",\"test\",\"--features\",\"postgres\",\"--\",\"--ignored\"],\"image_digest\":\"sha256:abc123\",\"toolchain\":\"rustc 1.96.0\",\"params\":{\"features\":\"postgres\",\"toolchain\":\"stable\"},\"services\":[\"postgres\"],\"node_id\":\"node-postgres-suite\"},\"outcome\":{\"conclusion\":\"failure\",\"failure\":{\"class\":\"test\",\"subclass\":\"ignored_suite\",\"failing_step\":\"check.postgres\",\"excerpt\":\"test schema::migrations::applies ... FAILED\",\"excerpt_encoding\":\"utf8\"}},\"execution\":{\"pick_id\":\"pk_02K\",\"attempt\":2,\"runner\":\"svc:runner-pool-b\",\"started_at\":\"2026-06-11T19:00:00Z\",\"finished_at\":\"2026-06-11T19:04:30Z\",\"duration_ms\":270000,\"ran_suites\":[\"postgres\",\"migrations\"],\"skipped_suites\":[\"unit\"],\"runner_pool\":\"pool-b\",\"trust_tier\":\"t1_container\",\"isolation_tier\":\"t1_container\",\"materialization_proof\":\"b3:merged7eaf00d5\",\"secret_grants\":[\"DATABASE_URL\"]},\"log\":{\"manifest_digest\":\"b3:109111\",\"size_bytes\":48122},\"repro\":{\"command\":[\"cargo\",\"test\",\"--locked\",\"--features\",\"postgres\",\"--\",\"--ignored\"],\"env\":{\"CARGO_TERM_COLOR\":\"never\",\"RUST_BACKTRACE\":\"1\"},\"image\":\"sha256:abc123\",\"services\":[\"postgres\"]},\"check_set_digest\":\"b3:cs0001\"}",
+      "content_hash_hex": "0fb5382254c883065771c347b9f2dc5e80b200b57d09b14f2627a4d1017cd43c",
+      "signing_preimage_hex": "686564646c652d63692d766572646963742d7632000fb5382254c883065771c347b9f2dc5e80b200b57d09b14f2627a4d1017cd43c02020202020202020202020202020202030303030303030303030303030303030303030303030303030303030303030364657669636500323032362d30362d31315431393a30343a33305a00",
+      "signature_hex": "c7805352d9f07c7271f93659218aa2b6f627b1f4b7e7c4f48f3b5dd8fa5be57d445b310ef631cf8ad04c7f8a5c5907f1097d0531c61aada349a0af44fad95108"
+    },
+    {
+      "name": "branch_basis",
+      "fixture": "branch_basis_body",
+      "signer_kind": "service_account",
+      "signed_at": "2026-06-11T18:05:54Z",
+      "change_id_hex": "02020202020202020202020202020202",
+      "tree_digest_hex": "0303030303030303030303030303030303030303030303030303030303030303",
+      "canonical_bytes_utf8": "{\"schema_version\":1,\"repo\":\"heddle/core/heddle\",\"state\":{\"content_hash\":\"b3:9af2c0de\",\"change_id\":\"hd-7m3k\"},\"basis\":{\"kind\":\"branch\",\"evaluated_tree_digest\":\"b3:branchasis\"},\"check\":{\"name\":\"check.test\",\"class\":\"required\",\"definition_digest\":\"b3:c0ffee\",\"command\":[\"cargo\",\"test\",\"--workspace\"],\"toolchain\":\"rustc 1.96.0\",\"params\":{\"features\":\"default\"},\"services\":[]},\"outcome\":{\"conclusion\":\"success\"},\"execution\":{\"pick_id\":\"pk_01J\",\"attempt\":1,\"runner\":\"svc:runner-pool-a\",\"started_at\":\"2026-06-11T18:02:11Z\",\"finished_at\":\"2026-06-11T18:05:54Z\",\"duration_ms\":223000,\"ran_suites\":[\"workspace\"],\"skipped_suites\":[]},\"repro\":{\"command\":[\"cargo\",\"test\",\"--locked\",\"--workspace\"],\"env\":{},\"services\":[]}}",
+      "content_hash_hex": "67d394f30f78ec12e804541419f7f88100d2664ac473bfaa657a481ce32fdbe6",
+      "signing_preimage_hex": "686564646c652d63692d766572646963742d76320067d394f30f78ec12e804541419f7f88100d2664ac473bfaa657a481ce32fdbe6020202020202020202020202020202020303030303030303030303030303030303030303030303030303030303030303736572766963655f6163636f756e7400323032362d30362d31315431383a30353a35345a00",
+      "signature_hex": "1992c3e150f90038e02838df41454b4c5dfe1cad5387262987498e13e19ef6a14dbe1d71fa4e27262b08bb3980916d9ef828cf29e1309c67197de6f9be895701"
+    }
+  ]
+}
