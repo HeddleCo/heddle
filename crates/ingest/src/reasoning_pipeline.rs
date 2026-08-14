@@ -277,7 +277,7 @@ impl<'a> ReasoningPipeline<'a> {
             };
             let changed = match self.changed_files(&commit, parent_commit.as_ref()) {
                 Ok(v) => v,
-                Err(PipelineFileError::UntranslatedTree(_)) => {
+                Err(PipelineFileError::UntranslatedTree) => {
                     debug!(sha, "commit tree not in sha_map — skipping");
                     self.stats.skipped_untranslated_tree += 1;
                     continue;
@@ -511,7 +511,7 @@ impl<'a> ReasoningPipeline<'a> {
         let to_hash = self
             .sha_map
             .get_tree(&commit.tree_sha)
-            .ok_or_else(|| PipelineFileError::UntranslatedTree(commit.tree_sha.clone()))?;
+            .ok_or(PipelineFileError::UntranslatedTree)?;
 
         let from_hash = if let Some(parent) = commit.parents.first() {
             let fallback_parent;
@@ -527,9 +527,7 @@ impl<'a> ReasoningPipeline<'a> {
             let from_hash = self
                 .sha_map
                 .get_tree(&parent_commit.tree_sha)
-                .ok_or_else(|| {
-                    PipelineFileError::UntranslatedTree(parent_commit.tree_sha.clone())
-                })?;
+                .ok_or(PipelineFileError::UntranslatedTree)?;
             Some(from_hash)
         } else {
             None
@@ -1048,7 +1046,7 @@ fn walk_tree<S: ObjectSource + ?Sized>(
 /// isn't in the sha map" (expected — count it) from "the store
 /// exploded" (unexpected — log and move on).
 enum PipelineFileError {
-    UntranslatedTree(String),
+    UntranslatedTree,
     Other(String),
 }
 
@@ -1059,20 +1057,6 @@ pub fn pipeline_default_commits(map: &ShaMap) -> Vec<String> {
     v.sort();
     v
 }
-
-/// Silence `unused` lint until the CLI starts using Provider here. The
-/// module re-exports it (through lib.rs) so the import stays local for
-/// diagnostic log lines and tests that construct fake transcripts.
-#[cfg(test)]
-fn _keep_provider_in_scope(_: Provider) {}
-#[cfg(not(test))]
-#[allow(dead_code)]
-fn _keep_provider_in_scope(_: Provider) {}
-
-// Re-export path helper for downstream docs: Path is in the signature
-// of ReasoningPipeline::new via impl Into<PathBuf>.
-#[allow(dead_code)]
-fn _keep_path_in_scope(_: &Path) {}
 
 #[cfg(test)]
 mod tests {

@@ -2419,6 +2419,7 @@ dependencies = [
  "serde_json",
  "syn 2.0.119",
  "tempfile",
+ "toml 1.1.4+spec-1.1.0",
  "walkdir",
 ]
 

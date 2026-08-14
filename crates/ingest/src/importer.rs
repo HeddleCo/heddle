@@ -913,15 +913,6 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
         Ok(hash)
     }
 
-    fn write_synthetic_blob(&mut self, bytes: Vec<u8>) -> crate::Result<ContentHash> {
-        let blob = Blob::new(bytes.clone());
-        let hash = blob.hash();
-        self.builder.add(hash, PackObjectType::Blob, bytes)?;
-        self.stats.object_count += 1;
-        self.stats.blobs += 1;
-        Ok(hash)
-    }
-
     fn write_annotated_tags(&mut self, heads: &[RefHead]) -> crate::Result<()> {
         for head in heads.iter().filter(|head| {
             head.namespace == RefNamespace::Tag && head.object_sha != head.target_sha

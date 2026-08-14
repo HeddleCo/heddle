@@ -9,6 +9,7 @@ mod check_no_silent_default_tree_load;
 mod check_oprecord_exhaustiveness;
 #[cfg(test)]
 mod check_ref_write_chokepoint;
+mod check_rust_source_reachability;
 mod check_snapshot_atomicity;
 mod check_verification_owner;
 mod fuse_dispatch_bench;
@@ -25,6 +26,9 @@ fn main() -> Result<()> {
             check_atomic_ledger_encapsulation::run(args.collect())
         }
         Some("check-oprecord-exhaustiveness") => check_oprecord_exhaustiveness::run(args.collect()),
+        Some("check-rust-source-reachability") => {
+            check_rust_source_reachability::run(args.collect())
+        }
         Some("check-verification-owner") => check_verification_owner::run(args.collect()),
         Some("fuse-dispatch-bench") => fuse_dispatch_bench::run(args.collect()),
         Some(command) => bail!("unknown command '{command}'"),

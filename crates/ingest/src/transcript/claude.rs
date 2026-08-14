@@ -30,7 +30,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use tracing::debug;
 
 use super::{
@@ -176,14 +176,29 @@ struct RawMessage {
 /// Untagged so serde tries `Blocks` first (richer shape) and falls back
 /// to `Text`. Shorter `String` matches before `Vec<RawBlock>` would
 /// succeed against an array, so this ordering is safe.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 enum RawContent {
     /// Plain-string content. We only mine `tool_use` blocks for file
     /// touches, so a string-only event contributes turn count + window
     /// timestamps and nothing else — same as a `text`-only Blocks event.
-    Text(String),
+    Text,
     Blocks(Vec<RawBlock>),
+}
+
+impl<'de> Deserialize<'de> for RawContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::String(_) => Ok(Self::Text),
+            serde_json::Value::Array(_) => serde_json::from_value(value)
+                .map(Self::Blocks)
+                .map_err(D::Error::custom),
+            _ => Err(D::Error::custom("expected a string or block array")),
+        }
+    }
 }
 
 impl RawContent {
@@ -192,7 +207,7 @@ impl RawContent {
     fn blocks(&self) -> &[RawBlock] {
         match self {
             RawContent::Blocks(b) => b.as_slice(),
-            RawContent::Text(_) => &[],
+            RawContent::Text => &[],
         }
     }
 }
