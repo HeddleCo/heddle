@@ -290,6 +290,8 @@ mod error_envelope_lint;
 mod exit_codes;
 #[path = "cli_integration/fault_injection.rs"]
 mod fault_injection;
+#[path = "cli_integration/first_use_resume_transcript.rs"]
+mod first_use_resume_transcript;
 #[path = "cli_integration/git_overlay_fixtures.rs"]
 mod git_overlay_fixtures;
 #[path = "cli_integration/git_overlay_interop_matrix.rs"]
@@ -365,6 +367,8 @@ mod thread_cleanup;
 mod thread_default_current;
 #[path = "cli_integration/timeline.rs"]
 mod timeline;
+#[path = "cli_integration/transcript_harness.rs"]
+mod transcript_harness;
 #[path = "cli_integration/try_cmd.rs"]
 mod try_cmd;
 #[path = "cli_integration/unrelated_histories_recovery.rs"]
