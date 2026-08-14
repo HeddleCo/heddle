@@ -2190,6 +2190,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "heddle-ci-config"
+version = "0.12.0"
+dependencies = [
+ "heddle-object-model",
+ "regex",
+ "serde",
+ "thiserror 2.0.18",
+ "toml 1.1.4+spec-1.1.0",
+]
+
+[[package]]
+name = "heddle-ci-engine"
+version = "0.12.0"
+dependencies = [
+ "heddle-ci-config",
+ "heddle-crypto",
+ "libc",
+ "regex",
+ "tempfile",
+ "thiserror 2.0.18",
+ "wait-timeout",
+]
+
+[[package]]
 name = "heddle-cli"
 version = "0.12.0"
 dependencies = [
@@ -2205,6 +2229,8 @@ dependencies = [
  "criterion",
  "futures",
  "heddle-api 0.5.0",
+ "heddle-ci-config",
+ "heddle-ci-engine",
  "heddle-cli-args",
  "heddle-cli-contract",
  "heddle-cli-render",

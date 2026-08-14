@@ -908,6 +908,12 @@ const EXTERNAL_WORKTREE_COMMAND: CommandContract = CommandContract {
     ..EXTERNAL_COMMAND_MUTATION
 };
 
+const CI_RUN: CommandContract = CommandContract {
+    supports_json: true,
+    json_kind: "json",
+    ..EXTERNAL_WORKTREE_COMMAND
+};
+
 const EXTERNAL_WORKTREE_MUTATION: CommandContract = CommandContract {
     external_command: true,
     ..WORKTREE_MUTATION
@@ -1166,6 +1172,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ),
             210,
         ),
+    ),
+    entry(&["ci"], surface(GROUP, "automation")),
+    entry(
+        &["ci", "run"],
+        surface(opaque_schemas(CI_RUN, &["ci run"]), "automation"),
     ),
     entry(&["agent"], surface(GROUP, "automation")),
     entry(
@@ -4521,6 +4532,9 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Start(_) => vec!["start"],
         Commands::Try(_) => vec!["try"],
         Commands::Run(_) => vec!["run"],
+        Commands::Ci { command } => match command {
+            heddle_cli_args::CiCommands::Run(_) => vec!["ci", "run"],
+        },
         Commands::Sync(args) => {
             #[cfg(feature = "git-overlay")]
             {

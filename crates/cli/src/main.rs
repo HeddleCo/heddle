@@ -27,7 +27,7 @@ use cli::{
         cli_args::LandArgs,
         commands::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
-            cmd_abort, cmd_adopt, cmd_agent, cmd_capture_split, cmd_clone, cmd_collapse,
+            cmd_abort, cmd_adopt, cmd_agent, cmd_capture_split, cmd_ci, cmd_clone, cmd_collapse,
             cmd_commit, cmd_complete, cmd_context_audit, cmd_context_check, cmd_context_edit,
             cmd_context_get, cmd_context_history, cmd_context_list, cmd_context_rm,
             cmd_context_set, cmd_context_suggest, cmd_context_supersede, cmd_continue,
@@ -387,6 +387,8 @@ async fn async_main() -> Result<()> {
         Commands::Run(RunArgs { thread, command }) => {
             cmd_run(&cli, thread.clone(), command.clone())
         }
+
+        Commands::Ci { command } => cmd_ci(&cli, command),
 
         Commands::Try(args) => cmd_try(&cli, args.clone()),
 

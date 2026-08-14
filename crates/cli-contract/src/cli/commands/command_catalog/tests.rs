@@ -26,6 +26,7 @@ struct RuntimeContractParseSample {
 const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["abort"], &["abort"]),
     sample(&["adopt"], &["adopt"]),
+    sample(&["ci", "run"], &["ci", "run", "--local"]),
     sample(
         &["agent", "presence", "list"],
         &["agent", "presence", "list"],

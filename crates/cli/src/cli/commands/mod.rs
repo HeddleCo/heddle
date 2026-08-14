@@ -11,6 +11,7 @@ mod auto_capture;
 mod blame;
 mod checkpoint;
 mod child_env;
+mod ci;
 mod clone;
 mod collapse;
 mod commit;
@@ -91,6 +92,7 @@ pub use agent_cmd::{
     agent_api_schema, cmd_agent_capture, cmd_agent_heartbeat, cmd_agent_list, cmd_agent_ready,
     cmd_agent_release, cmd_agent_reserve,
 };
+pub use ci::cmd_ci;
 #[cfg(feature = "client")]
 pub use clone::recover_interrupted_clone;
 pub use clone::{

@@ -24,6 +24,8 @@ biscuit-auth = { workspace = true, optional = true }
 blake3.workspace = true
 bytes = { workspace = true, optional = true }
 chrono.workspace = true
+ci-config = { path = "../ci-config", package = "heddle-ci-config", version = "0.12" }
+ci-engine = { path = "../ci-engine", package = "heddle-ci-engine", version = "0.12" }
 clap.workspace = true
 clap_complete.workspace = true
 futures.workspace = true
