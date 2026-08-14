@@ -871,6 +871,175 @@ fn land_auto_captures_and_merges_clean_thread() {
     );
 }
 
+#[test]
+fn land_from_isolated_checkout_integrates_ready_fast_forward() {
+    let main = setup_repo("base.txt", "base");
+    let started: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/land-from-thread",
+                "--workspace",
+                "auto",
+            ],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let thread = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
+
+    std::fs::write(thread.join("landed.txt"), "land from the thread checkout").unwrap();
+    heddle(&["capture", "-m", "feature work"], Some(&thread)).unwrap();
+
+    let ready: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "ready",
+                "--thread",
+                "feature/land-from-thread",
+            ],
+            Some(&thread),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ready["status"], "completed", "{ready}");
+    assert_eq!(ready["report"]["merge_relation"], "fast_forward", "{ready}");
+    assert_eq!(ready["report"]["conflict_count"], 0, "{ready}");
+
+    let landed: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "land",
+                "--thread",
+                "feature/land-from-thread",
+            ],
+            Some(&thread),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(landed["status"], "landed", "{landed}");
+    assert_eq!(landed["integrated"], true, "{landed}");
+    assert_eq!(
+        std::fs::read_to_string(main.path().join("landed.txt")).unwrap(),
+        "land from the thread checkout"
+    );
+}
+
+#[test]
+fn ready_and_land_name_low_confidence_without_sync_loop() {
+    let main = setup_repo("base.txt", "base");
+    let started: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/low-confidence",
+                "--workspace",
+                "auto",
+            ],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let thread = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
+
+    std::fs::write(thread.join("uncertain.txt"), "draft").unwrap();
+    let capture = heddle_output_with_env(
+        &["capture", "-m", "uncertain work", "--confidence", "0.40"],
+        Some(&thread),
+        &[
+            ("HEDDLE_AGENT_PROVIDER", "test-agent"),
+            ("HEDDLE_AGENT_MODEL", "test-model"),
+        ],
+    )
+    .unwrap();
+    assert!(
+        capture.status.success(),
+        "{}",
+        String::from_utf8_lossy(&capture.stderr)
+    );
+
+    let ready_output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "ready",
+            "--thread",
+            "feature/low-confidence",
+        ],
+        Some(&thread),
+    )
+    .unwrap();
+    assert!(!ready_output.status.success());
+    let ready: Value = serde_json::from_slice(&ready_output.stdout).unwrap();
+    assert!(
+        ready["blockers"].as_array().is_some_and(|blockers| blockers
+            .iter()
+            .any(|blocker| blocker.as_str().is_some_and(|message| message
+                .contains("confidence 0.40 is below the auto-land threshold of 0.75")))),
+        "{ready}"
+    );
+    let ready_action = ready["recommended_action"]
+        .as_str()
+        .expect("ready recovery action");
+    assert!(
+        ready_action.contains("capture -m \"...\" --confidence <confidence>"),
+        "{ready}"
+    );
+    assert!(!ready_action.contains("sync"), "{ready}");
+
+    let land_output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/low-confidence",
+        ],
+        Some(&thread),
+    )
+    .unwrap();
+    assert!(!land_output.status.success());
+    let land: Value = serde_json::from_slice(&land_output.stdout).unwrap();
+    let confidence_blocker = land["blocker_details"]
+        .as_array()
+        .and_then(|details| {
+            details
+                .iter()
+                .find(|detail| detail["code"] == "auto_land_confidence_below_threshold")
+        })
+        .expect("typed confidence blocker");
+    assert_eq!(
+        confidence_blocker["code"], "auto_land_confidence_below_threshold",
+        "{land}"
+    );
+    assert!(
+        confidence_blocker["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("0.40 is below the 0.75 threshold")),
+        "{land}"
+    );
+    let action = land["recommended_action"]
+        .as_str()
+        .expect("recovery action");
+    assert!(
+        action.contains("capture -m \"...\" --confidence <confidence>"),
+        "{land}"
+    );
+    assert!(!action.contains("sync"), "{land}");
+}
+
 /// `heddle delegate` with per-task `task:provider:model` syntax —
 /// the YC-demo opener primitive. Three children, three different
 /// agents, one command. Pre-extension, every child shared the same
