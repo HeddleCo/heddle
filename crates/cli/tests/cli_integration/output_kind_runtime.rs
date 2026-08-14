@@ -28,6 +28,35 @@ fn init_and_capture() -> TempDir {
     temp
 }
 
+fn local_identity_public_key(path: &std::path::Path) -> String {
+    let identity_raw =
+        fs::read_to_string(path.join(".heddle/identity.toml")).expect("read local identity");
+    let identity: toml::Value = toml::from_str(&identity_raw).expect("parse local identity");
+    identity
+        .get("public_key")
+        .and_then(toml::Value::as_str)
+        .expect("local identity public key")
+        .to_string()
+}
+
+fn trust_local_purge_identity(path: &std::path::Path) {
+    let public_key = local_identity_public_key(path);
+    heddle(
+        &[
+            "redact",
+            "purge",
+            "trust",
+            "add",
+            "--algorithm",
+            "ed25519",
+            "--public-key",
+            &public_key,
+        ],
+        Some(path),
+    )
+    .expect("authorize local purge identity");
+}
+
 /// Capture a second state on top of the seeded one so `HEAD~1` resolves.
 fn capture_second(temp: &TempDir) {
     fs::write(
@@ -362,6 +391,37 @@ fn redact_trust_add_and_remove_emit_output_kind() {
 }
 
 #[test]
+fn purge_trust_add_list_and_remove_emit_output_kind() {
+    let temp = init_and_capture();
+    let public_key = local_identity_public_key(temp.path());
+
+    let add = heddle_json(
+        &[
+            "redact",
+            "purge",
+            "trust",
+            "add",
+            "--algorithm",
+            "ed25519",
+            "--public-key",
+            &public_key,
+            "--label",
+            "test-key",
+        ],
+        &temp,
+    );
+    assert_output_kind(&add, "purge_trust_add");
+
+    let list = heddle_json(&["redact", "purge", "trust", "list"], &temp);
+    assert_output_kind(&list, "purge_trust_list");
+    assert_eq!(list["count"].as_u64(), Some(1));
+
+    let remove = heddle_json(&["redact", "purge", "trust", "remove", &public_key], &temp);
+    assert_output_kind(&remove, "purge_trust_remove");
+    assert_eq!(remove["removed"].as_u64(), Some(1));
+}
+
+#[test]
 fn purge_apply_emits_output_kind() {
     let temp = init_and_capture();
     let log = heddle_json(&["log", "--limit", "1"], &temp);
@@ -376,6 +436,7 @@ fn purge_apply_emits_output_kind() {
         Some(temp.path()),
     )
     .expect("redact apply");
+    trust_local_purge_identity(temp.path());
 
     let value = heddle_json(
         &[
@@ -675,6 +736,7 @@ fn purge_list_envelope_includes_recent_apply() {
         Some(temp.path()),
     )
     .expect("redact apply");
+    trust_local_purge_identity(temp.path());
     heddle(
         &[
             "redact", "purge", "apply", &state, "--path", "main.rs", "--force",

@@ -2,7 +2,9 @@
 //! Fail-closed resolution of state signatures through a key-binding registry.
 
 use crypto::{verify_payload_signature, verify_state_signature_bytes};
-use objects::object::{KeyBinding, KeyBindingRegistry, State, StateAttachmentBody, StateSignature};
+use objects::object::{
+    KeyBinding, KeyBindingRegistry, KeyRole, State, StateAttachmentBody, StateSignature,
+};
 
 use crate::{HeddleError, KeyBindingRegistryAnchor, RepoConfig, Repository, Result, TrustedKey};
 
@@ -13,8 +15,10 @@ pub enum AuthorshipVerification {
     Verified(String),
     /// The state was signed, but none of its signing keys occur in the registry.
     UnknownKey,
-    /// A valid state signature resolved to a binding revoked at signing time.
+    /// A valid signature resolved to a binding revoked in the anchored registry.
     Revoked,
+    /// The key is registered, but its signed role does not authorize this action.
+    UnauthorizedRole { required: KeyRole, actual: KeyRole },
     /// The state, registry, binding authorization, or signature was invalid.
     Invalid,
 }
@@ -48,16 +52,18 @@ impl Repository {
         }
     }
 
-    /// Resolve a signing key through an offline registry at a claimed signing time.
+    /// Resolve a signing key through the current authenticated registry.
     ///
-    /// This verifies the registry's signed binding chain and validity window. It
-    /// deliberately does not verify a payload signature; callers must do that
-    /// first with the domain-specific signing payload.
+    /// Signer-asserted object timestamps are not trusted for revocation. A key
+    /// revoked in the anchored registry is rejected even when the signed object
+    /// claims to predate revocation. The verifier's clock only bounds a
+    /// future-dated authority-issued binding. Payload verification remains the
+    /// caller's domain-specific responsibility.
     pub fn verify_known_actor_key(
         &self,
         algorithm: &str,
         public_key: &str,
-        signed_at: chrono::DateTime<chrono::Utc>,
+        required_role: KeyRole,
         registry: &KeyBindingRegistry,
         trusted_authority: &TrustedKey,
     ) -> AuthorshipVerification {
@@ -67,13 +73,17 @@ impl Repository {
         let Some(binding) = find_binding_by_key(registry, algorithm, public_key) else {
             return AuthorshipVerification::UnknownKey;
         };
-        if signed_second_precedes(signed_at.timestamp(), binding.valid_from) {
+        if binding.valid_from > chrono::Utc::now() {
             return AuthorshipVerification::Invalid;
         }
-        if binding.revoked_at.is_some_and(|revoked_at| {
-            signed_second_may_be_revoked(signed_at.timestamp(), revoked_at)
-        }) {
+        if binding.revoked_at.is_some() {
             return AuthorshipVerification::Revoked;
+        }
+        if binding.role != required_role {
+            return AuthorshipVerification::UnauthorizedRole {
+                required: required_role,
+                actual: binding.role,
+            };
         }
         AuthorshipVerification::Verified(binding.identity_ref.clone())
     }
@@ -81,10 +91,8 @@ impl Repository {
     /// Verify integrity and resolve a state author through an offline registry.
     ///
     /// Unknown keys fail closed even when their state signature is
-    /// cryptographically valid. Binding windows are evaluated at the state's
-    /// signed whole-second `created_at`, the only trusted signing-time value
-    /// in the current state-signature envelope. A subsecond boundary that
-    /// shares the signed second is treated conservatively.
+    /// cryptographically valid. The signer-controlled state timestamp is never
+    /// used to move a signature behind a revocation boundary.
     pub fn verify_authored_by_known_actor(
         &self,
         state: &State,
@@ -106,6 +114,7 @@ impl Repository {
         let mut verified_identity: Option<String> = None;
         let mut saw_unknown = false;
         let mut saw_revoked = false;
+        let mut unauthorized_role = None;
         let mut saw_invalid = false;
         for signature in &signatures {
             if verify_state_signature_bytes(signature, &state.compute_hash()).is_err() {
@@ -115,7 +124,7 @@ impl Repository {
             match self.verify_known_actor_key(
                 &signature.algorithm,
                 &signature.public_key,
-                state.created_at,
+                KeyRole::Author,
                 registry,
                 trusted_authority,
             ) {
@@ -126,6 +135,9 @@ impl Repository {
                 },
                 AuthorshipVerification::UnknownKey => saw_unknown = true,
                 AuthorshipVerification::Revoked => saw_revoked = true,
+                AuthorshipVerification::UnauthorizedRole { actual, .. } => {
+                    unauthorized_role.get_or_insert(actual);
+                }
                 AuthorshipVerification::Invalid => saw_invalid = true,
             }
         }
@@ -134,6 +146,10 @@ impl Repository {
             Some(identity) if !saw_invalid => AuthorshipVerification::Verified(identity),
             Some(_) => AuthorshipVerification::Invalid,
             None if saw_revoked => AuthorshipVerification::Revoked,
+            None if unauthorized_role.is_some() => AuthorshipVerification::UnauthorizedRole {
+                required: KeyRole::Author,
+                actual: unauthorized_role.expect("checked above"),
+            },
             None if saw_invalid => AuthorshipVerification::Invalid,
             None if saw_unknown => AuthorshipVerification::UnknownKey,
             None => AuthorshipVerification::Invalid,
@@ -215,15 +231,6 @@ fn binding_self_signature_verifies(binding: &KeyBinding) -> bool {
 
 fn binding_active_at(binding: &KeyBinding, at: chrono::DateTime<chrono::Utc>) -> bool {
     binding.valid_from <= at && binding.revoked_at.is_none_or(|revoked| at < revoked)
-}
-
-fn signed_second_precedes(signed_at: i64, valid_from: chrono::DateTime<chrono::Utc>) -> bool {
-    signed_at < valid_from.timestamp()
-        || (signed_at == valid_from.timestamp() && valid_from.timestamp_subsec_nanos() != 0)
-}
-
-fn signed_second_may_be_revoked(signed_at: i64, revoked_at: chrono::DateTime<chrono::Utc>) -> bool {
-    signed_at >= revoked_at.timestamp()
 }
 
 fn signature_verifies(payload: &[u8], signature: &StateSignature) -> bool {

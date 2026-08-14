@@ -38,7 +38,7 @@ impl StateProvenanceVerification {
     }
 
     pub fn is_clean(&self) -> bool {
-        self.status == "IntegrityOnly" || self.status.starts_with("Verified(")
+        self.status.starts_with("Verified(")
     }
 }
 
@@ -140,19 +140,8 @@ pub(super) fn identity_error(result: &AuthorshipVerification) -> &'static str {
         AuthorshipVerification::Verified(_) => "Verified",
         AuthorshipVerification::UnknownKey => "UnknownKey",
         AuthorshipVerification::Revoked => "Revoked",
+        AuthorshipVerification::UnauthorizedRole { .. } => "UnauthorizedRole",
         AuthorshipVerification::Invalid => "Invalid",
-    }
-}
-
-pub(super) fn integrity_only(state_id: StateId, detail: &str) -> StateProvenanceVerification {
-    StateProvenanceVerification {
-        state_id: state_id.to_string_full(),
-        status: "IntegrityOnly".to_string(),
-        identity: None,
-        failed_link: None,
-        detail: detail.to_string(),
-        reviews_verified: 0,
-        reviewer_identities: Vec::new(),
     }
 }
 

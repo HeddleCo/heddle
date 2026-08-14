@@ -6,8 +6,8 @@ use chrono::{TimeZone, Utc};
 use crypto::{Ed25519Signer, Signer, state_signature_from_signer};
 use objects::{
     object::{
-        Attribution, Blob, KeyBinding, Principal, State, StateAttachment, StateAttachmentBody,
-        StateSignature, Tree, TreeEntry,
+        Attribution, Blob, KeyBinding, KeyRole, Principal, State, StateAttachment,
+        StateAttachmentBody, StateSignature, Tree, TreeEntry,
     },
     store::ObjectStore,
 };
@@ -43,7 +43,7 @@ pub(super) fn attach_signature(
     state: &State,
     signature: StateSignature,
     attribution: Attribution,
-) {
+) -> objects::object::StateAttachmentId {
     repo.store()
         .put_state_attachment(&StateAttachment {
             state_id: state.state_id,
@@ -52,7 +52,7 @@ pub(super) fn attach_signature(
             created_at: state.created_at,
             supersedes: None,
         })
-        .expect("put signature attachment");
+        .expect("put signature attachment")
 }
 
 pub(super) fn binding(
@@ -65,7 +65,7 @@ pub(super) fn binding(
         algorithm: signer.algorithm().to_string(),
         public_key: public_key.clone(),
         identity_ref: identity.to_string(),
-        role: "author".to_string(),
+        role: KeyRole::Author,
         added_by_sig: StateSignature {
             algorithm: signer.algorithm().to_string(),
             public_key,
@@ -207,6 +207,140 @@ fn revoked_key_fails_identity_as_revoked() {
     let result = result_for(&repo, &state);
     assert_eq!(result.display_status(), "FAILED(identity)");
     assert!(result.detail.contains("Revoked"));
+}
+
+#[test]
+fn backdated_state_from_currently_revoked_key_fails_identity() {
+    let (_temp, repo) = setup();
+    let blob_hash = repo.store().put_blob(&Blob::from("hello")).unwrap();
+    let state = state_with_blob(&repo, blob_hash);
+    let signer = Ed25519Signer::generate().unwrap();
+    repo.store().put_state(&state).unwrap();
+    attach_signature(
+        &repo,
+        &state,
+        state_signature_from_signer(&state.compute_hash(), &signer).unwrap(),
+        state.attribution.clone(),
+    );
+    put_registry(
+        &repo,
+        &signer,
+        vec![binding(&signer, "identity:alice", Some(2_001))],
+    );
+
+    let result = result_for(&repo, &state);
+    assert_eq!(result.display_status(), "FAILED(identity)");
+    assert!(result.detail.contains("Revoked"), "{result:?}");
+}
+
+#[test]
+fn reviewer_role_cannot_author_a_state() {
+    let (_temp, repo) = setup();
+    let blob_hash = repo.store().put_blob(&Blob::from("hello")).unwrap();
+    let state = state_with_blob(&repo, blob_hash);
+    let signer = Ed25519Signer::generate().unwrap();
+    repo.store().put_state(&state).unwrap();
+    attach_signature(
+        &repo,
+        &state,
+        state_signature_from_signer(&state.compute_hash(), &signer).unwrap(),
+        state.attribution.clone(),
+    );
+    let mut reviewer = binding(&signer, "identity:alice", None);
+    reviewer.role = KeyRole::Reviewer;
+    reviewer.added_by_sig.signature = hex::encode(
+        signer
+            .sign(&reviewer.canonical_signing_payload())
+            .expect("sign reviewer binding"),
+    );
+    put_registry(&repo, &signer, vec![reviewer]);
+
+    let result = result_for(&repo, &state);
+    assert_eq!(result.display_status(), "FAILED(identity)");
+    assert!(result.detail.contains("UnauthorizedRole"), "{result:?}");
+}
+
+#[test]
+fn stripped_authorship_evidence_does_not_downgrade_to_integrity_only() {
+    let (_temp, repo) = setup();
+    let blob_hash = repo.store().put_blob(&Blob::from("hello")).unwrap();
+    let state = state_with_blob(&repo, blob_hash);
+    let signer = Ed25519Signer::generate().unwrap();
+    repo.store().put_state(&state).unwrap();
+    let attachment_id = attach_signature(
+        &repo,
+        &state,
+        state_signature_from_signer(&state.compute_hash(), &signer).unwrap(),
+        state.attribution.clone(),
+    );
+    put_registry(
+        &repo,
+        &signer,
+        vec![binding(&signer, "identity:alice", None)],
+    );
+    assert_eq!(
+        result_for(&repo, &state).display_status(),
+        "Verified(identity:alice)"
+    );
+
+    let attachment_path = repo
+        .heddle_dir()
+        .join("objects/state-attachments")
+        .join(state.state_id.to_string_full())
+        .join(format!("{}.attachment", attachment_id.as_hash().to_hex()));
+    fs::remove_file(attachment_path).expect("attacker strips signature attachment");
+    let index_path = repo
+        .heddle_dir()
+        .join("objects/state-attachment-index")
+        .join(format!("{}.msgpack", state.state_id.to_string_full()));
+    fs::remove_file(index_path).expect("attacker strips signature index");
+    repo.store().clear_recent_caches();
+
+    let report = verify_repository_provenance(&repo).unwrap();
+    let result = report
+        .states
+        .iter()
+        .find(|result| result.state_id == state.state_id.to_string_full())
+        .expect("attacked state result");
+    assert_eq!(result.display_status(), "FAILED(identity)");
+    assert!(!report.clean);
+}
+
+#[test]
+fn missing_parent_fails_provenance_chain() {
+    let (_temp, repo) = setup();
+    let blob_hash = repo.store().put_blob(&Blob::from("hello")).unwrap();
+    let parent = state_with_blob(&repo, blob_hash);
+    let child = State::new(parent.tree, vec![parent.state_id], alice())
+        .with_timestamp(Utc.timestamp_opt(2_001, 0).unwrap());
+    let grandchild = State::new(child.tree, vec![child.state_id], alice())
+        .with_timestamp(Utc.timestamp_opt(2_002, 0).unwrap());
+    let signer = Ed25519Signer::generate().unwrap();
+    for state in [&parent, &child, &grandchild] {
+        repo.store().put_state(state).unwrap();
+        attach_signature(
+            &repo,
+            state,
+            state_signature_from_signer(&state.compute_hash(), &signer).unwrap(),
+            state.attribution.clone(),
+        );
+    }
+    put_registry(
+        &repo,
+        &signer,
+        vec![binding(&signer, "identity:alice", None)],
+    );
+
+    let parent_path = repo
+        .heddle_dir()
+        .join("objects/states")
+        .join(format!("{}.state", parent.state_id.to_string_full()));
+    fs::remove_file(parent_path).expect("attacker removes parent state");
+    repo.store().clear_recent_caches();
+
+    let result = result_for(&repo, &grandchild);
+    assert_eq!(result.display_status(), "FAILED(chain)");
+    assert!(result.detail.contains("ancestor"), "{result:?}");
 }
 
 #[test]

@@ -441,7 +441,7 @@ fn store_sourced_reconcile_replaces_redacted_tip_with_derived_sha() {
         redactor: Principal::new("Grace Hopper", "grace@example.com"),
         redacted_at: chrono::Utc::now(),
         signature: None,
-        purged_at: None,
+        purge: None,
         supersedes: None,
     })
     .expect("redact secret");

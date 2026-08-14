@@ -337,8 +337,8 @@ impl LocalSync {
 
     /// If the source repository has any redactions for `blob`, ferry
     /// the sidecar bytes through `Repository::accept_wire_redactions`
-    /// on the target so signatures are verified and any `purged_at`
-    /// records trigger a local purge on the target.
+    /// on the target so declaration and purge-authority signatures are
+    /// verified and authorized purge evidence triggers local erasure.
     ///
     /// `LocalSync` is local→local, so we use the same wire-side
     /// contract as the network path — same signature requirement,

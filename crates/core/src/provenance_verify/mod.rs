@@ -10,13 +10,14 @@ mod review_tests;
 #[cfg(test)]
 mod tests;
 
-use chrono::{DateTime, Utc};
+use std::collections::HashSet;
+
 use crypto::verify_payload_signature;
 use objects::{
     error::Result,
     object::{
-        KeyBindingRegistry, ReviewSignature, ReviewSignaturesBlob, SignatureStatus, State,
-        StateAttachmentBody, StateAttachmentKind, StateId, signing_payload,
+        KeyBindingRegistry, KeyRole, ReviewKind, ReviewSignature, ReviewSignaturesBlob,
+        SignatureStatus, State, StateAttachmentBody, StateAttachmentKind, StateId, signing_payload,
     },
     store::ObjectStore,
 };
@@ -25,9 +26,7 @@ use repo::{AuthorshipVerification, Repository, TrustedKey};
 pub use self::result::{ProvenanceReport, StateProvenanceVerification};
 use self::{
     content::verify_tree_content,
-    result::{
-        RegistryDiscovery, discover_registry, failed, identity_error, integrity_only, legacy,
-    },
+    result::{RegistryDiscovery, discover_registry, failed, identity_error, legacy},
 };
 
 const MAX_REGISTRY_BLOB_BYTES: usize = 16 * 1024 * 1024;
@@ -85,52 +84,19 @@ fn verify_state(
             "state content hash does not match its stored state id",
         ));
     }
+    if let Some(detail) = verify_parent_chain(repo, state) {
+        return Ok(failed(state.state_id, "chain", &detail));
+    }
     if let Some(detail) = verify_tree_content(repo, state.tree)? {
         return Ok(failed(state.state_id, "content", &detail));
     }
 
     let verification = match repo.verify_state_signature(&state.state_id)? {
-        SignatureStatus::Unsigned => match registry {
-            RegistryDiscovery::Available {
-                registry,
-                authority,
-                ..
-            } => verify_reviews(repo, state, Some(registry.as_ref()), Some(authority), None),
-            RegistryDiscovery::Absent => {
-                if repo
-                    .latest_state_attachment(
-                        &state.state_id,
-                        StateAttachmentKind::ReviewSignatures,
-                    )?
-                    .is_some()
-                {
-                    failed(
-                        state.state_id,
-                        "review",
-                        "trusted key-binding registry anchor is missing",
-                    )
-                } else {
-                    failed(
-                        state.state_id,
-                        "identity",
-                        "trusted key-binding registry anchor is missing",
-                    )
-                }
-            }
-            RegistryDiscovery::Invalid(detail) => {
-                if repo
-                    .latest_state_attachment(
-                        &state.state_id,
-                        StateAttachmentKind::ReviewSignatures,
-                    )?
-                    .is_some()
-                {
-                    failed(state.state_id, "review", detail)
-                } else {
-                    failed(state.state_id, "identity", detail)
-                }
-            }
-        },
+        SignatureStatus::Unsigned => failed(
+            state.state_id,
+            "identity",
+            "required authorship signature evidence is missing",
+        ),
         SignatureStatus::Legacy => legacy(state.state_id),
         SignatureStatus::Invalid => failed(
             state.state_id,
@@ -182,6 +148,39 @@ fn verify_state(
     Ok(verification)
 }
 
+/// Walk the complete ancestor closure so a present direct parent cannot hide
+/// a missing state deeper in the provenance chain.
+fn verify_parent_chain(repo: &Repository, state: &State) -> Option<String> {
+    let mut visited = HashSet::from([state.state_id]);
+    let mut pending = state.parents.clone();
+    while let Some(parent_id) = pending.pop() {
+        if !visited.insert(parent_id) {
+            continue;
+        }
+        match repo.store().get_state(&parent_id) {
+            Ok(Some(parent)) => {
+                if parent.id() != parent_id {
+                    return Some(format!(
+                        "ancestor state {} failed content binding",
+                        parent_id.short()
+                    ));
+                }
+                pending.extend(parent.parents);
+            }
+            Ok(None) => {
+                return Some(format!("ancestor state {} is missing", parent_id.short()));
+            }
+            Err(error) => {
+                return Some(format!(
+                    "ancestor state {} failed verification: {error}",
+                    parent_id.short()
+                ));
+            }
+        }
+    }
+    None
+}
+
 fn verify_reviews(
     repo: &Repository,
     state: &State,
@@ -200,21 +199,11 @@ fn verify_reviews(
                 reviews_verified: count,
                 reviewer_identities,
             },
-            None => {
-                let mut result = integrity_only(
-                    state.state_id,
-                    if registry.is_some() && count > 0 {
-                        "state is unsigned; review-signature identities verified offline"
-                    } else if registry.is_some() {
-                        "state has no authorship signature"
-                    } else {
-                        "content and signatures verify, but no key-binding registry is present"
-                    },
-                );
-                result.reviews_verified = count;
-                result.reviewer_identities = reviewer_identities;
-                result
-            }
+            None => failed(
+                state.state_id,
+                "identity",
+                "required authorship signature evidence is missing",
+            ),
         },
         Err(detail) => failed(state.state_id, "review", &detail),
     }
@@ -252,12 +241,10 @@ fn verify_review_chain(
     for review in &reviews.signatures {
         verify_review_signature(state.state_id, review)?;
         if let Some((registry, trusted_authority)) = registry.zip(trusted_authority) {
-            let signed_at = DateTime::<Utc>::from_timestamp(review.signed_at, 0)
-                .ok_or_else(|| "review signature has an invalid signed_at".to_string())?;
             match repo.verify_known_actor_key(
                 &review.algorithm,
                 &review.public_key,
-                signed_at,
+                required_role(review.kind),
                 registry,
                 trusted_authority,
             ) {
@@ -272,6 +259,13 @@ fn verify_review_chain(
         }
     }
     Ok((reviews.signatures.len(), identities))
+}
+
+fn required_role(kind: ReviewKind) -> KeyRole {
+    match kind {
+        ReviewKind::Read | ReviewKind::AgentCoReview => KeyRole::Reviewer,
+        ReviewKind::AgentPreview => KeyRole::CiRunner,
+    }
 }
 
 fn verify_review_signature(

@@ -2309,6 +2309,40 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    entry(&["redact", "purge", "trust"], GROUP),
+    entry(
+        &["redact", "purge", "trust", "add"],
+        json_discriminators(
+            opaque_schemas(CONFIG_MUTATION, &["redact purge trust add"]),
+            &[json_discriminator(
+                Some("redact purge trust add"),
+                "output_kind",
+                "purge_trust_add",
+            )],
+        ),
+    ),
+    entry(
+        &["redact", "purge", "trust", "list"],
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["redact purge trust list"]),
+            &[json_discriminator(
+                Some("redact purge trust list"),
+                "output_kind",
+                "purge_trust_list",
+            )],
+        ),
+    ),
+    entry(
+        &["redact", "purge", "trust", "remove"],
+        json_discriminators(
+            opaque_schemas(CONFIG_MUTATION, &["redact purge trust remove"]),
+            &[json_discriminator(
+                Some("redact purge trust remove"),
+                "output_kind",
+                "purge_trust_remove",
+            )],
+        ),
+    ),
     entry(&["redact", "trust"], GROUP),
     entry(
         &["redact", "trust", "add"],
@@ -4535,6 +4569,13 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             RedactCommands::Purge(command) => match command {
                 PurgeCommands::Apply(_) => vec!["redact", "purge", "apply"],
                 PurgeCommands::List(_) => vec!["redact", "purge", "list"],
+                PurgeCommands::Trust(command) => match command {
+                    RedactTrustCommands::Add(_) => vec!["redact", "purge", "trust", "add"],
+                    RedactTrustCommands::List(_) => vec!["redact", "purge", "trust", "list"],
+                    RedactTrustCommands::Remove(_) => {
+                        vec!["redact", "purge", "trust", "remove"]
+                    }
+                },
             },
         },
         Commands::Visibility { command } => match command {

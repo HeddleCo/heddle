@@ -4,7 +4,7 @@ use chrono::{TimeZone, Utc};
 use crypto::{Ed25519Signer, Signer, state_signature_from_signer};
 use objects::{
     object::{
-        Attribution, ContentHash, KeyBinding, KeyBindingRegistry, Principal, State,
+        Attribution, ContentHash, KeyBinding, KeyBindingRegistry, KeyRole, Principal, State,
         StateAttachment, StateAttachmentBody, StateSignature, Tree,
     },
     store::ObjectStore,
@@ -45,7 +45,7 @@ fn binding(signer: &Ed25519Signer, valid_from: i64, revoked_at: Option<i64>) -> 
         algorithm: signer.algorithm().to_string(),
         public_key: public_key.clone(),
         identity_ref: "identity:alice".to_string(),
-        role: "author".to_string(),
+        role: KeyRole::Author,
         added_by_sig: StateSignature {
             algorithm: signer.algorithm().to_string(),
             public_key,
@@ -72,7 +72,7 @@ fn delegated_binding(
         algorithm: signer.algorithm().to_string(),
         public_key: hex::encode(signer.public_key()),
         identity_ref: root.identity_ref.clone(),
-        role: "author".to_string(),
+        role: KeyRole::Author,
         added_by_sig: StateSignature {
             algorithm: root_signer.algorithm().to_string(),
             public_key: hex::encode(root_signer.public_key()),
@@ -183,7 +183,7 @@ fn valid_signature_from_unregistered_key_is_unknown_not_verified() {
 }
 
 #[test]
-fn registered_key_past_revoked_at_is_revoked() {
+fn currently_revoked_registered_key_is_revoked() {
     let (_temp, repo, state) = setup();
     let signer = Ed25519Signer::generate().expect("signer");
     attach_signature(&repo, &state, signed_state(&state, &signer));
@@ -217,7 +217,7 @@ fn registered_key_with_bad_state_signature_is_invalid() {
 }
 
 #[test]
-fn registered_key_before_valid_from_is_invalid() {
+fn signer_claimed_time_does_not_control_binding_validity() {
     let (_temp, repo, state) = setup();
     let signer = Ed25519Signer::generate().expect("signer");
     attach_signature(&repo, &state, signed_state(&state, &signer));
@@ -227,7 +227,7 @@ fn registered_key_before_valid_from_is_invalid() {
     assert_eq!(
         repo.verify_authored_by_known_actor(&state, &registry, &authority)
             .unwrap(),
-        AuthorshipVerification::Invalid
+        AuthorshipVerification::Verified("identity:alice".to_string())
     );
 }
 

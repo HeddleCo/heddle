@@ -3,7 +3,9 @@
 
 use std::{
     fs,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use super::{
@@ -14,7 +16,9 @@ use super::{
 use crate::{
     object::{ContentHash, State, StateAttachment, StateAttachmentId, Tree},
     store::{
-        HeddleError, ObjectStore, Result, SnapshotCommitArtifact, SnapshotCommitDescriptor, codec,
+        FsRepackOperation, HeddleError, ObjectStore, RepackPolicy, RepackResourceLimits,
+        RepackSchedule, RepackScheduler, Result, SnapshotCommitArtifact, SnapshotCommitDescriptor,
+        codec,
         pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
         snapshot_commit::snapshot_commit_marker_path,
     },
@@ -76,6 +80,58 @@ fn remove_file_ignore_missing(path: &std::path::Path) -> Result<()> {
 }
 
 impl FsStore {
+    /// Rewrite all packs without `hash`, remove its loose copy, and verify that
+    /// neither local nor external object lookup can still serve the bytes.
+    pub fn remove_blob_everywhere(&self, hash: &ContentHash) -> Result<bool> {
+        let was_present = ObjectStore::has_blob_locally(self, hash)?;
+        if was_present {
+            let scheduler = RepackScheduler::new(
+                RepackPolicy::default(),
+                RepackResourceLimits::new(NonZeroUsize::MIN),
+            );
+            let operation = Arc::new(FsRepackOperation::new(self.clone()).excluding_blob(*hash));
+            let RepackSchedule::Started(handle) = scheduler
+                .repack_now(operation)
+                .map_err(|error| HeddleError::InvalidObject(error.to_string()))?
+            else {
+                return Err(HeddleError::InvalidObject(
+                    "exclusive purge repack did not start".to_string(),
+                ));
+            };
+            handle
+                .wait()
+                .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+
+            // The repack operation owns a clone of this store, so its atomic
+            // cutover updates that clone's in-memory pack manager. Reload the
+            // caller's manager from the newly published generation before
+            // checking whether the purged object is still reachable.
+            self.reload_packs()?;
+
+            let loose = hash_path(&blobs_dir(&self.root), hash);
+            match fs::remove_file(&loose) {
+                Ok(()) => {
+                    if let Some(parent) = loose.parent() {
+                        crate::fs_atomic::sync_directory(parent)?;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        self.clear_recent_object_caches();
+        if ObjectStore::has_blob_locally(self, hash)?
+            || ObjectStore::get_blob(self, hash)?.is_some()
+            || ObjectStore::get_blob_bytes(self, hash)?.is_some()
+        {
+            return Err(HeddleError::InvalidObject(format!(
+                "purged blob {} remains readable after pack rewrite",
+                hash.short()
+            )));
+        }
+        Ok(was_present)
+    }
+
     pub(crate) fn put_committed_snapshot_objects_packed_impl(
         &self,
         blobs: Vec<(ContentHash, Vec<u8>)>,

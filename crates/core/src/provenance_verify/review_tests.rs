@@ -3,8 +3,8 @@
 use crypto::{Ed25519Signer, Signer, state_signature_from_signer};
 use objects::{
     object::{
-        Blob, Principal, ReviewKind, ReviewScope, ReviewSignature, ReviewSignaturesBlob, State,
-        StateAttachment, StateAttachmentBody, signing_payload,
+        Blob, KeyBinding, KeyRole, Principal, ReviewKind, ReviewScope, ReviewSignature,
+        ReviewSignaturesBlob, State, StateAttachment, StateAttachmentBody, signing_payload,
     },
     store::ObjectStore,
 };
@@ -32,7 +32,7 @@ fn verifies_authorship_and_review_chain_by_registry_identity() {
         &author,
         vec![
             binding(&author, "identity:alice", None),
-            binding(&reviewer, "identity:bob", None),
+            reviewer_binding(&reviewer, "identity:bob"),
         ],
     );
 
@@ -61,13 +61,49 @@ fn tampered_review_signature_fails_review_link() {
         &author,
         vec![
             binding(&author, "identity:alice", None),
-            binding(&reviewer, "identity:bob", None),
+            reviewer_binding(&reviewer, "identity:bob"),
         ],
     );
 
     let result = result_for(&repo, &state);
     assert_eq!(result.display_status(), "FAILED(review)");
     assert!(result.detail.contains("did not verify"));
+}
+
+#[test]
+fn author_role_cannot_sign_review_evidence() {
+    let (_temp, repo) = setup();
+    let blob_hash = repo.store().put_blob(&Blob::from("hello")).unwrap();
+    let state = state_with_blob(&repo, blob_hash);
+    let author = Ed25519Signer::generate().unwrap();
+    repo.store().put_state(&state).unwrap();
+    attach_signature(
+        &repo,
+        &state,
+        state_signature_from_signer(&state.compute_hash(), &author).unwrap(),
+        state.attribution.clone(),
+    );
+    attach_review(&repo, &state, &author, false);
+    put_registry(
+        &repo,
+        &author,
+        vec![binding(&author, "identity:alice", None)],
+    );
+
+    let result = result_for(&repo, &state);
+    assert_eq!(result.display_status(), "FAILED(review)");
+    assert!(result.detail.contains("UnauthorizedRole"), "{result:?}");
+}
+
+fn reviewer_binding(signer: &Ed25519Signer, identity: &str) -> KeyBinding {
+    let mut reviewer = binding(signer, identity, None);
+    reviewer.role = KeyRole::Reviewer;
+    reviewer.added_by_sig.signature = hex::encode(
+        signer
+            .sign(&reviewer.canonical_signing_payload())
+            .expect("sign reviewer binding"),
+    );
+    reviewer
 }
 
 fn attach_review(repo: &Repository, state: &State, signer: &Ed25519Signer, tamper: bool) {

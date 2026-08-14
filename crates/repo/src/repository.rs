@@ -73,11 +73,11 @@ use objects::{
     worktree::WorktreeStatus,
 };
 use oplog::{ConditionalCommitOutcome, IsolationPrecondition, OpLog, OpLogBackend, OpRecord};
+pub use refs::SpoolFacet;
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
-pub use refs::{RefSummaryIndexInspection, SpoolFacet};
 pub use repo_config::{
     HostedConfig, KeyBindingRegistryAnchor, MetadataConfig, OutputFormat, ProvenanceConfig,
-    RedactConfig, RepoConfig, RepositorySourceAuthority, TrustedKey,
+    PurgeConfig, RedactConfig, RepoConfig, RepositorySourceAuthority, TrustedKey,
 };
 // Review-epic config types — re-exported here so the new
 // `repository_signals.rs` (and external crates wanting to construct a
