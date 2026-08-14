@@ -6,17 +6,52 @@ use std::{
 
 use api::{
     HOSTED_ALPN_V1,
-    heddle::api::v1alpha1::{EndpointDescriptor, SignedEndpointDescriptor},
+    framing::{ResponseFrame, decode_response_frame, encode_request_frame},
+    heddle::api::v1alpha1::{
+        CallContext, CallFailureCode, EndpointDescriptor, SignedEndpointDescriptor,
+    },
     signing::endpoint_descriptor_bytes,
 };
 use crypto::{Ed25519Signer, Signer};
 use iroh::{Endpoint, RelayMode, endpoint::presets};
 use n0_watcher::Watcher;
 
-use super::{DescriptorKeyring, VerifiedEndpointDescriptor, connection::HostedConnection};
+use super::{
+    DescriptorKeyring, VerifiedEndpointDescriptor,
+    claim_protocol::{CLAIM_ALPN_V1, CLAIM_RESOLVE_METHOD},
+    connection::HostedConnection,
+};
 
 const HOSTED_ENDPOINT_CLOSE_P95_BUDGET: Duration = Duration::from_millis(20);
 const DEFAULT_CLOSE_SAMPLE_COUNT: usize = 20;
+
+struct HeddleHomeEnvGuard {
+    previous: Option<std::ffi::OsString>,
+    _home: tempfile::TempDir,
+}
+
+impl HeddleHomeEnvGuard {
+    fn isolated() -> Self {
+        let home = tempfile::TempDir::new().expect("temp Heddle home");
+        let previous = std::env::var_os("HEDDLE_HOME");
+        unsafe {
+            std::env::set_var("HEDDLE_HOME", home.path());
+        }
+        Self {
+            previous,
+            _home: home,
+        }
+    }
+}
+
+impl Drop for HeddleHomeEnvGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
+            None => unsafe { std::env::remove_var("HEDDLE_HOME") },
+        }
+    }
+}
 
 fn require_release_build() {
     #[cfg(debug_assertions)]
@@ -60,7 +95,10 @@ fn verified_descriptor(
 
 #[tokio::test]
 #[ignore = "release-only hosted endpoint close performance contract"]
+#[allow(clippy::await_holding_lock)]
 async fn hosted_endpoint_close_release_contract() {
+    let _env_guard = cli_shared::credentials::lock_test_env();
+    let _home = HeddleHomeEnvGuard::isolated();
     require_release_build();
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -162,7 +200,18 @@ fn percentile_ms(sorted_values: &[f64], percentile: usize) -> f64 {
 }
 
 #[tokio::test]
-async fn reachable_direct_address_never_initializes_advertised_relays() {
+#[allow(clippy::await_holding_lock)]
+async fn reachable_direct_address_keeps_the_claim_relay_online() {
+    use iroh_relay::server::{RelayConfig as RelayServerConfig, Server, ServerConfig};
+
+    let _env_guard = cli_shared::credentials::lock_test_env();
+    let _home = HeddleHomeEnvGuard::isolated();
+    let mut relay_config = ServerConfig::default();
+    relay_config.relay = Some(RelayServerConfig::new((Ipv4Addr::LOCALHOST, 0)));
+    let relay = Server::spawn(relay_config).await.unwrap();
+    let relay_url: iroh::RelayUrl = format!("http://{}", relay.http_addr().unwrap())
+        .parse()
+        .unwrap();
     let server = Endpoint::builder(presets::Minimal)
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
         .relay_mode(RelayMode::Disabled)
@@ -173,7 +222,7 @@ async fn reachable_direct_address_never_initializes_advertised_relays() {
         .unwrap();
     let descriptor = verified_descriptor(
         server.id(),
-        vec!["https://usw1-1.relay.n0.iroh.link.".to_string()],
+        vec![relay_url.to_string()],
         server.addr().ip_addrs().map(ToString::to_string).collect(),
     );
     let server_task = tokio::spawn(async move {
@@ -191,17 +240,23 @@ async fn reachable_direct_address_never_initializes_advertised_relays() {
         HostedConnection::connect_verified(&descriptor, &cli_shared::ClientConfig::default())
             .await
             .unwrap();
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokio::time::timeout(Duration::from_secs(5), connection.endpoint.online())
+        .await
+        .expect("claim listener should register with the signed relay");
     assert!(
-        connection.endpoint.home_relay_status().get().is_empty(),
-        "a reachable signed direct address must not initialize a relay transport"
+        !connection.endpoint.home_relay_status().get().is_empty(),
+        "a direct hosted path must keep the inbound claim relay initialized"
     );
     connection.close().await;
     server_task.await.unwrap();
+    drop(relay);
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn direct_only_descriptor_uses_the_normal_connection_path() {
+    let _env_guard = cli_shared::credentials::lock_test_env();
+    let _home = HeddleHomeEnvGuard::isolated();
     let server = Endpoint::builder(presets::Minimal)
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
         .relay_mode(RelayMode::Disabled)
@@ -235,7 +290,10 @@ async fn direct_only_descriptor_uses_the_normal_connection_path() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn unreachable_direct_address_falls_back_to_signed_relay() {
+    let _env_guard = cli_shared::credentials::lock_test_env();
+    let _home = HeddleHomeEnvGuard::isolated();
     use iroh_relay::server::{RelayConfig as RelayServerConfig, Server, ServerConfig};
 
     let mut relay_config = ServerConfig::default();
@@ -288,4 +346,68 @@ async fn unreachable_direct_address_falls_back_to_signed_relay() {
     connection.close().await;
     server_task.await.unwrap();
     drop(relay);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn hosted_connection_uses_persisted_id_and_accepts_claim_alpn() {
+    let _env_guard = cli_shared::credentials::lock_test_env();
+    let _home = HeddleHomeEnvGuard::isolated();
+    let server = Endpoint::builder(presets::Minimal)
+        .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    let descriptor = verified_descriptor(
+        server.id(),
+        Vec::new(),
+        server.addr().ip_addrs().map(ToString::to_string).collect(),
+    );
+    let server_task = tokio::spawn(async move {
+        let connection = server
+            .accept()
+            .await
+            .expect("incoming hosted connection")
+            .await
+            .unwrap();
+        connection.closed().await;
+        server.close().await;
+    });
+
+    let connection =
+        HostedConnection::connect_verified(&descriptor, &cli_shared::ClientConfig::default())
+            .await
+            .unwrap();
+    let persisted = crate::hosted_runtime::agent_node_identity::load_or_create()
+        .expect("persisted agent node identity");
+    assert_eq!(connection.endpoint_id(), persisted.node_id());
+
+    let claim_client = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    let claim_connection = claim_client
+        .connect(connection.endpoint.addr(), CLAIM_ALPN_V1)
+        .await
+        .expect("claim ALPN connection");
+    let (mut send, mut recv) = claim_connection.open_bi().await.unwrap();
+    let frame = encode_request_frame(CLAIM_RESOLVE_METHOD, &CallContext::default(), b"resolve")
+        .expect("claim request frame");
+    send.write_all(&frame).await.unwrap();
+    send.finish().unwrap();
+    let response = recv.read_to_end(64 * 1024).await.unwrap();
+    let ResponseFrame::Failure(failure) = decode_response_frame(&response).unwrap() else {
+        panic!("missing Biscuit authentication must be refused");
+    };
+    assert_eq!(failure.code, CallFailureCode::Unauthenticated as i32);
+
+    claim_client.close().await;
+    connection.close().await;
+    server_task.await.unwrap();
 }

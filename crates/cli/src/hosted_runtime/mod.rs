@@ -6,6 +6,7 @@
 //! hosted command implementations. It is deliberately not a public transport
 //! client surface.
 
+mod agent_node_identity;
 pub(crate) mod auth;
 pub(crate) mod auth_requests;
 pub(crate) mod credential_file;
