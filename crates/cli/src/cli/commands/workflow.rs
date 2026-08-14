@@ -394,19 +394,11 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         return cmd_land_many(cli, args).await;
     }
 
-    // Open at CWD only to discover the active thread, then re-open at
-    // its metadata-recorded worktree. This makes `heddle land` work
-    // from anywhere — operators don't need to `cd` into a lightweight
-    // thread directory before landing. The capture/merge below run
-    // against `repo`, so they all see the same checkout. See
-    // `Repository::active_worktree_path`.
-    let cwd_repo = cli.open_repo()?;
-    let target_path = cwd_repo.active_worktree_path()?;
-    let repo = if target_path == *cwd_repo.root() {
-        cwd_repo
-    } else {
-        Repository::open(&target_path)?
-    };
+    // Resolve the integration target independently of CWD. A dedicated source
+    // checkout has its own local HEAD, so treating it as the target would ask
+    // the merge engine to integrate the thread into itself. Route through the
+    // shared main repository first, then honor its active target worktree.
+    let repo = open_land_target_repository(cli)?;
     // One land owns the target repository from recovery/preflight through
     // integration, Git checkpoint publication, and marker cleanup. This makes
     // the Prepared marker an operation-owned journal instead of a replaceable
@@ -1101,6 +1093,27 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             },
         },
     )
+}
+
+fn open_land_target_repository(cli: &Cli) -> Result<Repository> {
+    let cwd_repo = cli.open_repo()?;
+    let main_repo = if cwd_repo.root().join(".heddle") == cwd_repo.heddle_dir() {
+        cwd_repo
+    } else {
+        let main_root = cwd_repo.heddle_dir().parent().ok_or_else(|| {
+            anyhow!(
+                "shared Heddle directory {} has no parent repository root",
+                cwd_repo.heddle_dir().display()
+            )
+        })?;
+        Repository::open(main_root)?
+    };
+    let target_path = main_repo.active_worktree_path()?;
+    if target_path == *main_repo.root() {
+        Ok(main_repo)
+    } else {
+        Ok(Repository::open(&target_path)?)
+    }
 }
 
 fn should_squash_land(args: &LandArgs, user_config: &UserConfig) -> bool {
@@ -2910,13 +2923,7 @@ fn finish_recovered_land(
 /// the land lock, captures work, syncs the remote, or merges. No server
 /// round-trip is made.
 fn emit_land_dry_run(cli: &Cli, args: &LandArgs) -> Result<()> {
-    let cwd_repo = cli.open_repo()?;
-    let target_path = cwd_repo.active_worktree_path()?;
-    let repo = if target_path == *cwd_repo.root() {
-        cwd_repo
-    } else {
-        Repository::open(&target_path)?
-    };
+    let repo = open_land_target_repository(cli)?;
 
     // Ordered set of threads a real land would process: `--thread` first
     // (when supplied), then each `--threads` peer, deduped.
