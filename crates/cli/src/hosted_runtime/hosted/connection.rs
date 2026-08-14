@@ -5,17 +5,21 @@ use cli_shared::ClientConfig;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode,
     endpoint::{AckFrequencyConfig, QuicTransportConfig, presets},
+    protocol::Router,
 };
 use tokio::sync::Mutex;
 
 use super::{
-    HostedError, Result, VerifiedEndpointDescriptor, provider_transport::ProviderWebSocketTransport,
+    HostedError, Result, VerifiedEndpointDescriptor,
+    claim_protocol::{CLAIM_ALPN_V1, ClaimProtocol, ClaimUnavailable},
+    provider_transport::ProviderWebSocketTransport,
 };
 
 const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug)]
 pub(super) struct HostedConnection {
+    router: Router,
     pub(super) endpoint: Endpoint,
     pub(super) connection: iroh::endpoint::Connection,
     provider_transport: Option<ProviderWebSocketTransport>,
@@ -35,8 +39,16 @@ impl HostedConnection {
 
         if direct_address.ip_addrs().next().is_some() {
             let provider_transport = ProviderWebSocketTransport::new(config.clone());
-            let endpoint =
-                bind_endpoint(RelayMode::Disabled, Some(provider_transport.clone())).await?;
+            // The endpoint is now also an inbound claim listener. Keep its
+            // signed relays online even when the hosted connection itself can
+            // use a direct path, or a browser holding only the claim link
+            // cannot reach the advertised node id.
+            let relay_mode = if relays.is_empty() {
+                RelayMode::Disabled
+            } else {
+                RelayMode::custom(relays.clone())
+            };
+            let endpoint = bind_endpoint(relay_mode, Some(provider_transport.clone())).await?;
             if relays.is_empty() {
                 return Self::connect_inner(endpoint, direct_address, Some(provider_transport))
                     .await;
@@ -85,7 +97,9 @@ impl HostedConnection {
                 return Err(HostedError::transport(error));
             }
         };
+        let router = claim_router(endpoint.clone());
         Ok(Arc::new(Self {
+            router,
             endpoint,
             connection,
             provider_transport,
@@ -145,7 +159,9 @@ impl HostedConnection {
 
     pub(super) async fn close(&self) {
         self.connection.close(0u32.into(), b"Heddle client closed");
-        self.endpoint.close().await;
+        if let Err(error) = self.router.shutdown().await {
+            tracing::warn!(%error, "failed to shut down Heddle Iroh router");
+        }
     }
 }
 
@@ -153,13 +169,25 @@ async fn bind_endpoint(
     relay_mode: RelayMode,
     provider_transport: Option<ProviderWebSocketTransport>,
 ) -> Result<Endpoint> {
+    let identity = crate::hosted_runtime::agent_node_identity::load_or_create()
+        .map_err(HostedError::transport)?;
     let mut builder = Endpoint::builder(presets::Minimal)
         .transport_config(transport_config())
-        .relay_mode(relay_mode);
+        .relay_mode(relay_mode)
+        .secret_key(identity.secret_key());
     if let Some(provider_transport) = provider_transport {
         builder = builder.add_custom_transport(Arc::new(provider_transport));
     }
     builder.bind().await.map_err(HostedError::transport)
+}
+
+fn claim_router(endpoint: Endpoint) -> Router {
+    Router::builder(endpoint)
+        .accept(
+            CLAIM_ALPN_V1,
+            ClaimProtocol::new(Arc::new(ClaimUnavailable), Arc::new(ClaimUnavailable)),
+        )
+        .spawn()
 }
 
 impl Drop for HostedConnection {
