@@ -90,6 +90,10 @@ pub(crate) trait WorktreeWalkPolicy {
         Ok(false)
     }
 
+    fn cached_tree_for_entry(&self, _rel_path: &Path, _tree_hash: &ContentHash) -> Option<Tree> {
+        None
+    }
+
     fn visit_file(
         &mut self,
         entry: WalkEntry<'_>,
@@ -274,6 +278,18 @@ fn walk_directory<P: WorktreeWalkPolicy>(
                     &mut state,
                 ),
                 ListedDirEntryKind::Directory => {
+                    let child_rel_path = directory.rel_path.join(name);
+                    let subtree = tree_entry
+                        .filter(|entry| entry.is_tree())
+                        .and_then(TreeEntry::tree_hash)
+                        .map(
+                            |hash| match policy.cached_tree_for_entry(&child_rel_path, &hash) {
+                                Some(tree) => Ok(Some(tree)),
+                                None => repo.store().get_tree(&hash),
+                            },
+                        )
+                        .transpose()?
+                        .flatten();
                     let output = walk_directory(
                         repo,
                         base,
@@ -283,13 +299,7 @@ fn walk_directory<P: WorktreeWalkPolicy>(
                         },
                         Some(metadata.clone()),
                         ignore_matcher,
-                        tree_entry
-                            .filter(|entry| entry.is_tree())
-                            .and_then(|entry| entry.tree_hash())
-                            .map(|hash| repo.store().get_tree(&hash))
-                            .transpose()?
-                            .flatten()
-                            .as_ref(),
+                        subtree.as_ref(),
                         policy,
                     )?;
                     policy.visit_directory_output(

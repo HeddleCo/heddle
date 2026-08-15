@@ -92,12 +92,14 @@ pub(crate) fn create_git_checkpoint(
         supplied_tree: None,
         reuse_current_state: true,
         require_clean_worktree: true,
+        require_worktree_change: false,
         worktree_status_options: status_options,
         run_hooks: true,
         commit_safe_post_verify: false,
         coalesce_snapshot_and_checkpoint: false,
         linearize_git_parent: request.linearize_git_parent,
         precomputed_worktree_status: None,
+        machine_contract_input: None,
     };
 
     let report = execute_save(repo, plan).map_err(|err| {

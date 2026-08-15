@@ -106,6 +106,10 @@ impl WorktreeIgnoreMatcher {
     }
 
     pub(crate) fn fingerprint(&self) -> ContentHash {
+        Self::fingerprint_patterns(&self.raw_patterns)
+    }
+
+    pub(crate) fn fingerprint_patterns(patterns: &[String]) -> ContentHash {
         // Hash patterns in declaration order — gitignore semantics are
         // *order-sensitive*. `*.log` followed by `!keep.log` ignores
         // every log file except `keep.log`; the same rules in reverse
@@ -114,7 +118,7 @@ impl WorktreeIgnoreMatcher {
         // files with identical rule sets but different orders produce
         // different ignore semantics, and the untracked-cache layer
         // needs cache keys to reflect that.
-        ContentHash::compute_typed("heddle.ignore", self.raw_patterns.join("\0").as_bytes())
+        ContentHash::compute_typed("heddle.ignore", patterns.join("\0").as_bytes())
     }
 }
 

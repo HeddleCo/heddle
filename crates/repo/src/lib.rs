@@ -159,9 +159,9 @@ pub use repository::{
     RepositoryPerformanceInspectionReport, RepositorySourceAuthority, SUGGESTION_WINDOW,
     SnapshotExecution, SnapshotProfile, SpoolFacet, ThreadCaptureOutcome, TreeBuildProfile,
     TrustedKey, UntrackedSet, UntrackedSubtree, WarmCanonicalStoreStats, WorktreeCompareProfile,
-    WorktreeIndexInspection, WorktreeStatusDetailed, compute_rewrite_pct, discover_heddle_root,
-    find_merge_base, is_heddle_repository_root, is_major_rewrite, is_synthetic_root,
-    open_git_repository_at_root, query_history_from_source,
+    WorktreeIndexInspection, WorktreeStateLookupProfile, WorktreeStatusDetailed,
+    compute_rewrite_pct, discover_heddle_root, find_merge_base, is_heddle_repository_root,
+    is_major_rewrite, is_synthetic_root, open_git_repository_at_root, query_history_from_source,
 };
 #[cfg(feature = "git-overlay")]
 pub use repository::{GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitOverlayShortStatus};

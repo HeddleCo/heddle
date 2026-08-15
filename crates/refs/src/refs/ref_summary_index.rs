@@ -127,6 +127,13 @@ pub(super) struct RefSummaryIndex {
 }
 
 impl RefSummaryIndex {
+    pub(super) fn thread_states(&self) -> Vec<(ThreadName, StateId)> {
+        self.threads
+            .iter()
+            .map(|entry| (ThreadName::new(&entry.name), entry.state_id))
+            .collect()
+    }
+
     fn parse(contents: &str) -> Result<Self> {
         let mut lines = contents.lines();
         let header = lines

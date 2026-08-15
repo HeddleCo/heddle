@@ -2,7 +2,7 @@
 //! Tree building and materialization helpers.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::Path,
     time::Instant,
@@ -16,13 +16,15 @@ use objects::{
 };
 use tracing::{debug, instrument, trace, warn};
 
+use serde::{Deserialize, Serialize};
+
 use super::{
     HeddleError, Repository, Result,
     repository_worktree_status::{WorktreeStatusDetailed, compare_worktree_with_index_detailed},
 };
 use crate::{
     FsMonitorSettings, WorktreeIndex, WorktreeStatusOptions,
-    fsmonitor::{ChangeMonitorSession, MonitorStatus},
+    fsmonitor::{ChangeMonitorSession, ChangeMonitorToken, MonitorStatus},
     thread_manifest::ManifestFile,
     worktree_ignore::WorktreeIgnoreMatcher,
     worktree_index::{WorktreeIndexLoadStats, WorktreeIndexSaveStats},
@@ -76,11 +78,94 @@ pub struct TreeBuildProfile {
     pub dir_count: usize,
 }
 
+pub(crate) type SnapshotTreeBuildOutput = (
+    Tree,
+    TreeBuildProfile,
+    BTreeMap<String, ManifestFile>,
+    Vec<(ContentHash, Vec<u8>)>,
+    Vec<Tree>,
+    Option<ChangeMonitorToken>,
+);
+
+#[derive(Debug, Clone, Default)]
+pub struct WorktreeStateLookupProfile {
+    pub head_ms: u128,
+    pub cache_read_ms: u128,
+    pub cache_decode_ms: u128,
+    pub cache_validate_ms: u128,
+    pub store_read_ms: u128,
+    pub cache_hit: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WorktreeTreeChainCache {
+    root: ContentHash,
+    ignore_fingerprint: ContentHash,
+    trees: Vec<Tree>,
+}
+
 #[derive(Debug, Clone)]
 struct TreeBuildOutput {
     tree: Tree,
     profile: TreeBuildProfile,
     revalidation_files: BTreeMap<String, ManifestFile>,
+    pending_blobs: Vec<(ContentHash, Vec<u8>)>,
+    pending_trees: Vec<Tree>,
+    monitor_token: Option<ChangeMonitorToken>,
+}
+
+fn rewrite_single_tracked_file(
+    repo: &Repository,
+    tree: &Tree,
+    components: &[&str],
+    blob_hash: ContentHash,
+    executable: bool,
+    cached_trees: &HashMap<ContentHash, Tree>,
+    descendant_trees: &mut Vec<Tree>,
+) -> Result<Option<Tree>> {
+    let Some((name, rest)) = components.split_first() else {
+        return Ok(None);
+    };
+    let Some(existing) = tree.get(name) else {
+        return Ok(None);
+    };
+    let replacement = if rest.is_empty() {
+        if existing.blob_hash().is_none() {
+            return Ok(None);
+        }
+        TreeEntry::file((*name).to_string(), blob_hash, executable)?
+    } else {
+        let Some(child_hash) = existing.tree_hash() else {
+            return Ok(None);
+        };
+        let child = match cached_trees.get(&child_hash) {
+            Some(tree) => tree.clone(),
+            None => {
+                let Some(tree) = repo.store().get_tree(&child_hash)? else {
+                    return Ok(None);
+                };
+                tree
+            }
+        };
+        let Some(updated_child) = rewrite_single_tracked_file(
+            repo,
+            &child,
+            rest,
+            blob_hash,
+            executable,
+            cached_trees,
+            descendant_trees,
+        )?
+        else {
+            return Ok(None);
+        };
+        let updated_hash = updated_child.hash();
+        descendant_trees.push(updated_child);
+        TreeEntry::directory((*name).to_string(), updated_hash)?
+    };
+    let mut updated = tree.clone();
+    updated.insert(replacement);
+    Ok(Some(updated))
 }
 
 impl Repository {
@@ -157,7 +242,7 @@ impl Repository {
         baseline_tree: Option<&Tree>,
         stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
     ) -> Result<(Tree, TreeBuildProfile)> {
-        self.build_tree_profiled_output(dir, baseline_tree, stat_cache)
+        self.build_tree_profiled_output(dir, baseline_tree, stat_cache, false)
             .map(|output| (output.tree, output.profile))
     }
 
@@ -166,9 +251,140 @@ impl Repository {
         dir: &Path,
         baseline_tree: Option<&Tree>,
         stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
-    ) -> Result<(Tree, TreeBuildProfile, BTreeMap<String, ManifestFile>)> {
-        self.build_tree_profiled_output(dir, baseline_tree, stat_cache)
-            .map(|output| (output.tree, output.profile, output.revalidation_files))
+    ) -> Result<SnapshotTreeBuildOutput> {
+        let fast_start = Instant::now();
+        if let Some(mut output) = self.try_build_single_changed_file_tree(dir, baseline_tree)? {
+            output.profile.tree_walk_ms = fast_start.elapsed().as_millis();
+            return Ok((
+                output.tree,
+                output.profile,
+                output.revalidation_files,
+                output.pending_blobs,
+                output.pending_trees,
+                output.monitor_token,
+            ));
+        }
+        self.build_tree_profiled_output(dir, baseline_tree, stat_cache, true)
+            .map(|output| {
+                (
+                    output.tree,
+                    output.profile,
+                    output.revalidation_files,
+                    output.pending_blobs,
+                    output.pending_trees,
+                    output.monitor_token,
+                )
+            })
+    }
+
+    /// Apply an authoritative one-file monitor delta directly to the baseline
+    /// tree. This is the common capture path and avoids enumerating 1,000 root
+    /// directories plus every sibling in the changed file's directory.
+    /// Unsupported shapes (new/deleted paths, symlinks, policy changes, or a
+    /// non-authoritative monitor) fall back to the general walker.
+    fn try_build_single_changed_file_tree(
+        &self,
+        dir: &Path,
+        baseline_tree: Option<&Tree>,
+    ) -> Result<Option<TreeBuildOutput>> {
+        if dir != self.root() {
+            return Ok(None);
+        }
+        let Some(baseline_tree) = baseline_tree else {
+            return Ok(None);
+        };
+        let monitor = ChangeMonitorSession::prepare(
+            self.root(),
+            self.default_worktree_status_options().fsmonitor,
+        );
+        let Some(changed) = monitor.single_changed_path() else {
+            return Ok(None);
+        };
+        let rel_path = Path::new(changed);
+        let components = rel_path
+            .components()
+            .map(|component| match component {
+                std::path::Component::Normal(name) => name.to_str(),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(components) = components.filter(|parts| !parts.is_empty()) else {
+            return Ok(None);
+        };
+
+        let expected_ignore_fingerprint =
+            WorktreeIgnoreMatcher::fingerprint_patterns(&self.ignore_patterns()?);
+        let Some(cached_trees) = self
+            .load_current_worktree_tree_chain(&baseline_tree.hash(), &expected_ignore_fingerprint)
+        else {
+            return Ok(None);
+        };
+        let nested_exclusions = self.nested_thread_worktree_exclusions(dir)?;
+        let mut absolute = self.root().to_path_buf();
+        for component in &components {
+            absolute.push(component);
+        }
+        let canonical_absolute = absolute.canonicalize().unwrap_or_else(|_| absolute.clone());
+        if nested_exclusions
+            .iter()
+            .any(|excluded| canonical_absolute.starts_with(excluded))
+        {
+            return Ok(None);
+        }
+
+        let metadata = match fs::symlink_metadata(&absolute) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        #[cfg(unix)]
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o111 != 0
+        };
+        #[cfg(not(unix))]
+        let executable = false;
+
+        let (blob, hash) = read_blob_with_hash(&absolute, metadata.len())?;
+        let mut pending_trees = Vec::with_capacity(components.len().saturating_sub(1));
+        let Some(tree) = rewrite_single_tracked_file(
+            self,
+            baseline_tree,
+            &components,
+            hash,
+            executable,
+            &cached_trees,
+            &mut pending_trees,
+        )?
+        else {
+            return Ok(None);
+        };
+        let (size, inode, mtime_ns, ctime_ns, mode) =
+            crate::stat_signature::stat_signature(&absolute, &metadata);
+        let revalidation_files = BTreeMap::from([(
+            cache_key(rel_path),
+            ManifestFile {
+                hash,
+                size,
+                inode,
+                mtime_ns,
+                ctime_ns,
+                mode,
+            },
+        )]);
+        Ok(Some(TreeBuildOutput {
+            tree,
+            profile: TreeBuildProfile {
+                file_count: 1,
+                dir_count: components.len().saturating_sub(1),
+                ..TreeBuildProfile::default()
+            },
+            revalidation_files,
+            pending_blobs: vec![(hash, blob.into_content())],
+            pending_trees,
+            monitor_token: monitor.revalidation_token(),
+        }))
     }
 
     fn build_tree_profiled_output(
@@ -176,13 +392,20 @@ impl Repository {
         dir: &Path,
         baseline_tree: Option<&Tree>,
         stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
+        defer_object_writes: bool,
     ) -> Result<TreeBuildOutput> {
         let patterns = self.ignore_patterns()?;
         debug!(pattern_count = patterns.len(), "Starting tree build");
         let start = Instant::now();
         let nested_exclusions = self.nested_thread_worktree_exclusions(dir)?;
-        let tree =
-            self.build_tree_walk(dir, &patterns, nested_exclusions, baseline_tree, stat_cache);
+        let tree = self.build_tree_walk(
+            dir,
+            &patterns,
+            nested_exclusions,
+            baseline_tree,
+            stat_cache,
+            defer_object_writes,
+        );
         let elapsed = start.elapsed().as_millis();
         debug!(duration_ms = elapsed, "Tree build complete");
         tree.map(|mut output| {
@@ -201,6 +424,7 @@ impl Repository {
         nested_exclusions: Vec<std::path::PathBuf>,
         baseline_tree: Option<&Tree>,
         stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
+        defer_object_writes: bool,
     ) -> Result<TreeBuildOutput> {
         let ignore_matcher =
             WorktreeIgnoreMatcher::new(patterns).with_nested_worktree_exclusions(nested_exclusions);
@@ -221,15 +445,28 @@ impl Repository {
             .unwrap_or_default();
             (index, monitor)
         });
-        let mut policy = TreeBuildPolicy::new(self, dir, stat_cache, incremental_state);
+        let mut policy = TreeBuildPolicy::new(
+            self,
+            dir,
+            stat_cache,
+            incremental_state,
+            defer_object_writes,
+        );
         let mut output = walk_worktree(self, dir, &ignore_matcher, baseline_tree, &mut policy)?;
+        output.monitor_token = policy
+            .incremental_state
+            .as_ref()
+            .and_then(|(_, monitor)| monitor.revalidation_token());
 
         // Flush every newly-seen blob as a single packfile. Stores
         // that don't override `put_blobs_packed` fall back to per-blob
         // writes (correct, just slower). Time is folded into
         // `blob_write_ms` so the existing perf profile keeps tracking
         // total blob-storage cost.
-        if !policy.pending_blobs.is_empty() {
+        if defer_object_writes {
+            output.pending_blobs = std::mem::take(&mut policy.pending_blobs);
+            output.pending_trees = std::mem::take(&mut policy.pending_trees);
+        } else if !policy.pending_blobs.is_empty() {
             let flush_start = Instant::now();
             let pending = std::mem::take(&mut policy.pending_blobs);
             self.store.put_blobs_packed(pending)?;
@@ -255,7 +492,8 @@ impl Repository {
         }
         let tree = self.require_tree(hash)?;
         if let Ok(bytes) = rmp_serde::to_vec_named(&tree)
-            && let Err(error) = objects::fs_atomic::write_file_atomic(&cache_path, &bytes)
+            && let Err(error) =
+                objects::fs_atomic::write_file_atomic_reconstructible(&cache_path, &bytes)
         {
             warn!(path = %cache_path.display(), %error, "Could not refresh worktree tree cache");
         }
@@ -263,30 +501,145 @@ impl Repository {
     }
 
     pub fn state_for_worktree_status(&self, id: &StateId) -> Result<State> {
+        self.state_for_worktree_status_profiled(id)
+            .map(|(state, _)| state)
+    }
+
+    fn state_for_worktree_status_profiled(
+        &self,
+        id: &StateId,
+    ) -> Result<(State, WorktreeStateLookupProfile)> {
+        let mut profile = WorktreeStateLookupProfile::default();
         let cache_path = self.root().join(".heddle/state/worktree-current-state.bin");
-        if let Ok(bytes) = fs::read(&cache_path)
-            && let Ok(mut state) = rmp_serde::from_slice::<State>(&bytes)
-            && state.id() == *id
-        {
-            state.state_id = *id;
-            return Ok(state);
+        let cache_read_started = Instant::now();
+        let cached = fs::read(&cache_path);
+        profile.cache_read_ms = cache_read_started.elapsed().as_millis();
+        if let Ok(bytes) = cached {
+            let cache_decode_started = Instant::now();
+            let decoded = rmp_serde::from_slice::<State>(&bytes);
+            profile.cache_decode_ms = cache_decode_started.elapsed().as_millis();
+            if let Ok(mut state) = decoded {
+                let cache_validate_started = Instant::now();
+                let matches = state.id() == *id;
+                profile.cache_validate_ms = cache_validate_started.elapsed().as_millis();
+                if matches {
+                    state.state_id = *id;
+                    profile.cache_hit = true;
+                    return Ok((state, profile));
+                }
+            }
         }
+        let store_read_started = Instant::now();
         let state = self
             .store()
             .get_state(id)?
             .ok_or(HeddleError::StateNotFound(*id))?;
+        profile.store_read_ms = store_read_started.elapsed().as_millis();
         if let Ok(bytes) = rmp_serde::to_vec_named(&state)
-            && let Err(error) = objects::fs_atomic::write_file_atomic(&cache_path, &bytes)
+            && let Err(error) =
+                objects::fs_atomic::write_file_atomic_reconstructible(&cache_path, &bytes)
         {
             warn!(path = %cache_path.display(), %error, "Could not refresh worktree state cache");
         }
-        Ok(state)
+        Ok((state, profile))
     }
 
     pub fn current_state_for_worktree_status(&self) -> Result<Option<State>> {
-        self.head()?
-            .map(|id| self.state_for_worktree_status(&id))
-            .transpose()
+        self.current_state_for_worktree_status_profiled()
+            .map(|(state, _)| state)
+    }
+
+    pub fn current_state_for_worktree_status_profiled(
+        &self,
+    ) -> Result<(Option<State>, WorktreeStateLookupProfile)> {
+        let head_started = Instant::now();
+        let head = self.head()?;
+        let head_ms = head_started.elapsed().as_millis();
+        let Some(id) = head else {
+            return Ok((
+                None,
+                WorktreeStateLookupProfile {
+                    head_ms,
+                    ..WorktreeStateLookupProfile::default()
+                },
+            ));
+        };
+        let (state, mut profile) = self.state_for_worktree_status_profiled(&id)?;
+        profile.head_ms = head_ms;
+        Ok((Some(state), profile))
+    }
+
+    /// Refresh the rebuildable current-state/tree materialized views from a
+    /// snapshot that has already committed and published its authoritative
+    /// state. A later process can resolve HEAD without searching pack indexes;
+    /// torn/missing views are harmless because the readers validate hashes and
+    /// fall back to the object store.
+    pub(crate) fn cache_current_worktree_state(
+        &self,
+        state: &State,
+        tree: &Tree,
+        tree_chain: &[Tree],
+    ) {
+        let state_path = self.root().join(".heddle/state/worktree-current-state.bin");
+        if let Ok(bytes) = rmp_serde::to_vec_named(state)
+            && let Err(error) = fs::write(&state_path, &bytes)
+        {
+            warn!(path = %state_path.display(), %error, "Could not refresh worktree state cache");
+        }
+        let tree_path = self.root().join(".heddle/state/worktree-current-tree.bin");
+        if let Ok(bytes) = rmp_serde::to_vec_named(tree)
+            && let Err(error) = fs::write(&tree_path, &bytes)
+        {
+            warn!(path = %tree_path.display(), %error, "Could not refresh worktree tree cache");
+        }
+        self.cache_current_worktree_tree_chain(tree, tree_chain);
+    }
+
+    fn cache_current_worktree_tree_chain(&self, root: &Tree, trees: &[Tree]) {
+        let path = self
+            .root()
+            .join(".heddle/state/worktree-current-tree-chain.bin");
+        let Ok(patterns) = self.ignore_patterns() else {
+            return;
+        };
+        let cache = WorktreeTreeChainCache {
+            root: root.hash(),
+            ignore_fingerprint: WorktreeIgnoreMatcher::fingerprint_patterns(&patterns),
+            trees: trees.to_vec(),
+        };
+        if let Ok(bytes) = rmp_serde::to_vec_named(&cache)
+            && let Err(error) = fs::write(&path, &bytes)
+        {
+            warn!(path = %path.display(), %error, "Could not refresh worktree tree-chain cache");
+        }
+    }
+
+    fn load_current_worktree_tree_chain(
+        &self,
+        expected_root: &ContentHash,
+        expected_ignore_fingerprint: &ContentHash,
+    ) -> Option<HashMap<ContentHash, Tree>> {
+        let path = self
+            .root()
+            .join(".heddle/state/worktree-current-tree-chain.bin");
+        let Ok(bytes) = fs::read(path) else {
+            return None;
+        };
+        let Ok(cache) = rmp_serde::from_slice::<WorktreeTreeChainCache>(&bytes) else {
+            return None;
+        };
+        if cache.root != *expected_root || cache.ignore_fingerprint != *expected_ignore_fingerprint
+        {
+            return None;
+        }
+        let mut trees = HashMap::with_capacity(cache.trees.len());
+        for tree in cache.trees {
+            if tree.validate().is_err() {
+                return None;
+            }
+            trees.insert(tree.hash(), tree);
+        }
+        Some(trees)
     }
 
     /// Return the complete gitlink summary cached for `tree`, when the hot
@@ -574,6 +927,8 @@ struct TreeBuildPolicy<'a> {
     /// Hashes already queued in `pending_blobs` so we don't double-add
     /// content-equal files (which is common: README.md, .gitkeep, etc).
     seen: HashSet<ContentHash>,
+    pending_trees: Vec<Tree>,
+    defer_object_writes: bool,
 }
 
 impl<'a> TreeBuildPolicy<'a> {
@@ -582,6 +937,7 @@ impl<'a> TreeBuildPolicy<'a> {
         walk_root: &'a Path,
         stat_cache: Option<&'a crate::thread_manifest::ThreadManifest>,
         incremental_state: Option<(WorktreeIndex, ChangeMonitorSession)>,
+        defer_object_writes: bool,
     ) -> Self {
         Self {
             repo,
@@ -591,6 +947,8 @@ impl<'a> TreeBuildPolicy<'a> {
             stat_cache_hits: 0,
             pending_blobs: Vec::new(),
             seen: HashSet::new(),
+            pending_trees: Vec::new(),
+            defer_object_writes,
         }
     }
 
@@ -639,13 +997,10 @@ impl<'a> TreeBuildPolicy<'a> {
         let Some((index, monitor)) = &self.incremental_state else {
             return false;
         };
-        entry.path.strip_prefix(self.walk_root).is_ok_and(|path| {
-            let parent = path.parent().unwrap_or_else(|| Path::new(""));
-            index
-                .get_directory(&crate::worktree_walk::cache_key(parent))
-                .is_some()
-                && !monitor.path_may_have_changed(path)
-        })
+        entry
+            .path
+            .strip_prefix(self.walk_root)
+            .is_ok_and(|path| monitor.can_reuse_unchanged_child(path, index))
     }
 
     fn changed_path_mode(&self) -> bool {
@@ -713,22 +1068,26 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         tree_entry: &TreeEntry,
         state: &mut Self::DirectoryState,
     ) -> Result<bool> {
-        let Some(tree_hash) = tree_entry.tree_hash() else {
+        let Some(_) = tree_entry.tree_hash() else {
             return Ok(false);
         };
         let Some((index, monitor)) = &self.incremental_state else {
             return Ok(false);
         };
-        let key = crate::worktree_walk::cache_key(rel_path);
-        let reusable = !monitor.path_may_have_changed(rel_path)
-            && index
-                .get_directory(&key)
-                .is_some_and(|entry| entry.clean_tree_hash == Some(tree_hash));
+        let reusable = monitor.can_reuse_unchanged_child(rel_path, index);
         if reusable {
             state.entries.push(tree_entry.clone());
             state.profile.dir_count += 1;
         }
         Ok(reusable)
+    }
+
+    fn cached_tree_for_entry(&self, rel_path: &Path, tree_hash: &ContentHash) -> Option<Tree> {
+        let key = crate::worktree_walk::cache_key(rel_path);
+        self.incremental_state
+            .as_ref()
+            .and_then(|(index, _)| index.clean_tree(&key, tree_hash))
+            .cloned()
     }
 
     fn skip_directory_before_enumeration(
@@ -749,6 +1108,9 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
                 tree: tree.clone(),
                 profile: TreeBuildProfile::default(),
                 revalidation_files: BTreeMap::new(),
+                pending_blobs: Vec::new(),
+                pending_trees: Vec::new(),
+                monitor_token: None,
             }))
     }
 
@@ -917,9 +1279,14 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         state.profile.file_count += subtree.profile.file_count;
         state.profile.dir_count += subtree.profile.dir_count + 1;
         state.revalidation_files.extend(subtree.revalidation_files);
-        let store_start = Instant::now();
-        let hash = self.repo.store.put_tree(&subtree.tree)?;
-        state.profile.tree_write_ms += store_start.elapsed().as_millis();
+        let hash = subtree.tree.hash();
+        if self.defer_object_writes {
+            self.pending_trees.push(subtree.tree);
+        } else {
+            let store_start = Instant::now();
+            self.repo.store.put_tree(&subtree.tree)?;
+            state.profile.tree_write_ms += store_start.elapsed().as_millis();
+        }
         state
             .entries
             .push(TreeEntry::directory(entry.name.to_string(), hash)?);
@@ -951,16 +1318,72 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
             tree: Tree::from_entries(state.entries),
             profile: state.profile,
             revalidation_files: state.revalidation_files,
+            pending_blobs: Vec::new(),
+            pending_trees: Vec::new(),
+            monitor_token: None,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use objects::object::ContentHash;
+    use objects::object::{ContentHash, Tree, TreeEntry};
     use tempfile::TempDir;
 
-    use crate::worktree_walk::{read_blob_with_hash, read_file_hash};
+    use crate::{
+        Repository,
+        worktree_ignore::WorktreeIgnoreMatcher,
+        worktree_walk::{read_blob_with_hash, read_file_hash},
+    };
+
+    #[test]
+    fn current_tree_chain_cache_is_hash_validated_and_root_scoped() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let blob = ContentHash::compute_typed("blob", b"cached");
+        let child = Tree::from_entries(vec![TreeEntry::file("file", blob, false).unwrap()]);
+        let root = Tree::from_entries(vec![TreeEntry::directory("dir", child.hash()).unwrap()]);
+        let ignore_fingerprint =
+            WorktreeIgnoreMatcher::fingerprint_patterns(&repo.ignore_patterns().unwrap());
+
+        repo.cache_current_worktree_tree_chain(&root, &[]);
+        assert!(
+            repo.load_current_worktree_tree_chain(&root.hash(), &ignore_fingerprint)
+                .unwrap()
+                .is_empty()
+        );
+        repo.cache_current_worktree_tree_chain(&root, std::slice::from_ref(&child));
+        let loaded = repo
+            .load_current_worktree_tree_chain(&root.hash(), &ignore_fingerprint)
+            .unwrap();
+        assert_eq!(loaded.get(&child.hash()), Some(&child));
+        assert!(
+            repo.load_current_worktree_tree_chain(
+                &ContentHash::compute_typed("tree", b"other"),
+                &ignore_fingerprint,
+            )
+            .is_none()
+        );
+        assert!(
+            repo.load_current_worktree_tree_chain(
+                &root.hash(),
+                &ContentHash::compute_typed("heddle.ignore", b"changed"),
+            )
+            .is_none()
+        );
+
+        std::fs::write(
+            temp_dir
+                .path()
+                .join(".heddle/state/worktree-current-tree-chain.bin"),
+            b"torn",
+        )
+        .unwrap();
+        assert!(
+            repo.load_current_worktree_tree_chain(&root.hash(), &ignore_fingerprint)
+                .is_none()
+        );
+    }
 
     #[test]
     fn read_blob_with_hash_uses_bytes_read_when_file_grows() {

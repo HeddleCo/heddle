@@ -47,6 +47,14 @@ const RECONCILE_WATERMARK_LOCAL: &str = "RECONCILE_WATERMARK_LOCAL";
 /// sibling had already processed/published — resurrecting it cross-worktree.
 const RECONCILE_WATERMARK_SHARED: &str = "RECONCILE_WATERMARK_SHARED";
 
+/// Reconstructible, request-scoped proof that the canonical HEAD written by a
+/// committed snapshot already matches the current oplog tip. Unlike a class
+/// watermark this is trusted only when both its tip and raw ref value match.
+const SNAPSHOT_WITNESS_LOCAL: &str = "SNAPSHOT_WITNESS_LOCAL";
+
+/// Shared-thread counterpart to [`SNAPSHOT_WITNESS_LOCAL`].
+const SNAPSHOT_WITNESS_SHARED: &str = "SNAPSHOT_WITNESS_SHARED";
+
 /// Well-known refspec that resolves the heddle-internal pre-undo recovery
 /// pointer used by `heddle undo --recover`. It is UNSHADOWABLE by any user
 /// marker or thread, in BOTH directions (heddle#305 r3):
@@ -72,7 +80,7 @@ pub const UNDO_RECOVERY_HANDLE: &str = ".undo-recovery";
 /// revalidated via `(mtime, len)` when another process rewrites the file.
 struct CachedPackedRefs {
     stamp: Option<(SystemTime, u64)>,
-    packed: PackedRefs,
+    packed: Arc<PackedRefs>,
 }
 
 /// Manager for references (threads, markers, HEAD).
@@ -275,6 +283,14 @@ impl RefManager {
         // Attached snapshots do not change HEAD's identity; this commit has no
         // other local-class effect, so the local view is complete at `tip` too.
         self.cached_local_generation.store(tip, Ordering::Release);
+        let _ = std::fs::write(
+            self.snapshot_witness_local_path(),
+            format!("{tip}\nattached\n{thread}\n"),
+        );
+        let _ = std::fs::write(
+            self.snapshot_witness_shared_path(),
+            format!("{tip}\nthread\n{thread}\n{}\n", state.to_string_full()),
+        );
         Ok(())
     }
 
@@ -295,6 +311,10 @@ impl RefManager {
         self.cached_local_generation.store(tip, Ordering::Release);
         // Detached snapshots do not touch a shared ref.
         self.cached_shared_generation.store(tip, Ordering::Release);
+        let _ = std::fs::write(
+            self.snapshot_witness_local_path(),
+            format!("{tip}\ndetached\n{}\n", state.to_string_full()),
+        );
         Ok(())
     }
 
@@ -409,6 +429,9 @@ impl RefManager {
         let tip = reconciler.generation()?;
         if watermark_covers(watermark.load(Ordering::Acquire), tip) {
             return self.raw_load(&req);
+        }
+        if let Some(loaded) = self.snapshot_witnessed_load(&req, tip)? {
+            return Ok(loaded);
         }
 
         // Lag: the fold AND the lazy re-publish must be atomic w.r.t. a
@@ -542,6 +565,80 @@ impl RefManager {
     /// under the same shared root and whose `LOCK` already serializes writers.
     fn reconcile_watermark_shared_path(&self) -> PathBuf {
         self.root.join(RECONCILE_WATERMARK_SHARED)
+    }
+
+    fn snapshot_witness_local_path(&self) -> PathBuf {
+        self.head_path()
+            .parent()
+            .map(|dir| dir.join(SNAPSHOT_WITNESS_LOCAL))
+            .unwrap_or_else(|| self.root.join(SNAPSHOT_WITNESS_LOCAL))
+    }
+
+    fn snapshot_witness_shared_path(&self) -> PathBuf {
+        self.root.join(SNAPSHOT_WITNESS_SHARED)
+    }
+
+    /// Return the raw point value when a snapshot witness proves this exact
+    /// read is already materialized at `tip`. Missing, torn, stale, and
+    /// mismatched witnesses are cache misses and fall through to reconciliation.
+    fn snapshot_witnessed_load(&self, request: &LoadRequest, tip: u64) -> Result<Option<Loaded>> {
+        let parse_tip = |lines: &mut std::str::Lines<'_>| {
+            lines
+                .next()
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| *value == tip)
+        };
+        match request {
+            LoadRequest::Head => {
+                let Some(contents) =
+                    self.read_optional_string(&self.snapshot_witness_local_path())?
+                else {
+                    return Ok(None);
+                };
+                let mut lines = contents.lines();
+                if parse_tip(&mut lines).is_none() {
+                    return Ok(None);
+                }
+                let witnessed = match lines.next() {
+                    Some("attached") => lines.next().map(|thread| Head::Attached {
+                        thread: ThreadName::new(thread),
+                    }),
+                    Some("detached") => lines
+                        .next()
+                        .and_then(|state| StateId::parse(state).ok())
+                        .map(|state| Head::Detached { state }),
+                    _ => None,
+                };
+                let Some(witnessed) = witnessed else {
+                    return Ok(None);
+                };
+                let raw = self.read_head_state()?.head;
+                Ok((raw == witnessed).then_some(Loaded::Head(raw)))
+            }
+            LoadRequest::Thread(requested) => {
+                let Some(contents) =
+                    self.read_optional_string(&self.snapshot_witness_shared_path())?
+                else {
+                    return Ok(None);
+                };
+                let mut lines = contents.lines();
+                if parse_tip(&mut lines).is_none() || lines.next() != Some("thread") {
+                    return Ok(None);
+                }
+                let Some(thread) = lines.next() else {
+                    return Ok(None);
+                };
+                let Some(state) = lines.next().and_then(|value| StateId::parse(value).ok()) else {
+                    return Ok(None);
+                };
+                if thread != requested.as_str() {
+                    return Ok(None);
+                }
+                let raw = self.raw_get_thread(requested)?;
+                Ok((raw == Some(state)).then_some(Loaded::Point(raw)))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Read the persisted `(local, shared)` watermark from their two scope
@@ -710,7 +807,7 @@ impl RefManager {
     /// Load packed-refs with a process-local cache. Safe under concurrent
     /// readers in this process; writers call [`invalidate_packed_refs_cache`]
     /// after mutating the file.
-    pub(super) fn load_packed_refs_cached(&self) -> Result<PackedRefs> {
+    pub(super) fn load_packed_refs_cached(&self) -> Result<Arc<PackedRefs>> {
         let path = self.packed_refs_path();
         let stamp = Self::packed_refs_stamp(&path);
         let mut guard = self.packed_refs_cache.lock().map_err(|_| {
@@ -721,7 +818,7 @@ impl RefManager {
         {
             return Ok(cached.packed.clone());
         }
-        let packed = PackedRefs::load(&path)?;
+        let packed = Arc::new(PackedRefs::load(&path)?);
         *guard = Some(CachedPackedRefs {
             stamp,
             packed: packed.clone(),
@@ -877,6 +974,32 @@ impl RefManager {
             Loaded::ThreadList(names) => Ok(names),
             _ => unreachable!("ThreadList request yields ThreadList"),
         }
+    }
+
+    /// List thread names and targets through one reconciled list read. The
+    /// summary index is updated by reconciliation before it is read here, so
+    /// callers avoid one logical point read per listed thread.
+    pub fn list_threads_with_states(&self) -> Result<Vec<(ThreadName, StateId)>> {
+        let names = self.list_threads()?;
+        if let Some(summary) = self.try_read_ref_summary_index() {
+            let states = summary.thread_states();
+            if states.len() == names.len()
+                && states
+                    .iter()
+                    .zip(&names)
+                    .all(|((state_name, _), name)| state_name == name)
+            {
+                return Ok(states);
+            }
+        }
+        names
+            .into_iter()
+            .filter_map(|name| match self.raw_get_thread(&name) {
+                Ok(Some(state)) => Some(Ok((name, state))),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
     }
 
     pub fn get_marker(&self, name: &MarkerName) -> Result<Option<StateId>> {
@@ -1120,7 +1243,7 @@ impl RefManager {
     pub fn pack_refs(&self) -> Result<()> {
         let lock = self.lock_refs()?;
         let packed_path = self.packed_refs_path();
-        let mut packed = self.load_packed_refs_cached()?;
+        let mut packed = (*self.load_packed_refs_cached()?).clone();
 
         let threads = self.list_threads_from_storage()?;
         for name in &threads {

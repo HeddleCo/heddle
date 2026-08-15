@@ -68,7 +68,10 @@ fn core_loop_release_contract() {
                 samples,
                 negative,
             ));
-            if negative == NegativeControl::None {
+            if matches!(
+                negative,
+                NegativeControl::None | NegativeControl::SubtreeSkip
+            ) {
                 fixture.make_dirty("dirty status\n");
                 std::thread::sleep(Duration::from_millis(50));
                 results.push(measure_case(
@@ -85,6 +88,33 @@ fn core_loop_release_contract() {
                     samples,
                     negative,
                 ));
+                if negative == NegativeControl::None && path_count == 100_000 {
+                    fixture.make_dirty("dirty diff\n");
+                    std::thread::sleep(Duration::from_millis(50));
+                    results.push(measure_case(
+                        binary,
+                        Some(&mut fixture),
+                        CaseKind::DiffOne,
+                        samples,
+                        negative,
+                    ));
+                    fixture.prepare_history(binary, 1_000);
+                    results.push(measure_case(
+                        binary,
+                        Some(&mut fixture),
+                        CaseKind::LogBounded,
+                        samples,
+                        negative,
+                    ));
+                    fixture.prepare_threads(binary, 1_000);
+                    results.push(measure_case(
+                        binary,
+                        Some(&mut fixture),
+                        CaseKind::ThreadListBounded,
+                        samples,
+                        negative,
+                    ));
+                }
             }
         }
     }
@@ -97,7 +127,7 @@ fn core_loop_release_contract() {
     } else {
         enforce_contract(&results);
         println!(
-            "GATES green: 100k clean status target, latency, scale invariance, repository opens, zero network"
+            "GATES green: absolute p95 targets, scale invariance, structural bounds, repository opens, zero network"
         );
     }
 }

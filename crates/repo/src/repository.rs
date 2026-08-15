@@ -101,7 +101,7 @@ pub use repository_materialization::WarmCanonicalStoreStats;
 pub use repository_partial_fetch::MissingBlob;
 pub use repository_snapshot::{SnapshotExecution, SnapshotProfile};
 pub use repository_thread_materialize::{CheckoutMaterialization, ThreadCaptureOutcome};
-pub use repository_tree::{TreeBuildProfile, WorktreeCompareProfile};
+pub use repository_tree::{TreeBuildProfile, WorktreeCompareProfile, WorktreeStateLookupProfile};
 pub use repository_worktree_status::{UntrackedSet, UntrackedSubtree, WorktreeStatusDetailed};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
@@ -786,7 +786,7 @@ impl Repository {
     /// Replay authoritative structured-snapshot artifacts whose oplog/ref
     /// materialized views were lost before they reached stable storage.
     fn recover_snapshot_artifact_views(&self) -> Result<()> {
-        let mut pending = self.store.snapshot_commit_descriptors()?;
+        let mut pending = self.store.snapshot_commit_recovery_descriptors()?;
         if pending.is_empty() {
             return Ok(());
         }

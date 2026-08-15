@@ -266,10 +266,9 @@ pub(crate) fn current_thread(repo: &Repository) -> Result<Option<Thread>> {
     let Head::Attached { thread } = repo.head_ref()? else {
         return Ok(None);
     };
-    let current_state = repo.refs().get_thread(&thread)?.map(|id| id.short());
-    let base_root = current_state
-        .as_deref()
-        .and_then(|state| repo.resolve_state(state).ok().flatten())
+    let current_state_id = repo.refs().get_thread(&thread)?;
+    let current_state = current_state_id.map(|id| id.short());
+    let base_root = current_state_id
         .and_then(|id| repo.store().get_state(&id).ok().flatten())
         .map(|state| state.tree.short())
         .unwrap_or_default();

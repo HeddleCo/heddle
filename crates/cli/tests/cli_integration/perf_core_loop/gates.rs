@@ -7,6 +7,9 @@ use serde::Deserialize;
 use super::measurement::{CaseKind, CaseResult, NegativeControl};
 
 const WARM_CLEAN_STATUS_100K_P95_MS: f64 = 50.0;
+const ONE_PATH_STATUS_100K_P95_MS: f64 = 75.0;
+const ONE_PATH_CAPTURE_100K_P95_MS: f64 = 100.0;
+const BOUNDED_LOCAL_READ_P95_MS: f64 = 100.0;
 
 #[derive(Deserialize)]
 struct BaselineFile {
@@ -179,12 +182,58 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
         }
     }
 
+    enforce_absolute_p95(
+        results,
+        CaseKind::StatusDirty,
+        ONE_PATH_STATUS_100K_P95_MS,
+        &mut failures,
+    );
+    enforce_absolute_p95(
+        results,
+        CaseKind::CaptureOne,
+        ONE_PATH_CAPTURE_100K_P95_MS,
+        &mut failures,
+    );
+    for kind in [
+        CaseKind::DiffOne,
+        CaseKind::LogBounded,
+        CaseKind::ThreadListBounded,
+    ] {
+        enforce_absolute_p95(results, kind, BOUNDED_LOCAL_READ_P95_MS, &mut failures);
+    }
+
     if !failures.is_empty() {
         eprintln!("PERF GATE RED");
         for failure in &failures {
             eprintln!("  - {failure}");
         }
         panic!("{} core-loop performance gate(s) failed", failures.len());
+    }
+}
+
+fn enforce_absolute_p95(
+    results: &[CaseResult],
+    kind: CaseKind,
+    budget_ms: f64,
+    failures: &mut Vec<String>,
+) {
+    let Some(result) = find(results, kind, 100_000) else {
+        failures.push(format!(
+            "absolute latency gate: missing {} @ 100000 paths",
+            kind.name()
+        ));
+        return;
+    };
+    let observed = result.metric(|sample| sample.wall_ms).p95;
+    println!(
+        "TARGET case={} paths=100000 budget_p95_ms={budget_ms:.3} observed_p95_ms={observed:.3}",
+        kind.name()
+    );
+    if observed > budget_ms {
+        failures.push(format!(
+            "absolute latency gate: {} @ 100000 paths p95 {observed:.3} ms > {budget_ms:.3} ms",
+            kind.name()
+        ));
     }
 }
 

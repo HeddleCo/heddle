@@ -19,7 +19,7 @@ use crate::{
         FsRepackOperation, HeddleError, ObjectStore, RepackPolicy, RepackResourceLimits,
         RepackSchedule, RepackScheduler, Result, SnapshotCommitArtifact, SnapshotCommitDescriptor,
         codec,
-        pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
+        pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId, PackReader},
         snapshot_commit::snapshot_commit_marker_path,
     },
 };
@@ -135,17 +135,25 @@ impl FsStore {
     pub(crate) fn put_committed_snapshot_objects_packed_impl(
         &self,
         blobs: Vec<(ContentHash, Vec<u8>)>,
+        trees: Vec<Tree>,
         tree: &Tree,
         state: &State,
         attachments: Vec<StateAttachment>,
         artifact: SnapshotCommitArtifact,
     ) -> Result<SnapshotCommitDescriptor> {
-        self.put_snapshot_objects_packed_impl(blobs, tree, state, attachments, Some(artifact))?
-            .ok_or_else(|| {
-                HeddleError::InvalidObject(
-                    "committed snapshot pack did not expose its artifact descriptor".to_string(),
-                )
-            })
+        self.put_snapshot_objects_packed_impl(
+            blobs,
+            trees,
+            tree,
+            state,
+            attachments,
+            Some(artifact),
+        )?
+        .ok_or_else(|| {
+            HeddleError::InvalidObject(
+                "committed snapshot pack did not expose its artifact descriptor".to_string(),
+            )
+        })
     }
 
     /// Install blobs, root tree, state, and immutable authored attachments
@@ -155,6 +163,7 @@ impl FsStore {
     pub(super) fn put_snapshot_objects_packed_impl(
         &self,
         blobs: Vec<(ContentHash, Vec<u8>)>,
+        trees: Vec<Tree>,
         tree: &Tree,
         state: &State,
         attachments: Vec<StateAttachment>,
@@ -185,12 +194,31 @@ impl FsStore {
         }
 
         let tree_hash = tree.hash();
-        if commit_artifact.is_some() || !ObjectStore::has_tree_locally(self, &tree_hash)? {
+        let mut staged_trees = Vec::with_capacity(trees.len() + 1);
+        let mut seen_trees = std::collections::HashSet::with_capacity(trees.len() + 1);
+        for authored_tree in trees {
+            let authored_hash = authored_tree.hash();
+            if seen_trees.insert(authored_hash)
+                && (commit_artifact.is_some()
+                    || !ObjectStore::has_tree_locally(self, &authored_hash)?)
+            {
+                builder.add(
+                    authored_hash,
+                    PackObjectType::Tree,
+                    rmp_serde::to_vec_named(&authored_tree)?,
+                );
+                staged_trees.push((authored_hash, authored_tree));
+            }
+        }
+        if (commit_artifact.is_some() || !ObjectStore::has_tree_locally(self, &tree_hash)?)
+            && seen_trees.insert(tree_hash)
+        {
             builder.add(
                 tree_hash,
                 PackObjectType::Tree,
                 rmp_serde::to_vec_named(tree)?,
             );
+            staged_trees.push((tree_hash, tree.clone()));
         }
 
         let state_id = state.id();
@@ -217,12 +245,16 @@ impl FsStore {
             })
             .collect::<Result<Vec<StateAttachmentId>>>()?;
         let artifact_id = commit_artifact.as_ref().map(SnapshotCommitArtifact::id);
+        let artifact_bytes = commit_artifact
+            .as_ref()
+            .map(rmp_serde::to_vec_named)
+            .transpose()?;
         if let Some(artifact) = &commit_artifact {
             artifact.validate()?;
             builder.add(
                 artifact.id(),
                 PackObjectType::SnapshotCommit,
-                rmp_serde::to_vec_named(artifact)?,
+                artifact_bytes.clone().expect("artifact bytes are present"),
             );
         }
 
@@ -234,6 +266,7 @@ impl FsStore {
                 pack_data,
                 index_data,
                 artifact_id.expect("commit artifact id is present"),
+                artifact_bytes.expect("commit artifact bytes are present"),
             )?
         } else {
             super::pack_install_journal::install_snapshot_pack_bytes(&packs, pack_data, index_data)?
@@ -255,21 +288,25 @@ impl FsStore {
             }
         }
         if let Ok(mut cache) = self.recent_trees.write() {
-            cache.insert(tree_hash, tree.clone());
+            for (hash, authored_tree) in staged_trees {
+                cache.insert(hash, authored_tree);
+            }
         }
         if let Ok(mut cache) = self.recent_states.write() {
             let mut cached = state.clone();
             cached.state_id = state_id;
             cache.insert(state_id, cached);
         }
-        let descriptor = if let Some(artifact_id) = artifact_id {
-            self.pack_manager()
-                .read()
-                .map_err(|_| {
-                    HeddleError::Config("Failed to acquire pack manager lock".to_string())
-                })?
-                .snapshot_commit_descriptor_for_state(&state_id)?
-                .filter(|descriptor| descriptor.artifact.id() == artifact_id)
+        let descriptor = if let Some(artifact) = commit_artifact {
+            let pack_path = packs.join(format!("{installed_pack_name}.pack"));
+            let index_path = packs.join(format!("{installed_pack_name}.idx"));
+            let object_ids = PackReader::open(&pack_path, &index_path)?.list_ids()?;
+            Some(SnapshotCommitDescriptor {
+                artifact,
+                pack_name: installed_pack_name,
+                pack_path,
+                object_ids,
+            })
         } else {
             None
         };

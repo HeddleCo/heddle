@@ -20,6 +20,8 @@ use crate::{
 
 pub const SNAPSHOT_COMMIT_ARTIFACT_SCHEMA: u32 = 1;
 
+type SnapshotCommitMarkersByPack = HashMap<String, Vec<(ContentHash, Vec<u8>)>>;
+
 pub(crate) fn snapshot_commit_marker_path(pack_path: &Path, artifact_id: &ContentHash) -> PathBuf {
     let stem = pack_path
         .file_stem()
@@ -136,6 +138,53 @@ impl SnapshotPackManager {
         Ok(self.snapshot_commit_index()?.descriptors.clone())
     }
 
+    /// Read recovery metadata directly from commit markers. New markers carry
+    /// the canonical artifact bytes, so repository open does not need to parse
+    /// a large pack index merely to decide whether oplog/ref views need repair.
+    /// Empty or damaged legacy markers fall back to the authoritative pack.
+    pub(crate) fn snapshot_commit_recovery_descriptors(
+        &self,
+    ) -> Result<Vec<SnapshotCommitDescriptor>> {
+        let mut descriptors = Vec::new();
+        let markers_by_pack = snapshot_commit_markers_by_pack(self.format.packs_dir())?;
+        for (pack_path, _) in self.format.pack_file_paths() {
+            let pack_name = pack_path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            let markers = markers_by_pack
+                .get(pack_name)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            if markers.is_empty() {
+                continue;
+            }
+            let decoded = markers
+                .iter()
+                .map(|(expected, bytes)| decode_marker_artifact(*expected, bytes))
+                .collect::<Option<Vec<_>>>();
+            let Some(artifacts) = decoded else {
+                descriptors.extend(Self::snapshot_commit_descriptors_for_pack(
+                    &self.format,
+                    pack_path,
+                )?);
+                continue;
+            };
+            let pack_name = pack_name.to_string();
+            descriptors.extend(
+                artifacts
+                    .into_iter()
+                    .map(|artifact| SnapshotCommitDescriptor {
+                        artifact,
+                        pack_name: pack_name.clone(),
+                        pack_path: pack_path.to_path_buf(),
+                        object_ids: Vec::new(),
+                    }),
+            );
+        }
+        Ok(descriptors)
+    }
+
     pub(crate) fn snapshot_commit_descriptor_for_state(
         &self,
         state: &StateId,
@@ -213,7 +262,39 @@ impl SnapshotPackManager {
     }
 }
 
+fn snapshot_commit_markers_by_pack(packs_dir: &Path) -> Result<SnapshotCommitMarkersByPack> {
+    let mut markers = SnapshotCommitMarkersByPack::new();
+    for entry in fs::read_dir(packs_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some((pack_name, artifact_hex)) = name
+            .to_str()
+            .and_then(|name| name.split_once(".snapshot-commit-"))
+        else {
+            continue;
+        };
+        let Ok(id) = ContentHash::from_hex(artifact_hex) else {
+            continue;
+        };
+        markers
+            .entry(pack_name.to_string())
+            .or_default()
+            .push((id, fs::read(entry.path())?));
+    }
+    for values in markers.values_mut() {
+        values.sort_unstable_by_key(|(id, _)| *id);
+    }
+    Ok(markers)
+}
+
 fn snapshot_commit_marker_ids(pack_path: &Path) -> Result<Vec<ContentHash>> {
+    Ok(snapshot_commit_markers(pack_path)?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect())
+}
+
+fn snapshot_commit_markers(pack_path: &Path) -> Result<Vec<(ContentHash, Vec<u8>)>> {
     let Some(parent) = pack_path.parent() else {
         return Ok(Vec::new());
     };
@@ -222,7 +303,7 @@ fn snapshot_commit_marker_ids(pack_path: &Path) -> Result<Vec<ContentHash>> {
         .and_then(|name| name.to_str())
         .unwrap_or_default();
     let prefix = format!("{stem}.snapshot-commit-");
-    let mut ids = Vec::new();
+    let mut markers = Vec::new();
     for entry in fs::read_dir(parent)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -230,11 +311,17 @@ fn snapshot_commit_marker_ids(pack_path: &Path) -> Result<Vec<ContentHash>> {
             continue;
         };
         if let Ok(id) = ContentHash::from_hex(suffix) {
-            ids.push(id);
+            markers.push((id, fs::read(entry.path())?));
         }
     }
-    ids.sort_unstable();
-    Ok(ids)
+    markers.sort_unstable_by_key(|(id, _)| *id);
+    Ok(markers)
+}
+
+fn decode_marker_artifact(expected: ContentHash, bytes: &[u8]) -> Option<SnapshotCommitArtifact> {
+    let artifact = rmp_serde::from_slice::<SnapshotCommitArtifact>(bytes).ok()?;
+    artifact.validate().ok()?;
+    (artifact.id() == expected).then_some(artifact)
 }
 
 impl Deref for SnapshotPackManager {
@@ -290,7 +377,11 @@ mod tests {
         let index_path = root.join(format!("snapshot-{ordinal:03}.idx"));
         fs::write(&pack_path, pack_data).unwrap();
         fs::write(&index_path, index_data).unwrap();
-        fs::write(snapshot_commit_marker_path(&pack_path, &artifact_id), []).unwrap();
+        fs::write(
+            snapshot_commit_marker_path(&pack_path, &artifact_id),
+            rmp_serde::to_vec_named(&artifact).unwrap(),
+        )
+        .unwrap();
         (pack_path, index_path, state)
     }
 
@@ -360,6 +451,17 @@ mod tests {
         }
         assert_eq!(manager.pack_count(), 128);
         assert!(manager.snapshot_commit_index.get().is_none());
+        assert_eq!(
+            manager
+                .snapshot_commit_recovery_descriptors()
+                .unwrap()
+                .len(),
+            128
+        );
+        assert!(
+            manager.snapshot_commit_index.get().is_none(),
+            "marker-backed recovery must not build the full pack index"
+        );
         assert_eq!(manager.snapshot_commit_descriptors().unwrap().len(), 128);
         assert!(manager.snapshot_commit_index.get().is_some());
 

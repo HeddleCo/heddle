@@ -58,6 +58,10 @@ use crate::{
 /// symbols.
 const SEMANTIC_FILE_BUDGET_BYTES: usize = 1 << 20;
 
+type PendingSemanticBlobs = Vec<(ContentHash, Vec<u8>)>;
+type DeferredSemanticRoot = (SemanticIndexRoot, ContentHash, PendingSemanticBlobs);
+type DeferredSemanticIndex = (Option<ContentHash>, PendingSemanticBlobs);
+
 /// What a built subtree resolved to: the storage hash of the node blob (or the
 /// raw source blob, for opaque entries) plus its reformat-stable digest.
 #[derive(Clone, Copy)]
@@ -74,6 +78,7 @@ struct BuiltEntry {
 pub struct SemanticIndexBuilder<'store, S: ObjectStore> {
     store: &'store S,
     source_blobs: Option<&'store HashMap<ContentHash, &'store [u8]>>,
+    source_trees: Option<&'store HashMap<ContentHash, &'store Tree>>,
     extractor_version: u32,
     /// Per-build memo keyed by `(source blob hash, language)` — a blob that
     /// appears at several paths is parsed once, but byte-identical blobs at
@@ -95,6 +100,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         Self {
             store,
             source_blobs: None,
+            source_trees: None,
             extractor_version,
             file_memo: HashMap::new(),
             grammars: BTreeMap::new(),
@@ -103,13 +109,15 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         }
     }
 
-    pub(crate) fn with_source_blobs(
+    pub(crate) fn with_source_objects(
         store: &'store S,
         extractor_version: u32,
         source_blobs: &'store HashMap<ContentHash, &'store [u8]>,
+        source_trees: &'store HashMap<ContentHash, &'store Tree>,
     ) -> Self {
         Self {
             source_blobs: Some(source_blobs),
+            source_trees: Some(source_trees),
             ..Self::new(store, extractor_version)
         }
     }
@@ -122,6 +130,19 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         tree: &Tree,
         parent: Option<&ParentIndex>,
     ) -> Result<(SemanticIndexRoot, ContentHash)> {
+        let (root, root_hash, pending) = self.build_root_deferred(tree, parent)?;
+        self.store.put_blobs_packed(pending)?;
+        Ok((root, root_hash))
+    }
+
+    /// Build the semantic closure without crossing a durability barrier.
+    /// Worktree snapshots fold these blobs into their authoritative commit
+    /// pack; other callers use [`Self::build_root`] for immediate persistence.
+    pub(crate) fn build_root_deferred(
+        &mut self,
+        tree: &Tree,
+        parent: Option<&ParentIndex>,
+    ) -> Result<DeferredSemanticRoot> {
         // Refuse node reuse across an extractor or grammar bump: reusing stale
         // nodes would mix v1+v2 fingerprints in one index. A non-current parent
         // is dropped entirely, forcing a clean full rebuild.
@@ -138,12 +159,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
             digest,
         );
         let root_hash = self.put_node(root.encode()?);
-        // Flush every node blob as a single pack — the same hot path the
-        // snapshot uses for source blobs, so capture stays fsync-cheap and
-        // leaves nothing loose behind.
-        self.store
-            .put_blobs_packed(std::mem::take(&mut self.pending))?;
-        Ok((root, root_hash))
+        Ok((root, root_hash, std::mem::take(&mut self.pending)))
     }
 
     /// Whether a parent index may be reused: its extractor version and every
@@ -225,10 +241,16 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
             });
         }
 
-        let source_tree = self
-            .store
-            .get_tree(&source_hash)?
-            .ok_or_else(|| crate::HeddleError::NotFound(format!("tree {source_hash}")))?;
+        let source_tree = match self
+            .source_trees
+            .and_then(|trees| trees.get(&source_hash).copied())
+        {
+            Some(tree) => tree.clone(),
+            None => self
+                .store
+                .get_tree(&source_hash)?
+                .ok_or_else(|| crate::HeddleError::NotFound(format!("tree {source_hash}")))?,
+        };
 
         // Descend with the matching parent subtree as the reuse basis, if any.
         let child_parent = self.child_parent_ctx(name, parent)?;
@@ -420,7 +442,7 @@ impl Repository {
                 return Ok(None);
             }
         };
-        self.compute_and_persist_semantic_index_for_tree(prior, &tree, None)
+        self.compute_and_persist_semantic_index_for_tree(prior, &tree, None, None)
     }
 
     pub(crate) fn compute_and_persist_semantic_index_for_tree(
@@ -428,7 +450,23 @@ impl Repository {
         prior: Option<&State>,
         tree: &Tree,
         source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
+        source_trees: Option<&HashMap<ContentHash, &Tree>>,
     ) -> Result<Option<ContentHash>> {
+        let (root, pending) =
+            self.compute_semantic_index_for_tree_deferred(prior, tree, source_blobs, source_trees)?;
+        self.store().put_blobs_packed(pending)?;
+        Ok(root)
+    }
+
+    /// Build and resolve the semantic closure without persisting it. Snapshot
+    /// authoring includes the returned blobs in its single authoritative pack.
+    pub(crate) fn compute_semantic_index_for_tree_deferred(
+        &self,
+        prior: Option<&State>,
+        tree: &Tree,
+        source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
+        source_trees: Option<&HashMap<ContentHash, &Tree>>,
+    ) -> Result<DeferredSemanticIndex> {
         let parent = match prior.map(|p| self.materialize_parent_index(p)) {
             Some(Ok(Some(parent))) => Some(parent),
             Some(Ok(None)) | None => None,
@@ -437,25 +475,32 @@ impl Repository {
                 None
             }
         };
-        let mut builder = match source_blobs {
-            Some(source_blobs) => SemanticIndexBuilder::with_source_blobs(
+        let mut builder = match (source_blobs, source_trees) {
+            (Some(source_blobs), Some(source_trees)) => SemanticIndexBuilder::with_source_objects(
                 self.store(),
                 EXTRACTOR_VERSION,
                 source_blobs,
+                source_trees,
             ),
-            None => SemanticIndexBuilder::new(self.store(), EXTRACTOR_VERSION),
+            _ => SemanticIndexBuilder::new(self.store(), EXTRACTOR_VERSION),
         };
-        match builder.build_root(tree, parent.as_ref()) {
-            Ok((root, _)) => match self.persist_resolved_semantic_edges(prior, root) {
-                Ok(root_hash) => Ok(Some(root_hash)),
-                Err(err) => {
-                    warn!(error = %err, "semantic graph: resolution failed; skipping index");
-                    Ok(None)
+        match builder.build_root_deferred(tree, parent.as_ref()) {
+            Ok((root, _, mut pending)) => {
+                let pending_by_hash = pending.iter().cloned().collect::<HashMap<_, _>>();
+                match self.persist_resolved_semantic_edges_deferred(prior, root, &pending_by_hash) {
+                    Ok((root_hash, resolved)) => {
+                        pending.extend(resolved);
+                        Ok((Some(root_hash), pending))
+                    }
+                    Err(err) => {
+                        warn!(error = %err, "semantic graph: resolution failed; skipping index");
+                        Ok((None, Vec::new()))
+                    }
                 }
-            },
+            }
             Err(err) => {
                 warn!(error = %err, "semantic index: build failed; skipping");
-                Ok(None)
+                Ok((None, Vec::new()))
             }
         }
     }

@@ -6,6 +6,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{OnceLock, RwLock},
+    time::SystemTime,
 };
 
 use tracing::{debug, instrument, trace};
@@ -127,7 +128,16 @@ impl PackManager {
             }
         }
 
-        packs.sort_by(|left, right| left.0.cmp(&right.0));
+        // Pack names are content hashes, so lexical order says nothing about
+        // recency. Keep the oldest pack first: point lookups walk this vector
+        // backwards and current snapshot trees overwhelmingly live in the
+        // newest incremental pack. The path is a deterministic tie-breaker
+        // for filesystems with coarse timestamp precision.
+        packs.sort_by(|left, right| {
+            pack_modified(&left.0)
+                .cmp(&pack_modified(&right.0))
+                .then_with(|| left.0.cmp(&right.0))
+        });
 
         debug!(count = packs.len(), "Discovered pack files");
         Ok(packs)
@@ -210,6 +220,33 @@ impl PackManager {
         Ok(index.locations.get(id).map(|location| location.pack_index))
     }
 
+    /// Locate one object through each pack's sorted index without building the
+    /// cross-pack map. Newer packs are checked first because incremental
+    /// snapshots usually place the current state/tree chain in the newest pack.
+    fn point_object_location(&self, id: &PackObjectId) -> Result<Option<usize>> {
+        {
+            let index = self
+                .object_locations
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(location) = index.locations.get(id) {
+                return Ok(Some(location.pack_index));
+            }
+            if index.complete {
+                return Ok(None);
+            }
+        }
+        for (pack_index, pack) in self.packs.iter().enumerate().rev() {
+            let Some(reader) = pack.reader() else {
+                continue;
+            };
+            if reader.contains_object(id)? {
+                return Ok(Some(pack_index));
+            }
+        }
+        Ok(None)
+    }
+
     /// Add a complete pack/index pair to the in-memory format index.
     pub fn add_pack(&mut self, pack_path: PathBuf, index_path: PathBuf) -> Result<()> {
         if self.packs.iter().any(|pack| pack.pack_path == pack_path) {
@@ -268,7 +305,7 @@ impl PackManager {
     }
 
     pub fn get_object(&self, id: &PackObjectId) -> Result<Option<(ObjectType, Vec<u8>)>> {
-        let Some(pack_index) = self.object_location(id)? else {
+        let Some(pack_index) = self.point_object_location(id)? else {
             trace!("Object not found in any pack");
             return Ok(None);
         };
@@ -332,7 +369,7 @@ impl PackManager {
     /// Look up the logical object type without decoding the object payload.
     pub fn get_hashed_object_type(&self, hash: &ContentHash) -> Result<Option<ObjectType>> {
         let id = PackObjectId::Hash(*hash);
-        let Some(pack_index) = self.object_location(&id)? else {
+        let Some(pack_index) = self.point_object_location(&id)? else {
             return Ok(None);
         };
         let Some(reader) = self.packs[pack_index].reader() else {
@@ -350,7 +387,7 @@ impl PackManager {
         hash: &ContentHash,
     ) -> Result<Option<(ObjectType, bytes::Bytes)>> {
         let id = PackObjectId::Hash(*hash);
-        let Some(pack_index) = self.object_location(&id)? else {
+        let Some(pack_index) = self.point_object_location(&id)? else {
             return Ok(None);
         };
         let Some(reader) = self.packs[pack_index].reader() else {
@@ -360,7 +397,7 @@ impl PackManager {
     }
 
     pub fn has_object(&self, hash: &ContentHash) -> bool {
-        self.object_location(&PackObjectId::Hash(*hash))
+        self.point_object_location(&PackObjectId::Hash(*hash))
             .is_ok_and(|location| location.is_some())
     }
 
@@ -369,7 +406,7 @@ impl PackManager {
     /// when the object isn't in any loaded pack.
     pub fn get_hashed_object_size(&self, hash: &ContentHash) -> Result<Option<u64>> {
         let id = PackObjectId::Hash(*hash);
-        let Some(pack_index) = self.object_location(&id)? else {
+        let Some(pack_index) = self.point_object_location(&id)? else {
             return Ok(None);
         };
         let Some(reader) = self.packs[pack_index].reader() else {
@@ -419,6 +456,12 @@ impl PackManager {
     pub fn packs_dir(&self) -> &Path {
         &self.packs_dir
     }
+}
+
+fn pack_modified(path: &Path) -> SystemTime {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
 fn remember_location(

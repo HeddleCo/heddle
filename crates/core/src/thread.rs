@@ -11,7 +11,7 @@
 //! report shape.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -19,10 +19,11 @@ use anyhow::Result;
 use chrono::Utc;
 use cli_shared::UserConfig;
 use objects::{
-    object::{ThreadName, Tree},
+    object::Tree,
     store::{
         ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStore,
     },
+    worktree::WorktreeStatus,
 };
 use repo::{
     AgentUsageSummary, GitOverlayBranchTip, GitRemoteTrackingStatus, Repository,
@@ -298,7 +299,25 @@ fn display_path_string(path: &Path) -> Option<String> {
 
 /// Collect, filter, and split thread list domain for an opened repository.
 pub fn list_threads(repo: &Repository, options: ThreadListOptions) -> Result<ThreadListReport> {
-    let mut summaries = collect_thread_summaries(repo)?;
+    list_threads_inner(repo, options, None)
+}
+
+/// List threads while reusing a worktree comparison already required by the
+/// caller's verification envelope.
+pub fn list_threads_with_worktree_status(
+    repo: &Repository,
+    options: ThreadListOptions,
+    worktree_status: &WorktreeStatus,
+) -> Result<ThreadListReport> {
+    list_threads_inner(repo, options, Some(worktree_status))
+}
+
+fn list_threads_inner(
+    repo: &Repository,
+    options: ThreadListOptions,
+    worktree_status: Option<&WorktreeStatus>,
+) -> Result<ThreadListReport> {
+    let mut summaries = collect_thread_summaries_inner(repo, worktree_status)?;
     if !options.include_auto {
         // Always keep the current thread visible even if it's auto:
         // hiding it from the user who is *standing in it* would be
@@ -326,7 +345,22 @@ pub fn list_threads(repo: &Repository, options: ThreadListOptions) -> Result<Thr
 
 /// Collect full thread summaries (no auto filter / git-ref split).
 pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadListEntry>> {
-    let thread_refs = repo.refs().list_threads()?;
+    collect_thread_summaries_inner(repo, None)
+}
+
+fn collect_thread_summaries_inner(
+    repo: &Repository,
+    worktree_status: Option<&WorktreeStatus>,
+) -> Result<Vec<ThreadListEntry>> {
+    let thread_refs = repo.refs().list_threads_with_states()?;
+    let thread_ref_names = thread_refs
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .collect::<HashSet<_>>();
+    let thread_ref_states = thread_refs
+        .iter()
+        .map(|(name, state)| (name.to_string(), *state))
+        .collect::<HashMap<_, _>>();
     let current = repo.current_lane()?;
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status().unwrap_or(None);
@@ -353,7 +387,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadListEntry
         threads_by_name.insert(thread.thread.clone(), thread);
     }
 
-    let mut names: BTreeSet<String> = thread_refs.iter().map(|t| t.to_string()).collect();
+    let mut names: BTreeSet<String> = thread_ref_names.iter().cloned().collect();
     names.extend(current.iter().cloned());
     names.extend(entries_by_thread.keys().cloned());
     names.extend(threads_by_name.keys().cloned());
@@ -368,6 +402,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadListEntry
             repo,
             current.as_ref() == Some(&name),
             name.clone(),
+            thread_ref_states.get(&name).copied(),
             entries,
             threads_by_name.remove(&name),
             branch_tips.get(&name).cloned(),
@@ -379,49 +414,55 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadListEntry
             summary.git_branch_tip = Some(branch_tip.git_commit.clone());
             summary.history_imported = branch_tip.history_imported;
         }
-        let has_heddle_tip = thread_refs.iter().any(|thread| thread == &summary.name);
-        let thread = Thread {
-            id: summary.name.clone(),
-            thread: summary.name.clone(),
-            target_thread: summary.target_thread.clone(),
-            parent_thread: summary.parent_thread.clone(),
-            mode: summary
-                .thread_mode
-                .clone()
-                .unwrap_or(ThreadMode::Materialized),
-            state: summary.thread_state.clone().unwrap_or(ThreadState::Active),
-            base_state: summary.base_state.clone().unwrap_or_default(),
-            base_root: summary.base_root.clone().unwrap_or_default(),
-            current_state: summary.current_state.clone(),
-            merged_state: None,
-            task: summary.task.clone(),
-            execution_path: summary
-                .execution_path
-                .as_ref()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| repo.root().to_path_buf()),
-            materialized_path: summary.path.as_ref().map(PathBuf::from),
-            changed_paths: summary.changed_paths.clone(),
-            impact_categories: summary.impact_categories.clone(),
-            heavy_impact_paths: summary.heavy_impact_paths.clone(),
-            promotion_suggested: summary.promotion_suggested,
-            freshness: summary
-                .freshness
-                .clone()
-                .unwrap_or(ThreadFreshness::Unknown),
-            verification_summary: summary.verification_summary.clone(),
-            confidence_summary: summary.confidence_summary.clone(),
-            integration_policy_result: summary.integration_policy_result.clone(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            ephemeral: None,
-            auto: summary.auto,
-            shared_target_dir: summary.shared_target_dir.as_ref().map(PathBuf::from),
-        };
-        let advice = describe_thread_advice(&thread, false, 0, false);
-        summary.thread_health = advice.thread_health;
-        summary.blockers = advice.blockers;
-        summary.recommended_action = advice.recommended_action;
+        let has_heddle_tip = thread_ref_names.contains(&summary.name);
+        let needs_advice = summary.thread_state != Some(ThreadState::Active)
+            || summary.freshness == Some(ThreadFreshness::Stale)
+            || !summary.changed_paths.is_empty()
+            || summary.promotion_suggested;
+        if needs_advice {
+            let thread = Thread {
+                id: summary.name.clone(),
+                thread: summary.name.clone(),
+                target_thread: summary.target_thread.clone(),
+                parent_thread: summary.parent_thread.clone(),
+                mode: summary
+                    .thread_mode
+                    .clone()
+                    .unwrap_or(ThreadMode::Materialized),
+                state: summary.thread_state.clone().unwrap_or(ThreadState::Active),
+                base_state: summary.base_state.clone().unwrap_or_default(),
+                base_root: summary.base_root.clone().unwrap_or_default(),
+                current_state: summary.current_state.clone(),
+                merged_state: None,
+                task: summary.task.clone(),
+                execution_path: summary
+                    .execution_path
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| repo.root().to_path_buf()),
+                materialized_path: summary.path.as_ref().map(PathBuf::from),
+                changed_paths: summary.changed_paths.clone(),
+                impact_categories: summary.impact_categories.clone(),
+                heavy_impact_paths: summary.heavy_impact_paths.clone(),
+                promotion_suggested: summary.promotion_suggested,
+                freshness: summary
+                    .freshness
+                    .clone()
+                    .unwrap_or(ThreadFreshness::Unknown),
+                verification_summary: summary.verification_summary.clone(),
+                confidence_summary: summary.confidence_summary.clone(),
+                integration_policy_result: summary.integration_policy_result.clone(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                ephemeral: None,
+                auto: summary.auto,
+                shared_target_dir: summary.shared_target_dir.as_ref().map(PathBuf::from),
+            };
+            let advice = describe_thread_advice(&thread, false, 0, false);
+            summary.thread_health = advice.thread_health;
+            summary.blockers = advice.blockers;
+            summary.recommended_action = advice.recommended_action;
+        }
         apply_terminal_thread_advice(&mut summary);
         apply_materialized_merge_advice(repo, &mut summary);
         if let Some(branch_tip) = branch_tips.get(&summary.name)
@@ -446,7 +487,8 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadListEntry
                 };
             }
         }
-        if summary.history_imported
+        if repo.capability() == repo::RepositoryCapability::GitOverlay
+            && summary.history_imported
             && summary.current_state.is_some()
             && remote_tracking_local_ref(repo, &summary.name).is_some()
         {
@@ -457,7 +499,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadListEntry
                 canonical_git_repair_ref_preview_command(None, &summary.name);
         }
         if summary.is_current {
-            enrich_current_summary_with_dirty_paths(repo, &mut summary)?;
+            enrich_current_summary_with_dirty_paths(repo, &mut summary, worktree_status)?;
             summary.operation = operation.clone();
             summary.remote_tracking = remote_tracking.clone();
             summary.recommended_action = effective_next_action(
@@ -490,32 +532,31 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadListEntry
         }
     }
     for summary in &mut summaries {
-        if let Some(children) = children_by_parent.remove(&summary.name) {
-            let mut children = children;
+        if let Some(children) = children_by_parent.get(&summary.name) {
+            let mut children = children.clone();
             children.sort();
             summary.child_threads = children;
         }
     }
 
-    let summaries_by_name = summaries
+    let parents_by_name = summaries
         .iter()
-        .map(|summary| (summary.name.clone(), summary.clone()))
+        .map(|summary| (summary.name.clone(), summary.parent_thread.clone()))
         .collect::<HashMap<_, _>>();
-    let mut siblings_by_thread: HashMap<String, Vec<String>> = HashMap::new();
-    for summary in &summaries {
-        if let Some(parent) = &summary.parent_thread {
-            let siblings = summaries_by_name
-                .values()
-                .filter(|candidate| candidate.parent_thread.as_deref() == Some(parent.as_str()))
-                .filter(|candidate| candidate.name != summary.name)
-                .map(|candidate| candidate.name.clone())
-                .collect::<Vec<_>>();
-            siblings_by_thread.insert(summary.name.clone(), siblings);
-        }
-    }
     for summary in &mut summaries {
-        summary.sibling_threads = siblings_by_thread.remove(&summary.name).unwrap_or_default();
-        summary.stack_depth = stack_depth(&summaries_by_name, &summary.name);
+        summary.sibling_threads = summary
+            .parent_thread
+            .as_ref()
+            .and_then(|parent| children_by_parent.get(parent))
+            .map(|children| {
+                children
+                    .iter()
+                    .filter(|child| *child != &summary.name)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        summary.stack_depth = stack_depth(&parents_by_name, &summary.name);
         summary.stale_from_parent =
             summary.parent_thread.is_some() && summary.freshness == Some(ThreadFreshness::Stale);
         if summary.last_progress_at.is_some() {
@@ -594,13 +635,19 @@ fn available_git_ref_from_summary(summary: &ThreadListEntry) -> AvailableGitRef 
 fn enrich_current_summary_with_dirty_paths(
     repo: &Repository,
     summary: &mut ThreadListEntry,
+    worktree_status: Option<&WorktreeStatus>,
 ) -> Result<()> {
-    let baseline = match repo.current_state()? {
-        Some(state) => repo.require_tree(&state.tree)?,
-        None => Tree::new(),
+    let status = match worktree_status {
+        Some(status) => status.clone(),
+        None => {
+            let baseline = match repo.current_state_for_worktree_status()? {
+                Some(state) => repo.require_tree_for_worktree_status(&state.tree)?,
+                None => Tree::new(),
+            };
+            let options = UserConfig::default().worktree_status_options(Some(repo.config()));
+            repo.compare_worktree_cached_with_options(&baseline, &options)?
+        }
     };
-    let options = UserConfig::default().worktree_status_options(Some(repo.config()));
-    let status = repo.compare_worktree_cached_with_options(&baseline, &options)?;
     let mut paths = summary
         .changed_paths
         .iter()
@@ -618,16 +665,12 @@ fn enrich_current_summary_with_dirty_paths(
     Ok(())
 }
 
-fn stack_depth(summaries_by_name: &HashMap<String, ThreadListEntry>, thread: &str) -> usize {
+fn stack_depth(parents_by_name: &HashMap<String, Option<String>>, thread: &str) -> usize {
     let mut depth = 0usize;
-    let mut cursor = summaries_by_name
-        .get(thread)
-        .and_then(|summary| summary.parent_thread.clone());
+    let mut cursor = parents_by_name.get(thread).cloned().flatten();
     while let Some(parent) = cursor {
         depth += 1;
-        cursor = summaries_by_name
-            .get(&parent)
-            .and_then(|summary| summary.parent_thread.clone());
+        cursor = parents_by_name.get(&parent).cloned().flatten();
     }
     depth
 }
@@ -661,11 +704,11 @@ fn build_thread_view(
     repo: &Repository,
     is_current: bool,
     name: String,
+    ref_state: Option<objects::object::StateId>,
     entries: Vec<ActorPresence>,
     thread: Option<Thread>,
     branch_tip: Option<GitOverlayBranchTip>,
 ) -> Result<(ThreadView, CoordinationStatus)> {
-    let ref_state = repo.refs().get_thread(&ThreadName::new(&name))?;
     let current_state = ref_state
         .or_else(|| {
             (is_current && repo.capability() == repo::RepositoryCapability::GitOverlay)

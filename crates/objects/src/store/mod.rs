@@ -308,6 +308,14 @@ impl ObjectStore for AnyStore {
 }
 
 impl AnyStore {
+    /// Lightweight repository-open seam for authoritative snapshot recovery.
+    #[doc(hidden)]
+    pub fn snapshot_commit_recovery_descriptors(&self) -> Result<Vec<SnapshotCommitDescriptor>> {
+        match self {
+            Self::Fs(store) => store.snapshot_commit_recovery_descriptors_impl(),
+        }
+    }
+
     /// Attach a read-only external source to the local filesystem store.
     pub fn set_external_source(&mut self, source: Arc<dyn ExternalObjectSource>) {
         match self {
@@ -344,6 +352,7 @@ impl AnyStore {
     pub fn put_committed_snapshot_objects_packed(
         &self,
         blobs: Vec<(ContentHash, Vec<u8>)>,
+        trees: Vec<Tree>,
         tree: &Tree,
         state: &State,
         attachments: Vec<StateAttachment>,
@@ -352,6 +361,7 @@ impl AnyStore {
         match self {
             Self::Fs(store) => store.put_committed_snapshot_objects_packed_impl(
                 blobs,
+                trees,
                 tree,
                 state,
                 attachments,

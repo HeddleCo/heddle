@@ -887,6 +887,7 @@ mod chokepoint {
         });
         let refs = RefManager::new(&dir).with_reconciler(reconciler.clone());
         refs.init().unwrap();
+        refs.init_reconcile_watermark().unwrap();
 
         let thread = ThreadName::new("main");
         let attached_state = crate::refs::fresh_state_id();
@@ -898,6 +899,22 @@ mod chokepoint {
         let summary = refs.inspect_ref_summary_index().unwrap();
         assert!(summary.present && summary.valid);
         assert_eq!(summary.threads, 1);
+
+        reconciler.generation.store(2, Ordering::Release);
+        let reopened = RefManager::new(&dir).with_reconciler(reconciler.clone());
+        reopened.init_reconcile_watermark().unwrap();
+        assert_eq!(
+            reopened.read_head().unwrap(),
+            super::super::Head::Attached {
+                thread: thread.clone()
+            }
+        );
+        assert_eq!(reopened.get_thread(&thread).unwrap(), Some(attached_state));
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            0,
+            "a fresh reader should validate snapshot witnesses without replay"
+        );
 
         let detached_state = crate::refs::fresh_state_id();
         reconciler.generation.store(3, Ordering::Release);

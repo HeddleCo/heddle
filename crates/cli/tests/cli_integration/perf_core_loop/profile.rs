@@ -18,10 +18,20 @@ pub(super) fn sample_from_trace(wall_ms: f64, trace: &Value) -> Sample {
         warm_repository_ms: status_repo + capture_repo,
         repository_open_ms: phase_metric(trace, "status repo open", "repo_open_ms"),
         current_state_ms: phase_metric(trace, "status current state", "current_state_ms"),
-        verification_ms: phase_metric(trace, "status verification", "verification_ms"),
+        verification_ms: phase_metric(trace, "status verification", "verification_ms")
+            + phase_metric(trace, "thread list verification", "verification_ms"),
         worktree_status_ms: phase_metric(trace, "status worktree status", "worktree_status_ms")
-            + phase_metric(trace, "capture phases", "worktree_status_ms"),
-        thread_summary_ms: phase_metric(trace, "status thread summary", "thread_summary_ms"),
+            + phase_metric(trace, "capture phases", "worktree_status_ms")
+            + phase_metric(trace, "thread list worktree status", "worktree_status_ms"),
+        worktree_index_load_ms: phase_metric(trace, "status worktree detail", "index_load_ms"),
+        worktree_compare_ms: phase_metric(trace, "status worktree detail", "compare_ms"),
+        worktree_index_save_ms: phase_metric(trace, "status worktree detail", "index_save_ms"),
+        thread_summary_ms: phase_metric(trace, "status thread summary", "thread_summary_ms")
+            + phase_metric(
+                trace,
+                "thread list collect summaries",
+                "collect_summaries_ms",
+            ),
         snapshot_ms: phase_metric(trace, "capture phases", "snapshot_ms"),
         snapshot_tree_walk_ms: phase_metric(trace, "capture phases", "snapshot_tree_walk_ms"),
         snapshot_blob_prep_ms: phase_metric(trace, "capture phases", "snapshot_blob_prep_ms"),
@@ -32,14 +42,71 @@ pub(super) fn sample_from_trace(wall_ms: f64, trace: &Value) -> Sample {
             "capture phases",
             "snapshot_state_ref_oplog_ms",
         ),
+        snapshot_atomic_execute_ms: phase_metric(
+            trace,
+            "capture phases",
+            "snapshot_atomic_execute_ms",
+        ),
+        snapshot_ref_publish_ms: phase_metric(trace, "capture phases", "snapshot_ref_publish_ms"),
+        snapshot_state_create_ms: phase_metric(trace, "capture phases", "snapshot_state_create_ms"),
+        snapshot_captured_path_count_ms: phase_metric(
+            trace,
+            "capture phases",
+            "snapshot_captured_path_count_ms",
+        ),
+        snapshot_post_verification_ms: phase_metric(
+            trace,
+            "capture phases",
+            "snapshot_post_verification_ms",
+        ),
         snapshot_thread_metadata_ms: phase_metric(
             trace,
             "capture phases",
             "snapshot_thread_metadata_ms",
         ),
+        snapshot_preflight_ms: phase_metric(trace, "capture phases", "snapshot_preflight_ms"),
+        snapshot_attribution_ms: phase_metric(trace, "capture phases", "snapshot_attribution_ms"),
+        snapshot_execute_save_ms: phase_metric(trace, "capture phases", "snapshot_execute_save_ms"),
+        snapshot_previous_state_ms: phase_metric(
+            trace,
+            "capture phases",
+            "snapshot_previous_state_ms",
+        ),
+        snapshot_previous_state_head_ms: phase_metric(
+            trace,
+            "capture phases",
+            "snapshot_previous_state_head_ms",
+        ),
+        snapshot_previous_state_cache_read_ms: phase_metric(
+            trace,
+            "capture phases",
+            "snapshot_previous_state_cache_read_ms",
+        ),
+        snapshot_previous_state_cache_decode_ms: phase_metric(
+            trace,
+            "capture phases",
+            "snapshot_previous_state_cache_decode_ms",
+        ),
+        snapshot_previous_state_cache_validate_ms: phase_metric(
+            trace,
+            "capture phases",
+            "snapshot_previous_state_cache_validate_ms",
+        ),
+        snapshot_previous_state_store_read_ms: phase_metric(
+            trace,
+            "capture phases",
+            "snapshot_previous_state_store_read_ms",
+        ),
+        snapshot_signature_lookup_ms: phase_metric(
+            trace,
+            "capture phases",
+            "snapshot_signature_lookup_ms",
+        ),
+        snapshot_output_build_ms: phase_metric(trace, "capture phases", "snapshot_output_build_ms"),
         monitor_ms: phase_metric(trace, "structural counters", "monitor_startup_ms"),
         rendering_ms: phase_metric(trace, "status render", "render_ms")
-            + phase_metric(trace, "capture phases", "render_ms"),
+            + phase_metric(trace, "capture phases", "render_ms")
+            + phase_metric(trace, "thread list command body", "render_ms"),
         network_ms: 0.0,
         counters,
     }

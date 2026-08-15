@@ -68,8 +68,6 @@ fn scan_directory(
         return Ok(true);
     }
 
-    ctx.index.remove_untracked_directory(dir_key);
-
     let metadata = match fs::symlink_metadata(dir) {
         Ok(metadata) if metadata.is_dir() => metadata,
         Ok(_) | Err(_) => {
@@ -77,6 +75,76 @@ fn scan_directory(
             return Ok(false);
         }
     };
+    if ctx
+        .monitor
+        .can_filter_directory_children(rel_path, ctx.index)
+        && let Some(changed_children) = ctx.monitor.changed_child_names(rel_path)
+    {
+        ctx.stats.directories_scanned += 1;
+        let tree = tree.expect("tracked-tree scan requires a tree");
+        let mut subtree_has_untracked = false;
+        for name in changed_children {
+            if ctx
+                .ignore_matcher
+                .should_prune_directory_child(rel_path, &name)
+            {
+                continue;
+            }
+            let child_rel_path = join_relative_path(rel_path, &name);
+            let child_path = dir.join(&name);
+            if ctx.ignore_matcher.should_prune_absolute_path(&child_path) {
+                continue;
+            }
+            let child_key = cache_key(&child_rel_path);
+            let tree_entry = tree.get(&name);
+            let child_metadata = match fs::symlink_metadata(&child_path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if child_metadata.is_dir() {
+                ctx.index.remove(&child_key);
+                let child_tree = match tree_entry {
+                    Some(tree_entry) if tree_entry.entry_type() == EntryType::Tree => {
+                        let tree_hash = tree_entry.require_content_hash();
+                        Some(
+                            if let Some(tree) = ctx.index.clean_tree(&child_key, &tree_hash) {
+                                tree.clone()
+                            } else {
+                                ctx.repo.store().get_tree(&tree_hash)?.ok_or_else(|| {
+                                    objects::error::HeddleError::NotFound(format!(
+                                        "tree {tree_hash}"
+                                    ))
+                                })?
+                            },
+                        )
+                    }
+                    _ => None,
+                };
+                if child_tree.is_some() {
+                    ctx.index.remove_untracked_directory_descendants(&child_key);
+                } else {
+                    ctx.index.remove_path_and_descendants(&child_key);
+                    subtree_has_untracked = true;
+                }
+                subtree_has_untracked |= scan_directory(
+                    ctx,
+                    &child_rel_path,
+                    &child_path,
+                    &child_key,
+                    child_tree.as_ref(),
+                )?;
+            } else if (child_metadata.is_file() || child_metadata.file_type().is_symlink())
+                && tree_entry.is_none()
+            {
+                ctx.index.remove_path_and_descendants(&child_key);
+                ctx.untracked.files.push(child_rel_path);
+                subtree_has_untracked = true;
+            }
+        }
+        return Ok(subtree_has_untracked);
+    }
+    ctx.index.remove_untracked_directory(dir_key);
     let entries = list_directory(dir, false)?;
     ctx.stats.directories_scanned += 1;
 
