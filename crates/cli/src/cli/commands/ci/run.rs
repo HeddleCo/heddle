@@ -7,7 +7,8 @@ use anyhow::{Context, Result, ensure};
 use chrono::{SecondsFormat, Utc};
 use ci_config::CiConfig;
 use ci_engine::{
-    BASE_ALLOWLIST, ExecutionContext, NoopProvider, RunControls, RunOptions, run_checks_with,
+    BASE_ALLOWLIST, ExecutionContext, FsResultCache, NoopProvider, RunControls, RunOptions,
+    run_checks_with,
 };
 use crypto::{
     Basis, BasisKind, Ed25519Signer, SignedVerdict, Signer, SignerKind, StateRef,
@@ -46,11 +47,15 @@ pub(crate) fn run_local(cli: &Cli, args: &CiRunArgs) -> Result<()> {
         now_rfc3339: &now,
     };
     let cache_root = repo.heddle_dir().join("cache/ci");
+    let result_cache_root = repo.heddle_dir().join("cache/ci-results");
+    let result_cache = FsResultCache::new(&result_cache_root);
     let controls = RunControls {
         cache_root: Some(&cache_root),
+        result_cache: Some(&result_cache),
         ..RunControls::default()
     };
-    let results = run_checks_with(&config, &context, &options, &controls);
+    let results = run_checks_with(&config, &context, &options, &controls)
+        .context("run checks (including result-cache spot-check)")?;
     target.ensure_unchanged(&repo)?;
     target.cleanup(&repo)?;
 

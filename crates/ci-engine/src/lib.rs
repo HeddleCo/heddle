@@ -11,6 +11,7 @@ mod model;
 mod proc_group;
 mod process;
 mod result;
+mod result_cache;
 mod service;
 
 pub use ansi::strip_ansi;
@@ -20,6 +21,10 @@ pub use env::{BASE_ALLOWLIST, GIT_IDENTITY_EMAIL, GIT_IDENTITY_NAME, HermeticEnv
 pub use exec::{run_checks, run_checks_with};
 pub use model::{AttemptRecord, CheckResult, ExecutionContext, RunControls, RunOptions};
 pub use proc_group::ProcGroupRegistry;
+pub use result_cache::{
+    CacheKey, FsResultCache, MemoryResultCache, RESULT_CACHE_SCHEMA_VERSION, ResultCache,
+    ResultCacheEntry, ResultCacheError, SpotCheck, SpotCheckDivergence, evidence_digest,
+};
 pub use service::{
     CommandOutcome, CommandRunner, DockerProvider, FakeProvider, NoopProvider, RealCommandRunner,
     RunningServices, ServiceError, ServiceProvider,

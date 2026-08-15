@@ -45,6 +45,7 @@ fn run(raw: &str, workdir: &std::path::Path) -> Vec<ci_engine::CheckResult> {
             now_rfc3339: &fixed_clock,
         },
     )
+    .expect("run")
 }
 
 #[test]
@@ -108,7 +109,8 @@ flake_signatures = ["FLAKE"]
             now_rfc3339: &fixed_clock,
         },
         &controls,
-    );
+    )
+    .expect("run");
     assert_eq!(results[0].conclusion(), Conclusion::Success);
     assert_eq!(results[0].attempts, 2);
     assert!(results[0].recovered_after_flake());
@@ -168,7 +170,8 @@ cache_paths = ["cargo"]
             now_rfc3339: &fixed_clock,
         },
         &controls,
-    );
+    )
+    .expect("run");
     assert_eq!(results[0].conclusion(), Conclusion::Success);
     assert!(
         results[0]

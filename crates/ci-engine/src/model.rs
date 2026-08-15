@@ -5,8 +5,12 @@ use std::path::Path;
 
 use ci_config::Trigger;
 use crypto::{Basis, CiVerdictBody, Conclusion, StateRef};
+use serde::{Deserialize, Serialize};
 
-use crate::{HermeticEnv, ProcGroupRegistry, ServiceProvider};
+use crate::{
+    HermeticEnv, ProcGroupRegistry, ServiceProvider,
+    result_cache::{ResultCache, SpotCheck},
+};
 
 /// Facts about the exact state/tree being evaluated.
 #[derive(Debug, Clone)]
@@ -52,10 +56,14 @@ pub struct RunControls<'a> {
     pub hermetic_env: Option<&'a HermeticEnv>,
     /// Optional group registry for runner drain.
     pub proc_groups: Option<ProcGroupRegistry>,
+    /// Optional content-addressed result cache.
+    pub result_cache: Option<&'a dyn ResultCache>,
+    /// Spot-check policy applied to cache hits. Ignored when no cache is set.
+    pub spot_check: SpotCheck,
 }
 
 /// Operational record for one flake-retry attempt.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptRecord {
     /// One-based attempt index.
     pub attempt: u32,
