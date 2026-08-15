@@ -13,6 +13,12 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+### Added
+
+- **CI rejects unreachable Rust modules and blanket dead-code suppression.**
+  Every `crates/*/src/**/*.rs` file must be reachable from a Cargo crate root,
+  and workspace clippy lanes deny dead code explicitly.
+
 ### Fixed
 
 - **Land resolves the target checkout from isolated threads.** A clean

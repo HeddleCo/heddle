@@ -67,13 +67,17 @@ jobs:
           shared-key: rust-tests-${{ runner.os }}
           cache-on-failure: true
 
+      - name: Rust source reachability and dead-code blankets
+        if: github.event_name == 'pull_request'
+        run: cargo run --locked -p heddle-devtools -- check-rust-source-reachability
+
       - name: Build (workspace, all targets)
         if: github.event_name == 'pull_request'
         run: cargo build --locked --workspace --all-targets
 
       - name: Clippy (workspace, all targets)
         if: github.event_name == 'pull_request'
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings -D dead-code
 
       - name: Unit tests (workspace, lib + bins)
         if: github.event_name == 'pull_request'

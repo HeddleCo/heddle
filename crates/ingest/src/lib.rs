@@ -30,8 +30,6 @@
 //!
 //! The flagship entry point is [`Importer::run`].
 
-#![allow(dead_code)] // module is under active construction
-
 pub mod git_walk;
 pub mod import_options;
 pub mod importer;

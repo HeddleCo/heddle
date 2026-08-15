@@ -280,6 +280,10 @@ jobs:
           shared-key: rust-tests-${{ runner.os }}
           cache-on-failure: true
 
+      - name: Rust source reachability and dead-code blankets
+        if: needs.changes.outputs.skip_cargo != 'true'
+        run: cargo run --locked -p heddle-devtools -- check-rust-source-reachability
+
       # Build, lint, and test changed crates plus their reverse dependents on
       # one shared target directory.
       - name: Build, clippy, and test affected packages
@@ -303,7 +307,7 @@ jobs:
 
           echo "::group::cargo clippy"
           cargo clippy --locked "${package_args[@]}" \
-            --lib --bins --tests --examples -- -D warnings
+            --lib --bins --tests --examples -- -D warnings -D dead-code
           echo "::endgroup::"
 
           echo "::group::cargo test"
