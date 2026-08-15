@@ -15,6 +15,12 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Added
 
+- **CI-runner trust-set resolver.** Valid, unrevoked, in-window
+  `KeyRole::CiRunner` bindings from an authorized registry are collected into
+  the trust set a verdict verifier checks `heddle-ci-verdict-v1` signatures
+  against. Revoked, out-of-window, and other-role bindings fail closed to
+  exclusion; an empty registry yields an empty set.
+
 - **CI rejects unreachable Rust modules and blanket dead-code suppression.**
   Every `crates/*/src/**/*.rs` file must be reachable from a Cargo crate root,
   and workspace clippy lanes deny dead code explicitly.
