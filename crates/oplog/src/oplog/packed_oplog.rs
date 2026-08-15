@@ -26,7 +26,7 @@ use heddle_schema::op_record::{
 };
 use objects::{
     error::{HeddleError, Result},
-    fs_atomic::{sync_directory, write_file_atomic},
+    fs_atomic::{sync_directory, write_file_atomic, write_file_atomic_reconstructible},
 };
 
 use super::oplog_types::{OpBatch, OpEntry, OpRecord};
@@ -310,13 +310,25 @@ impl PackedOpLog {
     }
 
     pub(crate) fn save(&self) -> Result<()> {
+        self.save_inner(false)
+    }
+
+    pub(crate) fn save_reconstructible(&self) -> Result<()> {
+        self.save_inner(true)
+    }
+
+    fn save_inner(&self, reconstructible: bool) -> Result<()> {
         let data = OplogData {
             entries: self.entries.clone(),
             head_id: self.head_id,
         };
         let mut bytes = Vec::new();
         encode_current_container(&data, &mut bytes)?;
-        write_file_atomic(&self.path, &bytes)?;
+        if reconstructible {
+            write_file_atomic_reconstructible(&self.path, &bytes)?;
+        } else {
+            write_file_atomic(&self.path, &bytes)?;
+        }
         Ok(())
     }
 

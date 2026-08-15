@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use heddle_core::{
-    GitScope, SavePlan, SaveVerb, execute_save, large_capture_requires_force,
+    GitScope, MachineContractInput, SavePlan, SaveVerb, execute_save, large_capture_requires_force,
     principal_lacks_accountable_identity,
 };
 use heddle_git_projection::GitProjection;
@@ -36,8 +36,8 @@ use super::{
     thread_cmd::current_thread,
     verification_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState, action_template,
-        build_repository_verification_state, git_overlay_mutation_preflight_advice,
-        git_overlay_mutation_preflight_advice_with_worktree_status,
+        git_overlay_mutation_preflight_advice,
+        git_overlay_mutation_preflight_advice_with_worktree_status, machine_contract_coverage,
         plain_git_mutation_preflight_advice, unimported_git_history_advice,
     },
 };
@@ -148,7 +148,26 @@ pub struct SnapshotCommandProfile {
     pub blob_write_ms: u128,
     pub tree_write_ms: u128,
     pub state_ref_oplog_ms: u128,
+    pub atomic_execute_ms: u128,
+    pub ref_publish_ms: u128,
+    pub state_create_ms: u128,
+    pub captured_path_count_ms: u128,
+    pub post_verification_ms: u128,
     pub thread_metadata_ms: u128,
+    pub output_build_ms: u128,
+    pub output_task_assignment_ms: u128,
+    pub output_principal_ms: u128,
+    pub preflight_ms: u128,
+    pub attribution_ms: u128,
+    pub execute_save_ms: u128,
+    pub previous_state_ms: u128,
+    pub previous_state_head_ms: u128,
+    pub previous_state_cache_read_ms: u128,
+    pub previous_state_cache_decode_ms: u128,
+    pub previous_state_cache_validate_ms: u128,
+    pub previous_state_store_read_ms: u128,
+    pub previous_state_cache_hit: bool,
+    pub signature_lookup_ms: u128,
 }
 
 #[derive(Clone, Debug)]
@@ -205,7 +224,10 @@ pub async fn cmd_snapshot(
                     .iter()
                     .all(|path| merge_state.resolved.contains(path))
             });
-    if !complete_thread_resolution && !capture_has_worktree_changes(&repo)? {
+    if !complete_thread_resolution
+        && repo.capability() == RepositoryCapability::GitOverlay
+        && !capture_has_worktree_changes(&repo)?
+    {
         return Err(anyhow!(nothing_to_capture_advice()));
     }
     // Compute the git-overlay worktree status ONCE and thread it through both
@@ -235,6 +257,13 @@ pub async fn cmd_snapshot(
     let (mut output, snapshot_profile) = match snapshot_result {
         Ok((output, profile)) => (output, profile),
         Err(err) => {
+            if err.chain().any(|cause| {
+                cause
+                    .downcast_ref::<objects::HeddleError>()
+                    .is_some_and(|error| matches!(error, objects::HeddleError::NoChanges))
+            }) {
+                return Err(anyhow!(nothing_to_capture_advice()));
+            }
             // ENOSPC is the only mid-capture failure where the user's
             // working tree is guaranteed safe (we never touched it) and
             // the recovery is mechanical (free disk, re-run). Surface
@@ -387,8 +416,66 @@ pub async fn cmd_snapshot(
                     snapshot_profile.state_ref_oplog_ms,
                 ),
                 ProfileField::millis(
+                    "snapshot_atomic_execute_ms",
+                    snapshot_profile.atomic_execute_ms,
+                ),
+                ProfileField::millis("snapshot_ref_publish_ms", snapshot_profile.ref_publish_ms),
+                ProfileField::millis("snapshot_state_create_ms", snapshot_profile.state_create_ms),
+                ProfileField::millis(
+                    "snapshot_captured_path_count_ms",
+                    snapshot_profile.captured_path_count_ms,
+                ),
+                ProfileField::millis(
+                    "snapshot_post_verification_ms",
+                    snapshot_profile.post_verification_ms,
+                ),
+                ProfileField::millis(
                     "snapshot_thread_metadata_ms",
                     snapshot_profile.thread_metadata_ms,
+                ),
+                ProfileField::millis("snapshot_output_build_ms", snapshot_profile.output_build_ms),
+                ProfileField::millis(
+                    "snapshot_output_task_assignment_ms",
+                    snapshot_profile.output_task_assignment_ms,
+                ),
+                ProfileField::millis(
+                    "snapshot_output_principal_ms",
+                    snapshot_profile.output_principal_ms,
+                ),
+                ProfileField::millis("snapshot_preflight_ms", snapshot_profile.preflight_ms),
+                ProfileField::millis("snapshot_attribution_ms", snapshot_profile.attribution_ms),
+                ProfileField::millis("snapshot_execute_save_ms", snapshot_profile.execute_save_ms),
+                ProfileField::millis(
+                    "snapshot_previous_state_ms",
+                    snapshot_profile.previous_state_ms,
+                ),
+                ProfileField::millis(
+                    "snapshot_previous_state_head_ms",
+                    snapshot_profile.previous_state_head_ms,
+                ),
+                ProfileField::millis(
+                    "snapshot_previous_state_cache_read_ms",
+                    snapshot_profile.previous_state_cache_read_ms,
+                ),
+                ProfileField::millis(
+                    "snapshot_previous_state_cache_decode_ms",
+                    snapshot_profile.previous_state_cache_decode_ms,
+                ),
+                ProfileField::millis(
+                    "snapshot_previous_state_cache_validate_ms",
+                    snapshot_profile.previous_state_cache_validate_ms,
+                ),
+                ProfileField::millis(
+                    "snapshot_previous_state_store_read_ms",
+                    snapshot_profile.previous_state_store_read_ms,
+                ),
+                ProfileField::boolean(
+                    "snapshot_previous_state_cache_hit",
+                    snapshot_profile.previous_state_cache_hit,
+                ),
+                ProfileField::millis(
+                    "snapshot_signature_lookup_ms",
+                    snapshot_profile.signature_lookup_ms,
                 ),
                 ProfileField::millis("render_ms", render_ms),
             ],
@@ -769,6 +856,7 @@ fn create_snapshot_profiled_inner(
 ) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
     info!("Creating snapshot");
 
+    let preflight_start = Instant::now();
     let preflight_advice = match worktree_status {
         Some(status) => git_overlay_mutation_preflight_advice_with_worktree_status(
             repo,
@@ -785,8 +873,11 @@ fn create_snapshot_profiled_inner(
     if let Some(advice) = preflight_advice {
         return Err(anyhow!(advice));
     }
+    let preflight_ms = preflight_start.elapsed().as_millis();
 
+    let attribution_start = Instant::now();
     let attribution = build_attribution(repo, user_config, &agent)?;
+    let attribution_ms = attribution_start.elapsed().as_millis();
     if let Some(ref agent) = attribution.agent {
         debug!(provider = %agent.provider, model = %agent.model, "Agent attribution");
     }
@@ -801,20 +892,31 @@ fn create_snapshot_profiled_inner(
         supplied_tree: None,
         reuse_current_state: false,
         require_clean_worktree: false,
+        require_worktree_change: repo.capability() == RepositoryCapability::NativeHeddle
+            && repo.merge_state_manager().load()?.is_none(),
         worktree_status_options: worktree_status_options(Some(repo.config())),
         run_hooks: true,
         commit_safe_post_verify: false,
         coalesce_snapshot_and_checkpoint: false,
         linearize_git_parent: false,
         precomputed_worktree_status: None,
+        machine_contract_input: Some(MachineContractInput::from_coverage(
+            machine_contract_coverage(),
+        )),
     };
     if let Some(status) = worktree_status {
         // Owned copy so SavePlan can take the Result; re-walk is avoided on the
         // success path because execute_save recomputes post-mutation verification.
         plan.precomputed_worktree_status = Some(clone_worktree_status_result(status));
     }
+    let execute_save_start = Instant::now();
     let report = execute_save(repo, plan)?;
-    snapshot_output_from_save_report(repo, user_config, report)
+    let execute_save_ms = execute_save_start.elapsed().as_millis();
+    let (output, mut profile) = snapshot_output_from_save_report(repo, user_config, report)?;
+    profile.preflight_ms = preflight_ms;
+    profile.attribution_ms = attribution_ms;
+    profile.execute_save_ms = execute_save_ms;
+    Ok((output, profile))
 }
 
 #[allow(dead_code)]
@@ -850,12 +952,16 @@ pub(crate) fn create_snapshot_from_tree_profiled(
         supplied_tree: Some(tree),
         reuse_current_state: false,
         require_clean_worktree: false,
+        require_worktree_change: false,
         worktree_status_options: worktree_status_options(Some(repo.config())),
         run_hooks: true,
         commit_safe_post_verify: false,
         coalesce_snapshot_and_checkpoint: false,
         linearize_git_parent: false,
         precomputed_worktree_status: None,
+        machine_contract_input: Some(MachineContractInput::from_coverage(
+            machine_contract_coverage(),
+        )),
     };
     let report = execute_save(repo, plan)?;
     snapshot_output_from_save_report(repo, user_config, report)
@@ -880,21 +986,29 @@ fn snapshot_output_from_save_report(
     user_config: &UserConfig,
     report: heddle_core::SaveReport,
 ) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
+    let output_build_start = Instant::now();
+    let previous_state_ms = report.previous_state_ms;
+    let previous_state_profile = report.previous_state_profile.clone();
+    let signature_lookup_ms = report.signature_lookup_ms;
     // Public capture JSON still uses the CLI verification adapter so
     // Machine-Contract Proof is injected from the command catalog. Core
     // `execute_save` already computed proof for the embedder path.
-    let trust = build_repository_verification_state(repo);
+    let trust = report.verification.clone();
     let recommended_action =
         (!trust.recommended_action.trim().is_empty()).then(|| trust.recommended_action.clone());
     let recommended_action_template = recommended_action
         .as_deref()
         .and_then(action_template)
         .or_else(|| trust.recommended_action_template.clone());
+    let task_assignment_start = Instant::now();
     let task_assignment_id = active_task_assignment_id(repo)?;
+    let output_task_assignment_ms = task_assignment_start.elapsed().as_millis();
+    let principal_start = Instant::now();
     let principal_source = cli_shared::resolve_principal(repo, user_config)?
         .source
         .unwrap_or("unknown")
         .to_string();
+    let output_principal_ms = principal_start.elapsed().as_millis();
     let warnings = bulk_capture_warning(report.captured_path_count)
         .into_iter()
         .collect();
@@ -922,10 +1036,25 @@ fn snapshot_output_from_save_report(
         recommended_action_template,
         trust,
     };
-    Ok((
-        output,
-        snapshot_command_profile(report.snapshot_profile, report.thread_metadata_ms),
-    ))
+    let mut profile = snapshot_command_profile(
+        report.snapshot_profile,
+        report.state_create_ms,
+        report.captured_path_count_ms,
+        report.post_verification_ms,
+        report.thread_metadata_ms,
+    );
+    profile.output_build_ms = output_build_start.elapsed().as_millis();
+    profile.output_task_assignment_ms = output_task_assignment_ms;
+    profile.output_principal_ms = output_principal_ms;
+    profile.previous_state_ms = previous_state_ms;
+    profile.previous_state_head_ms = previous_state_profile.head_ms;
+    profile.previous_state_cache_read_ms = previous_state_profile.cache_read_ms;
+    profile.previous_state_cache_decode_ms = previous_state_profile.cache_decode_ms;
+    profile.previous_state_cache_validate_ms = previous_state_profile.cache_validate_ms;
+    profile.previous_state_store_read_ms = previous_state_profile.store_read_ms;
+    profile.previous_state_cache_hit = previous_state_profile.cache_hit;
+    profile.signature_lookup_ms = signature_lookup_ms;
+    Ok((output, profile))
 }
 
 const BULK_CAPTURE_WARNING_THRESHOLD: usize = 500;
@@ -954,6 +1083,9 @@ fn default_bootstrap_intent(repo: &Repository) -> String {
 
 fn snapshot_command_profile(
     repo_profile: SnapshotProfile,
+    state_create_ms: u128,
+    captured_path_count_ms: u128,
+    post_verification_ms: u128,
     thread_metadata_ms: u128,
 ) -> SnapshotCommandProfile {
     SnapshotCommandProfile {
@@ -962,7 +1094,26 @@ fn snapshot_command_profile(
         blob_write_ms: repo_profile.blob_write_ms,
         tree_write_ms: repo_profile.tree_write_ms,
         state_ref_oplog_ms: repo_profile.state_ref_oplog_ms,
+        atomic_execute_ms: repo_profile.atomic_execute_ms,
+        ref_publish_ms: repo_profile.ref_publish_ms,
+        state_create_ms,
+        captured_path_count_ms,
+        post_verification_ms,
         thread_metadata_ms,
+        output_build_ms: 0,
+        output_task_assignment_ms: 0,
+        output_principal_ms: 0,
+        preflight_ms: 0,
+        attribution_ms: 0,
+        execute_save_ms: 0,
+        previous_state_ms: 0,
+        previous_state_head_ms: 0,
+        previous_state_cache_read_ms: 0,
+        previous_state_cache_decode_ms: 0,
+        previous_state_cache_validate_ms: 0,
+        previous_state_store_read_ms: 0,
+        previous_state_cache_hit: false,
+        signature_lookup_ms: 0,
     }
 }
 
@@ -1006,6 +1157,9 @@ fn build_attribution_with_env(
     }
 
     let current_session = SessionManager::new(repo.root()).get_current_session()?;
+    let explicit_provider = agent.provider.clone().or(env.provider.clone());
+    let explicit_model = agent.model.clone().or(env.model.clone());
+    let explicit_agent_identity = explicit_provider.is_some() && explicit_model.is_some();
 
     // Pull the thread's declared actor — set when the user ran
     // `heddle start --agent-provider X --agent-model Y` to dedicate this
@@ -1022,10 +1176,14 @@ fn build_attribution_with_env(
     // silently masked by a detected harness actor. The active thread
     // actor remains the zero-config fallback for agent threads when no
     // explicit attribution is present.
-    let thread_actor = current_thread(repo)
-        .ok()
-        .flatten()
-        .and_then(|t| find_active_thread_entry(repo, &t.id).ok().flatten());
+    let thread_actor = (!explicit_agent_identity)
+        .then(|| {
+            current_thread(repo)
+                .ok()
+                .flatten()
+                .and_then(|t| find_active_thread_entry(repo, &t.id).ok().flatten())
+        })
+        .flatten();
     // Harness probing writes the literal "unknown" placeholder into
     // `ActorPresence.model` and `SessionSegment.model` when it can't
     // identify the model from argv/env (see `harness::open_session`
@@ -1058,13 +1216,17 @@ fn build_attribution_with_env(
         .and_then(|session| session.current_segment())
         .and_then(|segment| segment.policy_id.clone())
         .and_then(clean_attribution_value);
-    let harness_probe = crate::harness::probe_current_process_harness(
-        repo,
-        thread_provider.clone().or_else(|| session_provider.clone()),
-        thread_model.clone().or_else(|| session_model.clone()),
-        session_policy.clone(),
-    )
-    .ok();
+    let harness_probe = (!explicit_agent_identity)
+        .then(|| {
+            crate::harness::probe_current_process_harness(
+                repo,
+                thread_provider.clone().or_else(|| session_provider.clone()),
+                thread_model.clone().or_else(|| session_model.clone()),
+                session_policy.clone(),
+            )
+            .ok()
+        })
+        .flatten();
     let harness_provider = harness_probe
         .as_ref()
         .and_then(|probe| probe.provider.clone())
@@ -1078,10 +1240,7 @@ fn build_attribution_with_env(
         .and_then(|probe| probe.policy.clone())
         .and_then(clean_attribution_value);
 
-    let provider = agent
-        .provider
-        .clone()
-        .or(env.provider)
+    let provider = explicit_provider
         .or(thread_provider)
         .or(harness_provider)
         .or(session_provider)
@@ -1099,10 +1258,7 @@ fn build_attribution_with_env(
                 .clone()
                 .and_then(clean_attribution_value)
         });
-    let model = agent
-        .model
-        .clone()
-        .or(env.model)
+    let model = explicit_model
         .or(thread_model)
         .or(harness_model)
         .or(session_model)

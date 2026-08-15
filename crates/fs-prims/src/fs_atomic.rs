@@ -745,6 +745,28 @@ pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_file_atomic_impl(path, bytes, AtomicWriteKind::Normal, |_, _| Ok(()))
 }
 
+/// Atomically publish reconstructible bytes without forcing them to stable
+/// storage. The final path is never observed partially written, but a crash may
+/// lose this write. Callers must have an independent durable source from which
+/// the file can be rebuilt.
+pub fn write_file_atomic_reconstructible(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|error| enrich_fs_error(parent, "creating", error))?;
+    let tmp = temp_path(path);
+    let result = (|| -> io::Result<()> {
+        let mut file = AtomicWriteKind::Normal.open_tmp(&tmp)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        drop(file);
+        fs::rename(&tmp, path).map_err(|error| enrich_rename_error(&tmp, path, error))
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&tmp);
+        return Err(enrich_write_error(path, error));
+    }
+    Ok(())
+}
+
 /// Create a directory tree with owner-only permissions on Unix (`0o700`),
 /// making newly created dirents crash-durable (same fsync chain as
 /// [`create_dir_all_durable`]).

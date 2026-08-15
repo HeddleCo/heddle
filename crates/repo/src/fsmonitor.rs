@@ -105,6 +105,15 @@ pub(crate) struct ChangeMonitorSession {
     pub(crate) status: MonitorStatus,
 }
 
+/// Opaque identity for the exact change-monitor position used to prepare a
+/// snapshot. Equality means the monitor observed no worktree event between
+/// preparation and the under-lock revalidation check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChangeMonitorToken {
+    backend: &'static str,
+    cursor: String,
+}
+
 impl ChangeMonitorSession {
     /// Prepare a change-monitor query for a worktree compare run.
     pub(crate) fn prepare(repo_root: &Path, settings: FsMonitorSettings) -> Self {
@@ -141,6 +150,64 @@ impl ChangeMonitorSession {
         self.changed_paths
             .as_ref()
             .map_or(0, |paths| paths.len() as u64)
+    }
+
+    /// Return the sole changed path when the monitor has an authoritative,
+    /// non-policy-changing one-path delta. Snapshot can then update that leaf
+    /// and its ancestor trees directly instead of enumerating every sibling in
+    /// a large root directory.
+    pub(crate) fn single_changed_path(&self) -> Option<&str> {
+        if subtree_skip_disabled() || self.status != MonitorStatus::Usable {
+            return None;
+        }
+        let paths = self.changed_paths.as_ref()?;
+        if paths.len() != 1 || ignore_policy_paths_changed(paths) {
+            return None;
+        }
+        paths.iter().next().map(String::as_str)
+    }
+
+    /// Immediate child names that may have changed below `rel_path`.
+    ///
+    /// `None` means callers must enumerate the directory (the monitor is not
+    /// authoritative, an ignore policy changed, or the directory itself was
+    /// reported). `Some` is an exhaustive set, so tracked/status walkers may
+    /// visit only those children and preserve all other baseline entries.
+    pub(crate) fn changed_child_names(&self, rel_path: &Path) -> Option<BTreeSet<String>> {
+        if subtree_skip_disabled() || self.status != MonitorStatus::Usable {
+            return None;
+        }
+        let paths = self.changed_paths.as_ref()?;
+        if ignore_policy_paths_changed(paths) {
+            return None;
+        }
+        let key = cache_key(rel_path);
+        let mut names = BTreeSet::new();
+        for changed in paths {
+            let suffix = if key.is_empty() {
+                changed.as_str()
+            } else if changed == &key {
+                return None;
+            } else {
+                changed.strip_prefix(&format!("{key}/"))?
+            };
+            let name = suffix.split('/').next()?;
+            if name.is_empty() {
+                return None;
+            }
+            names.insert(name.to_string());
+        }
+        Some(names)
+    }
+
+    pub(crate) fn revalidation_token(&self) -> Option<ChangeMonitorToken> {
+        if self.status != MonitorStatus::Usable {
+            return None;
+        }
+        Some(ChangeMonitorToken {
+            backend: self.backend?,
+            cursor: self.next_cursor.clone()?,
+        })
     }
 
     pub(crate) fn changed_directory_keys(&self) -> BTreeSet<String> {
@@ -194,6 +261,29 @@ impl ChangeMonitorSession {
             && self.status == MonitorStatus::Usable
             && self.changed_paths.is_some()
             && index.get_directory(&cache_key(rel_path)).is_some()
+    }
+
+    /// Returns whether the active monitor cursor proves that `rel_path` did
+    /// not change since the persisted baseline. Unlike
+    /// [`Self::can_reuse_unchanged_child`], this does not require an index
+    /// entry: callers that are validating a tree they just prepared already
+    /// own the relevant tree baseline and only need the cursor proof.
+    pub(crate) fn can_reuse_since_cursor(&self, rel_path: &Path) -> bool {
+        !subtree_skip_disabled()
+            && self.status == MonitorStatus::Usable
+            && self.changed_paths.is_some()
+            && !self.path_may_have_changed(rel_path)
+    }
+
+    /// Returns whether a tracked child can be reused without touching its
+    /// metadata. A validated parent index entry anchors the monitor's clean
+    /// baseline, and the monitor proves that this child has not changed since
+    /// that baseline. Requiring the parent (rather than the child's own hot
+    /// index entry) lets a one-path query load only the changed path and its
+    /// ancestors while safely reusing unchanged sibling trees.
+    pub(crate) fn can_reuse_unchanged_child(&self, rel_path: &Path, index: &WorktreeIndex) -> bool {
+        let parent = rel_path.parent().unwrap_or_else(|| Path::new(""));
+        self.can_filter_directory_children(parent, index) && self.can_reuse_since_cursor(rel_path)
     }
 
     pub(crate) fn can_skip_directory(
@@ -1397,6 +1487,7 @@ fn optional_string(value: &Value, key: &str) -> Option<String> {
 mod tests {
     use std::{
         collections::BTreeSet,
+        path::Path,
         sync::{
             Arc, Barrier,
             atomic::{AtomicUsize, Ordering},
@@ -1408,9 +1499,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        HELPER_HOST, HELPER_PROTOCOL_VERSION, helper_endpoint_path,
-        local_helper_binary_for_executable, shutdown_local_monitor_helper, subtree_has_changes,
-        try_spawn_local_helper_with, try_spawn_local_helper_with_probe,
+        ChangeMonitorSession, HELPER_HOST, HELPER_PROTOCOL_VERSION, MonitorStatus,
+        helper_endpoint_path, local_helper_binary_for_executable, shutdown_local_monitor_helper,
+        subtree_has_changes, try_spawn_local_helper_with, try_spawn_local_helper_with_probe,
     };
     use crate::{DirectoryCacheEntry, WorktreeIndex};
 
@@ -1446,6 +1537,34 @@ mod tests {
 
         let cached = index.get_directory("src").unwrap();
         assert_eq!(cached.clean_tree_hash, Some(tree_hash));
+    }
+
+    #[test]
+    fn unchanged_child_reuse_is_anchored_by_its_parent_index_entry() {
+        let mut index = WorktreeIndex::new();
+        index.insert_directory(
+            "src".to_string(),
+            DirectoryCacheEntry {
+                mtime_sec: 0,
+                mtime_nsec: 0,
+                child_count: 2,
+                child_digest: DirectoryCacheEntry::digest_for_child_names(
+                    ["changed", "unchanged"].into_iter(),
+                    2,
+                )
+                .unwrap(),
+                clean_tree_hash: None,
+            },
+        );
+        let monitor = ChangeMonitorSession {
+            changed_paths: Some(BTreeSet::from(["src/changed/file.rs".to_string()])),
+            status: MonitorStatus::Usable,
+            ..ChangeMonitorSession::default()
+        };
+
+        assert!(monitor.can_reuse_unchanged_child(Path::new("src/unchanged"), &index));
+        assert!(!monitor.can_reuse_unchanged_child(Path::new("src/changed"), &index));
+        assert!(!monitor.can_reuse_unchanged_child(Path::new("other/unchanged"), &index));
     }
 
     #[test]

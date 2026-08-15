@@ -752,6 +752,17 @@ impl FsStore {
 }
 
 impl FsStore {
+    pub(crate) fn snapshot_commit_recovery_descriptors_impl(
+        &self,
+    ) -> Result<Vec<SnapshotCommitDescriptor>> {
+        self.reload_packs_if_stale()?;
+        let manager = self
+            .pack_manager()
+            .read()
+            .map_err(|_| HeddleError::Config("Failed to acquire pack manager lock".to_string()))?;
+        manager.snapshot_commit_recovery_descriptors()
+    }
+
     pub(crate) fn snapshot_commit_descriptors_impl(&self) -> Result<Vec<SnapshotCommitDescriptor>> {
         self.reload_packs_if_stale()?;
         let manager = self
@@ -1530,7 +1541,7 @@ impl ObjectStore for FsStore {
         tree: &Tree,
         state: &State,
     ) -> Result<()> {
-        self.put_snapshot_objects_packed_impl(blobs, tree, state, Vec::new(), None)
+        self.put_snapshot_objects_packed_impl(blobs, Vec::new(), tree, state, Vec::new(), None)
             .map(|_| ())
     }
 
@@ -1541,7 +1552,7 @@ impl ObjectStore for FsStore {
         state: &State,
         attachments: Vec<StateAttachment>,
     ) -> Result<()> {
-        self.put_snapshot_objects_packed_impl(blobs, tree, state, attachments, None)
+        self.put_snapshot_objects_packed_impl(blobs, Vec::new(), tree, state, attachments, None)
             .map(|_| ())
     }
 

@@ -34,6 +34,9 @@ toward these bands:
   one-dirty-path, and one-path-capture fixtures, including percentile phase
   totals, structural counters, a runner fingerprint, baseline ratchets, and
   repeatable red negative controls.
+- Replace the one-path status/capture ratchets with absolute 75/100 ms p95
+  gates, add 100 ms gates for bounded diff/log/thread-list, and optimize the
+  durable capture and local-read paths until all gates pass at 100k paths.
 
 ## Next
 
@@ -43,5 +46,5 @@ toward these bands:
   only needs sorted path lists.
 - Reduce repo-open work by skipping migration/hydrator probes when a repo has a
   clean schema ledger and no lazy-hydrator file.
-- Close the recorded Wave 0 target and scale-ratchet gaps in
-  `docs/perf/cli-core-loop-baseline.json`.
+- Recalibrate the historical controlled-runner scale ratios after the next
+  dedicated Blacksmith run; absolute latency gates do not depend on them.

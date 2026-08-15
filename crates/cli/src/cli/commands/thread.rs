@@ -13,9 +13,10 @@ use heddle_core::{
     ThreadCreateOptions, ThreadListOptions, ThreadPathIsolationError, ThreadPlanError,
     ThreadStartOptions, WorkspaceModeRequest, active_reservation_blocks_start,
     active_reservation_path_matches, check_explicit_path_isolation, list_threads,
-    plan_checkout_path, plan_shared_target_redirect, plan_thread_create, plan_thread_materialize,
-    plan_thread_mode, plan_thread_start, select_thread_base, shared_target_redirect_applies,
-    should_advise_shared_target, should_warn_materialized_without_reflink,
+    list_threads_with_worktree_status, plan_checkout_path, plan_shared_target_redirect,
+    plan_thread_create, plan_thread_materialize, plan_thread_mode, plan_thread_start,
+    select_thread_base, shared_target_redirect_applies, should_advise_shared_target,
+    should_warn_materialized_without_reflink,
     status::next_action::{
         canonical_git_repair_ref_preview_command,
         thread_recovery_action_is_primary as shared_thread_recovery_action_is_primary,
@@ -26,11 +27,12 @@ pub use heddle_core::{
     find_thread_summary, thread_is_available_git_ref, thread_is_imported_git_ref,
 };
 use objects::{
-    object::{State, StateId, ThreadName},
+    object::{State, StateId, ThreadName, Tree},
     store::{
         ActorPresence, ActorPresenceStatus, ActorPresenceStore, ObjectStore, WriterLeaseStatus,
         WriterLeaseStore,
     },
+    worktree::WorktreeStatus,
 };
 use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
@@ -52,8 +54,10 @@ use super::{
     thread_cmd::thread_not_found_advice,
     verification_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
-        build_repository_verification_state, git_overlay_mutation_preflight_advice,
-        override_trust_recommended_action, serialize_empty_action_as_null,
+        build_repository_verification_state,
+        build_repository_verification_state_with_worktree_status,
+        git_overlay_mutation_preflight_advice, override_trust_recommended_action,
+        serialize_empty_action_as_null,
     },
     worktree_cmd::{
         helpers::{plan_worktree_target, write_isolated_checkout},
@@ -464,16 +468,34 @@ fn render_repository_context_lines(context: Option<&crate::cli::render::Reposito
 pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs) -> Result<()> {
     let body_start = Instant::now();
     let as_json = should_output_json(cli, Some(repo.config()));
+    let worktree_status_start = Instant::now();
+    let worktree_status: repo::Result<Option<WorktreeStatus>> =
+        if repo.capability() == repo::RepositoryCapability::GitOverlay {
+            repo.git_overlay_worktree_status()
+        } else {
+            let baseline = match repo.current_state_for_worktree_status()? {
+                Some(state) => repo.require_tree_for_worktree_status(&state.tree)?,
+                None => Tree::new(),
+            };
+            repo.compare_worktree_cached_with_options(
+                &baseline,
+                &crate::cli::worktree_status_options(Some(repo.config())),
+            )
+            .map(Some)
+        };
+    let worktree_status_ms = worktree_status_start.elapsed().as_millis();
     let collect_start = Instant::now();
-    let report = list_threads(
-        repo,
-        ThreadListOptions::new()
-            .include_auto(args.include_auto)
-            .include_abandoned(args.include_abandoned),
-    )?;
+    let options = ThreadListOptions::new()
+        .include_auto(args.include_auto)
+        .include_abandoned(args.include_abandoned);
+    let report = match &worktree_status {
+        Ok(Some(status)) => list_threads_with_worktree_status(repo, options, status)?,
+        _ => list_threads(repo, options)?,
+    };
     let collect_summaries_ms = collect_start.elapsed().as_millis();
     let verification_start = Instant::now();
-    let mut trust = build_repository_verification_state(repo);
+    let mut trust =
+        build_repository_verification_state_with_worktree_status(repo, &worktree_status);
     let verification_ms = verification_start.elapsed().as_millis();
     let mut summaries = report.threads;
     let available_git_refs = report.available_git_refs;
@@ -542,6 +564,7 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
         current,
     };
 
+    let render_start = Instant::now();
     if as_json {
         write_full_command_json(
             &output,
@@ -587,15 +610,25 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
         render_thread_sections(&output.threads, cli.verbose > 0);
         render_available_git_refs(&output.available_git_refs, cli.verbose > 0);
     }
+    let render_ms = render_start.elapsed().as_millis();
 
     if instrumentation_enabled() {
         let fields = [
+            ProfileField::millis("worktree_status_ms", worktree_status_ms),
             ProfileField::millis("collect_summaries_ms", collect_summaries_ms),
             ProfileField::millis("verification_ms", verification_ms),
+            ProfileField::millis("render_ms", render_ms),
             ProfileField::duration("command_body_ms", body_start.elapsed()),
         ];
         match profile_mode() {
             ProfileMode::Off | ProfileMode::Jsonl => {
+                emit_profile(
+                    "thread list worktree status",
+                    &[ProfileField::millis(
+                        "worktree_status_ms",
+                        worktree_status_ms,
+                    )],
+                );
                 emit_profile(
                     "thread list collect summaries",
                     &[ProfileField::millis(
@@ -609,10 +642,10 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
                 );
                 emit_profile(
                     "thread list command body",
-                    &[ProfileField::duration(
-                        "command_body_ms",
-                        body_start.elapsed(),
-                    )],
+                    &[
+                        ProfileField::duration("command_body_ms", body_start.elapsed()),
+                        ProfileField::millis("render_ms", render_ms),
+                    ],
                 );
             }
             ProfileMode::Human => emit_profile("thread list phases", &fields),

@@ -26,7 +26,7 @@ pub struct WorktreeChange {
 }
 
 /// Worktree status summary.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct WorktreeStatus {
     /// Files that have been modified.
     pub modified: Vec<PathBuf>,

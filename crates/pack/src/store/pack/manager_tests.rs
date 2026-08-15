@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fs::OpenOptions, sync::Arc};
+use std::{
+    fs::OpenOptions,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use heddle_format::compression::CompressionConfig;
 use tempfile::TempDir;
@@ -32,6 +36,33 @@ fn write_pack(
 
 fn cached_location_count(manager: &PackManager) -> usize {
     manager.object_locations.read().unwrap().locations.len()
+}
+
+#[test]
+fn discovered_packs_are_ordered_oldest_to_newest() {
+    let temp = TempDir::new().unwrap();
+    let (old_pack, _, _) = write_pack(temp.path(), 999);
+    let (new_pack, _, _) = write_pack(temp.path(), 0);
+    std::fs::File::options()
+        .write(true)
+        .open(&old_pack)
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+        .unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&new_pack)
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(2))
+        .unwrap();
+
+    let manager = PackManager::new_with_index_mode(temp.path().to_path_buf(), false);
+    let discovered = manager
+        .packs
+        .iter()
+        .map(|pack| pack.pack_path.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(discovered, vec![old_pack, new_pack]);
 }
 
 fn write_solid_tree_pack(root: &std::path::Path, name: &str, trees: &[Tree]) {
@@ -90,8 +121,15 @@ fn object_locator_is_lazy_for_incremental_and_reloaded_packs() {
     assert_eq!(ids.len(), 8);
     assert_eq!(cached_location_count(&manager), 0);
     for id in &ids {
-        assert!(manager.has_object_id(id));
         assert!(manager.get_object(id).unwrap().is_some());
+    }
+    assert_eq!(
+        cached_location_count(&manager),
+        0,
+        "point reads must not materialize the global object map"
+    );
+    for id in &ids {
+        assert!(manager.has_object_id(id));
     }
     assert_eq!(cached_location_count(&manager), 8);
 
@@ -111,7 +149,7 @@ fn object_locator_is_lazy_for_incremental_and_reloaded_packs() {
 }
 
 #[test]
-fn adding_a_pack_extends_a_completed_lazy_index() {
+fn adding_a_pack_remains_point_addressable_without_a_global_index() {
     let temp = TempDir::new().unwrap();
     let mut manager = PackManager::new_with_index_mode(temp.path().to_path_buf(), false);
     let (pack_path, index_path, id) = write_pack(temp.path(), 1);
@@ -119,7 +157,7 @@ fn adding_a_pack_extends_a_completed_lazy_index() {
     assert!(!manager.has_object(&id));
     assert_eq!(cached_location_count(&manager), 0);
     manager.add_pack(pack_path, index_path).unwrap();
-    assert_eq!(cached_location_count(&manager), 1);
+    assert_eq!(cached_location_count(&manager), 0);
     assert!(manager.has_object(&id));
     assert!(manager.get_hashed_object(&id).unwrap().is_some());
 }

@@ -44,6 +44,9 @@ pub(super) enum CaseKind {
     StatusClean,
     StatusDirty,
     CaptureOne,
+    DiffOne,
+    LogBounded,
+    ThreadListBounded,
 }
 
 impl CaseKind {
@@ -54,6 +57,9 @@ impl CaseKind {
             Self::StatusClean => "status_clean",
             Self::StatusDirty => "status_one_dirty",
             Self::CaptureOne => "capture_one",
+            Self::DiffOne => "diff_one",
+            Self::LogBounded => "log_bounded",
+            Self::ThreadListBounded => "thread_list_bounded",
         }
     }
 
@@ -63,6 +69,9 @@ impl CaseKind {
             Self::Help => &["help"],
             Self::StatusClean | Self::StatusDirty => &["--output", "json", "status"],
             Self::CaptureOne => &["--output", "json", "capture", "-m", "perf sample"],
+            Self::DiffOne => &["--output", "json", "diff"],
+            Self::LogBounded => &["--output", "json", "log", "--limit", "20"],
+            Self::ThreadListBounded => &["--output", "json", "thread", "list"],
         }
     }
 
@@ -71,6 +80,7 @@ impl CaseKind {
             Self::Version | Self::Help => 0,
             Self::StatusClean | Self::StatusDirty => 1,
             Self::CaptureOne => 2,
+            Self::DiffOne | Self::LogBounded | Self::ThreadListBounded => 1,
         }
     }
 }
@@ -85,6 +95,9 @@ pub(super) struct Sample {
     pub current_state_ms: f64,
     pub verification_ms: f64,
     pub worktree_status_ms: f64,
+    pub worktree_index_load_ms: f64,
+    pub worktree_compare_ms: f64,
+    pub worktree_index_save_ms: f64,
     pub thread_summary_ms: f64,
     pub snapshot_ms: f64,
     pub snapshot_tree_walk_ms: f64,
@@ -92,7 +105,23 @@ pub(super) struct Sample {
     pub snapshot_blob_write_ms: f64,
     pub snapshot_tree_write_ms: f64,
     pub snapshot_state_ref_oplog_ms: f64,
+    pub snapshot_atomic_execute_ms: f64,
+    pub snapshot_ref_publish_ms: f64,
+    pub snapshot_state_create_ms: f64,
+    pub snapshot_captured_path_count_ms: f64,
+    pub snapshot_post_verification_ms: f64,
     pub snapshot_thread_metadata_ms: f64,
+    pub snapshot_preflight_ms: f64,
+    pub snapshot_attribution_ms: f64,
+    pub snapshot_execute_save_ms: f64,
+    pub snapshot_previous_state_ms: f64,
+    pub snapshot_previous_state_head_ms: f64,
+    pub snapshot_previous_state_cache_read_ms: f64,
+    pub snapshot_previous_state_cache_decode_ms: f64,
+    pub snapshot_previous_state_cache_validate_ms: f64,
+    pub snapshot_previous_state_store_read_ms: f64,
+    pub snapshot_signature_lookup_ms: f64,
+    pub snapshot_output_build_ms: f64,
     pub monitor_ms: f64,
     pub rendering_ms: f64,
     pub network_ms: f64,
@@ -124,6 +153,9 @@ impl Sample {
         self.current_state_ms += other.current_state_ms;
         self.verification_ms += other.verification_ms;
         self.worktree_status_ms += other.worktree_status_ms;
+        self.worktree_index_load_ms += other.worktree_index_load_ms;
+        self.worktree_compare_ms += other.worktree_compare_ms;
+        self.worktree_index_save_ms += other.worktree_index_save_ms;
         self.thread_summary_ms += other.thread_summary_ms;
         self.snapshot_ms += other.snapshot_ms;
         self.snapshot_tree_walk_ms += other.snapshot_tree_walk_ms;
@@ -131,7 +163,25 @@ impl Sample {
         self.snapshot_blob_write_ms += other.snapshot_blob_write_ms;
         self.snapshot_tree_write_ms += other.snapshot_tree_write_ms;
         self.snapshot_state_ref_oplog_ms += other.snapshot_state_ref_oplog_ms;
+        self.snapshot_atomic_execute_ms += other.snapshot_atomic_execute_ms;
+        self.snapshot_ref_publish_ms += other.snapshot_ref_publish_ms;
+        self.snapshot_state_create_ms += other.snapshot_state_create_ms;
+        self.snapshot_captured_path_count_ms += other.snapshot_captured_path_count_ms;
+        self.snapshot_post_verification_ms += other.snapshot_post_verification_ms;
         self.snapshot_thread_metadata_ms += other.snapshot_thread_metadata_ms;
+        self.snapshot_preflight_ms += other.snapshot_preflight_ms;
+        self.snapshot_attribution_ms += other.snapshot_attribution_ms;
+        self.snapshot_execute_save_ms += other.snapshot_execute_save_ms;
+        self.snapshot_previous_state_ms += other.snapshot_previous_state_ms;
+        self.snapshot_previous_state_head_ms += other.snapshot_previous_state_head_ms;
+        self.snapshot_previous_state_cache_read_ms += other.snapshot_previous_state_cache_read_ms;
+        self.snapshot_previous_state_cache_decode_ms +=
+            other.snapshot_previous_state_cache_decode_ms;
+        self.snapshot_previous_state_cache_validate_ms +=
+            other.snapshot_previous_state_cache_validate_ms;
+        self.snapshot_previous_state_store_read_ms += other.snapshot_previous_state_store_read_ms;
+        self.snapshot_signature_lookup_ms += other.snapshot_signature_lookup_ms;
+        self.snapshot_output_build_ms += other.snapshot_output_build_ms;
         self.monitor_ms += other.monitor_ms;
         self.rendering_ms += other.rendering_ms;
         self.network_ms += other.network_ms;
@@ -179,7 +229,7 @@ impl CaseResult {
     pub(super) fn print(&self) {
         let wall = self.metric(|sample| sample.wall_ms);
         println!(
-            "RESULT case={} mode={} paths={} samples={} wall_ms={} total_ms={} startup_ms={} warm_repo_ms={} repo_open_ms={} current_state_ms={} verification_ms={} worktree_status_ms={} thread_summary_ms={} snapshot_ms={} snapshot_tree_walk_ms={} snapshot_blob_prep_ms={} snapshot_blob_write_ms={} snapshot_tree_write_ms={} snapshot_state_ref_oplog_ms={} snapshot_thread_metadata_ms={} monitor_ms={} render_ms={} network_ms={}",
+            "RESULT case={} mode={} paths={} samples={} wall_ms={} total_ms={} startup_ms={} warm_repo_ms={} repo_open_ms={} current_state_ms={} verification_ms={} worktree_status_ms={} worktree_index_load_ms={} worktree_compare_ms={} worktree_index_save_ms={} thread_summary_ms={} snapshot_ms={} snapshot_tree_walk_ms={} snapshot_blob_prep_ms={} snapshot_blob_write_ms={} snapshot_tree_write_ms={} snapshot_state_ref_oplog_ms={} snapshot_atomic_execute_ms={} snapshot_ref_publish_ms={} snapshot_state_create_ms={} snapshot_captured_path_count_ms={} snapshot_post_verification_ms={} snapshot_thread_metadata_ms={} snapshot_preflight_ms={} snapshot_attribution_ms={} snapshot_execute_save_ms={} snapshot_previous_state_ms={} snapshot_previous_state_head_ms={} snapshot_previous_state_cache_read_ms={} snapshot_previous_state_cache_decode_ms={} snapshot_previous_state_cache_validate_ms={} snapshot_previous_state_store_read_ms={} snapshot_signature_lookup_ms={} snapshot_output_build_ms={} monitor_ms={} render_ms={} network_ms={}",
             self.kind.name(),
             if self.path_count == 0 {
                 "cold_process"
@@ -196,6 +246,9 @@ impl CaseResult {
             self.metric(|sample| sample.current_state_ms),
             self.metric(|sample| sample.verification_ms),
             self.metric(|sample| sample.worktree_status_ms),
+            self.metric(|sample| sample.worktree_index_load_ms),
+            self.metric(|sample| sample.worktree_compare_ms),
+            self.metric(|sample| sample.worktree_index_save_ms),
             self.metric(|sample| sample.thread_summary_ms),
             self.metric(|sample| sample.snapshot_ms),
             self.metric(|sample| sample.snapshot_tree_walk_ms),
@@ -203,7 +256,23 @@ impl CaseResult {
             self.metric(|sample| sample.snapshot_blob_write_ms),
             self.metric(|sample| sample.snapshot_tree_write_ms),
             self.metric(|sample| sample.snapshot_state_ref_oplog_ms),
+            self.metric(|sample| sample.snapshot_atomic_execute_ms),
+            self.metric(|sample| sample.snapshot_ref_publish_ms),
+            self.metric(|sample| sample.snapshot_state_create_ms),
+            self.metric(|sample| sample.snapshot_captured_path_count_ms),
+            self.metric(|sample| sample.snapshot_post_verification_ms),
             self.metric(|sample| sample.snapshot_thread_metadata_ms),
+            self.metric(|sample| sample.snapshot_preflight_ms),
+            self.metric(|sample| sample.snapshot_attribution_ms),
+            self.metric(|sample| sample.snapshot_execute_save_ms),
+            self.metric(|sample| sample.snapshot_previous_state_ms),
+            self.metric(|sample| sample.snapshot_previous_state_head_ms),
+            self.metric(|sample| sample.snapshot_previous_state_cache_read_ms),
+            self.metric(|sample| sample.snapshot_previous_state_cache_decode_ms),
+            self.metric(|sample| sample.snapshot_previous_state_cache_validate_ms),
+            self.metric(|sample| sample.snapshot_previous_state_store_read_ms),
+            self.metric(|sample| sample.snapshot_signature_lookup_ms),
+            self.metric(|sample| sample.snapshot_output_build_ms),
             self.metric(|sample| sample.monitor_ms),
             self.metric(|sample| sample.rendering_ms),
             self.metric(|sample| sample.network_ms),

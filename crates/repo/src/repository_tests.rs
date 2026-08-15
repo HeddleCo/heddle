@@ -951,6 +951,69 @@ fn packed_structured_snapshot_remains_invisible_until_oplog_commit() {
 }
 
 #[test]
+fn durable_worktree_snapshot_artifact_recovers_the_complete_tree_closure() {
+    let (temp_dir, repo) = create_test_repo();
+    let baseline = repo.head().unwrap();
+    let before = repo
+        .store()
+        .list_states()
+        .unwrap()
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    fs::create_dir_all(temp_dir.path().join("nested")).unwrap();
+    fs::write(
+        temp_dir.path().join("nested/artifact.txt"),
+        "authoritative worktree closure",
+    )
+    .unwrap();
+
+    let crashed = with_snapshot_fault(SnapshotFault::ArtifactCommitBeforeOplogView, || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = repo.snapshot(Some("worktree artifact committed".to_string()), None);
+        }))
+    });
+    assert!(crashed.is_err());
+    assert_eq!(repo.head().unwrap(), baseline);
+
+    let committed = repo
+        .store()
+        .list_states()
+        .unwrap()
+        .into_iter()
+        .find(|state| !before.contains(state))
+        .expect("durable artifact must contain the worktree state");
+    drop(repo);
+
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    assert_eq!(reopened.head().unwrap(), Some(committed));
+    let state = reopened.store().get_state(&committed).unwrap().unwrap();
+    let root = reopened.store().get_tree(&state.tree).unwrap().unwrap();
+    let nested_hash = root
+        .entries()
+        .iter()
+        .find(|entry| entry.name() == "nested")
+        .and_then(TreeEntry::tree_hash)
+        .expect("root tree must retain the nested tree");
+    let nested = reopened.store().get_tree(&nested_hash).unwrap().unwrap();
+    let blob_hash = nested
+        .entries()
+        .iter()
+        .find(|entry| entry.name() == "artifact.txt")
+        .and_then(TreeEntry::blob_hash)
+        .expect("nested tree must retain the authored blob");
+    let blob = reopened.store().get_blob(&blob_hash).unwrap().unwrap();
+    assert_eq!(blob.content(), b"authoritative worktree closure");
+    #[cfg(feature = "tree-sitter-symbols")]
+    assert!(
+        reopened
+            .attached_semantic_index(&committed)
+            .unwrap()
+            .is_some(),
+        "authoritative artifact must retain the deferred semantic closure"
+    );
+}
+
+#[test]
 fn durable_snapshot_artifact_recovers_missing_oplog_and_ref_views_after_reopen() {
     let (temp_dir, repo) = create_test_repo();
     let baseline = repo.head().unwrap();

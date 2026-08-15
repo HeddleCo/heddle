@@ -910,8 +910,14 @@ pub(crate) fn install_committed_snapshot_pack_bytes(
     pack_data: Vec<u8>,
     index_data: Vec<u8>,
     artifact_id: ContentHash,
+    artifact_bytes: Vec<u8>,
 ) -> io::Result<String> {
-    install_snapshot_pack_bytes_inner(packs_dir, pack_data, index_data, &[artifact_id])
+    install_snapshot_pack_bytes_inner(
+        packs_dir,
+        pack_data,
+        index_data,
+        &[(artifact_id, artifact_bytes)],
+    )
 }
 
 pub(crate) fn install_snapshot_pack_bytes_with_commit_markers(
@@ -920,14 +926,19 @@ pub(crate) fn install_snapshot_pack_bytes_with_commit_markers(
     index_data: Vec<u8>,
     artifact_ids: &[ContentHash],
 ) -> io::Result<String> {
-    install_snapshot_pack_bytes_inner(packs_dir, pack_data, index_data, artifact_ids)
+    let markers = artifact_ids
+        .iter()
+        .copied()
+        .map(|id| (id, Vec::new()))
+        .collect::<Vec<_>>();
+    install_snapshot_pack_bytes_inner(packs_dir, pack_data, index_data, &markers)
 }
 
 fn install_snapshot_pack_bytes_inner(
     packs_dir: &Path,
     pack_data: Vec<u8>,
     index_data: Vec<u8>,
-    artifact_ids: &[ContentHash],
+    commit_markers: &[(ContentHash, Vec<u8>)],
 ) -> io::Result<String> {
     ensure_journal_layout_safe(packs_dir)?;
     let digest = *blake3::hash(&pack_data).as_bytes();
@@ -936,13 +947,14 @@ fn install_snapshot_pack_bytes_inner(
 
     let pack_path = dst_pack_path(packs_dir, &pack_name);
     if existing_pair_matches_digest(packs_dir, &pack_name, &digest)? {
-        for artifact_id in artifact_ids {
+        for (artifact_id, artifact_bytes) in commit_markers {
             let marker = snapshot_commit_marker_path(&pack_path, artifact_id);
             if !marker.exists() {
-                OpenOptions::new()
+                let mut file = OpenOptions::new()
                     .write(true)
                     .create_new(true)
                     .open(marker)?;
+                file.write_all(artifact_bytes)?;
             }
         }
         sync_directory(packs_dir)?;
@@ -968,12 +980,13 @@ fn install_snapshot_pack_bytes_inner(
         fault_inject::maybe_fail_at("snapshot_pack_after_publish_pack")?;
         fs::rename(&tmp_idx, &dst_idx)?;
         fault_inject::maybe_fail_at("snapshot_pack_after_publish_idx")?;
-        for artifact_id in artifact_ids {
+        for (artifact_id, artifact_bytes) in commit_markers {
             let marker = snapshot_commit_marker_path(&dst_pack, artifact_id);
-            OpenOptions::new()
+            let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(marker)?;
+            file.write_all(artifact_bytes)?;
         }
         sync_directory(packs_dir)?;
         Ok(pack_name.clone())
@@ -1726,6 +1739,7 @@ mod tests {
                 pack_bytes.clone(),
                 idx_bytes.clone(),
                 artifact_id,
+                b"snapshot artifact metadata".to_vec(),
             )
         })
         .expect_err("fault should stop publication before the commit marker");
@@ -1733,11 +1747,17 @@ mod tests {
         assert!(existing_pair_matches_pack_name(&packs, &expected_name).unwrap());
         assert!(!marker.exists());
 
-        let repaired =
-            install_committed_snapshot_pack_bytes(&packs, pack_bytes, idx_bytes, artifact_id)
-                .unwrap();
+        let repaired = install_committed_snapshot_pack_bytes(
+            &packs,
+            pack_bytes,
+            idx_bytes,
+            artifact_id,
+            b"snapshot artifact metadata".to_vec(),
+        )
+        .unwrap();
         assert_eq!(repaired, expected_name);
         assert!(marker.exists());
+        assert_eq!(fs::read(marker).unwrap(), b"snapshot artifact metadata");
     }
 
     #[test]

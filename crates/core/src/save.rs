@@ -20,14 +20,18 @@ use oplog::{OpLogBackend, OpRecord};
 use refs::Head;
 use repo::{
     GitCheckpointRecord, Hook, HookContext, HookManager, Repository, RepositoryCapability,
-    SnapshotProfile, WorktreeStatusOptions, refresh_active_thread_metadata,
+    SnapshotProfile, WorktreeStateLookupProfile, WorktreeStatusOptions,
+    refresh_active_thread_metadata,
 };
 use serde::Serialize;
 use sley::Repository as SleyRepository;
 
 use crate::{
-    RepositoryVerificationState, build_repository_verification_health_with_worktree_status,
-    build_repository_verification_state, build_repository_verification_state_with_worktree_status,
+    MachineContractInput, RepositoryVerificationState,
+    build_repository_verification_health_with_worktree_status, build_repository_verification_state,
+    build_repository_verification_state_with_machine_contract,
+    build_repository_verification_state_with_worktree_status,
+    build_repository_verification_state_with_worktree_status_and_machine_contract,
 };
 
 /// How far a save should write through into Git (Git-overlay only).
@@ -67,6 +71,10 @@ pub struct SavePlan {
     pub reuse_current_state: bool,
     /// After ensuring state, refuse dirty Heddle worktree before Git write-through.
     pub require_clean_worktree: bool,
+    /// Refuse a worktree snapshot whose tree is identical to the current state.
+    /// The comparison happens during the snapshot tree build, avoiding a
+    /// separate preflight walk.
+    pub require_worktree_change: bool,
     pub worktree_status_options: WorktreeStatusOptions,
     /// Run pre/post snapshot hooks when creating a new Heddle state.
     pub run_hooks: bool,
@@ -81,6 +89,10 @@ pub struct SavePlan {
     /// on the no-new-state path. Post-mutation paths always recompute.
     pub precomputed_worktree_status:
         Option<repo::Result<Option<objects::worktree::WorktreeStatus>>>,
+    /// Optional embedding-surface machine-contract inventory. Passing it into
+    /// core verification lets callers reuse the post-save proof instead of
+    /// rebuilding the entire repository health envelope for presentation.
+    pub machine_contract_input: Option<MachineContractInput>,
 }
 
 impl SavePlan {
@@ -94,12 +106,14 @@ impl SavePlan {
             supplied_tree: None,
             reuse_current_state: false,
             require_clean_worktree: false,
+            require_worktree_change: false,
             worktree_status_options: WorktreeStatusOptions::default(),
             run_hooks: true,
             commit_safe_post_verify: false,
             coalesce_snapshot_and_checkpoint: false,
             linearize_git_parent: false,
             precomputed_worktree_status: None,
+            machine_contract_input: None,
         }
     }
 
@@ -117,6 +131,7 @@ impl SavePlan {
             supplied_tree: None,
             reuse_current_state: false,
             require_clean_worktree: matches!(git_scope, GitScope::WorktreeAll),
+            require_worktree_change: false,
             worktree_status_options: WorktreeStatusOptions::default(),
             run_hooks: true,
             commit_safe_post_verify: true,
@@ -126,6 +141,7 @@ impl SavePlan {
             ),
             linearize_git_parent: false,
             precomputed_worktree_status: None,
+            machine_contract_input: None,
         }
     }
 
@@ -143,12 +159,14 @@ impl SavePlan {
             supplied_tree: None,
             reuse_current_state: true,
             require_clean_worktree: !staged,
+            require_worktree_change: false,
             worktree_status_options: WorktreeStatusOptions::default(),
             run_hooks: true,
             commit_safe_post_verify: false,
             coalesce_snapshot_and_checkpoint: false,
             linearize_git_parent: false,
             precomputed_worktree_status: None,
+            machine_contract_input: None,
         }
     }
 
@@ -199,7 +217,13 @@ pub struct SaveReport {
     pub created_new_state: bool,
     pub git_checkpoint: Option<GitCheckpointRecord>,
     pub snapshot_profile: SnapshotProfile,
+    pub state_create_ms: u128,
+    pub captured_path_count_ms: u128,
+    pub post_verification_ms: u128,
     pub thread_metadata_ms: u128,
+    pub previous_state_ms: u128,
+    pub previous_state_profile: WorktreeStateLookupProfile,
+    pub signature_lookup_ms: u128,
 }
 
 /// Pure routing helper: which Git write-through scope a verb should use.
@@ -415,7 +439,10 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
         )));
     }
 
-    let previous_state = repo.current_state()?;
+    let previous_state_started = Instant::now();
+    let (previous_state, previous_state_profile) =
+        repo.current_state_for_worktree_status_profiled()?;
+    let previous_state_ms = previous_state_started.elapsed().as_millis();
     let has_current = previous_state.is_some();
     let mut created_new_state = false;
     let mut snapshot_profile = SnapshotProfile::default();
@@ -424,10 +451,14 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
     let mut heavy_impact_paths = Vec::new();
     let mut snapshot_state_id: Option<StateId> = None;
     let mut captured_path_count = 0usize;
+    let mut state_create_ms = 0u128;
+    let mut captured_path_count_ms = 0u128;
 
     let mut state = if plan_creates_new_state(&plan, has_current) {
         created_new_state = true;
+        let state_create_started = Instant::now();
         let execution = create_heddle_state(repo, &plan)?;
+        state_create_ms = state_create_started.elapsed().as_millis();
         snapshot_profile = execution.profile;
         thread_metadata_ms = execution.thread_metadata_ms;
         promotion_suggested = execution.promotion_suggested;
@@ -437,9 +468,11 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
             Some(state) => state.tree,
             None => repo.store().put_tree(&Tree::new())?,
         };
+        let captured_path_count_started = Instant::now();
         captured_path_count = repo
             .diff_trees(&previous_tree, &execution.state.tree)?
             .len();
+        captured_path_count_ms = captured_path_count_started.elapsed().as_millis();
         execution.state
     } else {
         repo.current_state()?
@@ -497,17 +530,56 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
     // Post-mutation verification is always fresh when we created state or wrote
     // a Git checkpoint (those mutations flip health classification). Otherwise
     // reuse a caller-supplied worktree status to avoid a redundant walk.
-    let mut verification = if created_new_state || git_checkpoint.is_some() {
-        build_repository_verification_state(repo)?
+    let captured_native_worktree = created_new_state
+        && plan.supplied_tree.is_none()
+        && repo.capability() == RepositoryCapability::NativeHeddle;
+    let captured_worktree_status = Ok(Some(objects::worktree::WorktreeStatus::default()));
+    let verification_started = Instant::now();
+    let mut verification = if captured_native_worktree && git_checkpoint.is_none() {
+        let health = build_repository_verification_health_with_worktree_status(
+            repo,
+            &captured_worktree_status,
+        );
+        if let Some(input) = &plan.machine_contract_input {
+            build_repository_verification_state_with_worktree_status_and_machine_contract(
+                repo,
+                health,
+                &captured_worktree_status,
+                input,
+            )
+        } else {
+            build_repository_verification_state_with_worktree_status(
+                repo,
+                health,
+                &captured_worktree_status,
+            )
+        }
+    } else if created_new_state || git_checkpoint.is_some() {
+        if let Some(input) = &plan.machine_contract_input {
+            build_repository_verification_state_with_machine_contract(repo, input)?
+        } else {
+            build_repository_verification_state(repo)?
+        }
     } else if let Some(status) = &plan.precomputed_worktree_status {
         let health = build_repository_verification_health_with_worktree_status(repo, status);
-        build_repository_verification_state_with_worktree_status(repo, health, status)
+        if let Some(input) = &plan.machine_contract_input {
+            build_repository_verification_state_with_worktree_status_and_machine_contract(
+                repo, health, status, input,
+            )
+        } else {
+            build_repository_verification_state_with_worktree_status(repo, health, status)
+        }
     } else {
-        build_repository_verification_state(repo)?
+        if let Some(input) = &plan.machine_contract_input {
+            build_repository_verification_state_with_machine_contract(repo, input)?
+        } else {
+            build_repository_verification_state(repo)?
+        }
     };
     if plan.commit_safe_post_verify {
         soften_commit_next_action(&mut verification);
     }
+    let post_verification_ms = verification_started.elapsed().as_millis();
 
     let summary = match plan.verb {
         SaveVerb::Capture => format!(
@@ -525,13 +597,16 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
             .unwrap_or_else(|| format!("Checkpoint {}", state.state_id.short())),
     };
 
+    let signature_lookup_started = Instant::now();
+    let signed = repo.get_state_signature(&state.id())?.is_some();
+    let signature_lookup_ms = signature_lookup_started.elapsed().as_millis();
     Ok(SaveReport {
         verb: plan.verb,
         state_id: state.state_id,
         content_hash: state.hash(),
         intent: state.intent.clone(),
         confidence: state.confidence,
-        signed: repo.get_state_signature(&state.id())?.is_some(),
+        signed,
         git_commit,
         git_previous_commit,
         summary,
@@ -544,7 +619,13 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
         created_new_state,
         git_checkpoint,
         snapshot_profile,
+        state_create_ms,
+        captured_path_count_ms,
+        post_verification_ms,
         thread_metadata_ms,
+        previous_state_ms,
+        previous_state_profile,
+        signature_lookup_ms,
     })
 }
 
@@ -592,6 +673,12 @@ fn create_heddle_state(repo: &Repository, plan: &SavePlan) -> Result<CreatedStat
     let mut execution = if let Some(tree) = plan.supplied_tree.clone() {
         repo.snapshot_tree_with_attribution_profiled(
             tree,
+            plan.intent.clone(),
+            plan.confidence,
+            plan.attribution.clone(),
+        )?
+    } else if plan.require_worktree_change {
+        repo.snapshot_with_attribution_profiled_if_changed(
             plan.intent.clone(),
             plan.confidence,
             plan.attribution.clone(),

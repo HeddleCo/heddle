@@ -646,7 +646,7 @@ impl RefManager {
             return Ok(());
         }
 
-        let mut packed = self.load_packed_refs_cached()?;
+        let mut packed = (*self.load_packed_refs_cached()?).clone();
         for removal in removals {
             match removal {
                 PackedRemove::Thread(name) => packed.remove_track(name),

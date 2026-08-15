@@ -204,7 +204,6 @@ fn recovery_dirty_conflict(paths: Vec<String>) -> HeddleError {
 mod tests {
     use std::fs;
 
-    use objects::store::ObjectStore;
     use tempfile::TempDir;
 
     use super::*;
@@ -225,17 +224,36 @@ mod tests {
             .heddle_dir()
             .join("objects/states")
             .join(format!("{}.state", current.id().to_string_full()));
-        fs::remove_file(current_path).unwrap();
+        if current_path.exists() {
+            fs::remove_file(current_path).unwrap();
+        }
+        let current_pack = repo
+            .store()
+            .snapshot_commit_descriptors()
+            .unwrap()
+            .into_iter()
+            .find(|descriptor| descriptor.artifact.state == current.id())
+            .unwrap()
+            .pack_path;
+        let current_pack_stem = current_pack
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let packs = repo.heddle_dir().join("packs");
         for entry in fs::read_dir(packs).unwrap() {
             let path = entry.unwrap().path();
-            if path.is_dir() {
-                fs::remove_dir_all(path).unwrap();
-            } else {
+            let is_current_pack_artifact = path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(&current_pack_stem));
+            if is_current_pack_artifact {
                 fs::remove_file(path).unwrap();
             }
         }
-        repo.store().clear_recent_caches();
+        // Snapshot objects are authoritative in packs, so reopen to discard
+        // the live store's immutable pack mappings after deleting those packs.
+        drop(repo);
+        let repo = Repository::open(temp.path()).unwrap();
 
         let error = repo
             .restore_state_tree_to_worktree(&recovery.id())

@@ -290,8 +290,8 @@ pub use status::{
 pub use thread::{
     AvailableGitRef, ThreadActorInfo, ThreadListEntry, ThreadListOptions, ThreadListReport,
     ThreadSummary, ThreadTaskSummary, collect_thread_summaries, find_thread_summary, list_threads,
-    split_available_git_refs, thread_is_available_git_ref, thread_is_imported_git_ref,
-    visibility_label,
+    list_threads_with_worktree_status, split_available_git_refs, thread_is_available_git_ref,
+    thread_is_imported_git_ref, visibility_label,
 };
 pub use thread_lifecycle::{
     CleanWorktreeGuard, ThreadDropDisposition, ThreadDropOptions, ThreadDropPlan,

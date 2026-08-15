@@ -8,7 +8,10 @@ use std::{
 
 use objects::{
     error::{HeddleError, Result},
-    fs_atomic::{create_dir_all_durable, sync_directory, write_file_atomic},
+    fs_atomic::{
+        create_dir_all_durable, sync_directory, write_file_atomic,
+        write_file_atomic_reconstructible,
+    },
 };
 
 use super::{
@@ -380,17 +383,14 @@ impl SegmentedOpLogIndex {
     }
 
     pub(crate) fn append_entries(&self, entries: &[OpEntry]) -> Result<Self> {
-        self.append_entries_inner(entries)
+        self.append_entries_inner(entries, false)
     }
 
     pub(crate) fn append_entries_reconstructible(&self, entries: &[OpEntry]) -> Result<Self> {
-        // The snapshot artifact remains the reconstruction source, but the
-        // manifest must not survive a crash without its selected segment.
-        // This durable ordering runs in the background materialization worker.
-        self.append_entries_inner(entries)
+        self.append_entries_inner(entries, true)
     }
 
-    fn append_entries_inner(&self, entries: &[OpEntry]) -> Result<Self> {
+    fn append_entries_inner(&self, entries: &[OpEntry], reconstructible: bool) -> Result<Self> {
         if entries.is_empty() {
             return Ok(self.clone());
         }
@@ -422,11 +422,20 @@ impl SegmentedOpLogIndex {
             "oplog.segments/segment-l{level:02}-{start:020}-{head:020}-g{generation:020}.bin"
         );
         let path = resolve_relative(&self.canonical_path, &relative)?;
-        create_dir_all_durable(path.parent().unwrap_or_else(|| Path::new(".")))?;
+        let segment_parent = path.parent().unwrap_or_else(|| Path::new("."));
+        if reconstructible {
+            fs::create_dir_all(segment_parent)?;
+        } else {
+            create_dir_all_durable(segment_parent)?;
+        }
         let mut packed = PackedOpLog::new(path.clone());
         packed.entries = carry_entries;
         packed.head_id = head;
-        packed.save()?;
+        if reconstructible {
+            packed.save_reconstructible()?;
+        } else {
+            packed.save()?;
+        }
         let index = PackedOpLogIndex::open(&path)?;
 
         let mut manifest = self.manifest.clone();
@@ -442,7 +451,11 @@ impl SegmentedOpLogIndex {
             .ok_or_else(|| HeddleError::InvalidObject("oplog entry count overflow".to_string()))?;
         manifest.head_id = head;
         let bytes = encode_manifest(&manifest)?;
-        write_manifest(&self.canonical_path, &bytes)?;
+        if reconstructible {
+            write_manifest_reconstructible(&self.canonical_path, &bytes)?;
+        } else {
+            write_manifest(&self.canonical_path, &bytes)?;
+        }
         sweep_unlisted_containers(&self.canonical_path, &manifest);
 
         indexes.push(index);
@@ -593,6 +606,12 @@ impl SegmentedOpLogIndex {
 fn write_manifest(path: &Path, bytes: &[u8]) -> Result<()> {
     let manifest = manifest_path(path);
     write_file_atomic(&manifest, bytes)?;
+    Ok(())
+}
+
+fn write_manifest_reconstructible(path: &Path, bytes: &[u8]) -> Result<()> {
+    let manifest = manifest_path(path);
+    write_file_atomic_reconstructible(&manifest, bytes)?;
     Ok(())
 }
 

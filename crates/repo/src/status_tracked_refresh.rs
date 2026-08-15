@@ -58,8 +58,10 @@ fn refresh_tracked_directory(
     dir_key: &str,
     tree: &Tree,
 ) -> Result<bool> {
-    ctx.index
-        .insert_clean_tree(dir_key.to_string(), tree.clone());
+    if ctx.index.clean_tree(dir_key, &tree.hash()).is_none() {
+        ctx.index
+            .insert_clean_tree(dir_key.to_string(), tree.clone());
+    }
     let dir_path = if dir_key.is_empty() {
         ctx.repo.root().to_path_buf()
     } else {
@@ -91,8 +93,18 @@ fn refresh_tracked_directory(
     // contents are edited in place, so they are not sufficient to skip tracked
     // subtree refresh safely. Only fsmonitor-backed skip decisions are sound here.
 
+    let changed_child_names = ctx
+        .monitor
+        .can_filter_directory_children(rel_path, ctx.index)
+        .then(|| ctx.monitor.changed_child_names(rel_path))
+        .flatten();
+    let entries = match changed_child_names.as_ref() {
+        Some(names) => names.iter().filter_map(|name| tree.get(name)).collect(),
+        None => tree.entries().iter().collect::<Vec<_>>(),
+    };
+
     let mut subtree_clean = true;
-    for entry in tree.entries() {
+    for entry in entries {
         let child_rel_path = join_relative_path(rel_path, entry.name());
         if ctx
             .monitor

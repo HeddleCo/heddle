@@ -232,6 +232,12 @@ impl<'a> PackReader<'a> {
             .collect())
     }
 
+    /// Point-membership probe backed by the sorted pack index. This avoids
+    /// enumerating every object merely to locate one hot-path tree or state.
+    pub(super) fn contains_object(&self, id: &PackObjectId) -> Result<bool> {
+        Ok(self.index.find(id)?.is_some())
+    }
+
     #[cfg(test)]
     pub(super) fn compact_frame_read_count(&self) -> usize {
         self.compact_frame_reads.load(Ordering::Relaxed)

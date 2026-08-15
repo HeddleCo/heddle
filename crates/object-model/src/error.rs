@@ -158,6 +158,8 @@ pub enum HeddleError {
     NotFound(String),
     #[error("No merge in progress")]
     NoMergeInProgress,
+    #[error("no worktree changes to capture")]
+    NoChanges,
     #[error("state not found: {0}")]
     StateNotFound(StateId),
     #[error("invalid object: {0}")]

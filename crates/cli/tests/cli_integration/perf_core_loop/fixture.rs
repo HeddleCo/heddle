@@ -7,6 +7,11 @@ use std::{
     time::Instant,
 };
 
+use objects::{
+    object::{State, ThreadName},
+    store::{CompressionConfig, ObjectStore, PackBuilder, PackObjectId, pack::ObjectType},
+};
+use refs::PackedRefsModel;
 use repo::{FsMonitorMode, FsMonitorSettings, Repository, WorktreeStatusOptions};
 use tempfile::TempDir;
 
@@ -71,6 +76,69 @@ impl PerfFixture {
         self.dirty_generation += 1;
         let content = format!("captured generation {}\n", self.dirty_generation);
         self.make_dirty(&content);
+    }
+
+    pub(super) fn prepare_history(&self, binary: &Path, depth: usize) {
+        let repo = Repository::open(&self.root).expect("open perf fixture for history setup");
+        let mut parent = repo
+            .head()
+            .expect("read perf fixture head")
+            .expect("seed state");
+        let tree = repo
+            .store()
+            .get_state(&parent)
+            .expect("read seed state")
+            .expect("seed state present")
+            .tree;
+        let attribution = repo.get_attribution().expect("history attribution");
+        let mut pack = PackBuilder::new(CompressionConfig::disabled());
+        for generation in 0..depth {
+            let state = State::new_snapshot(tree, vec![parent], attribution.clone())
+                .with_intent(format!("perf history {generation}"));
+            parent = state.id();
+            pack.add_id(
+                PackObjectId::StateId(parent),
+                ObjectType::State,
+                rmp_serde::to_vec_named(&state).expect("encode perf history state"),
+            );
+        }
+        let (pack_data, index_data, _) = pack.build().expect("build perf history pack");
+        repo.store()
+            .install_pack(&pack_data, &index_data)
+            .expect("install perf history pack");
+        repo.refs()
+            .set_thread(&ThreadName::new("main"), &parent)
+            .expect("advance main to perf history tip");
+        drop(repo);
+        run_setup(
+            binary,
+            &["--output", "json", "log", "--limit", "20"],
+            &self.root,
+        );
+        println!("SETUP history_depth={depth}");
+    }
+
+    pub(super) fn prepare_threads(&self, binary: &Path, count: usize) {
+        let repo = Repository::open(&self.root).expect("open perf fixture for thread setup");
+        let tip = repo
+            .head()
+            .expect("read perf fixture head")
+            .expect("history tip");
+        drop(repo);
+
+        let mut packed = PackedRefsModel::new();
+        for index in 0..count {
+            packed.set_thread(&format!("perf-{index:04}"), tip);
+        }
+        fs::write(self.root.join(".heddle/refs/packed-refs"), packed.to_text())
+            .expect("write packed perf threads");
+        let repo = Repository::open(&self.root).expect("reopen perf fixture for thread setup");
+        repo.refs()
+            .rebuild_ref_summary_index()
+            .expect("rebuild perf thread summary index");
+        drop(repo);
+        run_setup(binary, &["--output", "json", "thread", "list"], &self.root);
+        println!("SETUP additional_threads={count}");
     }
 
     pub(super) fn prepare_full_scan_sample(&self) {

@@ -60,19 +60,22 @@ profile total, process startup, warm repository work, repository open,
 verification, worktree status, snapshot subphases, monitor startup, rendering,
 and network work. Structural counters use the same percentiles.
 
-Wave 0 covers `--version`, `help`, clean status, one-dirty-path status, and a
-one-path capture. Repository fixtures contain 10k and 100k paths. Version and
+Wave 0 covers `--version`, `help`, clean status, one-dirty-path status, a
+one-path capture, one-path diff, a 20-entry log over 1,000 ancestors, and a
+1,000-thread list. Repository fixtures contain 10k and 100k paths. Version and
 help enforce the cold-process band; repository commands run after two explicit
-native-monitor warmups. The versioned, runner-scoped baselines and target gaps
-live in `docs/perf/cli-core-loop-baseline.json`. CI selects the controlled
-Blacksmith profile with `HEDDLE_PERF_BASELINE`; local runs use the recorded
-local calibration profile.
+native-monitor warmups. The versioned, runner-scoped cold-process and scale
+baselines live in `docs/perf/cli-core-loop-baseline.json`. CI selects the
+controlled Blacksmith profile with `HEDDLE_PERF_BASELINE`; local runs use the
+recorded local calibration profile.
 
 The ignored marker keeps the harness out of debug and ordinary unit-test runs;
-the dedicated release workflow runs it on a controlled runner. Warm clean
-status at 100k paths has an explicit 50 ms p95 assertion independent of the
-runner baseline. Other absolute bands already met use the product target;
-missed bands use a baseline ratchet and keep the target gap explicit.
+the dedicated release workflow runs it on a controlled runner. Every bounded
+100k local command has a fail-loud absolute p95 gate independent of the runner
+baseline: clean status is 50 ms, one-path status is 75 ms, and one-path durable
+capture, diff, bounded log, and bounded thread-list are each 100 ms. Structural
+directory, hash, object-decode, history-walk, repository-open, and zero-network
+gates remain in force alongside the latency contract.
 
 The repeatable negative controls are:
 
@@ -92,21 +95,26 @@ repository open inside each sample. Each invocation must fail with `PERF GATE
 RED`. The eager-index control is pinned by the warm repository-open p95 gate
 (2 ms), not only by the aggregate wall-time band.
 
-## 2026-08-09 local calibration
+## 2026-08-15 local calibration
 
-The 100k clean-status path now consumes its root hot sidecar without replaying
-the full file journal. Changed-path operations still replay the file entries
-they need. The release contract pins clean status p95 directly to the product
-target; one-path status and capture retain their existing ratchets.
+The before column is a fresh-main five-sample calibration on the same host.
+The after column is the final 20-sample release contract. Status consumes hot
+directory proofs; capture applies an authoritative one-file monitor delta to a
+cached, hash-validated tree chain and commits the complete snapshot closure in
+one durable pack.
 
-| Case | Previous p95 | Recorded p95 | Gate | Product target |
-|---|---:|---:|---:|---:|
-| Clean status | 73.271 ms | 11.703 ms | 50 ms | 50 ms |
-| One-path status | 415.569 ms | 78.619 ms | 87 ms | 75 ms |
-| One-path capture | 2436.937 ms | 971.053 ms | 1069 ms | 100 ms |
+| Case (100k paths) | Before p95 | After p95 | Absolute gate |
+|---|---:|---:|---:|
+| Clean status | 12.815 ms | 11.617 ms | 50 ms |
+| One-path status | 164.556 ms | 61.843 ms | 75 ms |
+| One-path durable capture | 1045.373 ms | 49.674 ms | 100 ms |
+| One-path diff | 354.053 ms | 62.965 ms | 100 ms |
+| Bounded log (20 of 1,000) | 20.724 ms | 10.316 ms | 100 ms |
+| Bounded thread-list (1,000) | 332.113 ms | 72.622 ms | 100 ms |
 
-Repository open measured 0 ms at both 10k and 100k. At 100k the clean,
-one-path status, and one-path capture cases scanned 2, 6, and 16 directories
-respectively and hashed 0, at most 1, and 1 files. The local 10k-to-100k
-wall-ratio gates are 7.4x (clean, unchanged) and 8.0x (one path, tightened
-from 8.55x); both retain a 3x directory-ratio ceiling.
+Repository open measured 0 ms throughout, and no measured command initialized
+a network client. Clean and one-path status scanned 2 and 6 directories;
+capture used the direct tree rewrite and hashed only the changed file. Disabling
+subtree and unchanged-child reuse is a repeatable red control: at 100k paths its
+five-sample p95 was 501.425 ms for status and 1557.785 ms for capture, exceeding
+the 75/100 ms gates while scanning 2,004 directories.

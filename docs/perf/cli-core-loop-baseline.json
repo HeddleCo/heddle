@@ -1,6 +1,6 @@
 {
   "schema": "heddle-cli-core-loop-baseline/v2",
-  "recorded_at": "2026-08-09",
+  "recorded_at": "2026-08-15",
   "sample_count": 20,
   "profiles": [
     {
@@ -30,22 +30,6 @@
           "measured_p95_ms": 337.419,
           "gate_p95_ms": 50.0,
           "disposition": "target; clean hot status does not replay the full worktree journal"
-        },
-        {
-          "case": "status_one_dirty",
-          "paths": 100000,
-          "target_p95_ms": 75.0,
-          "measured_p95_ms": 537.327,
-          "gate_p95_ms": 592.0,
-          "disposition": "controlled-runner baseline + 10% noise; 462.327 ms above target"
-        },
-        {
-          "case": "capture_one",
-          "paths": 100000,
-          "target_p95_ms": 100.0,
-          "measured_p95_ms": 2000.495,
-          "gate_p95_ms": 2201.0,
-          "disposition": "controlled-runner baseline + 10% noise; 1900.495 ms above target"
         }
       ],
       "scale_cases": [
@@ -69,13 +53,13 @@
     },
     {
       "name": "local-calibration",
-      "runner_fingerprint": "linux/x86_64; Linux 7.0.0-22-generic; AMD Ryzen 7 7700 8-Core Processor; 16 logical cores; rustc 1.97.0 (2d8144b78 2026-07-07); release binary 57338320 bytes",
+      "runner_fingerprint": "linux/x86_64; Linux 7.0.0-22-generic; AMD Ryzen 7 7700 8-Core Processor; 16 logical cores; rustc 1.97.0 (2d8144b78 2026-07-07); release binary 59765776 bytes",
       "cases": [
         {
           "case": "version",
           "paths": 0,
           "target_p95_ms": 20.0,
-          "measured_p95_ms": 1.498,
+          "measured_p95_ms": 1.475,
           "gate_p95_ms": 20.0,
           "disposition": "target"
         },
@@ -83,7 +67,7 @@
           "case": "help",
           "paths": 0,
           "target_p95_ms": 20.0,
-          "measured_p95_ms": 4.903,
+          "measured_p95_ms": 5.378,
           "gate_p95_ms": 20.0,
           "disposition": "target"
         },
@@ -91,31 +75,15 @@
           "case": "status_clean",
           "paths": 100000,
           "target_p95_ms": 50.0,
-          "measured_p95_ms": 11.703,
+          "measured_p95_ms": 11.617,
           "gate_p95_ms": 50.0,
           "disposition": "target; clean hot status does not replay the full worktree journal"
-        },
-        {
-          "case": "status_one_dirty",
-          "paths": 100000,
-          "target_p95_ms": 75.0,
-          "measured_p95_ms": 78.619,
-          "gate_p95_ms": 87.0,
-          "disposition": "local lazy-pack baseline + 10% noise; 3.619 ms above target"
-        },
-        {
-          "case": "capture_one",
-          "paths": 100000,
-          "target_p95_ms": 100.0,
-          "measured_p95_ms": 971.053,
-          "gate_p95_ms": 1069.0,
-          "disposition": "local lazy-pack baseline + 10% noise; 871.053 ms above target"
         }
       ],
       "scale_cases": [
         {
           "case": "status_clean",
-          "measured_wall_ratio": 6.976,
+          "measured_wall_ratio": 1.088,
           "gate_wall_ratio": 7.4,
           "measured_directory_ratio": 1.0,
           "gate_directory_ratio": 3.0,
@@ -123,7 +91,7 @@
         },
         {
           "case": "status_one_dirty",
-          "measured_wall_ratio": 7.096,
+          "measured_wall_ratio": 3.847,
           "gate_wall_ratio": 8.0,
           "measured_directory_ratio": 1.0,
           "gate_directory_ratio": 3.0,

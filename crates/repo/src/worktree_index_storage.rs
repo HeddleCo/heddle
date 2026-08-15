@@ -8,7 +8,7 @@ use std::{
 };
 
 use objects::{
-    fs_atomic::{sync_directory, sync_file, sync_file_data},
+    fs_atomic::{sync_directory, sync_file},
     object::ContentHash,
 };
 use tracing::{debug, warn};
@@ -1163,21 +1163,11 @@ fn hot_gitlinks_path(snapshot_path: &Path) -> std::path::PathBuf {
 fn write_reconstructible_atomic(path: &Path, bytes: &[u8]) -> Result<(), IndexError> {
     let parent = path.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    temporary.write_all(bytes)?;
-    temporary.flush()?;
-    let (_file, temporary_path) = temporary
-        .keep()
-        .map_err(|error| IndexError::Io(error.error))?;
-    match fs::rename(&temporary_path, path) {
-        Ok(()) => Ok(()),
-        Err(_error) if path.exists() => {
-            fs::remove_file(path)?;
-            fs::rename(temporary_path, path)?;
-            Ok(())
-        }
-        Err(error) => Err(IndexError::Io(error)),
-    }
+    // Hot records are rebuildable and checksum-framed. A concurrent or
+    // post-crash reader that observes a short write rejects it and safely
+    // falls back to the canonical index, so temp-file creation plus rename for
+    // every changed ancestor only adds latency without strengthening history.
+    fs::write(path, bytes).map_err(IndexError::Io)
 }
 
 fn frame_hot_record(mut body: Vec<u8>) -> Vec<u8> {
@@ -1464,7 +1454,6 @@ fn append_journal(index: &WorktreeIndex, journal_path: &Path) -> Result<(), Inde
         fs::create_dir_all(parent)?;
     }
 
-    let journal_existed = journal_path.exists();
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -1481,10 +1470,10 @@ fn append_journal(index: &WorktreeIndex, journal_path: &Path) -> Result<(), Inde
     file.write_all(&crc32(&payload).to_be_bytes())?;
     file.write_all(&payload)?;
     file.flush()?;
-    sync_file_data(&file, journal_path)?;
-    if !journal_existed && let Some(parent) = journal_path.parent() {
-        sync_directory(parent)?;
-    }
+    // The index journal is a rebuildable acceleration sidecar, never an
+    // authoritative history record. A torn tail is already ignored/rejected
+    // by framed checksums and forces a safe full scan, so fsyncing this file
+    // and its parent directory only adds latency without improving correctness.
     Ok(())
 }
 

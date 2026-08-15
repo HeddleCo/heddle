@@ -71,7 +71,8 @@ pub fn cmd_diff(
     }
 
     let repo = Repository::open(start)?;
-    let trust = build_repository_verification_state(&repo);
+    let trust = (repo.capability() == RepositoryCapability::GitOverlay)
+        .then(|| build_repository_verification_state(&repo));
     let json = should_output_json(cli, Some(repo.config()));
     let options = diff_options(
         from.clone(),
@@ -85,9 +86,10 @@ pub fn cmd_diff(
         json,
     );
 
-    if to.is_none()
+    if let Some(trust) = trust.as_ref()
+        && to.is_none()
         && from_is_head_or_default
-        && let Some(status) = trust_visible_worktree_status(&repo, &trust)?
+        && let Some(status) = trust_visible_worktree_status(&repo, trust)?
     {
         let report = authority_worktree_diff(&repo, &status, &options)?;
         return render_diff_report(
@@ -100,7 +102,12 @@ pub fn cmd_diff(
             patch,
         );
     }
-    if to.is_none() && from_is_head_or_default && trust.mapping_state == "git_backed" {
+    if to.is_none()
+        && from_is_head_or_default
+        && trust
+            .as_ref()
+            .is_some_and(|trust| trust.mapping_state == "git_backed")
+    {
         let status = repo.git_overlay_worktree_status()?.unwrap_or_default();
         let report = authority_worktree_diff(&repo, &status, &options)?;
         return render_diff_report(
