@@ -14,26 +14,25 @@ use crate::{
     proc_group::ProcGroupRegistry,
     process::{RunOutput, run_process},
     result::{CompletedRun, finalize, infra_result, skipped_result},
+    result_cache::{ResultCache, ResultCacheError, SpotCheck, with_cache},
 };
 
 /// Run every check with default controls.
-#[must_use]
 pub fn run_checks(
     config: &CiConfig,
     context: &ExecutionContext,
     options: &RunOptions<'_>,
-) -> Vec<CheckResult> {
+) -> Result<Vec<CheckResult>, ResultCacheError> {
     run_checks_with(config, context, options, &RunControls::default())
 }
 
 /// Run checks with explicit trigger/cache/environment controls.
-#[must_use]
 pub fn run_checks_with(
     config: &CiConfig,
     context: &ExecutionContext,
     options: &RunOptions<'_>,
     controls: &RunControls<'_>,
-) -> Vec<CheckResult> {
+) -> Result<Vec<CheckResult>, ResultCacheError> {
     let default_environment = HermeticEnv::new();
     let environment = controls.hermetic_env.unwrap_or(&default_environment);
     let default_cache_root = options.workdir.join(".hci-cache");
@@ -43,13 +42,15 @@ pub fn run_checks_with(
         environment,
         cache_root,
         proc_groups: controls.proc_groups.as_ref(),
+        result_cache: controls.result_cache,
+        spot_check: controls.spot_check,
     };
     config
         .checks
         .iter()
         .map(|check| match &controls.trigger {
             Some(trigger) if !check_runs_for_trigger(&check.triggers, trigger) => {
-                skipped_result(check, context, &resolved)
+                Ok(skipped_result(check, context, &resolved))
             }
             _ => run_one_check(check, context, &resolved),
         })
@@ -61,9 +62,43 @@ pub(crate) struct ResolvedRun<'a> {
     pub(crate) environment: &'a HermeticEnv,
     pub(crate) cache_root: &'a Path,
     pub(crate) proc_groups: Option<&'a ProcGroupRegistry>,
+    pub(crate) result_cache: Option<&'a dyn ResultCache>,
+    pub(crate) spot_check: SpotCheck,
 }
 
-fn run_one_check(check: &Check, context: &ExecutionContext, run: &ResolvedRun<'_>) -> CheckResult {
+fn run_one_check(
+    check: &Check,
+    context: &ExecutionContext,
+    run: &ResolvedRun<'_>,
+) -> Result<CheckResult, ResultCacheError> {
+    let service_environment = declared_service_env(check);
+    let key_environment = run
+        .environment
+        .build(&check.env, &service_environment, &BTreeMap::new());
+    with_cache(check, context, run, &key_environment, || {
+        run_one_check_uncached(check, context, run, &service_environment)
+    })
+}
+
+fn declared_service_env(check: &Check) -> BTreeMap<String, String> {
+    check
+        .services
+        .iter()
+        .flat_map(|service| {
+            service
+                .env
+                .iter()
+                .map(|entry| (entry.0.clone(), entry.1.clone()))
+        })
+        .collect()
+}
+
+fn run_one_check_uncached(
+    check: &Check,
+    context: &ExecutionContext,
+    run: &ResolvedRun<'_>,
+    service_environment: &BTreeMap<String, String>,
+) -> CheckResult {
     let started_at = (run.options.now_rfc3339)();
     let started = Instant::now();
     let caches = prepare_caches(&check.cache_paths, run.cache_root);
@@ -73,19 +108,9 @@ fn run_one_check(check: &Check, context: &ExecutionContext, run: &ResolvedRun<'_
             return infra_result(check, context, run, started_at, started.elapsed(), &error);
         }
     };
-    let service_environment = check
-        .services
-        .iter()
-        .flat_map(|service| {
-            service
-                .env
-                .iter()
-                .map(|entry| (entry.0.clone(), entry.1.clone()))
-        })
-        .collect();
     let environment = run
         .environment
-        .build(&check.env, &service_environment, &caches.env);
+        .build(&check.env, service_environment, &caches.env);
     let (last, attempts) = run_attempts(check, run, &environment);
     let _ = run.options.services.down(services);
     finalize(
