@@ -32,6 +32,12 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Fixed
 
+- **Git-lane push reuses local pack entries.** Hosted git-overlay push no
+  longer rebuilds a transfer pack from every decoded object. Existing
+  self-contained pack bytes are copied when they already are the selected
+  closure, so a first push of a packed repo stays near the source pack size
+  instead of a multi-minute, larger tempfile (heddle#1234).
+
 - **Land resolves the target checkout from isolated threads.** A clean
   fast-forward now lands when invoked inside the source thread checkout, while
   genuine readiness-policy blockers retain their concrete recovery guidance.
