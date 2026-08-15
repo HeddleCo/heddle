@@ -18,6 +18,7 @@ pub(crate) fn test_state_id() -> objects::object::StateId {
 }
 
 pub mod atomic;
+mod ci_runner_trust;
 pub mod clone_intent;
 mod collaboration_migration;
 mod collaboration_store;
@@ -107,6 +108,7 @@ mod worktree_status_options;
 pub mod worktree_walk;
 
 // Re-export commonly used types from underlying crates.
+pub use ci_runner_trust::{CiRunnerTrustEntry, CiRunnerTrustSet};
 pub use collaboration_migration::{
     LegacyDiscussionMigrationBlocker, LegacyDiscussionMigrationItem, LegacyDiscussionMigrationPlan,
     LegacyDiscussionMigrationReport, apply_legacy_discussion_migration,
