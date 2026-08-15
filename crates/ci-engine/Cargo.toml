@@ -1,0 +1,23 @@
+[package]
+name = "heddle-ci-engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Local check executor for Heddle CI"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ci-config = { path = "../ci-config", package = "heddle-ci-config", version = "0.12" }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.12" }
+regex.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+wait-timeout.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "ci_engine"

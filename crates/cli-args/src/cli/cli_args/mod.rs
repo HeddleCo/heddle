@@ -4,6 +4,7 @@
 mod cli_base;
 mod commands_agent;
 mod commands_args;
+mod commands_ci;
 #[cfg(feature = "client")]
 mod commands_client;
 mod commands_context;
@@ -48,6 +49,7 @@ pub use commands_args::{
     TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs,
     TimelineTargetArgs, TryArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
 };
+pub use commands_ci::{CiCommands, CiRunArgs};
 #[cfg(feature = "client")]
 pub use commands_client::{AgentTemplateArg, AuthCommands, AuthTrustCommands};
 pub use commands_context::ContextCommands;

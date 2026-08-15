@@ -8,7 +8,7 @@ use super::AuthCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
-    AgentCommands, CompletionSubject, ContextCommands, DiscussCommands, HookCommands,
+    AgentCommands, CiCommands, CompletionSubject, ContextCommands, DiscussCommands, HookCommands,
     IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
     ShellCommands, ThreadCommands, VisibilityCommands,
     commands_args::{
@@ -214,6 +214,12 @@ Heddle options must appear before `--`. Everything after `--` is passed unchange
     /// for `run` when you already have a thread and just need to exec
     /// inside it.
     Run(RunArgs),
+
+    /// Run Heddle CI checks.
+    Ci {
+        #[command(subcommand)]
+        command: CiCommands,
+    },
 
     /// Automation/workflow command: refresh the current thread onto its target when safe.
     Sync(SyncArgs),
