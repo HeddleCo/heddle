@@ -6,8 +6,8 @@ use chrono::{TimeZone, Utc};
 use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::{
-    decode_blob_frame, decode_state_frame, decode_tree_frame, encode_blob_frame,
-    encode_state_frame, encode_tree_frame,
+    CompactError, decode_blob_frame, decode_state_frame, decode_tree_frame, encode_blob_frame,
+    encode_state_frame, encode_tree_frame, extract_state, extract_tree,
 };
 use crate::object::{
     Agent, Attribution, ChangeId, ChangeLineage, ChangeLineageKind, ContentHash, Principal,
@@ -140,6 +140,90 @@ fn corrupt_frame_byte_rejects_every_contained_object() {
     for _ in &trees {
         let error = decode_tree_frame(&encoded).unwrap_err();
         assert!(error.to_string().contains("checksum mismatch"));
+    }
+}
+
+#[test]
+fn extract_matches_decode_all_canonical_bytes() {
+    let content = ContentHash::from_bytes([31; 32]);
+    let trees = vec![
+        Tree::from_entries(vec![TreeEntry::file("first", content, false).unwrap()]),
+        Tree::from_entries(vec![TreeEntry::file("second", content, true).unwrap()]),
+        Tree::from_entries(vec![TreeEntry::directory("nested", content).unwrap()]),
+    ];
+    let encoded = encode_tree_frame(&trees).unwrap();
+    let decoded = decode_tree_frame(&encoded).unwrap();
+
+    for (expected, decoded) in trees.iter().zip(&decoded) {
+        let extracted = extract_tree(&encoded, expected.hash()).unwrap();
+        assert_eq!(extracted, *decoded);
+        assert_eq!(extracted.hash(), expected.hash());
+        assert_eq!(
+            rmp_serde::to_vec_named(&extracted).unwrap(),
+            rmp_serde::to_vec_named(expected).unwrap()
+        );
+    }
+}
+
+#[test]
+fn extract_state_matches_decode_all_canonical_bytes() {
+    let mut first = State::new(
+        ContentHash::from_bytes([41; 32]),
+        Vec::new(),
+        Attribution::human(Principal::new("Author", "author@example.com")),
+    );
+    first.intent = Some("first".to_string());
+    first.state_id = first.id();
+    let mut second = State::new(
+        ContentHash::from_bytes([42; 32]),
+        vec![first.state_id],
+        Attribution::human(Principal::new("Author", "author@example.com")),
+    );
+    second.intent = Some("second".to_string());
+    second.state_id = second.id();
+    let states = vec![first, second];
+    let encoded = encode_state_frame(&states).unwrap();
+    let decoded = decode_state_frame(&encoded).unwrap();
+
+    for (expected, decoded) in states.iter().zip(&decoded) {
+        let extracted = extract_state(&encoded, expected.id()).unwrap();
+        assert_eq!(extracted.id(), decoded.id());
+        assert_eq!(
+            rmp_serde::to_vec_named(&extracted).unwrap(),
+            rmp_serde::to_vec_named(expected).unwrap()
+        );
+    }
+}
+
+#[test]
+fn extract_rejects_a_forged_typed_hash() {
+    let content = ContentHash::from_bytes([51; 32]);
+    let tree = Tree::from_entries(vec![TreeEntry::file("only", content, false).unwrap()]);
+    let encoded = encode_tree_frame(std::slice::from_ref(&tree)).unwrap();
+    let forged = ContentHash::compute_typed("tree", b"not this tree");
+
+    let error = extract_tree(&encoded, forged).unwrap_err();
+    assert!(matches!(error, CompactError::Missing));
+    assert_ne!(forged, tree.hash());
+}
+
+#[test]
+fn extract_rejects_every_object_after_one_corrupt_frame_byte() {
+    let hash = ContentHash::from_bytes([61; 32]);
+    let trees = vec![
+        Tree::from_entries(vec![TreeEntry::file("a", hash, false).unwrap()]),
+        Tree::from_entries(vec![TreeEntry::file("b", hash, true).unwrap()]),
+    ];
+    let mut encoded = encode_tree_frame(&trees).unwrap();
+    let corrupt_at = encoded.len() / 2;
+    encoded[corrupt_at] ^= 0x01;
+
+    for tree in &trees {
+        let error = extract_tree(&encoded, tree.hash()).unwrap_err();
+        assert!(
+            error.to_string().contains("checksum mismatch"),
+            "corrupt frame must fail typed extraction, got {error}"
+        );
     }
 }
 

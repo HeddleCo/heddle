@@ -15,6 +15,11 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Added
 
+- **Compact-frame reader extracts one tree or state by typed hash.** SoA
+  columns reconstruct the canonical object, BLAKE3 typed-hash is checked
+  on extraction, and a single corrupt frame byte fails every contained
+  object. The hosted S3 hot-tier is out of scope for this native path.
+
 - **CI-runner trust-set resolver.** Valid, unrevoked, in-window
   `KeyRole::CiRunner` bindings from an authorized registry are collected into
   the trust set a verdict verifier checks `heddle-ci-verdict-v1` signatures

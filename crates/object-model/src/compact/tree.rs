@@ -61,6 +61,22 @@ pub fn decode_tree_frame(bytes: &[u8]) -> Result<Vec<Tree>> {
     Ok(trees)
 }
 
+/// Reconstruct one tree and verify its BLAKE3 typed hash.
+///
+/// The whole-frame checksum is verified first. Each tree is rebuilt from its
+/// SoA columns until `expected` matches the reconstructed typed hash.
+pub fn extract_tree(bytes: &[u8], expected: ContentHash) -> Result<Tree> {
+    let mut input = Reader::verified(bytes, TREE_MAGIC)?;
+    let tree_count = input.get_count("tree frame")?;
+    for _ in 0..tree_count {
+        let tree = decode_tree(&mut input)?;
+        if tree.hash() == expected {
+            return Ok(tree);
+        }
+    }
+    Err(super::CompactError::Missing)
+}
+
 fn decode_tree(input: &mut Reader<'_>) -> Result<Tree> {
     let count = input.get_count("tree entry")?;
     let modes = (0..count)

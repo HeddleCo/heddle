@@ -896,14 +896,47 @@ fn decode_compact_object(
     data: &[u8],
     require_blob_frame: bool,
 ) -> Result<Option<Vec<u8>>> {
-    let Some(objects) = decode_compact_objects(obj_type, data, require_blob_frame)? else {
-        return Ok(None);
-    };
-    objects
-        .into_iter()
-        .find_map(|(id, _, bytes)| (id == *requested_id).then_some(bytes))
-        .map(Some)
-        .ok_or_else(|| compact_index_miss(requested_id))
+    match (obj_type, requested_id) {
+        (ObjectType::Tree, PackObjectId::Hash(hash))
+            if heddle_object_model::compact::is_tree_frame(data) =>
+        {
+            let tree = heddle_object_model::compact::extract_tree(data, *hash)
+                .map_err(|error| compact_extract_error(requested_id, error))?;
+            rmp_serde::to_vec_named(&tree)
+                .map(Some)
+                .map_err(|error| StoreError::InvalidObject(error.to_string()))
+        }
+        (ObjectType::State, PackObjectId::StateId(id))
+            if heddle_object_model::compact::is_state_frame(data) =>
+        {
+            let state = heddle_object_model::compact::extract_state(data, *id)
+                .map_err(|error| compact_extract_error(requested_id, error))?;
+            rmp_serde::to_vec_named(&state)
+                .map(Some)
+                .map_err(|error| StoreError::InvalidObject(error.to_string()))
+        }
+        _ => {
+            let Some(objects) = decode_compact_objects(obj_type, data, require_blob_frame)? else {
+                return Ok(None);
+            };
+            objects
+                .into_iter()
+                .find_map(|(id, _, bytes)| (id == *requested_id).then_some(bytes))
+                .map(Some)
+                .ok_or_else(|| compact_index_miss(requested_id))
+        }
+    }
+}
+
+fn compact_extract_error(
+    id: &PackObjectId,
+    error: heddle_object_model::compact::CompactError,
+) -> StoreError {
+    if matches!(error, heddle_object_model::compact::CompactError::Missing) {
+        compact_index_miss(id)
+    } else {
+        StoreError::InvalidObject(error.to_string())
+    }
 }
 
 fn decode_compact_objects(
