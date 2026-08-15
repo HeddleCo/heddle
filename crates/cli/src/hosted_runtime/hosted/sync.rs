@@ -3814,6 +3814,11 @@ fn proto_git_ref_kind(kind: ClassifiedGitRefKind) -> ProtoGitRefKind {
 /// boundary). Returns `Ok(None)` when the exclusions cover the entire reachable
 /// set, i.e. the server already holds every pushed object: a pure ref-move that
 /// needs no pack, only the ref updates (heddle#968 want-only short-circuit).
+///
+/// The write copies already-validated local pack entries when their delta bases
+/// are also in the selected set (sley reachable-pack reuse). That is the
+/// git-lane path that used to rebuild every object from decoded bodies and
+/// produce a slower, larger tempfile than the source pack (heddle#1234).
 fn build_git_lane_multi_root_pack_plan(
     git_repo: &SleyRepository,
     roots: Vec<GitObjectId>,
@@ -3825,26 +3830,21 @@ fn build_git_lane_multi_root_pack_plan(
             "cannot plan a Git pack with no roots".to_string(),
         ));
     }
-    let Some(plan) = git_repo
-        .reachable_pack_plan()
-        .roots(roots.iter().copied())
-        .exclusions(excluded)
-        .build()
-        .map_err(|err| {
-            ProtocolError::InvalidState(format!("plan reachable Git pack stream: {err}"))
-        })?
+    let mut pack_file = NamedTempFile::new()
+        .map_err(|err| ProtocolError::InvalidState(format!("create Git pack tempfile: {err}")))?;
+    let Some(written) =
+        write_git_lane_reachable_pack(git_repo, &roots, &excluded, pack_file.as_file_mut())?
     else {
         // Empty reachable set: every object the refs reach is already on the
         // server. Skip the pack entirely; only the ref updates ship.
         return Ok(None);
     };
-    let pack_file = NamedTempFile::new()
-        .map_err(|err| ProtocolError::InvalidState(format!("create Git pack tempfile: {err}")))?;
-    let prepared = plan.prepare_to_file(pack_file.path()).map_err(|err| {
-        ProtocolError::InvalidState(format!("write reachable Git pack tempfile: {err}"))
-    })?;
-    let pack_size = prepared.summary.pack_size;
-    let checksum = prepared.summary.checksum;
+    pack_file
+        .as_file()
+        .sync_all()
+        .map_err(|err| ProtocolError::InvalidState(format!("sync Git pack tempfile: {err}")))?;
+    let pack_size = written.summary.pack_size;
+    let checksum = written.summary.checksum;
     if pack_size > wire::MAX_RECEIVED_GIT_PACK_SIZE {
         return Err(ProtocolError::InvalidState(format!(
             "Git pack exceeds maximum transfer size of {} bytes; multi-pack split for repos over this size is a follow-up (plan §B.2)",
@@ -3866,6 +3866,38 @@ fn build_git_lane_multi_root_pack_plan(
         roots,
         pack_file: Arc::new(Mutex::new(pack_file)),
     }))
+}
+
+/// Write the git-lane transfer pack with sley's reuse-aware reachable-pack
+/// writer. Object *set* matches the old `ReachablePackPlan` rebuild; bytes may
+/// be the local pack verbatim when that pack already is the selected closure.
+fn write_git_lane_reachable_pack(
+    git_repo: &SleyRepository,
+    roots: &[GitObjectId],
+    excluded: &[GitObjectId],
+    writer: &mut impl Write,
+) -> Result<Option<sley::plumbing::sley_odb::ReachablePackReuseWrite>, ProtocolError> {
+    let excluded = excluded.iter().copied().collect::<HashSet<_>>();
+    let written = sley::plumbing::sley_odb::write_reachable_pack_with_reuse_stats_to_writer(
+        git_repo.object_database(),
+        git_repo.object_format(),
+        roots.iter().copied(),
+        &excluded,
+        writer,
+    )
+    .map_err(|err| {
+        ProtocolError::InvalidState(format!("write reachable Git pack tempfile: {err}"))
+    })?;
+    if let Some(written) = written.as_ref() {
+        tracing::debug!(
+            verbatim_entries = written.reuse.verbatim_entries,
+            redeltified_entries = written.reuse.redeltified_entries,
+            whole_pack = written.reuse.whole_pack,
+            pack_size = written.summary.pack_size,
+            "git-lane reachable pack reuse"
+        );
+    }
+    Ok(written)
 }
 
 async fn send_git_pack_streaming_messages(
@@ -5264,3 +5296,7 @@ mod pure_helpers_tests {
         let _ = native_pack_required_for_pull(true, &empty_info);
     }
 }
+
+#[cfg(test)]
+#[path = "git_lane_pack_plan_tests.rs"]
+mod git_lane_pack_plan_tests;
