@@ -11,14 +11,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const STATE_FORMAT: &str = "heddle-agent-claim";
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
 const STATE_FILE: &str = "agent-claim.toml";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ClaimStatus {
+    Dormant,
     Active,
-    Consented,
+    Prepared,
+    Claimed,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -26,7 +28,7 @@ pub(crate) struct ClaimState {
     format: String,
     version: u32,
     pub(crate) server: String,
-    pub(crate) account_id: String,
+    pub(crate) owner_id: uuid::Uuid,
     pub(crate) subject: String,
     pub(crate) pet_name: String,
     pub(crate) node_id: String,
@@ -34,12 +36,14 @@ pub(crate) struct ClaimState {
     secret_hash: String,
     pub(crate) expires_at_millis: i64,
     status: ClaimStatus,
+    prepared_handle: Option<String>,
+    prepared_nonce_hash: Option<String>,
 }
 
 impl ClaimState {
     pub(crate) fn new(
         server: String,
-        account_id: String,
+        owner_id: uuid::Uuid,
         subject: String,
         pet_name: String,
         node_id: String,
@@ -48,29 +52,38 @@ impl ClaimState {
             format: STATE_FORMAT.to_string(),
             version: STATE_VERSION,
             server,
-            account_id,
+            owner_id,
             subject,
             pet_name,
             node_id,
             created_at: chrono::Utc::now().to_rfc3339(),
             secret_hash: String::new(),
             expires_at_millis: 0,
-            status: ClaimStatus::Consented,
+            status: ClaimStatus::Dormant,
+            prepared_handle: None,
+            prepared_nonce_hash: None,
         }
     }
 
-    pub(crate) fn reissue(&mut self, secret: &[u8], expires_at_millis: i64) {
+    pub(crate) fn reissue(&mut self, secret: &[u8], expires_at_millis: i64) -> bool {
+        if matches!(self.status, ClaimStatus::Claimed) {
+            return false;
+        }
         self.secret_hash = hex::encode(Sha256::digest(secret));
         self.expires_at_millis = expires_at_millis;
         self.status = ClaimStatus::Active;
+        self.prepared_handle = None;
+        self.prepared_nonce_hash = None;
+        true
     }
 
     pub(crate) fn is_active(&self, now: i64) -> bool {
-        matches!(self.status, ClaimStatus::Active) && now < self.expires_at_millis
+        matches!(self.status, ClaimStatus::Active | ClaimStatus::Prepared)
+            && now < self.expires_at_millis
     }
 
     pub(crate) fn accepts(&self, secret: &[u8], now: i64) -> bool {
-        if now >= self.expires_at_millis {
+        if !self.is_active(now) {
             return false;
         }
         let Ok(expected) = hex::decode(&self.secret_hash) else {
@@ -83,12 +96,36 @@ impl ClaimState {
         &self.secret_hash
     }
 
-    pub(crate) fn is_consented(&self) -> bool {
-        matches!(self.status, ClaimStatus::Consented)
+    pub(crate) fn is_claimed(&self) -> bool {
+        matches!(self.status, ClaimStatus::Claimed)
     }
 
-    pub(crate) fn mark_consented(&mut self) {
-        self.status = ClaimStatus::Consented;
+    pub(crate) fn prepare(&mut self, handle: &str, nonce: &[u8]) -> bool {
+        let nonce_hash = hex::encode(Sha256::digest(nonce));
+        match self.status {
+            ClaimStatus::Active => {
+                self.status = ClaimStatus::Prepared;
+                self.prepared_handle = Some(handle.to_string());
+                self.prepared_nonce_hash = Some(nonce_hash);
+                true
+            }
+            ClaimStatus::Prepared => {
+                self.prepared_handle.as_deref() == Some(handle)
+                    && self.prepared_nonce_hash.as_deref() == Some(nonce_hash.as_str())
+            }
+            ClaimStatus::Dormant | ClaimStatus::Claimed => false,
+        }
+    }
+
+    pub(crate) fn claim(&mut self, handle: &str) -> bool {
+        if !matches!(self.status, ClaimStatus::Prepared)
+            || self.prepared_handle.as_deref() != Some(handle)
+        {
+            return false;
+        }
+        self.status = ClaimStatus::Claimed;
+        self.prepared_nonce_hash = None;
+        true
     }
 }
 
@@ -108,6 +145,14 @@ pub(crate) fn write_lock() -> Result<WriteLockGuard> {
     claim_lock(&state_path())
         .write()
         .map_err(|error| anyhow::anyhow!(error))
+}
+
+pub(crate) fn load_while_locked() -> Result<Option<ClaimState>> {
+    load_at(&state_path())
+}
+
+pub(crate) fn store_while_locked(state: &ClaimState) -> Result<()> {
+    store_at_unlocked(&state_path(), state)
 }
 
 fn load_at(path: &Path) -> Result<Option<ClaimState>> {
@@ -133,6 +178,10 @@ fn store_at(path: &Path, state: &ClaimState) -> Result<()> {
     let _guard = claim_lock(path)
         .write()
         .map_err(|error| anyhow::anyhow!(error))?;
+    store_at_unlocked(path, state)
+}
+
+fn store_at_unlocked(path: &Path, state: &ClaimState) -> Result<()> {
     let encoded = toml::to_string_pretty(state).context("serializing claim state")?;
     write_file_atomic_secret(path, encoded.as_bytes())
         .with_context(|| format!("writing {}", path.display()))
@@ -161,7 +210,7 @@ mod tests {
     fn state() -> ClaimState {
         ClaimState::new(
             "api.heddle.test".into(),
-            "account-1".into(),
+            uuid::Uuid::parse_str("7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28").unwrap(),
             "subject-1".into(),
             "quiet-otter".into(),
             "11".repeat(32),
@@ -171,11 +220,25 @@ mod tests {
     #[test]
     fn reissue_invalidates_the_previous_secret() {
         let mut state = state();
-        state.reissue(b"first-secret", 2_000);
+        assert!(state.reissue(b"first-secret", 2_000));
         assert!(state.accepts(b"first-secret", 1_000));
-        state.reissue(b"second-secret", 2_000);
+        assert!(state.reissue(b"second-secret", 2_000));
         assert!(!state.accepts(b"first-secret", 1_000));
         assert!(state.accepts(b"second-secret", 1_000));
+    }
+
+    #[test]
+    fn prepared_claim_is_bound_to_one_handle_and_nonce() {
+        let mut state = state();
+        assert!(state.reissue(b"claim-secret", 2_000));
+        assert!(state.prepare("human-handle", b"nonce-one"));
+        assert!(state.prepare("human-handle", b"nonce-one"));
+        assert!(!state.prepare("other-handle", b"nonce-one"));
+        assert!(!state.prepare("human-handle", b"nonce-two"));
+        assert!(!state.claim("other-handle"));
+        assert!(state.claim("human-handle"));
+        assert!(!state.accepts(b"claim-secret", 1_000));
+        assert!(!state.reissue(b"third-secret", 3_000));
     }
 
     #[test]
@@ -183,7 +246,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("claim.toml");
         let mut state = state();
-        state.reissue(b"super-secret-value", 2_000);
+        assert!(state.reissue(b"super-secret-value", 2_000));
         assert!(!state.accepts(b"super-secret-value", 2_000));
         store_at(&path, &state).expect("store claim state");
         let contents = std::fs::read_to_string(path).expect("read claim state");

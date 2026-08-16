@@ -464,7 +464,7 @@ mod tests {
     use sley_transport::{GitCredential, HttpResponse, parse_remote_url};
     use tempfile::TempDir;
 
-    use super::EmbeddingSafeCredentialProvider;
+    use super::{EmbeddingSafeCredentialProvider, MAX_CREDENTIAL_HELPER_OUTPUT};
 
     fn write_helper(directory: &Path, name: &str, body: &str) -> PathBuf {
         let helper = directory.join(format!("git-credential-{name}"));
@@ -518,6 +518,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(credential_helpers)]
     fn https_transport_retries_with_bare_credential_helper_without_git_dispatch() {
         let temp = TempDir::new().expect("tempdir");
         let helper = write_helper(
@@ -559,6 +560,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(credential_helpers)]
     fn missing_bare_helper_falls_through_to_the_next_helper() {
         let temp = TempDir::new().expect("tempdir");
         let helper = write_helper(
@@ -589,6 +591,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(credential_helpers)]
     fn failing_bare_helper_falls_through_to_the_next_helper() {
         let temp = TempDir::new().expect("tempdir");
         let helper = write_helper(temp.path(), "heddle-fails", "exit 23");
@@ -622,6 +625,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(credential_helpers)]
     fn url_scoped_reset_runs_only_helpers_selected_for_the_request() {
         let temp = TempDir::new().expect("tempdir");
         let global = write_helper(
@@ -665,13 +669,19 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(credential_helpers)]
     fn oversized_streaming_helper_is_killed_before_fallback_runs() {
         let temp = TempDir::new().expect("tempdir");
         let oversized = write_helper(
             temp.path(),
             "heddle-oversized",
-            "cat >/dev/null\nwhile :; do printf '0123456789abcdef'; done",
+            "cat >/dev/null\ncat \"$0.output\"",
         );
+        fs::write(
+            format!("{}.output", oversized.display()),
+            vec![b'x'; MAX_CREDENTIAL_HELPER_OUTPUT + 1],
+        )
+        .expect("write oversized helper output");
         let fallback = write_helper(
             temp.path(),
             "heddle-after-oversized",
@@ -681,10 +691,17 @@ mod tests {
             b"[credential]\n\tinteractive = false\n\thelper = heddle-oversized\n\thelper = heddle-after-oversized\n",
         )
         .expect("parse config");
+        let coverage_instrumented = std::env::var_os("LLVM_PROFILE_FILE").is_some()
+            || std::env::var_os("CARGO_LLVM_COV").is_some();
+        let helper_timeout = if coverage_instrumented {
+            Duration::from_secs(10)
+        } else {
+            Duration::from_secs(2)
+        };
         let mut provider = EmbeddingSafeCredentialProvider::with_search_path_and_timeout(
             &config,
             Some(temp.path().as_os_str()),
-            Duration::from_secs(2),
+            helper_timeout,
         );
         assert_helper_preconditions(&provider, &oversized, temp.path());
         assert_helper_preconditions(&provider, &fallback, temp.path());
@@ -704,6 +721,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(credential_helpers)]
     fn nonterminating_helper_is_killed_at_the_deadline_before_fallback_runs() {
         let temp = TempDir::new().expect("tempdir");
         let hanging = write_helper(temp.path(), "heddle-hangs", "cat >/dev/null\nexec sleep 30");
@@ -735,6 +753,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(credential_helpers)]
     fn nonterminating_store_helper_is_killed_at_the_deadline() {
         let temp = TempDir::new().expect("tempdir");
         write_helper(
@@ -762,6 +781,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(credential_helpers)]
     fn built_in_helpers_use_heddles_direct_embedding_dispatch() {
         let config = sley::GitConfig::parse(
             b"[credential]\n\thelper = store --file=/tmp/heddle-credentials\n",
@@ -781,6 +801,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(credential_helpers)]
     fn bare_manager_resolves_to_the_standalone_helper_binary() {
         let temp = TempDir::new().expect("tempdir");
         let manager = temp.path().join("git-credential-manager");

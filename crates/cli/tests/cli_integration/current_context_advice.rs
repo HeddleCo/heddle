@@ -3,6 +3,7 @@
 
 use std::{fs, str};
 
+use refs::Head;
 use repo::Repository;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -20,11 +21,8 @@ fn setup_detached_repo_without_current_thread() -> TempDir {
         .head()
         .unwrap()
         .expect("repo should have a current state after capture");
-    fs::write(
-        temp.path().join(".heddle").join("HEAD"),
-        format!("{}\n", head.to_string_full()),
-    )
-    .unwrap();
+    repo.write_head_recorded(&Head::Detached { state: head })
+        .unwrap();
     drop(repo);
 
     temp

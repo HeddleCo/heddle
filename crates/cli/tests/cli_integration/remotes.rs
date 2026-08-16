@@ -3451,6 +3451,8 @@ fn push_bootstrap_with_valid_config_still_creates_state() {
 
     heddle(&["init"], Some(source.path())).expect("init source");
     heddle(&["init"], Some(remote.path())).expect("init target");
+    std::fs::write(source.path().join("bootstrap.txt"), "bootstrap\n")
+        .expect("write bootstrap fixture");
 
     let before = Repository::open(source.path()).expect("open source");
     before

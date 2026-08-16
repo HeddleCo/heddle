@@ -12,7 +12,7 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use heddle_core::visibility_tier_label;
-use objects::object::{StateId, StateVisibility, VisibilityTier};
+use objects::object::{StateVisibility, VisibilityTier};
 use repo::{Repository, VisibilityCommitKind};
 use serde::Serialize;
 
@@ -20,6 +20,8 @@ use crate::cli::{
     Cli, VisibilityCommands, VisibilityListArgs, VisibilityPromoteArgs, VisibilitySetArgs,
     VisibilityShowArgs, should_output_json,
 };
+
+use super::history_target::resolve_state_id as resolve_state;
 
 pub fn cmd_visibility(cli: &Cli, command: VisibilityCommands) -> Result<()> {
     let repo = cli.open_repo()?;
@@ -34,12 +36,6 @@ pub fn cmd_visibility(cli: &Cli, command: VisibilityCommands) -> Result<()> {
 /// The team id / scope label carried by a non-public tier, for output.
 fn tier_label(tier: &VisibilityTier) -> Option<&str> {
     visibility_tier_label(tier)
-}
-
-fn resolve_state(repo: &Repository, spec: &str) -> Result<StateId> {
-    repo.resolve_state(spec)
-        .with_context(|| format!("resolve state '{}'", spec))?
-        .ok_or_else(|| anyhow!("state '{}' not found", spec))
 }
 
 #[derive(Serialize)]

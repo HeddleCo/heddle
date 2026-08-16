@@ -104,16 +104,32 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
     // Durable invite claim mints a signup bearer; derived agents must not
     // consume invite codes on behalf of a parent principal.
     ("ClaimSignupInvite", AgentAuthOperationDisposition::Denied),
+    // Public drop selection accepts an optional verified agent subject only
+    // to choose the subject-scoped anti-abuse budget.
+    (
+        "ClaimNextDropCode",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
+    (
+        "RemainingDropCodes",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
     (
         "IssueSignupEmailChallenge",
         AgentAuthOperationDisposition::Denied,
     ),
-    // Consumes a human invite to open an agent-rooted account; account
+    // Consumes a human invite to open an unclaimed placeholder account;
     // provisioning stays parent-only even though the RPC is public.
+    ("CreateAgentAccount", AgentAuthOperationDisposition::Denied),
+    // Legacy generated-handle variant of create-on-behalf. It remains in the
+    // shared contract but is not the pet-name claim path used by this CLI.
     (
         "ProvisionAgentRootedAccount",
         AgentAuthOperationDisposition::Denied,
     ),
+    // Claim promotion is authorized by the browser's verified passkey and the
+    // agent's dedicated Iroh consent, never by an attached derived bearer.
+    ("PromoteAgentAccount", AgentAuthOperationDisposition::Denied),
     (
         "ResolveSignupInvite",
         AgentAuthOperationDisposition::ReviewedSafe,

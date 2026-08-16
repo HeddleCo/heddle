@@ -1,4 +1,4 @@
-//! Data-only browser claim resolution and promotion consent.
+//! Data-only browser claim resolution and two-phase promotion consent.
 
 // The transport contract owns `CallFailure` by value at this seam.
 #![allow(clippy::result_large_err)]
@@ -18,7 +18,8 @@ use super::{
     identity_state::{self, ClaimState},
 };
 
-const CONSENT_TTL_MILLIS: i64 = 5 * 60 * 1_000;
+const PRE_CONSENT_DOMAIN: &[u8] = b"heddle-agent-pre-consent-v1";
+const PROMOTE_CONSENT_DOMAIN: &[u8] = b"heddle-agent-promote-consent-v1";
 
 #[derive(Clone, Debug)]
 pub(crate) struct StoredClaimAuthorization;
@@ -41,7 +42,7 @@ impl ClaimSecretVerifier for StoredClaimAuthorization {
             return Err(auth_failure());
         }
         Ok(VerifiedClaimPrincipal {
-            subject: state.account_id.clone(),
+            subject: state.owner_id.to_string(),
             authorization_hash: state.authorization_hash().to_string(),
         })
     }
@@ -58,17 +59,23 @@ impl ClaimHandler for StoredClaimAuthorization {
         // lock, two browser requests verified against the same one-time
         // secret could both load Active state before either consumed it.
         let _guard = identity_state::write_lock().map_err(internal_failure)?;
-        let mut state = identity_state::load()
+        let mut state = identity_state::load_while_locked()
             .map_err(internal_failure)?
             .ok_or_else(auth_failure)?;
-        if state.account_id != principal.subject
+        if state.owner_id.to_string() != principal.subject
             || state.authorization_hash() != principal.authorization_hash
+            || !state.is_active(chrono::Utc::now().timestamp_millis())
         {
             return Err(auth_failure());
         }
         match method {
             CLAIM_RESOLVE_METHOD => resolved_reply(&state, body),
-            CLAIM_CONSENT_METHOD => consent_reply(&mut state, body),
+            CLAIM_CONSENT_METHOD => {
+                let signer = claim_signer(&state)?;
+                let reply = consent_reply(&mut state, body, &signer)?;
+                identity_state::store_while_locked(&state).map_err(internal_failure)?;
+                Ok(reply)
+            }
             _ => Err(failure(
                 CallFailureCode::Unimplemented,
                 "unknown claim method",
@@ -80,29 +87,35 @@ impl ClaimHandler for StoredClaimAuthorization {
 #[derive(Deserialize)]
 #[serde(
     tag = "kind",
-    rename_all = "lowercase",
+    rename_all = "camelCase",
     rename_all_fields = "camelCase",
     deny_unknown_fields
 )]
 enum ClaimRequest {
     Resolve,
-    Consent {
+    PreConsent {
+        handle: String,
+        nonce: String,
+    },
+    PromoteConsent {
         handle: String,
         credential_id: String,
     },
 }
 
 #[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[serde(tag = "kind", rename_all = "camelCase")]
 enum ClaimReply {
     Resolved { agent: AgentAccountSummary },
-    Consented { consent: AgentConsent },
+    PreConsented { consent: AgentConsent },
+    PromoteConsented { consent: AgentConsent },
     Refused { refusal: &'static str },
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentAccountSummary {
+    account_id: String,
     pet_name: String,
     created_at: String,
     last_active_at: Option<String>,
@@ -115,21 +128,21 @@ struct AgentAccountSummary {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentConsent {
+    pub(crate) account_id: String,
     pub(crate) node_id: String,
-    pub(crate) statement: String,
     pub(crate) signature: String,
-    pub(crate) expires_at: i64,
 }
 
 pub(crate) fn resolved_reply(state: &ClaimState, body: &[u8]) -> Result<Vec<u8>, CallFailure> {
     if !matches!(parse_request(body)?, ClaimRequest::Resolve) {
         return Err(invalid_failure("resolve body has the wrong kind"));
     }
-    let reply = if state.is_consented() {
+    let reply = if state.is_claimed() {
         ClaimReply::Refused { refusal: "claimed" }
     } else {
         ClaimReply::Resolved {
             agent: AgentAccountSummary {
+                account_id: state.owner_id.to_string(),
                 pet_name: state.pet_name.clone(),
                 created_at: state.created_at.clone(),
                 last_active_at: None,
@@ -143,59 +156,115 @@ pub(crate) fn resolved_reply(state: &ClaimState, body: &[u8]) -> Result<Vec<u8>,
     serde_json::to_vec(&reply).map_err(internal_failure)
 }
 
-pub(crate) fn consent_reply(state: &mut ClaimState, body: &[u8]) -> Result<Vec<u8>, CallFailure> {
-    let ClaimRequest::Consent {
-        handle,
-        credential_id,
-    } = parse_request(body)?
-    else {
-        return Err(invalid_failure("consent body has the wrong kind"));
-    };
-    if state.is_consented() {
-        return serde_json::to_vec(&ClaimReply::Refused { refusal: "claimed" })
-            .map_err(internal_failure);
+pub(crate) fn consent_reply(
+    state: &mut ClaimState,
+    body: &[u8],
+    signer: &Ed25519Signer,
+) -> Result<Vec<u8>, CallFailure> {
+    if state.is_claimed() {
+        return Err(failure(
+            CallFailureCode::FailedPrecondition,
+            "account claim is already complete",
+        ));
     }
-    validate_handle(&handle)?;
-    validate_credential_id(&credential_id)?;
-    let now = chrono::Utc::now().timestamp_millis();
-    let expires_at = (now + CONSENT_TTL_MILLIS).min(state.expires_at_millis);
-    if expires_at <= now {
-        return Err(auth_failure());
+    match parse_request(body)? {
+        ClaimRequest::PreConsent { handle, nonce } => {
+            validate_handle(&handle)?;
+            let nonce = decode_nonce(&nonce)?;
+            if !state.prepare(&handle, &nonce) {
+                return Err(failure(
+                    CallFailureCode::PermissionDenied,
+                    "claim binding does not match the opened ceremony",
+                ));
+            }
+            let consent = signed_pre_consent(state, &handle, &nonce, signer)?;
+            serde_json::to_vec(&ClaimReply::PreConsented { consent }).map_err(internal_failure)
+        }
+        ClaimRequest::PromoteConsent {
+            handle,
+            credential_id,
+        } => {
+            validate_handle(&handle)?;
+            validate_credential_id(&credential_id)?;
+            if !state.claim(&handle) {
+                return Err(failure(
+                    CallFailureCode::FailedPrecondition,
+                    "claim promotion does not match its pre-consent",
+                ));
+            }
+            let consent = signed_promote_consent(state, &handle, &credential_id, signer)?;
+            serde_json::to_vec(&ClaimReply::PromoteConsented { consent }).map_err(internal_failure)
+        }
+        ClaimRequest::Resolve => Err(invalid_failure("consent body has the wrong kind")),
     }
-    let signer = claim_signer(state)?;
-    let consent = signed_consent(state, &handle, &credential_id, expires_at, &signer)?;
-    state.mark_consented();
-    identity_state::store(state).map_err(internal_failure)?;
-    serde_json::to_vec(&ClaimReply::Consented { consent }).map_err(internal_failure)
 }
 
-pub(crate) fn signed_consent(
+pub(crate) fn signed_pre_consent(
+    state: &ClaimState,
+    handle: &str,
+    nonce: &[u8],
+    signer: &Ed25519Signer,
+) -> Result<AgentConsent, CallFailure> {
+    let statement = pre_consent_message(state, handle, nonce)?;
+    let signature = URL_SAFE_NO_PAD.encode(signer.sign(&statement).map_err(internal_failure)?);
+    Ok(AgentConsent {
+        account_id: state.owner_id.to_string(),
+        node_id: state.node_id.clone(),
+        signature,
+    })
+}
+
+pub(crate) fn signed_promote_consent(
     state: &ClaimState,
     handle: &str,
     credential_id: &str,
-    expires_at: i64,
     signer: &Ed25519Signer,
 ) -> Result<AgentConsent, CallFailure> {
-    let statement = serde_json::json!({
-        "accountId": state.account_id,
-        "credentialId": credential_id,
-        "expiresAt": expires_at,
-        "handle": handle,
-        "nodeId": state.node_id,
-        "purpose": "heddle-agent-account-promotion-v1"
-    })
-    .to_string();
-    let signature = URL_SAFE_NO_PAD.encode(
-        signer
-            .sign(statement.as_bytes())
-            .map_err(internal_failure)?,
-    );
+    let statement = promote_consent_message(state, handle, credential_id)?;
+    let signature = URL_SAFE_NO_PAD.encode(signer.sign(&statement).map_err(internal_failure)?);
     Ok(AgentConsent {
+        account_id: state.owner_id.to_string(),
         node_id: state.node_id.clone(),
-        statement,
         signature,
-        expires_at,
     })
+}
+
+pub(crate) fn pre_consent_message(
+    state: &ClaimState,
+    handle: &str,
+    nonce: &[u8],
+) -> Result<Vec<u8>, CallFailure> {
+    encode_counted(&[
+        PRE_CONSENT_DOMAIN,
+        state.owner_id.to_string().as_bytes(),
+        handle.as_bytes(),
+        state.node_id.as_bytes(),
+        nonce,
+    ])
+}
+
+pub(crate) fn promote_consent_message(
+    state: &ClaimState,
+    handle: &str,
+    credential_id: &str,
+) -> Result<Vec<u8>, CallFailure> {
+    encode_counted(&[
+        PROMOTE_CONSENT_DOMAIN,
+        state.owner_id.to_string().as_bytes(),
+        handle.as_bytes(),
+        credential_id.as_bytes(),
+    ])
+}
+
+fn encode_counted(parts: &[&[u8]]) -> Result<Vec<u8>, CallFailure> {
+    let mut encoded = Vec::new();
+    for part in parts {
+        let length = u32::try_from(part.len())
+            .map_err(|_| invalid_failure("claim consent field is too large"))?;
+        encoded.extend_from_slice(&length.to_be_bytes());
+        encoded.extend_from_slice(part);
+    }
+    Ok(encoded)
 }
 
 fn claim_signer(state: &ClaimState) -> Result<Ed25519Signer, CallFailure> {
@@ -222,6 +291,18 @@ fn claim_signer(state: &ClaimState) -> Result<Ed25519Signer, CallFailure> {
 
 fn parse_request(body: &[u8]) -> Result<ClaimRequest, CallFailure> {
     serde_json::from_slice(body).map_err(|_| invalid_failure("invalid claim request body"))
+}
+
+fn decode_nonce(nonce: &str) -> Result<Vec<u8>, CallFailure> {
+    let nonce = URL_SAFE_NO_PAD
+        .decode(nonce)
+        .map_err(|_| invalid_failure("invalid claim nonce"))?;
+    if !(16..=1024).contains(&nonce.len()) {
+        return Err(invalid_failure(
+            "claim nonce must contain between 16 and 1024 bytes",
+        ));
+    }
+    Ok(nonce)
 }
 
 pub(crate) fn validate_handle(handle: &str) -> Result<(), CallFailure> {

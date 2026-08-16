@@ -10,31 +10,13 @@
 //! asserts refresh fails loud rather than committing data loss. The
 //! second exercises a legitimate directory rename and ensures the same
 //! integration path does not false-positive.
-use std::{fs, path::Path};
+use std::fs;
 
 use objects::{object::ThreadName, store::ObjectStore};
 use repo::Repository;
 use tempfile::TempDir;
 
-use super::heddle;
-
-/// Walk the loose-objects tree at `.heddle/objects/trees/<prefix>/<rest>`
-/// and remove the file whose hash matches `target`. Returns whether a
-/// matching file was actually deleted, so the test can assert the
-/// tampering set up the corruption it intended.
-fn delete_loose_tree(repo_root: &Path, target_hex: &str) -> bool {
-    let prefix = &target_hex[..2];
-    let rest = &target_hex[2..];
-    let path = repo_root
-        .join(".heddle/objects/trees")
-        .join(prefix)
-        .join(rest);
-    match fs::remove_file(&path) {
-        Ok(()) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => panic!("failed to delete loose tree at {path:?}: {error}"),
-    }
-}
+use super::{delete_tree_object, heddle};
 
 /// Red-commit guard for heddle#90: a subtree that the merge wants to
 /// recurse into MUST be present in the object store. If it isn't —
@@ -121,10 +103,10 @@ fn test_merge_missing_base_subtree_fails_loud_not_silent_erase() {
     // Tamper with the on-disk store. The merge subprocess starts cold
     // (no in-memory caches), so this is the exact failure mode a
     // user with a corrupt object would hit.
-    let deleted = delete_loose_tree(temp.path(), &sub_hash_hex);
+    let deleted = delete_tree_object(temp.path(), &sub_hash_hex);
     assert!(
         deleted,
-        "test setup: expected to find loose tree at hash {sub_hash_hex} to delete",
+        "test setup: expected to find tree at hash {sub_hash_hex} to delete",
     );
 
     // Refresh is the current public operation that integrates the parent

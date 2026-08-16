@@ -480,6 +480,9 @@ impl DaemonHandler for LocalMonitorServer {
         if self.shutdown_requested {
             return IdleDecision::Exit;
         }
+        if !self.repo_root.exists() {
+            return IdleDecision::Exit;
+        }
         // fsmonitor drains pending notify events between accepts so
         // the change cursor stays current even when no CLI is
         // querying. Errors here historically propagated; preserve
@@ -1689,6 +1692,22 @@ mod tests {
         let shutdown = shutdown_local_monitor_helper(&checkout).unwrap();
         assert!(!endpoint_path.exists());
         drop(shutdown);
+    }
+
+    #[test]
+    fn helper_exits_when_watched_repository_is_removed() {
+        let temp = TempDir::new().unwrap();
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".heddle/state")).unwrap();
+        let state_path = checkout.join(".heddle/state/fsmonitor.toml");
+        let mut server = super::LocalMonitorServer::new(checkout.clone(), state_path).unwrap();
+
+        std::fs::remove_dir_all(&checkout).unwrap();
+
+        assert_eq!(
+            crate::daemon::server::DaemonHandler::on_tick(&mut server, std::time::Duration::ZERO,),
+            crate::daemon::IdleDecision::Exit
+        );
     }
 
     #[test]

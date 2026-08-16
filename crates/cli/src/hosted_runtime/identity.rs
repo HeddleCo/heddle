@@ -1,7 +1,7 @@
 //! Reuse-first machine identity and browser claim-link commands.
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v1alpha1::ProvisionAgentRootedAccountRequest;
+use api::heddle::api::v1alpha1::CreateAgentAccountRequest;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use cli_shared::{UserConfig, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer as _};
@@ -109,7 +109,7 @@ async fn ensure(
         }
         EnsureAction::Provision => {
             let invite = invite.ok_or_else(|| anyhow::anyhow!("identity decision lost invite"))?;
-            provision_and_claim(ctx, server, invite).await
+            create_on_behalf(ctx, server, invite).await
         }
         EnsureAction::RequireInvite => bail!(
             "no existing account credential for {server}; supply --invite to create a placeholder human account"
@@ -126,7 +126,7 @@ pub(crate) fn ensure_action(derived: Option<bool>, has_invite: bool) -> EnsureAc
     }
 }
 
-async fn provision_and_claim(
+async fn create_on_behalf(
     ctx: &(dyn CliContext + 'static),
     server: String,
     invite: String,
@@ -154,13 +154,15 @@ async fn provision_and_claim(
         value => value,
     };
     let response = client
-        .provision_agent_rooted_account(ProvisionAgentRootedAccountRequest {
+        .create_agent_account(CreateAgentAccountRequest {
             invite_code: invite,
             agent_public_key: signer.public_key().to_vec(),
             client_operation_id: operation_id,
         })
         .await
-        .map_err(|error| anyhow::anyhow!("provisioning agent-rooted account: {error}"));
+        .map_err(|error| {
+            anyhow::anyhow!("creating placeholder account on behalf of human: {error}")
+        });
     client.close().await;
     let response = response?;
     let token = String::from_utf8(response.agent_capability)
@@ -181,11 +183,13 @@ async fn provision_and_claim(
             expires_at: metadata.expires_at,
         },
     )?;
+    let owner_id = uuid::Uuid::parse_str(&response.account_id)
+        .context("server returned a non-UUID account identity")?;
     let state = ClaimState::new(
         server.clone(),
-        response.account_id,
+        owner_id,
         metadata.subject.clone(),
-        response.handle,
+        response.pet_name,
         node_id,
     );
     identity_state::store(&state)?;
@@ -246,7 +250,9 @@ fn reissue(server: &str, ttl_secs: u64) -> Result<(String, String)> {
         .timestamp_millis()
         .checked_add(ttl_millis)
         .context("claim expiry overflow")?;
-    state.reissue(&secret, expires);
+    if !state.reissue(&secret, expires) {
+        bail!("account claim is already complete");
+    }
     identity_state::store(&state)?;
     let encoded_secret = URL_SAFE_NO_PAD.encode(secret);
     let url = format!(

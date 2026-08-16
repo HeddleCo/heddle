@@ -179,8 +179,14 @@ fn rejects_symlink_target_path_for_materialized_start() {
 #[test]
 fn test_snapshot_excludes_nested_thread_worktrees() {
     let main = setup_repo("hello.txt", "world");
-    let nested = main.path().join("agents").join("approach-x");
-    fs::create_dir_all(&nested).unwrap();
+    let agents = main.path().join("agents");
+    fs::create_dir(&agents).unwrap();
+    heddle(
+        &["capture", "-m", "add nested worktree container"],
+        Some(main.path()),
+    )
+    .unwrap();
+    let nested = agents.join("approach-x");
 
     heddle(
         &[

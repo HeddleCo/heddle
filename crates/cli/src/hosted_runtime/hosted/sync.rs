@@ -2756,6 +2756,8 @@ mod pull_bootstrap_tests {
         let snapshot = repo
             .snapshot(Some("bootstrap marker".to_string()), None)
             .expect("snapshot");
+        repo.create_marker_recorded(&MarkerName::from("release"), &snapshot.state_id)
+            .expect("seed existing marker");
         let payload = rmp_serde::to_vec_named(&(
             true,
             Vec::<Discussion>::new(),
