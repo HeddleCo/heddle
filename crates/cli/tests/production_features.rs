@@ -559,34 +559,46 @@ mod fsck {
         let temp = TempDir::new().unwrap();
         setup_repo_with_file(&temp, "file.txt", "content");
 
-        // Snapshot pack-batches blobs into `.heddle/packs/*.pack`, so
-        // there's no loose blob to overwrite. Scramble the pack
-        // payload after its 8-byte magic+version header — the read
-        // path will surface a hash mismatch, decompression error, or
-        // structural failure. Fsck accepts any of those signals.
-        // Capture can install more than one pack (source blobs plus sidecar
-        // packs such as the semantic index). Corrupt every pack large enough
-        // to scramble so the source-object pack — the one fsck walks — is
-        // always hit, independent of read_dir order.
-        let packs_dir = temp.path().join(".heddle/packs");
-        let mut corrupted = false;
-        for entry in fs::read_dir(&packs_dir).unwrap().filter_map(Result::ok) {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("pack") {
-                continue;
-            }
-            let mut bytes = fs::read(&path).unwrap();
-            if bytes.len() <= 32 {
-                continue;
-            }
-            let end = bytes.len().min(48);
-            for b in &mut bytes[16..end] {
-                *b ^= 0xFF;
-            }
-            fs::write(&path, bytes).unwrap();
-            corrupted = true;
+        // Capture stores the source blob in an authoritative snapshot pack.
+        // Materialize every packed object as loose before removing the packs,
+        // then corrupt the exact blob referenced by the current tree. This
+        // keeps the fixture deterministic as the pack layout evolves.
+        use objects::store::ObjectStore;
+
+        let repo = Repository::open(temp.path()).unwrap();
+        let store = repo.store();
+        let state = repo.current_state().unwrap().unwrap();
+        let tree = store.get_tree(&state.tree).unwrap().unwrap();
+        let blob = tree
+            .get("file.txt")
+            .and_then(|entry| entry.blob_hash())
+            .expect("captured file should reference a blob");
+        for state_id in store.list_states().unwrap() {
+            let state = store.get_state(&state_id).unwrap().unwrap();
+            store.put_state(&state).unwrap();
         }
-        assert!(corrupted, "should have found a pack file to corrupt");
+        for tree_id in store.list_trees().unwrap() {
+            let serialized = store.get_tree_serialized(&tree_id).unwrap().unwrap();
+            store.put_tree_serialized(&serialized, tree_id).unwrap();
+        }
+        for blob_id in store.list_blobs().unwrap() {
+            store.promote_to_loose_uncompressed(&blob_id).unwrap();
+        }
+        let blob_path = store
+            .loose_blob_path(&blob)
+            .expect("source blob should have a loose copy");
+        drop(repo);
+
+        let packs_dir = temp.path().join(".heddle/packs");
+        for entry in fs::read_dir(&packs_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                fs::remove_dir_all(path).unwrap();
+            } else {
+                fs::remove_file(path).unwrap();
+            }
+        }
+        fs::write(blob_path, b"corrupt blob").unwrap();
 
         let error = heddle(&["fsck", "--full"], Some(temp.path()))
             .expect_err("full fsck must fail when a source-object pack is corrupt");

@@ -685,9 +685,9 @@ fn test_undo_recover_refuses_when_preserved_state_is_missing() {
     let recovery_state = head_short(temp.path());
     heddle_must_succeed(&["undo", "--hard"], temp.path());
 
-    let state_path = locate_state_loose_file(temp.path(), &recovery_state)
-        .expect("preserved state has a loose object");
-    std::fs::remove_file(state_path).unwrap();
+    if let Some(state_path) = locate_state_loose_file(temp.path(), &recovery_state) {
+        std::fs::remove_file(state_path).unwrap();
+    }
     wipe_pack_store(temp.path());
 
     let missing = heddle(
@@ -760,9 +760,9 @@ fn test_undo_refuses_when_prior_state_missing() {
     // gone from the loose store *and* any pack that might contain it.
     // Mirrors a `gc --prune` having reached past the live oplog, or an oplog
     // backup restored without its objects.
-    let state_path = locate_state_loose_file(temp.path(), &first_state_short)
-        .expect("prior state's loose file is present after capture");
-    std::fs::remove_file(&state_path).unwrap();
+    if let Some(state_path) = locate_state_loose_file(temp.path(), &first_state_short) {
+        std::fs::remove_file(state_path).unwrap();
+    }
     // Drop every pack in the repo too; heddle writes packs eagerly and a
     // surviving pack would still resolve the state, masking the test's
     // destructive-boundary intent.

@@ -130,7 +130,7 @@ pub fn cmd_undo(
             } else if cli.verbose > 0 {
                 print_batches(&output.batches);
             } else {
-                print_human_history(&output.batches);
+                render_human_history(&output.batches);
             }
         }
 
@@ -180,7 +180,7 @@ pub fn cmd_undo(
             if cli.verbose > 0 {
                 print_batches(&output.batches);
             } else {
-                print_human_history(&output.batches);
+                render_human_history(&output.batches);
             }
         }
 
@@ -265,9 +265,9 @@ pub fn cmd_undo(
         if cli.verbose > 0 {
             print_batches(&output.batches);
         } else {
-            print_human_history(&output.batches);
+            render_human_history(&output.batches);
         }
-        print_head(&post_undo_repo)?;
+        render_head(&post_undo_repo)?;
         if let Some(state) = &output.recovery_state {
             println!(
                 "Preserved pre-undo state {} as `{}`",
@@ -395,7 +395,7 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
             if cli.verbose > 0 {
                 print_batches(&output.batches);
             } else {
-                print_human_history(&output.batches);
+                render_human_history(&output.batches);
             }
         }
 
@@ -441,15 +441,15 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
         if cli.verbose > 0 {
             print_batches(&output.batches);
         } else {
-            print_human_history(&output.batches);
+            render_human_history(&output.batches);
         }
-        print_head(&repo)?;
+        render_head(&repo)?;
     }
 
     Ok(())
 }
 
-fn print_human_history(batches: &[UndoBatchSummary]) {
+fn render_human_history(batches: &[UndoBatchSummary]) {
     for batch in batches {
         let status = if batch.undone {
             " undone"
@@ -501,7 +501,7 @@ fn print_batches(batches: &[UndoBatchSummary]) {
     }
 }
 
-fn print_head(repo: &Repository) -> Result<()> {
+fn render_head(repo: &Repository) -> Result<()> {
     if let Some(id) = repo.head()? {
         println!("Now at: {}", id.short());
     }

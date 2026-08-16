@@ -29,6 +29,64 @@ fn heddle_output(
     cli_test_support::heddle_output(args, cwd, &[])
 }
 
+/// Remove one tree from the native object store while preserving every other
+/// packed object as a loose copy. Snapshot commits are authoritative packs, so
+/// corruption fixtures cannot assume the target tree has a loose file.
+fn delete_tree_object(repo_root: &std::path::Path, target_hex: &str) -> bool {
+    use objects::store::ObjectStore;
+    use repo::Repository;
+
+    let repo = Repository::open(repo_root).unwrap();
+    let store = repo.store();
+    let tree_ids = store.list_trees().unwrap();
+    let target_present = tree_ids.iter().any(|id| id.to_hex() == target_hex);
+
+    for state_id in store.list_states().unwrap() {
+        let state = store.get_state(&state_id).unwrap().unwrap();
+        store.put_state(&state).unwrap();
+    }
+    for blob_id in store.list_blobs().unwrap() {
+        store.promote_to_loose_uncompressed(&blob_id).unwrap();
+    }
+    for tree_id in tree_ids {
+        if tree_id.to_hex() == target_hex {
+            continue;
+        }
+        let serialized = store.get_tree_serialized(&tree_id).unwrap().unwrap();
+        store.put_tree_serialized(&serialized, tree_id).unwrap();
+    }
+    drop(repo);
+
+    let packs_dir = repo_root.join(".heddle/packs");
+    if packs_dir.exists() {
+        for entry in fs::read_dir(&packs_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                fs::remove_dir_all(path).unwrap();
+            } else {
+                fs::remove_file(path).unwrap();
+            }
+        }
+    }
+
+    let loose_tree = repo_root
+        .join(".heddle/objects/trees")
+        .join(&target_hex[..2])
+        .join(&target_hex[2..]);
+    match fs::remove_file(&loose_tree) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("failed to delete loose tree at {loose_tree:?}: {error}"),
+    }
+    let cached_tree = repo_root.join(".heddle/state/worktree-current-tree.bin");
+    match fs::remove_file(&cached_tree) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("failed to remove tree cache at {cached_tree:?}: {error}"),
+    }
+    target_present
+}
+
 fn status_json(path: &std::path::Path) -> Value {
     let output = heddle(&["status", "--output", "json"], Some(path)).unwrap();
     serde_json::from_str(&output).expect("status output should be JSON")

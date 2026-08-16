@@ -14,6 +14,7 @@
 
 use std::{fs, path::PathBuf, str};
 
+use refs::Head;
 use repo::{Repository, ThreadManager};
 use serde_json::Value;
 use tempfile::TempDir;
@@ -44,11 +45,8 @@ fn detach_head_to_current_state(path: &std::path::Path) {
         .head()
         .unwrap()
         .expect("repo should have a current state before detaching");
-    fs::write(
-        path.join(".heddle").join("HEAD"),
-        format!("{}\n", head.to_string_full()),
-    )
-    .unwrap();
+    repo.write_head_recorded(&Head::Detached { state: head })
+        .unwrap();
 }
 
 /// `heddle thread show` with no positional should resolve to whatever
@@ -97,30 +95,22 @@ fn thread_captures_without_arg_resolves_current_thread() {
 /// missing positional and the unavailable fallback.
 ///
 /// `heddle init` auto-attaches HEAD to `main`, so we have to detach
-/// it manually: overwrite `.heddle/HEAD` with a parseable change id
-/// (the ID of the snapshot we just created), which the `Head` parser
-/// will read as `Detached`. From a detached HEAD, `current_lane()`
-/// returns `None` — exactly the state we need to exercise the
-/// fallback branch.
+/// it explicitly through the repository mutation API. From a detached
+/// HEAD, `current_lane()` returns `None` — exactly the state we need to
+/// exercise the fallback branch.
 #[test]
 fn thread_show_without_arg_errors_when_no_current_thread() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     fs::write(temp.path().join("base.txt"), "base").unwrap();
     heddle(&["capture", "-m", "init"], Some(temp.path())).unwrap();
-    // Snapshot's wire format only exposes the short id; we need the
-    // full form to write a parseable Detached HEAD. Reach in via the
-    // `repo` API, which both the CLI and these tests already share.
     let repo = Repository::open(temp.path()).unwrap();
     let head = repo
         .head()
         .unwrap()
         .expect("repo should have a current state after snapshot");
-    fs::write(
-        temp.path().join(".heddle").join("HEAD"),
-        format!("{}\n", head.to_string_full()),
-    )
-    .unwrap();
+    repo.write_head_recorded(&Head::Detached { state: head })
+        .unwrap();
     drop(repo);
 
     let err = heddle(&["thread", "show"], Some(temp.path()))
@@ -226,9 +216,8 @@ fn thread_cd_without_available_worktree_uses_typed_advice() {
 /// pointed at the cwd.
 ///
 /// We seed a thread record whose `execution_path` is the repo root,
-/// then detach HEAD by overwriting `.heddle/HEAD` with the snapshot's
-/// state id (same trick `thread_show_without_arg_errors_when_no_current_thread`
-/// uses). After that, `thread show` (no positional) must resolve to
+/// then detach HEAD through the repository mutation API. After that,
+/// `thread show` (no positional) must resolve to
 /// the seeded thread and succeed.
 #[test]
 fn thread_show_without_arg_resolves_via_execution_path_when_detached() {
@@ -250,17 +239,13 @@ fn thread_show_without_arg_resolves_via_execution_path_when_detached() {
     thread.execution_path = temp.path().to_path_buf();
     manager.save(&thread).unwrap();
 
-    // Detach HEAD to the snapshot's state id. Overwriting
-    // `.heddle/HEAD` directly is what `Head` parses as Detached.
+    // Detach HEAD to the snapshot's state id.
     let head = repo
         .head()
         .unwrap()
         .expect("repo should have a current state after snapshot");
-    fs::write(
-        temp.path().join(".heddle").join("HEAD"),
-        format!("{}\n", head.to_string_full()),
-    )
-    .unwrap();
+    repo.write_head_recorded(&Head::Detached { state: head })
+        .unwrap();
     drop(repo);
 
     // Sanity: confirm `thread show` with the explicit positional

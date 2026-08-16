@@ -2486,6 +2486,7 @@ dependencies = [
  "heddle-wire",
  "serde",
  "serde_json",
+ "serial_test",
  "sley",
  "sley-transport",
  "tempfile",

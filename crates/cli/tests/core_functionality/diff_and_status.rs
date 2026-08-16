@@ -324,6 +324,7 @@ fn test_status_clean_after_snapshot() {
 }
 
 #[test]
+#[serial_test::serial(fsmonitor)]
 fn test_native_status_warms_helper_for_second_run() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
@@ -338,9 +339,17 @@ fn test_native_status_warms_helper_for_second_run() {
     let second = heddle_with_env(&["status", "--short"], Some(temp.path()), &envs).unwrap();
     assert!(!second.contains("file.txt"));
 
+    let coverage_instrumented = std::env::var_os("LLVM_PROFILE_FILE").is_some()
+        || std::env::var_os("CARGO_LLVM_COV").is_some();
+    let ready_timeout = if coverage_instrumented {
+        std::time::Duration::from_secs(30)
+    } else {
+        std::time::Duration::from_secs(6)
+    };
+    let ready_deadline = std::time::Instant::now() + ready_timeout;
     let mut helper_ready = false;
     let mut last_monitor = Value::Null;
-    for _ in 0..60 {
+    while std::time::Instant::now() < ready_deadline {
         let output = heddle_with_env(
             &["maintenance", "inspect", "--output", "json"],
             Some(temp.path()),

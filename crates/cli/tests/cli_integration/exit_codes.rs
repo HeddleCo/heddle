@@ -195,11 +195,11 @@ fn status_on_corrupted_state_is_data_err_with_recovery_path() {
     // probe, so it must name the condition, exit DataErr (65), and hand
     // back executable recovery commands in both output modes.
     let repo = init_repo();
-    std::fs::write(repo.path().join("f.txt"), "base\n").expect("write f.txt");
-    assert_exit(&["capture", "-m", "base"], repo.path(), 0);
 
     // Corrupt every stored state object: 0x90 is msgpack FixArray(0),
-    // the exact marker from the persona report's dead-end.
+    // the exact marker from the persona report's dead-end. The initial
+    // state is intentionally used because later captures are durable pack
+    // artifacts and can repair their loose-object mirrors.
     let states_dir = repo.path().join(".heddle/objects/states");
     let mut corrupted = 0usize;
     for entry in std::fs::read_dir(&states_dir).expect("read states dir") {

@@ -18,25 +18,7 @@ use objects::{object::ThreadName, store::ObjectStore};
 use repo::Repository;
 use tempfile::TempDir;
 
-use super::heddle;
-
-/// Walk the loose-objects tree at `.heddle/objects/trees/<prefix>/<rest>`
-/// and remove the file whose hash matches `target`. Returns whether a
-/// matching file was actually deleted, so the test can assert the
-/// tampering set up the corruption it intended.
-fn delete_loose_tree(repo_root: &Path, target_hex: &str) -> bool {
-    let prefix = &target_hex[..2];
-    let rest = &target_hex[2..];
-    let path = repo_root
-        .join(".heddle/objects/trees")
-        .join(prefix)
-        .join(rest);
-    match fs::remove_file(&path) {
-        Ok(()) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => panic!("failed to delete loose tree at {path:?}: {error}"),
-    }
-}
+use super::{delete_tree_object, heddle};
 
 /// Look up the captured state's tree hash via a short-lived
 /// `Repository` handle, closing it before the subprocess runs so no
@@ -93,8 +75,8 @@ fn test_status_missing_tree_fails_loud_not_silent_empty() {
 
     let tree_hex = current_state_tree_hex(temp.path());
     assert!(
-        delete_loose_tree(temp.path(), &tree_hex),
-        "test setup: expected to find loose tree at hash {tree_hex} to delete",
+        delete_tree_object(temp.path(), &tree_hex),
+        "test setup: expected to find tree at hash {tree_hex} to delete",
     );
 
     let err = heddle(&["status"], Some(temp.path())).expect_err(
@@ -118,8 +100,8 @@ fn test_ready_missing_tree_fails_loud_not_silent_empty() {
 
     let tree_hex = current_state_tree_hex(temp.path());
     assert!(
-        delete_loose_tree(temp.path(), &tree_hex),
-        "test setup: expected to find loose tree at hash {tree_hex} to delete",
+        delete_tree_object(temp.path(), &tree_hex),
+        "test setup: expected to find tree at hash {tree_hex} to delete",
     );
 
     let err = heddle(&["ready"], Some(temp.path())).expect_err(
@@ -162,8 +144,8 @@ fn test_revert_missing_parent_tree_fails_loud_not_silent_empty() {
         parent_state.tree.to_hex()
     };
     assert!(
-        delete_loose_tree(temp.path(), &parent_tree_hex),
-        "test setup: expected to find loose tree at parent hash {parent_tree_hex}",
+        delete_tree_object(temp.path(), &parent_tree_hex),
+        "test setup: expected to find tree at parent hash {parent_tree_hex}",
     );
 
     // We need the short change-id for "second" to feed to revert. Pull

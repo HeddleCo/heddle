@@ -15,6 +15,36 @@ use tracing::{debug, warn};
 
 use crate::Repository;
 
+const HOOK_SPAWN_BUSY_RETRIES: u32 = 5;
+
+fn hook_executable_busy(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ETXTBSY)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+fn spawn_payload_hook(command: &mut Command, hook: Hook) -> Result<std::process::Child> {
+    let mut attempt = 0;
+    loop {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error) if hook_executable_busy(&error) && attempt + 1 < HOOK_SPAWN_BUSY_RETRIES => {
+                std::thread::sleep(Duration::from_millis(1_u64 << attempt));
+                attempt += 1;
+            }
+            Err(error) => {
+                return Err(anyhow!("failed to spawn hook {}: {error}", hook.filename()));
+            }
+        }
+    }
+}
+
 /// Typed hook response. Captures the JSON object the hook
 /// emits on stdout when invoked via [`HookManager::run_with_payload`].
 /// Per-event richer response shapes (e.g.
@@ -218,9 +248,7 @@ impl HookManager {
         for (key, value) in &ctx.env {
             cmd.env(key, value);
         }
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| anyhow!("failed to spawn hook {}: {e}", hook.filename()))?;
+        let mut child = spawn_payload_hook(&mut cmd, hook)?;
         let payload_bytes =
             serde_json::to_vec(payload).map_err(|e| anyhow!("encode hook payload: {e}"))?;
         if let Some(mut stdin) = child.stdin.take() {
@@ -382,6 +410,39 @@ mod tests {
         assert!(manager.uninstall(Hook::PrePull).unwrap());
         assert!(!manager.has_hook(Hook::PrePull));
         assert!(!manager.uninstall(Hook::PrePull).unwrap());
+    }
+
+    #[test]
+    fn payload_hook_spawn_reports_non_busy_errors() {
+        let temp = TempDir::new().unwrap();
+        let mut command = Command::new(temp.path().join("missing-hook"));
+
+        let error = spawn_payload_hook(&mut command, Hook::PreSnapshot)
+            .expect_err("missing hook executable should not spawn");
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to spawn hook pre-snapshot")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn payload_hook_spawn_retries_text_file_busy() {
+        use std::{fs::OpenOptions, os::unix::fs::PermissionsExt};
+
+        let temp = TempDir::new().unwrap();
+        let hook_path = temp.path().join("busy-hook");
+        fs::write(&hook_path, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
+        let _write_guard = OpenOptions::new().write(true).open(&hook_path).unwrap();
+        let mut command = Command::new(&hook_path);
+
+        let error = spawn_payload_hook(&mut command, Hook::PreSnapshot)
+            .expect_err("an executable open for writing should stay busy");
+
+        assert!(error.to_string().contains("Text file busy"));
     }
 
     #[test]

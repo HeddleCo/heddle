@@ -4,6 +4,7 @@
 use std::{
     fs,
     path::{Component, Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use objects::{
@@ -24,6 +25,7 @@ use super::{
 
 const MANIFEST_MAGIC: &[u8; 8] = b"HDOPV5\0\0";
 const MANIFEST_VERSION: u32 = 2;
+const ATOMIC_TEMP_SWEEP_GRACE: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SegmentDescriptor {
@@ -519,6 +521,10 @@ impl SegmentedOpLogIndex {
             HeddleError::InvalidObject("oplog suffix length exceeds platform limits".to_string())
         })?;
         quarantine_pruned_suffix(path, &manifest, discarded_segments)?;
+        let pruned_paths = manifest.segments[manifest.segments.len() - discarded_segments..]
+            .iter()
+            .map(|segment| segment.path.clone())
+            .collect::<Vec<_>>();
         manifest.generation = manifest.generation.checked_add(1).ok_or_else(|| {
             HeddleError::InvalidObject("oplog manifest generation overflow".to_string())
         })?;
@@ -542,6 +548,11 @@ impl SegmentedOpLogIndex {
         // and overwrite these counts; the inverse order could commit suffix
         // loss and crash before preserving an honest operator report.
         write_manifest(path, &manifest_bytes)?;
+        for relative in pruned_paths {
+            if let Ok(pruned) = resolve_relative(path, &relative) {
+                let _ = fs::remove_file(pruned);
+            }
+        }
         sweep_unlisted_containers(path, &manifest);
         Ok(report)
     }
@@ -632,15 +643,16 @@ fn sweep_unlisted_containers(canonical_path: &Path, manifest: &Manifest) {
     if let Ok(entries) = fs::read_dir(segment_dir) {
         for entry in entries.filter_map(std::result::Result::ok) {
             let path = entry.path();
-            let is_generation_container = path.file_name().is_some_and(|name| {
-                let name = name.to_string_lossy();
-                (name.starts_with("base-") || name.starts_with("segment-"))
-                    && name.ends_with(".bin")
-            });
+            let is_generation_container = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    generation_container_is_sweepable(&path, name, manifest.generation)
+                });
             let is_generation_temp = path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(is_generation_atomic_temp);
+                .is_some_and(is_stale_generation_atomic_temp);
             if (is_generation_container || is_generation_temp)
                 && entry.file_type().is_ok_and(|kind| kind.is_file())
                 && !live.contains(&path)
@@ -658,12 +670,37 @@ fn sweep_unlisted_containers(canonical_path: &Path, manifest: &Manifest) {
             let is_manifest_temp = entry
                 .file_name()
                 .to_str()
-                .is_some_and(|name| atomic_temp_suffix(name, ".oplog.manifest"));
+                .is_some_and(|name| atomic_temp_is_stale(name, ".oplog.manifest"));
             if is_manifest_temp && entry.file_type().is_ok_and(|kind| kind.is_file()) {
                 let _ = fs::remove_file(entry.path());
             }
         }
     }
+}
+
+fn generation_container_is_sweepable(path: &Path, name: &str, selected_generation: u64) -> bool {
+    if !(name.starts_with("base-") || name.starts_with("segment-")) {
+        return false;
+    }
+    let Some(generation) = name
+        .strip_suffix(".bin")
+        .and_then(|name| name.rsplit_once("-g"))
+        .and_then(|(_, generation)| generation.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    if generation > selected_generation {
+        return false;
+    }
+    // A writer publishes the immutable container before atomically replacing
+    // the manifest, and lock-free readers can still be opening the prior
+    // generation while the new manifest becomes visible. Keep recent
+    // containers through that publication window; a later sweep reclaims them.
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .is_some_and(|age| age >= ATOMIC_TEMP_SWEEP_GRACE)
 }
 
 /// Preserve every container that explicit recovery removes from the selected
@@ -718,31 +755,39 @@ fn next_pruned_quarantine_path(quarantine_dir: &Path, file_name: &std::ffi::OsSt
     unreachable!("unbounded pruned-container suffix search should always return")
 }
 
-fn is_generation_atomic_temp(name: &str) -> bool {
+fn is_stale_generation_atomic_temp(name: &str) -> bool {
     let Some(target) = name.strip_prefix('.') else {
         return false;
     };
     ((target.starts_with("base-") || target.starts_with("segment-"))
         && target.contains(".bin.tmp-"))
-        && atomic_temp_suffix(
+        && atomic_temp_is_stale(
             name,
             &format!(".{}", target.split(".tmp-").next().unwrap_or("")),
         )
 }
 
-fn atomic_temp_suffix(name: &str, target: &str) -> bool {
+fn atomic_temp_is_stale(name: &str, target: &str) -> bool {
     let Some(suffix) = name
         .strip_prefix(target)
         .and_then(|rest| rest.strip_prefix(".tmp-"))
     else {
         return false;
     };
-    let mut parts = suffix.split('-');
-    let valid = parts
-        .by_ref()
-        .take(3)
-        .all(|part| !part.is_empty() && part.parse::<u128>().is_ok());
-    valid && parts.next().is_none() && suffix.split('-').count() == 3
+    let parts = suffix.split('-').collect::<Vec<_>>();
+    let Ok([pid, timestamp, counter]) = <[&str; 3]>::try_from(parts) else {
+        return false;
+    };
+    if pid.parse::<u32>().is_err() || counter.parse::<u64>().is_err() {
+        return false;
+    }
+    let Ok(timestamp) = timestamp.parse::<u128>() else {
+        return false;
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    now.as_nanos().saturating_sub(timestamp) >= ATOMIC_TEMP_SWEEP_GRACE.as_nanos()
 }
 
 fn reconcile_manifest_metadata(path: &Path, manifest: &mut Manifest) -> Result<()> {
@@ -1082,6 +1127,19 @@ mod tests {
             view = view.append_entries(&[entry(id)]).unwrap();
         }
 
+        for entry in fs::read_dir(temp.path().join("oplog.segments"))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+        {
+            fs::File::options()
+                .write(true)
+                .open(entry.path())
+                .unwrap()
+                .set_modified(SystemTime::UNIX_EPOCH)
+                .unwrap();
+        }
+        sweep_unlisted_containers(&path, &view.manifest);
+
         assert_eq!(view.segment_count(), 1);
         assert_eq!(view.manifest.segments[0].level, 7);
         assert_eq!(view.materialize_entries().unwrap().len(), 128);
@@ -1115,6 +1173,9 @@ mod tests {
         let staged_generation = temp
             .path()
             .join("oplog.segments/segment-l00-00000000000000000002-00000000000000000002-g999.bin");
+        let stale_generation = temp.path().join(
+            "oplog.segments/segment-l00-00000000000000000000-00000000000000000000-g00000000000000000000.bin",
+        );
         let staged_temp = temp.path().join(
             "oplog.segments/.segment-l00-00000000000000000002-00000000000000000002-g999.bin.tmp-1-2-3",
         );
@@ -1122,21 +1183,94 @@ mod tests {
             "oplog.segments/.segment-l00-00000000000000000002-00000000000000000002-g999.bin.tmp-operator-note",
         );
         let manifest_temp = temp.path().join(".oplog.manifest.tmp-1-2-3");
+        let active_segment_temp = objects::fs_atomic::temp_path(&staged_generation);
+        let active_manifest_temp = objects::fs_atomic::temp_path(&manifest_path(&path));
         fs::write(&staged_generation, b"complete but unpublished").unwrap();
+        fs::write(&stale_generation, b"old unpublished generation").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&stale_generation)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH)
+            .unwrap();
         fs::write(&staged_temp, b"partial atomic write").unwrap();
         fs::write(&unknown_temp, b"operator evidence").unwrap();
         fs::write(&manifest_temp, b"partial manifest").unwrap();
+        fs::write(&active_segment_temp, b"active segment write").unwrap();
+        fs::write(&active_manifest_temp, b"active manifest write").unwrap();
         assert_eq!(SegmentedOpLogIndex::open(&path).unwrap().head_id(), 1);
         let updated = updated.append_entries(&[entry(2)]).unwrap();
-        assert!(!staged_generation.exists());
+        assert!(
+            staged_generation.exists(),
+            "a future generation may be between its segment and manifest rename"
+        );
+        assert!(!stale_generation.exists());
         assert!(!staged_temp.exists());
         assert!(!manifest_temp.exists());
+        assert!(active_segment_temp.exists());
+        assert!(active_manifest_temp.exists());
         assert!(orphan.exists(), "unknown operator files are not GC targets");
         assert!(unknown_temp.exists(), "non-atomic temp names are preserved");
 
         let listed = resolve_relative(&path, &updated.manifest.segments[0].path).unwrap();
         fs::remove_file(listed).unwrap();
         assert!(SegmentedOpLogIndex::open(&path).is_err());
+    }
+
+    #[test]
+    fn atomic_temp_sweep_requires_a_valid_old_writer_stamp() {
+        assert!(!atomic_temp_is_stale(
+            ".oplog.manifest.tmp-writer-2-3",
+            ".oplog.manifest"
+        ));
+        assert!(!atomic_temp_is_stale(
+            ".oplog.manifest.tmp-1-time-3",
+            ".oplog.manifest"
+        ));
+        assert!(!atomic_temp_is_stale(
+            ".oplog.manifest.tmp-1-2-counter",
+            ".oplog.manifest"
+        ));
+        assert!(atomic_temp_is_stale(
+            ".oplog.manifest.tmp-1-2-3",
+            ".oplog.manifest"
+        ));
+        let temp = TempDir::new().unwrap();
+        let old = temp
+            .path()
+            .join("segment-l00-1-1-g00000000000000000002.bin");
+        fs::write(&old, b"old").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        assert!(!generation_container_is_sweepable(&old, "operator.bin", 2));
+        assert!(!generation_container_is_sweepable(
+            &old,
+            "segment-note.bin",
+            2
+        ));
+        assert!(generation_container_is_sweepable(
+            &old,
+            "segment-l00-1-1-g00000000000000000002.bin",
+            2
+        ));
+        assert!(!generation_container_is_sweepable(
+            &old,
+            "segment-l00-2-2-g00000000000000000003.bin",
+            2
+        ));
+        let recent = temp
+            .path()
+            .join("segment-l00-2-2-g00000000000000000001.bin");
+        fs::write(&recent, b"recent").unwrap();
+        assert!(!generation_container_is_sweepable(
+            &recent,
+            "segment-l00-2-2-g00000000000000000001.bin",
+            2
+        ));
     }
 
     #[test]
@@ -1243,6 +1377,17 @@ mod tests {
             later.exists(),
             "automatic repair must retain the healthy suffix"
         );
+        for entry in fs::read_dir(temp.path().join("oplog.segments"))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+        {
+            fs::File::options()
+                .write(true)
+                .open(entry.path())
+                .unwrap()
+                .set_modified(SystemTime::UNIX_EPOCH)
+                .unwrap();
+        }
 
         let report = SegmentedOpLogIndex::recover(&path).unwrap();
         assert!(!report.already_healthy);

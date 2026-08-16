@@ -162,6 +162,7 @@ fn test_release_help_surfaces_keep_maintenance_tools_under_maintenance() {
 }
 
 #[test]
+#[serial_test::serial(fsmonitor)]
 fn test_maintenance_inspect_json_reports_repo_shape_fields() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
@@ -207,6 +208,7 @@ fn test_maintenance_inspect_json_reports_repo_shape_fields() {
 }
 
 #[test]
+#[serial_test::serial(fsmonitor)]
 fn test_maintenance_refresh_creates_or_refreshes_sidecars_in_simple_repo() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
@@ -257,6 +259,7 @@ fn test_store_group_is_removed() {
 }
 
 #[test]
+#[serial_test::serial(fsmonitor)]
 fn test_maintenance_inspect_reflects_sidecars_after_refresh() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());

@@ -60,13 +60,19 @@ fn truncated_packed_oplog_salvages_prefix_quarantines_tail_and_keeps_repo_usable
 
         let output = heddle_output(&["log", "--output", "json"], Some(temp.path()))
             .expect("heddle log should run after explicit recovery");
-        assert!(output.status.success());
+        assert!(
+            output.status.success(),
+            "{}: log should succeed after recovery; stdout={} stderr={}",
+            case.name,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         let parsed: Value = serde_json::from_slice(&output.stdout)
             .expect("log should emit JSON after explicit recovery");
         assert!(
             !parsed["states"].as_array().unwrap().is_empty(),
-            "{}: salvaged log should retain at least one complete state",
-            case.name
+            "{}: salvaged log should retain at least one complete state: {parsed}",
+            case.name,
         );
 
         std::fs::write(
@@ -258,18 +264,33 @@ fn seed_native_repo_with_four_captures(path: &std::path::Path) {
         String::from_utf8_lossy(&init.stdout),
         String::from_utf8_lossy(&init.stderr)
     );
-    for index in 1..=4 {
-        std::fs::write(path.join("file.txt"), format!("snapshot {index}\n"))
-            .expect("write snapshot file");
-        let capture = heddle_output(&["capture", "-m", &format!("snapshot {index}")], Some(path))
-            .expect("capture runs");
-        assert!(
-            capture.status.success(),
-            "capture {index} should succeed: stdout={} stderr={}",
-            String::from_utf8_lossy(&capture.stdout),
-            String::from_utf8_lossy(&capture.stderr)
-        );
-    }
+    let repo = Repository::open(path).expect("open seeded repository");
+    let state = repo.head().expect("read HEAD").expect("initial state");
+    let mut fixture_state = repo
+        .current_state()
+        .expect("read current state")
+        .expect("initial state object");
+    fixture_state.parents = vec![state];
+    fixture_state.intent = Some("oplog salvage fixture".to_string());
+    let fixture_state_id = fixture_state.id();
+    repo.store()
+        .put_state(&fixture_state)
+        .expect("store oplog salvage state");
+    let batches = (1..=8)
+        .map(|_| {
+            (
+                vec![oplog::OpRecord::Snapshot {
+                    new_state: fixture_state_id,
+                    prev_head: Some(state),
+                    head: None,
+                    thread: Some("main".to_string()),
+                }],
+                None,
+            )
+        })
+        .collect();
+    oplog::OpLogBackend::record_batches_scoped(repo.oplog(), batches)
+        .expect("record oplog salvage fixture");
 }
 
 fn current_entry_offsets(bytes: &[u8]) -> (Vec<usize>, usize) {
