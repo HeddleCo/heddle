@@ -198,6 +198,7 @@ const UNSWEPT_TODO: &[&str] = &[
     "agent release",
     "agent reserve",
     "context reason git",
+    "ci run",
     "collapse",
     "daemon serve",
     "daemon status",

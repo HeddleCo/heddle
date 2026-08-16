@@ -1903,6 +1903,18 @@ the same ready envelope.
 
 ---
 
+## `heddle ci run --output json`
+
+Local device-signed check verdicts. The payload is an array of signed
+verdict envelopes; the machine contract keeps this verb opaque while
+the verdict schema is still settling.
+
+```json
+[]
+```
+
+---
+
 ## `heddle identity ensure --output json`
 
 ```json
@@ -3118,46 +3130,46 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
   "command_contract_schema_coverage": {
     "accepted_opaque_schema_examples": [
       "help",
+      "ci run",
       "redact apply",
       "redact list",
       "redact show",
       "redact trust add",
       "redact trust list",
-      "redact trust remove",
-      "redact purge apply"
+      "redact trust remove"
     ],
-    "accepted_opaque_schema_verbs_total": 43,
+    "accepted_opaque_schema_verbs_total": 44,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
+      "ci run",
       "redact apply",
       "redact list",
       "redact show",
       "redact trust add",
       "redact trust list",
-      "redact trust remove",
-      "redact purge apply"
+      "redact trust remove"
     ],
-    "advanced_scope_json_commands_total": 115,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 43,
-    "advanced_scope_mutating_commands_total": 67,
-    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 24,
-    "catalog_commands_total": 196,
-    "catalog_mutating_commands_total": 96,
-    "json_commands_total": 155,
-    "json_commands_with_accepted_opaque_schema": 43,
+    "advanced_scope_json_commands_total": 116,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 44,
+    "advanced_scope_mutating_commands_total": 68,
+    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 25,
+    "catalog_commands_total": 198,
+    "catalog_mutating_commands_total": 97,
+    "json_commands_total": 156,
+    "json_commands_with_accepted_opaque_schema": 44,
     "json_commands_with_schema": 112,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 91,
+    "json_mutating_commands_total": 92,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 91,
-    "mutating_commands_with_accepted_opaque_schema": 24,
+    "mutating_commands_total": 92,
+    "mutating_commands_with_accepted_opaque_schema": 25,
     "mutating_commands_with_schema": 67,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 43,
+    "opaque_schema_verbs_total": 44,
     "status": "available",
-    "summary": "196 command(s), 155 JSON command(s), 96 mutating command(s), 91 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 43 accepted opaque schema(s) outside clean verification",
+    "summary": "198 command(s), 156 JSON command(s), 97 mutating command(s), 92 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3195,7 +3207,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "192 command(s), 153 JSON command(s), 93 mutating command(s), 89 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 43 accepted opaque schema(s) outside clean verification",
+  "summary": "198 command(s), 156 JSON command(s), 97 mutating command(s), 92 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true

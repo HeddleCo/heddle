@@ -554,6 +554,8 @@ export interface ChangesInfo {
   modified: string[];
 }
 
+export type CiRunSchema = Record<string, unknown>;
+
 export interface CloneGitSchema {
   action: string;
   branch: string;
@@ -3454,6 +3456,7 @@ export interface HeddleVerbOutputs {
   "auth trust replace": AuthTrustReplaceSchema;
   "auth trust show": AuthTrustShowSchema;
   capture: CaptureSchema;
+  "ci run": CiRunSchema;
   clone: CloneSchema;
   collapse: CollapseSchema;
   commit: CommitSchema;
@@ -3623,6 +3626,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "auth trust replace",
   "auth trust show",
   "capture",
+  "ci run",
   "clone",
   "collapse",
   "commit",
