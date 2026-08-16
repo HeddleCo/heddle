@@ -1,15 +1,15 @@
 use api::heddle::api::v1alpha1::{
     ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, CheckMergeEligibilityRequest,
-    CheckMergeEligibilityResponse, CreateGrantRequest, CreateInvitationRequest,
-    CreateServiceAccountRequest, CreateSpoolRequest, DeleteGrantRequest, DeleteNamespaceRequest,
-    DeleteRepositoryRequest, GetCurrentUserSpoolRequest, GrantSupportAccessRequest, GrantTargetRef,
+    CheckMergeEligibilityResponse, CreateAgentAccountRequest, CreateAgentAccountResponse,
+    CreateGrantRequest, CreateInvitationRequest, CreateServiceAccountRequest, CreateSpoolRequest,
+    DeleteGrantRequest, DeleteNamespaceRequest, DeleteRepositoryRequest,
+    GetCurrentUserSpoolRequest, GrantSupportAccessRequest, GrantTargetRef,
     Invitation as ProtoInvitation, IssueServiceAccountCredentialRequest, IssuedCredentialResponse,
     ListGrantsRequest, ListSpoolsRequest, ListSupportAccessGrantsRequest,
-    ListThreadApprovalsRequest, MonorepoNode, ProvisionAgentRootedAccountRequest,
-    ProvisionAgentRootedAccountResponse, ResolveMonorepoRequest, RevokeApprovalRequest,
-    RevokeSupportAccessRequest, ServiceAccountResponse, SpoolSummary, SpoolVisibility,
-    SupportAccessGrant, ThreadApproval, UpdateGrantRequest, UpdateNamespaceRequest,
-    UpdateRepositoryRequest, grant_target_ref::Target as GrantTargetKind,
+    ListThreadApprovalsRequest, MonorepoNode, ResolveMonorepoRequest, RevokeApprovalRequest,
+    RevokeSupportAccessRequest, ServiceAccountResponse, SpoolSummary, SupportAccessGrant,
+    ThreadApproval, UpdateGrantRequest, UpdateNamespaceRequest, UpdateRepositoryRequest,
+    Visibility, grant_target_ref::Target as GrantTargetKind,
 };
 use wire::ProtocolError;
 
@@ -61,12 +61,12 @@ macro_rules! workflow_call {
 }
 
 impl HostedClient {
-    pub async fn provision_agent_rooted_account(
+    pub async fn create_agent_account(
         &mut self,
-        request: ProvisionAgentRootedAccountRequest,
-    ) -> Result<ProvisionAgentRootedAccountResponse, ProtocolError> {
+        request: CreateAgentAccountRequest,
+    ) -> Result<CreateAgentAccountResponse, ProtocolError> {
         self.routes()
-            .provision_agent_rooted_account(&request)
+            .create_agent_account(&request)
             .await
             .map_err(hosted_to_protocol_error)
     }
@@ -170,8 +170,9 @@ impl HostedClient {
                 slug: slug.to_string(),
                 is_repo: kind.is_repo(),
                 display_name,
-                visibility: SpoolVisibility::Private as i32,
+                visibility: Visibility::Private as i32,
                 client_operation_id: operation_id.to_wire(),
+                settings: None,
             }
         );
         Ok(to_protocol_spool(spool))
