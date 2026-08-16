@@ -5,7 +5,7 @@
 
 mod bootstrap;
 mod call;
-mod claim_protocol;
+pub(crate) mod claim_protocol;
 mod collaboration;
 mod connection;
 #[cfg(test)]

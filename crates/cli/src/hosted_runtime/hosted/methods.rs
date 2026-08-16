@@ -85,6 +85,13 @@ impl HostedRoutes<'_> {
         AccessTokenResponse
     );
     unary_method!(
+        provision_agent_rooted_account,
+        "IdentityService",
+        "ProvisionAgentRootedAccount",
+        ProvisionAgentRootedAccountRequest,
+        ProvisionAgentRootedAccountResponse
+    );
+    unary_method!(
         who_am_i,
         "IdentityService",
         "WhoAmI",

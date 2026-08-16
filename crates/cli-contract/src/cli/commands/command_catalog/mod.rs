@@ -12,8 +12,6 @@ use heddle_core::{
 use schemars::JsonSchema;
 use serde::Serialize;
 
-#[cfg(feature = "client")]
-use crate::cli::AuthCommands;
 #[cfg(feature = "semantic")]
 use crate::cli::SemanticCommands;
 #[cfg(feature = "git-overlay")]
@@ -29,6 +27,8 @@ use crate::cli::{
     },
     render::shell_quote,
 };
+#[cfg(feature = "client")]
+use crate::cli::{AuthCommands, IdentityCommands};
 #[cfg(feature = "git-overlay")]
 use crate::cli::{ExportCommands, ImportCommands};
 
@@ -782,6 +782,16 @@ const CONFIG_MUTATION_NO_OP_ID: CommandContract = CommandContract {
     ..CONFIG_MUTATION
 };
 
+const NETWORK_CONFIG_MUTATION: CommandContract = CommandContract {
+    network_io: true,
+    ..CONFIG_MUTATION
+};
+
+const NETWORK_CONFIG_MUTATION_NO_OP_ID: CommandContract = CommandContract {
+    network_io: true,
+    ..CONFIG_MUTATION_NO_OP_ID
+};
+
 const CONFIG_MUTATION_TEXT: CommandContract = CommandContract {
     supports_json: false,
     supports_op_id: false,
@@ -1502,6 +1512,45 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ),
             "client",
         ),
+    ),
+    entry(
+        &["identity"],
+        category(feature_gated(user_scoped(GROUP), "client"), "repo"),
+    ),
+    entry(
+        &["identity", "ensure"],
+        feature_gated(
+            json_discriminators(
+                documented_schemas(user_scoped(NETWORK_CONFIG_MUTATION), &["identity ensure"]),
+                &[json_discriminator(
+                    Some("identity ensure"),
+                    "output_kind",
+                    "identity_ensure",
+                )],
+            ),
+            "client",
+        ),
+    ),
+    entry(
+        &["identity", "claim-link"],
+        feature_gated(
+            json_discriminators(
+                documented_schemas(
+                    user_scoped(NETWORK_CONFIG_MUTATION_NO_OP_ID),
+                    &["identity claim-link"],
+                ),
+                &[json_discriminator(
+                    Some("identity claim-link"),
+                    "output_kind",
+                    "identity_claim_link",
+                )],
+            ),
+            "client",
+        ),
+    ),
+    entry(
+        &["identity", "serve"],
+        feature_gated(user_scoped(NETWORK_CONFIG_MUTATION_TEXT), "client"),
     ),
     entry(
         &["whoami"],
@@ -4685,6 +4734,12 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             },
             AuthCommands::DeriveAgent { .. } => vec!["auth", "derive-agent"],
             AuthCommands::CreateServiceToken { .. } => vec!["auth", "create-service-token"],
+        },
+        #[cfg(feature = "client")]
+        Commands::Identity { command } => match command {
+            IdentityCommands::Ensure { .. } => vec!["identity", "ensure"],
+            IdentityCommands::ClaimLink { .. } => vec!["identity", "claim-link"],
+            IdentityCommands::Serve { .. } => vec!["identity", "serve"],
         },
         #[cfg(feature = "client")]
         Commands::Whoami { .. } => vec!["whoami"],

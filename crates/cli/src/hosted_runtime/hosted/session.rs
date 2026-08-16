@@ -13,6 +13,10 @@ use super::{
 
 pub enum HostedAuthMode {
     Unauthenticated,
+    ProofOnly {
+        proof_key_pem: String,
+        signing_identity: String,
+    },
     CredentialFallback,
 }
 
@@ -34,6 +38,10 @@ impl HostedSession {
             resolved_credential_subject,
         ) = match mode {
             HostedAuthMode::Unauthenticated => (None, None, None, None),
+            HostedAuthMode::ProofOnly {
+                proof_key_pem,
+                signing_identity,
+            } => (None, Some(proof_key_pem), None, Some(signing_identity)),
             HostedAuthMode::CredentialFallback => {
                 let resolved = resolve_hosted_credential(server_key.as_deref())?;
                 (
@@ -62,22 +70,23 @@ impl HostedSession {
             config = config.with_auth_proof_key_pem(pem);
         }
         if config.auth_proof_key_pem.is_some() {
-            let token = config.token.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "hosted request signing has a proof key but no authenticated bearer token"
-                )
-            })?;
-            let subject = crate::hosted_runtime::device_flow::authenticated_subject(&token.id)
-                .context("reading the hosted bearer token's authenticated principal")?;
-            if resolved_credential_subject
-                .as_deref()
-                .is_some_and(|stored| stored != subject.as_str())
-            {
-                anyhow::bail!(
-                    "resolved credential subject does not match the bearer token's authenticated principal"
-                );
+            if let Some(token) = config.token.as_ref() {
+                let subject = crate::hosted_runtime::device_flow::authenticated_subject(&token.id)
+                    .context("reading the hosted bearer token's authenticated principal")?;
+                if resolved_credential_subject
+                    .as_deref()
+                    .is_some_and(|stored| stored != subject.as_str())
+                {
+                    anyhow::bail!(
+                        "resolved credential subject does not match the bearer token's authenticated principal"
+                    );
+                }
+                config = config.with_authenticated_principal(format!("principal:{subject}"));
+            } else if let Some(identity) = resolved_credential_subject {
+                config = config.with_authenticated_principal(identity);
+            } else {
+                anyhow::bail!("hosted request signing has no stable signing identity");
             }
-            config = config.with_authenticated_principal(format!("principal:{subject}"));
         }
         Ok(Self {
             config,

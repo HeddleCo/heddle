@@ -2174,9 +2174,9 @@ dependencies = [
 
 [[package]]
 name = "heddle-api"
-version = "0.5.0"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d7a59e258c91a1e15de848f30b309f1808da36bbb0bcc82b75062693631ea4e"
+checksum = "4db7d9fae2fc727e06ad2685cc9271f27bcf5ede39bfa0f30b1f52fc44ab60cd"
 dependencies = [
  "bytes",
  "hex",
@@ -2231,7 +2231,8 @@ dependencies = [
  "clap_complete",
  "criterion",
  "futures",
- "heddle-api 0.5.0",
+ "getrandom 0.4.3",
+ "heddle-api 0.6.4",
  "heddle-ci-config",
  "heddle-ci-engine",
  "heddle-cli-args",
@@ -2303,7 +2304,7 @@ version = "0.12.0"
 dependencies = [
  "anyhow",
  "clap",
- "heddle-api 0.5.0",
+ "heddle-api 0.6.4",
  "heddle-cli-shared",
  "heddle-objects",
  "heddle-repo",

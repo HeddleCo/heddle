@@ -123,6 +123,7 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
             allowed_operations,
             template,
             out.as_deref(),
+            false,
         ),
         AuthCommand::CreateServiceToken {
             name,
@@ -215,7 +216,7 @@ fn emit_auth_trust(ctx: &dyn CliContext, output: AuthTrustOutput) -> Result<()> 
 /// Derive an offline child credential with a fresh PoP key, then either install
 /// it as the active credential or write a portable token + child-key bundle.
 #[allow(clippy::too_many_arguments)]
-fn cmd_auth_derive_agent(
+pub(crate) fn cmd_auth_derive_agent(
     server: &str,
     agent_id: Option<String>,
     ttl_secs: u64,
@@ -223,6 +224,7 @@ fn cmd_auth_derive_agent(
     requested_operations: Vec<String>,
     template: Option<AgentTemplate>,
     out: Option<&Path>,
+    quiet: bool,
 ) -> Result<()> {
     if ttl_secs == 0 {
         bail!("--ttl must be greater than zero seconds");
@@ -353,26 +355,28 @@ fn cmd_auth_derive_agent(
         },
     )?;
 
-    println!("Derived and installed agent token {agent_id} for {server}.");
-    println!("Parent source: {}", parent.source.label());
-    println!("Expires: {expires_at}");
-    if let Some(template) = template {
-        println!("Template: {} ceiling", template.as_str());
+    if !quiet {
+        println!("Derived and installed agent token {agent_id} for {server}.");
+        println!("Parent source: {}", parent.source.label());
+        println!("Expires: {expires_at}");
+        if let Some(template) = template {
+            println!("Template: {} ceiling", template.as_str());
+        }
+        println!("Allowed operations: {}", allowed_operations.join(", "));
+        if declared_scopes.is_empty() {
+            println!("Scopes: none (full resource authority inherited from parent)");
+        } else {
+            println!(
+                "Scopes: {} (enforced server-side per request)",
+                declared_scopes
+                    .iter()
+                    .map(|(kind, path)| format!("{kind}:{path}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        println!("{DERIVED_TOKEN_SECURITY_NOTE}");
     }
-    println!("Allowed operations: {}", allowed_operations.join(", "));
-    if declared_scopes.is_empty() {
-        println!("Scopes: none (full resource authority inherited from parent)");
-    } else {
-        println!(
-            "Scopes: {} (enforced server-side per request)",
-            declared_scopes
-                .iter()
-                .map(|(kind, path)| format!("{kind}:{path}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    println!("{DERIVED_TOKEN_SECURITY_NOTE}");
     Ok(())
 }
 
@@ -1874,6 +1878,7 @@ mod tests {
                 vec!["Push".to_string()],
                 None,
                 None,
+                false,
             )
             .expect("derive and install parent agent");
             let installed = credentials::get_server_credential(server)
@@ -1922,6 +1927,7 @@ mod tests {
                 vec!["Push".to_string()],
                 None,
                 None,
+                false,
             )
             .expect("derive narrower subagent");
             let subagent = credentials::get_server_credential(server)
@@ -1960,6 +1966,7 @@ mod tests {
                 vec!["Push".to_string()],
                 None,
                 None,
+                false,
             )
             .expect_err("subagent scope widening must be rejected");
             assert!(error.to_string().contains("would widen"));
@@ -1982,6 +1989,7 @@ mod tests {
                 vec!["Push".to_string()],
                 None,
                 Some(&out),
+                false,
             )
             .expect("derive portable child credential");
 
@@ -2029,6 +2037,7 @@ mod tests {
                 vec!["Push".to_string()],
                 None,
                 Some(&out),
+                false,
             )
             .expect_err("an existing credential file must not be overwritten");
             assert!(error.to_string().contains("already exists"));

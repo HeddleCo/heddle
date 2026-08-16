@@ -1903,6 +1903,48 @@ the same ready envelope.
 
 ---
 
+## `heddle ci run --output json`
+
+Local device-signed check verdicts. The payload is an array of signed
+verdict envelopes; the machine contract keeps this verb opaque while
+the verdict schema is still settling.
+
+```json
+[]
+```
+
+---
+
+## `heddle identity ensure --output json`
+
+```json
+{
+  "output_kind": "identity_ensure",
+  "outcome": "created_on_behalf",
+  "server": "api.heddle.sh",
+  "subject": "account-01K2N",
+  "node_id": "b1a1cb0e0644173d6dc75f787fd203fdfd8f5ec116a0f70a854f12f54a67c121",
+  "claim_url": "https://heddle.sh/claim/hcl1.b1a1cb0e0644173d6dc75f787fd203fdfd8f5ec116a0f70a854f12f54a67c121.c2hvcnQtbGl2ZWQtY2xhaW0tc2VjcmV0"
+}
+```
+
+---
+
+## `heddle identity claim-link --output json`
+
+```json
+{
+  "output_kind": "identity_claim_link",
+  "outcome": "claim_link_reissued",
+  "server": "api.heddle.sh",
+  "subject": "account-01K2N",
+  "node_id": "b1a1cb0e0644173d6dc75f787fd203fdfd8f5ec116a0f70a854f12f54a67c121",
+  "claim_url": "https://heddle.sh/claim/hcl1.b1a1cb0e0644173d6dc75f787fd203fdfd8f5ec116a0f70a854f12f54a67c121.bmV3LXNob3J0LWxpdmVkLWNsYWltLXNlY3JldA"
+}
+```
+
+---
+
 ## `heddle whoami --output json`
 
 ```json
@@ -3088,46 +3130,46 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
   "command_contract_schema_coverage": {
     "accepted_opaque_schema_examples": [
       "help",
+      "ci run",
       "redact apply",
       "redact list",
       "redact show",
       "redact trust add",
       "redact trust list",
-      "redact trust remove",
-      "redact purge apply"
+      "redact trust remove"
     ],
-    "accepted_opaque_schema_verbs_total": 43,
+    "accepted_opaque_schema_verbs_total": 44,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
+      "ci run",
       "redact apply",
       "redact list",
       "redact show",
       "redact trust add",
       "redact trust list",
-      "redact trust remove",
-      "redact purge apply"
+      "redact trust remove"
     ],
-    "advanced_scope_json_commands_total": 113,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 43,
-    "advanced_scope_mutating_commands_total": 65,
-    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 24,
-    "catalog_commands_total": 192,
-    "catalog_mutating_commands_total": 93,
-    "json_commands_total": 153,
-    "json_commands_with_accepted_opaque_schema": 43,
-    "json_commands_with_schema": 110,
+    "advanced_scope_json_commands_total": 116,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 44,
+    "advanced_scope_mutating_commands_total": 68,
+    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 25,
+    "catalog_commands_total": 198,
+    "catalog_mutating_commands_total": 97,
+    "json_commands_total": 156,
+    "json_commands_with_accepted_opaque_schema": 44,
+    "json_commands_with_schema": 112,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 89,
+    "json_mutating_commands_total": 92,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 89,
-    "mutating_commands_with_accepted_opaque_schema": 24,
-    "mutating_commands_with_schema": 65,
+    "mutating_commands_total": 92,
+    "mutating_commands_with_accepted_opaque_schema": 25,
+    "mutating_commands_with_schema": 67,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 43,
+    "opaque_schema_verbs_total": 44,
     "status": "available",
-    "summary": "192 command(s), 153 JSON command(s), 93 mutating command(s), 89 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 43 accepted opaque schema(s) outside clean verification",
+    "summary": "198 command(s), 156 JSON command(s), 97 mutating command(s), 92 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3165,7 +3207,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "192 command(s), 153 JSON command(s), 93 mutating command(s), 89 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 43 accepted opaque schema(s) outside clean verification",
+  "summary": "198 command(s), 156 JSON command(s), 97 mutating command(s), 92 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true

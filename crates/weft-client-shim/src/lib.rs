@@ -72,6 +72,14 @@ pub trait WeftExtensions: Send + Sync {
         command: &(dyn Any + Send + Sync),
     ) -> Result<()>;
 
+    /// `heddle identity <subcommand>` — reuse-first machine identity and the
+    /// data-only browser claim endpoint.
+    async fn identity(
+        &self,
+        ctx: &(dyn CliContext + 'static),
+        command: &(dyn Any + Send + Sync),
+    ) -> Result<()>;
+
     /// `heddle whoami` — resolve and report the acting identity (principal,
     /// token kind, scopes, operation ceiling, TTL, signing + reachability).
     /// `server` is the optional `--server` override.
