@@ -81,6 +81,14 @@ and wire purge evidence. A completed capability cutover must explicitly decide
 its removal too; otherwise purge would retain a TOML authorization path after
 redact and metadata moved to Biscuits.
 
+The named metadata-supersession consumer is not a distinct live acceptance
+path on this checkout. `verify_trusted_client_metadata_signature` has only the
+state-visibility caller, while `put_state_attachment` rejects signature
+attachments with `supersedes` as append-only before that verifier can run. The
+live metadata-supersession carrier and acceptance seam therefore also need to
+land before Heddle can produce the requested ACCEPT/DENY evidence for that
+decision.
+
 ## Conditions to unblock implementation
 
 The code cutover can proceed atomically after all of these are available:
@@ -91,7 +99,9 @@ The code cutover can proceed atomically after all of these are available:
    Heddle persists its owner pin before accepting sidecars.
 3. Every affected sidecar carries the complete offline capability material
    needed by a peer with no Weft connection.
-4. The owner confirms whether `[purge].trusted_keys` is part of the retirement
+4. A live metadata-supersession acceptance seam invokes the literal shared
+   capability decision before persisting a superseding record.
+5. The owner confirms whether `[purge].trusted_keys` is part of the retirement
    scope, as required to avoid a remaining purge verifier.
 
 Once those contracts land, #1393 should remove all selected TOML surfaces and
