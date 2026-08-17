@@ -1406,8 +1406,8 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
                 script.display()
             );
             assert!(
-                source.contains("\"heddle bridge git\"") && source.contains("\"reconcile\""),
-                "{} should keep old bridge ceremony out of the human cold path by linting it from transcripts",
+                source.contains("bridge git import") && source.contains("\"reconcile\""),
+                "{} should exercise the canonical Git import and keep stale reconcile wording out of human transcripts",
                 script.display()
             );
             assert!(

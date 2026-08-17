@@ -416,6 +416,7 @@ assert_transcript_claims() {
     "pull" \
     "push" \
     "clone" \
+    "bridge git import" \
     "start" \
     "ready" \
     "Git repo detected" \
@@ -448,7 +449,6 @@ assert_transcript_claims() {
     "Last 5 captures" \
     "Captures on" \
     "materialized" \
-    "heddle bridge git" \
     "reconcile" \
     "performed:" \
     "skipped:" \
@@ -700,7 +700,7 @@ run_shape() {
 
   run_text "$transcript" "$repo" init --output text
   assert_source_authority "$repo" git-overlay
-  run_text "$transcript" "$repo" import git --ref main --output text
+  run_text "$transcript" "$repo" bridge git import --ref main --output text
   assert_source_authority "$repo" git-overlay
   assert_git_commit_mapped "$repo" "$overlay_base"
   assert_clean_git_status "$repo"
