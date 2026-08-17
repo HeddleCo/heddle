@@ -349,7 +349,7 @@ pub fn cmd_export_git(cli: &Cli, destination: Option<PathBuf>) -> Result<()> {
         &repo,
         &mut bridge,
         destination,
-        "no destination specified. Use `export git --destination PATH` to write a bare Git repository, or `push <remote>` to push to a configured remote.",
+        "no destination specified. Use `bridge git export --destination PATH` to write a bare Git repository, or `push <remote>` to push to a configured remote.",
     )
 }
 
@@ -368,9 +368,9 @@ pub fn cmd_import_git(
         path,
         &refs,
         lossy,
-        "import_git",
-        "import git",
-        &["import", "git"],
+        "bridge_git_import",
+        "bridge git import",
+        &["bridge", "git", "import"],
     )
 }
 
@@ -405,7 +405,7 @@ fn run_git_export(
         // could not publish every ref.
         if failure.is_none() {
             let out = serde_json::json!({
-                "output_kind": "export_git",
+                "output_kind": "bridge_git_export",
                 "states_exported": stats.states_exported,
                 "commits_total": stats.commits_total,
                 "threads_synced": stats.threads_synced,

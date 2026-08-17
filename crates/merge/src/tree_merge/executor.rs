@@ -1331,7 +1331,7 @@ mod tests {
              can locate the corrupt entry; got: {msg}"
         );
         assert!(
-            msg.contains("heddle fsck"),
+            msg.contains("heddle maintenance fsck"),
             "error must point at the recovery command so operators have a \
              next step instead of just a stack trace; got: {msg}"
         );

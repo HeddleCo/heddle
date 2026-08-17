@@ -69,7 +69,7 @@ pub fn run(args: Vec<String>) -> Result<()> {
 site(s) in production code. This pattern silently substitutes \
 `Tree::default()` for a missing subtree (heddle#90 merge / heddle#93 \
 non-merge). Replace with `repo.require_tree(&hash)?` so missing trees \
-surface with a `heddle fsck --full` recovery hint.\n\
+surface with a `heddle maintenance fsck --full` recovery hint.\n\
 \n\
 If a site is a legitimate empty-tree sentinel (no-parent-commit marker, \
 etc.) add a `path:line` entry to HEDDLE_ASSERTER_ALLOWLIST with a \

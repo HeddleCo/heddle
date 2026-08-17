@@ -2636,7 +2636,7 @@ mod require_tree_callback {
     //! `require_tree` has no hydrator dance — partial-fetch only ever
     //! lazy-fetches blobs, not trees — so the contract is the simpler
     //! shape: present trees round-trip; absent trees surface
-    //! `MissingObject { object_type: "tree" }` with the `heddle fsck`
+    //! `MissingObject { object_type: "tree" }` with the `heddle maintenance fsck`
     //! hint baked into the display.
     //!
     //! These tests pin the contract at the API boundary; the
@@ -2711,7 +2711,7 @@ mod require_tree_callback {
         };
         let msg = err.to_string();
         assert!(
-            msg.contains("heddle fsck"),
+            msg.contains("heddle maintenance fsck"),
             "missing-object display must include the fsck recovery hint; got: {msg}",
         );
         assert!(

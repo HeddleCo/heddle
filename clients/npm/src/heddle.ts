@@ -372,9 +372,9 @@ export class Heddle {
     return this.run("push", args, options);
   }
 
-  /** `heddle export git` — export to a git repo. Mutating. */
+  /** `heddle bridge git export` — export to a git repo. Mutating. */
   export(args: readonly string[] = [], options: RunOptions = {}) {
-    return this.run("export git", args, options);
+    return this.run("bridge git export", args, options);
   }
 
   /** `heddle watch` — stream live oplog activity (JSONL). Read-only. */

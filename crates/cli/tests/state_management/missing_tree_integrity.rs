@@ -9,7 +9,7 @@
 //! engine). Each test introduces targeted corruption (deletes the loose
 //! tree object backing a captured state) and asserts the CLI command
 //! fails loud with a diagnostic naming the missing hash and pointing at
-//! `heddle fsck` — pre-fix the same scenario produced silent, plausible-
+//! `heddle maintenance fsck` — pre-fix the same scenario produced silent, plausible-
 //! looking output that masked store corruption.
 
 use std::{fs, path::Path};
@@ -39,7 +39,7 @@ fn current_state_tree_hex(repo_root: &Path) -> String {
 }
 
 /// Assert the CLI error names the missing-tree diagnostic, includes the
-/// missing hash so the operator can correlate with `heddle fsck` output,
+/// missing hash so the operator can correlate with `heddle maintenance fsck` output,
 /// and points at the recovery command so they have a next step instead
 /// of just a stack trace. Used by every test in this module — the
 /// contract is the same regardless of which command surfaced the error.
@@ -52,10 +52,10 @@ fn assert_missing_tree_error(err: &str, tree_hex: &str) {
     assert!(
         err.contains(tree_hex),
         "error must include the missing tree's hash so the operator can correlate \
-         with `heddle fsck` output; got: {err}"
+         with `heddle maintenance fsck` output; got: {err}"
     );
     assert!(
-        err.contains("heddle fsck"),
+        err.contains("heddle maintenance fsck"),
         "error must point at the recovery command so the operator has a next step \
          instead of just a stack trace; got: {err}"
     );

@@ -3,12 +3,14 @@
 
 use clap::{Args, Subcommand};
 
+#[cfg(feature = "git-overlay")]
+use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
     AgentCommands, CiCommands, CompletionSubject, ContextCommands, DiscussCommands, HookCommands,
-    IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
-    ShellCommands, ThreadCommands, VisibilityCommands,
+    IntegrationCommands, OplogCommands, PresenceCommands, QueryArgs, RedactCommands,
+    RemoteCommands, ReviewCommands, ShellCommands, ThreadCommands, VisibilityCommands,
     commands_args::{
         AdoptArgs, CloneArgs, CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, ExpandArgs, InitArgs,
         LandArgs, LogArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs,
@@ -18,8 +20,6 @@ use super::{
 };
 #[cfg(feature = "client")]
 use super::{AuthCommands, IdentityCommands};
-#[cfg(feature = "git-overlay")]
-use super::{ExportCommands, ImportCommands};
 
 #[derive(Clone, Debug, Args)]
 pub struct FsckArgs {
@@ -402,9 +402,6 @@ Examples:
     /// Resolve merge conflicts.
     Resolve(ResolveArgs),
 
-    /// Verify repository integrity or explicitly repair one surface.
-    Fsck(FsckArgs),
-
     /// Inspect and repair the operation log.
     ///
     /// `heddle oplog recover` explicitly salvages a truncated or torn oplog,
@@ -415,18 +412,11 @@ Examples:
         command: OplogCommands,
     },
 
-    /// Import from another version control system.
+    /// Explicit interoperability with other version-control formats.
     #[cfg(feature = "git-overlay")]
-    Import {
+    Bridge {
         #[command(subcommand)]
-        command: ImportCommands,
-    },
-
-    /// Export to another version control system.
-    #[cfg(feature = "git-overlay")]
-    Export {
-        #[command(subcommand)]
-        command: ExportCommands,
+        command: BridgeCommands,
     },
 
     /// Push the source-authoritative history to a remote.
@@ -531,6 +521,15 @@ Examples:
         command: AgentCommands,
     },
 
+    /// Inspect attribution and work context for local agents.
+    ///
+    /// Presence is intentionally separate from `agent`: presence records
+    /// explain who is acting, while `agent reserve` grants writer authority.
+    Presence {
+        #[command(subcommand)]
+        command: PresenceCommands,
+    },
+
     /// Inspect and refresh rebuildable performance sidecars.
     Maintenance {
         #[command(subcommand)]
@@ -550,6 +549,9 @@ Examples:
 /// Maintenance subcommands.
 #[derive(Clone, Debug, clap::Subcommand)]
 pub enum MaintenanceCommands {
+    /// Verify repository integrity or explicitly repair one surface.
+    Fsck(FsckArgs),
+
     /// Inspect repository performance sidecars and repo shape.
     Inspect,
 

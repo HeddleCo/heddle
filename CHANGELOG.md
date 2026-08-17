@@ -108,7 +108,7 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   treats a missing residual as a hard error.
 
 - **Offline provenance verification.** `heddle verify --provenance` and
-  `heddle fsck --thorough --provenance` check content integrity,
+  `heddle maintenance fsck --thorough --provenance` check content integrity,
   domain-tagged authorship, registry identity, and review signatures, and
   emit only exact fail-closed statuses.
 

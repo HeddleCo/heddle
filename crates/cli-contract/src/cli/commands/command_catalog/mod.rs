@@ -22,15 +22,15 @@ use crate::cli::{
     RedactTrustCommands, RemoteCommands, ShellCommands, ThreadCommands, ThreadMarkerCommands,
     TimelineCommands, VisibilityCommands,
     cli_args::{
-        AgentFanoutCommands, AgentPresenceCommands, AgentProvenanceCommands, AgentTaskCommands,
-        DiscussCommands, ReviewCommands,
+        AgentFanoutCommands, AgentProvenanceCommands, AgentTaskCommands, DiscussCommands,
+        PresenceCommands, ReviewCommands,
     },
     render::shell_quote,
 };
 #[cfg(feature = "client")]
 use crate::cli::{AuthCommands, IdentityCommands};
 #[cfg(feature = "git-overlay")]
-use crate::cli::{ExportCommands, ImportCommands};
+use crate::cli::{BridgeCommands, BridgeGitCommands};
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CommandCatalogOutput {
@@ -410,7 +410,7 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle agent provenance begin",
     "heddle start <name> --path <empty-path>",
     "heddle start <name> --path ../<name>",
-    "heddle agent presence show <session>",
+    "heddle presence show <session>",
     "heddle thread show <THREAD>",
     // Remote setup requires filling in a real name and URL after
     // inspecting current configuration.
@@ -424,8 +424,8 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle clone <remote> <fresh-path>",
     "heddle clone <remote> <path> --thread <thread>",
     // Shallow Git import recovery requires choosing a complete checkout.
-    "heddle import git --path <full-git-repo>",
-    "heddle import git --path <full-git-repo> --ref <ref>",
+    "heddle bridge git import --path <full-git-repo>",
+    "heddle bridge git import --path <full-git-repo> --ref <ref>",
     "heddle thread switch <branch>",
     "heddle ready --thread <thread>",
     "heddle land --thread <thread>",
@@ -526,8 +526,8 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
-        "heddle agent presence show <session>",
-        &["heddle", "agent", "presence", "show", "<session>"],
+        "heddle presence show <session>",
+        &["heddle", "presence", "show", "<session>"],
         &["session"],
         true,
     ),
@@ -646,17 +646,25 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         false,
     ),
     (
-        "heddle import git --path <full-git-repo>",
-        &["heddle", "import", "git", "--path", "<full-git-repo>"],
+        "heddle bridge git import --path <full-git-repo>",
+        &[
+            "heddle",
+            "bridge",
+            "git",
+            "import",
+            "--path",
+            "<full-git-repo>",
+        ],
         &["path"],
         false,
     ),
     (
-        "heddle import git --path <full-git-repo> --ref <ref>",
+        "heddle bridge git import --path <full-git-repo> --ref <ref>",
         &[
             "heddle",
-            "import",
+            "bridge",
             "git",
+            "import",
             "--path",
             "<full-git-repo>",
             "--ref",
@@ -1328,58 +1336,58 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
-    entry(&["agent", "presence"], surface(GROUP, "automation")),
+    entry(&["presence"], surface(GROUP, "automation")),
     entry(
-        &["agent", "presence", "list"],
+        &["presence", "list"],
         surface(
             json_discriminators(
-                documented_schemas(READ_JSON, &["agent presence list"]),
+                documented_schemas(READ_JSON, &["presence list"]),
                 &[json_discriminator(
-                    Some("agent presence list"),
+                    Some("presence list"),
                     "output_kind",
-                    "agent_presence_list",
+                    "presence_list",
                 )],
             ),
             "automation",
         ),
     ),
     entry(
-        &["agent", "presence", "show"],
+        &["presence", "show"],
         surface(
             json_discriminators(
-                documented_schemas(READ_JSON, &["agent presence show"]),
+                documented_schemas(READ_JSON, &["presence show"]),
                 &[json_discriminator(
-                    Some("agent presence show"),
+                    Some("presence show"),
                     "output_kind",
-                    "agent_presence_show",
+                    "presence_show",
                 )],
             ),
             "automation",
         ),
     ),
     entry(
-        &["agent", "presence", "explain"],
+        &["presence", "explain"],
         surface(
             json_discriminators(
-                documented_schemas(READ_JSON, &["agent presence explain"]),
+                documented_schemas(READ_JSON, &["presence explain"]),
                 &[json_discriminator(
-                    Some("agent presence explain"),
+                    Some("presence explain"),
                     "output_kind",
-                    "agent_presence_explain",
+                    "presence_explain",
                 )],
             ),
             "automation",
         ),
     ),
     entry(
-        &["agent", "presence", "complete"],
+        &["presence", "complete"],
         surface(
             json_discriminators(
-                documented_schemas(METADATA_MUTATION, &["agent presence complete"]),
+                documented_schemas(METADATA_MUTATION, &["presence complete"]),
                 &[json_discriminator(
-                    Some("agent presence complete"),
+                    Some("presence complete"),
                     "output_kind",
-                    "agent_presence_complete",
+                    "presence_complete",
                 )],
             ),
             "automation",
@@ -1567,16 +1575,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "repo",
         ),
     ),
-    entry(&["import"], surface(GROUP, "git_projection")),
+    entry(&["bridge"], surface(GROUP, "git_projection")),
+    entry(&["bridge", "git"], surface(GROUP, "git_projection")),
     entry(
-        &["import", "git"],
+        &["bridge", "git", "import"],
         exits(
             json_discriminators(
-                documented_schemas(IMPORTING_MUTATION, &["import git"]),
+                documented_schemas(IMPORTING_MUTATION, &["bridge git import"]),
                 &[json_discriminator(
-                    Some("import git"),
+                    Some("bridge git import"),
                     "output_kind",
-                    "import_git",
+                    "bridge_git_import",
                 )],
             ),
             &[
@@ -1586,21 +1595,20 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ],
         ),
     ),
-    entry(&["export"], surface(GROUP, "git_projection")),
     entry(
-        &["export", "git"],
+        &["bridge", "git", "export"],
         json_discriminators(
             documented_schemas(
                 CommandContract {
                     writes_git_refs: true,
                     ..REF_MUTATION
                 },
-                &["export git"],
+                &["bridge git export"],
             ),
             &[json_discriminator(
-                Some("export git"),
+                Some("bridge git export"),
                 "output_kind",
-                "export_git",
+                "bridge_git_export",
             )],
         ),
     ),
@@ -2013,19 +2021,22 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["fsck"],
+        &["maintenance", "fsck"],
         category(
             documented_core_report_schema(READ_JSON, FsckReport::CONTRACT),
             "recovery",
         ),
     ),
-    entry(&["fsck", "repair"], category(GROUP, "recovery")),
     entry(
-        &["fsck", "repair", "git"],
+        &["maintenance", "fsck", "repair"],
+        category(GROUP, "recovery"),
+    ),
+    entry(
+        &["maintenance", "fsck", "repair", "git"],
         category(
             documented_schemas(
                 documented_core_report_schema(FSCK_GIT_REPAIR, FsckReport::CONTRACT),
-                &["fsck repair git"],
+                &["maintenance fsck repair git"],
             ),
             "recovery",
         ),
@@ -3159,7 +3170,7 @@ fn walk_commands(
 
 /// Append catalog entries for `feature_gated` contracts whose clap
 /// subcommand is compiled out of THIS build (e.g. the `client`-gated
-/// `auth`/`support`/`presence` surfaces in a default `cargo install`).
+/// `auth`/`identity`/`whoami` surfaces in a default `cargo install`).
 ///
 /// `walk_commands` only sees the live clap tree, so without this the
 /// hosted verbs would be missing from the catalog `commands` list even
@@ -3831,7 +3842,7 @@ fn active_command_contract_entries() -> &'static [&'static CommandContractEntry]
 /// The contracts advertised to agents: every [`active_command_contract_entries`]
 /// entry (present in the compiled clap tree) PLUS any `feature_gated` contract
 /// whose clap subcommand is compiled out of this build. The hosted surfaces
-/// (`auth`, `support`, `presence`) are `client`-gated, so a default
+/// (`auth`, `identity`, `whoami`) are `client`-gated, so a default
 /// `cargo install heddle-cli` omits their clap nodes — but their schema verbs
 /// and `output_kind` discriminators are a wire-format-stable promise that must
 /// stay advertised in the catalog regardless of build features. Distinct from
@@ -4697,19 +4708,12 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         },
         Commands::Complete { .. } => vec!["complete"],
         Commands::Resolve(_) => vec!["resolve"],
-        Commands::Fsck(args) => match &args.command {
-            None => vec!["fsck"],
-            Some(crate::cli::FsckCommands::Repair { target }) => match target {
-                crate::cli::FsckRepairCommands::Git(_) => vec!["fsck", "repair", "git"],
+        #[cfg(feature = "git-overlay")]
+        Commands::Bridge { command } => match command {
+            BridgeCommands::Git { command } => match command {
+                BridgeGitCommands::Import { .. } => vec!["bridge", "git", "import"],
+                BridgeGitCommands::Export { .. } => vec!["bridge", "git", "export"],
             },
-        },
-        #[cfg(feature = "git-overlay")]
-        Commands::Import { command } => match command {
-            ImportCommands::Git { .. } => vec!["import", "git"],
-        },
-        #[cfg(feature = "git-overlay")]
-        Commands::Export { command } => match command {
-            ExportCommands::Git { .. } => vec!["export", "git"],
         },
         Commands::Oplog { command } => match command {
             OplogCommands::Recover => vec!["oplog", "recover"],
@@ -4797,12 +4801,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 AgentFanoutCommands::Plan(_) => vec!["agent", "fanout", "plan"],
                 AgentFanoutCommands::Start(_) => vec!["agent", "fanout", "start"],
             },
-            AgentCommands::Presence(command) => match command {
-                AgentPresenceCommands::List(_) => vec!["agent", "presence", "list"],
-                AgentPresenceCommands::Show(_) => vec!["agent", "presence", "show"],
-                AgentPresenceCommands::Explain(_) => vec!["agent", "presence", "explain"],
-                AgentPresenceCommands::Complete(_) => vec!["agent", "presence", "complete"],
-            },
             AgentCommands::Provenance(command) => match command {
                 AgentProvenanceCommands::Begin(_) => vec!["agent", "provenance", "begin"],
                 AgentProvenanceCommands::Segment(_) => vec!["agent", "provenance", "segment"],
@@ -4811,7 +4809,21 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 AgentProvenanceCommands::List(_) => vec!["agent", "provenance", "list"],
             },
         },
+        Commands::Presence { command } => match command {
+            PresenceCommands::List(_) => vec!["presence", "list"],
+            PresenceCommands::Show(_) => vec!["presence", "show"],
+            PresenceCommands::Explain(_) => vec!["presence", "explain"],
+            PresenceCommands::Complete(_) => vec!["presence", "complete"],
+        },
         Commands::Maintenance { command } => match command {
+            MaintenanceCommands::Fsck(args) => match &args.command {
+                None => vec!["maintenance", "fsck"],
+                Some(crate::cli::FsckCommands::Repair { target }) => match target {
+                    crate::cli::FsckRepairCommands::Git(_) => {
+                        vec!["maintenance", "fsck", "repair", "git"]
+                    }
+                },
+            },
             MaintenanceCommands::Inspect => vec!["maintenance", "inspect"],
             MaintenanceCommands::Refresh => vec!["maintenance", "refresh"],
             MaintenanceCommands::Repack => vec!["maintenance", "repack"],

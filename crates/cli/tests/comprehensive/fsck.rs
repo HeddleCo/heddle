@@ -10,7 +10,7 @@ fn test_fsck_dangling_ref() {
     let thread_path = temp.path().join(".heddle/refs/threads/orphan");
     fs::write(&thread_path, "hs-deadbeef12345678901234567890").unwrap();
 
-    let result = heddle(&["fsck"], Some(temp.path()));
+    let result = heddle(&["maintenance", "fsck"], Some(temp.path()));
     assert!(result.is_err(), "fsck should fail with dangling ref");
     let err = result.unwrap_err();
     assert!(
@@ -36,7 +36,7 @@ fn test_fsck_orphaned_objects() {
     )
     .unwrap();
 
-    let result = heddle(&["fsck", "--full"], Some(temp.path()));
+    let result = heddle(&["maintenance", "fsck", "--full"], Some(temp.path()));
     assert!(result.is_ok(), "fsck should complete: {:?}", result.err());
 }
 
@@ -45,7 +45,7 @@ fn test_fsck_empty_repository() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let result = heddle(&["fsck", "--full"], Some(temp.path()));
+    let result = heddle(&["maintenance", "fsck", "--full"], Some(temp.path()));
     assert!(
         result.is_ok(),
         "fsck on empty repo should succeed: {:?}",
@@ -65,6 +65,6 @@ fn test_fsck_basic_vs_full() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "content");
 
-    assert!(heddle(&["fsck"], Some(temp.path())).is_ok());
-    assert!(heddle(&["fsck", "--full"], Some(temp.path())).is_ok());
+    assert!(heddle(&["maintenance", "fsck"], Some(temp.path())).is_ok());
+    assert!(heddle(&["maintenance", "fsck", "--full"], Some(temp.path())).is_ok());
 }

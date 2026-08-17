@@ -212,12 +212,13 @@ pub fn canonical_adopt_ref_command(ref_name: &str) -> String {
 }
 
 pub fn canonical_git_import_ref_command(ref_name: &str) -> String {
-    heddle_action(["import", "git", "--ref", ref_name])
+    heddle_action(["bridge", "git", "import", "--ref", ref_name])
 }
 
 pub fn canonical_git_repair_ref_preview_command(prefer: Option<&str>, ref_name: &str) -> String {
     match prefer {
         Some(prefer) => heddle_action([
+            "maintenance",
             "fsck",
             "repair",
             "git",
@@ -227,13 +228,28 @@ pub fn canonical_git_repair_ref_preview_command(prefer: Option<&str>, ref_name: 
             ref_name,
             "--preview",
         ]),
-        None => heddle_action(["fsck", "repair", "git", "--ref", ref_name, "--preview"]),
+        None => heddle_action([
+            "maintenance",
+            "fsck",
+            "repair",
+            "git",
+            "--ref",
+            ref_name,
+            "--preview",
+        ]),
     }
 }
 
 pub fn canonical_git_repair_ref_command(prefer: &str, ref_name: &str) -> String {
     heddle_action([
-        "fsck", "repair", "git", "--prefer", prefer, "--ref", ref_name,
+        "maintenance",
+        "fsck",
+        "repair",
+        "git",
+        "--prefer",
+        prefer,
+        "--ref",
+        ref_name,
     ])
 }
 
@@ -409,7 +425,7 @@ mod tests {
         assert_eq!(
             remote_tracking_next_action(&remote("main", "origin/main", 1, 1, "heddle pull"))
                 .as_deref(),
-            Some("heddle import git --ref origin/main")
+            Some("heddle bridge git import --ref origin/main")
         );
         assert_eq!(
             remote_tracking_next_action(&remote("main", "", 1, 0, "heddle push")).as_deref(),

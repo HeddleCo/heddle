@@ -291,9 +291,11 @@ fn adopt_moves_authority_to_native_and_retains_git_projection() {
     let imported = json(&heddle(
         repo.path(),
         &config,
-        &["import", "git", "--ref", "main", "--output", "json"],
+        &[
+            "bridge", "git", "import", "--ref", "main", "--output", "json",
+        ],
     ));
-    assert_eq!(imported["output_kind"], "import_git");
+    assert_eq!(imported["output_kind"], "bridge_git_import");
 }
 
 #[cfg(unix)]

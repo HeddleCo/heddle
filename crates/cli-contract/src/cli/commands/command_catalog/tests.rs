@@ -27,22 +27,10 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["abort"], &["abort"]),
     sample(&["adopt"], &["adopt"]),
     sample(&["ci", "run"], &["ci", "run", "--local"]),
-    sample(
-        &["agent", "presence", "list"],
-        &["agent", "presence", "list"],
-    ),
-    sample(
-        &["agent", "presence", "show"],
-        &["agent", "presence", "show"],
-    ),
-    sample(
-        &["agent", "presence", "explain"],
-        &["agent", "presence", "explain"],
-    ),
-    sample(
-        &["agent", "presence", "complete"],
-        &["agent", "presence", "complete"],
-    ),
+    sample(&["presence", "list"], &["presence", "list"]),
+    sample(&["presence", "show"], &["presence", "show"]),
+    sample(&["presence", "explain"], &["presence", "explain"]),
+    sample(&["presence", "complete"], &["presence", "complete"]),
     sample(
         &["agent", "reserve"],
         &["agent", "reserve", "--thread", "main"],
@@ -181,11 +169,11 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     #[cfg(feature = "client")]
     sample(&["whoami"], &["whoami"]),
     #[cfg(feature = "git-overlay")]
-    sample(&["import", "git"], &["import", "git"]),
+    sample(&["bridge", "git", "import"], &["bridge", "git", "import"]),
     #[cfg(feature = "git-overlay")]
     sample(
-        &["export", "git"],
-        &["export", "git", "--destination", "out.git"],
+        &["bridge", "git", "export"],
+        &["bridge", "git", "export", "--destination", "out.git"],
     ),
     #[cfg(feature = "git-overlay")]
     sample(&["sync", "git"], &["sync", "git"]),
@@ -256,10 +244,18 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["doctor"], &["doctor"]),
     sample(&["doctor", "docs"], &["doctor", "docs"]),
     sample(&["doctor", "schemas"], &["doctor", "schemas"]),
-    sample(&["fsck"], &["fsck"]),
+    sample(&["maintenance", "fsck"], &["maintenance", "fsck"]),
     sample(
-        &["fsck", "repair", "git"],
-        &["fsck", "repair", "git", "--ref", "main", "--preview"],
+        &["maintenance", "fsck", "repair", "git"],
+        &[
+            "maintenance",
+            "fsck",
+            "repair",
+            "git",
+            "--ref",
+            "main",
+            "--preview",
+        ],
     ),
     sample(&["oplog", "recover"], &["oplog", "recover"]),
     sample(&["help"], &["help"]),
@@ -547,7 +543,7 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
         "heddle clone <remote> <fresh-path>",
         "heddle clone <local-path> <path>",
         "heddle clone /tmp/source <path> --thread main",
-        "heddle import git --path <full-git-repo> --ref <ref>",
+        "heddle bridge git import --path <full-git-repo> --ref <ref>",
         "heddle thread promote main",
         "heddle thread resolve main",
     ] {
@@ -557,11 +553,11 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
     #[cfg(feature = "git-overlay")]
     {
         for action in [
-            "heddle import git --ref main",
-            "heddle import git --ref origin/main",
+            "heddle bridge git import --ref main",
+            "heddle bridge git import --ref origin/main",
             "heddle ready --thread origin/main",
-            "heddle fsck repair git --ref main --preview",
-            "heddle fsck repair git --prefer heddle --ref main --preview",
+            "heddle maintenance fsck repair git --ref main --preview",
+            "heddle maintenance fsck repair git --prefer heddle --ref main --preview",
         ] {
             validate_recommended_action(action)
                 .unwrap_or_else(|err| panic!("expected `{action}` to validate: {err}"));
@@ -676,14 +672,15 @@ fn recommended_action_templates_describe_display_only_placeholders() {
     assert!(!dynamic_clone.agent_may_fill);
 
     let import =
-        recommended_action_template("heddle import git --path <full-git-repo> --ref <ref>")
+        recommended_action_template("heddle bridge git import --path <full-git-repo> --ref <ref>")
             .expect("shallow import recovery placeholder should resolve");
     assert_eq!(
         import.argv_template,
         vec![
             "heddle",
-            "import",
+            "bridge",
             "git",
+            "import",
             "--path",
             "<full-git-repo>",
             "--ref",
@@ -771,7 +768,6 @@ fn contracted_commands_are_not_parseable() {
         "fetch",
         "git-overlay",
         "merge",
-        "presence",
         "prove",
         "rebase",
         "spool",
@@ -782,6 +778,22 @@ fn contracted_commands_are_not_parseable() {
         assert!(
             Cli::try_parse_from(["heddle", command]).is_err(),
             "removed command `{command}` must not return to the public CLI"
+        );
+    }
+}
+
+#[test]
+fn phase_3_old_command_paths_are_not_parseable() {
+    for argv in [
+        &["heddle", "agent", "presence", "list"][..],
+        &["heddle", "fsck"],
+        &["heddle", "import", "git"],
+        &["heddle", "export", "git"],
+    ] {
+        assert!(
+            Cli::try_parse_from(argv).is_err(),
+            "removed Phase 3 command path `{}` must be rejected",
+            argv[1..].join(" ")
         );
     }
 }
@@ -1359,7 +1371,7 @@ fn assert_command_effects(path: &[&str], expected: &[CommandSideEffect]) {
 #[test]
 fn sidecar_only_effect_sets_exclude_refs() {
     for path in [
-        &["agent", "presence", "complete"][..],
+        &["presence", "complete"][..],
         &["agent", "heartbeat"],
         &["agent", "release"],
         &["agent", "task", "create"],
@@ -1475,8 +1487,8 @@ fn auth_commands_are_user_scoped() {
 
 #[test]
 fn fsck_observation_has_no_side_effects() {
-    assert_command_effects(&["fsck"], &[CommandSideEffect::ObserveOnly]);
-    let contract = raw_command_contract_for_path(["fsck"]).expect("fsck contract");
+    assert_command_effects(&["maintenance", "fsck"], &[CommandSideEffect::ObserveOnly]);
+    let contract = raw_command_contract_for_path(["maintenance", "fsck"]).expect("fsck contract");
     assert!(contract.observe_only);
     assert!(!contract.supports_op_id);
 }
@@ -1484,7 +1496,7 @@ fn fsck_observation_has_no_side_effects() {
 #[test]
 fn fsck_repair_git_has_explicit_mutation_effects() {
     assert_command_effects(
-        &["fsck", "repair", "git"],
+        &["maintenance", "fsck", "repair", "git"],
         &[
             CommandSideEffect::ImportGit,
             CommandSideEffect::WritesHeddleRefs,
@@ -1493,8 +1505,8 @@ fn fsck_repair_git_has_explicit_mutation_effects() {
             CommandSideEffect::WritesMetadata,
         ],
     );
-    let contract =
-        raw_command_contract_for_path(["fsck", "repair", "git"]).expect("fsck repair git contract");
+    let contract = raw_command_contract_for_path(["maintenance", "fsck", "repair", "git"])
+        .expect("fsck repair git contract");
     assert!(contract.supports_op_id);
     assert!(!contract.persists_op_id);
 }
@@ -1664,10 +1676,10 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "agent task update",
             "agent fanout plan",
             "agent fanout start",
-            "agent presence list",
-            "agent presence show",
-            "agent presence explain",
-            "agent presence complete",
+            "presence list",
+            "presence show",
+            "presence explain",
+            "presence complete",
             "auth logout",
             "auth status",
             // heddle#1130: descriptor-trust inspection and explicit
@@ -1682,8 +1694,8 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             // advertises its discriminator here alongside the other
             // client-gated hosted verbs.
             "whoami",
-            "import git",
-            "export git",
+            "bridge git import",
+            "bridge git export",
             "sync git",
             "capture",
             "clone",
@@ -2116,7 +2128,7 @@ fn catalog_option_lookup_includes_globals_and_finite_values() {
     );
 
     let fsck_options = catalog
-        .options_for_display("fsck")
+        .options_for_display("maintenance fsck")
         .expect("fsck should be cataloged");
     for mutation_option in ["ref", "prefer", "preview"] {
         assert!(
@@ -2127,7 +2139,7 @@ fn catalog_option_lookup_includes_globals_and_finite_values() {
         );
     }
     let repair_options = catalog
-        .options_for_display("fsck repair git")
+        .options_for_display("maintenance fsck repair git")
         .expect("fsck repair git should be cataloged");
     let prefer = repair_options
         .iter()

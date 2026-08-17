@@ -871,7 +871,7 @@ PYJSON
 
   run_json "$transcript" "$repo" "$shape.03.init-overlay" init
   assert_source_authority "$repo" git-overlay
-  run_json "$transcript" "$repo" "$shape.03.import-overlay-main" import git --ref main
+  run_json "$transcript" "$repo" "$shape.03.import-overlay-main" bridge git import --ref main
   assert_source_authority "$repo" git-overlay
   assert_git_commit_mapped "$repo" "$overlay_base"
   assert_clean_git_status "$repo"

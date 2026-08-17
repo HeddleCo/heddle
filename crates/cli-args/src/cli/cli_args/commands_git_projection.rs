@@ -41,12 +41,21 @@ pub(crate) fn parse_git_source(s: &str) -> Result<GitSource, String> {
 }
 
 #[derive(Subcommand, Clone)]
-pub enum ImportCommands {
-    /// Import Git commits to Heddle.
+pub enum BridgeCommands {
+    /// Explicit Git projection operations.
+    Git {
+        #[command(subcommand)]
+        command: BridgeGitCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum BridgeGitCommands {
+    /// Import Git commits to Heddle without changing source authority.
     ///
     /// Walks local branches and tags by default. To import remote-tracking
     /// refs (`refs/remotes/*`), name them explicitly with `--ref`.
-    Git {
+    Import {
         /// Local path or git URL to import from.
         #[arg(short, long, value_parser = parse_git_source)]
         path: Option<GitSource>,
@@ -61,16 +70,12 @@ pub enum ImportCommands {
         #[arg(long)]
         lossy: bool,
     },
-}
-
-#[derive(Subcommand, Clone)]
-pub enum ExportCommands {
     /// Export Heddle states to Git.
     ///
     /// Writes a complete bare Git repository at `--destination` containing
     /// every reachable Heddle state as a Git commit, with branches and tags
     /// mirroring Heddle's threads and markers.
-    Git {
+    Export {
         /// Destination path for the exported Git repository. Must be writable;
         /// will be initialized as a bare repo if it does not already exist.
         #[arg(short, long)]

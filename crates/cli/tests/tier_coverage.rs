@@ -51,7 +51,7 @@ fn every_commands_variant_has_explicit_root_contract() {
                 // `command_contract_root_commands()` omits them in a no-client
                 // build even though the enum source (read as text) still lists
                 // the variant.
-                "Auth" | "Whoami" | "Support" | "Presence" | "Prove" | "Spool"
+                "Auth" | "Whoami" | "Support" | "Prove" | "Spool"
             )
         {
             continue;

@@ -197,7 +197,7 @@ This matters for harness integration work:
 - Heddle should follow supported harnesses ambiently rather than requiring users to run tools through Heddle
 - presence records are stored separately from writer leases
 - harness-native identities are tracked separately from Heddle-local reconnect identifiers
-- `heddle agent presence ...` inspects attribution without granting write authority
+- `heddle presence ...` inspects attribution without granting write authority
 - `heddle agent reserve|heartbeat|capture|ready|release` is the writer hot loop
 - `heddle agent provenance ...` records provider, model, and policy epochs
 

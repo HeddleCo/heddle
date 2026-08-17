@@ -29,8 +29,8 @@ mod output_mode;
 pub use cli_base::{Cli, should_output_json};
 pub use cli_shared::OutputMode;
 pub use commands_agent::{
-    AgentCommands, AgentFanoutCommands, AgentPresenceCommands, AgentProvenanceCommands,
-    AgentTaskCommands,
+    AgentCommands, AgentFanoutCommands, AgentProvenanceCommands, AgentTaskCommands,
+    PresenceCommands,
 };
 pub use commands_args::{
     AdoptArgs, AgentApiListArgs, AgentCaptureArgs, AgentFanoutPlanArgs, AgentFanoutStartArgs,
@@ -60,7 +60,7 @@ pub use commands_discuss::{
     DiscussResolveArgs, DiscussShowArgs, ResolveModeArg,
 };
 #[cfg(feature = "git-overlay")]
-pub use commands_git_projection::{ExportCommands, GitSource, ImportCommands, SyncCommands};
+pub use commands_git_projection::{BridgeCommands, BridgeGitCommands, GitSource, SyncCommands};
 pub use commands_hook::{HookCommands, HookInstallSource};
 pub use commands_integration::{
     IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs, IntegrationTargetArgs,

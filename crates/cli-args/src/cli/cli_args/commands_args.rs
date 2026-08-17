@@ -1402,7 +1402,7 @@ pub struct WorktreeRemoveArgs {
     pub delete_thread: bool,
 }
 
-/// Arguments for `agent presence list`.
+/// Arguments for `presence list`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct AgentPresenceListArgs {
     /// Show only active actors.
@@ -1410,21 +1410,21 @@ pub struct AgentPresenceListArgs {
     pub active: bool,
 }
 
-/// Arguments for `agent presence show`.
+/// Arguments for `presence show`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct AgentPresenceShowArgs {
     /// Session ID to show (default: current thread actor).
     pub session: Option<String>,
 }
 
-/// Arguments for `agent presence explain`.
+/// Arguments for `presence explain`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct AgentPresenceExplainArgs {
     /// Session ID to explain (default: current thread actor).
     pub session: Option<String>,
 }
 
-/// Arguments for `agent presence complete`.
+/// Arguments for `presence complete`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct AgentPresenceCompleteArgs {
     /// Session ID to mark as complete (default: current thread actor).

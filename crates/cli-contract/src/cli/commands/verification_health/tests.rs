@@ -92,7 +92,7 @@ fn canonical_git_overlay_ref_commands_quote_parseable_refs() {
         action_template(&import)
             .expect("import command should expose a template")
             .argv_template[1..],
-        ["import", "git", "--ref", "feature with spaces"]
+        ["bridge", "git", "import", "--ref", "feature with spaces"]
     );
 
     let reconcile = canonical_git_repair_ref_preview_command(Some("heddle"), "feature 'quoted'");
@@ -101,6 +101,7 @@ fn canonical_git_overlay_ref_commands_quote_parseable_refs() {
             .expect("reconcile command should expose a template")
             .argv_template[1..],
         [
+            "maintenance",
             "fsck",
             "repair",
             "git",
@@ -139,9 +140,9 @@ fn repository_verification_blocked_advice_uses_verify_when_no_action_exists() {
 #[test]
 fn repository_verification_blocked_advice_preserves_trust_recovery_commands() {
     let trust = verification_state(
-        "heddle fsck repair git --ref main --preview",
+        "heddle maintenance fsck repair git --ref main --preview",
         vec![
-            "heddle fsck repair git --ref main --preview".to_string(),
+            "heddle maintenance fsck repair git --ref main --preview".to_string(),
             "heddle verify".to_string(),
         ],
     );
@@ -159,7 +160,7 @@ fn repository_verification_blocked_advice_preserves_trust_recovery_commands() {
 
     assert_eq!(
         advice.primary_command,
-        "heddle fsck repair git --ref main --preview"
+        "heddle maintenance fsck repair git --ref main --preview"
     );
     assert_eq!(advice.recovery_commands, trust.recovery_commands);
 }
@@ -167,8 +168,8 @@ fn repository_verification_blocked_advice_preserves_trust_recovery_commands() {
 #[test]
 fn repository_verification_blocked_advice_keeps_primary_override_first() {
     let trust = verification_state(
-        "heddle import git --ref origin/main",
-        vec!["heddle import git --ref origin/main".to_string()],
+        "heddle bridge git import --ref origin/main",
+        vec!["heddle bridge git import --ref origin/main".to_string()],
     );
 
     let advice = repository_verification_blocked_advice(
@@ -201,7 +202,7 @@ fn remote_tracking_next_action_covers_basic_git_states_without_repo_context() {
     );
     assert_eq!(
         remote_tracking_next_action(&remote("main", "origin/main", 1, 1, "heddle pull")).as_deref(),
-        Some("heddle import git --ref origin/main")
+        Some("heddle bridge git import --ref origin/main")
     );
     assert_eq!(
         remote_tracking_next_action(&remote("main", "", 1, 0, "heddle push")).as_deref(),
@@ -218,13 +219,13 @@ fn remote_drift_decision_prefers_import_until_upstream_thread_matches_git_tip() 
     assert_eq!(unimported.status, "remote_diverged");
     assert_eq!(
         unimported.primary_action.as_deref(),
-        Some("heddle import git --ref origin/main")
+        Some("heddle bridge git import --ref origin/main")
     );
     assert_eq!(
         unimported.recovery_commands,
         vec![
-            "heddle import git --ref origin/main",
-            "heddle fsck repair git --ref origin/main --preview"
+            "heddle bridge git import --ref origin/main",
+            "heddle maintenance fsck repair git --ref origin/main --preview"
         ]
     );
 
@@ -235,13 +236,13 @@ fn remote_drift_decision_prefers_import_until_upstream_thread_matches_git_tip() 
     let stale_thread = remote_drift_decision(&repo, &diverged);
     assert_eq!(
         stale_thread.primary_action.as_deref(),
-        Some("heddle import git --ref origin/main")
+        Some("heddle bridge git import --ref origin/main")
     );
     assert_eq!(
         stale_thread.recovery_commands,
         vec![
-            "heddle import git --ref origin/main",
-            "heddle fsck repair git --ref origin/main --preview"
+            "heddle bridge git import --ref origin/main",
+            "heddle maintenance fsck repair git --ref origin/main --preview"
         ]
     );
 }

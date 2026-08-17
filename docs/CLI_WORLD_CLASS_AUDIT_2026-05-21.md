@@ -59,7 +59,7 @@ extract time.
 | `start` / `merge` / `undo` JSON workflow | `start_merge_undo_json_workflow_keeps_machine_streams_clean` | Pass after strengthening | Isolated solid checkout, feature capture, merge preview/apply, undo list/preview all emit parseable JSON with empty stderr; merge and undo preview paths do not mutate current state or worktree content; repeat merge is a successful `Already up to date` text no-op. |
 | `version --repo <path> --verbose --output json` | `version_verbose_honors_explicit_repo_path` | Pass after fix | Verbose bug-context JSON reports the explicitly requested repository root, not the process cwd. |
 | `resolve` outside a merge | `resolve_without_merge_emits_actionable_json_error` | Pass after fix | JSON and text failures use `kind=no_merge_in_progress` / `Error: No merge in progress`, hint at `heddle status`, keep stdout empty, and avoid the old `object not found` wrapper. |
-| corrupt repository ref recovery | `fsck_on_corrupt_ref_emits_integrity_hint_in_text_and_json` | Pass after fix | Corrupt thread ref fails non-zero with stdout clean; JSON stderr has `kind=repository_integrity_error`, preserves the invalid-object error, and hints `heddle fsck --full`; text mode mirrors the recovery hint. |
+| corrupt repository ref recovery | `fsck_on_corrupt_ref_emits_integrity_hint_in_text_and_json` | Pass after fix | Corrupt thread ref fails non-zero with stdout clean; JSON stderr has `kind=repository_integrity_error`, preserves the invalid-object error, and hints `heddle maintenance fsck --full`; text mode mirrors the recovery hint. |
 | global quiet/color/narrow text behavior | `quiet_no_color_and_narrow_text_outputs_preserve_global_contract`; `narrow_no_color_text_outputs_cover_everyday_read_surfaces` | Pass after fix | `--quiet` suppresses capture/log tips; `NO_COLOR=1` wins over forced color; `COLUMNS=28/30` text succeeds across status, diagnose, doctor, diff, log, show, thread list, status, bridge status, fsck, and ready with primary labels intact. |
 | default auto-output contract | `default_auto_output_is_json_when_stdout_is_piped_and_text_when_forced`; `tty_auto_mode_renders_text_and_explicit_json_stays_json` | Pass | Confirms piped stdout uses parseable JSON in `auto` mode; TTY stdout uses human text for `status` and rich guidance for `start`; `--output text` and `--output json` override auto regardless of stream. |
 | exit-code and failure-stream taxonomy | `global_exit_codes_and_failure_streams_are_predictable` | Pass | Help exits 0 on stdout; clap parse errors exit 2 on stderr with suggestions; environment failures exit 1 with clean stdout and JSON error envelope when requested. |
@@ -123,7 +123,7 @@ extract time.
 - Added ready text/no-op coverage and broadened missing-state recovery checks
   across `goto`, `show`, and `diff`.
 - Classified invalid, corrupt, or missing object failures as
-  `repository_integrity_error`, with an actionable `heddle fsck --full` hint in
+  `repository_integrity_error`, with an actionable `heddle maintenance fsck --full` hint in
   both JSON and text modes.
 - Fixed the help-router regression test to match the current unknown-topic
   wording: unknown help names now say `no topic or command`, then point back to

@@ -915,7 +915,7 @@ fn write_reflog_full<W: std::io::Write>(out: &mut W, output: &ReflogOutput) -> s
     writeln!(out, "Reflog: {} entrie(s)", output.entries.len())?;
     if output.entries.is_empty() {
         if let Some(line) = format_next_step_dim(
-            "run `heddle commit` after capturing work, `heddle pull`, or `heddle import git`",
+            "run `heddle commit` after capturing work, `heddle pull`, or `heddle bridge git import`",
             0,
         ) {
             writeln!(out, "{line}")?;

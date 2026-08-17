@@ -478,7 +478,7 @@ impl Drop for Tx<'_> {
             tracing::error!(
                 error = %e,
                 "Tx Drop rewind failed; staged effects may persist as orphans \
-                 (gc-collectable); run heddle fsck"
+                 (gc-collectable); run heddle maintenance fsck"
             );
         }
     }

@@ -15,15 +15,15 @@ use cli::cli::commands::cmd_context_reason_git;
 use cli::cli::commands::cmd_semantic;
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
-    ExportCommands, ImportCommands,
+    BridgeCommands, BridgeGitCommands,
     cli_args::{SyncArgs, SyncCommands},
     commands::{cmd_export_git, cmd_import_git, cmd_sync_git},
 };
 use cli::{
     cli::{
         Cli, CloneArgs, CollapseArgs, Commands, ContextCommands, DaemonCommands, DiffArgs,
-        ExpandArgs, FsckCommands, FsckRepairCommands, IntegrationCommands, LogArgs,
-        MaintenanceCommands, ResolveArgs, RetroArgs, RevertArgs, RunArgs, ThreadCommands, UndoArgs,
+        ExpandArgs, IntegrationCommands, LogArgs, MaintenanceCommands, ResolveArgs, RetroArgs,
+        RevertArgs, RunArgs, ThreadCommands, UndoArgs,
         cli_args::LandArgs,
         commands::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
@@ -32,14 +32,14 @@ use cli::{
             cmd_context_get, cmd_context_history, cmd_context_list, cmd_context_rm,
             cmd_context_set, cmd_context_suggest, cmd_context_supersede, cmd_continue,
             cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop, cmd_diff, cmd_discuss,
-            cmd_doctor, cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fsck,
-            cmd_fsck_repair_git, cmd_hook, cmd_init, cmd_integration, cmd_land, cmd_log,
-            cmd_maintenance, cmd_oplog, cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_redo,
-            cmd_remote, cmd_resolve, cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas,
-            cmd_shell, cmd_show, cmd_snapshot, cmd_start, cmd_status, cmd_sync_smart, cmd_thread,
-            cmd_timeline, cmd_try, cmd_undo, cmd_undo_recover, cmd_verify, cmd_watch,
-            command_runtime_contract_for_command, print_error_with_hint,
-            print_parse_error_json_envelope, recover_incomplete_land_if_present,
+            cmd_doctor, cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_hook, cmd_init,
+            cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_oplog, cmd_presence, cmd_pull,
+            cmd_push, cmd_query, cmd_ready, cmd_redo, cmd_remote, cmd_resolve, cmd_retro,
+            cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_shell, cmd_show, cmd_snapshot,
+            cmd_start, cmd_status, cmd_sync_smart, cmd_thread, cmd_timeline, cmd_try, cmd_undo,
+            cmd_undo_recover, cmd_verify, cmd_watch, command_runtime_contract_for_command,
+            print_error_with_hint, print_parse_error_json_envelope,
+            recover_incomplete_land_if_present,
         },
         render::write_json_stdout,
     },
@@ -84,7 +84,7 @@ async fn async_main() -> Result<()> {
     }
 
     // Install the ring crypto provider as the rustls default. Without this,
-    // any rustls TLS handshake (hosted API, GitHub REST, `import git
+    // any rustls TLS handshake (hosted API, GitHub REST, `bridge git import
     // https://…`) panics in 0.23.x. We pin ring instead of aws-lc-rs to
     // keep the 80s aws-lc-sys C build out of release builds. Measured
     // ~0ms on macOS — defensive ordering rather than a perf hot spot.
@@ -583,26 +583,14 @@ async fn async_main() -> Result<()> {
         }
 
         #[cfg(feature = "git-overlay")]
-        Commands::Import { command } => match command {
-            ImportCommands::Git { path, refs, lossy } => {
-                cmd_import_git(&cli, path.clone(), refs.clone(), *lossy)
-            }
-        },
-
-        #[cfg(feature = "git-overlay")]
-        Commands::Export { command } => match command {
-            ExportCommands::Git { destination } => cmd_export_git(&cli, destination.clone()),
-        },
-
-        Commands::Fsck(args) => match &args.command {
-            None => cmd_fsck(&cli, args.full, args.thorough, args.provenance, args.git),
-            Some(cli::cli::FsckCommands::Repair { target }) => match target {
-                cli::cli::FsckRepairCommands::Git(args) => cmd_fsck_repair_git(
-                    &cli,
-                    args.ref_name.clone(),
-                    args.prefer.clone(),
-                    args.preview,
-                ),
+        Commands::Bridge { command } => match command {
+            BridgeCommands::Git { command } => match command {
+                BridgeGitCommands::Import { path, refs, lossy } => {
+                    cmd_import_git(&cli, path.clone(), refs.clone(), *lossy)
+                }
+                BridgeGitCommands::Export { destination } => {
+                    cmd_export_git(&cli, destination.clone())
+                }
             },
         },
 
@@ -802,6 +790,8 @@ async fn async_main() -> Result<()> {
         },
 
         Commands::Agent { command } => cmd_agent(&cli, command).await,
+
+        Commands::Presence { command } => cmd_presence(&cli, command).await,
 
         Commands::Discuss { command } => cmd_discuss(&cli, command).await,
 
@@ -1161,10 +1151,12 @@ fn invocation_is_observe_only(command: &Commands) -> bool {
     match command {
         Commands::Undo(args) => args.list || args.preview,
         Commands::Resolve(args) => args.list,
-        Commands::Fsck(args) => matches!(
+        Commands::Maintenance {
+            command: MaintenanceCommands::Fsck(args),
+        } => matches!(
             &args.command,
-            Some(FsckCommands::Repair {
-                target: FsckRepairCommands::Git(args)
+            Some(cli::cli::FsckCommands::Repair {
+                target: cli::cli::FsckRepairCommands::Git(args)
             }) if args.preview
         ),
         Commands::Thread {
@@ -1242,9 +1234,27 @@ mod tests {
             (&["heddle", "undo", "--redo"], false),
             (&["heddle", "resolve", "--list"], true),
             (&["heddle", "resolve", "--all"], false),
-            (&["heddle", "fsck", "repair", "git", "--preview"], true),
             (
-                &["heddle", "fsck", "repair", "git", "--prefer", "git"],
+                &[
+                    "heddle",
+                    "maintenance",
+                    "fsck",
+                    "repair",
+                    "git",
+                    "--preview",
+                ],
+                true,
+            ),
+            (
+                &[
+                    "heddle",
+                    "maintenance",
+                    "fsck",
+                    "repair",
+                    "git",
+                    "--prefer",
+                    "git",
+                ],
                 false,
             ),
             (&["heddle", "thread", "absorb", "child", "--preview"], true),

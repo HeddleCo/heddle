@@ -81,8 +81,8 @@ fn git_projection_help_topic_distinguishes_native_projection_from_overlay() {
     );
     for needle in [
         "heddle adopt --ref <branch>",
-        "heddle import git --path <git-repository> --ref <branch>",
-        "heddle export git --destination <bare-git-repository>",
+        "heddle bridge git import --path <git-repository> --ref <branch>",
+        "heddle bridge git export --destination <bare-git-repository>",
         "heddle sync git --path <git-repository>",
         "Export metadata for Git readers",
         "refs/notes/heddle",
@@ -103,12 +103,11 @@ fn git_projection_help_topic_distinguishes_native_projection_from_overlay() {
 }
 
 #[test]
-fn import_alias_leads_to_adopt_instead_of_clap_guesswork() {
-    let help = heddle_help(&["import", "--help"]);
+fn bridge_git_import_help_names_the_explicit_git_importer() {
+    let help = heddle_help(&["bridge", "git", "import", "--help"]);
     assert!(
-        help.contains("Import from another version control system")
-            && help.contains("git   Import Git commits to Heddle"),
-        "`heddle import --help` should route import intent to the explicit git importer: {help}"
+        help.contains("Import Git commits to Heddle") && help.contains("--ref <REF>"),
+        "`heddle bridge git import --help` should describe the explicit git importer: {help}"
     );
 }
 
@@ -1347,7 +1346,7 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
         }
         assert!(
             source.contains("adopt")
-                || source.contains("import git")
+                || source.contains("bridge git import")
                 || source.contains("run_verify_recommended_action"),
             "{} should run one-command adoption, explicit import, or verify's recommended action",
             script.display()
@@ -1407,8 +1406,8 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
                 script.display()
             );
             assert!(
-                source.contains("\"heddle bridge git\"") && source.contains("\"reconcile\""),
-                "{} should keep old bridge ceremony out of the human cold path by linting it from transcripts",
+                source.contains("bridge git import") && source.contains("\"reconcile\""),
+                "{} should exercise the canonical Git import and keep stale reconcile wording out of human transcripts",
                 script.display()
             );
             assert!(
@@ -1864,8 +1863,9 @@ fn op_id_replays_export_git() {
             "json",
             "--op-id",
             &export_op_id,
-            "export",
+            "bridge",
             "git",
+            "export",
             "--destination",
             &export_dest_arg,
         ],
@@ -1879,8 +1879,9 @@ fn op_id_replays_export_git() {
             "json",
             "--op-id",
             &export_op_id,
-            "export",
+            "bridge",
             "git",
+            "export",
             "--destination",
             &export_dest_arg,
         ],
@@ -2408,10 +2409,10 @@ fn core_loop_schemas_are_discoverable() {
         "doctor docs",
         "doctor schemas",
         "diff",
-        "agent presence list",
-        "agent presence show",
-        "agent presence explain",
-        "agent presence complete",
+        "presence list",
+        "presence show",
+        "presence explain",
+        "presence complete",
         "agent provenance begin",
         "agent provenance segment",
         "agent provenance end",
@@ -2424,7 +2425,7 @@ fn core_loop_schemas_are_discoverable() {
         "agent release",
         "agent list",
         "thread list",
-        "fsck repair git",
+        "maintenance fsck repair git",
         "remote list",
         "remote show",
         "remote add",
@@ -6560,7 +6561,14 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
     );
     assert_text_surface(
         temp.path(),
-        vec!["--quiet", "--output", "text", "fsck", "--git"],
+        vec![
+            "--quiet",
+            "--output",
+            "text",
+            "maintenance",
+            "fsck",
+            "--git",
+        ],
         &["repository is valid", "Git projection:"],
     );
 
@@ -7289,8 +7297,8 @@ fn command_catalog_exposes_public_surface_for_agents() {
     );
     let import_git = commands
         .iter()
-        .find(|entry| entry["display"] == "import git")
-        .expect("import git command should be cataloged");
+        .find(|entry| entry["display"] == "bridge git import")
+        .expect("bridge git import command should be cataloged");
     assert!(
         import_git["summary"]
             .as_str()
@@ -7403,8 +7411,8 @@ fn command_catalog_exposes_public_surface_for_agents() {
     );
     let bridge_import = commands
         .iter()
-        .find(|entry| entry["display"] == "import git")
-        .expect("import git should be cataloged");
+        .find(|entry| entry["display"] == "bridge git import")
+        .expect("bridge git import should be cataloged");
     assert_eq!(bridge_import["canonical_action"], Value::Null);
     assert_eq!(bridge_import["canonical_command"], Value::Null);
     for removed in ["stash pop", "stash push"] {
@@ -8640,7 +8648,7 @@ fn agent_presence_explain_json_detects_harness_without_active_presence() {
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let output = heddle_output_with_env_removed(
-        &["agent", "presence", "explain", "--output", "json"],
+        &["presence", "explain", "--output", "json"],
         Some(temp.path()),
         &[
             ("CODEX_THREAD_ID", "thread-cold-agent"),
@@ -8665,7 +8673,7 @@ fn agent_presence_explain_json_detects_harness_without_active_presence() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|err| panic!("actor explain JSON should parse: {err}: {stdout}"));
-    assert_eq!(parsed["output_kind"], "agent_presence_explain", "{parsed}");
+    assert_eq!(parsed["output_kind"], "presence_explain", "{parsed}");
     assert_eq!(parsed["attached"], false);
     assert!(parsed.get("active_presence").is_none());
     assert_eq!(parsed["detected"]["harness"], "codex");
@@ -8702,7 +8710,7 @@ fn agent_presence_explain_json_detects_harness_without_active_presence() {
         heddle_argv_json(["agent", "reserve", "--thread", "main"]),
         "presence explain should expose replayable argv for reservation: {parsed}"
     );
-    assert_schema_declares_runtime_top_level(&["agent", "presence", "explain"], &parsed);
+    assert_schema_declares_runtime_top_level(&["presence", "explain"], &parsed);
     assert!(
         parsed.get("verification").is_some(),
         "actor explain should prove repository verify for agents: {parsed}"
@@ -8724,15 +8732,9 @@ fn agent_presence_and_provenance_outputs_match_registered_schemas() {
         .as_str()
         .expect("reserve should attach presence");
 
-    let actor_list = json_value(
-        temp.path(),
-        &["agent", "presence", "list", "--output", "json"],
-    );
-    assert_schema_declares_runtime_top_level(&["agent", "presence", "list"], &actor_list);
-    assert_eq!(
-        actor_list["output_kind"], "agent_presence_list",
-        "{actor_list}"
-    );
+    let actor_list = json_value(temp.path(), &["presence", "list", "--output", "json"]);
+    assert_schema_declares_runtime_top_level(&["presence", "list"], &actor_list);
+    assert_eq!(actor_list["output_kind"], "presence_list", "{actor_list}");
     assert!(
         actor_list["presence"].as_array().is_some(),
         "presence list should emit an envelope: {actor_list}"
@@ -8741,19 +8743,15 @@ fn agent_presence_and_provenance_outputs_match_registered_schemas() {
 
     let actor_show = json_value(
         temp.path(),
-        &["agent", "presence", "show", presence_id, "--output", "json"],
+        &["presence", "show", presence_id, "--output", "json"],
     );
-    assert_schema_declares_runtime_top_level(&["agent", "presence", "show"], &actor_show);
-    assert_eq!(
-        actor_show["output_kind"], "agent_presence_show",
-        "{actor_show}"
-    );
+    assert_schema_declares_runtime_top_level(&["presence", "show"], &actor_show);
+    assert_eq!(actor_show["output_kind"], "presence_show", "{actor_show}");
     assert_eq!(actor_show["presence"]["session_id"], presence_id);
 
     let actor_done = json_value(
         temp.path(),
         &[
-            "agent",
             "presence",
             "complete",
             "--session",
@@ -8762,9 +8760,9 @@ fn agent_presence_and_provenance_outputs_match_registered_schemas() {
             "json",
         ],
     );
-    assert_schema_declares_runtime_top_level(&["agent", "presence", "complete"], &actor_done);
+    assert_schema_declares_runtime_top_level(&["presence", "complete"], &actor_done);
     assert_eq!(
-        actor_done["output_kind"], "agent_presence_complete",
+        actor_done["output_kind"], "presence_complete",
         "{actor_done}"
     );
     assert_eq!(actor_done["status"], "complete");
@@ -9067,8 +9065,11 @@ fn fsck_on_corrupt_ref_emits_integrity_hint_in_text_and_json() {
     )
     .unwrap();
 
-    let json = heddle_output(&["--output", "json", "fsck"], Some(temp.path()))
-        .expect("invoke corrupt fsck json");
+    let json = heddle_output(
+        &["--output", "json", "maintenance", "fsck"],
+        Some(temp.path()),
+    )
+    .expect("invoke corrupt fsck json");
     assert!(
         !json.status.success(),
         "corrupt fsck JSON should exit non-zero"
@@ -9093,12 +9094,15 @@ fn fsck_on_corrupt_ref_emits_integrity_hint_in_text_and_json() {
         envelope["hint"]
             .as_str()
             .unwrap_or("")
-            .contains("heddle fsck --full"),
+            .contains("heddle maintenance fsck --full"),
         "corrupt ref should point at fsck recovery: {envelope}"
     );
 
-    let text = heddle_output(&["--output", "text", "fsck"], Some(temp.path()))
-        .expect("invoke corrupt fsck text");
+    let text = heddle_output(
+        &["--output", "text", "maintenance", "fsck"],
+        Some(temp.path()),
+    )
+    .expect("invoke corrupt fsck text");
     assert!(
         !text.status.success(),
         "corrupt fsck text should exit non-zero"
@@ -9111,8 +9115,8 @@ fn fsck_on_corrupt_ref_emits_integrity_hint_in_text_and_json() {
     let text_stderr = String::from_utf8_lossy(&text.stderr);
     assert!(
         text_stderr.contains("Error: invalid object")
-            && text_stderr.contains("Next: heddle fsck --full")
-            && text_stderr.contains("heddle fsck --full"),
+            && text_stderr.contains("Next: heddle maintenance fsck --full")
+            && text_stderr.contains("heddle maintenance fsck --full"),
         "corrupt ref text recovery should include original error and fsck hint: {text_stderr}"
     );
 }
@@ -9401,13 +9405,13 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
     }
     for verb in [
         "thread list",
-        "fsck repair git",
+        "maintenance fsck repair git",
         "capture",
         "commit",
-        "agent presence list",
-        "agent presence show",
-        "agent presence explain",
-        "agent presence complete",
+        "presence list",
+        "presence show",
+        "presence explain",
+        "presence complete",
         "agent provenance begin",
         "agent provenance segment",
         "agent provenance end",
@@ -9451,7 +9455,7 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         "watch",
         "try",
         "query --attribution",
-        "fsck",
+        "maintenance fsck",
         "resolve",
     ] {
         assert!(
@@ -10062,7 +10066,7 @@ fn make_local_master_git_repo(parent: &std::path::Path, commits: usize) -> std::
 
 #[test]
 fn import_git_after_clone_reports_commits_not_zero() {
-    // heddle#147: rerunning `import git --ref master --path .`
+    // heddle#147: rerunning `bridge git import --ref master --path .`
     // after `heddle clone` used to land at `commits_imported: 0` even
     // though every commit on master had been imported during clone —
     // visually indistinguishable from "your import did nothing".
@@ -10086,7 +10090,7 @@ fn import_git_after_clone_reports_commits_not_zero() {
 
     let json = heddle(
         &[
-            "--output", "json", "import", "git", "--ref", "master", "--path", ".",
+            "--output", "json", "bridge", "git", "import", "--ref", "master", "--path", ".",
         ],
         Some(&work),
     )
@@ -10108,7 +10112,7 @@ fn import_git_after_clone_reports_commits_not_zero() {
 
     let text = heddle(
         &[
-            "--output", "text", "import", "git", "--ref", "master", "--path", ".",
+            "--output", "text", "bridge", "git", "import", "--ref", "master", "--path", ".",
         ],
         Some(&work),
     )
@@ -10329,7 +10333,9 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
     git_commit_all_for_json_contract(temp.path(), "git side");
 
     let output = heddle_output(
-        &["--output", "json", "import", "git", "--ref", "main"],
+        &[
+            "--output", "json", "bridge", "git", "import", "--ref", "main",
+        ],
         Some(temp.path()),
     )
     .expect("invoke import git");
@@ -10349,11 +10355,11 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
     assert_eq!(envelope["kind"], "git_heddle_thread_diverged");
     assert_eq!(
         envelope["primary_command"],
-        "heddle fsck repair git --ref main --preview"
+        "heddle maintenance fsck repair git --ref main --preview"
     );
     assert_eq!(
         envelope["recovery_commands"],
-        serde_json::json!(["heddle fsck repair git --ref main --preview"])
+        serde_json::json!(["heddle maintenance fsck repair git --ref main --preview"])
     );
     assert!(
         envelope["preserved"]
@@ -10364,18 +10370,27 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
     );
     assert_eq!(
         envelope["primary_command_template"]["argv_template"],
-        heddle_argv_json(["fsck", "repair", "git", "--ref", "main", "--preview",])
+        heddle_argv_json([
+            "maintenance",
+            "fsck",
+            "repair",
+            "git",
+            "--ref",
+            "main",
+            "--preview",
+        ])
     );
 }
 
 #[test]
 fn import_git_schema_declares_already_in_sync() {
     // heddle#147 added `already_in_sync: bool` to the JSON output of
-    // `import git`. The schema contract surfaced via
-    // `heddle schemas "import git"` must list the field, or
+    // `bridge git import`. The schema contract surfaced via
+    // `heddle schemas "bridge git import"` must list the field, or
     // automation that validates against the schema will reject the
     // new payload shape.
-    let schema = heddle(&["schemas", "import git"], None).expect("heddle schemas \"import git\"");
+    let schema = heddle(&["schemas", "bridge git import"], None)
+        .expect("heddle schemas \"bridge git import\"");
     let parsed: Value = serde_json::from_str(&schema).expect("schema parses");
     let props = parsed["properties"]
         .as_object()
@@ -10496,11 +10511,11 @@ fn exit_codes_surface_in_json_catalog() {
     let bridge_import = catalog
         .commands
         .iter()
-        .find(|c| c.display == "import git")
-        .expect("import git command in catalog");
+        .find(|c| c.display == "bridge git import")
+        .expect("bridge git import command in catalog");
     assert!(
         bridge_import.exit_codes.iter().any(|c| c.code == 65),
-        "import git must surface DataErr (65) for malformed repos"
+        "bridge git import must surface DataErr (65) for malformed repos"
     );
 }
 
@@ -10515,7 +10530,11 @@ fn read_commands_gate_repository_preamble_on_verbose() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
     heddle(&["capture", "-m", "checkpoint"], Some(temp.path())).unwrap();
     heddle(&["commit", "-m", "checkpoint"], Some(temp.path())).unwrap();

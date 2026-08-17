@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn fsck_authority_refusal_is_data_err() {
-        // An authority-conflicting `heddle fsck repair git --prefer ...`
+        // An authority-conflicting `heddle maintenance fsck repair git --prefer ...`
         // request is a semantic refusal, not an IO failure.
         let advice = crate::cli::commands::RecoveryAdvice::safety_refusal(
             "git_repair_requires_adoption",

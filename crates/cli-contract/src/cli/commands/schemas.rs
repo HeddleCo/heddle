@@ -69,7 +69,7 @@ fn report_contract_schema_verbs() -> &'static [&'static str] {
 }
 
 schema_registry! {
-    (&["fsck repair git"], FsckReport),
+    (&["maintenance fsck repair git"], FsckReport),
     (&["init"], InitSchema),
     (&["adopt"], AdoptSchema),
     (&["capture"], CaptureSchema),
@@ -123,17 +123,17 @@ schema_registry! {
     (&["discuss show"], DiscussionShowSchema),
     (&["discuss list"], DiscussionListSchema),
     (&["query --attribution"], BlameSchema),
-    (&["export git"], ExportGitSchema),
-    (&["import git"], ImportGitSchema),
+    (&["bridge git export"], ExportGitSchema),
+    (&["bridge git import"], ImportGitSchema),
     (&["sync git"], SyncGitSchema),
     (&["revert"], RevertSchema),
     (&["doctor"], DoctorSchema),
     (&["doctor docs"], DoctorDocsSchema),
     (&["doctor schemas"], DoctorSchemasSchema),
-    (&["agent presence show"], AgentPresenceSingleSchema),
-    (&["agent presence list"], AgentPresenceListSchema),
-    (&["agent presence complete"], AgentPresenceCompleteSchema),
-    (&["agent presence explain"], AgentPresenceExplainSchema),
+    (&["presence show"], AgentPresenceSingleSchema),
+    (&["presence list"], AgentPresenceListSchema),
+    (&["presence complete"], AgentPresenceCompleteSchema),
+    (&["presence explain"], AgentPresenceExplainSchema),
     (&["agent reserve", "agent heartbeat", "agent release"], AgentReservationEnvelopeSchema),
     (&["agent capture"], CaptureSchema),
     (&["agent ready"], ReadySchema),
@@ -3459,8 +3459,8 @@ mod tests {
     fn native_only_schema_registry_excludes_git_overlay_verbs() {
         let catalog = command_catalog::build_command_catalog();
         for verb in [
-            "import git",
-            "export git",
+            "bridge git import",
+            "bridge git export",
             "sync git",
             "context reason git",
             "git-overlay",
@@ -3928,7 +3928,7 @@ mod tests {
     #[test]
     fn oss_recovery_surfaces_do_not_use_opaque_generic_schema() {
         for verb in [
-            "fsck",
+            "maintenance fsck",
             "resolve",
             "retro",
             "discuss open",

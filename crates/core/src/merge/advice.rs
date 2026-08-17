@@ -12,7 +12,7 @@ pub(crate) fn merge_integrity_refusal(
     HeddleError::recovery(RecoveryDetails::safety_refusal(
         "repository_integrity_error",
         error,
-        "Inspect repository integrity with `heddle fsck --full`, then restore or repair the reported object/ref.",
+        "Inspect repository integrity with `heddle maintenance fsck --full`, then restore or repair the reported object/ref.",
         unsafe_condition,
         would_change,
         preserved,

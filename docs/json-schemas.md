@@ -1190,14 +1190,14 @@ verification.
 }
 ```
 
-## `heddle agent presence show --output json`
+## `heddle presence show --output json`
 
 Presence inspection emits an envelope with post-command verification. Lists are
 also enveloped so agents never have to special-case a raw array.
 
 ```json
 {
-  "output_kind": "agent_presence_show",
+  "output_kind": "presence_show",
   "presence": {
     "session_id": "agent-4dvta2dd6as3uzjrszmq",
     "thread": "actor/agent-4dvta2dd6as3uzjrszmq",
@@ -1219,11 +1219,11 @@ also enveloped so agents never have to special-case a raw array.
 
 ---
 
-## `heddle agent presence list --output json`
+## `heddle presence list --output json`
 
 ```json
 {
-  "output_kind": "agent_presence_list",
+  "output_kind": "presence_list",
   "presence": [],
   "active_only": false,
   "verification": {
@@ -1251,11 +1251,11 @@ also enveloped so agents never have to special-case a raw array.
 
 ---
 
-## `heddle agent presence complete --output json`
+## `heddle presence complete --output json`
 
 ```json
 {
-  "output_kind": "agent_presence_complete",
+  "output_kind": "presence_complete",
   "session_id": "agent-4dvta2dd6as3uzjrszmq",
   "status": "complete",
   "thread": "actor/agent-4dvta2dd6as3uzjrszmq",
@@ -1265,11 +1265,11 @@ also enveloped so agents never have to special-case a raw array.
 
 ---
 
-## `heddle agent presence explain --output json`
+## `heddle presence explain --output json`
 
 ```json
 {
-  "output_kind": "agent_presence_explain",
+  "output_kind": "presence_explain",
   "attached": false,
   "reason": "No active actor is registered for this checkout.",
   "repository": "/work/project",
@@ -2187,7 +2187,7 @@ native Heddle, and returns the post-adoption verification proof. The existing
 
 Canonical surface for Git Overlay and native Heddle state. Plain Git first-run
 flows recommend `heddle init`; Git Overlay reconciliation uses explicit
-`heddle import git ...`; `heddle adopt` is the explicit authority transition.
+`heddle bridge git import ...`; `heddle adopt` is the explicit authority transition.
 
 `verification` is the public proof block. Legacy `git_overlay_import_hint`
 and `git_overlay_health` sidecars are internal render data, not public JSON
@@ -2207,11 +2207,11 @@ contract fields.
     "mapping_state": "needs_import",
     "summary": "1 Git branch tip(s) still need Heddle import",
     "checks": [],
-    "recommended_action": "heddle import git --ref support/import-me",
-    "recovery_commands": ["heddle import git --ref support/import-me"]
+    "recommended_action": "heddle bridge git import --ref support/import-me",
+    "recovery_commands": ["heddle bridge git import --ref support/import-me"]
   },
-  "recommended_action": "heddle import git --ref support/import-me",
-  "recovery_commands": ["heddle import git --ref support/import-me"]
+  "recommended_action": "heddle bridge git import --ref support/import-me",
+  "recovery_commands": ["heddle bridge git import --ref support/import-me"]
 }
 ```
 
@@ -2965,22 +2965,22 @@ objects installed after the repack snapshot are preserved separately.
 | `duration_ms` | integer | Wall-clock duration of the completed repack. |
 | `bytes_reclaimed` | integer | Physical bytes removed by retiring superseded storage. |
 
-## `heddle export git --output json`
+## `heddle bridge git export --output json`
 
 Export emits:
 
 ```json
-{"output_kind": "export_git", "states_exported": 3, "commits_total": 3, "threads_synced": 1, "markers_synced": 2, "branches": [{"name": "main", "tip": "0123456789abcdef0123456789abcdef01234567"}], "tags": [{"name": "v1.0.0", "tip": "89abcdef0123456789abcdef0123456789abcdef"}], "destination": "/work/project.git"}
+{"output_kind": "bridge_git_export", "states_exported": 3, "commits_total": 3, "threads_synced": 1, "markers_synced": 2, "branches": [{"name": "main", "tip": "0123456789abcdef0123456789abcdef01234567"}], "tags": [{"name": "v1.0.0", "tip": "89abcdef0123456789abcdef0123456789abcdef"}], "destination": "/work/project.git"}
 ```
 
 Export requires an explicit destination and does not default to `.heddle/git`.
 
-## `heddle import git --output json`
+## `heddle bridge git import --output json`
 
 Import emits:
 
 ```json
-{"output_kind": "import_git", "status": "completed", "action": "import git", "summary": "Imported Git history from /work/project; repository verification is clean", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "lossy_entries": [], "already_in_sync": false, "recommended_action": null, "recommended_action_template": null, "recovery_commands": []}
+{"output_kind": "bridge_git_import", "status": "completed", "action": "import git", "summary": "Imported Git history from /work/project; repository verification is clean", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "lossy_entries": [], "already_in_sync": false, "recommended_action": null, "recommended_action_template": null, "recovery_commands": []}
 ```
 
 ### Import Git Fields
@@ -2998,26 +2998,26 @@ key naming:
 
 | Verb | Shape |
 |------|-------|
-| `export` | `{"output_kind": "export_git", "states_exported": N, "threads_synced": N, "markers_synced": N, "destination": "..."}` |
-| `import` | `{"output_kind": "import_git", "commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "lossy_entries": [], "already_in_sync": false}` |
+| `export` | `{"output_kind": "bridge_git_export", "states_exported": N, "threads_synced": N, "markers_synced": N, "destination": "..."}` |
+| `import` | `{"output_kind": "bridge_git_import", "commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "lossy_entries": [], "already_in_sync": false}` |
 | `sync` | `{"output_kind": "sync_git", "states_exported": N, "commits_imported": N, "threads_synced": N, "markers_synced": N}` |
 
-## `heddle export git --output json`
+## `heddle bridge git export --output json`
 
 Export emits:
 
 ```json
-{"output_kind": "export_git", "states_exported": 3, "threads_synced": 1, "markers_synced": 2, "destination": "/work/project.git"}
+{"output_kind": "bridge_git_export", "states_exported": 3, "threads_synced": 1, "markers_synced": 2, "destination": "/work/project.git"}
 ```
 
 Export requires an explicit destination and does not default to `.heddle/git`.
 
-## `heddle import git --output json`
+## `heddle bridge git import --output json`
 
 Import emits:
 
 ```json
-{"output_kind": "import_git", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "lossy_entries": [], "already_in_sync": false}
+{"output_kind": "bridge_git_import", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "lossy_entries": [], "already_in_sync": false}
 ```
 
 ## `heddle sync git --output json`
@@ -3150,9 +3150,9 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact trust list",
       "redact trust remove"
     ],
-    "advanced_scope_json_commands_total": 116,
+    "advanced_scope_json_commands_total": 120,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 44,
-    "advanced_scope_mutating_commands_total": 68,
+    "advanced_scope_mutating_commands_total": 69,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 25,
     "catalog_commands_total": 198,
     "catalog_mutating_commands_total": 97,
@@ -3169,21 +3169,21 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 44,
     "status": "available",
-    "summary": "198 command(s), 156 JSON command(s), 97 mutating command(s), 92 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
+    "summary": "198 command(s), 156 JSON command(s), 97 mutating command(s), 92 mutating JSON command(s); verified everyday/agent machine surface has 36 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
     "undocumented_schema_verbs_total": 0,
     "verified_scope": "everyday_and_agent",
     "verified_scope_accepted_opaque_schema_examples": [],
-    "verified_scope_json_commands_total": 40,
+    "verified_scope_json_commands_total": 36,
     "verified_scope_json_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_json_commands_with_schema": 40,
+    "verified_scope_json_commands_with_schema": 36,
     "verified_scope_json_commands_without_schema": 0,
     "verified_scope_missing_schema_examples": [],
-    "verified_scope_mutating_commands_total": 24,
+    "verified_scope_mutating_commands_total": 23,
     "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_mutating_commands_with_schema": 24,
+    "verified_scope_mutating_commands_with_schema": 23,
     "verified_scope_mutating_commands_without_schema": 0
   },
   "doc_path": "/repo/docs/json-schemas.md",
@@ -3207,7 +3207,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "198 command(s), 156 JSON command(s), 97 mutating command(s), 92 mutating JSON command(s); verified everyday/agent machine surface has 40 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
+  "summary": "198 command(s), 156 JSON command(s), 97 mutating command(s), 92 mutating JSON command(s); verified everyday/agent machine surface has 36 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -3300,7 +3300,7 @@ Refresh the active or named thread, or report the verification/action blocker.
 }
 ```
 
-## `heddle fsck repair git --output json`
+## `heddle maintenance fsck repair git --output json`
 
 Preview or apply the repair direction allowed by durable source authority.
 Git Overlay repairs Git into Heddle metadata; native repositories repair a
@@ -3320,7 +3320,7 @@ named Heddle ref into the retained Git projection. Supplying the opposite
     {
       "name": "git_projection_ref_reconcile_preview",
       "repaired": false,
-      "detail": "heddle fsck repair git --prefer git --ref main",
+      "detail": "heddle maintenance fsck repair git --prefer git --ref main",
       "count": 0
     }
   ]
@@ -3431,7 +3431,7 @@ the `discuss_show` discriminator:
 {"output_kind":"discuss_list","discussions":[]}
 ```
 
-`heddle fsck --output json` emits:
+`heddle maintenance fsck --output json` emits:
 
 ```json
 {"valid": true, "errors": [], "warnings": [], "objects_checked": 42, "git_projection_checked": false, "repair_target": null, "repaired": false, "repairs": []}
@@ -3609,7 +3609,7 @@ discipline; see the corresponding handler in `crates/cli/src/cli/commands/`:
 `heddle clone`, `heddle collapse`,
 `heddle context get/set`, `heddle diff`, `heddle expand`,
 `heddle discuss`, `heddle doctor docs`,
-`heddle fsck`, `heddle init`, `heddle integration`,
+`heddle maintenance fsck`, `heddle init`, `heddle integration`,
 `heddle maintenance`, `heddle ready`,
 `heddle remote`, `heddle resolve`, `heddle retro`,
 `heddle agent provenance`, `heddle capture`,

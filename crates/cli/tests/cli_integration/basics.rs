@@ -358,11 +358,11 @@ fn test_cli_adopt_partial_divergence_failure_preserves_state_and_one_recovery() 
     );
     assert_eq!(
         envelope["primary_command"],
-        "heddle fsck repair git --ref feature/drop-in --preview"
+        "heddle maintenance fsck repair git --ref feature/drop-in --preview"
     );
     assert_eq!(
         envelope["recovery_commands"],
-        serde_json::json!(["heddle fsck repair git --ref feature/drop-in --preview"])
+        serde_json::json!(["heddle maintenance fsck repair git --ref feature/drop-in --preview"])
     );
 }
 
@@ -1406,7 +1406,11 @@ fn test_cli_import_git_clears_import_hint_for_existing_branches() {
             .unwrap();
     assert_no_legacy_verification_sidecars(&before);
 
-    let import_output = heddle(&["import", "git", "--path", "."], Some(temp.path())).unwrap();
+    let import_output = heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
     let parsed_import: serde_json::Value =
         serde_json::from_str(&import_output).unwrap_or(serde_json::Value::Null);
     let synced = parsed_import["branches_synced"].as_u64().unwrap_or(0);
@@ -1447,8 +1451,9 @@ fn test_cli_import_git_ref_imports_only_selected_branch() {
         &[
             "--output",
             "json",
-            "import",
+            "bridge",
             "git",
+            "import",
             "--path",
             ".",
             "--ref",
@@ -1538,7 +1543,7 @@ fn test_cli_diff_mapped_git_branch_alias_resolves_without_import_loop() {
     git(&["branch", "support/git-only"], temp.path());
     heddle(&["init"], Some(temp.path())).unwrap();
     heddle(
-        &["import", "git", "--ref", "support/git-only"],
+        &["bridge", "git", "import", "--ref", "support/git-only"],
         Some(temp.path()),
     )
     .unwrap();
@@ -1568,7 +1573,11 @@ fn test_cli_compare_mapped_git_tag_resolves_without_import_loop() {
     git_commit_all(temp.path(), "seed branch");
     git(&["tag", "v1.0.0"], temp.path());
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["import", "git", "--ref", "v1.0.0"], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--ref", "v1.0.0"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     let output = heddle(
         &["diff", "HEAD", "v1.0.0", "--output", "json"],
@@ -1639,7 +1648,7 @@ fn test_cli_import_git_ref_imports_only_selected_tag() {
 
     let import_output = heddle(
         &[
-            "--output", "json", "import", "git", "--path", ".", "--ref", "v1.0.0",
+            "--output", "json", "bridge", "git", "import", "--path", ".", "--ref", "v1.0.0",
         ],
         Some(temp.path()),
     )
@@ -1670,11 +1679,15 @@ fn test_cli_import_git_defaults_to_current_repo_even_after_mirror_exists() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
 
-    heddle(&["import", "git", "--path", "."], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     git(&["branch", "support/import-latest"], temp.path());
 
-    let import_output = heddle(&["import", "git"], Some(temp.path())).unwrap();
+    let import_output = heddle(&["bridge", "git", "import"], Some(temp.path())).unwrap();
     let parsed_import: Value = serde_json::from_str(&import_output).unwrap_or(Value::Null);
     let synced = parsed_import["branches_synced"].as_u64().unwrap_or(0);
     assert!(

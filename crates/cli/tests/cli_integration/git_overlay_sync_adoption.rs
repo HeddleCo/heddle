@@ -206,7 +206,7 @@ fn git_overlay_sync_adopts_fast_forward_upstream_tip() {
     configure_git_identity(&work);
 
     heddle(&["status", "--output", "json"], Some(&work)).unwrap();
-    heddle(&["import", "git", "--ref", "main"], Some(&work)).unwrap();
+    heddle(&["bridge", "git", "import", "--ref", "main"], Some(&work)).unwrap();
     let before = status_json(&work);
     let before_state = before["current_state"]
         .as_str()
