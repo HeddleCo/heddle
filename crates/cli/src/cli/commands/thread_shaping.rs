@@ -661,12 +661,13 @@ mod tests {
                 "active Git branch has not been imported"
             }
             .to_string(),
-            recommended_action: (!verified).then(|| "heddle import git --ref main".to_string()),
+            recommended_action: (!verified)
+                .then(|| "heddle bridge git import --ref main".to_string()),
             recommended_action_template: None,
             recovery_commands: if verified {
                 Vec::new()
             } else {
-                vec!["heddle import git --ref main".to_string()]
+                vec!["heddle bridge git import --ref main".to_string()]
             },
             recovery_action_templates: Vec::new(),
             details: std::collections::BTreeMap::new(),
@@ -724,7 +725,7 @@ mod tests {
         );
         assert_eq!(
             blocked.recommended_action.as_deref(),
-            Some("heddle import git --ref main")
+            Some("heddle bridge git import --ref main")
         );
         assert!(
             blocked

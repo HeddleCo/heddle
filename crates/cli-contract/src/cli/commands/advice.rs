@@ -352,7 +352,7 @@ impl RecoveryAdvice {
     }
 
     pub fn git_import_metadata_required(map_path: &str, git_path: &str) -> Self {
-        let command = format!("heddle import git --path {git_path}");
+        let command = format!("heddle bridge git import --path {git_path}");
         Self::safety_refusal(
             "git_import_metadata_required",
             format!("No Git SHA map exists at {map_path}"),
@@ -984,7 +984,7 @@ impl RecoveryAdvice {
     /// commit. Keep this distinct from a remote push rejection so recovery is
     /// executable in the current checkout.
     pub(crate) fn git_overlay_local_non_fast_forward(branch: &str) -> Self {
-        let import_command = format!("heddle import git --ref {branch}");
+        let import_command = format!("heddle bridge git import --ref {branch}");
         Self::safety_refusal(
             "git_overlay_local_non_fast_forward",
             format!("Local Git branch '{branch}' does not fast-forward from the Heddle tip"),
@@ -1392,7 +1392,7 @@ mod tests {
 
     #[test]
     fn git_projection_shallow_clone_returns_typed_advice() {
-        let retry_command = "heddle import git --ref main";
+        let retry_command = "heddle bridge git import --ref main";
         let error = GitProjectionError::ShallowClone {
             repository: std::path::PathBuf::from("/tmp/shallow"),
             retry_command: retry_command.to_string(),

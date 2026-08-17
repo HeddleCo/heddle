@@ -198,7 +198,7 @@ export interface AgentPresenceCompleteSchema {
   idempotency_status?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "agent_presence_complete";
+  output_kind: "presence_complete";
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   replayed?: boolean | null;
@@ -220,7 +220,7 @@ export interface AgentPresenceExplainSchema {
   native_actor_key?: string | null;
   native_instance_key?: string | null;
   native_parent_actor_key?: string | null;
-  output_kind: "agent_presence_explain";
+  output_kind: "presence_explain";
   probe_confidence?: number | null;
   probe_source?: string | null;
   reason?: string | null;
@@ -235,13 +235,13 @@ export interface AgentPresenceExplainSchema {
 
 export interface AgentPresenceListSchema {
   active_only: boolean;
-  output_kind: "agent_presence_list";
+  output_kind: "presence_list";
   presence: ActorEntrySchema[];
   verification: RepositoryVerificationStateSchema;
 }
 
 export interface AgentPresenceSingleSchema {
-  output_kind: "agent_presence_show";
+  output_kind: "presence_show";
   presence: ActorEntrySchema;
   verification: RepositoryVerificationStateSchema;
 }
@@ -1064,7 +1064,7 @@ export interface ExportGitSchema {
   markers_synced: number;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "export_git";
+  output_kind: "bridge_git_export";
   replayed?: boolean | null;
   states_exported: number;
   tags: ExportedRefSchema[];
@@ -1108,34 +1108,6 @@ export interface FsckRepair {
   detail: string;
   name: string;
   repaired: boolean;
-}
-
-export interface FsckRepairGitSchema {
-  errors: FsckError[];
-  git_projection_checked: boolean;
-  idempotency_status?: string | null;
-  objects_checked: number;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  provenance?: ProvenanceReport | null;
-  repair_target?: string | null;
-  repaired: boolean;
-  repairs: FsckRepair[];
-  replayed?: boolean | null;
-  valid: boolean;
-  warnings: string[];
-}
-
-export interface FsckSchema {
-  errors: FsckError[];
-  git_projection_checked: boolean;
-  objects_checked: number;
-  provenance?: ProvenanceReport | null;
-  repair_target?: string | null;
-  repaired: boolean;
-  repairs: FsckRepair[];
-  valid: boolean;
-  warnings: string[];
 }
 
 export interface GitCheckpointInfo {
@@ -1229,7 +1201,7 @@ export interface ImportGitSchema {
   lossy_entries: LossyImportEntrySchema[];
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "import_git";
+  output_kind: "bridge_git_import";
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   recovery_commands: string[];
@@ -1530,6 +1502,34 @@ export interface MachineContractCoverageSchema {
   verified_scope_mutating_commands_with_accepted_opaque_schema: number;
   verified_scope_mutating_commands_with_schema: number;
   verified_scope_mutating_commands_without_schema: number;
+}
+
+export interface MaintenanceFsckRepairGitSchema {
+  errors: FsckError[];
+  git_projection_checked: boolean;
+  idempotency_status?: string | null;
+  objects_checked: number;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  provenance?: ProvenanceReport | null;
+  repair_target?: string | null;
+  repaired: boolean;
+  repairs: FsckRepair[];
+  replayed?: boolean | null;
+  valid: boolean;
+  warnings: string[];
+}
+
+export interface MaintenanceFsckSchema {
+  errors: FsckError[];
+  git_projection_checked: boolean;
+  objects_checked: number;
+  provenance?: ProvenanceReport | null;
+  repair_target?: string | null;
+  repaired: boolean;
+  repairs: FsckRepair[];
+  valid: boolean;
+  warnings: string[];
 }
 
 export interface MaintenanceGcSchema {
@@ -3434,10 +3434,6 @@ export interface HeddleVerbOutputs {
   "agent fanout start": AgentFanoutStartSchema;
   "agent heartbeat": AgentHeartbeatSchema;
   "agent list": AgentReservationListSchema;
-  "agent presence complete": AgentPresenceCompleteSchema;
-  "agent presence explain": AgentPresenceExplainSchema;
-  "agent presence list": AgentPresenceListSchema;
-  "agent presence show": AgentPresenceSingleSchema;
   "agent provenance begin": AgentProvenanceBeginSchema;
   "agent provenance end": AgentProvenanceEndSchema;
   "agent provenance list": AgentProvenanceListSchema;
@@ -3455,6 +3451,8 @@ export interface HeddleVerbOutputs {
   "auth status": AuthStatusSchema;
   "auth trust replace": AuthTrustReplaceSchema;
   "auth trust show": AuthTrustShowSchema;
+  "bridge git export": ExportGitSchema;
+  "bridge git import": ImportGitSchema;
   capture: CaptureSchema;
   "ci run": CiRunSchema;
   clone: CloneSchema;
@@ -3487,9 +3485,6 @@ export interface HeddleVerbOutputs {
   "doctor schemas": DoctorSchemasSchema;
   error: ErrorEnvelopeSchema;
   expand: ExpandSchema;
-  "export git": ExportGitSchema;
-  fsck: FsckSchema;
-  "fsck repair git": FsckRepairGitSchema;
   help: HelpSchema;
   "hook events": HookEventsSchema;
   "hook install": HookInstallSchema;
@@ -3497,7 +3492,6 @@ export interface HeddleVerbOutputs {
   "hook uninstall": HookUninstallSchema;
   "identity claim-link": IdentityClaimLinkSchema;
   "identity ensure": IdentityEnsureSchema;
-  "import git": ImportGitSchema;
   init: InitSchema;
   "integration doctor": IntegrationDoctorSchema;
   "integration install": IntegrationInstallSchema;
@@ -3510,11 +3504,17 @@ export interface HeddleVerbOutputs {
   log: LogSchema;
   "log --reflog": LogReflogSchema;
   "log --timeline": TimelineLogSchema;
+  "maintenance fsck": MaintenanceFsckSchema;
+  "maintenance fsck repair git": MaintenanceFsckRepairGitSchema;
   "maintenance gc": MaintenanceGcSchema;
   "maintenance inspect": MaintenanceInspectSchema;
   "maintenance refresh": MaintenanceRefreshSchema;
   "maintenance repack": MaintenanceRepackSchema;
   "oplog recover": OplogRecoverSchema;
+  "presence complete": AgentPresenceCompleteSchema;
+  "presence explain": AgentPresenceExplainSchema;
+  "presence list": AgentPresenceListSchema;
+  "presence show": AgentPresenceSingleSchema;
   pull: PullSchema;
   push: PushSchema;
   query: QueryReport;
@@ -3604,10 +3604,6 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "agent fanout start",
   "agent heartbeat",
   "agent list",
-  "agent presence complete",
-  "agent presence explain",
-  "agent presence list",
-  "agent presence show",
   "agent provenance begin",
   "agent provenance end",
   "agent provenance list",
@@ -3625,6 +3621,8 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "auth status",
   "auth trust replace",
   "auth trust show",
+  "bridge git export",
+  "bridge git import",
   "capture",
   "ci run",
   "clone",
@@ -3657,9 +3655,6 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "doctor schemas",
   "error",
   "expand",
-  "export git",
-  "fsck",
-  "fsck repair git",
   "help",
   "hook events",
   "hook install",
@@ -3667,7 +3662,6 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "hook uninstall",
   "identity claim-link",
   "identity ensure",
-  "import git",
   "init",
   "integration doctor",
   "integration install",
@@ -3680,11 +3674,17 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "log",
   "log --reflog",
   "log --timeline",
+  "maintenance fsck",
+  "maintenance fsck repair git",
   "maintenance gc",
   "maintenance inspect",
   "maintenance refresh",
   "maintenance repack",
   "oplog recover",
+  "presence complete",
+  "presence explain",
+  "presence list",
+  "presence show",
   "pull",
   "push",
   "query",

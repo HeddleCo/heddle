@@ -49,17 +49,13 @@ pub enum AgentCommands {
     #[command(subcommand)]
     Fanout(AgentFanoutCommands),
 
-    /// Inspect attribution and work context for local agents.
-    #[command(subcommand)]
-    Presence(AgentPresenceCommands),
-
     /// Record provider, model, and policy provenance across an agent run.
     #[command(subcommand)]
     Provenance(AgentProvenanceCommands),
 }
 
 #[derive(Clone, Debug, Subcommand)]
-pub enum AgentPresenceCommands {
+pub enum PresenceCommands {
     /// List agent presence records known to this repository.
     List(AgentPresenceListArgs),
 

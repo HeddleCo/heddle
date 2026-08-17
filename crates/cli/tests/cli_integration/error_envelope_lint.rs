@@ -40,9 +40,9 @@ const SWEPT_COVERAGE: &[&str] = &[
     "commit",
     "push",
     "pull",
-    "import git",
+    "bridge git import",
     "sync git",
-    "fsck repair git",
+    "maintenance fsck repair git",
 ];
 
 /// One representative error case: the swept command it covers, the argv
@@ -97,11 +97,12 @@ fn adopted_git_overlay() -> TempDir {
     git(&["add", "a.txt"], dir);
     git(&["commit", "-qm", "init"], dir);
     heddle_output(&["adopt"], Some(dir)).expect("heddle adopt");
-    heddle_output(&["import", "git", "--ref", "main"], Some(dir)).expect("heddle import git");
+    heddle_output(&["bridge", "git", "import", "--ref", "main"], Some(dir))
+        .expect("heddle bridge git import");
     temp
 }
 
-/// `init` / `status` / `verify` / `import git|sync` exit
+/// `init` / `status` / `verify` / `bridge git import|sync` exit
 /// `0` on their documented happy paths, so this lint covers them through
 /// adjacent error conditions: an unparseable invocation (`init`), a
 /// missing-state lookup (`status`/`verify` share the
@@ -140,9 +141,9 @@ fn cases() -> Vec<ErrorCase> {
             fixture: init_repo,
         },
         ErrorCase {
-            covers: &["import git"],
-            label: "import git of a missing ref",
-            argv: &["import", "git", "--ref", "no-such-branch"],
+            covers: &["bridge git import"],
+            label: "bridge git import of a missing ref",
+            argv: &["bridge", "git", "import", "--ref", "no-such-branch"],
             fixture: adopted_git_overlay,
         },
         ErrorCase {
@@ -156,9 +157,18 @@ fn cases() -> Vec<ErrorCase> {
             fixture: adopted_git_overlay,
         },
         ErrorCase {
-            covers: &["fsck repair git"],
+            covers: &["maintenance fsck repair git"],
             label: "fsck repair git against native source authority",
-            argv: &["fsck", "repair", "git", "--prefer", "git", "--ref", "main"],
+            argv: &[
+                "maintenance",
+                "fsck",
+                "repair",
+                "git",
+                "--prefer",
+                "git",
+                "--ref",
+                "main",
+            ],
             fixture: adopted_git_overlay,
         },
     ]

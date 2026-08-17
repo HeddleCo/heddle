@@ -371,7 +371,7 @@ fn overlay_records_leave_no_git_residue() {
     );
 
     let fsck = std::process::Command::new("git")
-        .args(["fsck", "--no-progress"])
+        .args(["maintenance", "fsck", "--no-progress"])
         .current_dir(dir)
         .output()
         .expect("git fsck");

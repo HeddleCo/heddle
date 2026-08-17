@@ -127,7 +127,7 @@ fn piped_actor_ambiguity_never_prompts_or_consumes_a_selection() {
         .unwrap();
 
     let output = heddle_output_with_stdin(
-        &["--output", "json", "agent", "presence", "show"],
+        &["--output", "json", "presence", "show"],
         temp.path(),
         "1\n",
     )
@@ -135,7 +135,7 @@ fn piped_actor_ambiguity_never_prompts_or_consumes_a_selection() {
     assert_non_tty_ambiguity(
         output,
         "ambiguous_actor_selection",
-        "heddle agent presence show <SESSION>",
+        "heddle presence show <SESSION>",
     );
 }
 
@@ -153,7 +153,7 @@ fn piped_actor_completion_never_picks_a_destructive_target() {
         .unwrap();
 
     let output = heddle_output_with_stdin(
-        &["--output", "json", "agent", "presence", "complete"],
+        &["--output", "json", "presence", "complete"],
         temp.path(),
         "1\n",
     )
@@ -161,7 +161,7 @@ fn piped_actor_completion_never_picks_a_destructive_target() {
     assert_non_tty_ambiguity(
         output,
         "ambiguous_actor_selection",
-        "heddle agent presence complete --session <SESSION>",
+        "heddle presence complete --session <SESSION>",
     );
     assert!(matches!(
         actors.load("agent-alpha").unwrap().unwrap().status,

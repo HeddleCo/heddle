@@ -119,6 +119,29 @@ fn removed_phase_2_roots_are_unknown_commands() {
     }
 }
 
+#[test]
+fn removed_phase_3_paths_are_clean_parse_errors() {
+    let temp = setup_detached_repo_without_current_thread();
+    for args in [
+        &["--output", "json", "agent", "presence", "list"][..],
+        &["--output", "json", "fsck"],
+        &["--output", "json", "import", "git"],
+        &["--output", "json", "export", "git"],
+    ] {
+        let output = heddle_output(args, Some(temp.path())).expect("invoke removed Phase 3 path");
+        assert_eq!(output.status.code(), Some(64), "args={args:?}");
+        assert!(output.stdout.is_empty(), "args={args:?}");
+
+        let stderr = str::from_utf8(&output.stderr).expect("stderr should be utf8");
+        let envelope: Value = serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+        assert_eq!(envelope["kind"], "parse_error", "args={args:?}");
+        assert!(
+            !stderr.to_ascii_lowercase().contains("panicked"),
+            "removed path must fail without a panic: {stderr}"
+        );
+    }
+}
+
 fn assert_action_template(
     template: &Value,
     action: &str,

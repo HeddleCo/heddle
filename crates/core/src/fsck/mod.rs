@@ -39,7 +39,7 @@ pub struct FsckReport {
 
 impl FsckReport {
     pub const CONTRACT: ReportContract = ReportContract {
-        schema_name: "fsck",
+        schema_name: "maintenance fsck",
         machine_output_kind: MachineOutputKind::Json,
         output_discriminator: None,
         schema: schema_for_report::<FsckReport>,

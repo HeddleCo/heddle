@@ -197,7 +197,13 @@ fn import_git_refuses_unrepresentable_tree_name_by_default_and_lossy_summarizes(
     let default_target = TempDir::new().unwrap();
     heddle(&["init"], Some(default_target.path())).expect("init default target");
     let default_output = heddle_output(
-        &["import", "git", "--path", source.path().to_str().unwrap()],
+        &[
+            "bridge",
+            "git",
+            "import",
+            "--path",
+            source.path().to_str().unwrap(),
+        ],
         Some(default_target.path()),
     )
     .expect("run default import");
@@ -219,8 +225,9 @@ fn import_git_refuses_unrepresentable_tree_name_by_default_and_lossy_summarizes(
     heddle(&["init"], Some(lossy_target.path())).expect("init lossy target");
     let lossy = heddle(
         &[
-            "import",
+            "bridge",
             "git",
+            "import",
             "--lossy",
             "--path",
             source.path().to_str().unwrap(),
@@ -242,7 +249,7 @@ fn import_git_refuses_unrepresentable_tree_name_by_default_and_lossy_summarizes(
 
 #[test]
 fn import_git_help_documents_lossy_flag() {
-    let output = heddle_help(&["import", "git", "--help"]);
+    let output = heddle_help(&["bridge", "git", "import", "--help"]);
 
     assert!(output.contains("--lossy"), "help should document --lossy");
 }
@@ -542,14 +549,24 @@ fn test_cli_export_git_and_clone_roundtrip() {
     )
     .unwrap();
 
-    // Phase A: `export git` requires `--destination`. Pre-Phase-A
+    // Phase A: `bridge git export` requires `--destination`. Pre-Phase-A
     // it silently no-op'd if no flag was given (writing only the sidecar
     // mapping, not actually exporting any git objects). Now it errors.
     let export = heddle(
-        &["export", "git", "--destination", dest.to_str().unwrap()],
+        &[
+            "bridge",
+            "git",
+            "export",
+            "--destination",
+            dest.to_str().unwrap(),
+        ],
         Some(source.path()),
     );
-    assert!(export.is_ok(), "export git failed: {:?}", export.err());
+    assert!(
+        export.is_ok(),
+        "bridge git export failed: {:?}",
+        export.err()
+    );
 
     let dest_repo = open_git(&dest).unwrap();
     assert!(find_reference(&dest_repo, "refs/heads/main").is_ok());
@@ -577,14 +594,24 @@ fn test_cli_export_git_writes_bare_repo() {
     let dest = dest_holder.path().join("export");
 
     heddle(&["init"], Some(source.path())).unwrap();
-    std::fs::write(source.path().join("file.txt"), "export git").unwrap();
+    std::fs::write(source.path().join("file.txt"), "bridge git export").unwrap();
     heddle(&["capture", "-m", "Export git source"], Some(source.path())).unwrap();
 
     let export = heddle(
-        &["export", "git", "--destination", dest.to_str().unwrap()],
+        &[
+            "bridge",
+            "git",
+            "export",
+            "--destination",
+            dest.to_str().unwrap(),
+        ],
         Some(source.path()),
     );
-    assert!(export.is_ok(), "export git failed: {:?}", export.err());
+    assert!(
+        export.is_ok(),
+        "bridge git export failed: {:?}",
+        export.err()
+    );
 
     let dest_repo = open_git(&dest).unwrap();
     assert!(find_reference(&dest_repo, "refs/heads/main").is_ok());
@@ -609,7 +636,13 @@ fn test_cli_export_git_preserves_foreign_destination_push_and_reports_divergence
     .expect("capture projection tip");
 
     let first = heddle_output(
-        &["export", "git", "--destination", dest.to_str().unwrap()],
+        &[
+            "bridge",
+            "git",
+            "export",
+            "--destination",
+            dest.to_str().unwrap(),
+        ],
         Some(source.path()),
     )
     .expect("first export");
@@ -639,7 +672,13 @@ fn test_cli_export_git_preserves_foreign_destination_push_and_reports_divergence
     );
 
     let second = heddle_output(
-        &["export", "git", "--destination", dest.to_str().unwrap()],
+        &[
+            "bridge",
+            "git",
+            "export",
+            "--destination",
+            dest.to_str().unwrap(),
+        ],
         Some(source.path()),
     )
     .expect("second export");
@@ -699,14 +738,19 @@ fn test_cli_import_git_from_external_repo() {
     heddle(&["init"], Some(heddle_repo_dir.path())).unwrap();
     let result = heddle(
         &[
-            "import",
+            "bridge",
             "git",
+            "import",
             "--path",
             git_repo_dir.path().to_str().unwrap(),
         ],
         Some(heddle_repo_dir.path()),
     );
-    assert!(result.is_ok(), "import git failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "bridge git import failed: {:?}",
+        result.err()
+    );
 
     let repo = Repository::open(heddle_repo_dir.path()).unwrap();
     assert!(

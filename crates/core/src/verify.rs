@@ -1624,7 +1624,7 @@ pub fn repository_setup_action_kind(action: &str) -> RepositorySetupActionKind {
         RepositorySetupActionKind::Init
     } else if action.starts_with("heddle adopt") {
         RepositorySetupActionKind::Adopt
-    } else if action.starts_with("heddle import git") {
+    } else if action.starts_with("heddle bridge git import") {
         RepositorySetupActionKind::GitImport
     } else {
         RepositorySetupActionKind::Other

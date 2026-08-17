@@ -23,9 +23,7 @@ fn help_render_matches_spawned_binary() {
         vec!["capture", "--help-agent"],
         vec!["push", "--help"],
         vec!["log", "--help"],
-        vec!["import", "git", "--help"],
-        // Alias resolution: `import` is an alias that resolves to `adopt`.
-        vec!["import", "--help"],
+        vec!["bridge", "git", "import", "--help"],
         // Curated topic page + `heddle help <verb>` clap fall-through.
         vec!["help"],
         vec!["help", "advanced"],
@@ -309,9 +307,9 @@ fn git_concepts_topic_explains_authority_and_current_surface() {
     assert!(
         help.contains("optional Git-compatible client")
             && help.contains("it is not a Heddle dependency")
-            && help.contains("`import git`")
-            && help.contains("`export")
-            && help.contains("git`, and `sync git`")
+            && help.contains("`bridge git import`")
+            && help.contains("`bridge git export`")
+            && help.contains("`sync git`")
             && help.contains("translate data between authorities"),
         "git-concepts topic should explain unsupported Git operations and authority translation: {help}"
     );

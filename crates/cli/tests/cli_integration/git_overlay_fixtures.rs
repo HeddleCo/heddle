@@ -25,7 +25,7 @@ impl GitOverlayFixture {
         git_hermetic(&["add", "README.md"], &work);
         git_hermetic(&["commit", "-m", "base"], &work);
         heddle(&["init"], Some(&work)).expect("initialize Git Overlay");
-        heddle(&["import", "git", "--ref", "main"], Some(&work)).expect("import main");
+        heddle(&["bridge", "git", "import", "--ref", "main"], Some(&work)).expect("import main");
         Self {
             temp,
             work,

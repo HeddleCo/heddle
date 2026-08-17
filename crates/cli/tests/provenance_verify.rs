@@ -129,7 +129,14 @@ fn verify_and_fsck_render_verified_registry_identity_end_to_end() {
 
     let fsck = run_json(
         &repo,
-        &["--output", "json", "fsck", "--thorough", "--provenance"],
+        &[
+            "--output",
+            "json",
+            "maintenance",
+            "fsck",
+            "--thorough",
+            "--provenance",
+        ],
     );
     assert_eq!(fsck["valid"], true, "{fsck}");
     assert_eq!(

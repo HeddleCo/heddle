@@ -241,12 +241,12 @@ fn git_repair_ref_required_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "git_repair_ref_required",
         "Git ref repair needs a ref name",
-        "Run `heddle fsck repair git --ref <branch> --preview` to inspect the authority-valid repair.",
+        "Run `heddle maintenance fsck repair git --ref <branch> --preview` to inspect the authority-valid repair.",
         "--preview was supplied without --ref",
         "repairing a Git projection ref without a ref name could mutate the wrong branch",
         "Git refs, Heddle refs, index, remotes, and worktree files were left unchanged",
-        "heddle fsck repair git --ref <branch> --preview",
-        vec!["heddle fsck repair git --ref <branch> --preview".to_string()],
+        "heddle maintenance fsck repair git --ref <branch> --preview",
+        vec!["heddle maintenance fsck repair git --ref <branch> --preview".to_string()],
     )
 }
 
@@ -254,12 +254,12 @@ fn git_repair_native_ref_required_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "git_repair_native_ref_required",
         "Native Git projection repair needs a ref name",
-        "Run `heddle fsck repair git --ref <branch> --preview` to inspect the Heddle-to-Git projection repair.",
+        "Run `heddle maintenance fsck repair git --ref <branch> --preview` to inspect the Heddle-to-Git projection repair.",
         "the native repository has no projection ref target",
         "repairing every retained Git ref could overwrite unrelated adapter state",
         "Git refs, Heddle refs, index, remotes, and worktree files were left unchanged",
-        "heddle fsck repair git --ref <branch> --preview",
-        vec!["heddle fsck repair git --ref <branch> --preview".to_string()],
+        "heddle maintenance fsck repair git --ref <branch> --preview",
+        vec!["heddle maintenance fsck repair git --ref <branch> --preview".to_string()],
     )
 }
 
@@ -281,7 +281,7 @@ fn git_repair_authority_mismatch_advice(
         ),
         RepositorySourceAuthority::Native => {
             let import = ref_name.map_or_else(
-                || "heddle import git".to_string(),
+                || "heddle bridge git import".to_string(),
                 heddle_core::status::next_action::canonical_git_import_ref_command,
             );
             RecoveryAdvice::safety_refusal(
@@ -342,7 +342,7 @@ fn repair_git(
 
 fn git_repair_ref_command(prefer: &str, ref_name: &str, preview: bool) -> String {
     let mut command = format!(
-        "heddle fsck repair git --prefer {} --ref {}",
+        "heddle maintenance fsck repair git --prefer {} --ref {}",
         repo::shell_quote(prefer),
         repo::shell_quote(ref_name)
     );
@@ -356,12 +356,12 @@ fn fsck_integrity_error_advice(error_count: usize) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "repository_integrity_error",
         "Repository has integrity errors",
-        "Inspect repository integrity with `heddle fsck --full`, then restore or repair the reported object/ref.",
+        "Inspect repository integrity with `heddle maintenance fsck --full`, then restore or repair the reported object/ref.",
         format!("{error_count} integrity error(s) remain after fsck"),
         "treating this repository as verified could hide missing or corrupt objects/refs",
         "no repository objects, refs, or worktree files were changed",
-        "heddle fsck --full",
-        vec!["heddle fsck --full".to_string()],
+        "heddle maintenance fsck --full",
+        vec!["heddle maintenance fsck --full".to_string()],
     )
 }
 

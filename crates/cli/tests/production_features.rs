@@ -546,7 +546,7 @@ mod fsck {
         let temp = TempDir::new().unwrap();
         setup_repo_with_file(&temp, "file.txt", "content");
 
-        let result = heddle(&["fsck"], Some(temp.path()));
+        let result = heddle(&["maintenance", "fsck"], Some(temp.path()));
         assert!(
             result.is_ok(),
             "fsck on clean repo should succeed: {:?}",
@@ -600,7 +600,7 @@ mod fsck {
         }
         fs::write(blob_path, b"corrupt blob").unwrap();
 
-        let error = heddle(&["fsck", "--full"], Some(temp.path()))
+        let error = heddle(&["maintenance", "fsck", "--full"], Some(temp.path()))
             .expect_err("full fsck must fail when a source-object pack is corrupt");
         assert!(
             ["error", "mismatch", "invalid", "corrupt"]
@@ -615,7 +615,10 @@ mod fsck {
         let temp = TempDir::new().unwrap();
         setup_repo_with_file(&temp, "file.txt", "content");
 
-        let result = heddle(&["fsck", "--output", "json"], Some(temp.path()));
+        let result = heddle(
+            &["maintenance", "fsck", "--output", "json"],
+            Some(temp.path()),
+        );
         assert!(
             result.is_ok(),
             "fsck --output json failed: {:?}",
@@ -631,14 +634,14 @@ mod fsck {
         let temp = TempDir::new().unwrap();
         setup_repo_with_file(&temp, "file.txt", "content");
 
-        let result = heddle(&["fsck", "repair"], Some(temp.path()));
+        let result = heddle(&["maintenance", "fsck", "repair"], Some(temp.path()));
         assert!(
             result.is_err(),
             "fsck repair should require an explicit repair target"
         );
         let err = result.unwrap_err();
         assert!(
-            err.contains("Usage: heddle fsck repair") && err.contains("Commands:"),
+            err.contains("Usage: heddle maintenance fsck repair") && err.contains("Commands:"),
             "bare repair command should fail at CLI parsing, got: {err}"
         );
     }
@@ -650,6 +653,7 @@ mod fsck {
 
         let result = heddle(
             &[
+                "maintenance",
                 "fsck",
                 "repair",
                 "git",
@@ -663,7 +667,7 @@ mod fsck {
         );
         assert!(
             result.is_ok(),
-            "fsck repair git --output json failed: {:?}",
+            "maintenance fsck repair git --output json failed: {:?}",
             result.err()
         );
 
@@ -683,7 +687,7 @@ mod fsck {
         let temp = TempDir::new().unwrap();
         setup_repo_with_file(&temp, "file.txt", "content");
 
-        let result = heddle(&["fsck", "--full"], Some(temp.path()));
+        let result = heddle(&["maintenance", "fsck", "--full"], Some(temp.path()));
         assert!(result.is_ok(), "fsck --full failed: {:?}", result.err());
     }
 
@@ -707,7 +711,10 @@ mod fsck {
         refresh_thread_for_land(temp.path(), "feature");
         land_thread(temp.path(), "feature");
 
-        let result = heddle(&["fsck", "--full", "--thorough"], Some(temp.path()));
+        let result = heddle(
+            &["maintenance", "fsck", "--full", "--thorough"],
+            Some(temp.path()),
+        );
         assert!(
             result.is_ok(),
             "fsck after merge should pass: {:?}",
@@ -984,7 +991,7 @@ mod gc {
 
         heddle(&["maintenance", "gc", "--aggressive"], Some(temp.path())).unwrap();
 
-        let result = heddle(&["fsck", "--full"], Some(temp.path()));
+        let result = heddle(&["maintenance", "fsck", "--full"], Some(temp.path()));
         assert!(
             result.is_ok(),
             "fsck after gc should pass: {:?}",

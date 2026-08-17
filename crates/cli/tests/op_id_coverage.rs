@@ -157,8 +157,8 @@ fn command_contract_table_drives_op_id_and_read_only_classification() {
         "clone",
         "thread switch",
         "thread drop",
-        "export git",
-        "import git",
+        "bridge git export",
+        "bridge git import",
         "context set",
         "review sign",
         "agent capture",
@@ -235,7 +235,7 @@ fn extract_command_arms(source: &str) -> Vec<Arm> {
         }
 
         // Word-boundary check: skip when preceded by an identifier char
-        // (e.g. `ContextCommands::`, `AgentPresenceCommands::`).
+        // (e.g. `ContextCommands::`, `PresenceCommands::`).
         if start > 0 {
             let prev = bytes[start - 1];
             if prev.is_ascii_alphanumeric() || prev == b'_' {

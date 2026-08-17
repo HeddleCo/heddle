@@ -63,7 +63,9 @@ fn assert_clean_json_without_git(args: &[&str], cwd: &std::path::Path) -> Value 
 fn init_and_import_git_overlay_without_git(cwd: &std::path::Path, ref_name: &str) -> Value {
     assert_clean_json_without_git(&["--output", "json", "init"], cwd);
     assert_clean_json_without_git(
-        &["--output", "json", "import", "git", "--ref", ref_name],
+        &[
+            "--output", "json", "bridge", "git", "import", "--ref", ref_name,
+        ],
         cwd,
     )
 }
@@ -302,7 +304,9 @@ fn git_replacement_matrix_shallow_import_refuses_without_raw_git_advice() {
     assert_clean_json_without_git(&["--output", "json", "init"], temp.path());
 
     let output = heddle_output_without_git(
-        &["--output", "json", "import", "git", "--ref", "main"],
+        &[
+            "--output", "json", "bridge", "git", "import", "--ref", "main",
+        ],
         temp.path(),
     );
     let stdout = str::from_utf8(&output.stdout).unwrap_or("");
@@ -326,7 +330,7 @@ fn git_replacement_matrix_shallow_import_refuses_without_raw_git_advice() {
         envelope["recovery_commands"],
         serde_json::json!([
             "heddle clone <remote> <fresh-path>",
-            "heddle import git --path <full-git-repo> --ref <ref>"
+            "heddle bridge git import --path <full-git-repo> --ref <ref>"
         ])
     );
     assert_eq!(
@@ -335,7 +339,7 @@ fn git_replacement_matrix_shallow_import_refuses_without_raw_git_advice() {
     );
     assert_eq!(
         envelope["recovery_action_templates"][1]["action"],
-        "heddle import git --path <full-git-repo> --ref <ref>"
+        "heddle bridge git import --path <full-git-repo> --ref <ref>"
     );
 }
 
@@ -729,8 +733,9 @@ fn git_replacement_matrix_file_url_clone_and_import_without_git_on_path() {
         &[
             "--output",
             "json",
-            "import",
+            "bridge",
             "git",
+            "import",
             "--path",
             &origin_url,
             "--ref",
@@ -770,7 +775,7 @@ fn git_replacement_matrix_git_import_export_sync_reconcile_without_git_on_path()
     let origin_arg = origin.to_str().expect("origin path should be utf8");
     let import = assert_clean_json_without_git(
         &[
-            "--output", "json", "import", "git", "--path", origin_arg, "--ref", "main",
+            "--output", "json", "bridge", "git", "import", "--path", origin_arg, "--ref", "main",
         ],
         &work,
     );
@@ -778,7 +783,7 @@ fn git_replacement_matrix_git_import_export_sync_reconcile_without_git_on_path()
         import["commits_imported"].as_u64().unwrap_or(0) >= 1,
         "explicit Git import should walk Git commits natively: {import}"
     );
-    assert_eq!(import["output_kind"], "import_git");
+    assert_eq!(import["output_kind"], "bridge_git_import");
     assert_eq!(
         import["verification"]["verified"], true,
         "Git import should embed post-operation verification: {import}"
@@ -789,8 +794,9 @@ fn git_replacement_matrix_git_import_export_sync_reconcile_without_git_on_path()
         &[
             "--output",
             "json",
-            "export",
+            "bridge",
             "git",
+            "export",
             "--destination",
             export_path.to_str().expect("export path should be utf8"),
         ],
@@ -814,6 +820,7 @@ fn git_replacement_matrix_git_import_export_sync_reconcile_without_git_on_path()
         &[
             "--output",
             "json",
+            "maintenance",
             "fsck",
             "repair",
             "git",
@@ -1141,7 +1148,8 @@ fn git_replacement_matrix_fsck_git_projection_validates_mapping_notes_and_checko
     heddle_without_git(&["capture", "-m", "git projection fsck"], &work).unwrap();
     heddle_without_git(&["commit", "-m", "git projection fsck"], &work).unwrap();
 
-    let fsck = heddle_without_git(&["fsck", "--git", "--output", "json"], &work).unwrap();
+    let fsck =
+        heddle_without_git(&["maintenance", "fsck", "--git", "--output", "json"], &work).unwrap();
     let parsed: Value = serde_json::from_str(&fsck).expect("fsck output should parse");
     assert_eq!(
         parsed["valid"], true,

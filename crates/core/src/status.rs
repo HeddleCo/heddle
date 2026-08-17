@@ -909,7 +909,7 @@ fn tag_mapping_recovery_commands(check: &RepositoryVerificationCheck) -> Vec<Str
     if tags.len() == 1 {
         vec![canonical_git_import_ref_command(&tags[0])]
     } else {
-        vec!["heddle import git".to_string()]
+        vec!["heddle bridge git import".to_string()]
     }
 }
 

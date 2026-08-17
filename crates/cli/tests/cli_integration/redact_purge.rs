@@ -92,7 +92,11 @@ fn setup_git_overlay_repo_with_secret() -> (TempDir, String) {
     git_overlay_fixture_cmd(temp.path(), &["add", "."]);
     git_overlay_fixture_cmd(temp.path(), &["commit", "-m", "seed"]);
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     fs::create_dir_all(temp.path().join("config")).unwrap();
     fs::write(

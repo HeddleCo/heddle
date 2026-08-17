@@ -8,7 +8,8 @@ use super::{git_overlay_fixtures::GitOverlayFixture, *};
 
 fn initialize_direct_git_overlay(path: &std::path::Path) {
     heddle(&["init"], Some(path)).expect("initialize direct Git overlay");
-    heddle(&["import", "git"], Some(path)).expect("import Git history into Heddle metadata");
+    heddle(&["bridge", "git", "import"], Some(path))
+        .expect("import Git history into Heddle metadata");
 }
 
 #[test]
@@ -1527,7 +1528,7 @@ fn setup_git_overlay_push_fixture() -> (TempDir, TempDir, SleyRepository) {
     .unwrap();
 
     heddle(&["init"], Some(work.path())).unwrap();
-    heddle(&["import", "git"], Some(work.path())).unwrap();
+    heddle(&["bridge", "git", "import"], Some(work.path())).unwrap();
     heddle_git_projection::git_notes::write_note(
         &git_repo,
         main,
@@ -2693,7 +2694,7 @@ fn test_cli_raw_git_clone_pull_fetches_notes_before_import() {
     git_ok(&["commit", "-m", "seed"], &work);
 
     heddle(&["init"], Some(&work)).expect("initialize direct Git overlay");
-    heddle(&["import", "git"], Some(&work)).expect("import initial Git mapping");
+    heddle(&["bridge", "git", "import"], Some(&work)).expect("import initial Git mapping");
     std::fs::write(work.join("README.md"), "seed\npublished by heddle\n").unwrap();
     heddle(&["capture", "-m", "Publish Heddle identity"], Some(&work))
         .expect("first Heddle capture succeeds");

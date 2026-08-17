@@ -420,7 +420,6 @@ fn scan_forbidden_prose(file: &str, text: &str, out: &mut Vec<DocsIssue>) {
             "support",
             "spool",
             "prove",
-            "presence",
             "actor",
             "session",
             "switch",
@@ -475,7 +474,6 @@ fn forbidden_invocation_issue(file: &str, inv: &DocsInvocation) -> Option<DocsIs
             | "support"
             | "spool"
             | "prove"
-            | "presence"
             | "actor"
             | "session"
     );

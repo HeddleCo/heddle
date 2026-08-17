@@ -10,7 +10,9 @@ use objects::store::{
 use serde::Serialize;
 
 use crate::cli::{
-    Cli, MaintenanceCommands, commands::cmd_gc, should_output_json, worktree_status_options,
+    Cli, FsckCommands, FsckRepairCommands, MaintenanceCommands,
+    commands::{cmd_fsck, cmd_fsck_repair_git, cmd_gc},
+    should_output_json, worktree_status_options,
 };
 
 #[derive(Serialize)]
@@ -49,6 +51,16 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
     let options = worktree_status_options(Some(repo.config()));
 
     match command {
+        MaintenanceCommands::Fsck(args) => {
+            return match args.command {
+                None => cmd_fsck(cli, args.full, args.thorough, args.provenance, args.git),
+                Some(FsckCommands::Repair { target }) => match target {
+                    FsckRepairCommands::Git(args) => {
+                        cmd_fsck_repair_git(cli, args.ref_name, args.prefer, args.preview)
+                    }
+                },
+            };
+        }
         MaintenanceCommands::Inspect => {
             let report = repo.inspect_performance_with_options(&options)?;
             if should_output_json(cli, Some(repo.config())) {

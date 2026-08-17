@@ -549,11 +549,8 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
         Some("heddle land --thread feature/native-cli")
     );
 
-    let actor_list_json = heddle(
-        &["--output", "json", "agent", "presence", "list"],
-        Some(main.path()),
-    )
-    .expect("actor list should succeed");
+    let actor_list_json = heddle(&["--output", "json", "presence", "list"], Some(main.path()))
+        .expect("actor list should succeed");
     let actor_list: Value = serde_json::from_str(&actor_list_json).unwrap();
     let actor_session = actor_list["presence"]
         .as_array()
@@ -566,7 +563,6 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
         &[
             "--output",
             "json",
-            "agent",
             "presence",
             "complete",
             "--session",
@@ -849,11 +845,8 @@ fn land_auto_captures_and_merges_clean_thread() {
         "auto_integrated"
     );
 
-    let actor_show = heddle_output(
-        &["--output", "json", "agent", "presence", "show"],
-        Some(main.path()),
-    )
-    .expect("invoke actor show after land");
+    let actor_show = heddle_output(&["--output", "json", "presence", "show"], Some(main.path()))
+        .expect("invoke actor show after land");
     assert!(
         !actor_show.status.success(),
         "actor show should not select the merged actor implicitly after land"
@@ -862,7 +855,7 @@ fn land_auto_captures_and_merges_clean_thread() {
     let envelope: Value = serde_json::from_str(stderr.trim())
         .unwrap_or_else(|err| panic!("actor show failure should be JSON: {err}: {stderr}"));
     assert_eq!(envelope["kind"], "no_active_actor");
-    assert_eq!(envelope["primary_command"], "heddle agent presence list");
+    assert_eq!(envelope["primary_command"], "heddle presence list");
     assert!(
         envelope["hint"]
             .as_str()

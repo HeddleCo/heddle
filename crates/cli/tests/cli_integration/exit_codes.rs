@@ -126,14 +126,22 @@ fn pull_without_remote_is_config() {
 fn import_git_exits_zero() {
     // Documented: `0 ok`.
     let repo = adopted_git_overlay();
-    assert_exit(&["import", "git", "--ref", "main"], repo.path(), 0);
+    assert_exit(
+        &["bridge", "git", "import", "--ref", "main"],
+        repo.path(),
+        0,
+    );
 }
 
 #[test]
 fn sync_git_exits_zero() {
     // Documented: `0 ok`.
     let repo = adopted_git_overlay();
-    assert_exit(&["import", "git", "--ref", "main"], repo.path(), 0);
+    assert_exit(
+        &["bridge", "git", "import", "--ref", "main"],
+        repo.path(),
+        0,
+    );
     assert_exit(&["sync", "git"], repo.path(), 0);
 }
 
@@ -142,9 +150,22 @@ fn fsck_git_repair_against_native_authority_is_data_err() {
     // Documented: `65 DataErr` — the retained Git adapter cannot become
     // authoritative through a repair command in a native repository.
     let repo = adopted_git_overlay();
-    assert_exit(&["import", "git", "--ref", "main"], repo.path(), 0);
     assert_exit(
-        &["fsck", "repair", "git", "--prefer", "git", "--ref", "main"],
+        &["bridge", "git", "import", "--ref", "main"],
+        repo.path(),
+        0,
+    );
+    assert_exit(
+        &[
+            "maintenance",
+            "fsck",
+            "repair",
+            "git",
+            "--prefer",
+            "git",
+            "--ref",
+            "main",
+        ],
         repo.path(),
         65,
     );

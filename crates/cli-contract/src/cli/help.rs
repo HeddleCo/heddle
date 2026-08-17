@@ -463,7 +463,7 @@ pub fn render_for_args(args: &[&str]) -> Option<String> {
     }
 
     // `heddle <path> --help` pre-parse direct help (e.g. `clone --help`,
-    // `import git --help`).
+    // `bridge git import --help`).
     if let Some(rendered) = render_direct_help_for_raw(&command, &raw) {
         return Some(rendered);
     }
@@ -706,8 +706,8 @@ Common mappings:
 
 Heddle intentionally does not reproduce the full Git command surface. An
 optional Git-compatible client can perform unsupported Git operations against
-the same `.git`; it is not a Heddle dependency. Explicit `import git`, `export
-git`, and `sync git` translate data between authorities. After `heddle adopt`,
+the same `.git`; it is not a Heddle dependency. Explicit `bridge git import`,
+`bridge git export`, and `sync git` translate data between authorities. After `heddle adopt`,
 the retained `.git` is an explicit Git Projection adapter; it no longer selects
 repository source authority.
 "#;
@@ -862,7 +862,7 @@ Git-compatible client, but that client is optional and is never invoked by
 Heddle. Unsupported capabilities fail closed.
 
 Run `heddle help --output json` to inspect the public command surface, and
-`heddle doctor` / `heddle fsck --full` when a repository reports integrity
+`heddle doctor` / `heddle maintenance fsck --full` when a repository reports integrity
 or Git Projection state problems.
 "#;
 
@@ -968,12 +968,12 @@ Move an existing Git repository to Native Heddle atomically:
 
 Translate explicitly without changing source authority:
 
-    heddle import git --path <git-repository> --ref <branch>
-    heddle export git --destination <bare-git-repository>
+    heddle bridge git import --path <git-repository> --ref <branch>
+    heddle bridge git export --destination <bare-git-repository>
     heddle sync git --path <git-repository>
 
-`import git` and `sync git` accept a local path or Git URL. Omit `--ref` to
-import all local branches and tags. `export git` writes a bare Git repository.
+`bridge git import` and `sync git` accept a local path or Git URL. Omit `--ref` to
+import all local branches and tags. `bridge git export` writes a bare Git repository.
 Legacy migration and repair may still read an existing Bridge Mirror at
 `.heddle/git` while ADR 0042's retirement work remains incomplete.
 
@@ -1164,7 +1164,7 @@ mod tests {
         let projection = topic_text("git-projection").expect("git-projection topic should exist");
         assert!(projection.contains("It is not Git Overlay"));
         assert!(projection.contains("heddle adopt --ref <branch>"));
-        assert!(projection.contains("heddle export git --destination"));
+        assert!(projection.contains("heddle bridge git export --destination"));
         assert!(projection.contains("Bridge Mirror"));
     }
 

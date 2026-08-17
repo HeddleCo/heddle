@@ -253,7 +253,7 @@ pub enum HeddleError {
         found: ContentHash,
     },
     #[error(
-        "missing {object_type} object: {id} (run `heddle fsck --full` to inspect store integrity)"
+        "missing {object_type} object: {id} (run `heddle maintenance fsck --full` to inspect store integrity)"
     )]
     MissingObject { object_type: String, id: String },
     #[error("invalid tree entry: {0}")]
@@ -337,6 +337,6 @@ mod tests {
         let err = HeddleError::recovery(RecoveryDetails::serialization_error("bad marker"));
 
         assert!(err.to_string().contains("Repository state is corrupted"));
-        assert!(!err.to_string().contains("heddle fsck --full"));
+        assert!(!err.to_string().contains("heddle maintenance fsck --full"));
     }
 }

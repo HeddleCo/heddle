@@ -154,7 +154,7 @@ pub async fn list(cli: &Cli, active_only: bool) -> Result<()> {
 
     if should_output_json(cli, None) {
         let output = ActorListOutput {
-            output_kind: "agent_presence_list",
+            output_kind: "presence_list",
             presence: report.actors,
             active_only: report.active_only,
             trust: build_repository_verification_state(&repo),
@@ -174,13 +174,13 @@ pub async fn show(cli: &Cli, session_id: Option<String>) -> Result<()> {
         &repo,
         &registry,
         session_id.as_deref(),
-        "heddle agent presence show <SESSION>",
+        "heddle presence show <SESSION>",
     )?;
     let show = show_actor_from_entry(&registry, &entry)?;
 
     if should_output_json(cli, None) {
         let output = ActorSingleOutput {
-            output_kind: "agent_presence_show",
+            output_kind: "presence_show",
             presence: show.actor,
             trust: build_repository_verification_state(&repo),
         };
@@ -281,7 +281,7 @@ pub async fn complete(cli: &Cli, session_id: Option<String>) -> Result<()> {
         &repo,
         &registry,
         session_id.as_deref(),
-        "heddle agent presence complete --session <SESSION>",
+        "heddle presence complete --session <SESSION>",
     )?;
     let plan = plan_actor_done(&entry);
     mark_actor_done(&registry, &plan.session_id)?;
@@ -293,7 +293,7 @@ pub async fn complete(cli: &Cli, session_id: Option<String>) -> Result<()> {
 
     if should_output_json(cli, None) {
         let output = ActorDoneOutput {
-            output_kind: "agent_presence_complete",
+            output_kind: "presence_complete",
             session_id: plan.session_id.clone(),
             status: "complete",
             thread: plan.thread.clone(),
@@ -333,7 +333,7 @@ pub async fn explain(cli: &Cli, session_id: Option<String>) -> Result<()> {
         &repo,
         &registry,
         session_id.as_deref(),
-        "heddle agent presence explain <SESSION>",
+        "heddle presence explain <SESSION>",
     ) {
         Ok(entry) => entry,
         Err(err) if session_id.is_none() && is_no_active_actor_error(&err) => {
@@ -348,7 +348,7 @@ pub async fn explain(cli: &Cli, session_id: Option<String>) -> Result<()> {
 
     if should_output_json(cli, None) {
         let output = ActorExplainOutput {
-            output_kind: "agent_presence_explain",
+            output_kind: "presence_explain",
             session_id: entry.session_id,
             thread: entry.thread,
             heddle_session_id: entry.heddle_session_id,
@@ -425,7 +425,7 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
 
     if should_output_json(cli, None) {
         let output = ActorExplainDetectedOutput {
-            output_kind: "agent_presence_explain",
+            output_kind: "presence_explain",
             attached: false,
             active_presence: None,
             reason: "No active actor is registered for this checkout.",
@@ -637,11 +637,11 @@ fn no_active_actor_advice() -> RecoveryAdvice {
         "no active actor registry entry matches the current thread or checkout path",
         "choosing a completed actor implicitly could show the wrong session",
         "no actor registry entries, refs, repository objects, or worktree files were changed",
-        "heddle agent presence list",
+        "heddle presence list",
         vec![
-            "heddle agent presence list".to_string(),
-            "heddle agent presence explain".to_string(),
-            "heddle agent presence show <session>".to_string(),
+            "heddle presence list".to_string(),
+            "heddle presence explain".to_string(),
+            "heddle presence show <session>".to_string(),
         ],
     )
 }

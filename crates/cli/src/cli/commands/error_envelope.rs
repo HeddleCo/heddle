@@ -307,8 +307,8 @@ impl ErrorClassification {
 
 fn typed_recovery_commands(kind: &str) -> Vec<String> {
     let commands: &[&str] = match kind {
-        "state_corrupted" => &["heddle verify", "heddle fsck --full"],
-        "repository_integrity_error" => &["heddle fsck --full"],
+        "state_corrupted" => &["heddle verify", "heddle maintenance fsck --full"],
+        "repository_integrity_error" => &["heddle maintenance fsck --full"],
         "repository_not_found" => &["heddle init"],
         "state_not_found" => &["heddle log"],
         // Merge-orchestration refusals raised from core as typed
@@ -611,11 +611,11 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                 | HeddleError::InvalidTreeEntry(_) => {
                     return ErrorClassification::known(
                         "repository_integrity_error",
-                        "Inspect repository integrity with `heddle fsck --full`, then restore or repair the reported object/ref.",
+                        "Inspect repository integrity with `heddle maintenance fsck --full`, then restore or repair the reported object/ref.",
                         "repository object or ref integrity did not pass validation",
                         "continuing could compound corruption or hide the missing object",
                         "the command stopped before applying the requested mutation",
-                        "heddle fsck --full",
+                        "heddle maintenance fsck --full",
                     );
                 }
                 HeddleError::NoMergeInProgress => {
@@ -814,7 +814,7 @@ mod tests {
         assert_eq!(classified.primary_command, "heddle verify");
         assert_eq!(
             classified.recovery_commands,
-            vec!["heddle verify", "heddle fsck --full"]
+            vec!["heddle verify", "heddle maintenance fsck --full"]
         );
         assert!(classified.extra_json_fields.is_empty());
     }

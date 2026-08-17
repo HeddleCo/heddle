@@ -21,7 +21,7 @@ use super::*;
 
 /// R9: Git Projection Mapping persistence.
 ///
-/// `export git` writes the served heddle↔git mapping to disk via a
+/// `bridge git export` writes the served heddle↔git mapping to disk via a
 /// tmp-rename-rename pattern (`git-projection-mapping.json.tmp` →
 /// `git-projection-mapping.json`). The fault checkpoint
 /// `mapping_after_tmp_before_commit` panics in the gap between those
@@ -69,7 +69,13 @@ fn bridge_recovers_from_crash_after_tmp_before_commit() {
     // panic message so a regression that silently no-ops the
     // checkpoint surfaces here, not three commits downstream.
     let crashed = Command::new(env!("CARGO_BIN_EXE_heddle"))
-        .args(["export", "git", "--destination", export.to_str().unwrap()])
+        .args([
+            "bridge",
+            "git",
+            "export",
+            "--destination",
+            export.to_str().unwrap(),
+        ])
         .current_dir(&work)
         .env("HEDDLE_FAULT_INJECT", "mapping_after_tmp_before_commit")
         .env("HEDDLE_CONFIG", work.join(".heddle-user/config.toml"))
@@ -115,7 +121,13 @@ fn bridge_recovers_from_crash_after_tmp_before_commit() {
     // export. Final assertion: the canonical mapping file exists,
     // is non-empty, and parses as the expected shape.
     let recovered = heddle_output_with_env(
-        &["export", "git", "--destination", export.to_str().unwrap()],
+        &[
+            "bridge",
+            "git",
+            "export",
+            "--destination",
+            export.to_str().unwrap(),
+        ],
         Some(&work),
         &[],
     )

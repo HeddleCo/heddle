@@ -90,7 +90,7 @@ impl fmt::Display for MergeError {
                 preserved,
             } => write!(
                 formatter,
-                "{error}\nUnsafe condition: {unsafe_condition}\nWould change: {would_change}\nPreserved: {preserved}\nNext: heddle fsck --full"
+                "{error}\nUnsafe condition: {unsafe_condition}\nWould change: {would_change}\nPreserved: {preserved}\nNext: heddle maintenance fsck --full"
             ),
         }
     }

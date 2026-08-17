@@ -358,7 +358,7 @@ pub struct GitOverlayTagTip {
 
 /// How many Git commits reachable from a branch tip have no Heddle mapping
 /// (neither imported/projection-mapped nor checkpointed). Used to report
-/// how far a Git branch moved out-of-band before `heddle import git --ref`
+/// how far a Git branch moved out-of-band before `heddle bridge git import --ref`
 /// reconciles it.
 #[cfg(feature = "git-overlay")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3258,7 +3258,7 @@ impl Repository {
     /// Returns [`HeddleError::MissingObject`] with `object_type =
     /// "tree"` so callers and the top-level error printer can
     /// recognize the bug class. The `Display` impl on `MissingObject`
-    /// includes the `heddle fsck --full` recovery hint, so call sites
+    /// includes the `heddle maintenance fsck --full` recovery hint, so call sites
     /// don't need to wrap with anyhow context to give the operator a
     /// next step.
     ///

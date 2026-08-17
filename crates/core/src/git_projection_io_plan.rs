@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pure Git projection import/export/sync summary strings (no Git I/O).
 //!
-//! Owns plain-text commit and ref listing summaries for `export git` /
+//! Owns plain-text commit and ref listing summaries for `bridge git export` /
 //! `sync git` human output. Styling, destination I/O, and RecoveryAdvice
 //! stay CLI-owned.
 

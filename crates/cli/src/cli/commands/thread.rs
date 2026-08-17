@@ -359,7 +359,7 @@ pub(crate) fn suppress_thread_actions_while_trust_blocked(
         if trust.status == "needs_import"
             && summary
                 .recommended_action
-                .starts_with("heddle import git --ref ")
+                .starts_with("heddle bridge git import --ref ")
         {
             summary.recommended_action_template =
                 recommended_action_template(&summary.recommended_action);
@@ -2867,7 +2867,7 @@ mod tests {
         assert!(advice.unsafe_condition.contains("dirty Git index"));
         assert_eq!(
             advice.primary_command,
-            "heddle fsck repair git --prefer heddle --ref feature/git --preview"
+            "heddle maintenance fsck repair git --prefer heddle --ref feature/git --preview"
         );
         assert!(advice.preserved.contains("Git checkout was left unchanged"));
     }

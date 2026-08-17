@@ -58,18 +58,18 @@ const SWEPT: &[&str] = &[
     "doctor docs",
     "doctor schemas",
     "schemas",
-    "import git",
-    "export git",
+    "bridge git import",
+    "bridge git export",
     "sync git",
     "status",
     // heddle#1057 — whoami emits `output_kind: "whoami"` (matches its verb path,
     // no override needed).
     "whoami",
     // heddle#272 — output_kind sweep on the named-by-persona verbs.
-    "agent presence list",
-    "agent presence show",
-    "agent presence explain",
-    "agent presence complete",
+    "presence list",
+    "presence show",
+    "presence explain",
+    "presence complete",
     "auth logout",
     "auth status",
     "auth trust show",
@@ -202,8 +202,8 @@ const UNSWEPT_TODO: &[&str] = &[
     "collapse",
     "daemon serve",
     "daemon status",
-    "fsck",
-    "fsck repair git",
+    "maintenance fsck",
+    "maintenance fsck repair git",
     "git-overlay",
     "hook events",
     "hook install",
@@ -1047,7 +1047,7 @@ fn runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
         git_hermetic(&["add", "README.md"], &work);
         git_hermetic(&["commit", "-m", "base"], &work);
         heddle(&["init"], Some(&work)).expect("initialize Git Overlay");
-        heddle(&["import", "git", "--ref", "main"], Some(&work)).expect("import main");
+        heddle(&["bridge", "git", "import", "--ref", "main"], Some(&work)).expect("import main");
         for (thread, path, file) in [
             ("alpha", alpha.as_path(), "alpha.txt"),
             ("beta", beta.as_path(), "beta.txt"),

@@ -546,7 +546,7 @@ fn git_overlay_matrix_undo_reconciles_checkout_without_persistent_mirror() {
     );
 
     initialize_git_overlay(&work);
-    json(&work, &["import", "git", "--ref", "main"]);
+    json(&work, &["bridge", "git", "import", "--ref", "main"]);
     std::fs::write(work.join("first.txt"), "first\n").unwrap();
     json(&work, &["capture", "-m", "first"]);
     json(&work, &["commit", "-m", "first"]);
@@ -1487,7 +1487,11 @@ fn git_overlay_matrix_ready_thread_action_not_overridden_by_remote_push() {
     git(&["remote", "add", "origin", origin_arg], temp.path());
     git(&["push", "-u", "origin", "main"], temp.path());
     initialize_git_overlay(temp.path());
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     let started = json(
         temp.path(),
@@ -1673,7 +1677,7 @@ fn git_overlay_matrix_native_git_import_materializes_current_thread_when_clean()
     let import = json(
         dest.path(),
         &[
-            "--output", "json", "import", "git", "--path", source_arg, "--ref", "main",
+            "--output", "json", "bridge", "git", "import", "--path", source_arg, "--ref", "main",
         ],
     );
     assert_eq!(import["states_created"], 1);
@@ -1791,7 +1795,16 @@ fn git_overlay_matrix_reconcile_apply_imports_current_git_branch() {
 
     let reconcile = json(
         temp.path(),
-        &["fsck", "repair", "git", "--prefer", "git", "--ref", "main"],
+        &[
+            "maintenance",
+            "fsck",
+            "repair",
+            "git",
+            "--prefer",
+            "git",
+            "--ref",
+            "main",
+        ],
     );
     assert_eq!(reconcile["repair_target"], "git");
     assert_eq!(reconcile["valid"], true);
@@ -1815,7 +1828,16 @@ fn git_overlay_matrix_reconcile_prefer_heddle_requires_adoption() {
 
     let output = heddle_output(
         &[
-            "--output", "json", "fsck", "repair", "git", "--prefer", "heddle", "--ref", "main",
+            "--output",
+            "json",
+            "maintenance",
+            "fsck",
+            "repair",
+            "git",
+            "--prefer",
+            "heddle",
+            "--ref",
+            "main",
         ],
         Some(temp.path()),
     )
@@ -1855,7 +1877,11 @@ fn git_overlay_matrix_commit_ignores_gitignored_noise_and_refuses_noop() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all(temp.path(), "seed");
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     std::fs::create_dir(temp.path().join("__pycache__")).unwrap();
     std::fs::write(temp.path().join("__pycache__/tracked.pyc"), "cache").unwrap();
@@ -1885,7 +1911,11 @@ fn git_overlay_matrix_commit_requires_explicit_ignore_for_python_generated_noise
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all(temp.path(), "seed");
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     std::fs::create_dir_all(temp.path().join("src/__pycache__")).unwrap();
     std::fs::write(
@@ -1940,7 +1970,11 @@ fn git_overlay_matrix_commit_noop_fails_closed_when_verification_blocked() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all(temp.path(), "seed");
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     let head = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
     std::fs::write(
@@ -1995,7 +2029,11 @@ fn git_overlay_matrix_top_level_push_closes_remote_verification_loop() {
     git(&["push", "-u", "origin", "main"], temp.path());
 
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
     json(
         temp.path(),
@@ -2101,7 +2139,11 @@ fn git_overlay_matrix_commit_refuses_remote_divergence_before_capture() {
     git(&["remote", "add", "origin", origin_arg], temp.path());
     git(&["push", "-u", "origin", "main"], temp.path());
     initialize_git_overlay(temp.path());
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     let peer_arg = peer.path().to_str().expect("peer path should be utf8");
     git(&["clone", origin_arg, peer_arg], temp.path());
@@ -2150,7 +2192,7 @@ fn git_overlay_matrix_commit_refuses_remote_divergence_before_capture() {
     let envelope: Value = serde_json::from_str(stderr).expect("commit refusal JSON parses");
     assert_eq!(envelope["kind"], "git_checkpoint_preflight_blocked");
     assert_eq!(
-        envelope["primary_command"], "heddle import git --ref origin/main",
+        envelope["primary_command"], "heddle bridge git import --ref origin/main",
         "{envelope}"
     );
     assert!(
@@ -2195,7 +2237,11 @@ fn git_overlay_matrix_push_defaults_to_branch_upstream_remote() {
     git(&["push", "-u", "upstream", "main"], temp.path());
 
     initialize_git_overlay(temp.path());
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
     json(
         temp.path(),
@@ -2239,7 +2285,11 @@ fn git_overlay_matrix_local_only_branch_is_clean_until_push_sets_tracking() {
     git(&["push", "upstream", "main"], temp.path());
 
     initialize_git_overlay(temp.path());
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
     json(
         temp.path(),
@@ -2295,7 +2345,11 @@ fn git_overlay_matrix_remote_add_configures_default_push_remote() {
     git_commit_all(temp.path(), "seed");
 
     initialize_git_overlay(temp.path());
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let audit_arg = audit.path().to_str().expect("audit path should be utf8");
     let added = json(
         temp.path(),
@@ -2567,7 +2621,7 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
 
     initialize_git_overlay(temp.path());
     heddle(
-        &["import", "git", "--ref", "feature/drop-in"],
+        &["bridge", "git", "import", "--ref", "feature/drop-in"],
         Some(temp.path()),
     )
     .unwrap();
@@ -2762,7 +2816,11 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
     git_commit_all(temp.path(), "seed");
     initialize_git_overlay(temp.path());
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     std::fs::write(temp.path().join("tracked.txt"), "heddle change\n").unwrap();
     json(
@@ -2791,11 +2849,19 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     assert!(status["changes"]["deleted"].as_array().unwrap().is_empty());
     assert_eq!(
         status["recommended_action"],
-        "heddle fsck repair git --ref main --preview"
+        "heddle maintenance fsck repair git --ref main --preview"
     );
     assert_eq!(
         status["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["fsck", "repair", "git", "--ref", "main", "--preview"])
+        heddle_argv_json([
+            "maintenance",
+            "fsck",
+            "repair",
+            "git",
+            "--ref",
+            "main",
+            "--preview"
+        ])
     );
     assert!(
         status["blockers"]
@@ -2826,14 +2892,14 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     assert_eq!(verify["status"], "needs_reconcile");
     assert_eq!(
         verify["recommended_action"],
-        "heddle fsck repair git --ref main --preview"
+        "heddle maintenance fsck repair git --ref main --preview"
     );
 
     let bridge = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge["verification"]["status"], "needs_reconcile");
     assert_eq!(
         bridge["recommended_action"],
-        "heddle fsck repair git --ref main --preview"
+        "heddle maintenance fsck repair git --ref main --preview"
     );
 
     let refused = heddle_output(
@@ -2863,7 +2929,7 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     );
     assert_eq!(
         envelope["primary_command"],
-        "heddle fsck repair git --ref main --preview"
+        "heddle maintenance fsck repair git --ref main --preview"
     );
     assert_eq!(
         git_stdout(temp.path(), &["rev-parse", "HEAD"]),
@@ -3051,7 +3117,11 @@ fn git_overlay_matrix_import_marks_branch_tip_history_as_imported() {
     );
     assert_eq!(before["history_imported"], false);
 
-    heddle(&["import", "git", "--path", "."], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     let after = json(
         temp.path(),
@@ -3091,7 +3161,7 @@ fn git_overlay_matrix_detached_head_sequence_commands() {
     git_commit_all(temp.path(), "seed branch");
     heddle(&["init"], Some(temp.path())).unwrap();
     heddle(
-        &["import", "git", "--ref", "feature/drop-in"],
+        &["bridge", "git", "import", "--ref", "feature/drop-in"],
         Some(temp.path()),
     )
     .unwrap();
@@ -3153,7 +3223,11 @@ fn git_overlay_matrix_commit_refuses_detached_head_without_advancing_branch() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     let before_head = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
     let before_main = git_stdout(temp.path(), &["rev-parse", "refs/heads/main"]);
@@ -3334,7 +3408,11 @@ fn git_overlay_matrix_imported_branch_evolution_after_git_import() {
     assert_no_legacy_verification_sidecars(&before);
     assert_eq!(before["verification"]["status"], "needs_init");
 
-    let import_output = heddle(&["import", "git", "--path", "."], Some(temp.path())).unwrap();
+    let import_output = heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
     assert!(
         import_output.contains("branches") || import_output.contains("\"branches_synced\""),
         "Git import should report branch sync activity: {import_output}"
@@ -3397,7 +3475,7 @@ fn git_overlay_matrix_reopen_from_different_cwds_preserves_state_and_git_only_al
     git_commit_all(temp.path(), "seed branch");
     initialize_git_overlay(temp.path());
     heddle(
-        &["import", "git", "--ref", "feature/drop-in"],
+        &["bridge", "git", "import", "--ref", "feature/drop-in"],
         Some(temp.path()),
     )
     .unwrap();
@@ -3462,7 +3540,7 @@ fn git_overlay_matrix_binary_file_commands_remain_coherent() {
     git_commit_all(temp.path(), "seed binary");
     initialize_git_overlay(temp.path());
     heddle(
-        &["import", "git", "--ref", "feature/drop-in"],
+        &["bridge", "git", "import", "--ref", "feature/drop-in"],
         Some(temp.path()),
     )
     .unwrap();
@@ -4600,7 +4678,11 @@ fn git_overlay_matrix_multi_peer_land_fast_forwards_git_tip() {
     std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
     git_commit_all(temp.path(), "base");
     heddle(&["init"], Some(temp.path())).expect("initialize Git Overlay");
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).expect("import main");
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .expect("import main");
 
     let alpha = temp.path().with_extension("alpha");
     let beta = temp.path().with_extension("beta");
@@ -4664,7 +4746,11 @@ fn git_overlay_matrix_land_threads_flag_lands_peers_in_order() {
     std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
     git_commit_all(temp.path(), "base");
     heddle(&["init"], Some(temp.path())).expect("initialize Git Overlay");
-    heddle(&["import", "git", "--ref", "main"], Some(temp.path())).expect("import main");
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .expect("import main");
 
     let alpha = temp.path().with_extension("alpha-mt");
     let beta = temp.path().with_extension("beta-mt");
@@ -4827,7 +4913,7 @@ fn git_overlay_matrix_manual_git_merge_commit_after_bootstrap_commands() {
     git_commit_all(temp.path(), "seed branch");
     heddle(&["init"], Some(temp.path())).unwrap();
     heddle(
-        &["import", "git", "--ref", "feature/drop-in"],
+        &["bridge", "git", "import", "--ref", "feature/drop-in"],
         Some(temp.path()),
     )
     .unwrap();
@@ -4889,7 +4975,11 @@ fn git_overlay_matrix_imported_branch_git_only_advance_reappears_in_import_hint(
     git_commit_all(temp.path(), "alpha one");
     git(&["checkout", "feature/drop-in"], temp.path());
 
-    let import_output = heddle(&["import", "git", "--path", "."], Some(temp.path())).unwrap();
+    let import_output = heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
     assert!(
         import_output.contains("branches") || import_output.contains("\"branches_synced\""),
         "Git import should report branch sync activity: {import_output}"
@@ -4929,7 +5019,11 @@ fn git_overlay_matrix_imported_branch_delete_and_recreate_same_name_reappears_in
     git_commit_all(temp.path(), "first reborn");
     git(&["checkout", "feature/drop-in"], temp.path());
 
-    let _ = heddle(&["import", "git", "--path", "."], Some(temp.path())).unwrap();
+    let _ = heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     git(&["branch", "-D", "support/reborn"], temp.path());
     git(&["checkout", "-b", "support/reborn"], temp.path());
@@ -5060,7 +5154,7 @@ fn git_overlay_matrix_rebase_and_cherry_pick_sequences_remain_coherent() {
     std::fs::write(cherry_repo.path().join("conflict.txt"), "main cherry\n").unwrap();
     git_commit_all(cherry_repo.path(), "main cherry");
     heddle(
-        &["import", "git", "--ref", "feature/drop-in"],
+        &["bridge", "git", "import", "--ref", "feature/drop-in"],
         Some(cherry_repo.path()),
     )
     .unwrap();
@@ -5220,7 +5314,11 @@ fn git_overlay_matrix_imported_branch_merge_commit_drift_reappears_in_hint() {
     git_commit_all(temp.path(), "support base");
     git(&["checkout", "feature/drop-in"], temp.path());
 
-    let _ = heddle(&["import", "git", "--path", "."], Some(temp.path())).unwrap();
+    let _ = heddle(
+        &["bridge", "git", "import", "--path", "."],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     git(&["checkout", "support/merge-drift"], temp.path());
     git(&["checkout", "-b", "support/merge-drift-side"], temp.path());

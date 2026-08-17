@@ -129,10 +129,10 @@ fn test_merge_missing_base_subtree_fails_loud_not_silent_erase() {
     assert!(
         err.contains(&sub_hash_hex),
         "refresh error must include the missing subtree's hash so the \
-         operator can correlate with `heddle fsck` output; got: {err}"
+         operator can correlate with `heddle maintenance fsck` output; got: {err}"
     );
     assert!(
-        err.contains("heddle fsck"),
+        err.contains("heddle maintenance fsck"),
         "refresh error must point at the recovery command so the operator \
          has a next step instead of just a stack trace; got: {err}"
     );

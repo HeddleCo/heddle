@@ -4,9 +4,9 @@
 use anyhow::Result;
 
 use crate::cli::cli_args::{
-    AgentCommands, AgentPresenceCommands, AgentProvenanceBeginArgs, AgentProvenanceCommands,
-    AgentProvenanceEndArgs, AgentProvenanceListArgs, AgentProvenanceSegmentArgs,
-    AgentProvenanceShowArgs, Cli,
+    AgentCommands, AgentProvenanceBeginArgs, AgentProvenanceCommands, AgentProvenanceEndArgs,
+    AgentProvenanceListArgs, AgentProvenanceSegmentArgs, AgentProvenanceShowArgs, Cli,
+    PresenceCommands,
 };
 
 pub async fn run(cli: &Cli, command: &AgentCommands) -> Result<()> {
@@ -21,21 +21,20 @@ pub async fn run(cli: &Cli, command: &AgentCommands) -> Result<()> {
         AgentCommands::List(args) => super::agent_cmd::cmd_agent_list(cli, args.clone()),
         AgentCommands::Task(command) => super::agent_cmd::cmd_agent_task(cli, command.clone()),
         AgentCommands::Fanout(command) => super::agent_cmd::cmd_agent_fanout(cli, command.clone()),
-        AgentCommands::Presence(command) => run_presence(cli, command).await,
         AgentCommands::Provenance(command) => run_provenance(cli, command).await,
     }
 }
 
-async fn run_presence(cli: &Cli, command: &AgentPresenceCommands) -> Result<()> {
+pub async fn run_presence(cli: &Cli, command: &PresenceCommands) -> Result<()> {
     match command {
-        AgentPresenceCommands::List(args) => super::agent_presence::list(cli, args.active).await,
-        AgentPresenceCommands::Show(args) => {
+        PresenceCommands::List(args) => super::agent_presence::list(cli, args.active).await,
+        PresenceCommands::Show(args) => {
             super::agent_presence::show(cli, args.session.clone()).await
         }
-        AgentPresenceCommands::Explain(args) => {
+        PresenceCommands::Explain(args) => {
             super::agent_presence::explain(cli, args.session.clone()).await
         }
-        AgentPresenceCommands::Complete(args) => {
+        PresenceCommands::Complete(args) => {
             super::agent_presence::complete(cli, args.session.clone()).await
         }
     }

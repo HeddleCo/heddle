@@ -312,8 +312,8 @@ pub fn cmd_undo_recover(cli: &Cli) -> Result<()> {
             "the checkout-local recovery ref points to an unavailable state",
             "recovery cannot materialize a state whose object is missing",
             "HEAD and worktree files were left unchanged",
-            "heddle fsck",
-            vec!["heddle fsck".to_string()],
+            "heddle maintenance fsck",
+            vec!["heddle maintenance fsck".to_string()],
         )));
     }
 

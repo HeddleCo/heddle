@@ -230,7 +230,7 @@ fn next_action_priority_lives_in_shared_selector() {
         for (line_index, line) in source.lines().enumerate() {
             for fragment in [
                 "remote_tracking.behind > 0",
-                "heddle import git --ref {}",
+                "heddle bridge git import --ref {}",
                 "thread_action.filter(|action| !action.trim().is_empty())",
             ] {
                 if line.contains(fragment) {
