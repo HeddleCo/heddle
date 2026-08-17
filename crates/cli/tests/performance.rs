@@ -625,6 +625,9 @@ fn encode_native_pack(objects: &[ObjectData]) -> (Vec<u8>, Vec<u8>) {
                 // pack; the test fixture doesn't construct them.
                 unreachable!("performance harness does not synthesize Redaction objects");
             }
+            ObjectType::Purge => {
+                unreachable!("performance harness does not synthesize Purge objects");
+            }
             ObjectType::StateVisibility => {
                 // StateVisibility sidecars never enter the content-addressed
                 // pack; the test fixture doesn't construct them.

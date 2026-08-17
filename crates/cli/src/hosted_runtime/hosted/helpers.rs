@@ -173,6 +173,7 @@ pub(super) fn parse_object_id(
         | ObjectType::Action
         | ObjectType::AnnotatedTag
         | ObjectType::Redaction
+        | ObjectType::Purge
         | ObjectType::KeyBinding => Ok(ObjectId::Hash(
             ContentHash::from_hex(value)
                 .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
@@ -181,9 +182,9 @@ pub(super) fn parse_object_id(
 }
 
 pub(super) fn parse_object_type(value: i32) -> Result<ObjectType, ProtocolError> {
-    // heddle-api 0.3 predates the key-binding closure object. Prost preserves
-    // unknown enum discriminants in the i32 field, so recognize the reserved
-    // next value before asking the generated enum to decode it.
+    // heddle-api 0.10 has no key-binding or annotated-tag closure variants.
+    // Prost preserves unknown discriminants, so recognize Heddle's extension
+    // values before asking the generated enum to decode them.
     if value == HOSTED_OBJECT_TYPE_KEY_BINDING {
         return Ok(ObjectType::KeyBinding);
     }
@@ -198,13 +199,14 @@ pub(super) fn parse_object_type(value: i32) -> Result<ObjectType, ProtocolError>
         HostedObjectType::Redaction => Ok(ObjectType::Redaction),
         HostedObjectType::StateVisibility => Ok(ObjectType::StateVisibility),
         HostedObjectType::StateAttachment => Ok(ObjectType::StateAttachment),
+        HostedObjectType::Purge => Ok(ObjectType::Purge),
         HostedObjectType::Unspecified => Err(ProtocolError::InvalidState(
             "object descriptor is missing object_type".to_string(),
         )),
     }
 }
 
-const HOSTED_OBJECT_TYPE_KEY_BINDING: i32 = 8;
+const HOSTED_OBJECT_TYPE_KEY_BINDING: i32 = 10;
 const HOSTED_OBJECT_TYPE_ANNOTATED_TAG: i32 = 9;
 
 fn object_type_to_proto(obj_type: ObjectType) -> i32 {
@@ -215,6 +217,7 @@ fn object_type_to_proto(obj_type: ObjectType) -> i32 {
         ObjectType::Action => HostedObjectType::Action as i32,
         ObjectType::AnnotatedTag => HOSTED_OBJECT_TYPE_ANNOTATED_TAG,
         ObjectType::Redaction => HostedObjectType::Redaction as i32,
+        ObjectType::Purge => HostedObjectType::Purge as i32,
         ObjectType::StateVisibility => HostedObjectType::StateVisibility as i32,
         ObjectType::StateAttachment => HostedObjectType::StateAttachment as i32,
         ObjectType::KeyBinding => HOSTED_OBJECT_TYPE_KEY_BINDING,
@@ -647,6 +650,10 @@ mod tests {
         assert_eq!(
             parse_object_type(HostedObjectType::StateAttachment as i32).unwrap(),
             ObjectType::StateAttachment
+        );
+        assert_eq!(
+            parse_object_type(HostedObjectType::Purge as i32).unwrap(),
+            ObjectType::Purge
         );
         assert_eq!(
             parse_object_type(HOSTED_OBJECT_TYPE_KEY_BINDING).unwrap(),

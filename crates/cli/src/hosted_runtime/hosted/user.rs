@@ -173,6 +173,8 @@ impl HostedClient {
                 visibility: Visibility::Private as i32,
                 client_operation_id: operation_id.to_wire(),
                 settings: None,
+                // Local genesis materialization is tracked separately by weft#1532.
+                owner_genesis: None,
             }
         );
         Ok(to_protocol_spool(spool))

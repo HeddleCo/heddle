@@ -8,8 +8,6 @@ use crypto::{Ed25519Signer, Signer as _};
 use serde::Serialize;
 use weft_client_shim::CliContext;
 
-use crate::cli::IdentityCommands;
-
 use super::{
     HostedAuthMode, HostedSession, agent_node_identity,
     auth::{cmd_auth_derive_agent, headless_token_metadata, resolve_server},
@@ -17,6 +15,7 @@ use super::{
     identity_server,
     identity_state::{self, ClaimState},
 };
+use crate::cli::IdentityCommands;
 
 const DEFAULT_AGENT_TTL_SECS: u64 = 60 * 60;
 const MAX_CLAIM_TTL_SECS: u64 = 60 * 60;

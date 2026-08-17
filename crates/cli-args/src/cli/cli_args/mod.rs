@@ -73,8 +73,7 @@ pub use commands_oplog::OplogCommands;
 pub use commands_query::QueryArgs;
 pub use commands_redact::{
     PurgeApplyArgs, PurgeCommands, PurgeListArgs, RedactApplyArgs, RedactCommands, RedactListArgs,
-    RedactShowArgs, RedactTrustAddArgs, RedactTrustCommands, RedactTrustListArgs,
-    RedactTrustRemoveArgs,
+    RedactShowArgs,
 };
 pub use commands_remote::RemoteCommands;
 pub use commands_review::{

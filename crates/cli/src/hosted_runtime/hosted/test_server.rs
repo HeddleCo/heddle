@@ -13,9 +13,10 @@ use api::{
         ListContextResponse, ListDiscussionsPageEnd, ListDiscussionsResponse, ListRefsPageEnd,
         ListRefsResponse, ListThreadsPageEnd, ListThreadsResponse, PackChunk, PackStreamKind,
         PullComplete, PullReady, PullServerFrame, PushClientFrame, PushComplete, PushReady,
-        PushServerFrame, StateId, TransferCheckpoint, TransportMode, get_context_history_response,
-        list_context_response, list_discussions_response, list_refs_response,
-        list_threads_response, pull_server_frame, push_client_frame, push_server_frame,
+        PushServerFrame, SignedSpoolOwnerGenesis, StateId, TransferCheckpoint, TransportMode,
+        get_context_history_response, list_context_response, list_discussions_response,
+        list_refs_response, list_threads_response, pull_server_frame, push_client_frame,
+        push_server_frame,
     },
     method_descriptor,
 };
@@ -26,6 +27,13 @@ use prost::Message;
 use tokio::task::JoinHandle;
 
 use super::{CallContextFactory, HostedClient};
+
+const OWNER_GENESIS_FIXTURE_HEX: &str = "0a380a10222222222222222222222222222222221224080112208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c12640a20def88318e44a809464c1022f22230567bae6805d17b1ccfc2bebe5326232c58a1240bfe677c0b6fec8d28e379f584f36dee7258d834222f9b75f61dc75b7db2d836d76d4fb6eaf9e7f561925b2e6882b51eadaf3ec77c565f5b638ad0febfc8cd304";
+
+fn owner_genesis_fixture() -> SignedSpoolOwnerGenesis {
+    let bytes = hex::decode(OWNER_GENESIS_FIXTURE_HEX).expect("published v2 fixture hex");
+    SignedSpoolOwnerGenesis::decode(bytes.as_slice()).expect("published v2 fixture genesis")
+}
 
 pub(crate) async fn start() -> (HostedClient, JoinHandle<()>) {
     start_inner(None).await
@@ -277,6 +285,8 @@ fn bidi_responses(method: &str, pull: Option<PullFixture>) -> Vec<Vec<u8>> {
                             .clone()
                             .or_else(|| Some(StateId { value: vec![7; 32] })),
                         full_closure_available: has_pack || !pull_succeeds,
+                        owner_authorization_protocol_version: 2,
+                        owner_genesis: Some(owner_genesis_fixture()),
                         ..PullReady::default()
                     })),
                 }

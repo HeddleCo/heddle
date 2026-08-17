@@ -128,30 +128,19 @@ impl Repository {
         })
     }
 
-    /// Verify hosted metadata against this repository's temporary, manually trusted client keys.
-    /// Weft authorizes destructive and state-visibility operations but holds no signing key for
-    /// this path, so it cannot forge them. HeddleCo/weft#836 tracks replacing the manual list
-    /// with that authorization model.
-    pub(crate) fn verify_trusted_client_metadata_signature(
+    /// Verify the author signature on client-authored metadata. Transport
+    /// write authority decides whether the principal may submit the record;
+    /// this signature only protects authorship and payload integrity.
+    pub(crate) fn verify_client_metadata_signature(
         &self,
         payload: &[u8],
         signature: Option<&StateSignature>,
     ) -> Result<()> {
         let signature = signature.ok_or_else(|| {
             HeddleError::InvalidObject(
-                "hosted metadata is unsigned; a trusted client signature is required".to_string(),
+                "hosted metadata is unsigned; a client signature is required".to_string(),
             )
         })?;
-        let trusted = self.config().metadata.trusted_keys.iter().any(|key| {
-            key.algorithm.eq_ignore_ascii_case(&signature.algorithm)
-                && key.public_key.eq_ignore_ascii_case(&signature.public_key)
-        });
-        if !trusted {
-            return Err(HeddleError::InvalidObject(format!(
-                "hosted metadata signer is not trusted ({}:{})",
-                signature.algorithm, signature.public_key
-            )));
-        }
         let public_key = hex::decode(&signature.public_key).map_err(|error| {
             HeddleError::InvalidObject(format!("invalid metadata public key: {error}"))
         })?;

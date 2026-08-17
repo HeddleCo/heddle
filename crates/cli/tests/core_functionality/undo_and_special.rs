@@ -877,35 +877,6 @@ fn setup_repo_with_secret() -> (TempDir, String) {
     (temp, state)
 }
 
-fn trust_local_purge_identity(path: &std::path::Path) {
-    let repo = Repository::open(path).expect("open repository");
-    let head = repo.head().expect("read HEAD").expect("captured HEAD");
-    let (algorithm, public_key) = repo
-        .list_state_attachments(&head)
-        .expect("list HEAD attachments")
-        .into_iter()
-        .find_map(|attachment| match attachment.body {
-            objects::object::StateAttachmentBody::Signature(signature) => {
-                Some((signature.algorithm, signature.public_key))
-            }
-            _ => None,
-        })
-        .expect("HEAD signature");
-    heddle_must_succeed(
-        &[
-            "redact",
-            "purge",
-            "trust",
-            "add",
-            "--algorithm",
-            &algorithm,
-            "--public-key",
-            &public_key,
-        ],
-        path,
-    );
-}
-
 #[test]
 fn test_undo_redact_with_allow_flag_restores_original_content() {
     let (temp, state) = setup_repo_with_secret();
@@ -1048,7 +1019,6 @@ fn test_undo_redact_refuses_when_blob_already_purged() {
         ],
         temp.path(),
     );
-    trust_local_purge_identity(temp.path());
     heddle_must_succeed(
         &[
             "redact",
@@ -1350,7 +1320,6 @@ fn test_undo_preview_refuses_redact_when_blob_already_purged() {
         ],
         temp.path(),
     );
-    trust_local_purge_identity(temp.path());
     heddle_must_succeed(
         &[
             "redact",
