@@ -330,7 +330,7 @@ Today's call sites that emit `FastForward` (via the shared
 | `commands/rebase/rebase_ops.rs:apply_tree_to_worktree` | `heddle sync` (parentless replay) | `"<rebase>"` synthetic | heddle#110; rare parentless-commit replay; same buffering as `apply_commit` |
 | `commands/workflow.rs:adopt_manual_resolution` | `heddle land` (manual-resolution adopt) | landed thread name | heddle#110 |
 | `commands/remote/remote_ops.rs:pull_local` | `heddle pull` (local sync, repeat pull) | remote thread name | heddle#110; first-time pull falls back to `Goto` because there's no pre-target tip to restore |
-| `commands/resolve.rs:abort_merge_state` | `heddle resolve --abort` | `"<abort>"` synthetic | heddle#110; today this is a pre-target = post-target no-op record (HEAD doesn't move during a 3-way conflict merge), kept on the same code path so a future merge variant that does move HEAD before abort gets correct undo semantics for free |
+| `commands/resolve.rs:abort_merge_state` | `heddle abort` | `"<abort>"` synthetic | heddle#110; today this is a pre-target = post-target no-op record (HEAD doesn't move during a 3-way conflict merge), kept on the same code path so a future merge variant that does move HEAD before abort gets correct undo semantics for free |
 
 Any new caller of `fast_forward_attached` should go through
 `record_ff_advance` (or `record_ff_advance_explicit` when the caller

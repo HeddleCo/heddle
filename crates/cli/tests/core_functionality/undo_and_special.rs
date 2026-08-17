@@ -1912,7 +1912,7 @@ fn test_undo_pull_local_restores_thread_ref() {
     );
 }
 
-/// Resolve --abort (merge abort): aborting a conflicted 3-way merge
+/// Abort (merge abort): aborting a conflicted 3-way merge
 /// calls `fast_forward_attached(merge_state.ours)` to clean the
 /// worktree back to the pre-merge state. During a 3-way conflict
 /// merge HEAD never moves (only the worktree gets conflict markers),
@@ -1927,7 +1927,7 @@ fn test_undo_pull_local_restores_thread_ref() {
 /// and future-proofs against a partial-apply merge variant that
 /// might move HEAD before abort.
 #[test]
-fn test_undo_resolve_abort_keeps_thread_ref_at_ours() {
+fn test_undo_abort_keeps_thread_ref_at_ours() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
 
@@ -1955,7 +1955,7 @@ fn test_undo_resolve_abort_keeps_thread_ref_at_ours() {
         "refresh should create a durable conflict state: {refresh:?}"
     );
 
-    heddle_must_succeed(&["resolve", "--abort"], temp.path());
+    heddle_must_succeed(&["abort"], temp.path());
     assert_eq!(
         head_short(temp.path()),
         feature_tip_before,

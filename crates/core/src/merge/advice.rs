@@ -42,7 +42,7 @@ pub(crate) fn merge_already_in_progress() -> HeddleError {
     HeddleError::recovery(RecoveryDetails::safety_refusal(
         "merge_already_in_progress",
         "A merge is already in progress",
-        "Inspect the active operation with `heddle status`; resolve it with `heddle continue` or abort it with `heddle resolve --abort`.",
+        "Inspect the active operation with `heddle status`; resolve it with `heddle continue` or abort it with `heddle abort`.",
         "merge state is already present for this repository",
         "starting another merge would overwrite or obscure the in-progress conflict state",
         "existing merge state and worktree were left unchanged",

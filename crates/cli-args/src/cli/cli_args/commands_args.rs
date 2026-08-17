@@ -87,7 +87,9 @@ pub enum DoctorCommands {
     /// Walks every `heddle <verb> [<subverb>] [flags]` invocation in
     /// the requested markdown files and reports any drift: missing
     /// verbs, unknown long flags, or invalid literal values for flags
-    /// like `--workspace`, `--scope`, and `--kind`.
+    /// like `--workspace`, `--scope`, and `--kind`. It also enforces the
+    /// accepted closed root surface and centralized `continue`/`abort`
+    /// lifecycle.
     ///
     /// Exits non-zero when any drift is found, so it's safe to run in
     /// CI. Pair with `--output json` for structured output. Run on every PR
@@ -1163,10 +1165,6 @@ pub struct ResolveArgs {
     /// Mark the path resolved even if conflict markers are still present.
     #[arg(long)]
     pub force: bool,
-
-    /// Abort the merge.
-    #[arg(long)]
-    pub abort: bool,
 }
 
 /// The `(remote, thread)` pair shared by remote commands that use an

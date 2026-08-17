@@ -51,9 +51,7 @@ pub(crate) fn check_refs(
 pub(crate) fn check_merge_state(repo: &Repository, warnings: &mut Vec<String>) -> Result<()> {
     let merge_manager = repo.merge_state_manager();
     if merge_manager.is_merge_in_progress() {
-        warnings.push(
-            "Merge in progress - resolve conflicts or use 'heddle resolve --abort'".to_string(),
-        );
+        warnings.push("Merge in progress - resolve conflicts or use 'heddle abort'".to_string());
     }
 
     let stash_manager = repo.stash_manager();

@@ -347,7 +347,7 @@ Examples:
     ///
     /// `heddle redact apply` declares a redaction; the blob bytes stay
     /// on disk and reads return the operator-supplied stub. `heddle
-    /// purge` afterward physically removes the bytes. Both are signed,
+    /// redact purge` afterward physically removes the bytes. Both are signed,
     /// attributed, oplog-audited operations. See
     /// `docs/PRINCIPLES.md` (the honesty principle) for context.
     Redact {

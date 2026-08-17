@@ -160,7 +160,7 @@ fn test_resolve_all_refuses_conflict_markers_without_force_or_side_selection() {
 }
 
 #[test]
-fn test_resolve_abort_restores_state() {
+fn test_abort_restores_state() {
     let temp = TempDir::new().unwrap();
     create_merge_conflict(&temp);
 
@@ -170,7 +170,7 @@ fn test_resolve_abort_restores_state() {
         "should have conflict markers"
     );
 
-    let result = heddle(&["resolve", "--abort"], Some(temp.path()));
+    let result = heddle(&["abort"], Some(temp.path()));
     assert!(result.is_ok(), "abort failed: {:?}", result.err());
 
     let content_after = fs::read_to_string(temp.path().join("file.txt")).unwrap();

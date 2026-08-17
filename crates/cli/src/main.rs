@@ -617,17 +617,7 @@ async fn async_main() -> Result<()> {
             ours,
             theirs,
             force,
-            abort,
-        }) => cmd_resolve(
-            &cli,
-            path.clone(),
-            *all,
-            *list,
-            *ours,
-            *theirs,
-            *force,
-            *abort,
-        ),
+        }) => cmd_resolve(&cli, path.clone(), *all, *list, *ours, *theirs, *force),
 
         Commands::Push(args) => {
             cmd_push(

@@ -34,6 +34,7 @@ use super::{
         ActionTemplate, CommandCatalogOption, CommandCatalogOutput, build_command_catalog,
         feature_gated_command_roots, recommended_action_template,
     },
+    surface_conformance::command_surface_violations,
 };
 use crate::cli::{Cli, DoctorDocsArgs, should_output_json};
 
@@ -68,6 +69,9 @@ pub enum IssueKind {
     /// The recommendation sends a source operation through Heddle when durable
     /// repository authority requires direct Git or a separate workflow step.
     AuthorityConflict,
+    /// The parser exposes a root or lifecycle flag outside the accepted,
+    /// explicitly reviewed command surface.
+    NonCanonicalSurface,
     /// The file referenced by `--path` (or enumerated by `--all`) could
     /// not be read. We surface this as a real issue, not a silent skip,
     /// so a typoed path or permission error fails CI instead of letting
@@ -97,7 +101,20 @@ pub fn cmd_doctor_docs(cli: &Cli, args: DoctorDocsArgs) -> Result<()> {
 
     let files = resolve_files(&repo_root, &args)?;
     let cli_command = Cli::command();
-    let mut issues = Vec::new();
+    let mut issues: Vec<DocsIssue> = command_surface_violations(&cli_command)
+        .into_iter()
+        .map(|violation| DocsIssue {
+            file: "<command-surface>".to_string(),
+            line: 0,
+            invocation: format!("heddle {}", violation.path.join(" ")),
+            kind: IssueKind::NonCanonicalSurface,
+            detail: violation.detail,
+            suggestion: Some(
+                "remove the surface or amend the accepted CLI design and conformance set"
+                    .to_string(),
+            ),
+        })
+        .collect();
     for file in &files {
         let display = display_path(&repo_root, file);
         let bytes = match std::fs::read_to_string(file) {

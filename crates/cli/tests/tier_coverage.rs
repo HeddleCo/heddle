@@ -13,7 +13,9 @@
 
 use std::{collections::BTreeSet, path::PathBuf};
 
-use cli::cli::commands::command_contract_root_commands;
+use cli::cli::commands::{
+    command_contract_root_commands, surface_conformance::unapproved_root_command_names,
+};
 
 #[test]
 fn every_commands_variant_has_explicit_root_contract() {
@@ -70,6 +72,33 @@ fn every_commands_variant_has_explicit_root_contract() {
          Add each root verb to CONTRACTS in \
          crates/cli-contract/src/cli/commands/command_catalog/mod.rs.",
         missing.join("\n  ")
+    );
+}
+
+#[test]
+fn every_commands_variant_is_in_the_closed_root_surface() {
+    let commands_rs = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("cli-args")
+        .join("src")
+        .join("cli")
+        .join("cli_args")
+        .join("commands_main.rs");
+    let source = std::fs::read_to_string(&commands_rs)
+        .unwrap_or_else(|e| panic!("read {}: {e}", commands_rs.display()));
+    let variants = enumerate_commands_variants(&source);
+    let verbs = variants
+        .iter()
+        .map(|variant| variant_to_verb(variant))
+        .collect::<Vec<_>>();
+    let violations = unapproved_root_command_names(verbs.iter().map(String::as_str));
+
+    assert!(
+        violations.is_empty(),
+        "top-level Commands contains roots outside the accepted closed surface: {}\n\n\
+         Fold the verb into its canonical owner, or amend the accepted design and \
+         surface-conformance set in the same review.",
+        violations.join(", ")
     );
 }
 
