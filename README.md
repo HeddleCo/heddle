@@ -10,6 +10,7 @@ Heddle is an agent-native version control CLI written in Rust. It keeps its own 
 - local captures and Git-compatible commits with explicit human and agent attribution
 - content-addressed immutable history with stable change identifiers that survive rewrites
 - provenance-aware inspection (`heddle query --attribution`, `heddle show`, `heddle diff`)
+- operation-agnostic recovery (`heddle continue` / `heddle abort`) without per-command lifecycle flags
 - separate coordination surfaces for writer leases (`heddle agent`) and acting-worker context (`heddle presence`)
 - explicit maintenance and interoperability namespaces (`heddle maintenance`, `heddle bridge git`)
 
@@ -134,6 +135,11 @@ heddle ready
 # Land locally, then publish with the source authority
 heddle land --thread feature/auth
 heddle push
+
+# Inspect, continue, or abort any in-progress integration
+heddle status
+heddle resolve --list
+heddle continue   # or: heddle abort
 
 # Inspect history and provenance
 heddle log

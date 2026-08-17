@@ -103,6 +103,27 @@ fn verify_exits_zero_when_clean() {
 }
 
 #[test]
+fn removed_resolve_abort_flag_is_a_clean_usage_error() {
+    let temp = TempDir::new().expect("tempdir");
+    let output = heddle_output(&["resolve", "--abort"], Some(temp.path()))
+        .expect("invoke removed resolve flag");
+    assert_eq!(output.status.code(), Some(64));
+    assert!(
+        output.stdout.is_empty(),
+        "parse errors must not write stdout"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected argument '--abort'"),
+        "removed flag should fail through clap: {stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked at") && !stderr.contains("thread 'main' panicked"),
+        "removed flag must not panic: {stderr}"
+    );
+}
+
+#[test]
 fn commit_without_git_overlay_is_data_err() {
     let repo = init_repo();
     assert_exit(&["commit", "-m", "again"], repo.path(), 65);

@@ -30,14 +30,9 @@ pub fn cmd_resolve(
     ours: bool,
     theirs: bool,
     force: bool,
-    abort: bool,
 ) -> Result<()> {
     let repo = cli.open_repo()?;
     let merge_manager = repo.merge_state_manager();
-
-    if abort {
-        return cmd_resolve_abort(&repo, &merge_manager, cli);
-    }
 
     if list {
         return cmd_resolve_list(&repo, &merge_manager, cli);
@@ -48,44 +43,10 @@ pub fn cmd_resolve(
     }
 
     let Some(path) = path else {
-        return Err(anyhow!(
-            "Specify a file to resolve, or use --all, --list, or --abort"
-        ));
+        return Err(anyhow!(missing_resolve_target_advice()));
     };
 
     cmd_resolve_file(&repo, &merge_manager, cli, &path, ours, theirs, force)
-}
-
-fn cmd_resolve_abort(
-    repo: &Repository,
-    merge_manager: &repo::MergeStateManager,
-    cli: &Cli,
-) -> Result<()> {
-    abort_merge_state(repo, merge_manager)?;
-
-    if should_output_json(cli, Some(repo.config())) {
-        println!(
-            "{}",
-            serde_json::to_string(&ResolveReport {
-                output_kind: "resolve".to_string(),
-                message: Some("Merge aborted".to_string()),
-                resolved: vec![],
-                remaining: vec![],
-                conflict_paths: vec![],
-                conflicts: vec![],
-                resolutions: vec![],
-                continued: false,
-                continuation_status: None,
-                continuation_message: None,
-                next_action: None,
-                recommended_action: None,
-            })?
-        );
-    } else {
-        println!("Merge aborted");
-    }
-
-    Ok(())
 }
 
 pub(crate) fn abort_merge_state(
@@ -526,6 +487,19 @@ fn no_merge_in_progress_advice(action: &'static str) -> RecoveryAdvice {
         "repository state was left unchanged",
         "heddle status",
         vec!["heddle status".to_string()],
+    )
+}
+
+fn missing_resolve_target_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "resolve_target_required",
+        "Specify a file to resolve, or use --all or --list",
+        "Inspect unresolved conflicts with `heddle resolve --list`.",
+        "no conflict path or bulk/list mode was selected",
+        "resolve cannot choose a conflict path on the operator's behalf",
+        "repository state and worktree files were left unchanged",
+        "heddle resolve --list",
+        vec!["heddle resolve --list".to_string()],
     )
 }
 

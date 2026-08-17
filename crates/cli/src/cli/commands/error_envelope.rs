@@ -317,9 +317,7 @@ fn typed_recovery_commands(kind: &str) -> Vec<String> {
         // machine envelope, losing the specific recovery path the human
         // hint already documents (HeddleCo/heddle#981 regression). Commands
         // mirror the CLI-side `RecoveryAdvice` versions on `main`.
-        "merge_already_in_progress" => {
-            &["heddle status", "heddle continue", "heddle resolve --abort"]
-        }
+        "merge_already_in_progress" => &["heddle status", "heddle continue", "heddle abort"],
         "thread_not_found" => &["heddle thread list"],
         "merge_no_common_ancestor" => &["heddle status"],
         "dirty_worktree" | "source_thread_uncaptured_work" => {
@@ -952,7 +950,7 @@ mod tests {
         assert_eq!(classified.primary_command, "heddle status");
         assert_eq!(
             classified.recovery_commands,
-            vec!["heddle status", "heddle continue", "heddle resolve --abort"]
+            vec!["heddle status", "heddle continue", "heddle abort"]
         );
 
         let not_found = anyhow!(HeddleError::recovery(RecoveryDetails::safety_refusal(

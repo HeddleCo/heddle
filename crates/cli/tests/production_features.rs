@@ -403,12 +403,12 @@ mod resolve {
 
     #[test]
     #[serial(inner_attrs = [timeout(15000)])]
-    fn test_resolve_abort() {
+    fn test_abort() {
         let temp = TempDir::new().unwrap();
         create_conflict(&temp);
 
-        let result = heddle(&["resolve", "--abort"], Some(temp.path()));
-        assert!(result.is_ok(), "resolve --abort failed: {:?}", result.err());
+        let result = heddle(&["abort"], Some(temp.path()));
+        assert!(result.is_ok(), "abort failed: {:?}", result.err());
     }
 
     #[test]

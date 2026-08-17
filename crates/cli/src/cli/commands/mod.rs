@@ -135,7 +135,8 @@ pub use git_projection_io::cmd_context_reason_git;
 #[cfg(feature = "git-overlay")]
 pub use git_projection_io::{cmd_export_git, cmd_import_git, cmd_sync_git};
 pub use heddle_cli_contract::cli::commands::{
-    advice, command_catalog, doctor_docs, doctor_schemas, schemas, verification_health,
+    advice, command_catalog, doctor_docs, doctor_schemas, schemas, surface_conformance,
+    verification_health,
 };
 pub use hook::cmd_hook;
 pub use init::cmd_init;
