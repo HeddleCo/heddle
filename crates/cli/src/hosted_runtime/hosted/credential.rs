@@ -33,6 +33,7 @@ impl CredentialSource {
 pub struct ResolvedHostedCredential {
     pub token: Option<AuthToken>,
     pub proof_key_pem: Option<String>,
+    pub owner_authorization: Option<Vec<u8>>,
     pub(crate) renewable: Option<RenewableAuthorityCredential>,
     pub subject: Option<String>,
     pub credential_id: Option<String>,
@@ -50,6 +51,10 @@ impl std::fmt::Debug for ResolvedHostedCredential {
                 &self.proof_key_pem.as_ref().map(|_| "<redacted>"),
             )
             .field("renewable", &self.renewable.is_some())
+            .field(
+                "owner_authorization",
+                &self.owner_authorization.as_ref().map(|_| "<redacted>"),
+            )
             .field("subject", &self.subject)
             .field("credential_id", &self.credential_id)
             .field("expires_at", &self.expires_at)
@@ -98,6 +103,7 @@ pub fn resolve_hosted_credential(server_key: Option<&str>) -> Result<ResolvedHos
         return Ok(ResolvedHostedCredential {
             token: Some(AuthToken::new(verified.token, "hcred-env")),
             proof_key_pem: Some(verified.proof_key_pem),
+            owner_authorization: None,
             renewable: None,
             subject: Some(verified.subject),
             credential_id: verified.credential_id,
@@ -113,6 +119,12 @@ pub fn resolve_hosted_credential(server_key: Option<&str>) -> Result<ResolvedHos
         return Ok(ResolvedHostedCredential {
             token: Some(AuthToken::new(credential.token, "credential-store")),
             proof_key_pem: credential.private_key_pem,
+            owner_authorization: credential
+                .owner_authorization_hex
+                .as_deref()
+                .map(hex::decode)
+                .transpose()
+                .context("decode stored owner authorization")?,
             renewable,
             subject: Some(credential.subject),
             credential_id: credential.credential_id,
@@ -124,6 +136,7 @@ pub fn resolve_hosted_credential(server_key: Option<&str>) -> Result<ResolvedHos
     Ok(ResolvedHostedCredential {
         token: None,
         proof_key_pem: None,
+        owner_authorization: None,
         renewable: None,
         subject: None,
         credential_id: None,
@@ -256,6 +269,7 @@ mod tests {
                     device_id: None,
                     credential_id: None,
                     private_key_pem: None,
+                    owner_authorization_hex: None,
                     expires_at: None,
                 },
             )
@@ -283,6 +297,7 @@ mod tests {
                     device_id: None,
                     credential_id: None,
                     private_key_pem: None,
+                    owner_authorization_hex: None,
                     expires_at: None,
                 },
             )

@@ -53,8 +53,9 @@ pub use object_graph::{
 };
 pub use object_transfer::{
     MAX_PULL_FRAME_MESSAGE_SIZE, MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
-    MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE, check_received_transfer_blob_size, chunk_bounds,
-    chunk_count, chunk_offset, load_object_data, load_requested_object, store_received_object,
+    MAX_RECEIVED_STATE_ATTACHMENT_BLOB_SIZE, MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE,
+    check_received_transfer_blob_size, chunk_bounds, chunk_count, chunk_offset, load_object_data,
+    load_requested_object, store_received_object,
 };
 pub use provider_pack::{
     CompletedProviderPack, ProviderPackBundle, ProviderPackExtent, ProviderPackIndexEntry,

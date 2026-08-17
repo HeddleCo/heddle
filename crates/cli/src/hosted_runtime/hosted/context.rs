@@ -5,18 +5,23 @@ use std::{
 
 use api::{
     heddle::api::v1alpha1::{
-        BearerProof, CallContext, HumanVerification, RepositoryRef, RequestProof,
+        AuthorizationKeyAlgorithm, AuthorizationSignature, BearerProof, CallContext,
+        HumanVerification, OwnerAuthorizationBundle, RepositoryRef, RequestProof,
+        SidecarAuthorization, SidecarIdentity, SidecarOperationSigningBody, SpoolCapabilityAction,
         StreamOpeningProof, TraceContext, repository_ref,
     },
     signing,
 };
 use cli_shared::ClientConfig;
 use crypto::{Ed25519Signer, Signer as _};
+use heddleco_capability_verifier::canonical_sidecar_operation;
 #[cfg(feature = "telemetry")]
 use opentelemetry::propagation::{Injector, TextMapPropagator};
 #[cfg(feature = "telemetry")]
 use opentelemetry_sdk::propagation::TraceContextPropagator;
+use prost::Message;
 use prost_types::Timestamp;
+use sha2::{Digest, Sha256};
 #[cfg(feature = "telemetry")]
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
@@ -34,6 +39,7 @@ pub struct CallContextFactory {
     bearer_capability: Vec<u8>,
     bearer_grant_envelope: Vec<u8>,
     signer: Option<Arc<Ed25519Signer>>,
+    owner_authorization: Option<OwnerAuthorizationBundle>,
     signing_identity: Option<String>,
     timeout: Duration,
     trace: Option<TraceContext>,
@@ -49,6 +55,10 @@ impl std::fmt::Debug for CallContextFactory {
                 &!self.bearer_grant_envelope.is_empty(),
             )
             .field("has_signer", &self.signer.is_some())
+            .field(
+                "has_owner_authorization",
+                &self.owner_authorization.is_some(),
+            )
             .field("signing_identity", &self.signing_identity)
             .field("timeout", &self.timeout)
             .field("trace", &self.trace)
@@ -62,6 +72,7 @@ impl Default for CallContextFactory {
             bearer_capability: Vec::new(),
             bearer_grant_envelope: Vec::new(),
             signer: None,
+            owner_authorization: None,
             signing_identity: None,
             timeout: Duration::from_secs(30),
             trace: None,
@@ -121,9 +132,91 @@ impl CallContextFactory {
                 .map_or_else(Vec::new, |token| token.id.as_bytes().to_vec()),
             bearer_grant_envelope: Vec::new(),
             signer,
+            owner_authorization: config
+                .owner_authorization
+                .as_deref()
+                .map(OwnerAuthorizationBundle::decode)
+                .transpose()
+                .map_err(|error| {
+                    HostedError::Framing(format!("decode owner authorization bundle: {error}"))
+                })?,
             signing_identity: config.authenticated_principal.clone(),
             timeout: Duration::from_secs(config.timeout_secs.max(1)),
             trace: None,
+        })
+    }
+
+    pub fn sidecar_authorization(
+        &self,
+        spool_uuid: [u8; 16],
+        identity: SidecarIdentity,
+        required_actions: &[SpoolCapabilityAction],
+        payload: &[u8],
+    ) -> Result<SidecarAuthorization> {
+        let signer = self.signer.as_ref().ok_or_else(|| {
+            HostedError::Framing(
+                "sidecar authorization requires the credential proof key".to_owned(),
+            )
+        })?;
+        let capability = self.owner_authorization.as_ref().ok_or_else(|| {
+            HostedError::Framing(
+                "sidecar authorization requires an owner-authored capability bundle".to_owned(),
+            )
+        })?;
+        let leaf = capability
+            .capability_chain
+            .last()
+            .and_then(|signed| signed.capability.as_ref())
+            .ok_or_else(|| {
+                HostedError::Framing("owner capability bundle has no leaf".to_owned())
+            })?;
+        let subject_key = leaf
+            .subject
+            .as_ref()
+            .and_then(|subject| subject.key.as_ref())
+            .ok_or_else(|| {
+                HostedError::Framing("owner capability leaf has no subject key".to_owned())
+            })?;
+        if subject_key.algorithm != AuthorizationKeyAlgorithm::Ed25519 as i32
+            || subject_key.public_key != signer.public_key()
+        {
+            return Err(HostedError::Framing(
+                "owner capability subject does not match the credential proof key".to_owned(),
+            ));
+        }
+        let body = SidecarOperationSigningBody {
+            format_version: 1,
+            required_actions: required_actions
+                .iter()
+                .copied()
+                .map(|action| action as i32)
+                .collect(),
+            spool_uuid: spool_uuid.to_vec(),
+            sidecar_identity: Some(identity),
+            payload_sha256: Sha256::digest(payload).to_vec(),
+            leaf_capability_id: leaf.capability_id.clone(),
+        };
+        let canonical = canonical_sidecar_operation(&body).map_err(|error| {
+            HostedError::Framing(format!("canonicalize sidecar operation: {error}"))
+        })?;
+        let mut operation_hasher = Sha256::new();
+        operation_hasher.update(b"heddle-sidecar-operation-v1");
+        operation_hasher.update(&canonical);
+        let operation_digest = operation_hasher.finalize();
+
+        let mut key_body = Vec::with_capacity(4 + subject_key.public_key.len());
+        key_body.extend_from_slice(&subject_key.algorithm.to_be_bytes());
+        key_body.extend_from_slice(&subject_key.public_key);
+        let mut key_hasher = Sha256::new();
+        key_hasher.update(b"heddle-key-v1");
+        key_hasher.update(&key_body);
+
+        Ok(SidecarAuthorization {
+            capability: Some(capability.clone()),
+            operation_signature: Some(AuthorizationSignature {
+                signer_key_id: key_hasher.finalize().to_vec(),
+                signature: signer.sign(&operation_digest)?,
+            }),
         })
     }
 

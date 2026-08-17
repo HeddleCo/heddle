@@ -36,12 +36,19 @@ impl HostedSession {
             mut credential_proof_key,
             renewable_authority_credential,
             resolved_credential_subject,
+            owner_authorization,
         ) = match mode {
-            HostedAuthMode::Unauthenticated => (None, None, None, None),
+            HostedAuthMode::Unauthenticated => (None, None, None, None, None),
             HostedAuthMode::ProofOnly {
                 proof_key_pem,
                 signing_identity,
-            } => (None, Some(proof_key_pem), None, Some(signing_identity)),
+            } => (
+                None,
+                Some(proof_key_pem),
+                None,
+                Some(signing_identity),
+                None,
+            ),
             HostedAuthMode::CredentialFallback => {
                 let resolved = resolve_hosted_credential(server_key.as_deref())?;
                 (
@@ -49,6 +56,7 @@ impl HostedSession {
                     resolved.proof_key_pem,
                     resolved.renewable,
                     resolved.subject,
+                    resolved.owner_authorization,
                 )
             }
         };
@@ -61,6 +69,9 @@ impl HostedSession {
         }
 
         let mut config = user_config.hosted_runtime_config(token)?;
+        if let Some(authorization) = owner_authorization {
+            config = config.with_owner_authorization(authorization);
+        }
         if let Some(key) = server_key {
             config = config.with_server_key(key);
         }

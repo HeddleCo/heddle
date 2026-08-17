@@ -24,66 +24,9 @@ pub enum RedactCommands {
     List(RedactListArgs),
     /// Show a single redaction by its content-addressed id.
     Show(RedactShowArgs),
-    /// Manage the list of operator public keys whose signed
-    /// redactions this repo accepts over the wire.
-    ///
-    /// `accept_wire_redactions` is fail-closed: an empty trust list
-    /// rejects every signed redaction. Operators run `heddle redact
-    /// trust add` to authorize a key for cross-replica propagation.
-    /// Signing alone proves *who* declared the redaction; the trust
-    /// list proves the receiver has authorized that operator to act
-    /// on this workspace.
-    #[command(subcommand)]
-    Trust(RedactTrustCommands),
     /// Physically remove bytes for an existing redaction.
     #[command(subcommand)]
     Purge(PurgeCommands),
-}
-
-#[derive(Clone, Debug, Subcommand)]
-pub enum RedactTrustCommands {
-    /// Add an operator public key to `[redact] trusted_keys` in
-    /// `.heddle/config.toml`. Subsequent `heddle pull` or `heddle clone`
-    /// invocations will accept signed redactions from that key.
-    Add(RedactTrustAddArgs),
-    /// List the currently-trusted operator keys.
-    List(RedactTrustListArgs),
-    /// Remove an operator public key from the trust list. Future
-    /// signed redactions from that key will be refused.
-    Remove(RedactTrustRemoveArgs),
-}
-
-#[derive(Clone, Debug, Args)]
-pub struct RedactTrustAddArgs {
-    /// Path to a PEM file (public or private key — the public half
-    /// is extracted either way). Algorithm autodetected from the PEM
-    /// header. This is the operator-friendly path: same PEM you
-    /// passed to `heddle redact apply --sign-with`.
-    #[arg(long, value_name = "PATH", group = "key_source")]
-    pub from_pem: Option<std::path::PathBuf>,
-    /// Algorithm identifier (`ed25519`, `p256`) when supplying
-    /// the raw hex-encoded public key directly via `--public-key`.
-    #[arg(long, value_name = "ALGO", requires = "public_key")]
-    pub algorithm: Option<String>,
-    /// Hex-encoded raw public key bytes. Use alongside `--algorithm`
-    /// when the operator already has the key in hex form (e.g. from
-    /// a signed-redaction's `signature.public_key` field).
-    #[arg(long, value_name = "HEX", requires = "algorithm", group = "key_source")]
-    pub public_key: Option<String>,
-    /// Optional free-text label for the trust entry (`"luke-laptop"`,
-    /// `"ci-signing"`). Doesn't affect matching semantics.
-    #[arg(long)]
-    pub label: Option<String>,
-}
-
-#[derive(Clone, Debug, Args)]
-pub struct RedactTrustListArgs {}
-
-#[derive(Clone, Debug, Args)]
-pub struct RedactTrustRemoveArgs {
-    /// Hex-encoded raw public key to remove. Exact match (case-
-    /// insensitive).
-    pub public_key: String,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -102,15 +45,6 @@ pub struct RedactApplyArgs {
     /// same blob hash. Default: just the named state.
     #[arg(long)]
     pub all_states: bool,
-    /// Path to a private key (PEM) used to sign the redaction. The
-    /// signature binds operator → declaration; auditors can verify
-    /// who hid what when with `heddle redact show`.
-    #[arg(long, value_name = "PATH")]
-    pub sign_with: Option<std::path::PathBuf>,
-    /// Override the signing algorithm. Defaults to autodetect from the
-    /// key file's PEM header. Accepts `ed25519`, `p256`.
-    #[arg(long, value_name = "ALGO", requires = "sign_with")]
-    pub sign_algo: Option<String>,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -127,17 +61,12 @@ pub enum PurgeCommands {
     /// Physically remove the blob bytes referenced by an existing
     /// redaction. Refuses if no redaction declared the blob first.
     ///
-    /// The active signing key must be authorized by
-    /// `[purge].trusted_keys`; `--force` confirms intent but does not
-    /// grant destructive authority.
+    /// The repository's pinned owner-authorized key signs the operation;
+    /// `--force` confirms intent but does not grant authority.
     Apply(PurgeApplyArgs),
     /// List every `Purge` oplog entry — who removed bytes, when, and
     /// which redaction the purge acted on.
     List(PurgeListArgs),
-    /// Manage the independent list of keys authorized to destroy bytes.
-    /// Redaction trust does not imply purge trust.
-    #[command(subcommand)]
-    Trust(RedactTrustCommands),
 }
 
 #[derive(Clone, Debug, Args)]

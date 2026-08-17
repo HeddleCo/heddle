@@ -12,6 +12,7 @@ use api::heddle::api::v1alpha1::{
 use cli_shared::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
 use objects::{HeddleError, RecoveryDetails};
+use prost::Message;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use weft_client_shim::CliContext;
@@ -351,6 +352,7 @@ pub(crate) fn cmd_auth_derive_agent(
             device_id: None,
             credential_id: None,
             private_key_pem: Some(child_private_key_pem),
+            owner_authorization_hex: None,
             expires_at: Some(expires_at.to_rfc3339()),
         },
     )?;
@@ -748,6 +750,7 @@ async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
             Some(access_token.credential_id)
         },
         private_key_pem: Some(private_key_pem.clone()),
+        owner_authorization_hex: access_token.owner_authorization.map(hex::encode),
         expires_at: access_token.expires_at.as_ref().and_then(|ts| {
             chrono::DateTime::from_timestamp(ts.seconds, ts.nanos.max(0) as u32)
                 .map(|dt| dt.to_rfc3339())
@@ -1295,6 +1298,9 @@ async fn mint_biscuit_with_device_auth(
         subject: inner.subject,
         expires_at: inner.expires_at,
         credential_id: inner.credential_id,
+        owner_authorization: inner
+            .owner_authorization
+            .map(|authorization| authorization.encode_to_vec()),
     })
 }
 
@@ -1319,6 +1325,9 @@ async fn exchange_device_authorization(
         subject: inner.subject,
         expires_at: inner.expires_at,
         credential_id: inner.credential_id,
+        owner_authorization: inner
+            .owner_authorization
+            .map(|authorization| authorization.encode_to_vec()),
     })
 }
 
@@ -1365,6 +1374,7 @@ struct AccessToken {
     subject: String,
     expires_at: Option<prost_types::Timestamp>,
     credential_id: String,
+    owner_authorization: Option<Vec<u8>>,
 }
 
 /// Validate a URL before handing it to a browser helper.
@@ -1827,6 +1837,7 @@ mod tests {
             device_id: None,
             credential_id: None,
             private_key_pem: None,
+            owner_authorization_hex: None,
             expires_at: None,
         }
     }
@@ -1857,6 +1868,7 @@ mod tests {
                 device_id: Some("device-root".to_string()),
                 credential_id: Some("root-credential".to_string()),
                 private_key_pem: Some(private_key_pem.clone()),
+                owner_authorization_hex: None,
                 expires_at: Some(expires_at.to_rfc3339()),
             },
             private_key_pem,
@@ -2110,6 +2122,7 @@ mod tests {
         let resolved = crate::hosted_runtime::hosted::ResolvedHostedCredential {
             token: Some(wire::AuthToken::new(credential.token, "credential-store")),
             proof_key_pem: credential.private_key_pem,
+            owner_authorization: None,
             renewable: None,
             subject: Some(credential.subject),
             credential_id: credential.credential_id,

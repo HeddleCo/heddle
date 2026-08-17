@@ -180,6 +180,7 @@ async fn create_on_behalf(
             device_id: None,
             credential_id: None,
             private_key_pem: Some(proof_pem),
+            owner_authorization_hex: None,
             expires_at: metadata.expires_at,
         },
     )?;

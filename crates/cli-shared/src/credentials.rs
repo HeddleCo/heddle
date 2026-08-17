@@ -51,6 +51,10 @@ pub struct ServerCredential {
         skip_serializing_if = "Option::is_none"
     )]
     pub private_key_pem: Option<String>,
+    /// Canonical protobuf bytes of the owner-authored capability bundle,
+    /// encoded as lower-case hex for TOML persistence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_authorization_hex: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
 }
@@ -255,6 +259,7 @@ mod tests {
                     device_id: Some("device-1".to_string()),
                     credential_id: Some("cred-1".to_string()),
                     private_key_pem: Some("pem".to_string()),
+                    owner_authorization_hex: None,
                     expires_at: Some("2026-01-01T00:00:00Z".to_string()),
                 },
             );
@@ -314,6 +319,7 @@ private_key = "legacy-pem"
                     device_id: None,
                     credential_id: None,
                     private_key_pem: Some("pem".to_string()),
+                    owner_authorization_hex: None,
                     expires_at: None,
                 },
             );
@@ -351,6 +357,7 @@ private_key = "legacy-pem"
                     device_id: None,
                     credential_id: None,
                     private_key_pem: Some("pem".to_string()),
+                    owner_authorization_hex: None,
                     expires_at: None,
                 },
             );
@@ -386,6 +393,7 @@ private_key = "legacy-pem"
                     device_id: None,
                     credential_id: None,
                     private_key_pem: None,
+                    owner_authorization_hex: None,
                     expires_at: None,
                 },
             );

@@ -134,6 +134,7 @@ impl VerifiedCredential {
             device_id: None,
             credential_id: self.credential_id,
             private_key_pem: Some(self.proof_key_pem),
+            owner_authorization_hex: None,
             expires_at: self.expires_at,
         }
     }

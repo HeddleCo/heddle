@@ -18,6 +18,8 @@ pub struct ClientConfig {
     /// signatures use this value as their canonical identity; the device key
     /// remains only the proof key.
     pub authenticated_principal: Option<String>,
+    /// Canonical owner-authored capability bundle for sidecar operations.
+    pub owner_authorization: Option<Vec<u8>>,
     /// Server key used to look up the credential in the credential store
     /// (`~/.heddle/credentials.toml`).  Matches the key used by `heddle auth login`.
     pub server_key: Option<String>,
@@ -71,6 +73,7 @@ impl ClientConfig {
             token: None,
             auth_proof_key_pem: None,
             authenticated_principal: None,
+            owner_authorization: None,
             server_key: None,
             descriptor_key_id: None,
             descriptor_public_key: None,
@@ -108,6 +111,13 @@ impl ClientConfig {
     /// Set the stable principal authenticated by the bearer token.
     pub fn with_authenticated_principal(mut self, principal: impl Into<String>) -> Self {
         self.authenticated_principal = Some(principal.into());
+        self
+    }
+
+    /// Set the canonical owner-authored capability bundle used to authorize
+    /// sidecar operations independently of the bearer token.
+    pub fn with_owner_authorization(mut self, authorization: Vec<u8>) -> Self {
+        self.owner_authorization = Some(authorization);
         self
     }
 

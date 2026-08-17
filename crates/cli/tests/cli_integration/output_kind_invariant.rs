@@ -82,13 +82,7 @@ const SWEPT: &[&str] = &[
     "redact list",
     "redact purge apply",
     "redact purge list",
-    "redact purge trust add",
-    "redact purge trust list",
-    "redact purge trust remove",
     "redact show",
-    "redact trust add",
-    "redact trust list",
-    "redact trust remove",
     "visibility set",
     "visibility promote",
     "visibility show",
@@ -264,9 +258,6 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         // `redact purge` preserves the pre-consolidation wire values.
         "redact purge apply" => Some("purge_apply"),
         "redact purge list" => Some("purge_list"),
-        "redact purge trust add" => Some("purge_trust_add"),
-        "redact purge trust list" => Some("purge_trust_list"),
-        "redact purge trust remove" => Some("purge_trust_remove"),
         // Timeline navigation subcommands intentionally share one action
         // envelope so agents can handle fork/reset/recover uniformly.
         "timeline fork" | "timeline reset" | "timeline recover" => Some("timeline_action"),
@@ -691,30 +682,6 @@ fn init_fixture() -> TempDir {
     temp
 }
 
-fn trust_local_purge_identity(path: &std::path::Path) {
-    let identity_raw =
-        std::fs::read_to_string(path.join(".heddle/identity.toml")).expect("read local identity");
-    let identity: toml::Value = toml::from_str(&identity_raw).expect("parse local identity");
-    let public_key = identity
-        .get("public_key")
-        .and_then(toml::Value::as_str)
-        .expect("local identity public key");
-    heddle(
-        &[
-            "redact",
-            "purge",
-            "trust",
-            "add",
-            "--algorithm",
-            "ed25519",
-            "--public-key",
-            public_key,
-        ],
-        Some(path),
-    )
-    .expect("authorize local purge identity");
-}
-
 /// Invocations for swept verbs we exercise at runtime. Per-verb argv +
 /// whether the verb is expected to exit zero. Some named verbs need a
 /// non-trivial fixture (e.g. `revert` requires a state to revert); we
@@ -724,9 +691,7 @@ fn runtime_invocation_args(
 ) -> Option<(&'static [&'static str], bool /* expect_ok */)> {
     match display {
         "redact purge list" => Some((&["redact", "purge", "list"], true)),
-        "redact purge trust list" => Some((&["redact", "purge", "trust", "list"], true)),
         "redact list" => Some((&["redact", "list"], true)),
-        "redact trust list" => Some((&["redact", "trust", "list"], true)),
         "discuss list" => Some((&["discuss", "list"], true)),
         "context list" => Some((&["context", "list"], true)),
         "review next" => Some((&["review", "next"], true)),
@@ -1123,7 +1088,6 @@ fn runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
                 Some(t.path()),
             )
             .expect("redact apply");
-            trust_local_purge_identity(t.path());
             (
                 t,
                 sv(&[
@@ -1137,21 +1101,6 @@ fn runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
                 ]),
             )
         }
-        "purge_trust_add" => (
-            init_fixture(),
-            sv(&[
-                "redact",
-                "purge",
-                "trust",
-                "add",
-                "--public-key",
-                "abc123def456",
-                "--algorithm",
-                "ed25519",
-                "--label",
-                "security",
-            ]),
-        ),
         "query_attribution" => {
             let t = init_fixture();
             std::fs::create_dir_all(t.path().join("src")).unwrap();
@@ -1175,20 +1124,6 @@ fn runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
                 vec!["semantic".to_string(), "diff".to_string(), first, second],
             )
         }
-        "redact_trust_add" => (
-            init_fixture(),
-            sv(&[
-                "redact",
-                "trust",
-                "add",
-                "--public-key",
-                "abc123def456",
-                "--algorithm",
-                "ed25519",
-                "--label",
-                "security",
-            ]),
-        ),
         "discuss_open" => {
             let t = init_fixture();
             std::fs::write(t.path().join("a.txt"), "fn verify(){}").unwrap();

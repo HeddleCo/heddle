@@ -276,6 +276,22 @@ pub fn load_or_mint_local(path: &Path) -> std::io::Result<LocalIdentity> {
     Ok(identity)
 }
 
+/// Replace a fresh clone destination's disposable local identity with the
+/// source repository owner's identity. Local clones share one self-sovereign
+/// owner anchor, so the destination must retain the matching private signer.
+pub(crate) fn clone_local_identity(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let identity = load_local(source)?.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "source local owner identity '{}' is missing",
+                source.display()
+            ),
+        )
+    })?;
+    persist_local(destination, &identity)
+}
+
 /// Reject an identity TOML whose embedded private key is exposed by
 /// group/world-readable permissions (heddle#482). Single-sources the key-file
 /// signer loader's rule via [`crypto::reject_group_or_world_readable_key`], so

@@ -11,15 +11,18 @@ categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+api = { package = "heddle-api", version = "0.9" }
 blake3.workspace = true
 chrono.workspace = true
 hex.workspace = true
+heddleco-capability-verifier = "0.1"
 ignore.workspace = true
 heddle-perf-contract = { path = "../perf-contract", version = "0.12" }
 libc.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.12" }
 crypto = { path = "../crypto", package = "heddle-crypto", version = "0.12" }
 oplog = { path = "../oplog", package = "heddle-oplog", version = "0.12" }
+prost.workspace = true
 wire = { path = "../wire", package = "heddle-wire", version = "0.12", default-features = false }
 refs = { path = "../refs", package = "heddle-refs", version = "0.12" }
 notify.workspace = true
@@ -30,11 +33,13 @@ semantic-recovery = { path = "../semantic-recovery", package = "heddle-semantic-
 state_review = { path = "../state_review", package = "heddle-state-review", version = "0.12", optional = true }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sley.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # Needed for `GetFileInformationByHandleEx` / `FILE_ID_INFO` so the

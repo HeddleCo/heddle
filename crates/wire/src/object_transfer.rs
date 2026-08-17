@@ -23,6 +23,9 @@ pub const MAX_RECEIVED_REDACTIONS_BLOB_SIZE: u64 = 64 * 1024 * 1024;
 /// same receive-side cap.
 pub const MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE: u64 = 64 * 1024 * 1024;
 
+/// Maximum serialized state-attachment sidecar accepted from the pull stream.
+pub const MAX_RECEIVED_STATE_ATTACHMENT_BLOB_SIZE: u64 = 64 * 1024 * 1024;
+
 /// Envelope headroom added on top of the largest legitimate sidecar blob when
 /// sizing the pull-stream frame decode limit. Covers the protobuf fields that
 /// wrap a max-size sidecar blob in a `PullMessage` — the oneof tag, the
@@ -56,7 +59,10 @@ const fn max_u64(a: u64, b: u64) -> u64 {
 /// unaffected.
 pub const MAX_PULL_FRAME_MESSAGE_SIZE: usize = (max_u64(
     MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
-    MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE,
+    max_u64(
+        MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE,
+        MAX_RECEIVED_STATE_ATTACHMENT_BLOB_SIZE,
+    ),
 ) + PULL_DECODE_ENVELOPE_HEADROOM) as usize;
 
 /// Reject a received per-object transfer sidecar blob whose length exceeds

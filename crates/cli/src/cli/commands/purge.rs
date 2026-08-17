@@ -2,9 +2,8 @@
 //! `heddle redact purge` — physically remove the bytes referenced by an
 //! existing redaction. Irreversible by design.
 //!
-//! The active repository signing key must be explicitly authorized in
-//! `[purge].trusted_keys`. This destructive authority is independent from
-//! `[redact].trusted_keys`; `--force` confirms intent but grants no authority.
+//! The repository's pinned owner-authorized key signs the operation;
+//! `--force` confirms intent but grants no authority.
 
 use anyhow::{Context, Result, anyhow};
 use heddle_core::{PurgeApplyPlan, plan_purge_apply, purge_apply_message, purge_force_command};
@@ -25,7 +24,6 @@ pub fn cmd_purge(cli: &Cli, command: PurgeCommands) -> Result<()> {
     match command {
         PurgeCommands::Apply(args) => cmd_purge_apply(cli, &repo, args),
         PurgeCommands::List(args) => cmd_purge_list(cli, &repo, args),
-        PurgeCommands::Trust(command) => super::redact::cmd_purge_trust(cli, &repo, command),
     }
 }
 

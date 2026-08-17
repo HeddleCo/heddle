@@ -333,6 +333,10 @@ impl HostedClient {
             device_id: credential.device_id,
             credential_id: credential.credential_id,
             private_key_pem: Some(private_key_pem),
+            owner_authorization_hex: response
+                .owner_authorization
+                .map(|authorization| hex::encode(authorization.encode_to_vec()))
+                .or(credential.owner_authorization_hex),
             expires_at,
         };
         if let Err(error) = cli_shared::credentials::store_server_credential(&server_key, updated) {

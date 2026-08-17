@@ -3134,11 +3134,11 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact apply",
       "redact list",
       "redact show",
-      "redact trust add",
-      "redact trust list",
-      "redact trust remove"
+      "redact purge apply",
+      "redact purge list",
+      "visibility set"
     ],
-    "accepted_opaque_schema_verbs_total": 44,
+    "accepted_opaque_schema_verbs_total": 38,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
@@ -3146,30 +3146,30 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact apply",
       "redact list",
       "redact show",
-      "redact trust add",
-      "redact trust list",
-      "redact trust remove"
+      "redact purge apply",
+      "redact purge list",
+      "visibility set"
     ],
-    "advanced_scope_json_commands_total": 120,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 44,
-    "advanced_scope_mutating_commands_total": 69,
-    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 25,
-    "catalog_commands_total": 198,
-    "catalog_mutating_commands_total": 97,
-    "json_commands_total": 156,
-    "json_commands_with_accepted_opaque_schema": 44,
+    "advanced_scope_json_commands_total": 114,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 38,
+    "advanced_scope_mutating_commands_total": 65,
+    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 21,
+    "catalog_commands_total": 190,
+    "catalog_mutating_commands_total": 93,
+    "json_commands_total": 150,
+    "json_commands_with_accepted_opaque_schema": 38,
     "json_commands_with_schema": 112,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 92,
+    "json_mutating_commands_total": 88,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 92,
-    "mutating_commands_with_accepted_opaque_schema": 25,
+    "mutating_commands_total": 88,
+    "mutating_commands_with_accepted_opaque_schema": 21,
     "mutating_commands_with_schema": 67,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 44,
+    "opaque_schema_verbs_total": 38,
     "status": "available",
-    "summary": "198 command(s), 156 JSON command(s), 97 mutating command(s), 92 mutating JSON command(s); verified everyday/agent machine surface has 36 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
+    "summary": "190 command(s), 150 JSON command(s), 93 mutating command(s), 88 mutating JSON command(s); verified everyday/agent machine surface has 36 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3207,7 +3207,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "198 command(s), 156 JSON command(s), 97 mutating command(s), 92 mutating JSON command(s); verified everyday/agent machine surface has 36 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
+  "summary": "190 command(s), 150 JSON command(s), 93 mutating command(s), 88 mutating JSON command(s); verified everyday/agent machine surface has 36 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -3494,16 +3494,6 @@ set to the snake-cased subcommand, e.g. `purge_apply`, `purge_list`).
 {"output_kind": "purge_apply", "redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hc-sqr398dvx9ay", "path": "secrets.env", "redactions_marked": 1, "blob_bytes_removed": false, "blob_remains_in_pack": false, "purger": "A. Engineer <a@example.com>", "message": "purged blob sha256:abc123 at secrets.env in hc-sqr398dvx9ay (1 redaction(s) marked)", "ignore_hint": {"ignore_file": ".heddleignore", "already_exists": false, "suggested_pattern": "secrets.env", "message": "hint: create .heddleignore with `secrets.env` so the next `heddle capture` doesn't re-import the leaked bytes"}}
 ```
 
-`heddle redact purge trust add|list|remove --output json` emit (each carries
-`output_kind` set to the snake-cased subcommand, e.g. `purge_trust_add`,
-`purge_trust_list`). Purge trust is independent from redaction trust. The `add`
-payload flattens the added entry alongside `output_kind`; `list` returns a
-`trusted_keys` array plus `count`; `remove` returns a `removed` count:
-
-```json
-{"output_kind": "purge_trust_add", "algorithm": "ed25519", "public_key": "abc123def456", "label": "security"}
-```
-
 `heddle query --output json` emits:
 
 ```json
@@ -3519,23 +3509,12 @@ for a tracked file:
 
 `heddle redact apply|list|show --output json` emit (each carries
 `output_kind` set to the snake-cased subcommand, e.g. `redact_apply`,
-`redact_list`). `signature_algorithm` is present only when the redaction
-is signed (`--sign-with`); `ignore_hint` only when the path is not yet
-covered by a `.heddleignore` / `.gitignore` glob:
+`redact_list`). Redactions are signed by the pinned repository owner;
+`ignore_hint` is present only when the path is not yet covered by a
+`.heddleignore` / `.gitignore` glob:
 
 ```json
-{"output_kind": "redact_apply", "redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hc-sqr398dvx9ay", "path": "secrets.env", "reason": "credential", "redactor": "A. Engineer <a@example.com>", "redacted_at": "2026-01-01T00:00:00Z", "all_states": false, "states_redacted": 1, "signed": false, "ignore_hint": {"ignore_file": ".heddleignore", "already_exists": false, "suggested_pattern": "secrets.env", "message": "hint: create .heddleignore with `secrets.env` so the next `heddle capture` doesn't re-import the leaked bytes"}}
-```
-
-`heddle redact trust add|list|remove --output json` emit (each carries
-`output_kind` set to the snake-cased subcommand, e.g. `redact_trust_add`,
-`redact_trust_list`). The `add` payload flattens the added entry alongside
-`output_kind` (`label` present only when `--label` is supplied); `list`
-returns a `trusted_keys` array plus `count`; `remove` returns a `removed`
-count:
-
-```json
-{"output_kind": "redact_trust_add", "algorithm": "ed25519", "public_key": "abc123def456", "label": "security"}
+{"output_kind": "redact_apply", "redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hc-sqr398dvx9ay", "path": "secrets.env", "reason": "credential", "redactor": "A. Engineer <a@example.com>", "redacted_at": "2026-01-01T00:00:00Z", "all_states": false, "states_redacted": 1, "signed": true, "signature_algorithm": "ed25519", "ignore_hint": {"ignore_file": ".heddleignore", "already_exists": false, "suggested_pattern": "secrets.env", "message": "hint: create .heddleignore with `secrets.env` so the next `heddle capture` doesn't re-import the leaked bytes"}}
 ```
 
 `heddle visibility set --output json` emits (each carries `output_kind`

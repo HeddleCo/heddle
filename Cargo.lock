@@ -402,6 +402,7 @@ dependencies = [
  "sha2 0.9.9",
  "thiserror 1.0.69",
  "time",
+ "wasm-bindgen",
  "zeroize",
 ]
 
@@ -2174,9 +2175,9 @@ dependencies = [
 
 [[package]]
 name = "heddle-api"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18dfa8dd50801a65fc83b3c9959dec28e743c4cd1a0c5cb3ea487e4b58e95aae"
+checksum = "2367393d4cb0d33a619a6e8a57e46c6ef6acbd94fc2d3c4dc9fdbad2c6b58356"
 dependencies = [
  "blake3",
  "bytes",
@@ -2233,7 +2234,7 @@ dependencies = [
  "criterion",
  "futures",
  "getrandom 0.4.3",
- "heddle-api 0.8.0",
+ "heddle-api 0.9.0",
  "heddle-ci-config",
  "heddle-ci-engine",
  "heddle-cli-args",
@@ -2255,6 +2256,7 @@ dependencies = [
  "heddle-repo",
  "heddle-semantic",
  "heddle-wire",
+ "heddleco-capability-verifier",
  "heddleco-iroh",
  "hex",
  "hyper-util",
@@ -2305,7 +2307,7 @@ version = "0.12.0"
 dependencies = [
  "anyhow",
  "clap",
- "heddle-api 0.8.0",
+ "heddle-api 0.9.0",
  "heddle-cli-shared",
  "heddle-objects",
  "heddle-repo",
@@ -2702,6 +2704,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "chrono",
+ "heddle-api 0.9.0",
  "heddle-crypto",
  "heddle-objects",
  "heddle-oplog",
@@ -2711,20 +2714,24 @@ dependencies = [
  "heddle-semantic-recovery",
  "heddle-state-review",
  "heddle-wire",
+ "heddleco-capability-verifier",
  "hex",
  "ignore",
  "libc",
  "notify",
  "proptest",
+ "prost 0.14.1",
  "rmp-serde",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sley",
  "tempfile",
  "thiserror 2.0.18",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
+ "uuid",
  "windows-sys 0.61.2",
 ]
 
@@ -2803,6 +2810,24 @@ dependencies = [
  "serde",
  "sley",
  "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "heddleco-capability-verifier"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f906e5a6191c4d8677a46a4181f4a2786df0a8347433b4b7e4875a810c51052"
+dependencies = [
+ "biscuit-auth",
+ "ed25519-dalek 3.0.0",
+ "getrandom 0.2.17",
+ "heddle-api 0.9.0",
+ "hex",
+ "prost 0.14.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
 ]
 

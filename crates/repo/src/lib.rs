@@ -38,6 +38,7 @@ mod merge_state;
 pub mod migration;
 pub mod namespace_policy;
 pub mod operation_dedup;
+mod owner_authorization;
 mod repository;
 mod repository_key_binding;
 mod repository_redaction;
@@ -154,10 +155,10 @@ pub use repository::{
     ContextSuggestionTier, DiffKind, GitCheckpointIntent, GitCheckpointIntentPhase,
     GitCheckpointRecord, GitImportGuidance, GitRemoteTrackingStatus, HIGH_SUGGESTION_THRESHOLD,
     HistoryQuery, HostedConfig, KeyBindingRegistryAnchor, MAJOR_REWRITE_THRESHOLD_PCT,
-    MEDIUM_SUGGESTION_THRESHOLD, MetadataConfig, MissingBlob, OperationKind, OperationScope,
-    OutputFormat, PackFilesInspection, PartialFetchInspection, ProvenanceConfig,
-    PullPlannerCacheInspection, PurgeConfig, RedactConfig, RefCountsInspection, RepoConfig,
-    Repository, RepositoryCapability, RepositoryMaintenanceRunReport, RepositoryOperationStatus,
+    MEDIUM_SUGGESTION_THRESHOLD, MissingBlob, OperationKind, OperationScope, OutputFormat,
+    PackFilesInspection, PartialFetchInspection, ProvenanceConfig, PullPlannerCacheInspection,
+    RefCountsInspection, RepoConfig, Repository, RepositoryCapability,
+    RepositoryMaintenanceRunReport, RepositoryOperationStatus,
     RepositoryPerformanceInspectionReport, RepositorySourceAuthority, SUGGESTION_WINDOW,
     SnapshotExecution, SnapshotProfile, SpoolFacet, ThreadCaptureOutcome, TreeBuildProfile,
     TrustedKey, UntrackedSet, UntrackedSubtree, WarmCanonicalStoreStats, WorktreeCompareProfile,

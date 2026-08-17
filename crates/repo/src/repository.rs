@@ -76,8 +76,8 @@ use oplog::{ConditionalCommitOutcome, IsolationPrecondition, OpLog, OpLogBackend
 pub use refs::SpoolFacet;
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
 pub use repo_config::{
-    HostedConfig, KeyBindingRegistryAnchor, MetadataConfig, OutputFormat, ProvenanceConfig,
-    PurgeConfig, RedactConfig, RepoConfig, RepositorySourceAuthority, TrustedKey,
+    HostedConfig, KeyBindingRegistryAnchor, OutputFormat, ProvenanceConfig, RepoConfig,
+    RepositorySourceAuthority, TrustedKey,
 };
 // Review-epic config types — re-exported here so the new
 // `repository_signals.rs` (and external crates wanting to construct a
@@ -1065,6 +1065,11 @@ impl Repository {
         // A freshly initialized repository is already in the current format.
         // Record that fact during the mutating init operation so the first
         // observe-only command does not have to create the migration ledger.
+        repo.initialize_local_owner_anchor().map_err(|error| {
+            HeddleError::Config(format!(
+                "initialize local owner authorization anchor: {error}"
+            ))
+        })?;
         crate::migration::apply_pending(&repo)?;
         Ok(repo)
     }

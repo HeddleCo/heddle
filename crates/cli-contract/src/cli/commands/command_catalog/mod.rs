@@ -19,8 +19,8 @@ use crate::cli::cli_args::SyncCommands;
 use crate::cli::{
     AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands, HookCommands,
     IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands, RedactCommands,
-    RedactTrustCommands, RemoteCommands, ShellCommands, ThreadCommands, ThreadMarkerCommands,
-    TimelineCommands, VisibilityCommands,
+    RemoteCommands, ShellCommands, ThreadCommands, ThreadMarkerCommands, TimelineCommands,
+    VisibilityCommands,
     cli_args::{
         AgentFanoutCommands, AgentProvenanceCommands, AgentTaskCommands, DiscussCommands,
         PresenceCommands, ReviewCommands,
@@ -2380,74 +2380,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
-    entry(&["redact", "purge", "trust"], GROUP),
-    entry(
-        &["redact", "purge", "trust", "add"],
-        json_discriminators(
-            opaque_schemas(CONFIG_MUTATION, &["redact purge trust add"]),
-            &[json_discriminator(
-                Some("redact purge trust add"),
-                "output_kind",
-                "purge_trust_add",
-            )],
-        ),
-    ),
-    entry(
-        &["redact", "purge", "trust", "list"],
-        json_discriminators(
-            opaque_schemas(READ_JSON, &["redact purge trust list"]),
-            &[json_discriminator(
-                Some("redact purge trust list"),
-                "output_kind",
-                "purge_trust_list",
-            )],
-        ),
-    ),
-    entry(
-        &["redact", "purge", "trust", "remove"],
-        json_discriminators(
-            opaque_schemas(CONFIG_MUTATION, &["redact purge trust remove"]),
-            &[json_discriminator(
-                Some("redact purge trust remove"),
-                "output_kind",
-                "purge_trust_remove",
-            )],
-        ),
-    ),
-    entry(&["redact", "trust"], GROUP),
-    entry(
-        &["redact", "trust", "add"],
-        json_discriminators(
-            opaque_schemas(CONFIG_MUTATION, &["redact trust add"]),
-            &[json_discriminator(
-                Some("redact trust add"),
-                "output_kind",
-                "redact_trust_add",
-            )],
-        ),
-    ),
-    entry(
-        &["redact", "trust", "list"],
-        json_discriminators(
-            opaque_schemas(READ_JSON, &["redact trust list"]),
-            &[json_discriminator(
-                Some("redact trust list"),
-                "output_kind",
-                "redact_trust_list",
-            )],
-        ),
-    ),
-    entry(
-        &["redact", "trust", "remove"],
-        json_discriminators(
-            opaque_schemas(CONFIG_MUTATION, &["redact trust remove"]),
-            &[json_discriminator(
-                Some("redact trust remove"),
-                "output_kind",
-                "redact_trust_remove",
-            )],
-        ),
-    ),
     entry(
         &["remote"],
         category(surface(GROUP, "source_authority"), "repo"),
@@ -4635,21 +4567,9 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             RedactCommands::Apply(_) => vec!["redact", "apply"],
             RedactCommands::List(_) => vec!["redact", "list"],
             RedactCommands::Show(_) => vec!["redact", "show"],
-            RedactCommands::Trust(command) => match command {
-                RedactTrustCommands::Add(_) => vec!["redact", "trust", "add"],
-                RedactTrustCommands::List(_) => vec!["redact", "trust", "list"],
-                RedactTrustCommands::Remove(_) => vec!["redact", "trust", "remove"],
-            },
             RedactCommands::Purge(command) => match command {
                 PurgeCommands::Apply(_) => vec!["redact", "purge", "apply"],
                 PurgeCommands::List(_) => vec!["redact", "purge", "list"],
-                PurgeCommands::Trust(command) => match command {
-                    RedactTrustCommands::Add(_) => vec!["redact", "purge", "trust", "add"],
-                    RedactTrustCommands::List(_) => vec!["redact", "purge", "trust", "list"],
-                    RedactTrustCommands::Remove(_) => {
-                        vec!["redact", "purge", "trust", "remove"]
-                    }
-                },
             },
         },
         Commands::Visibility { command } => match command {

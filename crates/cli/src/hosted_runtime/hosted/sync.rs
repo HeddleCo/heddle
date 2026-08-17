@@ -15,18 +15,21 @@ use api::heddle::api::v1alpha1::{
     IntegrationPolicyStatus as ProtoIntegrationPolicyStatus, ListRefsRequest,
     ObjectAvailabilityStatus, ObjectDescriptor, PackChunk, PackStreamKind, PartialFetchStatus,
     ProviderPlanChallenge, PullClientFrame, PullReady, PullRequest, PullServerFrame,
-    PushClientFrame, PushRequest, PushServerFrame, RedactionTransfer, StateAttachmentTransfer,
+    PushClientFrame, PushRequest, PushServerFrame, RedactionSidecarIdentity, RedactionTransfer,
+    SidecarIdentity, SpoolCapabilityAction, StateAttachmentKind as ProtoStateAttachmentKind,
+    StateAttachmentSidecarIdentity, StateAttachmentTransfer, StateVisibilitySidecarIdentity,
     StateVisibilityTransfer, StreamOpeningProof, ThreadConfidenceSummary,
     ThreadFreshness as ProtoThreadFreshness, ThreadIntegrationPolicy, ThreadMetadata,
     ThreadMode as ProtoThreadMode, ThreadVerificationSummary, TransportMode, UpdateRefRequest,
     WantObjects, git_lane_transfer, list_refs_response, pull_client_frame, pull_server_frame,
-    push_client_frame, push_server_frame, thread_state::Kind as ProtoThreadState,
+    push_client_frame, push_server_frame, sidecar_identity, thread_state::Kind as ProtoThreadState,
 };
 use objects::{
     Progress,
     object::{
         AnnotationStatus, ContentHash, ContextBlob, ContextTarget, Discussion, DiscussionsBlob,
-        MarkerName, StateAttachmentBody, StateAttachmentKind, StateId, ThreadName,
+        MarkerName, RedactionsBlob, StateAttachmentBody, StateAttachmentId, StateAttachmentKind,
+        StateId, ThreadName,
     },
     store::{AnyStore, ObjectStore, PackObjectId, SnapshotCommitDescriptor},
 };
@@ -1127,7 +1130,7 @@ impl HostedClient {
             .into_iter()
             .chain(push_sidecar_objects)
         {
-            let message = sidecar_push_message(repo, info, operation_id.as_str())?;
+            let message = sidecar_push_message(&self.context, repo, info, operation_id.as_str())?;
             tx.send(message).await.map_err(|_| {
                 ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
             })?;
@@ -1835,13 +1838,17 @@ impl HostedClient {
                         ))
                     })?;
                     let decode_start = Instant::now();
-                    repo.accept_wire_redactions(blob, &transfer.redactions_blob)
-                        .map_err(|err| {
-                            ProtocolError::InvalidState(format!(
-                                "accept_wire_redactions for blob {}: {err}",
-                                transfer.blob_hash
-                            ))
-                        })?;
+                    repo.accept_wire_redactions(
+                        blob,
+                        &transfer.redactions_blob,
+                        transfer.authorization.as_ref(),
+                    )
+                    .map_err(|err| {
+                        ProtocolError::InvalidState(format!(
+                            "accept_wire_redactions for blob {}: {err}",
+                            transfer.blob_hash
+                        ))
+                    })?;
                     let decode_elapsed = decode_start.elapsed();
                     profile.store_receive_object += decode_elapsed;
                 }
@@ -1871,15 +1878,75 @@ impl HostedClient {
                             })
                         })?;
                     let decode_start = Instant::now();
-                    repo.accept_wire_state_visibility(state, &transfer.state_visibility_blob)
-                        .map_err(|err| {
-                            ProtocolError::InvalidState(format!(
-                                "accept_wire_state_visibility for state {}: {err}",
-                                state
-                            ))
-                        })?;
+                    repo.accept_wire_state_visibility(
+                        state,
+                        &transfer.state_visibility_blob,
+                        transfer.authorization.as_ref(),
+                    )
+                    .map_err(|err| {
+                        ProtocolError::InvalidState(format!(
+                            "accept_wire_state_visibility for state {}: {err}",
+                            state
+                        ))
+                    })?;
                     let decode_elapsed = decode_start.elapsed();
                     profile.store_receive_object += decode_elapsed;
+                }
+                Some(pull_server_frame::Frame::StateAttachment(transfer)) => {
+                    wire::check_received_transfer_blob_size(
+                        transfer.attachment_object.len(),
+                        wire::MAX_RECEIVED_STATE_ATTACHMENT_BLOB_SIZE,
+                        "state-attachment",
+                    )?;
+                    profile.bytes_received = profile
+                        .bytes_received
+                        .saturating_add(transfer.attachment_object.len());
+                    profile.object_mix.record(ObjectType::StateAttachment);
+                    let state = transfer
+                        .state_id
+                        .as_ref()
+                        .ok_or_else(|| {
+                            ProtocolError::InvalidState(
+                                "StateAttachmentTransfer.state_id is required".to_string(),
+                            )
+                        })
+                        .and_then(|state| {
+                            StateId::try_from_slice(&state.value).map_err(|err| {
+                                ProtocolError::InvalidState(format!(
+                                    "StateAttachmentTransfer.state_id is not valid: {err}"
+                                ))
+                            })
+                        })?;
+                    let attachment_id = StateAttachmentId::from_hash(
+                        ContentHash::from_hex(&transfer.attachment_id).map_err(|err| {
+                            ProtocolError::InvalidState(format!(
+                                "StateAttachmentTransfer.attachment_id is not valid: {err}"
+                            ))
+                        })?,
+                    );
+                    let kind = ProtoStateAttachmentKind::try_from(transfer.attachment_kind)
+                        .ok()
+                        .filter(|kind| *kind != ProtoStateAttachmentKind::Unspecified)
+                        .ok_or_else(|| {
+                            ProtocolError::InvalidState(
+                                "StateAttachmentTransfer.attachment_kind is required".to_string(),
+                            )
+                        })?;
+                    let decode_start = Instant::now();
+                    repo.accept_wire_state_attachment(
+                        state,
+                        attachment_id,
+                        kind,
+                        &transfer.attachment_object,
+                        transfer.authorization.as_ref(),
+                    )
+                    .map_err(|err| {
+                        ProtocolError::InvalidState(format!(
+                            "accept state attachment {}: {err}",
+                            transfer.attachment_id
+                        ))
+                    })?;
+                    profile.store_receive_object += decode_start.elapsed();
                 }
                 Some(pull_server_frame::Frame::GitLane(transfer)) => {
                     let decode_start = Instant::now();
@@ -2316,6 +2383,7 @@ async fn next_pull_message(
 }
 
 fn redaction_push_message(
+    context: &super::CallContextFactory,
     repo: &Repository,
     info: wire::ObjectInfo,
     client_operation_id: &str,
@@ -2344,10 +2412,41 @@ fn redaction_push_message(
                 hex
             ))
         })?;
+    let redactions = RedactionsBlob::decode(&bytes).map_err(|error| {
+        ProtocolError::InvalidState(format!(
+            "decode outgoing redactions for authorization: {error}"
+        ))
+    })?;
+    let actions = if redactions
+        .redactions
+        .iter()
+        .any(objects::object::Redaction::is_purged)
+    {
+        vec![SpoolCapabilityAction::Redact, SpoolCapabilityAction::Purge]
+    } else {
+        vec![SpoolCapabilityAction::Redact]
+    };
+    let authorization = context
+        .sidecar_authorization(
+            repo.hosted_owner_spool_uuid().map_err(|error| {
+                ProtocolError::InvalidState(format!("load hosted owner anchor: {error}"))
+            })?,
+            SidecarIdentity {
+                identity: Some(sidecar_identity::Identity::Redaction(
+                    RedactionSidecarIdentity {
+                        blob_hash: hex.clone(),
+                    },
+                )),
+            },
+            &actions,
+            &bytes,
+        )
+        .map_err(hosted_to_protocol_error)?;
     Ok(PushClientFrame {
         frame: Some(push_client_frame::Frame::Redaction(RedactionTransfer {
             blob_hash: hex,
             redactions_blob: bytes,
+            authorization: Some(authorization),
         })),
         client_operation_id: client_operation_id.to_string(),
     })
@@ -2395,17 +2494,18 @@ fn wanted_packable_type(wanted_types: &WantedTypes, pack_id: &PackObjectId) -> O
 }
 
 fn sidecar_push_message(
+    context: &super::CallContextFactory,
     repo: &Repository,
     info: wire::ObjectInfo,
     client_operation_id: &str,
 ) -> Result<PushClientFrame, ProtocolError> {
     match info.obj_type {
-        ObjectType::Redaction => redaction_push_message(repo, info, client_operation_id),
+        ObjectType::Redaction => redaction_push_message(context, repo, info, client_operation_id),
         ObjectType::StateVisibility => {
-            state_visibility_push_message(repo, info, client_operation_id)
+            state_visibility_push_message(context, repo, info, client_operation_id)
         }
         ObjectType::StateAttachment => {
-            state_attachment_push_message(repo, info, client_operation_id)
+            state_attachment_push_message(context, repo, info, client_operation_id)
         }
         obj_type => Err(ProtocolError::InvalidState(format!(
             "{obj_type:?} is not an out-of-pack sidecar object"
@@ -2417,6 +2517,7 @@ fn sidecar_push_message(
 /// attachment pushes. Pull keeps using the native pack. The receiver treats
 /// the decoded body's kind as authoritative and verifies it before install.
 fn state_attachment_push_message(
+    context: &super::CallContextFactory,
     repo: &Repository,
     info: wire::ObjectInfo,
     client_operation_id: &str,
@@ -2427,13 +2528,33 @@ fn state_attachment_push_message(
             "wanted StateAttachment must be keyed by ObjectId::StateAttachment".to_string(),
         ));
     };
+    let proto_kind = super::helpers::attachment_kind_to_proto(kind);
+    let authorization = context
+        .sidecar_authorization(
+            repo.hosted_owner_spool_uuid().map_err(|error| {
+                ProtocolError::InvalidState(format!("load hosted owner anchor: {error}"))
+            })?,
+            SidecarIdentity {
+                identity: Some(sidecar_identity::Identity::StateAttachment(
+                    StateAttachmentSidecarIdentity {
+                        state_id: super::helpers::proto_state_id(state),
+                        attachment_id: id.as_hash().to_hex(),
+                        attachment_kind: proto_kind as i32,
+                    },
+                )),
+            },
+            &[SpoolCapabilityAction::MetadataSupersession],
+            &record.data,
+        )
+        .map_err(hosted_to_protocol_error)?;
     Ok(PushClientFrame {
         frame: Some(push_client_frame::Frame::StateAttachment(
             StateAttachmentTransfer {
                 state_id: super::helpers::proto_state_id(state),
                 attachment_id: id.as_hash().to_hex(),
-                attachment_kind: super::helpers::attachment_kind_to_proto(kind) as i32,
+                attachment_kind: proto_kind as i32,
                 attachment_object: record.data,
+                authorization: Some(authorization),
             },
         )),
         client_operation_id: client_operation_id.to_string(),
@@ -2441,6 +2562,7 @@ fn state_attachment_push_message(
 }
 
 fn state_visibility_push_message(
+    context: &super::CallContextFactory,
     repo: &Repository,
     info: wire::ObjectInfo,
     client_operation_id: &str,
@@ -2465,11 +2587,28 @@ fn state_visibility_push_message(
                 state_id
             ))
         })?;
+    let authorization = context
+        .sidecar_authorization(
+            repo.hosted_owner_spool_uuid().map_err(|error| {
+                ProtocolError::InvalidState(format!("load hosted owner anchor: {error}"))
+            })?,
+            SidecarIdentity {
+                identity: Some(sidecar_identity::Identity::StateVisibility(
+                    StateVisibilitySidecarIdentity {
+                        state_id: super::helpers::proto_state_id(state),
+                    },
+                )),
+            },
+            &[SpoolCapabilityAction::Visibility],
+            &bytes,
+        )
+        .map_err(hosted_to_protocol_error)?;
     Ok(PushClientFrame {
         frame: Some(push_client_frame::Frame::StateVisibility(
             StateVisibilityTransfer {
                 state_id: super::helpers::proto_state_id(state),
                 state_visibility_blob: bytes,
+                authorization: Some(authorization),
             },
         )),
         client_operation_id: client_operation_id.to_string(),
@@ -3140,13 +3279,13 @@ mod native_exchange_tests {
     }
 
     #[tokio::test]
-    async fn native_push_and_clone_pull_complete_the_real_framed_exchange() {
+    async fn native_push_without_owner_capability_fails_closed_before_clone_pull() {
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
 
         assert!(client.list_refs("acme/widgets").await.unwrap().is_empty());
-        let pushed = client
+        let push_error = client
             .push_with_expected_head(
                 &repo,
                 "acme/widgets",
@@ -3157,9 +3296,12 @@ mod native_exchange_tests {
                 "push-test-op".to_string(),
             )
             .await
-            .unwrap();
-        assert!(!pushed.success);
-        assert_eq!(pushed.error.as_deref(), Some("test rejection"));
+            .expect_err("protected sidecars require a clone-pinned hosted owner anchor");
+        assert!(
+            push_error
+                .to_string()
+                .contains("clone-pinned hosted owner anchor")
+        );
 
         let clone = TempDir::new().unwrap();
         let (pulled, cloned_repo) = client
@@ -5024,9 +5166,6 @@ mod git_lane_pull_staging_tests {
 
 #[cfg(test)]
 mod attachment_sidecar_tests {
-    use api::heddle::api::v1alpha1::{
-        StateAttachmentKind as ProtoStateAttachmentKind, push_client_frame,
-    };
     use chrono::Utc;
     use objects::{
         object::{Attribution, Blob, Principal, StateAttachment, StateAttachmentBody},
@@ -5038,7 +5177,7 @@ mod attachment_sidecar_tests {
     use super::{Repository, sidecar_push_message};
 
     #[test]
-    fn semantic_index_attachment_emits_verified_sidecar_carrier() {
+    fn semantic_index_attachment_requires_owner_authorization() {
         let temp = TempDir::new().expect("temp repo");
         let repo = Repository::init_default(temp.path()).expect("init repo");
         std::fs::write(temp.path().join("lib.rs"), "pub fn f() {}\n").expect("write source");
@@ -5066,7 +5205,8 @@ mod attachment_sidecar_tests {
         };
         let canonical = wire::load_object_data(repo.store(), &id, ObjectType::StateAttachment)
             .expect("load canonical attachment");
-        let message = sidecar_push_message(
+        let error = sidecar_push_message(
+            &super::super::CallContextFactory::default(),
             &repo,
             ObjectInfo {
                 id,
@@ -5076,22 +5216,12 @@ mod attachment_sidecar_tests {
             },
             "op-1",
         )
-        .expect("build attachment sidecar");
-
-        assert_eq!(message.client_operation_id, "op-1");
-        let Some(push_client_frame::Frame::StateAttachment(transfer)) = message.frame else {
-            panic!("expected StateAttachmentTransfer")
-        };
-        assert_eq!(
-            transfer.state_id,
-            super::super::helpers::proto_state_id(snapshot.state_id)
+        .expect_err("attachment push must fail without an owner capability");
+        assert!(
+            error
+                .to_string()
+                .contains("clone-pinned hosted owner anchor")
         );
-        assert_eq!(transfer.attachment_id, attachment.id().as_hash().to_hex());
-        assert_eq!(
-            transfer.attachment_kind,
-            ProtoStateAttachmentKind::SemanticIndex as i32
-        );
-        assert_eq!(transfer.attachment_object, canonical.data);
         assert!(!ObjectType::StateAttachment.packable_for_push());
         assert!(ObjectType::StateAttachment.packable_for_pull());
     }

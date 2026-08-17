@@ -1846,54 +1846,8 @@ export interface RedactPurgeListSchema {
   [key: string]: unknown;
 }
 
-export interface RedactPurgeTrustAddSchema {
-  idempotency_status?: string | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "purge_trust_add";
-  replayed?: boolean | null;
-  [key: string]: unknown;
-}
-
-export interface RedactPurgeTrustListSchema {
-  output_kind: "purge_trust_list";
-  [key: string]: unknown;
-}
-
-export interface RedactPurgeTrustRemoveSchema {
-  idempotency_status?: string | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "purge_trust_remove";
-  replayed?: boolean | null;
-  [key: string]: unknown;
-}
-
 export interface RedactShowSchema {
   output_kind: "redact_show";
-  [key: string]: unknown;
-}
-
-export interface RedactTrustAddSchema {
-  idempotency_status?: string | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "redact_trust_add";
-  replayed?: boolean | null;
-  [key: string]: unknown;
-}
-
-export interface RedactTrustListSchema {
-  output_kind: "redact_trust_list";
-  [key: string]: unknown;
-}
-
-export interface RedactTrustRemoveSchema {
-  idempotency_status?: string | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "redact_trust_remove";
-  replayed?: boolean | null;
   [key: string]: unknown;
 }
 
@@ -3524,13 +3478,7 @@ export interface HeddleVerbOutputs {
   "redact list": RedactListSchema;
   "redact purge apply": RedactPurgeApplySchema;
   "redact purge list": RedactPurgeListSchema;
-  "redact purge trust add": RedactPurgeTrustAddSchema;
-  "redact purge trust list": RedactPurgeTrustListSchema;
-  "redact purge trust remove": RedactPurgeTrustRemoveSchema;
   "redact show": RedactShowSchema;
-  "redact trust add": RedactTrustAddSchema;
-  "redact trust list": RedactTrustListSchema;
-  "redact trust remove": RedactTrustRemoveSchema;
   "remote add": RemoteAddSchema;
   "remote list": RemoteListSchema;
   "remote remove": RemoteRemoveSchema;
@@ -3694,13 +3642,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "redact list",
   "redact purge apply",
   "redact purge list",
-  "redact purge trust add",
-  "redact purge trust list",
-  "redact purge trust remove",
   "redact show",
-  "redact trust add",
-  "redact trust list",
-  "redact trust remove",
   "remote add",
   "remote list",
   "remote remove",

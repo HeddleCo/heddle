@@ -349,7 +349,7 @@ impl LocalSync {
         let Some(bytes) = self.source.store().get_redactions_bytes_for_blob(blob)? else {
             return Ok(());
         };
-        target.accept_wire_redactions(*blob, &bytes)?;
+        target.accept_local_owner_redactions(*blob, &bytes)?;
         Ok(())
     }
 
@@ -364,7 +364,7 @@ impl LocalSync {
         let Some(bytes) = self.source.get_state_visibility_bytes_for_state(state)? else {
             return Ok(());
         };
-        target.accept_wire_state_visibility(*state, &bytes)?;
+        target.accept_local_owner_state_visibility(*state, &bytes)?;
         Ok(())
     }
 

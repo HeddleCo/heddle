@@ -440,6 +440,7 @@ mod tests {
         let resolved = ResolvedHostedCredential {
             token: None,
             proof_key_pem: None,
+            owner_authorization: None,
             renewable: None,
             subject: None,
             credential_id: None,

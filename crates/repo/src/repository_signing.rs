@@ -113,11 +113,9 @@ impl Repository {
     /// fail-closed because an unsigned sidecar must never become authoritative
     /// after a hosted round trip.
     pub(crate) fn sign_client_metadata(&self, payload: &[u8]) -> Result<StateSignature> {
-        let signer = self.signing_signer().ok_or_else(|| {
-            HeddleError::Conflict(
-                "client metadata requires a protected local signing identity".to_string(),
-            )
-        })?;
+        let signer = self
+            .authoritative_metadata_signer()
+            .map_err(|error| HeddleError::Conflict(error.to_string()))?;
         let signature = signer.sign(payload).map_err(|error| {
             HeddleError::Conflict(format!("failed to sign client metadata: {error}"))
         })?;
@@ -128,30 +126,19 @@ impl Repository {
         })
     }
 
-    /// Verify hosted metadata against this repository's temporary, manually trusted client keys.
-    /// Weft authorizes destructive and state-visibility operations but holds no signing key for
-    /// this path, so it cannot forge them. HeddleCo/weft#836 tracks replacing the manual list
-    /// with that authorization model.
-    pub(crate) fn verify_trusted_client_metadata_signature(
+    /// Verify the client signature after the transfer-level owner capability
+    /// has authorized the operation. This proves the device-authored bytes;
+    /// the canonical capability verifier separately answers who may act.
+    pub(crate) fn verify_client_metadata_signature(
         &self,
         payload: &[u8],
         signature: Option<&StateSignature>,
     ) -> Result<()> {
         let signature = signature.ok_or_else(|| {
             HeddleError::InvalidObject(
-                "hosted metadata is unsigned; a trusted client signature is required".to_string(),
+                "hosted metadata is unsigned; a client signature is required".to_string(),
             )
         })?;
-        let trusted = self.config().metadata.trusted_keys.iter().any(|key| {
-            key.algorithm.eq_ignore_ascii_case(&signature.algorithm)
-                && key.public_key.eq_ignore_ascii_case(&signature.public_key)
-        });
-        if !trusted {
-            return Err(HeddleError::InvalidObject(format!(
-                "hosted metadata signer is not trusted ({}:{})",
-                signature.algorithm, signature.public_key
-            )));
-        }
         let public_key = hex::decode(&signature.public_key).map_err(|error| {
             HeddleError::InvalidObject(format!("invalid metadata public key: {error}"))
         })?;
@@ -938,10 +925,11 @@ mod tests {
         with_signing_home(home.path(), || {
             let (temp, repo) = setup_repo();
 
-            // Force the local-identity mint to fail by occupying its path with a
-            // directory, so `read_to_string` errors and no key can be produced.
-            std::fs::create_dir(temp.path().join(".heddle").join("identity.toml"))
-                .expect("occupy identity path");
+            // Init mints the self-sovereign owner identity. Remove it, then
+            // occupy its path so the signing lookup fails closed.
+            let identity = temp.path().join(".heddle").join("identity.toml");
+            std::fs::remove_file(&identity).expect("remove owner identity");
+            std::fs::create_dir(&identity).expect("occupy identity path");
 
             std::fs::write(temp.path().join("file.txt"), "x").expect("write");
             // Capture must still succeed — signing is best-effort.

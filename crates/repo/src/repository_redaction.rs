@@ -25,6 +25,10 @@
 use std::{collections::HashSet, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
+use api::heddle::api::v1alpha1::{
+    RedactionSidecarIdentity, SidecarAuthorization, SidecarIdentity, SpoolCapabilityAction,
+    sidecar_identity,
+};
 use chrono::Utc;
 use crypto::verify_payload_signature;
 use objects::{
@@ -36,7 +40,7 @@ use objects::{
     store::{AnyStore, ObjectStore},
 };
 
-use crate::{RepoConfig, repository::Repository};
+use crate::repository::Repository;
 
 /// Why a wire-side redaction was rejected. Surfaces in sync error
 /// messages so operators can diagnose the bad record.
@@ -51,21 +55,6 @@ pub enum WireRejection {
     Tampered,
     /// Purge evidence was modified after its destructive-authority signature.
     TamperedPurge,
-    /// The signature verifies, but the public key isn't on this
-    /// receiver's `[redact] trusted_keys` list. Signing proves *who*
-    /// declared the redaction; the trust list proves the receiver
-    /// has *authorized* that operator to act on this workspace.
-    /// Without this gate an attacker can mint and sign their own
-    /// redaction and pass verification trivially.
-    UntrustedKey {
-        algorithm: String,
-        public_key: String,
-    },
-    /// Purge evidence was signed by a key without destructive authority.
-    UntrustedPurgeKey {
-        algorithm: String,
-        public_key: String,
-    },
 }
 
 /// Outcome of an `accept_wire_redactions` call. Receiver-side sync
@@ -229,7 +218,7 @@ impl Repository {
     /// Matches by the redaction's content-addressed `redaction_id`
     /// first so a refinement pass that produced multiple records for
     /// the same `(blob, state, path)` (e.g. a re-run of `redact apply`
-    /// with an updated `--reason` or `--sign-with`) undoes the exact
+    /// with an updated reason or signing identity) undoes the exact
     /// record the OpRecord references rather than the first one in
     /// sidecar order.
     ///
@@ -397,9 +386,8 @@ impl Repository {
     /// `redact` before `purge`. This is the contract from the build
     /// brief: "Refuses unless a Redaction already exists on the blob."
     ///
-    /// Purge trust is independent from redaction trust. The active repository
-    /// identity must appear in `[purge].trusted_keys`; `--force` is only an
-    /// operator confirmation and never substitutes for this authorization.
+    /// The key bound by the repository's pinned owner anchor signs the
+    /// destructive operation; `--force` only confirms intent.
     pub fn purge_blob(&self, blob: &ContentHash) -> Result<PurgeOutcome> {
         let _lock = self.locker().write()?;
         let mut redactions_blob = self.get_redactions_for_blob(blob)?;
@@ -457,18 +445,7 @@ impl Repository {
     }
 
     fn authorized_purge_signer(&self) -> Result<std::sync::Arc<dyn crypto::Signer>> {
-        let signer = self
-            .signing_signer()
-            .ok_or_else(|| anyhow::anyhow!("purge requires a protected local signing identity"))?;
-        let config = RepoConfig::load_for_repository(&self.heddle_dir().join("config.toml"))?;
-        if !key_is_trusted(
-            &config.purge.trusted_keys,
-            signer.algorithm(),
-            &hex::encode(signer.public_key()),
-        ) {
-            anyhow::bail!("active signing key is not authorized by [purge].trusted_keys");
-        }
-        Ok(signer)
+        self.authoritative_metadata_signer()
     }
 
     /// Accept a wire-transferred `RedactionsBlob` for a specific blob
@@ -487,28 +464,62 @@ impl Repository {
     ///   would let an unsigned sibling smuggle in via a signed peer).
     /// - [`WireRejection::Tampered`] if any signature fails to verify
     ///   against the canonical payload.
-    /// - [`WireRejection::UntrustedKey`] if the signer's public key is
-    ///   not on this receiver's `[redact] trusted_keys` list. The list
-    ///   is fail-closed: an empty list rejects every incoming signed
-    ///   redaction, forcing operators to make an explicit trust
-    ///   decision before secrets-scrubbing primitives are accepted.
+    /// - owner-capability denial if authorization is absent, invalid, expired,
+    ///   attenuated beyond its grant, or bound to another operation.
     /// - Other errors propagate as `anyhow::Error` (decode failure, io,
     ///   crypto subsystem failure).
     pub fn accept_wire_redactions(
         &self,
         blob: ContentHash,
         bytes: &[u8],
+        authorization: Option<&SidecarAuthorization>,
     ) -> Result<WireAcceptOutcome> {
-        let _lock = self.locker().write()?;
         let incoming = RedactionsBlob::decode(bytes)
             .with_context(|| format!("decode incoming redactions for blob {}", blob.short()))?;
 
-        let config = RepoConfig::load_for_repository(&self.heddle_dir().join("config.toml"))?;
-        let trusted_keys = config.redact.trusted_keys;
-        let purge_trusted_keys = config.purge.trusted_keys;
+        let has_purge = incoming.redactions.iter().any(Redaction::is_purged);
+        let actions = if has_purge {
+            vec![SpoolCapabilityAction::Redact, SpoolCapabilityAction::Purge]
+        } else {
+            vec![SpoolCapabilityAction::Redact]
+        };
+        self.verify_owner_sidecar_authorization(
+            authorization,
+            SidecarIdentity {
+                identity: Some(sidecar_identity::Identity::Redaction(
+                    RedactionSidecarIdentity {
+                        blob_hash: blob.to_hex(),
+                    },
+                )),
+            },
+            &actions,
+            bytes,
+            Utc::now().timestamp(),
+        )?;
 
-        // Pre-validate every entry before we touch the local store —
-        // an all-or-nothing accept keeps the audit trail honest.
+        self.validate_incoming_redactions(blob, &incoming, false)?;
+        self.merge_incoming_redactions(blob, incoming)
+    }
+
+    /// Accept a purely local replica transfer under the repository's pinned
+    /// self-sovereign owner key. This path never consults repo config.
+    pub fn accept_local_owner_redactions(
+        &self,
+        blob: ContentHash,
+        bytes: &[u8],
+    ) -> Result<WireAcceptOutcome> {
+        let incoming = RedactionsBlob::decode(bytes)
+            .with_context(|| format!("decode incoming redactions for blob {}", blob.short()))?;
+        self.validate_incoming_redactions(blob, &incoming, true)?;
+        self.merge_incoming_redactions(blob, incoming)
+    }
+
+    fn validate_incoming_redactions(
+        &self,
+        blob: ContentHash,
+        incoming: &RedactionsBlob,
+        require_local_owner: bool,
+    ) -> Result<()> {
         for redaction in &incoming.redactions {
             if redaction.redacted_blob != blob {
                 anyhow::bail!(
@@ -517,10 +528,28 @@ impl Repository {
                     blob.short()
                 );
             }
-            verify_wire_redaction(redaction, &trusted_keys, &purge_trusted_keys)
+            if require_local_owner {
+                let signature = redaction
+                    .signature
+                    .as_ref()
+                    .ok_or(WireRejection::Unsigned)?;
+                self.local_owner_authorizes_signature(signature)?;
+                if let Some(purge) = &redaction.purge {
+                    self.local_owner_authorizes_signature(&purge.signature)?;
+                }
+            }
+            verify_wire_redaction(redaction)
                 .with_context(|| format!("verify incoming redaction for blob {}", blob.short()))?;
         }
+        Ok(())
+    }
 
+    fn merge_incoming_redactions(
+        &self,
+        blob: ContentHash,
+        incoming: RedactionsBlob,
+    ) -> Result<WireAcceptOutcome> {
+        let _lock = self.locker().write()?;
         let mut outcome = WireAcceptOutcome::default();
         if incoming.redactions.iter().any(Redaction::is_purged) && remove_blob_bytes(self, &blob)?.0
         {
@@ -744,44 +773,18 @@ fn walk_tree_for_blob(
     Ok(())
 }
 
-/// Wire-side signature gate. Returns `Ok(())` for a verified,
-/// trusted redaction. Rejection variants:
+/// Wire-side author signature gate. Owner authorization is verified once for
+/// the byte-exact transfer before individual lifecycle signatures are checked.
 ///
 /// - [`WireRejection::Unsigned`] when no signature is present.
-/// - [`WireRejection::UntrustedKey`] when the signer's public key is
-///   not on the trust list. Checked *before* `verify_payload_signature`
-///   so an attacker can't probe the trust list via a timing oracle —
-///   the cryptographic cost is paid only for keys we trust.
 /// - [`WireRejection::Tampered`] when verification fails.
-///
-/// `trusted_keys` is the snapshot from `RepoConfig::redact::trusted_keys`.
-/// An empty list rejects every signed redaction (fail-closed).
-fn verify_wire_redaction(
-    redaction: &Redaction,
-    trusted_keys: &[crate::TrustedKey],
-    purge_trusted_keys: &[crate::TrustedKey],
-) -> Result<()> {
+fn verify_wire_redaction(redaction: &Redaction) -> Result<()> {
     let Some(signature) = &redaction.signature else {
         anyhow::bail!(WireRejection::Unsigned);
     };
-    if !key_is_trusted(trusted_keys, &signature.algorithm, &signature.public_key) {
-        anyhow::bail!(WireRejection::UntrustedKey {
-            algorithm: signature.algorithm.clone(),
-            public_key: signature.public_key.clone(),
-        });
-    }
+    let _ = signature;
     verify_redaction_signature(redaction)?;
-    if let Some(purge) = &redaction.purge {
-        if !key_is_trusted(
-            purge_trusted_keys,
-            &purge.signature.algorithm,
-            &purge.signature.public_key,
-        ) {
-            anyhow::bail!(WireRejection::UntrustedPurgeKey {
-                algorithm: purge.signature.algorithm.clone(),
-                public_key: purge.signature.public_key.clone(),
-            });
-        }
+    if redaction.purge.is_some() {
         verify_purge_signature(redaction)?;
     }
     Ok(())
@@ -824,23 +827,12 @@ fn verify_purge_signature(redaction: &Redaction) -> Result<()> {
     Ok(())
 }
 
-/// Whether `(algorithm, public_key)` is in the configured trust list.
-/// Hex comparison is case-insensitive to match the storage format
-/// produced by `hex::encode` (lowercase) without surprising operators
-/// who copy-paste keys that happen to be uppercase.
-fn key_is_trusted(trusted: &[crate::TrustedKey], algorithm: &str, public_key_hex: &str) -> bool {
-    trusted.iter().any(|t| {
-        t.algorithm.eq_ignore_ascii_case(algorithm)
-            && t.public_key.eq_ignore_ascii_case(public_key_hex)
-    })
-}
-
 impl std::fmt::Display for WireRejection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WireRejection::Unsigned => f.write_str(
                 "redaction has no signature — cross-replica redactions must be \
-                 signed with `--sign-with` to propagate",
+                 signed by the repository owner to propagate",
             ),
             WireRejection::Tampered => f.write_str(
                 "redaction signature failed to verify — the canonical payload \
@@ -848,22 +840,6 @@ impl std::fmt::Display for WireRejection {
             ),
             WireRejection::TamperedPurge => f.write_str(
                 "purge authorization signature failed to verify — purge evidence was modified",
-            ),
-            WireRejection::UntrustedKey {
-                algorithm,
-                public_key,
-            } => write!(
-                f,
-                "redaction signed by an untrusted operator key ({algorithm}:{public_key}) — \
-                 add the key to `[redact] trusted_keys` in `.heddle/config.toml` to accept it",
-            ),
-            WireRejection::UntrustedPurgeKey {
-                algorithm,
-                public_key,
-            } => write!(
-                f,
-                "purge signed by an unauthorized destructive-capability key ({algorithm}:{public_key}) — \
-                 add the key to `[purge] trusted_keys` in `.heddle/config.toml` to accept it",
             ),
         }
     }
@@ -921,6 +897,7 @@ fn remove_blob_bytes(repo: &Repository, hash: &ContentHash) -> Result<(bool, boo
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
+    use crypto::Signer as _;
     use objects::{
         object::{Blob, Principal, StateId},
         store::pack::PackObjectId,
@@ -961,19 +938,7 @@ mod tests {
     }
 
     fn fresh_repo_with_local_purge_authority() -> (TempDir, Repository) {
-        let (dir, repo) = fresh_repo();
-        let signer = repo.signing_signer().expect("local signer");
-        let config_path = repo.heddle_dir().join("config.toml");
-        let mut config = RepoConfig::load_for_repository(&config_path).expect("load config");
-        config.purge.trusted_keys.push(crate::TrustedKey {
-            algorithm: signer.algorithm().to_string(),
-            public_key: hex::encode(signer.public_key()),
-            label: Some("local-owner".to_string()),
-        });
-        config.save(&config_path).expect("save purge authority");
-        drop(repo);
-        let reopened = Repository::open(dir.path()).expect("reopen trusted repo");
-        (dir, reopened)
+        fresh_repo()
     }
 
     #[test]
@@ -1262,50 +1227,19 @@ mod tests {
         assert_eq!(again.redactions_marked, 0);
     }
 
-    fn signed_sample_redaction(signer: &dyn crypto::Signer) -> Redaction {
+    fn signed_sample_redaction(repo: &Repository) -> Redaction {
         let mut r = sample_redaction();
         let payload = r.canonical_signing_payload();
-        let sig = signer.sign(&payload).expect("sign payload");
-        r.signature = Some(objects::object::StateSignature {
-            algorithm: signer.algorithm().to_string(),
-            public_key: hex::encode(signer.public_key()),
-            signature: hex::encode(&sig),
-        });
+        r.signature = Some(
+            repo.sign_local_owner_metadata(&payload)
+                .expect("sign payload"),
+        );
         r
     }
 
-    fn fresh_repo_trusting(signer: &dyn crypto::Signer) -> (TempDir, Repository) {
-        fresh_repo_trusting_with_purge(signer, None)
-    }
-
-    fn fresh_repo_trusting_with_purge(
-        redactor: &dyn crypto::Signer,
-        purger: Option<&dyn crypto::Signer>,
-    ) -> (TempDir, Repository) {
-        let (dir, repo) = fresh_repo();
-        let config_path = dir.path().join(".heddle/config.toml");
-        let mut config = RepoConfig::load_for_repository(&config_path).expect("load config");
-        config.redact.trusted_keys.push(crate::TrustedKey {
-            algorithm: redactor.algorithm().to_string(),
-            public_key: hex::encode(redactor.public_key()),
-            label: Some("test-fixture".to_string()),
-        });
-        if let Some(purger) = purger {
-            config.purge.trusted_keys.push(crate::TrustedKey {
-                algorithm: purger.algorithm().to_string(),
-                public_key: hex::encode(purger.public_key()),
-                label: Some("purge-fixture".to_string()),
-            });
-        }
-        config.save(&config_path).expect("save trust configuration");
-        drop(repo);
-        let reopened = Repository::open(dir.path()).expect("re-open repo");
-        (dir, reopened)
-    }
-
     fn attach_purge_evidence(
+        repo: &Repository,
         redaction: &mut Redaction,
-        signer: &dyn crypto::Signer,
         purged_at: chrono::DateTime<Utc>,
     ) {
         let purger = Principal::new("Purge Owner", "owner@example.com");
@@ -1313,26 +1247,25 @@ mod tests {
         redaction.purge = Some(PurgeEvidence {
             purger,
             purged_at,
-            signature: StateSignature {
-                algorithm: signer.algorithm().to_string(),
-                public_key: hex::encode(signer.public_key()),
-                signature: hex::encode(signer.sign(&payload).expect("sign purge evidence")),
-            },
+            signature: repo
+                .sign_local_owner_metadata(&payload)
+                .expect("sign purge evidence"),
         });
     }
 
     #[test]
     fn accept_wire_redactions_refuses_unsigned() {
         let (_dir, repo) = fresh_repo_with_local_purge_authority();
-        let unsigned = sample_redaction();
-        let payload = RedactionsBlob::new(vec![unsigned]).encode().unwrap();
+        let payload = RedactionsBlob::new(vec![signed_sample_redaction(&repo)])
+            .encode()
+            .unwrap();
         let err = repo
-            .accept_wire_redactions(sample_blob(), &payload)
-            .expect_err("unsigned redaction must be refused");
+            .accept_wire_redactions(sample_blob(), &payload, None)
+            .expect_err("absent capability must be refused");
         let chain: Vec<String> = err.chain().map(|e| e.to_string()).collect();
         assert!(
-            chain.iter().any(|m| m.contains("no signature")),
-            "rejection reason must explain unsigned, got chain: {chain:?}"
+            chain.iter().any(|m| m.contains("capability is absent")),
+            "rejection reason must explain absent capability, got chain: {chain:?}"
         );
         // Local store must remain empty — refusal is atomic.
         let stored = repo.get_redactions_for_blob(&sample_blob()).unwrap();
@@ -1349,10 +1282,9 @@ mod tests {
             .expect_err("unsigned metadata must not be sent to a hosted relay");
         assert!(error.to_string().contains("verify outgoing redaction"));
 
-        let signer = crypto::Ed25519Signer::generate().expect("keygen");
         let (_dir, signed_repo) = fresh_repo();
         signed_repo
-            .put_redaction(signed_sample_redaction(&signer))
+            .put_redaction(signed_sample_redaction(&signed_repo))
             .expect("persist signed redaction");
         assert!(
             signed_repo
@@ -1363,24 +1295,34 @@ mod tests {
     }
 
     #[test]
-    fn accept_wire_redactions_refuses_untrusted_signer_even_with_valid_signature() {
-        // The codex-flagged spoof vector: an attacker mints a redaction,
-        // signs it with their own key, and ships it. Signature
-        // verification by itself passes (the math is fine — the key
-        // matches the signature) but the receiver MUST reject because
-        // the key isn't on the trust list. Fail-closed default: an
-        // empty trust list rejects every signed key.
-        let (_dir, repo) = fresh_repo();
+    fn legacy_toml_trusted_key_does_not_grant_local_owner_authority() {
+        let (dir, repo) = fresh_repo();
         let attacker = crypto::Ed25519Signer::generate().expect("keygen");
-        let forged = signed_sample_redaction(&attacker);
+        let mut forged = sample_redaction();
+        forged.signature = Some(StateSignature {
+            algorithm: attacker.algorithm().to_owned(),
+            public_key: hex::encode(attacker.public_key()),
+            signature: hex::encode(
+                attacker
+                    .sign(&forged.canonical_signing_payload())
+                    .expect("sign forged redaction"),
+            ),
+        });
+        let config_path = dir.path().join(".heddle/config.toml");
+        let mut config = std::fs::read_to_string(&config_path).unwrap();
+        config.push_str(&format!(
+            "\n[redact]\ntrusted_keys = [{{ algorithm = \"ed25519\", public_key = \"{}\" }}]\n",
+            hex::encode(attacker.public_key())
+        ));
+        std::fs::write(&config_path, config).unwrap();
         let payload = RedactionsBlob::new(vec![forged]).encode().unwrap();
         let err = repo
-            .accept_wire_redactions(sample_blob(), &payload)
-            .expect_err("untrusted signer must be refused");
+            .accept_local_owner_redactions(sample_blob(), &payload)
+            .expect_err("legacy TOML key must not grant owner authority");
         let chain: Vec<String> = err.chain().map(|e| e.to_string()).collect();
         assert!(
-            chain.iter().any(|m| m.contains("untrusted operator key")),
-            "rejection reason must explain untrusted-key, got chain: {chain:?}"
+            chain.iter().any(|m| m.contains("pinned local owner key")),
+            "rejection reason must identify the pinned owner mismatch: {chain:?}"
         );
         // Local store must remain empty — refusal is atomic.
         let stored = repo.get_redactions_for_blob(&sample_blob()).unwrap();
@@ -1389,20 +1331,19 @@ mod tests {
 
     #[test]
     fn accept_wire_redactions_persists_signed_redaction_idempotently() {
-        let signer = crypto::Ed25519Signer::generate().expect("keygen");
-        let (_dir, repo) = fresh_repo_trusting(&signer);
-        let signed = signed_sample_redaction(&signer);
+        let (_dir, repo) = fresh_repo();
+        let signed = signed_sample_redaction(&repo);
         let payload = RedactionsBlob::new(vec![signed]).encode().unwrap();
 
         let first = repo
-            .accept_wire_redactions(sample_blob(), &payload)
+            .accept_local_owner_redactions(sample_blob(), &payload)
             .expect("first accept");
         assert_eq!(first.redactions_added, 1);
         assert_eq!(first.skipped_existing, 0);
         assert_eq!(first.blobs_purged, 0);
 
         let second = repo
-            .accept_wire_redactions(sample_blob(), &payload)
+            .accept_local_owner_redactions(sample_blob(), &payload)
             .expect("second accept idempotent");
         assert_eq!(second.redactions_added, 0);
         assert_eq!(second.skipped_existing, 1);
@@ -1410,15 +1351,14 @@ mod tests {
 
     #[test]
     fn accept_wire_redactions_rejects_tampered_signature() {
-        let signer = crypto::Ed25519Signer::generate().expect("keygen");
-        let (_dir, repo) = fresh_repo_trusting(&signer);
-        let mut tampered = signed_sample_redaction(&signer);
+        let (_dir, repo) = fresh_repo();
+        let mut tampered = signed_sample_redaction(&repo);
         // Mutate the reason AFTER signing — the canonical payload
         // changes but the signature does not, so verification fails.
         tampered.reason = "post-signing tampered reason".to_string();
         let payload = RedactionsBlob::new(vec![tampered]).encode().unwrap();
         let err = repo
-            .accept_wire_redactions(sample_blob(), &payload)
+            .accept_local_owner_redactions(sample_blob(), &payload)
             .expect_err("tampered signature must be refused");
         let chain: Vec<String> = err.chain().map(|e| e.to_string()).collect();
         assert!(
@@ -1429,19 +1369,17 @@ mod tests {
 
     #[test]
     fn separately_authorized_wire_purge_drives_local_erasure() {
-        let redactor = crypto::Ed25519Signer::generate().expect("redactor keygen");
-        let purger = crypto::Ed25519Signer::generate().expect("purger keygen");
-        let (_dir, repo) = fresh_repo_trusting_with_purge(&redactor, Some(&purger));
-        let mut signed = signed_sample_redaction(&redactor);
+        let (_dir, repo) = fresh_repo();
+        let mut signed = signed_sample_redaction(&repo);
         attach_purge_evidence(
+            &repo,
             &mut signed,
-            &purger,
             Utc.with_ymd_and_hms(2026, 5, 12, 9, 0, 0).unwrap(),
         );
         let wire = RedactionsBlob::new(vec![signed]).encode().unwrap();
 
         let outcome = repo
-            .accept_wire_redactions(sample_blob(), &wire)
+            .accept_local_owner_redactions(sample_blob(), &wire)
             .expect("accept wire purge");
         assert_eq!(outcome.redactions_added, 1);
         // Local store records the purge.
@@ -1453,43 +1391,12 @@ mod tests {
     }
 
     #[test]
-    fn redaction_trust_alone_does_not_authorize_wire_purge() {
-        let signer = crypto::Ed25519Signer::generate().expect("keygen");
-        let (_dir, repo) = fresh_repo_trusting(&signer);
-        let mut signed = signed_sample_redaction(&signer);
-        attach_purge_evidence(
-            &mut signed,
-            &signer,
-            Utc.with_ymd_and_hms(2026, 5, 12, 9, 0, 0).unwrap(),
-        );
-        let wire = RedactionsBlob::new(vec![signed]).encode().unwrap();
-
-        let error = repo
-            .accept_wire_redactions(sample_blob(), &wire)
-            .expect_err("redaction-only signer must not gain purge authority");
-        assert!(
-            error
-                .chain()
-                .any(|cause| cause.to_string().contains("purge")),
-            "{error:#}"
-        );
-        assert!(
-            repo.get_redactions_for_blob(&sample_blob())
-                .unwrap()
-                .redactions
-                .is_empty()
-        );
-    }
-
-    #[test]
     fn accept_wire_redactions_rejects_forged_purge_evidence() {
-        let redactor = crypto::Ed25519Signer::generate().expect("redactor keygen");
-        let purger = crypto::Ed25519Signer::generate().expect("purger keygen");
-        let (_dir, repo) = fresh_repo_trusting_with_purge(&redactor, Some(&purger));
-        let mut signed = signed_sample_redaction(&redactor);
+        let (_dir, repo) = fresh_repo();
+        let mut signed = signed_sample_redaction(&repo);
         attach_purge_evidence(
+            &repo,
             &mut signed,
-            &purger,
             Utc.with_ymd_and_hms(2026, 5, 12, 9, 0, 0).unwrap(),
         );
         signed.purge.as_mut().unwrap().purged_at =
@@ -1497,7 +1404,7 @@ mod tests {
         let wire = RedactionsBlob::new(vec![signed]).encode().unwrap();
 
         let err = repo
-            .accept_wire_redactions(sample_blob(), &wire)
+            .accept_local_owner_redactions(sample_blob(), &wire)
             .expect_err("relay-forged purge marker must be refused");
         assert!(
             err.chain()

@@ -1226,6 +1226,7 @@ async fn clone_local(
     // preflight target selection has succeeded.
     fs::create_dir_all(local_path)?;
     let local_repo = Repository::init(local_path)?.without_fsmonitor();
+    local_repo.pin_local_clone_owner_anchor(remote_repo)?;
 
     // Fetch the state and dependencies
     let mut objects_copied = if let Some(d) = depth {
@@ -1646,6 +1647,25 @@ async fn clone_network_connected(
                 )
                 .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
                 let repo = initialize_hosted_clone_repository(local_path, &refs.refs, &track_name)?;
+                let keyring = ready.authorization_keyring.as_deref().ok_or_else(|| {
+                    wire::ProtocolError::InvalidState(
+                        "PullReady is missing authorization_keyring".to_string(),
+                    )
+                })?;
+                let owner_key_binding = ready.owner_key_binding.as_deref().ok_or_else(|| {
+                    wire::ProtocolError::InvalidState(
+                        "PullReady is missing owner_key_binding".to_string(),
+                    )
+                })?;
+                repo.pin_hosted_owner_anchor(
+                    ready.owner_authorization_protocol_version,
+                    &ready.stable_owner_uuid,
+                    keyring,
+                    owner_key_binding,
+                    &[],
+                    chrono::Utc::now().timestamp(),
+                )
+                .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
                 folded_refs = Some(refs.refs);
                 Ok(repo)
             },

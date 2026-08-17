@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use api::heddle::api::v1alpha1::{
+    SidecarAuthorization, SidecarIdentity, SpoolCapabilityAction, StateAttachmentSidecarIdentity,
+    sidecar_identity,
+};
+use chrono::Utc;
 /// The kind of a state attachment, re-exported from the `objects` crate where
 /// it lives as a first-class projection of `StateAttachmentBody` (heddle#1080).
 /// Derive kind from a body with `body.kind()`.
@@ -95,6 +100,66 @@ where
             .into_iter()
             .filter(|attachment| !superseded.contains(&attachment.id()))
             .max_by_key(StateAttachment::id))
+    }
+}
+
+impl Repository {
+    /// Decode and install a state attachment only after the canonical verifier
+    /// authorizes its byte-exact transfer against the clone-pinned owner.
+    pub fn accept_wire_state_attachment(
+        &self,
+        state_id: StateId,
+        attachment_id: StateAttachmentId,
+        attachment_kind: api::heddle::api::v1alpha1::StateAttachmentKind,
+        bytes: &[u8],
+        authorization: Option<&SidecarAuthorization>,
+    ) -> Result<()> {
+        let attachment: StateAttachment = rmp_serde::from_slice(bytes).map_err(|error| {
+            HeddleError::InvalidObject(format!("decode state attachment transfer: {error}"))
+        })?;
+        if attachment.state_id != state_id
+            || attachment.id() != attachment_id
+            || proto_attachment_kind(attachment.body.kind()) != attachment_kind
+        {
+            return Err(HeddleError::InvalidObject(
+                "state attachment transfer identity does not match its payload".to_owned(),
+            ));
+        }
+        self.verify_owner_sidecar_authorization(
+            authorization,
+            SidecarIdentity {
+                identity: Some(sidecar_identity::Identity::StateAttachment(
+                    StateAttachmentSidecarIdentity {
+                        state_id: Some(api::heddle::api::v1alpha1::StateId {
+                            value: state_id.as_bytes().to_vec(),
+                        }),
+                        attachment_id: attachment_id.as_hash().to_hex(),
+                        attachment_kind: attachment_kind as i32,
+                    },
+                )),
+            },
+            &[SpoolCapabilityAction::MetadataSupersession],
+            bytes,
+            Utc::now().timestamp(),
+        )
+        .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+        self.put_state_attachment(&attachment)?;
+        Ok(())
+    }
+}
+
+fn proto_attachment_kind(
+    kind: StateAttachmentKind,
+) -> api::heddle::api::v1alpha1::StateAttachmentKind {
+    use api::heddle::api::v1alpha1::StateAttachmentKind as ProtoKind;
+    match kind {
+        StateAttachmentKind::Context => ProtoKind::Context,
+        StateAttachmentKind::RiskSignals => ProtoKind::RiskSignals,
+        StateAttachmentKind::ReviewSignatures => ProtoKind::ReviewSignatures,
+        StateAttachmentKind::Discussions => ProtoKind::Discussions,
+        StateAttachmentKind::StructuredConflicts => ProtoKind::StructuredConflicts,
+        StateAttachmentKind::SemanticIndex => ProtoKind::SemanticIndex,
+        StateAttachmentKind::Signature => ProtoKind::Signature,
     }
 }
 

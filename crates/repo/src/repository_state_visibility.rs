@@ -27,6 +27,10 @@
 use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
+use api::heddle::api::v1alpha1::{
+    SidecarAuthorization, SidecarIdentity, SpoolCapabilityAction, StateVisibilitySidecarIdentity,
+    sidecar_identity,
+};
 use chrono::Utc;
 use objects::{
     fs_atomic::write_file_atomic,
@@ -475,11 +479,16 @@ impl Repository {
 
     /// Accept a wire-transferred `StateVisibilityBlob` for a specific state.
     /// The payload must decode, every contained record must target `state`,
-    /// every record must carry a valid signature from a configured trusted
-    /// client key. Each verified record is persisted through
+    /// every record must carry a valid client signature, and the transfer must
+    /// carry an owner capability authorizing this exact payload. Each verified record is persisted through
     /// `put_state_visibility` so validation and public-by-absence
     /// normalization run at the same boundary as local writes.
-    pub fn accept_wire_state_visibility(&self, state: StateId, bytes: &[u8]) -> Result<()> {
+    pub fn accept_wire_state_visibility(
+        &self,
+        state: StateId,
+        bytes: &[u8],
+        authorization: Option<&SidecarAuthorization>,
+    ) -> Result<()> {
         let incoming = StateVisibilityBlob::decode(bytes).with_context(|| {
             format!(
                 "decode incoming state visibility for state {}",
@@ -487,6 +496,52 @@ impl Repository {
             )
         })?;
 
+        self.verify_owner_sidecar_authorization(
+            authorization,
+            SidecarIdentity {
+                identity: Some(sidecar_identity::Identity::StateVisibility(
+                    StateVisibilitySidecarIdentity {
+                        state_id: Some(api::heddle::api::v1alpha1::StateId {
+                            value: state.as_bytes().to_vec(),
+                        }),
+                    },
+                )),
+            },
+            &[SpoolCapabilityAction::Visibility],
+            bytes,
+            Utc::now().timestamp(),
+        )?;
+
+        self.validate_incoming_state_visibility(state, &incoming, false)?;
+
+        for record in incoming.records {
+            self.put_state_visibility(record)?;
+        }
+        Ok(())
+    }
+
+    /// Accept a purely local visibility transfer under the repository's
+    /// pinned self-sovereign owner key.
+    pub fn accept_local_owner_state_visibility(&self, state: StateId, bytes: &[u8]) -> Result<()> {
+        let incoming = StateVisibilityBlob::decode(bytes).with_context(|| {
+            format!(
+                "decode incoming state visibility for state {}",
+                state.to_string_full()
+            )
+        })?;
+        self.validate_incoming_state_visibility(state, &incoming, true)?;
+        for record in incoming.records {
+            self.put_state_visibility(record)?;
+        }
+        Ok(())
+    }
+
+    fn validate_incoming_state_visibility(
+        &self,
+        state: StateId,
+        incoming: &StateVisibilityBlob,
+        require_local_owner: bool,
+    ) -> Result<()> {
         for record in &incoming.records {
             if record.state != state {
                 anyhow::bail!(
@@ -498,16 +553,20 @@ impl Repository {
             record
                 .validate()
                 .with_context(|| "validate incoming state-visibility record")?;
-            self.verify_trusted_client_metadata_signature(
+            if require_local_owner {
+                let signature = record
+                    .signature
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("local state-visibility record is unsigned"))?;
+                self.local_owner_authorizes_signature(signature)?;
+            }
+            self.verify_client_metadata_signature(
                 &record.canonical_signing_payload(),
                 record.signature.as_ref(),
             )
             .with_context(|| "verify incoming state-visibility signature")?;
         }
 
-        for record in incoming.records {
-            self.put_state_visibility(record)?;
-        }
         Ok(())
     }
 
@@ -872,7 +931,6 @@ mod tests {
     use std::{sync::Arc, thread};
 
     use chrono::{TimeZone, Utc};
-    use crypto::{Ed25519Signer, Signer};
     use objects::object::{Principal, VisibilityTier};
     use oplog::OpLogBackend;
     use tempfile::TempDir;
@@ -913,51 +971,31 @@ mod tests {
         }
     }
 
-    fn repo_trusting_metadata(signer: &dyn Signer) -> (TempDir, Repository) {
-        let dir = TempDir::new().unwrap();
-        Repository::init_default(dir.path()).unwrap();
-        let config_path = dir.path().join(".heddle/config.toml");
-        let mut config = crate::repository::repo_config::RepoConfig::load(&config_path).unwrap();
-        config.metadata.trusted_keys.push(crate::TrustedKey {
-            algorithm: signer.algorithm().to_string(),
-            public_key: hex::encode(signer.public_key()),
-            label: Some("test-client".to_string()),
-        });
-        config.save(&config_path).unwrap();
-        let repo = Repository::open(dir.path()).unwrap();
-        (dir, repo)
-    }
-
-    fn sign_visibility(record: &mut StateVisibility, signer: &dyn Signer) {
-        let signature = signer
-            .sign(&record.canonical_signing_payload())
-            .expect("sign visibility");
-        record.signature = Some(objects::object::StateSignature {
-            algorithm: signer.algorithm().to_string(),
-            public_key: hex::encode(signer.public_key()),
-            signature: hex::encode(signature),
-        });
+    fn sign_visibility(record: &mut StateVisibility, repo: &Repository) {
+        record.signature = Some(
+            repo.sign_local_owner_metadata(&record.canonical_signing_payload())
+                .expect("sign visibility"),
+        );
     }
 
     #[test]
-    fn wire_visibility_requires_trusted_signature_and_covers_tier() {
-        let signer = Ed25519Signer::generate().expect("keygen");
-        let (_dir, repo) = repo_trusting_metadata(&signer);
+    fn local_visibility_requires_owner_signature_and_covers_tier() {
+        let (_dir, repo) = fresh_repo();
         let state = StateId::from_bytes([4u8; 32]);
         let mut record = sample_record(state, VisibilityTier::Internal);
 
         let unsigned = StateVisibilityBlob::new(vec![record.clone()])
             .encode()
             .unwrap();
-        repo.accept_wire_state_visibility(state, &unsigned)
+        repo.accept_local_owner_state_visibility(state, &unsigned)
             .expect_err("unsigned authoritative metadata must be rejected");
 
-        sign_visibility(&mut record, &signer);
+        sign_visibility(&mut record, &repo);
         let signed = StateVisibilityBlob::new(vec![record.clone()])
             .encode()
             .unwrap();
-        repo.accept_wire_state_visibility(state, &signed)
-            .expect("trusted signed visibility");
+        repo.accept_local_owner_state_visibility(state, &signed)
+            .expect("owner-signed visibility");
 
         let tampered_state = StateId::from_bytes([5u8; 32]);
         let mut tampered = sample_record(
@@ -966,10 +1004,10 @@ mod tests {
                 scope_label: "executives".to_string(),
             },
         );
-        sign_visibility(&mut tampered, &signer);
+        sign_visibility(&mut tampered, &repo);
         tampered.tier = VisibilityTier::Public;
         let forged = StateVisibilityBlob::new(vec![tampered]).encode().unwrap();
-        repo.accept_wire_state_visibility(tampered_state, &forged)
+        repo.accept_local_owner_state_visibility(tampered_state, &forged)
             .expect_err("relay must not widen signed visibility");
     }
 

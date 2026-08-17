@@ -23,40 +23,6 @@ use tempfile::TempDir;
 
 use super::{assert_json_recovery_advice_fields, heddle, heddle_output};
 
-fn write_test_private_key(path: &std::path::Path, pem: &str) {
-    objects::fs_atomic::write_file_atomic_secret(path, pem.as_bytes())
-        .expect("write test private key");
-}
-
-fn local_identity_public_key(path: &std::path::Path) -> String {
-    let identity_raw =
-        fs::read_to_string(path.join(".heddle/identity.toml")).expect("read local identity");
-    let identity: toml::Value = toml::from_str(&identity_raw).expect("parse local identity");
-    identity
-        .get("public_key")
-        .and_then(toml::Value::as_str)
-        .expect("local identity public key")
-        .to_string()
-}
-
-fn trust_local_purge_identity(path: &std::path::Path) {
-    let public_key = local_identity_public_key(path);
-    heddle(
-        &[
-            "redact",
-            "purge",
-            "trust",
-            "add",
-            "--algorithm",
-            "ed25519",
-            "--public-key",
-            &public_key,
-        ],
-        Some(path),
-    )
-    .expect("authorize local purge identity");
-}
-
 /// Bootstrap a repo containing a fake-secret file in a captured state.
 /// Returns the temp dir and the short change-id of the capture.
 fn setup_repo_with_secret() -> (TempDir, String) {
@@ -350,7 +316,6 @@ fn undo_redact_refusal_uses_json_error_envelope() {
 #[test]
 fn purge_apply_with_force_records_and_marks_redaction_purged() {
     let (temp, state) = setup_repo_with_secret();
-    trust_local_purge_identity(temp.path());
     heddle(
         &[
             "redact",
@@ -404,58 +369,14 @@ fn purge_apply_with_force_records_and_marks_redaction_purged() {
 }
 
 #[test]
-fn redaction_trust_does_not_authorize_local_purge() {
-    let (temp, state) = setup_repo_with_secret();
-    let public_key = local_identity_public_key(temp.path());
-    heddle(
-        &[
-            "redact",
-            "trust",
-            "add",
-            "--algorithm",
-            "ed25519",
-            "--public-key",
-            &public_key,
-        ],
-        Some(temp.path()),
-    )
-    .expect("grant declaration-only trust");
-    heddle(
-        &[
-            "redact",
-            "apply",
-            &state,
-            "--path",
-            "config/secrets.toml",
-            "--reason",
-            "leaked credential",
-        ],
-        Some(temp.path()),
-    )
-    .expect("declare redaction");
-
-    let error = heddle(
-        &[
-            "redact",
-            "purge",
-            "apply",
-            &state,
-            "--path",
-            "config/secrets.toml",
-            "--force",
-        ],
-        Some(temp.path()),
-    )
-    .expect_err("redaction trust must not grant destructive authority");
-    assert!(error.contains("[purge].trusted_keys"), "{error}");
-
-    let list: Value = serde_json::from_str(
-        &heddle(&["--output", "json", "redact", "list"], Some(temp.path())).unwrap(),
-    )
-    .unwrap();
+fn legacy_trust_cli_is_removed() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).expect("init");
+    let error = heddle(&["redact", "trust", "list"], Some(temp.path()))
+        .expect_err("legacy trust surface must be absent");
     assert!(
-        !list["redactions"][0]["purged"].as_bool().unwrap(),
-        "failed authorization must not write a false purged status"
+        error.contains("unrecognized subcommand") || error.contains("unexpected argument"),
+        "clap should reject the removed trust surface: {error}"
     );
 }
 
@@ -471,18 +392,8 @@ fn purge_root_alias_is_rejected() {
 }
 
 #[test]
-fn redact_apply_with_sign_with_records_signature_verifiable_on_show() {
-    // Critical acceptance criterion (build brief item 3): redactions
-    // are signed (Ed25519) and `heddle redact show` displays
-    // verification status alongside the merge-signature equivalent.
-    use crypto::Ed25519Signer;
-
+fn redact_apply_records_owner_signature_verifiable_on_show() {
     let (temp, state) = setup_repo_with_secret();
-    let signer = Ed25519Signer::generate().expect("generate ed25519 signing key");
-    let key_pem = signer.to_pem().expect("export PEM");
-    let key_path = temp.path().join("redact_signing_key.pem");
-    write_test_private_key(&key_path, &key_pem);
-
     let apply_raw = heddle(
         &[
             "--output",
@@ -494,16 +405,14 @@ fn redact_apply_with_sign_with_records_signature_verifiable_on_show() {
             "config/secrets.toml",
             "--reason",
             "leaked credential",
-            "--sign-with",
-            &key_path.to_string_lossy(),
         ],
         Some(temp.path()),
     )
-    .expect("redact apply --sign-with should succeed");
+    .expect("owner-signed redact apply should succeed");
     let apply: Value = serde_json::from_str(&apply_raw).expect("redact apply JSON");
     assert!(
         apply["signed"].as_bool().unwrap(),
-        "redact apply with --sign-with must report signed=true"
+        "redact apply must report its owner signature"
     );
     assert_eq!(
         apply["signature_algorithm"].as_str().unwrap(),
@@ -535,10 +444,7 @@ fn redact_apply_with_sign_with_records_signature_verifiable_on_show() {
 }
 
 #[test]
-fn redact_show_without_sign_with_reports_unsigned() {
-    // Mirror property: unsigned redactions must surface as
-    // `signature_status: "unsigned"` so auditors can sort the
-    // attested-vs-asserted axis cleanly.
+fn redact_apply_has_no_unsigned_cli_mode() {
     let (temp, state) = setup_repo_with_secret();
     let apply_raw = heddle(
         &[
@@ -557,8 +463,8 @@ fn redact_show_without_sign_with_reports_unsigned() {
     .unwrap();
     let apply: Value = serde_json::from_str(&apply_raw).unwrap();
     assert!(
-        !apply["signed"].as_bool().unwrap(),
-        "redact apply without --sign-with must report signed=false"
+        apply["signed"].as_bool().unwrap(),
+        "redact apply must always use the pinned owner identity"
     );
     let id = apply["redaction_id"].as_str().unwrap();
 
@@ -568,11 +474,11 @@ fn redact_show_without_sign_with_reports_unsigned() {
     )
     .unwrap();
     let show: Value = serde_json::from_str(&show_raw).unwrap();
-    assert!(!show["signed"].as_bool().unwrap());
+    assert!(show["signed"].as_bool().unwrap());
     assert_eq!(
         show["signature_status"].as_str().unwrap(),
-        "unsigned",
-        "redact show must call unsigned redactions out explicitly"
+        "verified",
+        "redact show must verify the automatic owner signature"
     );
 }
 
@@ -682,11 +588,7 @@ fn purge_without_prior_redact_is_refused() {
 // replica scope.
 // ---------------------------------------------------------------------
 
-fn signed_redact_on_repo_a(
-    temp: &TempDir,
-    state: &str,
-    pem_path: &std::path::Path,
-) -> serde_json::Value {
+fn signed_redact_on_repo_a(temp: &TempDir, state: &str) -> serde_json::Value {
     let raw = heddle(
         &[
             "--output",
@@ -698,52 +600,30 @@ fn signed_redact_on_repo_a(
             "config/secrets.toml",
             "--reason",
             "leaked credential",
-            "--sign-with",
-            pem_path.to_str().unwrap(),
         ],
         Some(temp.path()),
     )
-    .expect("redact apply --sign-with should succeed on A");
+    .expect("owner-signed redact apply should succeed on A");
     serde_json::from_str(&raw).expect("apply output JSON")
 }
 
 #[test]
 fn redact_apply_signed_propagates_to_cloned_replica() {
-    use crypto::Ed25519Signer;
     let (a, state) = setup_repo_with_secret();
-    let signer = Ed25519Signer::generate().unwrap();
-    let pem = signer.to_pem().unwrap();
-    let pem_path = a.path().join("ed25519.pem");
-    write_test_private_key(&pem_path, &pem);
-    let apply = signed_redact_on_repo_a(&a, &state, &pem_path);
+    let apply = signed_redact_on_repo_a(&a, &state);
     let redaction_id = apply["redaction_id"].as_str().unwrap().to_string();
 
-    // Set up B: init empty repo, trust A's signing key, then pull.
-    // Operators do this on their own machine the first time they
-    // accept signed redactions from a new collaborator; the trust
-    // gate is fail-closed so signed records won't propagate until
-    // the operator explicitly authorizes the key.
     let b_dir = TempDir::new().unwrap();
     let b_path = b_dir.path().join("replica-b");
-    fs::create_dir_all(&b_path).unwrap();
-    heddle(&["init"], Some(&b_path)).expect("init B");
     heddle(
         &[
-            "redact",
-            "trust",
-            "add",
-            "--from-pem",
-            pem_path.to_str().unwrap(),
+            "clone",
+            a.path().to_str().unwrap(),
+            b_path.to_str().unwrap(),
         ],
-        Some(&b_path),
+        Some(b_dir.path()),
     )
-    .expect("B trusts A's signing key");
-    heddle(
-        &["remote", "add", "origin", a.path().to_str().unwrap()],
-        Some(&b_path),
-    )
-    .expect("remote add origin");
-    heddle(&["pull", "origin"], Some(&b_path)).expect("pull propagates signed redaction to B");
+    .expect("local clone pins A's public owner anchor before sidecar transfer");
 
     // B's redact list must include the propagated redaction. The
     // worktree-stub contract is tested separately by the local
@@ -774,55 +654,9 @@ fn redact_apply_signed_propagates_to_cloned_replica() {
 }
 
 #[test]
-fn redact_apply_unsigned_is_refused_at_clone_boundary() {
-    // Wire policy: unsigned redactions do not propagate. The local
-    // redaction stays on A; B's clone refuses with a clear message
-    // because LocalSync routes through accept_wire_redactions which
-    // rejects unsigned records.
-    let (a, state) = setup_repo_with_secret();
-    let _ = heddle(
-        &[
-            "--output",
-            "json",
-            "redact",
-            "apply",
-            &state,
-            "--path",
-            "config/secrets.toml",
-            "--reason",
-            "leaked credential",
-        ],
-        Some(a.path()),
-    )
-    .expect("unsigned local redact on A succeeds");
-
-    let b_dir = TempDir::new().unwrap();
-    let b_path = b_dir.path().join("replica-b");
-    let err = heddle(
-        &[
-            "clone",
-            a.path().to_str().unwrap(),
-            b_path.to_str().unwrap(),
-        ],
-        Some(b_dir.path()),
-    )
-    .expect_err("clone must refuse unsigned redaction propagation");
-    assert!(
-        err.contains("no signature") || err.contains("Unsigned") || err.contains("unsigned"),
-        "clone rejection must explain the unsigned cause: {err}"
-    );
-}
-
-#[test]
 fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
-    use crypto::Ed25519Signer;
     let (a, state) = setup_repo_with_secret();
-    let signer = Ed25519Signer::generate().unwrap();
-    let pem = signer.to_pem().unwrap();
-    let pem_path = a.path().join("ed25519.pem");
-    write_test_private_key(&pem_path, &pem);
-    let _ = signed_redact_on_repo_a(&a, &state, &pem_path);
-    trust_local_purge_identity(a.path());
+    let _ = signed_redact_on_repo_a(&a, &state);
 
     heddle(
         &[
@@ -838,57 +672,17 @@ fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
     )
     .expect("purge on A succeeds");
 
-    // Set up B with explicit trust for A's signing key, then pull.
     let b_dir = TempDir::new().unwrap();
     let b_path = b_dir.path().join("replica-b");
-    fs::create_dir_all(&b_path).unwrap();
-    heddle(&["init"], Some(&b_path)).expect("init B");
     heddle(
         &[
-            "redact",
-            "trust",
-            "add",
-            "--from-pem",
-            pem_path.to_str().unwrap(),
+            "clone",
+            a.path().to_str().unwrap(),
+            b_path.to_str().unwrap(),
         ],
-        Some(&b_path),
+        Some(b_dir.path()),
     )
-    .expect("B trusts A's signing key");
-    // Purging is a new authoritative metadata decision. A re-signs the
-    // lifecycle transition with its active client identity rather than
-    // pretending the original redaction operator made that later decision.
-    // Hosted rollout must provision trusted client identities through the
-    // Weft/Tapestry control plane before purge sync is enabled. That
-    // distribution is not implemented in this repository; this local-sync
-    // fixture mirrors current behavior by enrolling A's public key explicitly.
-    let identity_raw =
-        fs::read_to_string(a.path().join(".heddle/identity.toml")).expect("read A identity");
-    let identity: toml::Value = toml::from_str(&identity_raw).expect("parse A identity");
-    let client_public_key = identity
-        .get("public_key")
-        .and_then(toml::Value::as_str)
-        .expect("A identity public key");
-    heddle(
-        &[
-            "redact",
-            "purge",
-            "trust",
-            "add",
-            "--algorithm",
-            "ed25519",
-            "--public-key",
-            client_public_key,
-        ],
-        Some(&b_path),
-    )
-    .expect("B grants A's client identity purge authority");
-    heddle(
-        &["remote", "add", "origin", a.path().to_str().unwrap()],
-        Some(&b_path),
-    )
-    .expect("remote add origin");
-    heddle(&["pull", "origin"], Some(&b_path))
-        .expect("pull propagates signed redaction + purge to B");
+    .expect("clone pins A's owner anchor and propagates redaction + purge");
 
     // B must record the purge.
     let purge_list_raw = heddle(
@@ -912,15 +706,10 @@ fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
 
 #[test]
 fn tampered_redaction_is_refused_at_pull_boundary() {
-    use crypto::Ed25519Signer;
     use objects::object::RedactionsBlob;
 
     let (a, state) = setup_repo_with_secret();
-    let signer = Ed25519Signer::generate().unwrap();
-    let pem = signer.to_pem().unwrap();
-    let pem_path = a.path().join("ed25519.pem");
-    write_test_private_key(&pem_path, &pem);
-    let _ = signed_redact_on_repo_a(&a, &state, &pem_path);
+    let _ = signed_redact_on_repo_a(&a, &state);
 
     // Tamper with A's stored redaction sidecar by mutating the reason
     // *after* signing — same blob hash key, but the canonical payload
@@ -940,31 +729,17 @@ fn tampered_redaction_is_refused_at_pull_boundary() {
     // The above forfeits A's own materialize-side stub correctness;
     // the local invariant break is the point of the test.
 
-    // B trusts the signing key, so the trust gate passes — the
-    // rejection comes from signature verification failing on the
-    // tampered canonical payload (Tampered, not UntrustedKey).
     let b_dir = TempDir::new().unwrap();
     let b_path = b_dir.path().join("replica-b");
-    fs::create_dir_all(&b_path).unwrap();
-    heddle(&["init"], Some(&b_path)).expect("init B");
-    heddle(
+    let err = heddle(
         &[
-            "redact",
-            "trust",
-            "add",
-            "--from-pem",
-            pem_path.to_str().unwrap(),
+            "clone",
+            a.path().to_str().unwrap(),
+            b_path.to_str().unwrap(),
         ],
-        Some(&b_path),
+        Some(b_dir.path()),
     )
-    .expect("B trusts A's signing key");
-    heddle(
-        &["remote", "add", "origin", a.path().to_str().unwrap()],
-        Some(&b_path),
-    )
-    .expect("remote add origin");
-    let err = heddle(&["pull", "origin"], Some(&b_path))
-        .expect_err("pull must refuse a tampered redaction");
+    .expect_err("clone must refuse a tampered redaction");
     assert!(
         err.contains("failed to verify") || err.contains("Tampered") || err.contains("tampered"),
         "pull rejection must explain the tamper cause: {err}"
@@ -1116,7 +891,6 @@ fn purge_apply_also_emits_ignore_hint() {
     // working-tree leak is the same problem regardless of which
     // verb you reach for.
     let (temp, state) = setup_repo_with_secret();
-    trust_local_purge_identity(temp.path());
     // Redact first (purge refuses without a prior redaction).
     heddle(
         &[
@@ -1165,8 +939,6 @@ fn redact_after_peer_pull_still_propagates_on_resync() {
     // would short-circuit before propagating the sidecar. The
     // post-fix behavior: redactions ferry through even when the
     // object graph hasn't changed.
-    use crypto::Ed25519Signer;
-
     let (a, state) = setup_repo_with_secret();
 
     // Peer B clones BEFORE the redaction is declared on A.
@@ -1191,35 +963,11 @@ fn redact_after_peer_pull_still_propagates_on_resync() {
         "B has no redactions yet (declared on A only after clone)"
     );
 
-    // Now A declares + signs the redaction.
-    let signer = Ed25519Signer::generate().unwrap();
-    let pem = signer.to_pem().unwrap();
-    let pem_path = a.path().join("ed25519.pem");
-    write_test_private_key(&pem_path, &pem);
-    let _ = signed_redact_on_repo_a(&a, &state, &pem_path);
+    // Now A declares + signs the redaction with its pinned owner key.
+    let _ = signed_redact_on_repo_a(&a, &state);
 
-    // Re-sync: B trusts A's signing key, registers A as a remote,
-    // then `heddle pull origin` should ferry the sidecar even
-    // though every state/tree/blob is already present on B. Trust
-    // setup happens after the initial clone (which used no signed
-    // redactions, so didn't need trust) — same operator pattern
-    // they'd run once after a peer publishes their signing key.
-    heddle(
-        &[
-            "redact",
-            "trust",
-            "add",
-            "--from-pem",
-            pem_path.to_str().unwrap(),
-        ],
-        Some(&b_path),
-    )
-    .expect("B trusts A's signing key");
-    heddle(
-        &["remote", "add", "origin", a.path().to_str().unwrap()],
-        Some(&b_path),
-    )
-    .expect("remote add origin");
+    // The original clone pinned A's public owner anchor. A no-op pull can
+    // therefore authenticate the later sidecar without any mutable key list.
     let pull =
         heddle(&["pull", "origin"], Some(&b_path)).expect("pull A → B after redaction declared");
     assert!(
@@ -1239,41 +987,24 @@ fn redact_after_peer_pull_still_propagates_on_resync() {
 }
 
 #[test]
-fn untrusted_signed_redaction_is_refused_at_pull_boundary() {
-    // Codex P1: signature verification alone is integrity, not
-    // authentication. Without a trust check the receiver accepts
-    // *any* mathematically-valid signature, including one minted by
-    // an attacker with their own key.
-    //
-    // This test pins the fail-closed default end-to-end: B receives
-    // a signed redaction from A, but B has *not* added A's key to
-    // its trust list. The pull must refuse with `UntrustedKey`,
-    // and B's local store must be unchanged.
-    use crypto::Ed25519Signer;
-
+fn independently_created_repo_rejects_unpinned_owner() {
     let (a, state) = setup_repo_with_secret();
-    let attacker = Ed25519Signer::generate().unwrap();
-    let pem = attacker.to_pem().unwrap();
-    let pem_path = a.path().join("attacker.pem");
-    write_test_private_key(&pem_path, &pem);
-    let _ = signed_redact_on_repo_a(&a, &state, &pem_path);
+    let _ = signed_redact_on_repo_a(&a, &state);
 
     let b_dir = TempDir::new().unwrap();
     let b_path = b_dir.path().join("replica-b");
     fs::create_dir_all(&b_path).unwrap();
     heddle(&["init"], Some(&b_path)).expect("init B");
-    // Intentionally skip `heddle redact trust add` — B does NOT
-    // trust the attacker's key.
     heddle(
         &["remote", "add", "origin", a.path().to_str().unwrap()],
         Some(&b_path),
     )
     .expect("remote add origin");
     let err = heddle(&["pull", "origin"], Some(&b_path))
-        .expect_err("pull must refuse untrusted signed redaction");
+        .expect_err("pull must refuse an owner key that was not pinned at clone");
     assert!(
-        err.contains("untrusted operator key"),
-        "pull rejection must explain the untrusted-key cause: {err}"
+        err.contains("does not match the pinned local owner key"),
+        "pull rejection must explain the pinned-owner mismatch: {err}"
     );
 
     // B's local redaction store must remain empty.
@@ -1285,86 +1016,6 @@ fn untrusted_signed_redaction_is_refused_at_pull_boundary() {
         list["redactions"].as_array().unwrap().len(),
         0,
         "B must have no redactions after refusal; refusal is atomic"
-    );
-}
-
-#[test]
-fn redact_trust_add_and_list_round_trip() {
-    // Operator-facing smoke: `heddle redact trust add --from-pem`
-    // produces an entry that `heddle redact trust list` surfaces.
-    use crypto::Ed25519Signer;
-
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).expect("init");
-    let signer = Ed25519Signer::generate().unwrap();
-    let pem = signer.to_pem().unwrap();
-    let pem_path = temp.path().join("key.pem");
-    write_test_private_key(&pem_path, &pem);
-
-    let add_raw = heddle(
-        &[
-            "--output",
-            "json",
-            "redact",
-            "trust",
-            "add",
-            "--from-pem",
-            pem_path.to_str().unwrap(),
-            "--label",
-            "test-key",
-        ],
-        Some(temp.path()),
-    )
-    .expect("trust add");
-    let add: Value = serde_json::from_str(&add_raw).unwrap();
-    assert_eq!(add["algorithm"].as_str().unwrap(), "ed25519");
-    assert_eq!(add["label"].as_str().unwrap(), "test-key");
-    let pubkey_hex = add["public_key"].as_str().unwrap().to_string();
-
-    let list_raw = heddle(
-        &["--output", "json", "redact", "trust", "list"],
-        Some(temp.path()),
-    )
-    .expect("trust list");
-    let list: Value = serde_json::from_str(&list_raw).unwrap();
-    assert_eq!(list["count"].as_u64().unwrap(), 1);
-    let entries = list["trusted_keys"].as_array().unwrap();
-    assert_eq!(entries[0]["public_key"].as_str().unwrap(), pubkey_hex);
-    assert_eq!(entries[0]["label"].as_str().unwrap(), "test-key");
-
-    // Re-adding the same key fails — operators get a clear signal
-    // rather than silent duplicate entries.
-    let output = heddle_output(
-        &[
-            "--output",
-            "json",
-            "redact",
-            "trust",
-            "add",
-            "--from-pem",
-            pem_path.to_str().unwrap(),
-        ],
-        Some(temp.path()),
-    )
-    .expect("invoke duplicate trust add");
-    assert!(
-        !output.status.success(),
-        "re-add must refuse duplicate trust keys"
-    );
-    assert!(
-        output.stdout.is_empty(),
-        "JSON-mode refusal must not write stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let envelope: Value =
-        serde_json::from_str(&stderr).expect("stderr should be JSON error envelope");
-    assert_eq!(envelope["kind"], "redact_trust_key_duplicate");
-    assert!(
-        envelope["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("already in the trust list")),
-        "duplicate-trust rejection must be clear: {stderr}"
     );
 }
 
@@ -1401,59 +1052,5 @@ fn redact_empty_path_uses_typed_advice_json() {
             .as_str()
             .is_some_and(|hint| hint.contains("--path <path>")),
         "typed advice should name the recovery path: {stderr}"
-    );
-}
-
-#[test]
-fn redact_trust_remove_missing_key_uses_typed_advice_json() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).expect("init");
-    let output = heddle_output(
-        &["--output", "json", "redact", "trust", "remove", "deadbeef"],
-        Some(temp.path()),
-    )
-    .expect("invoke redact trust remove");
-    assert!(!output.status.success(), "missing trust key must refuse");
-    assert!(
-        output.stdout.is_empty(),
-        "JSON-mode refusal must not write stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let envelope: Value =
-        serde_json::from_str(&stderr).expect("stderr should be JSON error envelope");
-    assert_eq!(envelope["kind"], "redact_trust_key_not_found");
-    assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("heddle redact trust list")),
-        "typed advice should name the inspection command: {stderr}"
-    );
-}
-
-#[test]
-fn redact_trust_add_missing_key_source_uses_typed_advice_json() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).expect("init");
-    let output = heddle_output(
-        &["--output", "json", "redact", "trust", "add"],
-        Some(temp.path()),
-    )
-    .expect("invoke redact trust add");
-    assert!(!output.status.success(), "missing key source must refuse");
-    assert!(
-        output.stdout.is_empty(),
-        "JSON-mode refusal must not write stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let envelope: Value =
-        serde_json::from_str(&stderr).expect("stderr should be JSON error envelope");
-    assert_eq!(envelope["kind"], "redact_trust_key_source_required");
-    assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("--from-pem <PATH>")),
-        "typed advice should name key-source recovery: {stderr}"
     );
 }

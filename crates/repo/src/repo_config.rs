@@ -37,46 +37,6 @@ pub struct RepoConfig {
     pub review: ReviewConfig,
     #[serde(default)]
     pub provenance: ProvenanceConfig,
-    #[serde(default)]
-    pub redact: RedactConfig,
-    #[serde(default)]
-    pub purge: PurgeConfig,
-    #[serde(default)]
-    pub metadata: MetadataConfig,
-}
-
-/// `[redact]` config section. Houses the list of operator public keys
-/// that the receiver trusts when accepting redactions over the wire
-/// (`Repository::accept_wire_redactions`). The list is fail-closed:
-/// an empty list rejects every incoming signed redaction. Operators
-/// populate it via `heddle redact trust add` or by hand-editing
-/// `.heddle/config.toml`.
-///
-/// The reason the trust list lives in repo config rather than in the
-/// signed payload itself: a signature only proves *who* declared the
-/// redaction, not whether the receiver should *honor* that operator's
-/// authority for this workspace. Without a separate trust anchor an
-/// attacker can mint a redaction with their own key and pass
-/// signature verification trivially.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RedactConfig {
-    /// Trusted operator public keys. Every signed redaction received
-    /// over the wire must match one of these (algorithm + hex-encoded
-    /// public key) before the receiver persists the sidecar.
-    #[serde(default)]
-    pub trusted_keys: Vec<TrustedKey>,
-}
-
-/// `[purge]` destructive-capability trust configuration.
-///
-/// This list is intentionally independent from `[redact].trusted_keys`:
-/// authority to hide content never grants authority to destroy its bytes.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PurgeConfig {
-    /// Keys allowed to authorize local or wire-replayed purge evidence.
-    /// Manage with `heddle redact purge trust`.
-    #[serde(default)]
-    pub trusted_keys: Vec<TrustedKey>,
 }
 
 /// One trusted operator key entry. Algorithm and key strings use the
@@ -114,17 +74,6 @@ pub struct KeyBindingRegistryAnchor {
     pub epoch: u64,
     /// Authority allowed to endorse registry checkpoints and root bindings.
     pub authority: TrustedKey,
-}
-
-/// Trust anchors for client-authored metadata received from a remote host.
-///
-/// Hosted servers relay these records but are not trusted to author them.
-/// An empty list therefore fails closed for authoritative metadata such as
-/// visibility declarations and detached signature supersession.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MetadataConfig {
-    #[serde(default)]
-    pub trusted_keys: Vec<TrustedKey>,
 }
 
 /// Review-epic configuration. Houses the `[review.signals]` sub-table read by
@@ -487,9 +436,6 @@ impl Default for RepoConfig {
             hosted: HostedConfig::default(),
             review: ReviewConfig::default(),
             provenance: ProvenanceConfig::default(),
-            redact: RedactConfig::default(),
-            purge: PurgeConfig::default(),
-            metadata: MetadataConfig::default(),
         }
     }
 }
@@ -629,6 +575,31 @@ source_authority = "native"
         assert!(config.agent.provider.is_none());
         assert!(config.agent.model.is_none());
         assert_eq!(config.storage.delta_search, DeltaSearchConfig::default());
+    }
+
+    #[test]
+    fn legacy_authority_tables_are_ignored_and_not_reserialized() {
+        let legacy = r#"
+[repository]
+version = 4
+source_authority = "native"
+
+[redact]
+trusted_keys = [{ algorithm = "ed25519", public_key = "attacker" }]
+
+[purge]
+trusted_keys = [{ algorithm = "ed25519", public_key = "attacker" }]
+
+[metadata]
+trusted_keys = [{ algorithm = "ed25519", public_key = "attacker" }]
+"#;
+        let config: RepoConfig = toml::from_str(legacy).expect("legacy tables are ignored");
+        let serialized = toml::to_string(&config).expect("serialize current config");
+
+        assert!(!serialized.contains("[redact]"));
+        assert!(!serialized.contains("[purge]"));
+        assert!(!serialized.contains("[metadata]"));
+        assert!(!serialized.contains("trusted_keys"));
     }
 
     #[test]

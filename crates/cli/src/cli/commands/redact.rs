@@ -19,8 +19,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use crypto::{Signer, load_signer, verify_payload_signature};
-use heddle_core::{redaction_signature_status, short_public_key};
+use crypto::verify_payload_signature;
+use heddle_core::redaction_signature_status;
 use objects::{
     object::{
         ContentHash, LeafPolicy, Redaction, RedactionsBlob, StateId, StateSignature,
@@ -35,8 +35,7 @@ use serde::Serialize;
 use super::advice::RecoveryAdvice;
 use crate::{
     cli::{
-        Cli, RedactApplyArgs, RedactCommands, RedactListArgs, RedactShowArgs, RedactTrustAddArgs,
-        RedactTrustCommands, RedactTrustListArgs, RedactTrustRemoveArgs, should_output_json,
+        Cli, RedactApplyArgs, RedactCommands, RedactListArgs, RedactShowArgs, should_output_json,
     },
     config::UserConfig,
 };
@@ -52,7 +51,6 @@ pub fn cmd_redact(cli: &Cli, command: RedactCommands) -> Result<()> {
         RedactCommands::Apply(args) => cmd_redact_apply(cli, &repo, args),
         RedactCommands::List(args) => cmd_redact_list(cli, &repo, args),
         RedactCommands::Show(args) => cmd_redact_show(cli, &repo, args),
-        RedactCommands::Trust(sub) => cmd_redact_trust(cli, &repo, sub),
         RedactCommands::Purge(_) => unreachable!("handled before opening repo"),
     }
 }
@@ -93,19 +91,6 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
     let blob = blob_at_path(repo, &state, &args.path)?;
     let now = Utc::now();
 
-    // Load signer up-front so a bad `--sign-with` fails before the
-    // redaction lands. Every redaction we write in this invocation
-    // (primary + propagated) gets a fresh signature over its own
-    // canonical payload — same operator key, different bytes.
-    let signer: Option<Box<dyn Signer>> = match &args.sign_with {
-        Some(path) => Some(
-            load_signer(path, args.sign_algo.as_deref())
-                .with_context(|| format!("load signer from '{}'", path.display()))?,
-        ),
-        None => None,
-    };
-    let signature_algorithm = signer.as_ref().map(|s| s.algorithm().to_string());
-
     // Always declare the redaction at the explicitly-named (state, path).
     // The redactions store is keyed by blob hash, so a single declaration
     // makes the materialize path render the stub everywhere that blob
@@ -122,9 +107,11 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
         purge: None,
         supersedes: None,
     };
-    if let Some(signer) = &signer {
-        primary.signature = Some(sign_redaction(signer.as_ref(), &primary)?);
-    }
+    primary.signature = Some(sign_redaction(repo, &primary)?);
+    let signature_algorithm = primary
+        .signature
+        .as_ref()
+        .map(|signature| signature.algorithm.clone());
     let primary_id = repo.put_redaction(primary)?;
     let scope = repo.op_scope();
     repo.oplog()
@@ -166,9 +153,7 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
                     purge: None,
                     supersedes: Some(primary_id),
                 };
-                if let Some(signer) = &signer {
-                    extra.signature = Some(sign_redaction(signer.as_ref(), &extra)?);
-                }
+                extra.signature = Some(sign_redaction(repo, &extra)?);
                 let extra_id = repo.put_redaction(extra)?;
                 repo.oplog()
                     .record_redact(&extra_id, &blob, &other_state, &path, Some(&scope))?;
@@ -191,7 +176,7 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
         redacted_at: now.to_rfc3339(),
         all_states: args.all_states,
         states_redacted,
-        signed: signer.is_some(),
+        signed: true,
         signature_algorithm,
         ignore_hint,
     };
@@ -262,16 +247,10 @@ pub(crate) fn ignore_hint_for_path(repo: &Repository, path: &str) -> Result<Opti
 /// Distinct from `state_signature_from_signer`, which signs raw bytes via
 /// `signer.sign`; this helper exists because `canonical_signing_payload`
 /// is structurally different from a `ContentHash`.
-fn sign_redaction(signer: &dyn Signer, redaction: &Redaction) -> Result<StateSignature> {
+fn sign_redaction(repo: &Repository, redaction: &Redaction) -> Result<StateSignature> {
     let payload = redaction.canonical_signing_payload();
-    let signature = signer
-        .sign(&payload)
-        .with_context(|| "sign redaction payload")?;
-    Ok(StateSignature {
-        algorithm: signer.algorithm().to_string(),
-        public_key: hex::encode(signer.public_key()),
-        signature: hex::encode(&signature),
-    })
+    repo.sign_authoritative_metadata(&payload)
+        .with_context(|| "sign redaction with owner-authorized key")
 }
 
 /// Verify a redaction's signature. Returns `Ok(true)` when verification
@@ -570,384 +549,6 @@ fn hex_encode(bytes: &[u8]) -> String {
         let _ = write!(out, "{:02x}", b);
     }
     out
-}
-
-// ---------------------------------------------------------------------
-// `heddle redact trust` — manage the operator trust list
-//
-// The trust list lives in `[redact] trusted_keys` of
-// `.heddle/config.toml`. `Repository::accept_wire_redactions` consults
-// it at wire-receive time; an empty list rejects every signed
-// redaction (fail-closed). Operators run `trust add` after an
-// out-of-band exchange of public key bytes with the redaction's
-// signer — same workflow as gpg/ssh trust setup.
-// ---------------------------------------------------------------------
-
-#[derive(Serialize)]
-struct TrustEntryOutput {
-    algorithm: String,
-    public_key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    label: Option<String>,
-}
-
-#[derive(Serialize)]
-struct TrustAddOutput {
-    output_kind: &'static str,
-    #[serde(flatten)]
-    entry: TrustEntryOutput,
-}
-
-#[derive(Serialize)]
-struct TrustListOutput {
-    output_kind: &'static str,
-    trusted_keys: Vec<TrustEntryOutput>,
-    count: usize,
-}
-
-#[derive(Serialize)]
-struct TrustRemoveOutput {
-    output_kind: &'static str,
-    removed: usize,
-}
-
-fn cmd_redact_trust(cli: &Cli, repo: &Repository, command: RedactTrustCommands) -> Result<()> {
-    cmd_trust(cli, repo, command, TrustCapability::Redact)
-}
-
-pub(super) fn cmd_purge_trust(
-    cli: &Cli,
-    repo: &Repository,
-    command: RedactTrustCommands,
-) -> Result<()> {
-    cmd_trust(cli, repo, command, TrustCapability::Purge)
-}
-
-#[derive(Clone, Copy)]
-enum TrustCapability {
-    Redact,
-    Purge,
-}
-
-impl TrustCapability {
-    fn section(self) -> &'static str {
-        match self {
-            Self::Redact => "redact",
-            Self::Purge => "purge",
-        }
-    }
-
-    fn command(self) -> &'static str {
-        match self {
-            Self::Redact => "heddle redact trust",
-            Self::Purge => "heddle redact purge trust",
-        }
-    }
-
-    fn output_kind(self, operation: &str) -> &'static str {
-        match (self, operation) {
-            (Self::Redact, "add") => "redact_trust_add",
-            (Self::Redact, "list") => "redact_trust_list",
-            (Self::Redact, "remove") => "redact_trust_remove",
-            (Self::Purge, "add") => "purge_trust_add",
-            (Self::Purge, "list") => "purge_trust_list",
-            (Self::Purge, "remove") => "purge_trust_remove",
-            _ => unreachable!("known trust operation"),
-        }
-    }
-
-    fn error_kind(self, operation: &str) -> &'static str {
-        match (self, operation) {
-            (Self::Redact, "key_source_required") => "redact_trust_key_source_required",
-            (Self::Redact, "key_duplicate") => "redact_trust_key_duplicate",
-            (Self::Redact, "config_missing") => "redact_trust_config_missing",
-            (Self::Redact, "keys_missing") => "redact_trust_keys_missing",
-            (Self::Redact, "key_not_found") => "redact_trust_key_not_found",
-            (Self::Purge, "key_source_required") => "purge_trust_key_source_required",
-            (Self::Purge, "key_duplicate") => "purge_trust_key_duplicate",
-            (Self::Purge, "config_missing") => "purge_trust_config_missing",
-            (Self::Purge, "keys_missing") => "purge_trust_keys_missing",
-            (Self::Purge, "key_not_found") => "purge_trust_key_not_found",
-            _ => unreachable!("known trust error"),
-        }
-    }
-}
-
-fn cmd_trust(
-    cli: &Cli,
-    repo: &Repository,
-    command: RedactTrustCommands,
-    capability: TrustCapability,
-) -> Result<()> {
-    match command {
-        RedactTrustCommands::Add(args) => cmd_trust_add(cli, repo, args, capability),
-        RedactTrustCommands::List(args) => cmd_trust_list(cli, repo, args, capability),
-        RedactTrustCommands::Remove(args) => cmd_trust_remove(cli, repo, args, capability),
-    }
-}
-
-fn cmd_trust_add(
-    cli: &Cli,
-    repo: &Repository,
-    args: RedactTrustAddArgs,
-    capability: TrustCapability,
-) -> Result<()> {
-    let (algorithm, public_key) = match (args.from_pem, args.algorithm, args.public_key) {
-        (Some(pem_path), _, _) => {
-            // Reuse the existing PEM loader — same code path operators
-            // hit via `--sign-with`, so a PEM that works for signing
-            // works for trust-add too.
-            let signer = crypto::load_signer(&pem_path, None)
-                .with_context(|| format!("load signer from '{}'", pem_path.display()))?;
-            (
-                signer.algorithm().to_string(),
-                hex::encode(signer.public_key()),
-            )
-        }
-        (None, Some(algorithm), Some(public_key)) => (algorithm, public_key),
-        (None, _, _) => {
-            return Err(anyhow!(RecoveryAdvice::invalid_usage(
-                capability.error_kind("key_source_required"),
-                "supply either `--from-pem <PATH>` or both `--algorithm` and `--public-key`",
-                format!(
-                    "Use `{} add --from-pem <PATH>` or pass both raw key fields.",
-                    capability.command()
-                ),
-                format!("{} add --from-pem <PATH>", capability.command()),
-            )));
-        }
-    };
-
-    // Round-trip the config through toml::Value so we don't have to
-    // re-serialize the entire typed config (which would lose
-    // operator-added comments and table ordering).
-    let config_path = repo.heddle_dir().join("config.toml");
-    let raw = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("read '{}'", config_path.display()))?;
-    let mut value: toml::Value = toml::from_str(&raw).with_context(|| "parse repo config")?;
-    let root = value
-        .as_table_mut()
-        .ok_or_else(|| anyhow!("repo config root must be a TOML table"))?;
-    let trust_section = root
-        .entry(capability.section().to_string())
-        .or_insert_with(|| toml::Value::Table(Default::default()))
-        .as_table_mut()
-        .ok_or_else(|| anyhow!("[{}] section must be a table", capability.section()))?;
-    let trusted_keys = trust_section
-        .entry("trusted_keys".to_string())
-        .or_insert_with(|| toml::Value::Array(Vec::new()))
-        .as_array_mut()
-        .ok_or_else(|| anyhow!("`trusted_keys` must be an array"))?;
-
-    // Refuse duplicates — operators get a clear signal that the key
-    // is already trusted rather than silently adding a second entry
-    // (`accept_wire_redactions` would tolerate dupes but the on-disk
-    // config drifts away from `cargo fmt`-clean noise-free state).
-    let already_trusted = trusted_keys.iter().any(|entry| {
-        entry
-            .get("algorithm")
-            .and_then(|v| v.as_str())
-            .map(|a| a.eq_ignore_ascii_case(&algorithm))
-            .unwrap_or(false)
-            && entry
-                .get("public_key")
-                .and_then(|v| v.as_str())
-                .map(|k| k.eq_ignore_ascii_case(&public_key))
-                .unwrap_or(false)
-    });
-    if already_trusted {
-        return Err(anyhow!(RecoveryAdvice::safety_refusal(
-            capability.error_kind("key_duplicate"),
-            format!("key {algorithm}:{public_key} is already in the trust list"),
-            format!("Inspect trusted keys with `{} list`.", capability.command()),
-            format!("the trust list already contains key {algorithm}:{public_key}"),
-            "adding it again would create duplicate trust metadata without changing trust",
-            "repo config, trust entries, objects, refs, and worktree files were left unchanged",
-            format!("{} list", capability.command()),
-            vec![format!("{} list", capability.command())],
-        )));
-    }
-
-    let mut entry = toml::value::Table::new();
-    entry.insert(
-        "algorithm".to_string(),
-        toml::Value::String(algorithm.clone()),
-    );
-    entry.insert(
-        "public_key".to_string(),
-        toml::Value::String(public_key.clone()),
-    );
-    if let Some(label) = &args.label {
-        entry.insert("label".to_string(), toml::Value::String(label.clone()));
-    }
-    trusted_keys.push(toml::Value::Table(entry));
-
-    let serialized = toml::to_string(&value).with_context(|| "serialize patched repo config")?;
-    std::fs::write(&config_path, serialized)
-        .with_context(|| format!("write '{}'", config_path.display()))?;
-
-    let entry = TrustEntryOutput {
-        algorithm,
-        public_key,
-        label: args.label,
-    };
-    let output = TrustAddOutput {
-        output_kind: capability.output_kind("add"),
-        entry,
-    };
-    if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(&output)?);
-    } else {
-        println!(
-            "trusted {} key {} ({})",
-            output.entry.algorithm,
-            short_public_key(&output.entry.public_key),
-            output.entry.label.as_deref().unwrap_or("unlabeled"),
-        );
-    }
-    Ok(())
-}
-
-fn cmd_trust_list(
-    cli: &Cli,
-    repo: &Repository,
-    _args: RedactTrustListArgs,
-    capability: TrustCapability,
-) -> Result<()> {
-    let trusted_keys = match capability {
-        TrustCapability::Redact => &repo.config().redact.trusted_keys,
-        TrustCapability::Purge => &repo.config().purge.trusted_keys,
-    };
-    let keys: Vec<TrustEntryOutput> = trusted_keys
-        .iter()
-        .map(|k| TrustEntryOutput {
-            algorithm: k.algorithm.clone(),
-            public_key: k.public_key.clone(),
-            label: k.label.clone(),
-        })
-        .collect();
-    let count = keys.len();
-    let output = TrustListOutput {
-        output_kind: capability.output_kind("list"),
-        trusted_keys: keys,
-        count,
-    };
-    if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
-    } else if count == 0 {
-        println!("no trusted operator keys");
-    } else {
-        println!("{count} trusted operator key(s):");
-        for k in &output.trusted_keys {
-            println!(
-                "  {} {} ({})",
-                k.algorithm,
-                short_public_key(&k.public_key),
-                k.label.as_deref().unwrap_or("unlabeled"),
-            );
-        }
-    }
-    Ok(())
-}
-
-fn cmd_trust_remove(
-    cli: &Cli,
-    repo: &Repository,
-    args: RedactTrustRemoveArgs,
-    capability: TrustCapability,
-) -> Result<()> {
-    let config_path = repo.heddle_dir().join("config.toml");
-    let raw = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("read '{}'", config_path.display()))?;
-    let mut value: toml::Value = toml::from_str(&raw).with_context(|| "parse repo config")?;
-    let root = value
-        .as_table_mut()
-        .ok_or_else(|| anyhow!("repo config root must be a TOML table"))?;
-    let Some(trust_section) = root
-        .get_mut(capability.section())
-        .and_then(|v| v.as_table_mut())
-    else {
-        return Err(anyhow!(trust_nothing_to_remove_advice(
-            capability.error_kind("config_missing"),
-            format!(
-                "no [{}] section in config; nothing to remove",
-                capability.section()
-            ),
-            &args.public_key,
-            capability,
-        )));
-    };
-    let Some(trusted_keys) = trust_section
-        .get_mut("trusted_keys")
-        .and_then(|v| v.as_array_mut())
-    else {
-        return Err(anyhow!(trust_nothing_to_remove_advice(
-            capability.error_kind("keys_missing"),
-            format!(
-                "no `trusted_keys` array in [{}]; nothing to remove",
-                capability.section()
-            ),
-            &args.public_key,
-            capability,
-        )));
-    };
-
-    let before = trusted_keys.len();
-    trusted_keys.retain(|entry| {
-        entry
-            .get("public_key")
-            .and_then(|v| v.as_str())
-            .map(|k| !k.eq_ignore_ascii_case(&args.public_key))
-            .unwrap_or(true)
-    });
-    let removed = before - trusted_keys.len();
-    if removed == 0 {
-        return Err(anyhow!(trust_nothing_to_remove_advice(
-            capability.error_kind("key_not_found"),
-            format!(
-                "no trusted key matched `{}`; nothing removed",
-                args.public_key
-            ),
-            &args.public_key,
-            capability,
-        )));
-    }
-
-    let serialized = toml::to_string(&value).with_context(|| "serialize patched repo config")?;
-    std::fs::write(&config_path, serialized)
-        .with_context(|| format!("write '{}'", config_path.display()))?;
-
-    if should_output_json(cli, None) {
-        let output = TrustRemoveOutput {
-            output_kind: capability.output_kind("remove"),
-            removed,
-        };
-        println!("{}", serde_json::to_string(&output)?);
-    } else {
-        println!(
-            "removed {removed} trust entry/entries matching {}",
-            args.public_key
-        );
-    }
-    Ok(())
-}
-
-fn trust_nothing_to_remove_advice(
-    kind: &'static str,
-    error: impl Into<String>,
-    public_key: &str,
-    capability: TrustCapability,
-) -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        kind,
-        error,
-        format!("Inspect trusted keys with `{} list`.", capability.command()),
-        format!("the trust list does not contain key `{public_key}`"),
-        "removing a missing key would imply a trust change that did not occur",
-        "repo config, trust entries, objects, refs, and worktree files were left unchanged",
-        format!("{} list", capability.command()),
-        vec![format!("{} list", capability.command())],
-    )
 }
 
 #[cfg(test)]
