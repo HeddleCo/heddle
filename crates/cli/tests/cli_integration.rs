@@ -723,20 +723,70 @@ fn seed_default_test_user_config(
     .map_err(|err| err.to_string())
 }
 
+#[derive(PartialEq, Eq)]
+enum TestTempPath {
+    Directory(std::path::PathBuf),
+    File(std::path::PathBuf),
+}
+
+#[derive(Default)]
+struct TestTempPaths(Vec<TestTempPath>);
+
+impl Drop for TestTempPaths {
+    fn drop(&mut self) {
+        for path in self.0.drain(..).rev() {
+            let result = match &path {
+                TestTempPath::Directory(path) => std::fs::remove_dir_all(path),
+                TestTempPath::File(path) => std::fs::remove_file(path),
+            };
+            if let Err(err) = result
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                let path = match path {
+                    TestTempPath::Directory(path) | TestTempPath::File(path) => path,
+                };
+                eprintln!("failed to remove test temp path {}: {err}", path.display());
+            }
+        }
+    }
+}
+
+thread_local! {
+    static TEST_TEMP_PATHS: std::cell::RefCell<TestTempPaths> =
+        std::cell::RefCell::new(TestTempPaths::default());
+}
+
+fn track_test_temp_path(path: std::path::PathBuf, directory: bool) -> std::path::PathBuf {
+    TEST_TEMP_PATHS.with(|paths| {
+        let tracked = if directory {
+            TestTempPath::Directory(path.clone())
+        } else {
+            TestTempPath::File(path.clone())
+        };
+        let mut paths = paths.borrow_mut();
+        if !paths.0.contains(&tracked) {
+            paths.0.push(tracked);
+        }
+    });
+    path
+}
+
 fn default_test_user_config_path(cwd: &std::path::Path) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
+    let path = std::env::temp_dir().join(format!(
         "heddle-cli-test-user-{}-{:016x}.toml",
         std::process::id(),
         test_path_hash(cwd)
-    ))
+    ));
+    track_test_temp_path(path, false)
 }
 
 fn default_test_home_path(cwd: &std::path::Path) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
+    let path = std::env::temp_dir().join(format!(
         "heddle-cli-test-home-{}-{:016x}",
         std::process::id(),
         test_path_hash(cwd)
-    ))
+    ));
+    track_test_temp_path(path, true)
 }
 
 fn test_path_hash(path: &std::path::Path) -> u64 {
