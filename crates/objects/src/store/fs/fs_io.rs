@@ -17,6 +17,7 @@ use crate::{
         create_dir_all_durable, enrich_fs_error, enrich_rename_error, sync_directory, sync_file,
         temp_path,
     },
+    object::StateId,
     store::Result,
 };
 
@@ -255,4 +256,30 @@ pub(super) fn list_hashes_from_dir(
     }
     debug!(count = hashes.len(), "Listed hashes");
     Ok(hashes)
+}
+
+/// List state ids from the flat `<state-id>.state` loose-object directory.
+pub(super) fn list_state_ids_from_dir(dir: &Path) -> Result<Vec<StateId>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut ids = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("state") {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|value| value.to_str())
+            && let Ok(id) = StateId::parse(stem)
+        {
+            ids.push(id);
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
 }

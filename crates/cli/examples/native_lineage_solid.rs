@@ -71,8 +71,12 @@ struct RegatedTotal {
     total_bytes: u64,
     git_pack_bytes: u64,
     git_pack_and_idx_bytes: u64,
+    physical_native_before_bytes: u64,
+    physical_native_after_bytes: u64,
     total_to_git_pack: f64,
     total_to_git_pack_and_idx: f64,
+    physical_before_to_git_pack: f64,
+    physical_after_to_git_pack: f64,
 }
 
 fn main() -> Result<()> {
@@ -169,8 +173,12 @@ fn regate(
         total_bytes,
         git_pack_bytes: git.pack_bytes,
         git_pack_and_idx_bytes,
+        physical_native_before_bytes: compact.storage_before.total_bytes,
+        physical_native_after_bytes: compact.storage_after.total_bytes,
         total_to_git_pack: ratio(total_bytes, git.pack_bytes),
         total_to_git_pack_and_idx: ratio(total_bytes, git_pack_and_idx_bytes),
+        physical_before_to_git_pack: ratio(compact.storage_before.total_bytes, git.pack_bytes),
+        physical_after_to_git_pack: ratio(compact.storage_after.total_bytes, git.pack_bytes),
     }
 }
 

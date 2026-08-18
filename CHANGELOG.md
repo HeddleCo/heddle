@@ -32,6 +32,14 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Fixed
 
+- **Compact repack reclaims loose metadata copies.** Loose trees and states are
+  now included in repack inventory, solidified with typed-hash verification,
+  and removed only after the durable replacement reconstructs the same object
+  and typed identity.
+  The pinned physical-store benchmark now measures pack/index framing and loose
+  objects before and after repack; native storage falls from 3.675× to 0.914×
+  Git pack on semver and from 12.430× to 0.857× on ripgrep.
+
 - **Git-lane push reuses local pack entries.** Hosted git-overlay push no
   longer rebuilds a transfer pack from every decoded object. Existing
   self-contained pack bytes are copied when they already are the selected
