@@ -57,11 +57,15 @@ pub enum ObjectType {
     Action,
     AnnotatedTag,
     /// A `RedactionsBlob` sidecar — the rmp-encoded record(s) declaring
-    /// that a specific blob has been redacted (and possibly purged) by
-    /// an authorized operator. Keyed on the wire by `ObjectId::Hash` of
+    /// that a specific blob has been redacted by a writer. Keyed on the
+    /// wire by `ObjectId::Hash` of
     /// the *redacted blob*, since `Repository`'s sidecar store is
     /// indexed that way.
     Redaction,
+    /// An owner-authorized purge sidecar. It carries the same encoded
+    /// `RedactionsBlob` as `Redaction`, but is a distinct operation because
+    /// receiving it can irreversibly erase blob bytes.
+    Purge,
     /// A `StateVisibilityBlob` sidecar — the rmp-encoded record(s)
     /// declaring a non-public audience tier for a specific state. Keyed
     /// on the wire by `ObjectId::StateId` of the state, since the
@@ -85,6 +89,7 @@ pub enum ObjectTypeBucket {
     Action,
     AnnotatedTag,
     Redaction,
+    Purge,
     StateVisibility,
     StateAttachment,
     KeyBinding,
@@ -99,6 +104,7 @@ impl ObjectType {
             ObjectType::Action => "action",
             ObjectType::AnnotatedTag => "annotated_tag",
             ObjectType::Redaction => "redaction",
+            ObjectType::Purge => "purge",
             ObjectType::StateVisibility => "state_visibility",
             ObjectType::StateAttachment => "state_attachment",
             ObjectType::KeyBinding => "key_binding",
@@ -113,6 +119,7 @@ impl ObjectType {
             "action" => Ok(ObjectType::Action),
             "annotated_tag" => Ok(ObjectType::AnnotatedTag),
             "redaction" => Ok(ObjectType::Redaction),
+            "purge" => Ok(ObjectType::Purge),
             "state_visibility" => Ok(ObjectType::StateVisibility),
             "state_attachment" => Ok(ObjectType::StateAttachment),
             "key_binding" => Ok(ObjectType::KeyBinding),
@@ -135,7 +142,10 @@ impl ObjectType {
     pub fn packable(self) -> bool {
         !matches!(
             self,
-            ObjectType::Redaction | ObjectType::StateVisibility | ObjectType::KeyBinding
+            ObjectType::Redaction
+                | ObjectType::Purge
+                | ObjectType::StateVisibility
+                | ObjectType::KeyBinding
         )
     }
 
@@ -174,6 +184,10 @@ impl ObjectType {
                 "Redaction sidecar records cannot be packed into the content-addressed object pack"
                     .to_string(),
             )),
+            ObjectType::Purge => Err(ProtocolError::InvalidState(
+                "Purge sidecar records cannot be packed into the content-addressed object pack"
+                    .to_string(),
+            )),
             ObjectType::StateVisibility => Err(ProtocolError::InvalidState(
                 "StateVisibility sidecar records cannot be packed into the content-addressed object pack"
                     .to_string(),
@@ -193,6 +207,7 @@ impl ObjectType {
             ObjectType::Action => ObjectTypeBucket::Action,
             ObjectType::AnnotatedTag => ObjectTypeBucket::AnnotatedTag,
             ObjectType::Redaction => ObjectTypeBucket::Redaction,
+            ObjectType::Purge => ObjectTypeBucket::Purge,
             ObjectType::StateVisibility => ObjectTypeBucket::StateVisibility,
             ObjectType::StateAttachment => ObjectTypeBucket::StateAttachment,
             ObjectType::KeyBinding => ObjectTypeBucket::KeyBinding,

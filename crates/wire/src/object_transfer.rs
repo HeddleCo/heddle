@@ -186,6 +186,9 @@ pub fn load_object_data(
         (ObjectId::Hash(hash), ObjectType::Redaction) => store
             .get_redactions_bytes_for_blob(hash)?
             .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?,
+        (ObjectId::Hash(hash), ObjectType::Purge) => store
+            .get_redactions_bytes_for_blob(hash)?
+            .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?,
         (ObjectId::StateId(state_id), ObjectType::StateVisibility) => store
             .get_state_visibility_bytes_for_state(state_id)?
             .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string_full()))?,
@@ -280,6 +283,12 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
             return Err(ProtocolError::InvalidState(
                 "Redaction objects must be persisted via Repository::accept_wire_redactions, \
                  not store_received_object — signature verification is required"
+                    .to_string(),
+            ));
+        }
+        (_, ObjectType::Purge) => {
+            return Err(ProtocolError::InvalidState(
+                "Purge objects must be persisted via Repository::accept_wire_purge, not store_received_object — owner authorization is required"
                     .to_string(),
             ));
         }

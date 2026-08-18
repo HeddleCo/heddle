@@ -22,7 +22,7 @@ struct RuntimeContractParseSample {
 // Representative parseable invocations for every runtime leaf command in
 // CONTRACTS. The only intentionally skipped rows are non-runtime grouping
 // contracts whose Clap variants require a subcommand, e.g. `thread`,
-// Git projection grouping rows, and `redact trust`.
+// and Git projection grouping rows.
 const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["abort"], &["abort"]),
     sample(&["adopt"], &["adopt"]),
@@ -312,44 +312,6 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         ],
     ),
     sample(&["redact", "purge", "list"], &["redact", "purge", "list"]),
-    sample(
-        &["redact", "purge", "trust", "add"],
-        &[
-            "redact",
-            "purge",
-            "trust",
-            "add",
-            "--algorithm",
-            "ed25519",
-            "--public-key",
-            "abcd",
-        ],
-    ),
-    sample(
-        &["redact", "purge", "trust", "list"],
-        &["redact", "purge", "trust", "list"],
-    ),
-    sample(
-        &["redact", "purge", "trust", "remove"],
-        &["redact", "purge", "trust", "remove", "abcd"],
-    ),
-    sample(
-        &["redact", "trust", "add"],
-        &[
-            "redact",
-            "trust",
-            "add",
-            "--algorithm",
-            "ed25519",
-            "--public-key",
-            "abcd",
-        ],
-    ),
-    sample(&["redact", "trust", "list"], &["redact", "trust", "list"]),
-    sample(
-        &["redact", "trust", "remove"],
-        &["redact", "trust", "remove", "abcd"],
-    ),
     sample(&["remote", "list"], &["remote", "list"]),
     sample(
         &["remote", "add"],
@@ -1447,16 +1409,8 @@ fn integration_installer_effect_sets_include_config_and_hooks() {
 }
 
 #[test]
-fn credential_and_trust_effect_sets_are_config_scoped() {
-    for path in [
-        &["auth", "logout"][..],
-        &["redact", "trust", "add"],
-        &["redact", "trust", "remove"],
-        &["redact", "purge", "trust", "add"],
-        &["redact", "purge", "trust", "remove"],
-    ] {
-        assert_command_effects(path, &[CommandSideEffect::WritesConfig]);
-    }
+fn credential_effect_sets_are_config_scoped() {
+    assert_command_effects(&["auth", "logout"], &[CommandSideEffect::WritesConfig]);
     assert_command_effects(
         &["auth", "login"],
         &[
@@ -1750,12 +1704,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "redact show",
             "redact purge apply",
             "redact purge list",
-            "redact purge trust add",
-            "redact purge trust list",
-            "redact purge trust remove",
-            "redact trust add",
-            "redact trust list",
-            "redact trust remove",
             "remote list",
             "remote add",
             "remote remove",

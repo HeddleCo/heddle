@@ -358,6 +358,7 @@ pub struct PullObjectMix {
     pub actions: usize,
     pub annotated_tags: usize,
     pub redactions: usize,
+    pub purges: usize,
     pub state_visibilities: usize,
     pub state_attachments: usize,
     pub key_bindings: usize,
@@ -381,6 +382,7 @@ impl PullObjectMix {
             ObjectTypeBucket::Action => self.actions += 1,
             ObjectTypeBucket::AnnotatedTag => self.annotated_tags += 1,
             ObjectTypeBucket::Redaction => self.redactions += 1,
+            ObjectTypeBucket::Purge => self.purges += 1,
             ObjectTypeBucket::StateVisibility => self.state_visibilities += 1,
             ObjectTypeBucket::StateAttachment => self.state_attachments += 1,
             ObjectTypeBucket::KeyBinding => self.key_bindings += 1,
@@ -394,6 +396,7 @@ impl PullObjectMix {
             + self.actions
             + self.annotated_tags
             + self.redactions
+            + self.purges
             + self.state_visibilities
             + self.state_attachments
             + self.key_bindings
@@ -1615,6 +1618,20 @@ impl HostedClient {
         let repo = initial_repo.or(owned_repo.as_ref()).ok_or_else(|| {
             ProtocolError::InvalidState("pull repository initialization failed".to_string())
         })?;
+        let spool_path_segments = repo_path
+            .trim_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        repo.verify_and_pin_owner_genesis(
+            ready.owner_authorization_protocol_version,
+            ready.owner_genesis.as_ref(),
+            &spool_path_segments,
+        )
+        .map_err(|error| {
+            ProtocolError::InvalidState(format!("verify PullReady owner genesis: {error}"))
+        })?;
         let remote_state = super::helpers::parse_proto_state_id(ready.remote_state)?
             .ok_or_else(|| ProtocolError::InvalidState("missing remote state".to_string()))?;
         let PullWantPlan {
@@ -1817,7 +1834,7 @@ impl HostedClient {
                 Some(pull_server_frame::Frame::Redaction(transfer)) => {
                     // Out-of-pack channel: receive a redaction sidecar
                     // and route through `Repository::accept_wire_redactions`
-                    // for signature + trust-list verification. The
+                    // for author-signature verification. The
                     // server emitted these only for blobs in our want
                     // set that carry an active redaction.
                     wire::check_received_transfer_blob_size(
@@ -1844,6 +1861,36 @@ impl HostedClient {
                         })?;
                     let decode_elapsed = decode_start.elapsed();
                     profile.store_receive_object += decode_elapsed;
+                }
+                Some(pull_server_frame::Frame::Purge(transfer)) => {
+                    wire::check_received_transfer_blob_size(
+                        transfer.redactions_blob.len(),
+                        wire::MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
+                        "purge",
+                    )?;
+                    profile.bytes_received = profile
+                        .bytes_received
+                        .saturating_add(transfer.redactions_blob.len());
+                    profile.object_mix.record(ObjectType::Purge);
+                    let blob = ContentHash::from_hex(&transfer.blob_hash).map_err(|err| {
+                        ProtocolError::InvalidState(format!(
+                            "PurgeTransfer.blob_hash is not a valid content hash: {err}"
+                        ))
+                    })?;
+                    let decode_start = Instant::now();
+                    repo.accept_wire_purge(
+                        blob,
+                        &transfer.redactions_blob,
+                        transfer.authorization.as_ref(),
+                        chrono::Utc::now().timestamp(),
+                    )
+                    .map_err(|err| {
+                        ProtocolError::InvalidState(format!(
+                            "accept_wire_purge for blob {}: {err}",
+                            transfer.blob_hash
+                        ))
+                    })?;
+                    profile.store_receive_object += decode_start.elapsed();
                 }
                 Some(pull_server_frame::Frame::StateVisibility(transfer)) => {
                     wire::check_received_transfer_blob_size(
@@ -2328,8 +2375,8 @@ fn redaction_push_message(
     let hex = blob.to_hex();
     // Sender-side: load the byte-identical sidecar payload
     // that `Repository::put_redaction` wrote to disk. The
-    // receiver verifies the signature + trust list and then
-    // persists these bytes verbatim.
+    // receiver verifies the author signature. The repository boundary
+    // strips purge evidence from this ordinary-write lane.
     let bytes = repo
         .verified_redactions_bytes_for_wire(&blob)
         .map_err(|err| {
@@ -3300,6 +3347,13 @@ mod native_exchange_tests {
         assert!(pulled.success);
         assert_eq!(pulled.final_state, Some(state));
         assert!(cloned_repo.store().has_state(&state).unwrap());
+        assert!(
+            clone
+                .path()
+                .join(".heddle/owner-authorization.bin")
+                .is_file(),
+            "clone must persist the verified PullReady owner genesis before installing objects"
+        );
 
         client.close().await;
         server.await.unwrap();

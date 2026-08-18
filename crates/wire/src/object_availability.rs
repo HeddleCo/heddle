@@ -25,6 +25,9 @@ pub fn has_object(store: &impl ObjectStore, info: &ObjectInfo) -> Result<bool> {
         // deduplicates via the content-addressed `put_redaction`
         // idempotency rule. Cheap to refetch; correct under merge.
         (ObjectId::Hash(_), ObjectType::Redaction) => Ok(false),
+        // Purge carries separately authorized destructive evidence and must
+        // always reach the repository verification boundary.
+        (ObjectId::Hash(_), ObjectType::Purge) => Ok(false),
         // StateVisibility is a per-state sidecar with append/merge
         // semantics. Like Redaction, conservatively refetch and let the
         // repository boundary validate + dedupe.

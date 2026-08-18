@@ -87,8 +87,7 @@ mod worktree_safety;
 
 pub use adopt::cmd_adopt;
 pub use advice::RecoveryAdvice;
-pub use agent::run as cmd_agent;
-pub use agent::run_presence as cmd_presence;
+pub use agent::{run as cmd_agent, run_presence as cmd_presence};
 pub use agent_cmd::{
     agent_api_schema, cmd_agent_capture, cmd_agent_heartbeat, cmd_agent_list, cmd_agent_ready,
     cmd_agent_release, cmd_agent_reserve,

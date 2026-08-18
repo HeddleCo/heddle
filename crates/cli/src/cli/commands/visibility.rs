@@ -16,12 +16,11 @@ use objects::object::{StateVisibility, VisibilityTier};
 use repo::{Repository, VisibilityCommitKind};
 use serde::Serialize;
 
+use super::history_target::resolve_state_id as resolve_state;
 use crate::cli::{
     Cli, VisibilityCommands, VisibilityListArgs, VisibilityPromoteArgs, VisibilitySetArgs,
     VisibilityShowArgs, should_output_json,
 };
-
-use super::history_target::resolve_state_id as resolve_state;
 
 pub fn cmd_visibility(cli: &Cli, command: VisibilityCommands) -> Result<()> {
     let repo = cli.open_repo()?;
