@@ -10,8 +10,9 @@ use std::{
 
 use super::{
     FsStore,
-    fs_io::{list_hashes_from_dir, read_file_bytes},
-    fs_paths::{blobs_dir, hash_path, packs_dir, trees_dir},
+    fs_impl::validate_state_serialized,
+    fs_io::{list_hashes_from_dir, list_state_ids_from_dir, read_file_bytes},
+    fs_paths::{blobs_dir, hash_path, packs_dir, state_path, states_dir, trees_dir},
 };
 use crate::{
     object::{ContentHash, State, StateAttachment, StateAttachmentId, Tree},
@@ -76,6 +77,19 @@ fn remove_file_ignore_missing(path: &std::path::Path) -> Result<()> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(HeddleError::from(e)),
+    }
+}
+
+fn remove_file_counted(path: &Path) -> Result<Option<u64>> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(HeddleError::from(error)),
+    };
+    match fs::remove_file(path) {
+        Ok(()) => Ok(Some(metadata.len())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(HeddleError::from(error)),
     }
 }
 
@@ -633,6 +647,7 @@ impl FsStore {
 
         let blobs = list_hashes_from_dir(&blobs_dir(&self.root))?;
         let trees = list_hashes_from_dir(&trees_dir(&self.root))?;
+        let states = list_state_ids_from_dir(&states_dir(&self.root))?;
 
         let pack_manager = self
             .pack_manager()
@@ -642,17 +657,9 @@ impl FsStore {
         for hash in &blobs {
             if pack_manager.get_hashed_object(hash)?.is_some() {
                 let path = hash_path(&blobs_dir(&self.root), hash);
-                match fs::metadata(&path) {
-                    Ok(metadata) => match fs::remove_file(&path) {
-                        Ok(()) => {
-                            bytes_freed += metadata.len();
-                            removed += 1;
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(e) => return Err(HeddleError::from(e)),
-                    },
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(HeddleError::from(e)),
+                if let Some(bytes) = remove_file_counted(&path)? {
+                    bytes_freed = bytes_freed.saturating_add(bytes);
+                    removed += 1;
                 }
             }
         }
@@ -668,20 +675,61 @@ impl FsStore {
             let Some(loose_data) = read_file_bytes(&path)? else {
                 continue;
             };
-            let loose_data = codec::decode_tree_body(loose_data.as_slice())?;
-            if packed_data == loose_data {
-                match fs::metadata(&path) {
-                    Ok(metadata) => match fs::remove_file(&path) {
-                        Ok(()) => {
-                            bytes_freed += metadata.len();
-                            removed += 1;
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(e) => return Err(HeddleError::from(e)),
-                    },
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(HeddleError::from(e)),
-                }
+            let loose_tree = codec::decode_tree(loose_data.as_slice())?;
+            let found = loose_tree.hash();
+            if found != *hash {
+                return Err(HeddleError::Corruption {
+                    expected: *hash,
+                    found,
+                });
+            }
+            // A loose current tree can intentionally shadow an older packed
+            // schema at the same semantic hash. Preserve that migration copy
+            // until consolidation replaces the legacy body.
+            let Ok(packed_tree) = codec::decode_tree_serialized(&packed_data) else {
+                continue;
+            };
+            let packed_found = packed_tree.hash();
+            if packed_found != *hash {
+                return Err(HeddleError::Corruption {
+                    expected: *hash,
+                    found: packed_found,
+                });
+            }
+            if packed_tree == loose_tree
+                && let Some(bytes) = remove_file_counted(&path)?
+            {
+                bytes_freed = bytes_freed.saturating_add(bytes);
+                removed += 1;
+            }
+        }
+
+        for id in &states {
+            let Some((obj_type, packed_data)) =
+                pack_manager.get_object(&PackObjectId::StateId(*id))?
+            else {
+                continue;
+            };
+            if obj_type != PackObjectType::State {
+                continue;
+            }
+            let path = state_path(&self.root, id);
+            let Some(loose_data) = read_file_bytes(&path)? else {
+                continue;
+            };
+            let loose_state = codec::decode_state(loose_data.as_slice())?;
+            let packed_state = validate_state_serialized(&packed_data, *id)?;
+            if loose_state.id() != *id {
+                return Err(HeddleError::InvalidObject(format!(
+                    "loose state id mismatch while pruning: expected {id}, computed {}",
+                    loose_state.id()
+                )));
+            }
+            if packed_state == loose_state
+                && let Some(bytes) = remove_file_counted(&path)?
+            {
+                bytes_freed = bytes_freed.saturating_add(bytes);
+                removed += 1;
             }
         }
 

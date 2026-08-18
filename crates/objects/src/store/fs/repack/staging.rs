@@ -4,11 +4,11 @@ use std::{collections::HashSet, fs, path::PathBuf};
 
 use super::super::{
     FsStore,
-    fs_io::list_hashes_from_dir,
-    fs_paths::{blobs_dir, trees_dir},
+    fs_io::{list_hashes_from_dir, list_state_ids_from_dir},
+    fs_paths::{blobs_dir, states_dir, trees_dir},
 };
 use crate::{
-    object::ContentHash,
+    object::{ContentHash, StateId},
     store::{
         HeddleError, Result,
         fs::fs_impl::validate_pack_entry,
@@ -20,6 +20,7 @@ pub(super) struct RepackSnapshot {
     pub(super) ids: Vec<PackObjectId>,
     pub(super) loose_blobs: Vec<ContentHash>,
     pub(super) loose_trees: Vec<ContentHash>,
+    pub(super) loose_states: Vec<StateId>,
     pub(super) old_pack_files: Vec<(PathBuf, PathBuf)>,
     pub(super) commit_artifact_ids: Vec<ContentHash>,
 }
@@ -28,6 +29,7 @@ impl RepackSnapshot {
     pub(super) fn capture(store: &FsStore) -> Result<Self> {
         let loose_blobs = list_hashes_from_dir(&blobs_dir(store.root()))?;
         let loose_trees = list_hashes_from_dir(&trees_dir(store.root()))?;
+        let loose_states = list_state_ids_from_dir(&states_dir(store.root()))?;
         let manager = store
             .pack_manager()
             .read()
@@ -47,6 +49,7 @@ impl RepackSnapshot {
             ids,
             loose_blobs,
             loose_trees,
+            loose_states,
             old_pack_files,
             commit_artifact_ids,
         })

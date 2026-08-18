@@ -167,6 +167,47 @@ fn loose_object_trigger_consolidates_and_reclaims_the_loose_copy() {
 }
 
 #[test]
+fn loose_state_is_solidified_and_reclaimed() {
+    let (_temp, store) = create_store();
+    let tree = Tree::from_entries(Vec::new());
+    let tree_hash = store.put_tree(&tree).unwrap();
+    let state = State::new(
+        tree_hash,
+        Vec::new(),
+        Attribution::human(Principal::new("Loose State", "loose-state@example.com")),
+    );
+    let state_id = state.id();
+    store.put_state(&state).unwrap();
+    let state_path = store
+        .root()
+        .join("objects/states")
+        .join(format!("{}.state", state_id.to_string_full()));
+    assert!(state_path.is_file());
+
+    let operation = Arc::new(FsRepackOperation::new(store.clone()));
+    assert_eq!(operation.inspect().unwrap().loose_objects, 2);
+    started_handle(scheduler(None).repack_now(operation).unwrap())
+        .wait()
+        .unwrap();
+
+    assert!(!state_path.exists());
+    assert_eq!(
+        FsRepackOperation::new(store.clone())
+            .inspect()
+            .unwrap()
+            .loose_objects,
+        0
+    );
+    store.clear_recent_object_caches();
+    let loaded = store.get_state(&state_id).unwrap().unwrap();
+    assert_eq!(loaded.id(), state_id);
+    assert_eq!(
+        rmp_serde::to_vec_named(&loaded).unwrap(),
+        rmp_serde::to_vec_named(&state).unwrap()
+    );
+}
+
+#[test]
 fn deliberately_corrupted_repack_output_is_rejected_before_cutover() {
     let (_temp, store) = create_store();
     let blob = Blob::from("authoritative bytes must survive rejection");

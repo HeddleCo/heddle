@@ -97,7 +97,7 @@ fn validate_loaded_state(requested_id: &StateId, mut state: State) -> Result<Sta
     Ok(state)
 }
 
-fn validate_state_serialized(data: &[u8], id: StateId) -> Result<State> {
+pub(super) fn validate_state_serialized(data: &[u8], id: StateId) -> Result<State> {
     let state: State = rmp_serde::from_slice(data)?;
     validate_loaded_state(&id, state)
 }

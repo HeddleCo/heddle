@@ -5,8 +5,8 @@ use std::{collections::HashSet, fs, fs::OpenOptions};
 use super::{
     super::{
         FsStore,
-        fs_io::list_hashes_from_dir,
-        fs_paths::{blobs_dir, packs_dir, trees_dir},
+        fs_io::{list_hashes_from_dir, list_state_ids_from_dir},
+        fs_paths::{blobs_dir, packs_dir, state_path, states_dir, trees_dir},
     },
     compact::add_compact_metadata,
     cutover::{
@@ -65,6 +65,7 @@ impl FsRepackOperation {
     fn inventory(&self) -> Result<RepackInventory> {
         let loose_blobs = list_hashes_from_dir(&blobs_dir(self.store.root()))?;
         let loose_trees = list_hashes_from_dir(&trees_dir(self.store.root()))?;
+        let loose_states = list_state_ids_from_dir(&states_dir(self.store.root()))?;
         let loose_bytes = loose_blobs
             .iter()
             .map(|hash| object_file_len(&blobs_dir(self.store.root()), hash))
@@ -72,6 +73,11 @@ impl FsRepackOperation {
                 loose_trees
                     .iter()
                     .map(|hash| object_file_len(&trees_dir(self.store.root()), hash)),
+            )
+            .chain(
+                loose_states
+                    .iter()
+                    .map(|id| file_len(&state_path(self.store.root(), id))),
             )
             .sum();
         let manager =
@@ -87,7 +93,7 @@ impl FsRepackOperation {
         let ids = manager.list_all_ids()?;
         let unique = ids.iter().copied().collect::<HashSet<_>>().len() as u64;
         Ok(RepackInventory {
-            loose_objects: (loose_blobs.len() + loose_trees.len()) as u64,
+            loose_objects: (loose_blobs.len() + loose_trees.len() + loose_states.len()) as u64,
             loose_bytes,
             pack_count: paths.len() as u64,
             pack_bytes,
@@ -106,6 +112,7 @@ impl FsRepackOperation {
         if snapshot.ids.is_empty()
             && snapshot.loose_blobs.is_empty()
             && snapshot.loose_trees.is_empty()
+            && snapshot.loose_states.is_empty()
         {
             return Ok(RepackOutcome::default());
         }
@@ -242,6 +249,12 @@ impl FsRepackOperation {
             let id = PackObjectId::Hash(*hash);
             if expected.insert(id) {
                 tree_hashes.push(*hash);
+            }
+        }
+        for id in &snapshot.loose_states {
+            let object_id = PackObjectId::StateId(*id);
+            if expected.insert(object_id) {
+                state_ids.push(*id);
             }
         }
         logical_bytes = logical_bytes.saturating_add(add_compact_metadata(
