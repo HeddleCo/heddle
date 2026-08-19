@@ -1,8 +1,15 @@
 ---
-status: accepted
+status: superseded
+superseded-by: ADR 0046
 ---
 
 # Workflow Command Vocabulary
+
+This decision preferred `commit` as the everyday human save, with `capture`
+as an advanced granular savepoint. Shipped CLI and ADR 0046 / ADR 0047 made
+`capture` the save boundary. `commit` is the Git Overlay write to `.git`;
+it is unnecessary in Native Heddle because a capture is already source
+history. The text below is retained as historical decision context.
 
 Heddle's everyday workflow vocabulary is `commit`, `ready`, `land`, `push`/`sync`, with top-level `resolve`, `continue`, and `abort` for recovery. `capture` remains a public advanced granular savepoint, and `checkpoint` remains a public Git-facing milestone primitive for agent and advanced workflows; neither is legacy. The old `ship` landing verb and bridge-oriented breadcrumbs should be retired while Heddle is alpha so the command surface reflects the intended model instead of carrying alias and compatibility complexity.
 

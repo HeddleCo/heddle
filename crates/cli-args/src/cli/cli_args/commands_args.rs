@@ -146,6 +146,7 @@ fn parse_confidence(s: &str) -> Result<f32, String> {
 
 /// Arguments for the `capture` command.
 #[derive(Clone, Debug, clap::Args)]
+#[command(override_usage = "heddle capture -m <INTENT> [OPTIONS]")]
 #[command(after_help = "\
 Examples:
   heddle capture -m 'add login route'           # capture the worktree with intent
@@ -167,8 +168,8 @@ pub struct SnapshotArgs {
     #[arg(long, hide = true)]
     pub help_agent: bool,
 
-    /// Natural language intent for this recoverable step.
-    #[arg(short = 'm', long, visible_alias = "message")]
+    /// Required natural-language intent for this recoverable step.
+    #[arg(short = 'm', long, visible_alias = "message", value_name = "INTENT")]
     pub intent: Option<String>,
 
     /// Confidence level (0.0-1.0).
@@ -1764,6 +1765,13 @@ mod capture_message_alias_tests {
     fn capture_accepts_short_m() {
         let args = parse_capture(&["-m", "my change"]).expect("-m should parse");
         assert_eq!(args.intent.as_deref(), Some("my change"));
+    }
+
+    #[test]
+    fn capture_parses_without_intent_so_the_refuse_can_fire() {
+        let args =
+            parse_capture(&[]).expect("omitted -m is a semantic refuse, not a clap usage error");
+        assert!(args.intent.is_none());
     }
 
     #[test]

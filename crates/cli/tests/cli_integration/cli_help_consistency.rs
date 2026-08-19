@@ -164,6 +164,19 @@ fn capture_help_agent_reveals_hidden_flags_through_clap() {
 /// the reveal surface. Progressive disclosure: discover via the pointer, not
 /// by seeing the flag in the human help.
 #[test]
+fn capture_help_marks_intent_required_on_the_usage_line() {
+    let help = heddle_help(&["capture", "--help"]);
+    let usage = help
+        .lines()
+        .find(|line| line.contains("Usage:"))
+        .unwrap_or(help.as_str());
+    assert!(
+        usage.contains("-m") && usage.contains("<INTENT>") && !usage.contains("[-m"),
+        "capture usage must mark -m required so agents do not guess a default intent: {help}"
+    );
+}
+
+#[test]
 fn capture_help_keeps_help_agent_hidden_but_keeps_the_pointer() {
     let help = heddle_help(&["capture", "--help"]);
     // The discovery pointer in after-help stays so agents can still find it.

@@ -10,6 +10,7 @@ use super::{
     checkpoint::{GitCheckpointRequest, create_git_checkpoint},
     command_catalog::ActionTemplate,
     git_overlay_txn,
+    ready_cmd::worktree_dirty,
     verification_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
     },
@@ -42,19 +43,7 @@ pub fn cmd_commit(cli: &Cli, args: CommitArgs) -> Result<()> {
 
     let repo = cli.open_repo()?;
     if repo.source_authority() != repo::RepositorySourceAuthority::GitOverlay {
-        return Err(anyhow!(RecoveryAdvice::safety_refusal(
-            "commit_requires_git_overlay",
-            "`heddle commit` writes Git-overlay source history",
-            "Use `heddle capture -m \"...\"` in a native Heddle repository.",
-            format!(
-                "repository source authority is {}",
-                repo.storage_model_label()
-            ),
-            "commit would try to update a Git ref where Git is not the source authority",
-            "Heddle refs and worktree files were left unchanged",
-            "heddle capture -m \"...\"",
-            vec!["heddle capture -m \"...\"".to_string()],
-        )));
+        return Err(anyhow!(native_commit_refusal(&repo)?));
     }
 
     let state = repo.current_state()?.ok_or_else(|| {
@@ -125,4 +114,26 @@ pub fn cmd_commit(cli: &Cli, args: CommitArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn native_commit_refusal(repo: &repo::Repository) -> Result<RecoveryAdvice> {
+    let dirty = worktree_dirty(repo, &worktree_status_options(Some(repo.config())))?;
+    let next = if dirty {
+        "heddle capture -m \"...\""
+    } else {
+        "heddle status"
+    };
+    Ok(RecoveryAdvice::safety_refusal(
+        "commit_requires_git_overlay",
+        "`heddle commit` writes Git-overlay source history",
+        "In a native repository, `heddle capture` is the save. `commit` writes `.git` in Git Overlay only.",
+        format!(
+            "repository source authority is {}",
+            repo.storage_model_label()
+        ),
+        "commit would try to update a Git ref where Git is not the source authority",
+        "Heddle refs and worktree files were left unchanged",
+        next,
+        vec![next.to_string()],
+    ))
 }

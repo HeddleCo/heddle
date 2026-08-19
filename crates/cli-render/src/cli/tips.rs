@@ -18,8 +18,8 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tip {
-    /// "tip: Git Overlay source history stays in direct Git commands."
-    /// Emitted after a successful capture.
+    /// "tip: in Git Overlay, run `heddle commit` when the captured state is ready."
+    /// Emitted after a successful capture in Git Overlay only.
     CheckpointAfterCapture,
     /// "tip: `heddle query` searches saved change history."
     /// Emitted after the first heavy `heddle log` view.

@@ -382,11 +382,9 @@ pub async fn cmd_snapshot(
         .flatten()
         .and_then(|thread| thread.target_thread)
         .is_some();
-    if !git_overlay && !captured_thread_targets_integration {
-        // Discoverability tip after a successful capture in native Heddle
-        // repos. In Git-overlay repos the concrete checkpoint next step
-        // above is more useful; in isolated feature checkouts, `ready`
-        // is the next product step.
+    if git_overlay && !captured_thread_targets_integration {
+        // Overlay-only discoverability: commit writes the captured tree
+        // to `.git`. Native capture is already the save boundary.
         crate::cli::tips::maybe_emit(
             repo.root(),
             Some(repo.config()),

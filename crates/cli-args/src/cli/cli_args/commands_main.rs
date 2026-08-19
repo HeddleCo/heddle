@@ -250,7 +250,7 @@ Heddle options must appear before `--`. Everything after `--` is passed unchange
     /// Capture a recoverable Heddle step for undo, provenance, and review.
     Capture(SnapshotArgs),
 
-    /// Commit the current captured state to the authoritative Git checkout.
+    /// Write captured source history to `.git` in Git Overlay.
     Commit(CommitArgs),
 
     /// Show state history.

@@ -48,8 +48,12 @@ pub fn everyday_verbs() -> Vec<&'static str> {
 
 /// The first screen of help is smaller than the complete everyday set:
 /// it shows the primary work loop, then points at setup, sync, proof,
-/// and recovery as nearby verbs.
-fn primary_loop_verbs(catalog: &crate::cli::commands::CommandCatalogOutput) -> Vec<&'static str> {
+/// and recovery as nearby verbs. Overlay-only `commit` stays off the
+/// native / no-repo front door (heddle#1435).
+fn primary_loop_verbs(
+    catalog: &crate::cli::commands::CommandCatalogOutput,
+    authority: repo::RepositorySourceAuthority,
+) -> Vec<&'static str> {
     everyday_verbs()
         .into_iter()
         .filter(|verb| {
@@ -57,7 +61,101 @@ fn primary_loop_verbs(catalog: &crate::cli::commands::CommandCatalogOutput) -> V
                 .command_by_display(verb)
                 .is_some_and(|entry| entry.help_rank <= 70)
         })
+        .filter(|verb| {
+            *verb != "commit" || authority == repo::RepositorySourceAuthority::GitOverlay
+        })
         .collect()
+}
+
+/// Discover source authority for first-screen help. Fail closed to Native
+/// (hide overlay `commit`) when no repository is proven.
+fn probed_source_authority() -> repo::RepositorySourceAuthority {
+    let Ok(cwd) = std::env::current_dir() else {
+        return repo::RepositorySourceAuthority::Native;
+    };
+    let Some(root) = repo::discover_heddle_root(&cwd) else {
+        return repo::RepositorySourceAuthority::Native;
+    };
+    match repo::RepoConfig::load_for_repository(&root.join(".heddle").join("config.toml")) {
+        Ok(config) => config.repository.source_authority,
+        Err(_) => repo::RepositorySourceAuthority::Native,
+    }
+}
+
+fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthority) {
+    use std::fmt::Write;
+
+    use heddle_core::source_authority::{SourceAction, SourceAuthorityActions};
+
+    let catalog = crate::cli::commands::build_command_catalog();
+    let overlay = authority == repo::RepositorySourceAuthority::GitOverlay;
+    let actions = SourceAuthorityActions::new(authority);
+    let capture = actions.display(SourceAction::Capture);
+    let push = actions.display(SourceAction::Push);
+
+    let _ = writeln!(out, "Heddle — agent-native version control");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Common loop:");
+    for name in primary_loop_verbs(&catalog, authority) {
+        let blurb = catalog_summary(&catalog, name);
+        if blurb.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "  {:<10}  {}", name, blurb);
+    }
+    let _ = writeln!(out);
+    if overlay {
+        let _ = writeln!(
+            out,
+            "Existing Git: heddle status -> heddle init -> {capture} -> heddle commit -> {push}"
+        );
+    } else {
+        let _ = writeln!(out, "Save: heddle init -> {capture}");
+    }
+    let _ = writeln!(
+        out,
+        "Isolated work: heddle start <name> --path ../<name> -> {capture} -> heddle ready -> heddle land"
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "Nearby: `heddle pull`, `heddle undo`, and `heddle verify`."
+    );
+    let _ = writeln!(
+        out,
+        "Start here: `heddle init`, `heddle clone`, or `heddle capture`."
+    );
+    let _ = writeln!(
+        out,
+        "In Git Overlay, Heddle uses its embedded Sley engine to operate directly on the checkout's `.git`."
+    );
+    let _ = writeln!(
+        out,
+        "Coming from Git? Run `heddle help git-concepts` for the concept map."
+    );
+    let _ = writeln!(out);
+    // The ONE place the --output machine-contract blurb is stated
+    // in full on a help screen; per-command --help carries only the
+    // one-line global flag plus the `heddle help output-formats`
+    // breadcrumb (heddle#652).
+    let _ = writeln!(
+        out,
+        "Output: text is the default; pass `--output json` for the \
+         full machine contract (stable `output_kind`, exit codes, recovery \
+         templates), or `--output json-compact` for the decision surface \
+         only (fewer tokens, same `output_kind`). No TTY/pipe auto-detection. \
+         Details: `heddle help output-formats`."
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "Run `heddle help model` for the short mental model, \
+         `heddle help advanced` for power surfaces, automation, and Git interop, \
+         or `heddle help <topic>` for a topic page (e.g. `git-concepts`, \
+         `git-overlay`, \
+         `threads`, `daemon`, `signals`, `git-projection`, `operation-ids`, \
+         `remotes`, `output-formats`, `ignore`/`heddleignore`, `git-dependencies`)."
+    );
 }
 
 /// Verbs surfaced by `heddle help advanced`, in command-contract order.
@@ -95,71 +193,22 @@ pub fn print_help(cmd: &clap::Command, topic: &[String]) -> std::io::Result<()> 
 /// this, so the bytes are identical. Extracted so in-process tests can
 /// assert on help prose without spawning the binary (HeddleCo/heddle#381).
 pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
+    render_help_for_authority(cmd, topic, probed_source_authority())
+}
+
+/// Render curated help for an explicit source authority.
+///
+/// Topic pages stay authority-independent. The empty-topic first screen
+/// hides overlay `commit` unless [`RepositorySourceAuthority::GitOverlay`].
+pub fn render_help_for_authority(
+    cmd: &clap::Command,
+    topic: &[String],
+    authority: repo::RepositorySourceAuthority,
+) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     match topic {
-        [] => {
-            let catalog = crate::cli::commands::build_command_catalog();
-            let _ = writeln!(out, "Heddle — agent-native version control");
-            let _ = writeln!(out);
-            let _ = writeln!(out, "Common loop:");
-            for name in primary_loop_verbs(&catalog) {
-                let blurb = catalog_summary(&catalog, name);
-                if blurb.is_empty() {
-                    continue;
-                }
-                let _ = writeln!(out, "  {:<10}  {}", name, blurb);
-            }
-            let _ = writeln!(out);
-            let _ = writeln!(
-                out,
-                "Existing Git: heddle status -> heddle init -> heddle capture -m \"...\" -> heddle commit -> heddle push"
-            );
-            let _ = writeln!(
-                out,
-                "Isolated work: heddle start <name> --path ../<name> -> heddle capture -m \"...\" -> heddle ready -> heddle land"
-            );
-            let _ = writeln!(out);
-            let _ = writeln!(
-                out,
-                "Nearby: `heddle pull`, `heddle undo`, and `heddle verify`."
-            );
-            let _ = writeln!(
-                out,
-                "Start here: `heddle init`, `heddle clone`, or `heddle capture`."
-            );
-            let _ = writeln!(
-                out,
-                "In Git Overlay, Heddle uses its embedded Sley engine to operate directly on the checkout's `.git`."
-            );
-            let _ = writeln!(
-                out,
-                "Coming from Git? Run `heddle help git-concepts` for the concept map."
-            );
-            let _ = writeln!(out);
-            // The ONE place the --output machine-contract blurb is stated
-            // in full on a help screen; per-command --help carries only the
-            // one-line global flag plus the `heddle help output-formats`
-            // breadcrumb (heddle#652).
-            let _ = writeln!(
-                out,
-                "Output: text is the default; pass `--output json` for the \
-                 full machine contract (stable `output_kind`, exit codes, recovery \
-                 templates), or `--output json-compact` for the decision surface \
-                 only (fewer tokens, same `output_kind`). No TTY/pipe auto-detection. \
-                 Details: `heddle help output-formats`."
-            );
-            let _ = writeln!(out);
-            let _ = writeln!(
-                out,
-                "Run `heddle help model` for the short mental model, \
-                 `heddle help advanced` for power surfaces, automation, and Git interop, \
-                 or `heddle help <topic>` for a topic page (e.g. `git-concepts`, \
-                 `git-overlay`, \
-                 `threads`, `daemon`, `signals`, `git-projection`, `operation-ids`, \
-                 `remotes`, `output-formats`, `ignore`/`heddleignore`, `git-dependencies`)."
-            );
-        }
+        [] => write_first_screen(&mut out, authority),
         [name] if name == "advanced" => {
             let catalog = crate::cli::commands::build_command_catalog();
             let _ = writeln!(out, "{}", ADVANCED_HELP);
@@ -445,8 +494,9 @@ fn command_path_from_raw_help_request(cmd: &clap::Command, raw: &[String]) -> Op
 /// reveal, and the `heddle help <topics>` arm. Because the underlying printers
 /// are now `write_stdout(&render_*(..))` wrappers, the in-process text is
 /// byte-identical to the spawned binary's stdout — only the execution
-/// mechanism differs (HeddleCo/heddle#381). Help is repo-, cwd-, and
-/// env-independent, so this is safe to call from parallel tests.
+/// mechanism differs (HeddleCo/heddle#381). Topic and per-verb help is
+/// repo-, cwd-, and env-independent. The empty-topic first screen probes
+/// source authority and fails closed to Native when no repository is proven.
 pub fn render_for_args(args: &[&str]) -> Option<String> {
     use clap::{CommandFactory, Parser};
 
@@ -1094,6 +1144,50 @@ mod tests {
                  advertised by `heddle help advanced`"
             );
         }
+    }
+
+    /// heddle#1435. Default first screen follows Native source authority:
+    /// capture is the save, and overlay `commit` stays off the front door.
+    #[test]
+    fn first_screen_hides_overlay_commit_by_default() {
+        use clap::CommandFactory;
+        let cmd = crate::cli::cli_args::Cli::command();
+        let help = render_help_for_authority(&cmd, &[], repo::RepositorySourceAuthority::Native);
+        assert!(
+            help.contains("heddle capture -m"),
+            "default first screen still teaches capture: {help}"
+        );
+        assert!(
+            help.contains("Save: heddle init -> heddle capture -m \"...\""),
+            "native first screen follows the unborn save path: {help}"
+        );
+        assert!(
+            !help.contains("-> heddle commit ->"),
+            "default first screen must not teach overlay commit: {help}"
+        );
+        assert!(
+            !help
+                .lines()
+                .any(|line| line.trim_start().starts_with("commit  ")),
+            "default first screen must hide the commit verb unless overlay: {help}"
+        );
+    }
+
+    #[test]
+    fn first_screen_shows_overlay_commit_for_git_overlay() {
+        use clap::CommandFactory;
+        let cmd = crate::cli::cli_args::Cli::command();
+        let help =
+            render_help_for_authority(&cmd, &[], repo::RepositorySourceAuthority::GitOverlay);
+        assert!(
+            help.contains("Existing Git: heddle status -> heddle init -> heddle capture -m \"...\" -> heddle commit -> heddle push"),
+            "overlay first screen still teaches commit after capture: {help}"
+        );
+        assert!(
+            help.lines()
+                .any(|line| line.trim_start().starts_with("commit  ")),
+            "overlay first screen lists the commit verb: {help}"
+        );
     }
 
     /// The everyday surface should mirror the core loop rather than
