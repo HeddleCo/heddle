@@ -58,7 +58,12 @@ async fn tls_authenticates_first_contact_and_configured_ca_allows_it() {
             resolve_and_verify_endpoint_descriptor(server.authority(), &Default::default())
                 .await
                 .unwrap_err();
-        assert!(untrusted_error.to_string().contains("HTTPS request failed"));
+        let message = untrusted_error.to_string();
+        assert!(message.contains("HTTPS request failed"));
+        assert!(
+            message.contains("HEDDLE_REMOTE_TLS_CA_CERT"),
+            "UnknownIssuer must name the CA configuration: {message}"
+        );
         assert!(load_automatic_pin(server.authority()).unwrap().is_none());
 
         resolve_and_verify_endpoint_descriptor(server.authority(), &trusted_config(&server))
