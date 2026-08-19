@@ -2437,8 +2437,6 @@ async fn next_pull_message(
         };
         let declared_len =
             admit_declared_received_len(length, wire::MAX_RECEIVED_PACK_SIZE, "pull raw body")?;
-        // Current contract: reserve the declared length, then append.
-        raw_target.reserve(declared_len);
         while let Some(chunk) = response
             .read_raw_chunk(1024 * 1024)
             .await
@@ -2454,8 +2452,17 @@ async fn next_pull_message(
 fn append_pull_raw_chunk(
     raw_target: &mut Vec<u8>,
     chunk: &[u8],
-    _declared_len: usize,
+    declared_len: usize,
 ) -> Result<(), ProtocolError> {
+    let next_len = raw_target
+        .len()
+        .checked_add(chunk.len())
+        .ok_or_else(|| ProtocolError::InvalidState("pull raw body length overflow".to_string()))?;
+    if next_len > declared_len {
+        return Err(ProtocolError::InvalidState(
+            "pull raw body exceeded declared length during receive".to_string(),
+        ));
+    }
     raw_target.extend_from_slice(chunk);
     Ok(())
 }
@@ -2477,7 +2484,6 @@ fn receive_pull_raw_chunks<'a>(
     chunks: impl IntoIterator<Item = &'a [u8]>,
 ) -> Result<(), ProtocolError> {
     let declared_len = admit_declared_received_len(declared, max_bytes, "pull raw body")?;
-    raw_target.reserve(declared_len);
     for chunk in chunks {
         append_pull_raw_chunk(raw_target, chunk, declared_len)?;
     }

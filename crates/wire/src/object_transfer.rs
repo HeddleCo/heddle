@@ -89,9 +89,11 @@ pub fn check_received_transfer_blob_size(
 /// before converting to `usize` so a hostile header cannot pick the
 /// allocation. This function does not reserve or allocate.
 pub fn admit_declared_received_len(declared: u64, max_bytes: u64, kind: &str) -> Result<usize> {
-    // Intentionally matches the current next_pull_message contract: convert
-    // the declared u64 to usize only. The max-bytes gate is the #1409 fix.
-    let _ = max_bytes;
+    if declared > max_bytes {
+        return Err(ProtocolError::InvalidState(format!(
+            "{kind} exceeds receive size limit: {declared} bytes (max {max_bytes})"
+        )));
+    }
     usize::try_from(declared)
         .map_err(|_| ProtocolError::InvalidState(format!("{kind} exceeds this platform")))
 }

@@ -6,14 +6,20 @@ use super::{admit_declared_received_len, receive_pull_raw_chunks};
 
 #[test]
 fn huge_declared_raw_body_is_rejected_before_any_reserve() {
-    // Call the admit gate only: the pre-fix receive path still reserve()s the
-    // declared usize, and exercising that with MAX+1 would abort the process.
-    let error = admit_declared_received_len(
+    let mut buf = Vec::new();
+    let error = receive_pull_raw_chunks(
+        &mut buf,
         MAX_RECEIVED_PACK_SIZE + 1,
         MAX_RECEIVED_PACK_SIZE,
-        "pull raw body",
+        std::iter::empty::<&[u8]>(),
     )
     .expect_err("huge declared length must fail closed before reserve");
+    assert_eq!(
+        buf.capacity(),
+        0,
+        "attacker-chosen length must not reserve, capacity={}",
+        buf.capacity()
+    );
     assert!(
         error.to_string().contains("exceeds receive size limit"),
         "got {error}"
