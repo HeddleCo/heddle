@@ -41,8 +41,8 @@ use super::super::{
     advice::RecoveryAdvice,
     import_progress::ImportProgress,
     verification_health::{
-        RepositoryVerificationState, build_plain_git_verification_probe,
-        build_repository_verification_state,
+        RepositoryVerificationState, action_template, action_templates,
+        build_plain_git_verification_probe, build_repository_verification_state,
     },
     worktree_safety::ensure_worktree_clean,
 };
@@ -1370,7 +1370,7 @@ pub async fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             Ok(())
         }
         RemoteCommands::Add { name, url } => {
-            super::preflight_native_remote_transport(&repo, Some(&url), "remote add").await?;
+            super::admit_native_remote_url(&repo, &url).await?;
             let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::new)?;
             cfg.add(
                 &name,
@@ -1390,7 +1390,7 @@ pub async fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
                     url: Some(url),
                     default,
                     message: "Added remote".to_string(),
-                    trust: build_repository_verification_state(&repo),
+                    trust: remotes_task_next_trust(&repo),
                 },
                 should_output_json(cli, Some(repo.config())),
             )?;
@@ -1426,7 +1426,7 @@ pub async fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
                     url: None,
                     default: Some(name),
                     message: "Set default remote".to_string(),
-                    trust: build_repository_verification_state(&repo),
+                    trust: remotes_task_next_trust(&repo),
                 },
                 should_output_json(cli, Some(repo.config())),
             )?;
@@ -1455,6 +1455,7 @@ fn cmd_git_overlay_remote(cli: &Cli, repo: &Repository, command: RemoteCommands)
             if git.remote_config_with_sources()?.get(&name).is_some() {
                 anyhow::bail!("Remote '{name}' already exists");
             }
+            super::admit_git_overlay_remote_url(&url)?;
             let set = RemoteConfigSet::new(&name)
                 .with_url(&url)
                 .with_fetch_refspec(format!("+refs/heads/*:refs/remotes/{name}/*"));
@@ -1471,7 +1472,7 @@ fn cmd_git_overlay_remote(cli: &Cli, repo: &Repository, command: RemoteCommands)
                     url: Some(url),
                     default: resolved_default_remote_name(repo)?,
                     message: "Added remote".to_string(),
-                    trust: build_repository_verification_state(repo),
+                    trust: remotes_task_next_trust(repo),
                 },
                 json,
             )
@@ -1509,7 +1510,7 @@ fn cmd_git_overlay_remote(cli: &Cli, repo: &Repository, command: RemoteCommands)
                     url: None,
                     default: Some(name),
                     message: "Set default remote".to_string(),
-                    trust: build_repository_verification_state(repo),
+                    trust: remotes_task_next_trust(repo),
                 },
                 json,
             )
@@ -1647,6 +1648,16 @@ fn set_git_overlay_default(git: &SleyRepository, branch: &str, name: &str) -> Re
         .with_operation(ConfigEdit::set(&branch_remote, name)?)
         .with_operation(ConfigEdit::set(&branch_merge, merge_target)?);
     git.apply_config_edit_plan(plan).map_err(anyhow::Error::new)
+}
+
+fn remotes_task_next_trust(repo: &Repository) -> RepositoryVerificationState {
+    let mut trust = build_repository_verification_state(repo);
+    let action = "heddle push".to_string();
+    trust.recommended_action = action.clone();
+    trust.recommended_action_template = action_template(&action);
+    trust.recovery_commands = vec!["heddle push".to_string(), "heddle auth login".to_string()];
+    trust.recovery_action_templates = action_templates(&trust.recovery_commands);
+    trust
 }
 
 fn render_remote_mutation(output: RemoteMutationOutput, json: bool) -> Result<()> {

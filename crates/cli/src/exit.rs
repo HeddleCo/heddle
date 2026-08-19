@@ -101,6 +101,8 @@ impl HeddleExitCode {
             "remote_not_configured" | "remote_not_found" | "repository_not_found" => {
                 Some(Self::Config)
             }
+            // Well-formed remote argument that push cannot use.
+            "invalid_remote_url" | "clone_invalid_remote_url" => Some(Self::DataErr),
             // A Heddle global option after `try --` is a malformed
             // invocation, not a child-command argument.
             "try_global_option_after_separator" => Some(Self::Usage),
@@ -492,6 +494,8 @@ mod tests {
             ("remote_not_configured", HeddleExitCode::Config),
             ("remote_not_found", HeddleExitCode::Config),
             ("repository_not_found", HeddleExitCode::Config),
+            ("invalid_remote_url", HeddleExitCode::DataErr),
+            ("clone_invalid_remote_url", HeddleExitCode::DataErr),
             ("try_global_option_after_separator", HeddleExitCode::Usage),
             ("nothing_to_capture", HeddleExitCode::DataErr),
             ("dirty_worktree", HeddleExitCode::DataErr),

@@ -1088,6 +1088,7 @@ pub fn summarize_pull_outcome(outcome: &PullOutcome) -> String {
 /// Stable RecoveryAdvice `kind` strings shared by domain failures and CLI.
 pub mod remote_advice_kind {
     pub const REMOTE_NOT_CONFIGURED: &str = "remote_not_configured";
+    pub const INVALID_REMOTE_URL: &str = "invalid_remote_url";
     pub const REMOTE_TRANSPORT_MISMATCH: &str = "remote_transport_mismatch";
     pub const GIT_OVERLAY_THREAD_MISMATCH: &str = "git_overlay_thread_mismatch";
     pub const NAMED_THREAD_TIP_MISMATCH: &str = "named_thread_tip_mismatch";
@@ -2201,6 +2202,75 @@ pub fn looks_like_git_remote_url(value: &str) -> bool {
         || lower.starts_with("git://")
         || lower.ends_with(".git")
         || (value.contains('@') && value.contains(':'))
+}
+
+/// Whether a remote is a public Git forge (or otherwise unambiguously Git).
+///
+/// Native HTTPS remotes may still be Heddle servers (`https://api.heddle.sh/...`).
+/// This predicate is the fail-closed classifier that keeps those hosts on the
+/// discovery path while refusing to probe github.com / GitLab / `*.git` as if
+/// they published Heddle descriptor trust.
+pub fn looks_like_git_forge_remote(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    if lower.ends_with(".git")
+        || lower.starts_with("ssh://")
+        || lower.starts_with("git://")
+        || (value.contains('@') && value.contains(':') && !lower.starts_with("heddle://"))
+    {
+        return true;
+    }
+    looks_like_known_git_host(value)
+}
+
+/// Whether the authority of `value` is a well-known Git hosting hostname.
+pub fn looks_like_known_git_host(value: &str) -> bool {
+    remote_url_host(value).is_some_and(is_known_git_host)
+}
+
+fn remote_url_host(value: &str) -> Option<&str> {
+    let rest = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .or_else(|| value.strip_prefix("ssh://"))
+        .or_else(|| value.strip_prefix("git://"))
+        .or_else(|| value.strip_prefix("heddle://"))
+        .unwrap_or(value);
+    let authority = if let Some((user, host_path)) = rest.split_once('@') {
+        if user.eq_ignore_ascii_case("git") || !host_path.contains('/') {
+            host_path
+        } else {
+            rest
+        }
+    } else {
+        rest
+    };
+    let host = authority.split(['/', '\\']).next().unwrap_or(authority);
+    if host.is_empty() {
+        return None;
+    }
+    Some(host_without_port(host))
+}
+
+fn host_without_port(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|host| host.split(']').next())
+        .unwrap_or_else(|| host.split(':').next().unwrap_or(host))
+}
+
+fn is_known_git_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    matches!(
+        host.as_str(),
+        "github.com"
+            | "www.github.com"
+            | "gitlab.com"
+            | "www.gitlab.com"
+            | "bitbucket.org"
+            | "www.bitbucket.org"
+            | "codeberg.org"
+            | "www.codeberg.org"
+    ) || host.ends_with(".github.com")
+        || host.ends_with(".gitlab.com")
 }
 
 /// Whether a remote arg looks like a path/URL location (not a short remote name).
@@ -3786,6 +3856,25 @@ mod tests {
         assert!(looks_like_git_remote_url("https://example.com/r.git"));
         assert!(looks_like_git_remote_url("git@github.com:org/r.git"));
         assert!(!looks_like_git_remote_url("origin"));
+        assert!(looks_like_git_forge_remote(
+            "https://github.com/luke/tiny-notes"
+        ));
+        assert!(looks_like_known_git_host(
+            "https://github.com/luke/tiny-notes"
+        ));
+        assert!(looks_like_git_forge_remote(
+            "https://gitlab.com/org/repo.git"
+        ));
+        assert!(looks_like_git_forge_remote("https://example.com/r.git"));
+        assert!(!looks_like_git_forge_remote(
+            "https://api.heddle.sh/luke/tiny-notes"
+        ));
+        assert!(!looks_like_known_git_host(
+            "https://api.heddle.sh/luke/tiny-notes"
+        ));
+        assert!(!looks_like_git_forge_remote(
+            "heddle://api.heddle.sh/luke/tiny-notes"
+        ));
         assert!(looks_like_remote_location("/tmp/repo"));
         assert!(looks_like_remote_location("~/src/repo"));
         assert!(looks_like_remote_location("ssh://host/path"));

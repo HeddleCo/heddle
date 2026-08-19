@@ -28,7 +28,13 @@ impl RemoteTarget {
     pub fn parse(s: &str) -> Result<Self, String> {
         // Check for file:// protocol
         if let Some(path) = s.strip_prefix("file://") {
-            return Ok(RemoteTarget::Local(PathBuf::from(path)));
+            let path = PathBuf::from(path);
+            if path.is_dir() {
+                return Ok(RemoteTarget::Local(path));
+            }
+            return Err(format!(
+                "invalid remote url (local path does not exist): {s}"
+            ));
         }
 
         if let Some((addr, repo_path)) = parse_network_with_repo_path(s) {
@@ -39,6 +45,18 @@ impl RemoteTarget {
         let path = PathBuf::from(s);
         if path.exists() && path.is_dir() {
             return Ok(RemoteTarget::Local(path));
+        }
+
+        if s.starts_with("heddle://") {
+            return Err(format!(
+                "invalid remote url: {s} (`heddle://` carries no addressing that push can use; use https://<host>/<repo> or host:port/repo)"
+            ));
+        }
+
+        if looks_like_unresolved_local_path(s) {
+            return Err(format!(
+                "invalid remote url (local path does not exist): {s}"
+            ));
         }
 
         Err(format!(
@@ -143,6 +161,15 @@ fn resolve_socket_addr(addr: &str) -> Option<SocketAddr> {
     addr.to_socket_addrs().ok()?.next()
 }
 
+fn looks_like_unresolved_local_path(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with("~/")
+        || value.contains('\\')
+        || (!value.contains("://") && !value.contains(':'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::RemoteTarget;
@@ -197,5 +224,25 @@ mod tests {
             RemoteTarget::Network { addr, .. } => assert_eq!(addr.port(), 443),
             other => panic!("expected network target, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn heddle_scheme_without_port_is_not_a_push_url() {
+        let error = RemoteTarget::parse("heddle://api.heddle.sh/luke/tiny-notes")
+            .expect_err("schemeless heddle:// host has no addressing");
+        assert!(
+            error.contains("heddle://") && error.contains("no addressing"),
+            "refusal must name the scheme gap: {error}"
+        );
+        assert!(RemoteTarget::parse_native("heddle://api.heddle.sh/luke/tiny-notes").is_err());
+        assert!(RemoteTarget::parse("heddle://127.0.0.1:8421/luke/tiny-notes").is_ok());
+    }
+
+    #[test]
+    fn nonexistent_local_paths_fail_closed() {
+        let missing = "/tmp/heddle-missing-remote-path-does-not-exist";
+        assert!(RemoteTarget::parse(missing).is_err());
+        assert!(RemoteTarget::parse(&format!("file://{missing}")).is_err());
+        assert!(RemoteTarget::parse("tiny-notes-mirror").is_err());
     }
 }
