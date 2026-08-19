@@ -1506,7 +1506,7 @@ mod tests {
         helper_endpoint_path, local_helper_binary_for_executable, shutdown_local_monitor_helper,
         subtree_has_changes, try_spawn_local_helper_with, try_spawn_local_helper_with_probe,
     };
-    use crate::{DirectoryCacheEntry, WorktreeIndex};
+    use crate::{DirectoryCacheEntry, FsMonitorSettings, WorktreeIndex};
 
     #[test]
     fn subtree_matching_handles_root_and_prefixes() {
@@ -1766,6 +1766,84 @@ mod tests {
     #[test]
     fn auto_native_backend_is_explicitly_platform_gated() {
         assert_eq!(super::native_backend_supported(), cfg!(target_os = "linux"));
+    }
+
+    #[test]
+    fn default_prepare_does_not_expose_an_unauthenticated_helper() {
+        let temp = TempDir::new().unwrap();
+        let repo_root = temp.path();
+        std::fs::create_dir_all(repo_root.join(".heddle/state")).unwrap();
+
+        let session = ChangeMonitorSession::prepare(repo_root, FsMonitorSettings::default());
+        let report = session.report();
+
+        assert_eq!(report.status, "disabled");
+        assert_eq!(report.backend, "off");
+        assert_eq!(report.reason.as_deref(), Some("disabled"));
+        assert!(report.changed_paths.is_empty());
+        assert!(!session.can_skip_directory(Path::new("src"), None, &WorktreeIndex::new()));
+
+        let state_path = repo_root.join(".heddle/state/fsmonitor.toml");
+        assert!(
+            !helper_endpoint_path(&state_path).exists(),
+            "default Off must not advertise a localhost helper"
+        );
+        assert!(
+            !super::helper_start_lock_path(&state_path).exists(),
+            "default Off must not take the helper start lock"
+        );
+        assert!(
+            !super::helper_lifetime_lock_path(&state_path).exists(),
+            "default Off must not take the helper lifetime lock"
+        );
+    }
+
+    #[test]
+    fn default_prepare_does_not_consume_a_live_helper_baseline() {
+        let temp = TempDir::new().unwrap();
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".heddle/state")).unwrap();
+        std::fs::write(checkout.join("tracked.txt"), b"tracked\n").unwrap();
+        let state_path = checkout.join(".heddle/state/fsmonitor.toml");
+        let endpoint_path = helper_endpoint_path(&state_path);
+        let helper_root = checkout.clone();
+        let helper = thread::spawn(move || super::run_local_monitor_helper(&helper_root));
+
+        for _ in 0..400 {
+            if endpoint_path.exists() {
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            endpoint_path.exists(),
+            "native helper endpoint should appear"
+        );
+
+        let unauthenticated = crate::daemon::send_json_request::<_, super::MonitorHelperResponse>(
+            &crate::daemon::load_endpoint(&endpoint_path).unwrap(),
+            &super::MonitorHelperRequest {
+                version: HELPER_PROTOCOL_VERSION,
+                command: "query".to_string(),
+                since: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            unauthenticated.ok,
+            "a leftover helper still answers any localhost peer; default Off must not use it"
+        );
+
+        let session = ChangeMonitorSession::prepare(&checkout, FsMonitorSettings::default());
+        let report = session.report();
+        assert_eq!(report.status, "disabled");
+        assert_eq!(report.backend, "off");
+        assert!(report.changed_paths.is_empty());
+        assert!(!session.can_skip_directory(Path::new(""), None, &WorktreeIndex::new()));
+
+        let shutdown = shutdown_local_monitor_helper(&checkout).unwrap();
+        drop(shutdown);
+        helper.join().unwrap().unwrap();
     }
 
     #[cfg(unix)]

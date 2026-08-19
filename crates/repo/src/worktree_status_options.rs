@@ -52,6 +52,22 @@ impl From<FsMonitorConfig> for FsMonitorSettings {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{FsMonitorConfig, FsMonitorMode, FsMonitorSettings, WorktreeStatusOptions};
+
+    #[test]
+    fn default_fsmonitor_mode_is_off() {
+        assert_eq!(FsMonitorMode::default(), FsMonitorMode::Off);
+        assert_eq!(FsMonitorConfig::default().mode, FsMonitorMode::Off);
+        assert_eq!(FsMonitorSettings::default().mode, FsMonitorMode::Off);
+        assert_eq!(
+            WorktreeStatusOptions::default().fsmonitor.mode,
+            FsMonitorMode::Off
+        );
+    }
+}
+
 /// Resolved options for worktree status operations.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorktreeStatusOptions {
