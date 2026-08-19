@@ -30,6 +30,7 @@ const COMPACT_ALLOWED_KEYS: &[&str] = &[
     "changed_path_count",
     "conflicts",
     "conflict_count",
+    "state_id",
 ];
 
 fn assert_only_compact_keys(value: &Value, context: &str) {
@@ -49,6 +50,12 @@ fn compact_json(args: &[&str], temp: &TempDir) -> Value {
     argv.extend(args.iter().copied());
     let out =
         heddle_output(&argv, Some(temp.path())).unwrap_or_else(|err| panic!("spawn failed: {err}"));
+    assert!(
+        out.status.success(),
+        "heddle {argv:?} should succeed; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = str::from_utf8(&out.stdout).expect("stdout utf8");
     let line = stdout.lines().next().unwrap_or_else(|| {
         panic!(
@@ -283,5 +290,193 @@ fn json_compact_rejects_commands_without_projection() {
     assert!(
         stderr.contains("json-compact is not supported"),
         "rejection should explain unsupported compact mode: {stderr}"
+    );
+}
+
+fn compact_error_envelope(args: &[&str], cwd: Option<&std::path::Path>) -> Value {
+    let out = heddle_output(args, cwd).unwrap_or_else(|err| panic!("spawn failed: {err}"));
+    assert!(
+        !out.status.success(),
+        "heddle {args:?} should fail; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = str::from_utf8(&out.stderr).expect("stderr utf8");
+    serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|err| panic!("stderr not JSON: {err}\n  stderr: {stderr}"))
+}
+
+const COMPACT_ERROR_KEYS: &[&str] = &["kind", "error", "exit_code", "hint", "primary_command"];
+
+fn assert_only_compact_error_keys(value: &Value, context: &str) {
+    let obj = value
+        .as_object()
+        .unwrap_or_else(|| panic!("{context}: compact error must be a JSON object: {value}"));
+    for key in obj.keys() {
+        assert!(
+            COMPACT_ERROR_KEYS.contains(&key.as_str()),
+            "{context}: compact error leaked non-decision-surface key `{key}`: {value}"
+        );
+    }
+    for key in COMPACT_ERROR_KEYS {
+        assert!(
+            obj.contains_key(*key),
+            "{context}: compact error missing `{key}`: {value}"
+        );
+    }
+}
+
+#[test]
+fn field_study_everyday_verbs_accept_json_compact() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).expect("init");
+    std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
+    heddle(&["capture", "-m", "seed"], Some(temp.path())).expect("seed");
+
+    for args in [
+        &["log"][..],
+        &["diff"][..],
+        &["verify"][..],
+        &[
+            "context",
+            "set",
+            "--path",
+            "main.rs",
+            "--scope",
+            "file",
+            "--kind",
+            "rationale",
+            "-m",
+            "entry point",
+        ][..],
+        &["discuss", "open", "main.rs", "main", "first turn"][..],
+    ] {
+        let compact = compact_json(args, &temp);
+        assert!(
+            compact.get("output_kind").and_then(Value::as_str).is_some(),
+            "heddle {args:?} --output json-compact must emit output_kind: {compact}"
+        );
+        assert_only_compact_keys(&compact, &format!("field-study {}", args.join(" ")));
+        assert!(
+            compact.get("verification").is_none()
+                && compact.get("machine_contract_coverage").is_none(),
+            "compact {args:?} must not embed machine-contract self-noise: {compact}"
+        );
+    }
+
+    let checkout = TempDir::new().unwrap();
+    let checkout_arg = checkout.path().join("work");
+    let started = compact_json(
+        &[
+            "start",
+            "feature/search",
+            "--path",
+            checkout_arg.to_str().unwrap(),
+        ],
+        &temp,
+    );
+    assert_eq!(started["output_kind"].as_str(), Some("thread_start"));
+    assert_only_compact_keys(&started, "field-study start");
+}
+
+#[test]
+fn capture_compact_includes_state_id() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).expect("init");
+    std::fs::write(temp.path().join("work.txt"), "pending\n").unwrap();
+
+    let compact = compact_json(&["capture", "-m", "compact state_id"], &temp);
+    assert_eq!(compact["output_kind"].as_str(), Some("capture"));
+    let state_id = compact["state_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("capture compact must include state_id: {compact}"));
+    assert!(
+        !state_id.is_empty(),
+        "capture compact state_id must be non-empty: {compact}"
+    );
+    assert_only_compact_keys(&compact, "capture state_id");
+
+    let full = full_json(&["log", "--limit", "1"], &temp);
+    assert_eq!(
+        full["states"][0]["state_id"].as_str(),
+        Some(state_id),
+        "compact capture state_id must match the tip state"
+    );
+}
+
+#[test]
+fn status_compact_after_ready_has_land_next_action() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).expect("init");
+    std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
+    heddle(&["capture", "-m", "base"], Some(temp.path())).expect("base");
+
+    let checkout = TempDir::new().unwrap();
+    let checkout_arg = checkout.path().join("work");
+    let started = full_json(
+        &[
+            "start",
+            "feature/search",
+            "--path",
+            checkout_arg.to_str().unwrap(),
+        ],
+        &temp,
+    );
+    let execution_path = started["execution_path"]
+        .as_str()
+        .expect("start should report execution_path");
+    let checkout_path = std::path::Path::new(execution_path);
+    std::fs::write(checkout_path.join("feature.txt"), "feature\n").unwrap();
+    heddle(&["capture", "-m", "feature"], Some(checkout_path)).expect("feature");
+    heddle(&["ready"], Some(checkout_path)).expect("ready");
+
+    let status_out = heddle_output(&["--output", "json-compact", "status"], Some(checkout_path))
+        .expect("status compact after ready");
+    assert!(
+        status_out.status.success(),
+        "compact status after ready should succeed; stderr={}",
+        String::from_utf8_lossy(&status_out.stderr)
+    );
+    let compact: Value = serde_json::from_str(
+        str::from_utf8(&status_out.stdout)
+            .expect("stdout utf8")
+            .lines()
+            .next()
+            .expect("status compact stdout"),
+    )
+    .expect("status compact JSON");
+    let next_action = compact["next_action"]
+        .as_str()
+        .unwrap_or_else(|| panic!("compact status after ready must have next_action: {compact}"));
+    assert!(
+        next_action.contains("land --thread feature/search"),
+        "compact status after ready must recommend land: {compact}"
+    );
+    assert_only_compact_keys(&compact, "status after ready");
+    assert!(
+        compact.get("verification").is_none(),
+        "compact status must drop the coverage report: {compact}"
+    );
+}
+
+#[test]
+fn status_compact_before_init_stays_compact() {
+    let temp = TempDir::new().unwrap();
+    let envelope =
+        compact_error_envelope(&["--output", "json-compact", "status"], Some(temp.path()));
+    assert_eq!(envelope["kind"], "repository_not_found");
+    assert_only_compact_error_keys(&envelope, "status compact before init");
+    let primary = envelope["primary_command"]
+        .as_str()
+        .unwrap_or_else(|| panic!("compact pre-init error must keep primary_command: {envelope}"));
+    assert!(
+        primary.contains("heddle init"),
+        "compact pre-init next step must be init: {envelope}"
+    );
+    assert!(
+        envelope.get("advice_contract_valid").is_none()
+            && envelope.get("recovery_commands").is_none()
+            && envelope.get("unsafe_condition").is_none(),
+        "compact pre-init must not dump the full recovery envelope: {envelope}"
     );
 }

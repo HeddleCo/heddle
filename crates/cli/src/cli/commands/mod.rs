@@ -16,6 +16,7 @@ mod clone;
 mod collapse;
 mod commit;
 pub(crate) mod compact;
+mod compact_projections;
 mod completion;
 pub(crate) mod context;
 mod daemon;

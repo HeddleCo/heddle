@@ -9,7 +9,7 @@ use super::{
     command_catalog::{ActionTemplate, recommended_action_template, validate_recommended_action},
 };
 use crate::{
-    cli::{Cli, render::shell_quote, should_output_json},
+    cli::{Cli, output_is_compact, render::shell_quote, should_output_json},
     exit::HeddleExitCode,
 };
 
@@ -56,22 +56,29 @@ fn print_error_with_hint_inner(cli: &Cli, err: &anyhow::Error, config: Option<&C
             "recovery_commands": classification.recovery_commands,
             "recovery_action_templates": recovery_action_templates,
         });
-        if let Some(op_id) = cli.op_id.as_deref()
-            && let Some(object) = body.as_object_mut()
-        {
-            object.insert(
-                "op_id".to_string(),
-                serde_json::Value::String(op_id.to_string()),
-            );
-            object.insert(
-                "idempotency_status".to_string(),
-                serde_json::Value::String(idempotency_status_for_error(&kind).to_string()),
-            );
-            object.insert("replayed".to_string(), serde_json::Value::Bool(false));
-        }
-        if let Some(object) = body.as_object_mut() {
-            for (key, value) in classification.extra_json_fields {
-                object.insert(key, value);
+        if output_is_compact(cli) {
+            // Compact is a projection of this envelope, not a second
+            // schema: keep the decision surface and drop recovery
+            // telemetry / self-validation noise.
+            super::compact::retain_compact_error_fields(&mut body);
+        } else {
+            if let Some(op_id) = cli.op_id.as_deref()
+                && let Some(object) = body.as_object_mut()
+            {
+                object.insert(
+                    "op_id".to_string(),
+                    serde_json::Value::String(op_id.to_string()),
+                );
+                object.insert(
+                    "idempotency_status".to_string(),
+                    serde_json::Value::String(idempotency_status_for_error(&kind).to_string()),
+                );
+                object.insert("replayed".to_string(), serde_json::Value::Bool(false));
+            }
+            if let Some(object) = body.as_object_mut() {
+                for (key, value) in classification.extra_json_fields {
+                    object.insert(key, value);
+                }
             }
         }
         eprintln!("{body}");

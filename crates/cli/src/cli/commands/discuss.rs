@@ -17,11 +17,13 @@ use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,
+    compact::{CompactOutput, CompactProjection},
     history_target::resolve_state_id,
     native_scope::{
         AnnotationStore, AnnotationSurface, emit_locality_notice_once, open_annotation_store,
         report_absent_store,
     },
+    next_action::write_projected_command_json,
     snapshot::ensure_current_state,
 };
 use crate::{
@@ -133,6 +135,18 @@ struct DiscussionWriteOutput {
     operation_id: String,
     disposition: CollaborationWriteDisposition,
     discussion: DiscussionOutput,
+}
+
+impl CompactProjection for DiscussionWriteOutput {
+    fn compact(&self) -> CompactOutput {
+        let mut compact = CompactOutput::new(self.output_kind);
+        compact.status = Some(match self.disposition {
+            CollaborationWriteDisposition::Created => "created".to_string(),
+            CollaborationWriteDisposition::ExistingOperation => "existing_operation".to_string(),
+            CollaborationWriteDisposition::IdempotentReplay => "idempotent_replay".to_string(),
+        });
+        compact
+    }
 }
 
 #[derive(Serialize)]
@@ -372,7 +386,14 @@ fn emit_write(
         discussion: to_view(store, &discussion)?,
     };
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(&output)?);
+        let emitting = match output_kind {
+            "discuss_open" => &["discuss", "open"][..],
+            "discuss_append" => &["discuss", "append"][..],
+            "discuss_resolve" => &["discuss", "resolve"][..],
+            "discuss_reopen" => &["discuss", "reopen"][..],
+            _ => &["discuss"][..],
+        };
+        write_projected_command_json(cli, &output, emitting)?;
     } else {
         println!(
             "{} {} ({})",

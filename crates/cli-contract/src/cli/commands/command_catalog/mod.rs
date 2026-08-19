@@ -1774,7 +1774,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["context", "set"],
         json_discriminators(
-            opaque_schemas(REF_AND_METADATA_MUTATION, &["context set"]),
+            compact_json(opaque_schemas(REF_AND_METADATA_MUTATION, &["context set"])),
             &[json_discriminator(
                 Some("context set"),
                 "output_kind",
@@ -1917,7 +1917,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["diff"],
         front_door(
-            documented_core_report_schema(READ_JSON, DiffReport::CONTRACT),
+            documented_core_report_schema(compact_json(READ_JSON), DiffReport::CONTRACT),
             20,
         ),
     ),
@@ -1925,7 +1925,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["discuss", "open"],
         json_discriminators(
-            documented_schemas(METADATA_MUTATION, &["discuss open"]),
+            documented_schemas(compact_json(METADATA_MUTATION), &["discuss open"]),
             &[json_discriminator(
                 Some("discuss open"),
                 "output_kind",
@@ -2153,7 +2153,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["log"],
         front_door(
             json_discriminators(
-                documented_schemas(READ_JSON, &["log", "log --reflog", "log --timeline"]),
+                documented_schemas(
+                    compact_json(READ_JSON),
+                    &["log", "log --reflog", "log --timeline"],
+                ),
                 &[
                     json_discriminator(Some("log"), "output_kind", "log"),
                     json_discriminator(Some("log --reflog"), "output_kind", "log_reflog"),
@@ -2615,7 +2618,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["start"],
         front_door(
             json_discriminators(
-                documented_schemas(WORKTREE_MUTATION, &["start"]),
+                documented_schemas(compact_json(WORKTREE_MUTATION), &["start"]),
                 &[json_discriminator(
                     Some("start"),
                     "output_kind",
@@ -2933,7 +2936,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["verify"],
         exits(
             front_door(
-                documented_core_report_schema(READ_JSON, VerifyReport::CONTRACT),
+                documented_core_report_schema(compact_json(READ_JSON), VerifyReport::CONTRACT),
                 110,
             ),
             &[

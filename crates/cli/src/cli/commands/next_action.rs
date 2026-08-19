@@ -76,6 +76,24 @@ where
     }
 }
 
+/// Emit JSON using the caller's CLI output mode. Compact goes through
+/// [`super::compact::CompactProjection`] so a new verb cannot leak the
+/// full envelope under `--output json-compact`.
+pub(crate) fn write_projected_command_json<T>(
+    cli: &crate::cli::Cli,
+    output: &T,
+    emitting_command: &[&str],
+) -> Result<()>
+where
+    T: Serialize + super::compact::CompactProjection,
+{
+    write_command_json(
+        output,
+        crate::cli::output_is_compact(cli),
+        NextActionValidationContext::without_repo(emitting_command),
+    )
+}
+
 pub(crate) fn validate_next_actions_in_value(
     value: &Value,
     context: NextActionValidationContext<'_>,
