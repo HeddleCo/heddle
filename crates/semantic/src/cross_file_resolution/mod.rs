@@ -38,34 +38,49 @@ pub struct FileResolution {
 pub fn resolve_repository(
     files: &BTreeMap<String, RepositorySemanticFile>,
 ) -> BTreeMap<String, FileResolution> {
-    files
-        .iter()
-        .map(|(path, file)| {
-            let mut dependencies = dependencies_for(path, &file.node, files);
-            let mut edges = file
-                .node
-                .occurrences
-                .iter()
-                .filter(|occurrence| occurrence.role != OccurrenceRole::Definition)
-                .filter_map(|occurrence| resolve_occurrence(path, file, occurrence, files))
-                .collect::<Vec<_>>();
-            edges.sort();
-            edges.dedup();
-            dependencies.extend(
-                edges
-                    .iter()
-                    .filter(|edge| edge.target_path != *path)
-                    .map(|edge| edge.target_path.clone()),
-            );
-            (
-                path.clone(),
-                FileResolution {
-                    dependencies,
-                    edges,
-                },
-            )
+    resolve_paths(files, files.keys().map(String::as_str))
+}
+
+/// Resolve only `paths`. `files` remains the full repository map so module and
+/// definition lookup can see files outside the invalidation frontier.
+pub fn resolve_paths<'a>(
+    files: &BTreeMap<String, RepositorySemanticFile>,
+    paths: impl IntoIterator<Item = &'a str>,
+) -> BTreeMap<String, FileResolution> {
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let file = files.get(path)?;
+            Some((path.to_string(), resolve_file(path, file, files)))
         })
         .collect()
+}
+
+fn resolve_file(
+    path: &str,
+    file: &RepositorySemanticFile,
+    files: &BTreeMap<String, RepositorySemanticFile>,
+) -> FileResolution {
+    let mut dependencies = dependencies_for(path, &file.node, files);
+    let mut edges = file
+        .node
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role != OccurrenceRole::Definition)
+        .filter_map(|occurrence| resolve_occurrence(path, file, occurrence, files))
+        .collect::<Vec<_>>();
+    edges.sort();
+    edges.dedup();
+    dependencies.extend(
+        edges
+            .iter()
+            .filter(|edge| edge.target_path != *path)
+            .map(|edge| edge.target_path.clone()),
+    );
+    FileResolution {
+        dependencies,
+        edges,
+    }
 }
 
 fn dependencies_for(

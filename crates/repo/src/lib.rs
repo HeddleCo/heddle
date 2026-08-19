@@ -63,6 +63,10 @@ pub use repository_semantic_recovery::{
 };
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_symbol_graph;
+#[cfg(feature = "tree-sitter-symbols")]
+mod repository_symbol_graph_frontier;
+#[cfg(feature = "tree-sitter-symbols")]
+mod repository_symbol_graph_load;
 mod repository_symbol_graph_query;
 pub use repository_symbol_graph_query::ResolvedSemanticEdgeSet;
 #[cfg(feature = "tree-sitter-symbols")]
@@ -70,6 +74,8 @@ mod repository_signals;
 mod repository_state_visibility;
 #[cfg(all(test, feature = "tree-sitter-symbols"))]
 mod repository_symbol_graph_tests;
+#[cfg(all(test, feature = "tree-sitter-symbols"))]
+pub(crate) use repository_symbol_graph::SemanticGraphBind;
 mod revision_address;
 pub use repository_state_visibility::{
     DefaultVisibilityBinding, PutVisibilityOutcome, VisibilityCommitKind, VisibilityCommitOutcome,

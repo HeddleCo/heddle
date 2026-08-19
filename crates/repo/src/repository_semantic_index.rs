@@ -21,6 +21,8 @@
 //! parent index's node wholesale wherever the source subtree hash is unchanged
 //! (assembly is O(changed-path)), and memoizes per source-blob so a blob shared
 //! across paths — or across the reformat of a sibling — is parsed at most once.
+//! Cross-file resolution mirrors that: capture walks the persisted file→importers
+//! index and re-resolves only the transitive invalidation frontier.
 //!
 //! ## Never-fail capture
 //!
@@ -510,6 +512,7 @@ impl Repository {
     /// bump recomputes.
     fn index_is_current(&self, root: &SemanticIndexRoot) -> bool {
         root.binding_delta.is_some()
+            && root.importer_index.is_some()
             && root.resolver_version == semantic::cross_file_resolution::RESOLVER_VERSION
             && root.extractor_version == EXTRACTOR_VERSION
             && root

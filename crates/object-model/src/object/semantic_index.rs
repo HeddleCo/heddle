@@ -589,6 +589,10 @@ pub struct SemanticIndexRoot {
     /// on repository placement and the first parent's edge set.
     #[serde(default)]
     pub binding_delta: Option<ContentHash>,
+    /// File → importers reverse-dependency index for this state. Capture uses
+    /// the parent copy to re-resolve only the invalidation frontier.
+    #[serde(default)]
+    pub importer_index: Option<ContentHash>,
     /// Heddle-owned resolver policy version used to produce `binding_delta`.
     #[serde(default)]
     pub resolver_version: u32,
@@ -610,6 +614,7 @@ impl SemanticIndexRoot {
             tree,
             semantic_digest,
             binding_delta: None,
+            importer_index: None,
             resolver_version: 0,
         }
     }
@@ -618,6 +623,12 @@ impl SemanticIndexRoot {
     pub fn with_binding_delta(mut self, binding_delta: ContentHash, resolver_version: u32) -> Self {
         self.binding_delta = Some(binding_delta);
         self.resolver_version = resolver_version;
+        self
+    }
+
+    /// Attach the file → importers index used for frontier-bounded re-resolution.
+    pub fn with_importer_index(mut self, importer_index: ContentHash) -> Self {
+        self.importer_index = Some(importer_index);
         self
     }
 

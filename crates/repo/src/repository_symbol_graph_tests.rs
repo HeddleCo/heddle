@@ -2,12 +2,14 @@
 
 #![cfg(feature = "tree-sitter-symbols")]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use objects::{
-    object::{Attribution, OccurrenceRole, Principal, StateId},
+    object::{Attribution, OccurrenceRole, Principal, SemanticIndexRoot, StateId},
     store::ObjectStore,
 };
+
+use crate::SemanticGraphBind;
 use tempfile::TempDir;
 
 use crate::{Repository, ResolvedSemanticEdgeSet};
@@ -135,6 +137,13 @@ fn rust_cross_file_roundtrip_and_frontier_delta_are_exact() {
             .unwrap(),
         "the attached delta is a content-addressed blob"
     );
+    let first_index = repo
+        .load_reverse_dependency_index(&first_root.importer_index.unwrap())
+        .unwrap();
+    assert_eq!(
+        first_index.importers_of("src/api.rs"),
+        ["src/client.rs", "src/qualified.rs"]
+    );
 }
 
 #[test]
@@ -162,6 +171,10 @@ fn opaque_only_change_inherits_bindings_without_a_repository_wide_resolve() {
     assert!(
         second_delta.files.is_empty(),
         "opaque files cannot change cross-file symbol bindings"
+    );
+    assert_eq!(
+        first_root.importer_index, second_root.importer_index,
+        "opaque-only capture content-address reuses the parent importer index"
     );
 }
 
@@ -193,4 +206,118 @@ fn typescript_named_import_resolves_across_files() {
             .unwrap()
             .is_none()
     );
+}
+
+fn unbound_root(repo: &Repository, state: &StateId) -> SemanticIndexRoot {
+    let root = repo.attached_semantic_index(state).unwrap().unwrap();
+    SemanticIndexRoot::new(
+        root.extractor_version,
+        root.grammars,
+        root.tree,
+        root.semantic_digest,
+    )
+}
+
+fn rebind(repo: &Repository, parent: &StateId, current: &StateId) -> SemanticGraphBind {
+    let parent_state = repo.store().get_state(parent).unwrap().unwrap();
+    repo.bind_semantic_graph(
+        Some(&parent_state),
+        unbound_root(repo, current),
+        &HashMap::new(),
+    )
+    .unwrap()
+}
+
+/// GOLDEN (heddle#1275): editing A's exports re-resolves exactly A and A's
+/// transitive importers — not the unrelated import lane.
+#[test]
+fn export_edit_reresolves_exactly_the_transitive_importer_frontier() {
+    let (temp, repo) = repo();
+    let first = snapshot(
+        &repo,
+        &temp,
+        &[
+            ("src/a.rs", "pub fn export_a() -> u8 { 1 }\n"),
+            (
+                "src/b.rs",
+                "use crate::a::export_a;\npub fn export_b() -> u8 { export_a() }\n",
+            ),
+            (
+                "src/c.rs",
+                "use crate::b::export_b;\npub fn run() { export_b(); }\n",
+            ),
+            ("src/d.rs", "pub fn unrelated() {}\n"),
+            (
+                "src/e.rs",
+                "use crate::d::unrelated;\npub fn use_d() { unrelated(); }\n",
+            ),
+        ],
+    );
+    let first_root = repo.attached_semantic_index(&first).unwrap().unwrap();
+    let first_index = repo
+        .load_reverse_dependency_index(&first_root.importer_index.unwrap())
+        .unwrap();
+    assert_eq!(first_index.importers_of("src/a.rs"), ["src/b.rs"]);
+    assert_eq!(first_index.importers_of("src/b.rs"), ["src/c.rs"]);
+    assert_eq!(first_index.importers_of("src/d.rs"), ["src/e.rs"]);
+
+    let second = snapshot(
+        &repo,
+        &temp,
+        &[("src/a.rs", "pub fn export_a() -> u8 { 2 }\n")],
+    );
+    let bound = rebind(&repo, &first, &second);
+    assert_eq!(
+        bound.frontier,
+        BTreeSet::from([
+            "src/a.rs".to_string(),
+            "src/b.rs".to_string(),
+            "src/c.rs".to_string()
+        ]),
+        "edit A's exports must invalidate exactly A's transitive importers"
+    );
+    assert_eq!(
+        bound.resolve_count, 3,
+        "only the frontier may re-resolve: {:?}",
+        bound.frontier
+    );
+
+    let delta = repo.semantic_edge_delta(&second).unwrap().unwrap();
+    let delta_paths = delta
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        delta_paths,
+        BTreeSet::from(["src/a.rs", "src/b.rs", "src/c.rs"])
+    );
+}
+
+#[test]
+fn unrelated_export_lane_does_not_reresolve_a_importers() {
+    let (temp, repo) = repo();
+    let first = snapshot(
+        &repo,
+        &temp,
+        &[
+            ("src/a.rs", "pub fn export_a() -> u8 { 1 }\n"),
+            (
+                "src/b.rs",
+                "use crate::a::export_a;\npub fn export_b() -> u8 { export_a() }\n",
+            ),
+            ("src/d.rs", "pub fn unrelated() {}\n"),
+            (
+                "src/e.rs",
+                "use crate::d::unrelated;\npub fn use_d() { unrelated(); }\n",
+            ),
+        ],
+    );
+    let second = snapshot(&repo, &temp, &[("src/d.rs", "pub fn unrelated() { 1; }\n")]);
+    let bound = rebind(&repo, &first, &second);
+    assert_eq!(
+        bound.frontier,
+        BTreeSet::from(["src/d.rs".to_string(), "src/e.rs".to_string()])
+    );
+    assert_eq!(bound.resolve_count, 2);
 }
