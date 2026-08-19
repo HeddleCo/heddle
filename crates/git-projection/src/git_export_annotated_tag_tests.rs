@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use objects::object::{AnnotatedTagMarker, MarkerName};
+use objects::object::{AnnotatedTagMarker, Attribution, MarkerName, Principal};
 use repo::Repository as HeddleRepository;
 use sley::{
     CommitObject, EntryKind, GitObjectType, GitTime, ObjectFormat, ObjectId, RefPrecondition,
@@ -200,7 +200,13 @@ fn export_peels_annotated_tag_before_writing_refs_tags() {
 fn export_rejects_annotated_tag_whose_git_target_disagrees_with_peeled_state() {
     let temp = tempfile::TempDir::new().unwrap();
     let repo = HeddleRepository::init_default(temp.path()).unwrap();
-    let state = repo.snapshot(Some("tagged".to_string()), None).unwrap();
+    let state = repo
+        .snapshot_with_attribution(
+            Some("tagged".to_string()),
+            None,
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        )
+        .unwrap();
     repo.create_marker_recorded(&MarkerName::new("v1.0"), &state.state_id)
         .unwrap();
     let tag = AnnotatedTag::new(
