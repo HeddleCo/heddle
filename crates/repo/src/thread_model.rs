@@ -306,6 +306,14 @@ pub struct ThreadIntegrationPolicy {
     pub conflicts_resolved_manually: bool,
 }
 
+impl ThreadIntegrationPolicy {
+    /// Zero landing fields an unauthenticated peer can forge.
+    pub fn clear_untrusted_landing_fields(&mut self) {
+        self.manual_resolution_state = None;
+        self.conflicts_resolved_manually = false;
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadRecord {
     pub id: String,
