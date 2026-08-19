@@ -10,7 +10,7 @@ use crate::model::{AttemptRecord, CheckResult};
 /// Schema version of [`ResultCacheEntry`]. Bump when the bytes change.
 pub const RESULT_CACHE_SCHEMA_VERSION: u32 = 1;
 
-/// A portable cached check result, keyed only on the content-addressed triple.
+/// A portable cached check result, bound to env, inputs, and check identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResultCacheEntry {
     /// Entry schema version.
@@ -126,12 +126,16 @@ impl ResultCacheEntry {
             && self.definition_digest == key.definition_digest
             && self.check_name == check_name
             && self.evidence_digest == evidence_digest(&self.combined_output)
+            && self.binds_check_identity(key, check_name)
     }
 
     /// Fail-closed comparison of a cached entry against a fresh run.
     pub fn verify_fresh(&self, fresh: &CheckResult) -> Result<(), ResultCacheError> {
         let fresh_evidence = evidence_digest(&fresh.combined_output);
-        if self.body.outcome == fresh.body.outcome && self.evidence_digest == fresh_evidence {
+        if self.body.outcome == fresh.body.outcome
+            && self.evidence_digest == fresh_evidence
+            && same_check_identity(&self.body, &fresh.body)
+        {
             return Ok(());
         }
         Err(ResultCacheError::SpotCheckDivergence(Box::new(
@@ -147,6 +151,39 @@ impl ResultCacheEntry {
             },
         )))
     }
+
+    pub(super) fn cache_key(&self) -> CacheKey {
+        CacheKey {
+            env_digest: self.env_digest.clone(),
+            input_digests: self.input_digests.clone(),
+            definition_digest: self.definition_digest.clone(),
+            repo: self.body.repo.clone(),
+            state: self.body.state.clone(),
+            basis: self.body.basis.clone(),
+            command: self.body.check.command.clone(),
+            class: self.body.check.class,
+        }
+    }
+
+    fn binds_check_identity(&self, key: &CacheKey, check_name: &str) -> bool {
+        self.body.repo == key.repo
+            && self.body.state == key.state
+            && self.body.basis == key.basis
+            && self.body.check.definition_digest == key.definition_digest
+            && self.body.check.command == key.command
+            && self.body.check.class == key.class
+            && self.body.check.name == check_name
+    }
+}
+
+fn same_check_identity(cached: &CiVerdictBody, fresh: &CiVerdictBody) -> bool {
+    cached.repo == fresh.repo
+        && cached.state == fresh.state
+        && cached.basis == fresh.basis
+        && cached.check.definition_digest == fresh.check.definition_digest
+        && cached.check.command == fresh.check.command
+        && cached.check.class == fresh.check.class
+        && cached.check.name == fresh.check.name
 }
 
 /// Domain-separated BLAKE3 of captured check output.

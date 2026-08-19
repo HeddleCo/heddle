@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Content-addressed check-result cache keyed on `(env, inputs, definition)`.
+//! Content-addressed check-result cache bound to env, inputs, and check identity.
 
 mod entry;
 mod key;
@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use ci_config::Check;
 use crypto::Conclusion;
 pub use entry::{
-    RESULT_CACHE_SCHEMA_VERSION, ResultCacheEntry, ResultCacheError, SpotCheckDivergence,
-    evidence_digest,
+    evidence_digest, ResultCacheEntry, ResultCacheError, SpotCheckDivergence,
+    RESULT_CACHE_SCHEMA_VERSION,
 };
 pub use key::CacheKey;
 pub use spot_check::SpotCheck;
@@ -33,7 +33,7 @@ pub(crate) fn with_cache(
     let Some(cache) = run.result_cache else {
         return Ok(run_fresh());
     };
-    let key = CacheKey::derive(key_environment, context);
+    let key = CacheKey::derive(key_environment, context, check);
     if let Some(entry) = cache.get(&key, &check.name)? {
         if run.spot_check.should_sample(&key, &check.name) {
             let fresh = run_fresh();

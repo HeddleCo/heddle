@@ -11,7 +11,7 @@ use std::{
 
 use super::{
     entry::{ResultCacheEntry, ResultCacheError},
-    key::{CacheKey, entry_id},
+    key::{entry_id, CacheKey},
 };
 
 /// Lookup and seed a content-addressed result cache.
@@ -69,11 +69,7 @@ impl ResultCache for MemoryResultCache {
     }
 
     fn put(&self, entry: &ResultCacheEntry) -> Result<(), ResultCacheError> {
-        let key = CacheKey {
-            env_digest: entry.env_digest.clone(),
-            input_digests: entry.input_digests.clone(),
-            definition_digest: entry.definition_digest.clone(),
-        };
+        let key = entry.cache_key();
         self.entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -135,11 +131,7 @@ impl ResultCache for FsResultCache {
     }
 
     fn put(&self, entry: &ResultCacheEntry) -> Result<(), ResultCacheError> {
-        let key = CacheKey {
-            env_digest: entry.env_digest.clone(),
-            input_digests: entry.input_digests.clone(),
-            definition_digest: entry.definition_digest.clone(),
-        };
+        let key = entry.cache_key();
         let path = self.path_for(&key, &entry.check_name);
         let bytes = serde_json::to_vec(entry).map_err(|error| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())

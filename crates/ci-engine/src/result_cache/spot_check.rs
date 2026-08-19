@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Deterministic sampling of cache hits for fail-closed re-execution.
 
-use super::key::{CacheKey, entry_id_bytes};
+use super::key::{entry_id_bytes, CacheKey};
 
 /// Policy for re-running a sampled fraction of cache hits.
 ///
@@ -84,6 +84,19 @@ mod tests {
                 attempt: 1,
                 runner: None,
                 image_digest: None,
+            },
+            &ci_config::Check {
+                name: "build".to_string(),
+                class: ci_config::CheckClass::Required,
+                command: vec!["true".to_string()],
+                timeout_secs: 1,
+                env: std::collections::BTreeMap::new(),
+                services: Vec::new(),
+                cache_paths: Vec::new(),
+                retry: ci_config::Retry::default(),
+                triggers: Vec::new(),
+                supersede: false,
+                isolation: None,
             },
         )
     }
