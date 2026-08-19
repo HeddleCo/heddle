@@ -38,6 +38,11 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Fixed
 
+- **`whoami` reports the capture actor before hosted auth.** `init --principal-*`
+  writes `user_config` and `status` already showed that principal. `whoami` now
+  prints the same capture actor first and hosted authentication as a second
+  stanza, including when the machine has no server credential (heddle#1437).
+
 - **PoP-bound hosted tokens fail locally without a matching proof key.**
   Session construction now distinguishes an unbound bearer from a bearer
   whose effective leaf proof-of-possession key requires proof, and refuses

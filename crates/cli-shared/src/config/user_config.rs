@@ -649,8 +649,8 @@ pub fn resolve_principal(
     repo: &Repository,
     user_config: &UserConfig,
 ) -> repo::Result<ResolvedPrincipal> {
-    if let Some(principal) = Principal::from_env() {
-        return Ok(ResolvedPrincipal::configured(principal, "environment"));
+    if let Some(resolved) = configured_from_env() {
+        return Ok(resolved);
     }
     if let Some(config) = &repo.config().principal {
         return Ok(ResolvedPrincipal::configured(
@@ -662,13 +662,35 @@ pub fn resolve_principal(
     if principal_is_accountable(&principal) {
         return Ok(ResolvedPrincipal::configured(principal, "git_config"));
     }
+    Ok(finish_principal_resolution(user_config, principal))
+}
+
+/// Resolve capture attribution when no repository is open.
+///
+/// Precedence is environment, then user config, then the built-in Unknown
+/// principal. Repository and Git-config sources are unavailable without a repo.
+pub fn resolve_principal_without_repo(user_config: &UserConfig) -> ResolvedPrincipal {
+    if let Some(resolved) = configured_from_env() {
+        return resolved;
+    }
+    finish_principal_resolution(
+        user_config,
+        Principal::new("Unknown", "unknown@example.com"),
+    )
+}
+
+fn configured_from_env() -> Option<ResolvedPrincipal> {
+    Principal::from_env().map(|principal| ResolvedPrincipal::configured(principal, "environment"))
+}
+
+fn finish_principal_resolution(user_config: &UserConfig, fallback: Principal) -> ResolvedPrincipal {
     if let Some(config) = &user_config.principal {
-        return Ok(ResolvedPrincipal::configured(
+        return ResolvedPrincipal::configured(
             Principal::new(&config.name, &config.email),
             "user_config",
-        ));
+        );
     }
-    Ok(ResolvedPrincipal::unknown(principal))
+    ResolvedPrincipal::unknown(fallback)
 }
 
 /// Human-facing source label. User config is called out as global because it

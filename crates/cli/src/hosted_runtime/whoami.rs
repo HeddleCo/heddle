@@ -1,17 +1,19 @@
-//! `heddle whoami` — machine-readable acting-identity introspection.
+//! `heddle whoami` — capture actor first, hosted auth second.
 //!
-//! Like `auth status`, `whoami` resolves the credential the hosted runtime
-//! would actually use. It then calls `IdentityService.WhoAmI`
-//! on the server for the authoritative principal/staff/service-account markers
-//! and directly-held resource roles, and reads the local Biscuit for the token
-//! kind, resource scopes, operation ceiling, and TTL that the delegation chain
-//! encodes. The proof-key (signing) availability and TTL remaining are computed
-//! locally so the verb still returns useful output when the server is
-//! unreachable.
+//! The capture actor is who the next capture is attributed to
+//! (`user_config`, `init --principal-*`, environment). Hosted auth is
+//! whether this machine has a server credential. These are different
+//! objects. `identity ensure` does not set the local actor.
 
 use anyhow::{Context, Result};
-use cli_shared::UserConfig;
+use api::heddle::api::v1alpha1::HostedRole;
+use biscuit_auth::builder::{BlockBuilder, Term};
+use cli_shared::{
+    ResolvedPrincipal, UserConfig, principal_source_display, resolve_principal,
+    resolve_principal_without_repo,
+};
 use crypto::Ed25519Signer;
+use repo::{Repository, discover_heddle_root};
 use serde::Serialize;
 use weft_client_shim::CliContext;
 
@@ -20,9 +22,28 @@ use super::{
     hosted::{HostedAuthMode, HostedSession, ResolvedHostedCredential, resolve_hosted_credential},
 };
 
+#[derive(Debug, Clone, Serialize)]
+struct CaptureActor {
+    name: String,
+    email: String,
+    /// `environment`, `repository`, `git_config`, `user_config`, or null when unknown.
+    source: Option<&'static str>,
+}
+
+impl CaptureActor {
+    fn from_resolved(resolved: &ResolvedPrincipal) -> Self {
+        Self {
+            name: resolved.principal.name_lossy().into_owned(),
+            email: resolved.principal.email_lossy().into_owned(),
+            source: resolved.source,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct WhoamiOutput {
     output_kind: &'static str,
+    capture_actor: CaptureActor,
     server: String,
     /// A usable credential resolves for this server.
     authenticated: bool,
@@ -30,7 +51,7 @@ struct WhoamiOutput {
     source: String,
     /// Locally verified subject, present even when the server is unreachable.
     subject: Option<String>,
-    /// The server answered `WhoAmI` — the acting identity below is authoritative.
+    /// The server answered `WhoAmI` — the hosted identity below is authoritative.
     reachable: bool,
     /// `root` (full-authority device/human token), `agent` (an offline-derived,
     /// attenuated delegation), or `service-account`. `None` when unauthenticated.
@@ -84,18 +105,19 @@ struct WhoamiRole {
 /// `heddle whoami [--server <addr>]`.
 pub async fn cmd_whoami(ctx: &dyn CliContext, server: Option<String>) -> Result<()> {
     let server = resolve_server(server.as_deref())?;
-    let output = resolve_whoami(&server).await?;
+    let output = resolve_whoami(ctx, &server).await?;
     if ctx.should_output_json(None) {
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        print_human(&output);
+        write_human(&mut std::io::stdout().lock(), &output)?;
     }
     Ok(())
 }
 
-async fn resolve_whoami(server: &str) -> Result<WhoamiOutput> {
+async fn resolve_whoami(ctx: &dyn CliContext, server: &str) -> Result<WhoamiOutput> {
+    let capture_actor = resolve_capture_actor(ctx)?;
     let resolved = resolve_hosted_credential(Some(server))?;
-    let mut output = resolve_local_whoami(server, &resolved)?;
+    let mut output = resolve_local_whoami(server, &resolved, capture_actor)?;
     if !output.authenticated {
         return Ok(output);
     }
@@ -124,10 +146,38 @@ async fn resolve_whoami(server: &str) -> Result<WhoamiOutput> {
     Ok(output)
 }
 
-fn resolve_local_whoami(server: &str, resolved: &ResolvedHostedCredential) -> Result<WhoamiOutput> {
+/// Who the next capture is attributed to.
+///
+/// Observe-only: probe with [`discover_heddle_root`] and open only an
+/// already-present store. `Repository::open` on a plain Git tree would
+/// bootstrap a `.heddle` sidecar. A discovered store that fails to open is
+/// surfaced, not rewritten as "no repository."
+fn resolve_capture_actor(ctx: &dyn CliContext) -> Result<CaptureActor> {
+    let user_config = UserConfig::load_default()?;
+    let start = match ctx.repo_path() {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir().context("get current working directory")?,
+    };
+    let resolved = match discover_heddle_root(&start) {
+        Some(root) => resolve_principal(
+            &Repository::open(&root)
+                .with_context(|| format!("open Heddle store at {}", root.display()))?,
+            &user_config,
+        )?,
+        None => resolve_principal_without_repo(&user_config),
+    };
+    Ok(CaptureActor::from_resolved(&resolved))
+}
+
+fn resolve_local_whoami(
+    server: &str,
+    resolved: &ResolvedHostedCredential,
+    capture_actor: CaptureActor,
+) -> Result<WhoamiOutput> {
     let Some(token) = resolved.token.as_ref() else {
         return Ok(WhoamiOutput {
             output_kind: "whoami",
+            capture_actor,
             server: server.to_string(),
             authenticated: false,
             source: resolved.source.label(),
@@ -149,7 +199,6 @@ fn resolve_local_whoami(server: &str, resolved: &ResolvedHostedCredential) -> Re
         .as_deref()
         .is_some_and(|pem| Ed25519Signer::from_pem(pem).is_ok());
 
-    // Local Biscuit introspection — works with no server round trip.
     let metadata =
         headless_token_metadata(&token.id).context("reading the active credential's Biscuit")?;
     let scopes = token_resource_scopes(&token.id)
@@ -178,6 +227,7 @@ fn resolve_local_whoami(server: &str, resolved: &ResolvedHostedCredential) -> Re
 
     Ok(WhoamiOutput {
         output_kind: "whoami",
+        capture_actor,
         server: server.to_string(),
         authenticated: true,
         source: resolved.source.label(),
@@ -237,13 +287,7 @@ async fn fetch_identity(server: &str) -> Result<WhoamiIdentity> {
     })
 }
 
-/// Resource scopes declared by a token's attenuation chain, read from the
-/// `agent_scope(kind, path)` facts each derivation hop records. Returned in
-/// first-seen order with duplicates removed. Empty for a full-authority
-/// (unattenuated) token.
 fn token_resource_scopes(token: &str) -> Result<Vec<(String, String)>> {
-    use biscuit_auth::builder::{BlockBuilder, Term};
-
     let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
         .context("parsing Biscuit token scopes")?;
     let mut seen = std::collections::BTreeSet::new();
@@ -270,10 +314,6 @@ fn token_resource_scopes(token: &str) -> Result<Vec<(String, String)>> {
     Ok(scopes)
 }
 
-/// The effective hosted-operation ceiling for a token: the INTERSECTION of every
-/// `check if operation($op), $op == …` allowlist across the attenuation chain
-/// (each hop can only narrow). `None` means no operation allowlist is present —
-/// i.e. full-authority for operations (the mandatory deny floor still applies).
 fn token_operation_ceiling(token: &str) -> Result<Option<Vec<String>>> {
     let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
         .context("parsing Biscuit token operation ceiling")?;
@@ -284,8 +324,6 @@ fn token_operation_ceiling(token: &str) -> Result<Option<Vec<String>>> {
             .with_context(|| format!("reading Biscuit attenuation block {index}"))?;
         for statement in source.split(';') {
             let statement = statement.trim();
-            // Only positive operation allowlists narrow the ceiling. Skip the
-            // mandatory deny floor (`$op != "…"`) and any non-operation check.
             if !statement.contains("operation($op)") || !statement.contains("$op ==") {
                 continue;
             }
@@ -300,9 +338,6 @@ fn token_operation_ceiling(token: &str) -> Result<Option<Vec<String>>> {
     Ok(intersection.map(|ops| ops.into_iter().collect()))
 }
 
-/// Extract the string literals (`"…"`) from a fragment of Biscuit DSL. Only the
-/// CLI-emitted, allowlist-validated shapes are parsed, so minimal escape
-/// handling (`\"`, `\\`) is sufficient.
 fn biscuit_string_literals(fragment: &str) -> Vec<String> {
     let mut literals = Vec::new();
     let mut chars = fragment.chars();
@@ -328,7 +363,6 @@ fn biscuit_string_literals(fragment: &str) -> Vec<String> {
 }
 
 fn hosted_role_name(role: i32) -> &'static str {
-    use api::heddle::api::v1alpha1::HostedRole;
     match HostedRole::try_from(role) {
         Ok(HostedRole::Reader) => "reader",
         Ok(HostedRole::Developer) => "developer",
@@ -339,11 +373,32 @@ fn hosted_role_name(role: i32) -> &'static str {
     }
 }
 
-fn print_human(output: &WhoamiOutput) {
-    write_human(&mut std::io::stdout().lock(), output).expect("write whoami output");
+fn write_human(writer: &mut impl std::io::Write, output: &WhoamiOutput) -> std::io::Result<()> {
+    write_capture_actor(writer, &output.capture_actor)?;
+    writeln!(writer)?;
+    write_hosted_auth(writer, output)
 }
 
-fn write_human(writer: &mut impl std::io::Write, output: &WhoamiOutput) -> std::io::Result<()> {
+fn write_capture_actor(
+    writer: &mut impl std::io::Write,
+    actor: &CaptureActor,
+) -> std::io::Result<()> {
+    writeln!(writer, "Capture actor: {} <{}>", actor.name, actor.email)?;
+    if let Some(source) = actor.source {
+        writeln!(
+            writer,
+            "Source:        {}",
+            principal_source_display(source)
+        )?;
+    }
+    Ok(())
+}
+
+fn write_hosted_auth(
+    writer: &mut impl std::io::Write,
+    output: &WhoamiOutput,
+) -> std::io::Result<()> {
+    writeln!(writer, "Hosted auth:")?;
     writeln!(writer, "Server:        {}", output.server)?;
     if !output.authenticated {
         writeln!(writer, "Not authenticated with {}.", output.server)?;
@@ -432,8 +487,41 @@ fn write_human(writer: &mut impl std::io::Write, output: &WhoamiOutput) -> std::
 
 #[cfg(test)]
 mod tests {
+    use objects::object::Principal;
+
     use super::*;
     use crate::hosted_runtime::hosted::CredentialSource;
+
+    fn luke_actor() -> CaptureActor {
+        CaptureActor::from_resolved(&ResolvedPrincipal {
+            principal: Principal::new("Luke", "luke@example.com"),
+            source: Some("user_config"),
+        })
+    }
+
+    #[test]
+    fn capture_actor_from_resolved_maps_user_config() {
+        let actor = luke_actor();
+        assert_eq!(actor.name, "Luke");
+        assert_eq!(actor.email, "luke@example.com");
+        assert_eq!(actor.source, Some("user_config"));
+    }
+
+    #[test]
+    fn without_repo_uses_user_config_when_env_unset() {
+        let _guard = PrincipalEnvGuard::clear();
+        let user_config = UserConfig {
+            principal: Some(cli_shared::config::UserPrincipalConfig {
+                name: "Luke".to_string(),
+                email: "luke@example.com".to_string(),
+            }),
+            ..UserConfig::default()
+        };
+        let resolved = resolve_principal_without_repo(&user_config);
+        assert_eq!(resolved.source, Some("user_config"));
+        assert_eq!(resolved.principal.name_lossy(), "Luke");
+        assert_eq!(resolved.principal.email_lossy(), "luke@example.com");
+    }
 
     #[test]
     fn local_unauthenticated_identity_has_actionable_output() {
@@ -446,18 +534,30 @@ mod tests {
             expires_at: None,
             source: CredentialSource::Unauthenticated,
         };
-        let output = resolve_local_whoami("host.example", &resolved).unwrap();
+        let output = resolve_local_whoami("host.example", &resolved, luke_actor()).unwrap();
         assert!(!output.authenticated);
         assert_eq!(output.source, "none");
+        assert_eq!(output.capture_actor.name, "Luke");
+        assert_eq!(output.capture_actor.source, Some("user_config"));
         assert_eq!(
             output.recommended_action.as_deref(),
             Some("heddle auth login --server host.example")
         );
         let mut rendered = Vec::new();
         write_human(&mut rendered, &output).unwrap();
+        let rendered = String::from_utf8(rendered).unwrap();
+        assert!(rendered.contains("Capture actor: Luke <luke@example.com>"));
+        let actor_at = rendered.find("Capture actor:").expect("capture actor");
+        let hosted_at = rendered.find("Hosted auth:").expect("hosted auth");
+        assert!(actor_at < hosted_at, "capture actor first:\n{rendered}");
         assert_eq!(
-            String::from_utf8(rendered).unwrap(),
-            "Server:        host.example\nNot authenticated with host.example.\n\
+            rendered,
+            "Capture actor: Luke <luke@example.com>\n\
+             Source:        user_config (shared global config)\n\
+             \n\
+             Hosted auth:\n\
+             Server:        host.example\n\
+             Not authenticated with host.example.\n\
              Run `heddle auth login --server host.example` to authenticate.\n"
         );
     }
@@ -466,6 +566,7 @@ mod tests {
     fn human_output_renders_authoritative_identity_and_local_token_facts() {
         let mut output = WhoamiOutput {
             output_kind: "whoami",
+            capture_actor: luke_actor(),
             server: "host.example".to_string(),
             authenticated: true,
             source: "keystore".to_string(),
@@ -501,6 +602,8 @@ mod tests {
         let mut rendered = Vec::new();
         write_human(&mut rendered, &output).unwrap();
         let rendered = String::from_utf8(rendered).unwrap();
+        assert!(rendered.contains("Capture actor: Luke <luke@example.com>"));
+        assert!(rendered.contains("Hosted auth:"));
         assert!(rendered.contains("Acting as:     agent:reviewer"));
         assert!(rendered.contains("Roles:         repo:alice/widgets=maintainer"));
         assert!(rendered.contains("Expires:       2030-01-01T00:00:00Z (in 60s)"));
@@ -539,5 +642,37 @@ mod tests {
         assert_eq!(hosted_role_name(4), "admin");
         assert_eq!(hosted_role_name(5), "owner");
         assert_eq!(hosted_role_name(i32::MAX), "unspecified");
+    }
+
+    struct PrincipalEnvGuard {
+        name: Option<std::ffi::OsString>,
+        email: Option<std::ffi::OsString>,
+    }
+
+    impl PrincipalEnvGuard {
+        fn clear() -> Self {
+            let name = std::env::var_os("HEDDLE_PRINCIPAL_NAME");
+            let email = std::env::var_os("HEDDLE_PRINCIPAL_EMAIL");
+            unsafe {
+                std::env::remove_var("HEDDLE_PRINCIPAL_NAME");
+                std::env::remove_var("HEDDLE_PRINCIPAL_EMAIL");
+            }
+            Self { name, email }
+        }
+    }
+
+    impl Drop for PrincipalEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.name {
+                    Some(value) => std::env::set_var("HEDDLE_PRINCIPAL_NAME", value),
+                    None => std::env::remove_var("HEDDLE_PRINCIPAL_NAME"),
+                }
+                match &self.email {
+                    Some(value) => std::env::set_var("HEDDLE_PRINCIPAL_EMAIL", value),
+                    None => std::env::remove_var("HEDDLE_PRINCIPAL_EMAIL"),
+                }
+            }
+        }
     }
 }

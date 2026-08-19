@@ -1950,6 +1950,11 @@ the verdict schema is still settling.
 ```json
 {
   "output_kind": "whoami",
+  "capture_actor": {
+    "name": "Luke",
+    "email": "luke@example.com",
+    "source": "user_config"
+  },
   "server": "grpc.heddle.sh",
   "authenticated": true,
   "reachable": true,
@@ -1984,11 +1989,15 @@ the verdict schema is still settling.
 }
 ```
 
-`token_kind` is one of `root`, `agent`, or `service-account`. `scopes` and
-`operation_ceiling` are read from the local Biscuit delegation chain; an empty
-`scopes` list means full resource authority and a null `operation_ceiling` means
-no operation allowlist. When the server is unreachable, `reachable` is `false`,
-`identity` is `null`, and the locally-known token facts are still reported.
+`capture_actor` is who the next capture is attributed to (`environment`,
+`repository`, `git_config`, `user_config`, or `null` when unknown). Hosted auth
+fields (`server`, `authenticated`, `identity`, token facts) are a different
+object. `token_kind` is one of `root`, `agent`, or `service-account`. `scopes`
+and `operation_ceiling` are read from the local Biscuit delegation chain; an
+empty `scopes` list means full resource authority and a null `operation_ceiling`
+means no operation allowlist. When the server is unreachable, `reachable` is
+`false`, `identity` is `null`, and the locally-known token facts are still
+reported.
 
 ---
 

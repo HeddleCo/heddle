@@ -445,12 +445,23 @@ Examples:
         command: IdentityCommands,
     },
 
-    /// Report the acting identity (principal, token kind, scopes, operation
-    /// ceiling, TTL, signing status, server reachability).
+    /// Report the capture actor, then hosted auth.
+    ///
+    /// The capture actor is who the next capture is attributed to
+    /// (`user_config`, `init --principal-*`, or `HEDDLE_PRINCIPAL_*`).
+    /// Hosted auth is whether this machine has a server credential.
+    /// These are different objects. `identity ensure` does not set the
+    /// local actor.
     #[cfg(feature = "client")]
     #[command(after_help = "\
+The capture actor and hosted auth are different objects:
+  capture actor  who the next capture is attributed to
+                 (user_config, init --principal-*, or HEDDLE_PRINCIPAL_*)
+  hosted auth    whether this machine has a credential for the server
+                 (heddle auth login). identity ensure does not set the actor.
+
 Examples:
-  heddle whoami                       # human-readable identity summary
+  heddle whoami                       # capture actor first, then hosted auth
   heddle whoami --output json         # machine-readable, stable output_kind shape
   heddle whoami --server api.heddle.sh")]
     Whoami {

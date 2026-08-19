@@ -7,5 +7,5 @@ pub use user_config::{
     UserHarnessOverride, UserHarnessRootThreadPolicy, UserHarnessSubagentThreadPolicy,
     UserHarnessThreadingConfig, UserLoggingConfig, UserOutputConfig, UserPrincipalConfig,
     UserRemoteConfig, UserThreadWorkspaceConfig, UserThreadWorkspaceMode, UserWorktreeConfig,
-    principal_source_display, resolve_principal,
+    principal_source_display, resolve_principal, resolve_principal_without_repo,
 };

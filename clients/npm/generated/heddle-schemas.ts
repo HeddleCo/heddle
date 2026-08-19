@@ -3322,6 +3322,13 @@ export interface WatchLineSchema {
   ts: string;
 }
 
+export interface WhoamiCaptureActorSchema {
+  email: string;
+  name: string;
+  /** `environment`, `repository`, `git_config`, or `user_config`; null when unknown. */
+  source?: string | null;
+}
+
 export interface WhoamiIdentitySchema {
   actor_subject: string;
   agent_model?: string | null;
@@ -3348,6 +3355,8 @@ export interface WhoamiRoleSchema {
 export interface WhoamiSchema {
   /** A usable credential is stored locally for this server. */
   authenticated: boolean;
+  /** Who the next capture is attributed to. Distinct from hosted auth. */
+  capture_actor: WhoamiCaptureActorSchema;
   expires_at?: string | null;
   identity?: WhoamiIdentitySchema | null;
   /** Intersected hosted-operation ceiling; null ⇒ full authority. */
