@@ -102,6 +102,7 @@ impl HeddleExitCode {
             | "remote_not_found"
             | "repository_not_found"
             | "hosted_tls_trust" => Some(Self::Config),
+            "clone_invalid_remote_url" => Some(Self::DataErr),
             // A Heddle global option after `try --` is a malformed
             // invocation, not a child-command argument.
             "try_global_option_after_separator" => Some(Self::Usage),
@@ -494,6 +495,7 @@ mod tests {
             ("remote_not_found", HeddleExitCode::Config),
             ("repository_not_found", HeddleExitCode::Config),
             ("hosted_tls_trust", HeddleExitCode::Config),
+            ("clone_invalid_remote_url", HeddleExitCode::DataErr),
             ("try_global_option_after_separator", HeddleExitCode::Usage),
             ("nothing_to_capture", HeddleExitCode::DataErr),
             ("dirty_worktree", HeddleExitCode::DataErr),

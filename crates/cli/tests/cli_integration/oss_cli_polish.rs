@@ -4056,7 +4056,7 @@ fn remote_mutations_honor_json_contract_and_schema() {
             "remote",
             "add",
             "origin",
-            "/tmp/heddle-schema-origin",
+            "localhost:8421",
             "--output",
             "json",
         ],

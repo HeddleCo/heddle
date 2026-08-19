@@ -12,10 +12,11 @@ use heddle_core::{
     first_multi_thread_push_failure, format_multi_ref_push_progress, format_push_outcome_text,
     format_pushing_to, git_overlay_push_execution_facts,
     heddle_single_push_execution_facts_from_local, is_native_transport_mismatch, list_remotes,
-    looks_like_git_remote_url, looks_like_remote_location, multi_ref_push_begin,
-    multi_ref_thread_failed, multi_ref_thread_succeeded_local, multi_thread_push_execution_facts,
-    named_thread_tip_mismatch_failure, plan_push, refuse_named_thread_tip_overwrite,
-    remote_urls_match, resolve_default_push_remote_name, transport_error_message,
+    looks_like_git_forge_remote, looks_like_git_remote_url, looks_like_remote_location,
+    multi_ref_push_begin, multi_ref_thread_failed, multi_ref_thread_succeeded_local,
+    multi_thread_push_execution_facts, named_thread_tip_mismatch_failure, plan_push,
+    refuse_named_thread_tip_overwrite, remote_urls_match, resolve_default_push_remote_name,
+    transport_error_message,
 };
 #[cfg(feature = "client")]
 use heddle_core::{
@@ -889,18 +890,39 @@ pub(super) async fn preflight_native_remote_transport(
     remote_arg: Option<&str>,
     action: &str,
 ) -> Result<()> {
-    if repo.capability() == RepositoryCapability::NativeHeddle
-        && let Some(spec) = remote_spec_for_transport(repo, remote_arg, RemoteAccess::Push)
-        && spec.starts_with("https://")
-    {
-        discover_native_https_remote(&spec, action).await?;
-    }
     match classify_push_remote_spec(repo, remote_arg) {
         Some(RemoteTransportKind::LocalGit | RemoteTransportKind::GitUrl) => Err(anyhow!(
             RecoveryAdvice::remote_transport_mismatch(action, remote_arg.unwrap_or("<default>"))
         )),
+        Some(RemoteTransportKind::NetworkHeddle)
+            if repo.capability() == RepositoryCapability::NativeHeddle =>
+        {
+            if let Some(spec) = remote_spec_for_transport(repo, remote_arg, RemoteAccess::Push)
+                && spec.starts_with("https://")
+            {
+                discover_native_https_remote(&spec, action).await?;
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
+}
+
+/// Admit a URL at `remote add` time using the same parser `push` uses.
+pub(super) async fn admit_native_remote_url(repo: &Repository, url: &str) -> Result<()> {
+    preflight_native_remote_transport(repo, Some(url), "remote add").await?;
+    cli_shared::remote::parse_target_for_repository(repo, url)
+        .map_err(|error| anyhow!(RecoveryAdvice::invalid_remote_url(url, &error)))?;
+    Ok(())
+}
+
+pub(super) fn admit_git_overlay_remote_url(url: &str) -> Result<()> {
+    if looks_like_git_forge_remote(url) || looks_like_git_remote_url(url) {
+        return Ok(());
+    }
+    RemoteTarget::parse(url)
+        .map(|_| ())
+        .map_err(|error| anyhow!(RecoveryAdvice::invalid_remote_url(url, &error)))
 }
 
 #[cfg(feature = "client")]
@@ -1012,6 +1034,9 @@ fn classify_remote_spec(
     access: RemoteAccess,
 ) -> Option<RemoteTransportKind> {
     let spec = remote_spec_for_transport(repo, remote_arg, access)?;
+    if looks_like_git_forge_remote(&spec) {
+        return Some(RemoteTransportKind::GitUrl);
+    }
     if let Ok(target) = cli_shared::remote::parse_target_for_repository(repo, &spec) {
         return Some(match target {
             RemoteTarget::Local(path) => {
@@ -1976,6 +2001,14 @@ mod tests {
             } if path == "acme/widget"
         ));
         assert_eq!(key.as_deref(), Some("127.0.0.1:8431"));
+        assert_eq!(
+            classify_push_remote_spec(&native, Some("https://github.com/luke/tiny-notes")),
+            Some(RemoteTransportKind::GitUrl)
+        );
+        assert_eq!(
+            classify_push_remote_spec(&native, Some("heddle://api.heddle.sh/luke/tiny-notes")),
+            Some(RemoteTransportKind::Unknown)
+        );
 
         let overlay_dir = tempfile::TempDir::new().unwrap();
         SleyRepository::init(overlay_dir.path()).unwrap();
