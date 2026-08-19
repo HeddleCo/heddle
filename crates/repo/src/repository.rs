@@ -2924,9 +2924,9 @@ impl Repository {
     /// spawn the long-lived `heddle-fsmonitor-worker` daemon as a child of the
     /// clone process, leaving anything that waits on the clone's process tree
     /// blocked on the helper's idle lifetime long after the clone finished
-    /// (heddle#1243). The monitor is deferred, not removed: the first
-    /// `heddle status` in the cloned repository starts the helper on demand
-    /// exactly as it always has.
+    /// (heddle#1243). The monitor is deferred, not removed: an explicit
+    /// `native`/`auto`/`watchman` setting (or `HEDDLE_FSMONITOR`) starts the
+    /// helper on demand. A default install leaves it off (heddle#1411).
     #[must_use]
     pub fn without_fsmonitor(mut self) -> Self {
         self.config.worktree.fsmonitor.mode = crate::FsMonitorMode::Off;

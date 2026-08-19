@@ -38,6 +38,12 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Fixed
 
+- **Default fsmonitor is off.** `FsMonitorMode` now defaults to `Off`, so a
+  stock install never binds the unauthenticated localhost helper or skips
+  status/capture directories from its baseline. Enable `native`, `auto`, or
+  `watchman` (or `HEDDLE_FSMONITOR`) when that workstation model is acceptable
+  (heddle#1411).
+
 - **Compact frames reject attacker-declared object counts before prealloc.**
   `get_count` now caps declarations against the 12 MiB writer frame object
   ceiling and a real per-entry encoded floor, so a hostile pack cannot force

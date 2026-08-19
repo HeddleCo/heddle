@@ -879,11 +879,11 @@ mod tests {
     }
 
     #[test]
-    fn user_worktree_status_options_default_to_auto() {
+    fn user_worktree_status_options_default_to_off() {
         let config = UserConfig::default();
         let options = config.worktree_status_options(None);
 
-        assert_eq!(options.fsmonitor.mode, FsMonitorMode::Auto);
+        assert_eq!(options.fsmonitor.mode, FsMonitorMode::Off);
     }
 
     #[test]

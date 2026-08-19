@@ -8,9 +8,15 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum FsMonitorMode {
     /// Disable fsmonitor integration.
+    ///
+    /// Fail-closed default: a stock install never binds the localhost helper
+    /// or consumes its baseline (heddle#1411).
+    #[default]
     Off,
     /// Auto-detect a supported backend at runtime.
-    #[default]
+    ///
+    /// Opt-in. On Linux this still starts the native helper, which currently
+    /// accepts any localhost TCP peer.
     Auto,
     /// Use Heddle's local native backend.
     Native,
@@ -49,6 +55,22 @@ pub struct FsMonitorSettings {
 impl From<FsMonitorConfig> for FsMonitorSettings {
     fn from(config: FsMonitorConfig) -> Self {
         Self { mode: config.mode }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FsMonitorConfig, FsMonitorMode, FsMonitorSettings, WorktreeStatusOptions};
+
+    #[test]
+    fn default_fsmonitor_mode_is_off() {
+        assert_eq!(FsMonitorMode::default(), FsMonitorMode::Off);
+        assert_eq!(FsMonitorConfig::default().mode, FsMonitorMode::Off);
+        assert_eq!(FsMonitorSettings::default().mode, FsMonitorMode::Off);
+        assert_eq!(
+            WorktreeStatusOptions::default().fsmonitor.mode,
+            FsMonitorMode::Off
+        );
     }
 }
 
