@@ -1,0 +1,192 @@
+name: Validate release tag
+
+# Trust gate for `.github/workflows/release.yml` (heddle#1415).
+#
+# A tag-push evaluates the *caller* from the tagged commit. If the gate
+# lived in that same file, a tag whose tree rewrote the caller could drop
+# `validate-tag` and still request the `release` environment. This workflow
+# is the gate. `release.yml` must call it with
+# `uses: HeddleCo/heddle/.github/workflows/validate-release-tag.yml@<sha>`
+# where `<sha>` is a full commit on default-branch `main`. GitHub fetches
+# *this* file from that SHA, so a tagged-tree rewrite of the working copy
+# cannot replace the check that authenticates the tag.
+#
+# `./` and `$/` resolve at the caller's commit and are forbidden by
+# `scripts/check-release-pipeline.sh`. Do not add `push` / `workflow_dispatch`
+# here — that would be a second release path.
+
+on:
+  workflow_call:
+    outputs:
+      tag:
+        description: Validated tag name (vX.Y.Z or prerelease shape).
+        value: ${{ jobs.classify.outputs.tag }}
+      tag_sha:
+        description: Commit SHA the tag pointed at when the ancestry check passed.
+        value: ${{ jobs.classify.outputs.tag_sha }}
+      kind:
+        description: stable or prerelease.
+        value: ${{ jobs.classify.outputs.kind }}
+      publish_release:
+        description: Whether downstream jobs may publish a GitHub Release.
+        value: ${{ jobs.classify.outputs.publish_release }}
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    name: validate tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.classify.outputs.tag }}
+      tag_sha: ${{ steps.classify.outputs.tag_sha }}
+      kind: ${{ steps.classify.outputs.kind }}
+      publish_release: ${{ steps.classify.outputs.publish_release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Full history is needed for both the tag→commit resolution and
+          # the ancestor check against origin/main.
+          fetch-depth: 0
+
+      - name: Resolve, verify, and classify tag
+        id: classify
+        shell: bash
+        env:
+          # github.* is the caller's context (docs: reusable workflow
+          # configurations). event_name is still recovered from the payload
+          # if a runner reports workflow_call instead of the original trigger.
+          EVENT: ${{ github.event_name }}
+          PUSH_REF: ${{ github.ref }}
+          EVENT_REF: ${{ github.event.ref }}
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+          BRANCH_DRY_RUN: ${{ github.event.inputs.branch_dry_run }}
+        run: |
+          set -euo pipefail
+
+          # Recover the original trigger. A reusable workflow must not
+          # trust caller `with:` inputs for this decision — a rewritten
+          # caller could lie. github.event is the real payload.
+          if [[ "$EVENT" == "workflow_call" ]]; then
+            if [[ -n "${DISPATCH_TAG:-}" ]]; then
+              EVENT=workflow_dispatch
+            elif [[ "${PUSH_REF:-}" == refs/tags/* || "${EVENT_REF:-}" == refs/tags/* ]]; then
+              EVENT=push
+            else
+              echo "::error::workflow_call could not recover the original trigger; refusing"
+              exit 1
+            fi
+          fi
+
+          # 1. Resolve the requested tag from the trigger.
+          case "$EVENT" in
+            push)
+              if [[ "${PUSH_REF:-}" == refs/tags/* ]]; then
+                tag="${PUSH_REF#refs/tags/}"
+              elif [[ "${EVENT_REF:-}" == refs/tags/* ]]; then
+                tag="${EVENT_REF#refs/tags/}"
+              else
+                echo "::error::push trigger but ref is not a tag: push_ref=${PUSH_REF:-} event.ref=${EVENT_REF:-}"
+                exit 1
+              fi
+              ;;
+            workflow_dispatch)
+              tag="${DISPATCH_TAG:-}"
+              ;;
+            *)
+              echo "::error::unsupported event: $EVENT"
+              exit 1
+              ;;
+          esac
+
+          if [[ -z "$tag" ]]; then
+            echo "::error::no tag resolved from trigger ($EVENT)"
+            exit 1
+          fi
+
+          # 2. Classify. Tag pattern decides the *shape* of release;
+          #    event source decides whether it ships as a final release.
+          #    Dispatch runs are *always* prerelease+draft so an operator
+          #    dry-run cannot accidentally publish a public, non-draft
+          #    release — even if they hand-type a stable-looking tag.
+          # SemVer prerelease identifiers permit both `-rc.1` (dot-
+          # separated) and `-rc1` (concatenated) shapes; accept either.
+          stable_re='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          pre_re='^v[0-9]+\.[0-9]+\.[0-9]+-(rc|alpha|beta)(\.?[0-9]+)?$'
+
+          if ! [[ "$tag" =~ $stable_re || "$tag" =~ $pre_re ]]; then
+            echo "::error::tag '${tag}' does not match vX.Y.Z or vX.Y.Z-(rc|alpha|beta)[.N]"
+            exit 1
+          fi
+
+          # A branch-selected workflow definition is not an acceptable
+          # signing boundary: it can replace this validation before asking
+          # GitHub for the Apple credentials or an OIDC token. Keep the
+          # deprecated input long enough to fail existing callers explicitly,
+          # but never build or sign from it. Approved RC dry-runs remain
+          # available by dispatching an existing prerelease tag reachable from
+          # main through the normal path below.
+          if [[ "$EVENT" == "workflow_dispatch" && "$BRANCH_DRY_RUN" == "true" ]]; then
+            echo "::error::branch_dry_run is disabled: branch-selected workflow code cannot receive release signing or publishing credentials. Push an existing prerelease tag reachable from main and dispatch that tag for an approval-protected RC dry-run."
+            exit 1
+          fi
+
+          # 3. Reject anything that is not a real tag in this repo. This
+          #    catches workflow_dispatch with 'main', a typo, or a
+          #    deleted tag — none of which should reach the release job.
+          if ! git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+            echo "::error::'${tag}' is not a tag in this repository"
+            exit 1
+          fi
+
+          # 4. The pipeline only ships releases from main. A tag pointed
+          #    at a feature branch (deliberately or accidentally) must
+          #    not produce signed release assets with the heddle release
+          #    OIDC identity. The tag-push trigger does not enforce
+          #    branch ancestry on its own, so we do it here.
+          tag_sha="$(git rev-parse "refs/tags/${tag}^{commit}")"
+          if ! git merge-base --is-ancestor "$tag_sha" "refs/remotes/origin/main"; then
+            echo "::error::tag '${tag}' (commit ${tag_sha}) is not reachable from origin/main — refusing to release"
+            exit 1
+          fi
+
+          publish_release=true
+
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            # Dispatch is the RC/dry-run path. Stable tags MUST go through
+            # the push trigger so they cannot be retroactively downgraded:
+            # softprops/action-gh-release UPDATES an existing release when
+            # tag_name already exists, and dispatch always sets
+            # kind=prerelease+draft. Without this guard, an operator (or
+            # an attacker with workflow-dispatch rights) could re-dispatch
+            # a previously-published vX.Y.Z and silently mark the public
+            # release as prerelease+draft. Refuse loudly.
+            if [[ "$tag" =~ $stable_re ]]; then
+              echo "::error::workflow_dispatch refuses stable tag '${tag}'. Stable releases (vX.Y.Z) must go through the push trigger; dispatch is for prerelease dry-runs only (vX.Y.Z-(rc|alpha|beta)[.N]). See RELEASING.md."
+              exit 1
+            fi
+            kind=prerelease
+          elif [[ "$EVENT" == "push" && "$tag" =~ $stable_re ]]; then
+            kind=stable
+          elif [[ "$EVENT" == "push" ]]; then
+            # Push trigger but the tag is not strict semver. The push
+            # filter should have blocked this; if it slipped through,
+            # fail loudly rather than silently downgrading.
+            echo "::error::push trigger received non-stable tag '${tag}'; refusing"
+            exit 1
+          fi
+
+          # tag_sha is the only ref downstream jobs are allowed to act on.
+          # Emitting it as an output (rather than re-resolving the tag in
+          # each downstream job) closes the TOCTOU window: if the tag is
+          # force-moved AFTER validate-tag passes but BEFORE build/release
+          # check it out, those jobs would otherwise operate on the
+          # attacker-controlled commit. Pinning to the SHA we just
+          # ancestor-checked means every step works on the same commit.
+          echo "Resolved: tag=${tag} commit=${tag_sha} kind=${kind}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "tag_sha=${tag_sha}" >> "$GITHUB_OUTPUT"
+          echo "kind=${kind}" >> "$GITHUB_OUTPUT"
+          echo "publish_release=${publish_release}" >> "$GITHUB_OUTPUT"
