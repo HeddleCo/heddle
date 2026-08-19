@@ -27,7 +27,8 @@ pub struct AnnotatedTagMarker {
 /// tagger identity and timezone, message, and any appended signature verbatim.
 /// `target_tag` links an outer tag to the native CAS object for an inner tag;
 /// the eventual commit target is represented by `marker.peeled_state` on the
-/// outermost object.
+/// outermost object. Construct and decode reject a Git target that disagrees
+/// with `target_tag`; export binds `peeled_state` to the mapped commit.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnnotatedTag {
     format_version: u8,
@@ -45,8 +46,7 @@ impl AnnotatedTag {
         target_tag: Option<ContentHash>,
         marker: Option<AnnotatedTagMarker>,
     ) -> Result<Self, AnnotatedTagError> {
-        TagObject::parse_ref(git_format, &body)
-            .map_err(|error| AnnotatedTagError::InvalidGitTag(error.to_string()))?;
+        bind_git_target(git_format, &body, target_tag)?;
         Ok(Self {
             format_version: ANNOTATED_TAG_FORMAT_VERSION,
             git_format: git_format_tag(git_format),
@@ -65,8 +65,7 @@ impl AnnotatedTag {
                 supported: ANNOTATED_TAG_FORMAT_VERSION,
             });
         }
-        TagObject::parse_ref(tag.git_format()?, &tag.body)
-            .map_err(|error| AnnotatedTagError::InvalidGitTag(error.to_string()))?;
+        bind_git_target(tag.git_format()?, &tag.body, tag.target_tag)?;
         Ok(tag)
     }
 
@@ -101,6 +100,16 @@ impl AnnotatedTag {
             .map_err(|error| AnnotatedTagError::InvalidGitTag(error.to_string()))
     }
 
+    /// Git object named by this tag body (`object <oid>`).
+    pub fn git_target(&self) -> Result<GitObjectId, AnnotatedTagError> {
+        Ok(self.parsed_git_tag()?.object)
+    }
+
+    /// Git object type named by this tag body (`type commit` / `type tag`).
+    pub fn git_target_type(&self) -> Result<GitObjectType, AnnotatedTagError> {
+        Ok(self.parsed_git_tag()?.object_type)
+    }
+
     /// Native CAS link to an inner tag object for tag-of-tag chains.
     pub fn target_tag(&self) -> Option<ContentHash> {
         self.target_tag
@@ -110,6 +119,68 @@ impl AnnotatedTag {
     pub fn marker(&self) -> Option<&AnnotatedTagMarker> {
         self.marker.as_ref()
     }
+
+    /// Prove `inner` is the native object this tag's Git target names.
+    pub fn bind_target_tag(&self, inner: &AnnotatedTag) -> Result<(), AnnotatedTagError> {
+        let parsed = self.parsed_git_tag()?;
+        let Some(expected_hash) = self.target_tag else {
+            return Err(target_tag_disagree(&parsed, false));
+        };
+        if parsed.object_type != GitObjectType::Tag {
+            return Err(target_tag_disagree(&parsed, true));
+        }
+        if inner.hash() != expected_hash {
+            return Err(AnnotatedTagError::GitTargetDisagree {
+                git_target: parsed.object.to_string(),
+                actual: inner.hash().to_string(),
+            });
+        }
+        let inner_oid = inner.git_oid()?;
+        if inner_oid != parsed.object {
+            return Err(AnnotatedTagError::GitTargetDisagree {
+                git_target: parsed.object.to_string(),
+                actual: inner_oid.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn parsed_git_tag(&self) -> Result<TagObject, AnnotatedTagError> {
+        parse_git_tag(self.git_format()?, &self.body)
+    }
+}
+
+fn bind_git_target(
+    git_format: GitObjectFormat,
+    body: &[u8],
+    target_tag: Option<ContentHash>,
+) -> Result<TagObject, AnnotatedTagError> {
+    let parsed = parse_git_tag(git_format, body)?;
+    let has_target_tag = target_tag.is_some();
+    match parsed.object_type {
+        GitObjectType::Commit if !has_target_tag => Ok(parsed),
+        GitObjectType::Tag if has_target_tag => Ok(parsed),
+        GitObjectType::Commit | GitObjectType::Tag => {
+            Err(target_tag_disagree(&parsed, has_target_tag))
+        }
+        GitObjectType::Blob | GitObjectType::Tree => Err(AnnotatedTagError::UnsupportedGitTarget {
+            git_target: parsed.object.to_string(),
+            git_type: git_object_type_name(parsed.object_type),
+        }),
+    }
+}
+
+fn parse_git_tag(git_format: GitObjectFormat, body: &[u8]) -> Result<TagObject, AnnotatedTagError> {
+    TagObject::parse(git_format, body)
+        .map_err(|error| AnnotatedTagError::InvalidGitTag(error.to_string()))
+}
+
+fn target_tag_disagree(parsed: &TagObject, has_target_tag: bool) -> AnnotatedTagError {
+    AnnotatedTagError::TargetTagDisagree {
+        git_target: parsed.object.to_string(),
+        git_type: git_object_type_name(parsed.object_type),
+        has_target_tag,
+    }
 }
 
 fn git_format_tag(format: GitObjectFormat) -> u8 {
@@ -117,6 +188,10 @@ fn git_format_tag(format: GitObjectFormat) -> u8 {
         GitObjectFormat::Sha1 => GIT_FORMAT_SHA1,
         GitObjectFormat::Sha256 => GIT_FORMAT_SHA256,
     }
+}
+
+fn git_object_type_name(kind: GitObjectType) -> &'static str {
+    kind.as_str()
 }
 
 #[derive(Debug, Error)]
@@ -129,44 +204,25 @@ pub enum AnnotatedTagError {
     UnknownGitFormat(u8),
     #[error("invalid annotated Git tag object: {0}")]
     InvalidGitTag(String),
+    #[error(
+        "annotated tag Git target {git_target} ({git_type}) disagrees with target_tag present={has_target_tag}"
+    )]
+    TargetTagDisagree {
+        git_target: String,
+        git_type: &'static str,
+        has_target_tag: bool,
+    },
+    #[error("annotated tag Git target {git_target} disagrees with target_tag object {actual}")]
+    GitTargetDisagree { git_target: String, actual: String },
+    #[error("annotated tags cannot name a {git_type} Git target {git_target}")]
+    UnsupportedGitTarget {
+        git_target: String,
+        git_type: &'static str,
+    },
     #[error("invalid annotated-tag encoding: {0}")]
     Decode(#[from] rmp_serde::decode::Error),
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn exemplar() -> AnnotatedTag {
-        AnnotatedTag::new(
-            GitObjectFormat::Sha1,
-            b"object 1111111111111111111111111111111111111111\ntype commit\ntag v1.0\ntagger Tagger <tagger@example.com> 1700000000 -0730\n\nrelease\n-----BEGIN PGP SIGNATURE-----\nsigned bytes\n-----END PGP SIGNATURE-----\n".to_vec(),
-            Some(ContentHash::from_bytes([2; 32])),
-            Some(AnnotatedTagMarker {
-                name: "release/v1.0".to_string(),
-                peeled_state: StateId::from_bytes([3; 32]),
-            }),
-        )
-        .expect("valid annotated tag")
-    }
-
-    #[test]
-    fn msgpack_roundtrip_preserves_exact_body() {
-        let tag = exemplar();
-        let decoded = AnnotatedTag::decode_current_msgpack(&tag.encode_current_msgpack())
-            .expect("decode annotated tag");
-        assert_eq!(decoded, tag);
-        assert_eq!(decoded.body(), tag.body());
-        assert_eq!(decoded.git_oid().unwrap(), tag.git_oid().unwrap());
-    }
-
-    #[test]
-    fn canonical_encoding_is_format_locked() {
-        let encoded = exemplar().encode_current_msgpack();
-        assert_eq!(
-            hex::encode(encoded),
-            "85ae666f726d61745f76657273696f6e01aa6769745f666f726d617401a4626f6479dc00c96f626a65637420313131313131313131313131313131313131313131313131313131313131313131313131313131310a7479706520636f6d6d69740a7461672076312e300a74616767657220546167676572203c746167676572406578616d706c652e636f6d3e2031373030303030303030202d303733300a0a72656c656173650a2d2d2d2d2d424547494e20504750205349474e41545552452d2d2d2d2d0a7369676e65642062797465730a2d2d2d2d2d454e4420504750205349474e41545552452d2d2d2d2d0aaa7461726765745f746167dc00200202020202020202020202020202020202020202020202020202020202020202a66d61726b657282a46e616d65ac72656c656173652f76312e30ac7065656c65645f7374617465dc00200303030303030303030303030303030303030303030303030303030303030303",
-            "changing annotated-tag bytes requires a format-version decision and migration"
-        );
-    }
-}
+#[path = "annotated_tag_tests.rs"]
+mod tests;
