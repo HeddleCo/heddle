@@ -373,14 +373,11 @@ impl HostedClient {
                 let canonical = signed
                     .canonical()
                     .ok_or(HostedError::SigningIdentityRequired)?;
-                let callback =
-                    self.on_human_signature
-                        .as_ref()
-                        .ok_or_else(|| HostedError::Call {
-                            code: api::heddle::api::v1alpha1::CallFailureCode::Unauthenticated,
-                            message,
-                            error: Some(error),
-                        })?;
+                let callback = self.on_human_signature.as_ref().ok_or(HostedError::Call {
+                    code: api::heddle::api::v1alpha1::CallFailureCode::Unauthenticated,
+                    message,
+                    error: Some(error),
+                })?;
                 let assertion = callback(HumanSignatureRequest {
                     method_path: method.to_string(),
                     action_summary: format!("Authorize {method}"),
