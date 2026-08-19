@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Repository configuration handling.
 
-use std::{io::Read, path::Path};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use objects::{error::HeddleError, fs_atomic::write_file_atomic, object::VisibilityTier};
 use serde::{Deserialize, Serialize};
@@ -41,6 +44,24 @@ pub struct RepoConfig {
     pub redact: RedactConfig,
     #[serde(default, skip_serializing_if = "MetadataConfig::is_empty")]
     pub metadata: MetadataConfig,
+    #[serde(default, skip_serializing_if = "RepoRemoteConfig::is_empty")]
+    pub remote: RepoRemoteConfig,
+}
+
+/// `[remote]` security settings that a checkout may pin for hosted and Git TLS.
+///
+/// Unknown keys fail at load so a knob cannot look configured while being ignored.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RepoRemoteConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_ca_certificate_path: Option<PathBuf>,
+}
+
+impl RepoRemoteConfig {
+    fn is_empty(&self) -> bool {
+        self.tls_ca_certificate_path.is_none()
+    }
 }
 
 /// `[redact]` config section. Houses the list of operator public keys
@@ -506,6 +527,7 @@ impl Default for RepoConfig {
             provenance: ProvenanceConfig::default(),
             redact: RedactConfig::default(),
             metadata: MetadataConfig::default(),
+            remote: RepoRemoteConfig::default(),
         }
     }
 }
@@ -665,6 +687,10 @@ source_authority = "native"
             !saved.contains("[metadata]"),
             "empty metadata trust must stay off disk: {saved}"
         );
+        assert!(
+            !saved.contains("[remote]"),
+            "empty remote TLS table must stay off disk: {saved}"
+        );
     }
 
     #[test]
@@ -805,5 +831,38 @@ format = "auto"
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
             .count();
         assert_eq!(sibling_entries, 0);
+    }
+
+    #[test]
+    fn remote_tls_ca_path_parses_and_unknown_remote_keys_fail() {
+        let config: RepoConfig = toml::from_str(
+            r#"
+[repository]
+version = 4
+source_authority = "native"
+[remote]
+tls_ca_certificate_path = "/etc/heddle/ca.pem"
+"#,
+        )
+        .expect("known remote CA path should parse");
+        assert_eq!(
+            config.remote.tls_ca_certificate_path.as_deref(),
+            Some(std::path::Path::new("/etc/heddle/ca.pem"))
+        );
+
+        let error = toml::from_str::<RepoConfig>(
+            r#"
+[repository]
+version = 4
+source_authority = "native"
+[remote]
+tls_insecure = true
+"#,
+        )
+        .expect_err("unknown remote keys must fail closed");
+        assert!(
+            error.to_string().contains("unknown field"),
+            "unknown remote knob must be rejected: {error}"
+        );
     }
 }

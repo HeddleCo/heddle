@@ -11,6 +11,7 @@ use api::heddle::api::v1alpha1::{
 };
 use cli_shared::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
+use heddle_cli_contract::cli::commands::RecoveryAdvice;
 use objects::{HeddleError, RecoveryDetails};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -1170,7 +1171,33 @@ async fn connect_auth_client(server: &str) -> Result<HostedClient> {
     )?
     .connect(([127, 0, 0, 1], 0).into())
     .await
-    .map_err(Into::into)
+    .map_err(hosted_bootstrap_connect_error)
+}
+
+fn hosted_bootstrap_connect_error(error: impl std::fmt::Display) -> anyhow::Error {
+    let message = error.to_string();
+    if cli_shared::is_tls_trust_failure(&message) {
+        anyhow::Error::new(hosted_tls_trust_advice(&message))
+    } else {
+        anyhow::Error::msg(message)
+    }
+}
+
+fn hosted_tls_trust_advice(message: &str) -> RecoveryAdvice {
+    let annotated = cli_shared::annotate_tls_trust_failure(message);
+    RecoveryAdvice::safety_refusal(
+        "hosted_tls_trust",
+        annotated,
+        format!(
+            "Trust this server's CA with {}=/path/to/ca.pem or [remote] tls_ca_certificate_path.",
+            cli_shared::REMOTE_TLS_CA_CERT_SETTING
+        ),
+        "the hosted bootstrap HTTPS request failed because the peer certificate is not trusted",
+        "retrying without a trusted CA will fail the same TLS handshake",
+        "no hosted session was opened and local credentials were not written",
+        "heddle help remotes",
+        vec!["heddle help remotes".to_string()],
+    )
 }
 
 /// Poll `MintBiscuit(DeviceAuthProof)` until the device code is approved or
@@ -1550,6 +1577,15 @@ mod tests {
         assert_eq!(percent_encode_query_component("ABCD-1234"), "ABCD-1234");
         assert_eq!(percent_encode_query_component("a b"), "a%20b");
         assert_eq!(percent_encode_query_component("x&y"), "x%26y");
+    }
+
+    #[test]
+    fn hosted_tls_trust_advice_names_ca_and_avoids_status() {
+        let advice = hosted_tls_trust_advice("invalid peer certificate: UnknownIssuer");
+        assert_eq!(advice.kind, "hosted_tls_trust");
+        assert!(advice.error.contains("HEDDLE_REMOTE_TLS_CA_CERT"));
+        assert_eq!(advice.primary_command, "heddle help remotes");
+        assert!(!advice.hint.contains("heddle status"));
     }
 
     #[test]

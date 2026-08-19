@@ -40,7 +40,7 @@ pub enum HostedError {
     #[error("hosted request metadata is invalid: {0}")]
     RequestMetadata(#[from] api::RequestMetadataError),
     #[error("hosted bootstrap HTTPS request failed: {0}")]
-    BootstrapHttp(#[from] reqwest::Error),
+    BootstrapHttp(String),
 }
 
 impl HostedError {
@@ -50,6 +50,12 @@ impl HostedError {
 
     pub(super) fn framing(error: impl std::fmt::Display) -> Self {
         Self::Framing(error.to_string())
+    }
+}
+
+impl From<reqwest::Error> for HostedError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::BootstrapHttp(cli_shared::annotate_error_chain_tls_trust_failure(&error))
     }
 }
 

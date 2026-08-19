@@ -170,7 +170,7 @@ pub use repository::{
     HistoryQuery, HostedConfig, KeyBindingRegistryAnchor, MAJOR_REWRITE_THRESHOLD_PCT,
     MEDIUM_SUGGESTION_THRESHOLD, MissingBlob, OperationKind, OperationScope, OutputFormat,
     PackFilesInspection, PartialFetchInspection, ProvenanceConfig, PullPlannerCacheInspection,
-    RefCountsInspection, RepoConfig, Repository, RepositoryCapability,
+    RefCountsInspection, RepoConfig, RepoRemoteConfig, Repository, RepositoryCapability,
     RepositoryMaintenanceRunReport, RepositoryOperationStatus,
     RepositoryPerformanceInspectionReport, RepositorySourceAuthority, SUGGESTION_WINDOW,
     SnapshotExecution, SnapshotProfile, SpoolFacet, ThreadCaptureOutcome, TreeBuildProfile,

@@ -98,9 +98,10 @@ impl HeddleExitCode {
         match kind {
             // Missing precondition (no default remote for push/pull), not
             // an IO failure.
-            "remote_not_configured" | "remote_not_found" | "repository_not_found" => {
-                Some(Self::Config)
-            }
+            "remote_not_configured"
+            | "remote_not_found"
+            | "repository_not_found"
+            | "hosted_tls_trust" => Some(Self::Config),
             "clone_invalid_remote_url" => Some(Self::DataErr),
             // A Heddle global option after `try --` is a malformed
             // invocation, not a child-command argument.
@@ -493,6 +494,7 @@ mod tests {
             ("remote_not_configured", HeddleExitCode::Config),
             ("remote_not_found", HeddleExitCode::Config),
             ("repository_not_found", HeddleExitCode::Config),
+            ("hosted_tls_trust", HeddleExitCode::Config),
             ("clone_invalid_remote_url", HeddleExitCode::DataErr),
             ("try_global_option_after_separator", HeddleExitCode::Usage),
             ("nothing_to_capture", HeddleExitCode::DataErr),
