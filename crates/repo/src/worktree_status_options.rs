@@ -8,9 +8,15 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum FsMonitorMode {
     /// Disable fsmonitor integration.
+    ///
+    /// Fail-closed default: a stock install never binds the localhost helper
+    /// or consumes its baseline (heddle#1411).
+    #[default]
     Off,
     /// Auto-detect a supported backend at runtime.
-    #[default]
+    ///
+    /// Opt-in. On Linux this still starts the native helper, which currently
+    /// accepts any localhost TCP peer.
     Auto,
     /// Use Heddle's local native backend.
     Native,
