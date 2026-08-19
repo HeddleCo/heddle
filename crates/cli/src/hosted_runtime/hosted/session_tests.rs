@@ -8,10 +8,7 @@ use std::path::{Path, PathBuf};
 use cli_shared::{UserConfig, credentials};
 use crypto::{Ed25519Signer, Signer};
 
-use super::{
-    CallContextFactory, HostedAuthMode, HostedSession,
-    context::SignedCallContext,
-};
+use super::{CallContextFactory, HostedAuthMode, HostedSession, context::SignedCallContext};
 
 const SERVER: &str = "api.heddle.test";
 
@@ -179,7 +176,11 @@ fn credential_store_root_attaches_matching_proof() {
     with_isolated_env(|_| {
         let signer = Ed25519Signer::generate().expect("root proof key");
         let pem = signer.to_pem().expect("root PEM");
-        store_credential(&mint_pop_token("alice", &signer), "alice", Some(pem.clone()));
+        store_credential(
+            &mint_pop_token("alice", &signer),
+            "alice",
+            Some(pem.clone()),
+        );
 
         let session = build_session(&UserConfig::default()).expect("keystore root session");
         assert_proof_attached(&session, &pem);
@@ -226,8 +227,8 @@ fn configured_key_attaches_matching_proof() {
         std::fs::write(&pem_path, &pem).expect("write configured PEM");
         store_credential(&mint_pop_token("alice", &signer), "alice", None);
 
-        let session = build_session(&user_config_with_proof_key(pem_path))
-            .expect("configured-key session");
+        let session =
+            build_session(&user_config_with_proof_key(pem_path)).expect("configured-key session");
         assert_proof_attached(&session, &pem);
     });
 }
@@ -250,7 +251,11 @@ fn same_host_identity_attaches_matching_root_key() {
 #[test]
 fn pop_bound_credential_store_token_without_key_fails_before_connect() {
     with_isolated_env(|_| {
-        store_credential(&mint_pop_token("alice", &Ed25519Signer::generate().expect("unused key")), "alice", None);
+        store_credential(
+            &mint_pop_token("alice", &Ed25519Signer::generate().expect("unused key")),
+            "alice",
+            None,
+        );
 
         let error = build_session(&UserConfig::default())
             .expect_err("a PoP-bound keystore token with no key must fail locally");
@@ -274,9 +279,8 @@ fn same_host_identity_does_not_satisfy_a_derived_child() {
         repo::identity::link_device_key(&parent.public_key(), &parent_pem, SERVER)
             .expect("link ancestor identity");
 
-        let error = build_session(&UserConfig::default()).expect_err(
-            "a token-only derived child must not borrow the ancestor same-host key",
-        );
+        let error = build_session(&UserConfig::default())
+            .expect_err("a token-only derived child must not borrow the ancestor same-host key");
         let message = error.to_string();
         assert!(
             message.contains("proof-of-possession") && message.contains("no matching"),
