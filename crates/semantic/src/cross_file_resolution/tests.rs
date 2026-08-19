@@ -44,6 +44,13 @@ fn rust_imported_call_resolves_and_missing_name_stays_unresolved() {
     );
 
     let resolution = resolve_repository(&files);
+    let only_client = resolve_paths(&files, ["src/client.rs"]);
+    assert_eq!(
+        only_client.len(),
+        1,
+        "resolve_paths must not visit other files"
+    );
+    assert_eq!(only_client["src/client.rs"], resolution["src/client.rs"]);
     let client = &resolution["src/client.rs"];
     assert_eq!(
         client.dependencies,

@@ -22,6 +22,7 @@ mod risk_signal;
 mod semantic_change;
 mod semantic_edges;
 mod semantic_index;
+mod semantic_reverse_deps;
 mod session;
 mod source;
 mod spool_id;
@@ -86,6 +87,7 @@ pub use semantic_index::{
     SymbolKindTag, SymbolNamespace, compute_dir_semantic_digest, compute_file_scaffold_hash,
     compute_file_semantic_digest, compute_symbol_semantic_hash,
 };
+pub use semantic_reverse_deps::ReverseDependencyIndex;
 pub use session::{Session, SessionSegment, generate_session_id};
 #[cfg(feature = "async-source")]
 pub use source::AsyncObjectSource;

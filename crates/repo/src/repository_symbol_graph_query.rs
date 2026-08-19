@@ -3,6 +3,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+#[cfg(feature = "tree-sitter-symbols")]
+use objects::object::ReverseDependencyIndex;
 use objects::{
     object::{BindingDelta, ContentHash, ResolvedSemanticEdge, StateId},
     store::ObjectStore,
@@ -54,6 +56,18 @@ impl Repository {
                     .into_iter()
                     .find(|edge| edge.source_occurrence == source_occurrence)
             }))
+    }
+
+    #[cfg(feature = "tree-sitter-symbols")]
+    pub(crate) fn load_reverse_dependency_index(
+        &self,
+        hash: &ContentHash,
+    ) -> Result<ReverseDependencyIndex> {
+        let blob = self.store().get_blob(hash)?.ok_or_else(|| {
+            HeddleError::NotFound(format!("semantic reverse-dependency index {hash}"))
+        })?;
+        ReverseDependencyIndex::decode(blob.content())
+            .map_err(|err| HeddleError::InvalidObject(err.to_string()))
     }
 
     pub(crate) fn load_binding_delta(&self, hash: &ContentHash) -> Result<BindingDelta> {

@@ -3,9 +3,9 @@ use std::collections::{HashSet, VecDeque};
 
 use objects::{
     object::{
-        AnnotatedTag, BindingDelta, ContentHash, RedactionsBlob, SemanticEntryKind,
-        SemanticIndexRoot, SemanticTreeNode, State, StateAttachment, StateAttachmentBody,
-        StateAttachmentId, StateAttachmentKind, StateId, TreeEntryTarget,
+        AnnotatedTag, BindingDelta, ContentHash, RedactionsBlob, ReverseDependencyIndex,
+        SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode, State, StateAttachment,
+        StateAttachmentBody, StateAttachmentId, StateAttachmentKind, StateId, TreeEntryTarget,
     },
     store::{ObjectStore, pack::ObjectType as PackObjectType},
 };
@@ -663,6 +663,9 @@ fn walk_semantic_index_closure(
                     // shallow-clone boundary.
                     emit_binding_delta(store, hash, excluded, seen, visit)?;
                 }
+                SemanticChild::ImporterIndex(hash) => {
+                    emit_importer_index(store, hash, excluded, seen, visit)?;
+                }
             }
         }
     }
@@ -674,6 +677,7 @@ enum SemanticChild {
     Interior(ContentHash),
     Leaf(ContentHash),
     BindingDelta(ContentHash),
+    ImporterIndex(ContentHash),
 }
 
 /// Decode a semantic-closure node — the root (which points at a tree node) or a
@@ -689,6 +693,9 @@ fn decode_semantic_container(
         let mut children = vec![SemanticChild::Interior(root.tree)];
         if let Some(binding_delta) = root.binding_delta {
             children.push(SemanticChild::BindingDelta(binding_delta));
+        }
+        if let Some(importer_index) = root.importer_index {
+            children.push(SemanticChild::ImporterIndex(importer_index));
         }
         return Ok(children);
     }
@@ -721,6 +728,25 @@ fn emit_binding_delta(
         .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
     BindingDelta::decode(blob.content()).map_err(|err| {
         ProtocolError::Serialization(format!("semantic binding delta {hash}: {err}"))
+    })?;
+    Ok(())
+}
+
+fn emit_importer_index(
+    store: &impl ObjectStore,
+    hash: ContentHash,
+    excluded: &HashSet<ContentHash>,
+    seen: &mut HashSet<ContentHash>,
+    visit: &mut impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
+) -> Result<()> {
+    if !emit_semantic_blob(store, hash, excluded, seen, visit)? {
+        return Ok(());
+    }
+    let blob = store
+        .get_blob(&hash)?
+        .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
+    ReverseDependencyIndex::decode(blob.content()).map_err(|err| {
+        ProtocolError::Serialization(format!("semantic reverse-dependency index {hash}: {err}"))
     })?;
     Ok(())
 }
@@ -777,7 +803,7 @@ fn collect_semantic_hashes(
                 SemanticChild::Leaf(hash) => {
                     excluded.insert(hash);
                 }
-                SemanticChild::BindingDelta(hash) => {
+                SemanticChild::BindingDelta(hash) | SemanticChild::ImporterIndex(hash) => {
                     excluded.insert(hash);
                 }
             }
