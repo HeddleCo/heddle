@@ -52,3 +52,5 @@ pub(crate) fn invalid(message: impl Into<String>) -> CompactError {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod hostile;
