@@ -14944,7 +14944,7 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "claim_url": {
-          "description": "Short-lived heddle.sh bearer URL, present only on deliberate mint/reissue.",
+          "description": "Short-lived claim URL on the selected server origin, present only on deliberate mint/reissue.",
           "type": [
             "string",
             "null"
@@ -14987,7 +14987,7 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "claim_url": {
-          "description": "Short-lived heddle.sh bearer URL, present only on deliberate mint/reissue.",
+          "description": "Short-lived claim URL on the selected server origin, present only on deliberate mint/reissue.",
           "type": [
             "string",
             "null"
@@ -27284,6 +27284,23 @@
       "title": "GenericJsonObjectSchema",
       "type": "object"
     },
+    "semantic refs": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "output_kind": {
+          "enum": [
+            "semantic_refs"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind"
+      ],
+      "title": "GenericJsonObjectSchema",
+      "type": "object"
+    },
     "show": {
       "$defs": {
         "ShowAgentSchema": {
@@ -39001,6 +39018,28 @@
     },
     "whoami": {
       "$defs": {
+        "WhoamiCaptureActorSchema": {
+          "properties": {
+            "email": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "source": {
+              "description": "`environment`, `repository`, `git_config`, or `user_config`; null when unknown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "email"
+          ],
+          "type": "object"
+        },
         "WhoamiIdentitySchema": {
           "properties": {
             "actor_subject": {
@@ -39099,6 +39138,10 @@
           "description": "A usable credential is stored locally for this server.",
           "type": "boolean"
         },
+        "capture_actor": {
+          "$ref": "#/$defs/WhoamiCaptureActorSchema",
+          "description": "Who the next capture is attributed to. Distinct from hosted auth."
+        },
         "expires_at": {
           "type": [
             "string",
@@ -39173,6 +39216,7 @@
       },
       "required": [
         "output_kind",
+        "capture_actor",
         "server",
         "authenticated",
         "reachable",

@@ -654,6 +654,23 @@ pub fn resolve_principal(
     Ok(ResolvedPrincipal::unknown(principal))
 }
 
+/// Resolve capture attribution when no repository is open.
+///
+/// Precedence is environment, then user config, then the built-in Unknown
+/// principal. Repository and Git-config sources are unavailable without a repo.
+pub fn resolve_principal_without_repo(user_config: &UserConfig) -> ResolvedPrincipal {
+    if let Some(principal) = Principal::from_env() {
+        return ResolvedPrincipal::configured(principal, "environment");
+    }
+    if let Some(config) = &user_config.principal {
+        return ResolvedPrincipal::configured(
+            Principal::new(&config.name, &config.email),
+            "user_config",
+        );
+    }
+    ResolvedPrincipal::unknown(Principal::new("Unknown", "unknown@example.com"))
+}
+
 /// Human-facing source label. User config is called out as global because it
 /// is shared across repositories unless `HEDDLE_HOME` or `HEDDLE_CONFIG`
 /// isolates it.

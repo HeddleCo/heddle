@@ -15,7 +15,10 @@ pub mod remote;
 pub use client_config::{
     ClientConfig, cleartext_connect_allowed, cleartext_refused_message, is_loopback_ip,
 };
-pub use config::{ResolvedPrincipal, UserConfig, principal_source_display, resolve_principal};
+pub use config::{
+    ResolvedPrincipal, UserConfig, principal_source_display, resolve_principal,
+    resolve_principal_without_repo,
+};
 pub use logging::{
     LogFormat, LoggingConfig, LoggingGuard, init_logging, init_logging_default, is_enabled,
 };

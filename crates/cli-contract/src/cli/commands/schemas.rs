@@ -738,8 +738,18 @@ pub struct AuthTrustSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+pub struct WhoamiCaptureActorSchema {
+    pub name: String,
+    pub email: String,
+    /// `environment`, `repository`, `git_config`, or `user_config`; null when unknown.
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct WhoamiSchema {
     pub output_kind: String,
+    /// Who the next capture is attributed to. Distinct from hosted auth.
+    pub capture_actor: WhoamiCaptureActorSchema,
     pub server: String,
     /// A usable credential is stored locally for this server.
     pub authenticated: bool,
