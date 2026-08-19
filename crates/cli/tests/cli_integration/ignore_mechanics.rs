@@ -370,7 +370,7 @@ fn native_capture_cannot_unignore_heddle_identity_via_gitignore() {
         .filter_map(Value::as_str)
         .collect();
     assert!(
-        paths.iter().any(|path| *path == "kept.txt"),
+        paths.contains(&"kept.txt"),
         "status must still list real worktree files: {paths:?}"
     );
     assert!(
@@ -380,9 +380,7 @@ fn native_capture_cannot_unignore_heddle_identity_via_gitignore() {
         "status must not list reserved root .heddle paths: {paths:?}"
     );
     assert!(
-        paths
-            .iter()
-            .any(|path| *path == "examples/calculator/.heddle/identity.toml"),
+        paths.contains(&"examples/calculator/.heddle/identity.toml"),
         "status must still list nested fixture .heddle: {paths:?}"
     );
 
