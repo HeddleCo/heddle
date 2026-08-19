@@ -18,6 +18,7 @@
 
 use std::{fs, process::Command};
 
+use crypto::Signer;
 use serde_json::Value;
 use tempfile::TempDir;
 
