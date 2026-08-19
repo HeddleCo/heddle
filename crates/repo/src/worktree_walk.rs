@@ -12,6 +12,7 @@ use objects::{
     error::{HeddleError, Result},
     object::{ContentHash, Tree, TreeEntry},
     store::ObjectStore,
+    worktree::is_reserved_directory_child,
 };
 
 use crate::{
@@ -208,6 +209,11 @@ fn walk_directory<P: WorktreeWalkPolicy>(
         let mut entry_key = location.key.to_string();
         for entry in &dir_entries {
             let name = entry.name.as_str();
+            // Reserved-path hard-deny (heddle#1413): root `.heddle/` is
+            // identity/engine state. User ignore rules cannot un-ignore it.
+            if is_reserved_directory_child(directory.rel_path, name) {
+                continue;
+            }
             if ignore_matcher.should_prune_directory_child(directory.rel_path, name) {
                 continue;
             }

@@ -16,10 +16,16 @@
 //! fixture) is *captured*, not silently dropped. Operators who want
 //! the gitignore-spec "match anywhere" behavior for those names can
 //! write `**/<name>` explicitly.
+//!
+//! Root `.heddle/` is also a reserved-path hard-deny evaluated after
+//! user rules. A later `!.heddle/` (or similar) cannot un-ignore
+//! identity material. Nested fixture `.heddle/` trees are not reserved.
 
 use std::path::Path;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+
+use super::worktree_reserved::is_reserved_worktree_path;
 
 /// Whether `path` is covered by any of the `.heddleignore` patterns.
 ///
@@ -111,6 +117,9 @@ fn canonical_line(pattern: &str) -> String {
 /// directory entry as well as paths inside it. See the docstring on
 /// `should_ignore` for the migration rationale.
 fn matched(gi: &Gitignore, path: &Path) -> bool {
+    if is_reserved_worktree_path(path) {
+        return true;
+    }
     matches!(
         gi.matched_path_or_any_parents(path, /* is_dir */ true),
         ignore::Match::Ignore(_)

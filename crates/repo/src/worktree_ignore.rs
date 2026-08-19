@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use objects::object::ContentHash;
+use objects::{object::ContentHash, worktree::is_reserved_worktree_path};
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct WorktreeIgnoreMatcher {
@@ -96,6 +96,9 @@ impl WorktreeIgnoreMatcher {
     }
 
     fn matched_relative(&self, path: &Path, is_dir: bool) -> bool {
+        if is_reserved_worktree_path(path) {
+            return true;
+        }
         let Some(gi) = &self.matcher else {
             return false;
         };

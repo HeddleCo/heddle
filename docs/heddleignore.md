@@ -54,8 +54,12 @@ and in isolated thread checkouts (`heddle start --path …`). Build junk that
 matches a root ignore rule is never listed as unsaved work and never enters
 permanent history.
 
-Heddle always protects its own `.heddle/` metadata. Other paths must
-be explicit in `.gitignore`, `.heddleignore`, or the config key below.
+Root `.heddle/` is reserved: identity, credentials, and repository-engine
+state. User ignore rules cannot un-ignore it. A `.gitignore` or
+`.heddleignore` negation such as `!.heddle/` does not pull
+`identity.toml` into capture. Nested `.heddle/` directories (fixtures)
+remain ordinary paths. Other paths must be explicit in `.gitignore`,
+`.heddleignore`, or the config key below.
 
 ## Config key: `[worktree] ignore`
 
@@ -70,7 +74,9 @@ Config patterns are loaded first, then root `.gitignore`, then
 `.heddle/info/exclude`, then root `.heddleignore`. Prefer the ignore files
 for project policy; use `[worktree] ignore` for operator-local or
 repo-engine defaults that should not appear as a tracked ignore file.
-Default config always includes `.heddle`.
+Default config always includes `.heddle`. That default is last-match
+and can be contradicted by a later user rule; the reserved-path hard-deny
+is what keeps root `.heddle/` out of capture.
 
 ## Capture path scoping
 

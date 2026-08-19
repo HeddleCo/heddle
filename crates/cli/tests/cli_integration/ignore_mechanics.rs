@@ -165,6 +165,10 @@ fn heddleignore_help_topic_prints_the_documented_contract() {
     assert!(help.contains("500 or more paths"));
     assert!(help.contains("[worktree] ignore"));
     assert!(help.contains("no `--path` filter") || help.contains("no `--path`"));
+    assert!(
+        help.contains("cannot un-ignore") && help.contains("identity.toml"),
+        "help must document the reserved .heddle hard-deny: {help}"
+    );
 }
 
 #[test]

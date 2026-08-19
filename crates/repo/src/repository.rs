@@ -2958,6 +2958,9 @@ impl Repository {
 
     pub fn ignore_patterns(&self) -> Result<Vec<String>> {
         let mut patterns = self.config.worktree.ignore.clone();
+        // Default config includes `.heddle`, but that is a last-match
+        // pattern. Root `.heddle/` is reserved after this list is
+        // compiled — see `objects::worktree::is_reserved_worktree_path`.
         // Reserve the operator-local courtesy-stub filename. It is a Heddle
         // artifact written for under-tier checkouts, never tracked content.
         // Excluding it here is the single tree-build chokepoint every capture path
