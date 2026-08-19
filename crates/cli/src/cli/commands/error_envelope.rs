@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared stderr error envelopes for CLI failures.
 
-use clap::error::Error as ClapError;
+use clap::error::{ContextKind, ContextValue, Error as ClapError, ErrorKind};
 use repo::Config;
 
 use super::{
@@ -136,6 +136,37 @@ fn compact_dirty_worktree_condition(condition: &str) -> String {
     format!("{PREFIX}{paths}")
 }
 
+pub fn print_or_suggest_parse_error(err: &ClapError) -> std::io::Result<()> {
+    if let Some(message) = unrecognized_subcommand_suggestion(err) {
+        eprint!("{message}");
+        return Ok(());
+    }
+    err.print()
+}
+
+fn unrecognized_subcommand_suggestion(err: &ClapError) -> Option<String> {
+    if err.kind() != ErrorKind::InvalidSubcommand {
+        return None;
+    }
+    let unknown = invalid_subcommand_name(err)?;
+    let suggested = crate::cli::cli_args::suggested_command(&unknown)?;
+    Some(crate::cli::cli_args::format_unrecognized_suggestion(
+        &unknown, suggested,
+    ))
+}
+
+fn invalid_subcommand_name(err: &ClapError) -> Option<String> {
+    if let Some(ContextValue::String(name)) = err.get(ContextKind::InvalidSubcommand) {
+        return Some(name.clone());
+    }
+    let message = err.to_string();
+    let prefix = "unrecognized subcommand '";
+    let start = message.find(prefix)? + prefix.len();
+    let rest = message.get(start..)?;
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_string())
+}
+
 pub fn print_parse_error_json_envelope(err: &ClapError) {
     let primary_command = "heddle help --output json";
     let recovery_commands = vec![
@@ -143,10 +174,27 @@ pub fn print_parse_error_json_envelope(err: &ClapError) {
         "heddle help --output text".to_string(),
     ];
     let recovery_action_templates = command_templates(&recovery_commands);
+    let suggestion = unrecognized_subcommand_suggestion(err);
+    let default_error = err.to_string();
+    let error = suggestion
+        .as_deref()
+        .and_then(|text| text.lines().next())
+        .unwrap_or(&default_error);
+    let hint = suggestion
+        .as_ref()
+        .and_then(|text| {
+            text.lines()
+                .find(|line| line.contains("similar subcommand"))
+                .map(str::trim)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| {
+            "Run `heddle help --output json` to inspect the command surface.".to_string()
+        });
     let body = serde_json::json!({
-        "error": err.to_string(),
+        "error": error,
         "exit_code": HeddleExitCode::from_clap(err).as_u8(),
-        "hint": "Run `heddle help --output json` to inspect the command surface.",
+        "hint": hint,
         "kind": "parse_error",
         "unsafe_condition": "the requested arguments do not match the registered command surface",
         "would_change": "the command body was not executed, so no repository state could be changed",

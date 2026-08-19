@@ -273,7 +273,7 @@ fn init_status_and_capture_agree_on_user_config_principal() {
     assert_success(&capture, "capture");
     assert!(
         output_text(&capture).contains(
-            "Saved by: Luke Thorne <luke@example.test> from user_config (shared global config)"
+            "Captured by: Luke Thorne <luke@example.test> from user_config (shared global config)"
         ),
         "capture must report the same principal and source:\n{}",
         output_text(&capture)

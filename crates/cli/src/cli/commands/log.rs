@@ -75,6 +75,10 @@ struct LogOutput {
     /// `heddle status --output json` instead.
     #[serde(skip)]
     import_guidance: Option<LogImportGuidanceOutput>,
+    /// Init seed id for the text renderer only. Not a JSON key: the
+    /// walk still omits genesis from `states` and names the id in text.
+    #[serde(skip)]
+    omitted_genesis: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -350,6 +354,10 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
     // output would always show the seed state above the user's first
     // real snapshot and report a "Heddle <init@heddle>" or (in older
     // repos) "Unknown" principal that the user never authored.
+    let omitted_genesis = states
+        .iter()
+        .find(|state| is_synthetic_root(state))
+        .map(|state| state.state_id.short());
     let visible_states = states
         .iter()
         .filter(|state| !is_synthetic_root(state))
@@ -386,6 +394,7 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
                 entry
             })
             .collect(),
+        omitted_genesis,
     };
 
     let as_json = should_output_json(cli, Some(repo.config()));
@@ -462,6 +471,7 @@ fn render_unbound_overlay_log(
                 recommended_command: hint.recommended_command,
             }),
         states: entries,
+        omitted_genesis: None,
     };
     if should_output_json(cli, Some(repo.config())) {
         write_projected_command_json(cli, &output, &["log"])?;
@@ -1048,7 +1058,27 @@ fn write_oneline<W: std::io::Write>(
             )?;
         }
     }
+    write_omitted_genesis(out, output)?;
     Ok(())
+}
+
+fn write_omitted_genesis<W: std::io::Write>(
+    out: &mut W,
+    output: &LogOutput,
+) -> std::io::Result<()> {
+    let Some(genesis) = &output.omitted_genesis else {
+        return Ok(());
+    };
+    if !output.states.is_empty() {
+        writeln!(out)?;
+    }
+    writeln!(
+        out,
+        "{}",
+        style::dim(&format!(
+            "genesis {genesis} from `heddle init` omitted; inspect with `heddle show {genesis}`"
+        ))
+    )
 }
 
 fn write_full<W: std::io::Write>(
@@ -1167,6 +1197,7 @@ fn write_full<W: std::io::Write>(
             )?;
         }
     }
+    write_omitted_genesis(out, output)?;
     Ok(())
 }
 
@@ -1321,6 +1352,7 @@ mod tests {
             repository_capability: "git-overlay".to_string(),
             storage_model: "git+heddle-sidecar".to_string(),
             import_guidance: None,
+            omitted_genesis: None,
             states: vec![sample_entry()],
         };
 
@@ -1358,6 +1390,7 @@ mod tests {
             repository_capability: "git-overlay".to_string(),
             storage_model: "git+heddle-sidecar".to_string(),
             import_guidance: None,
+            omitted_genesis: None,
             states: vec![sample_entry()],
         };
         let mut buf = Vec::new();
@@ -1400,6 +1433,7 @@ mod tests {
             repository_capability: "git-overlay".to_string(),
             storage_model: "git+heddle-sidecar".to_string(),
             import_guidance: None,
+            omitted_genesis: None,
             states: vec![sample_entry()],
         };
 
@@ -1430,6 +1464,29 @@ mod tests {
         assert!(
             s.contains("\n\n"),
             "verbose full log should keep the spacer after the preamble: {s:?}"
+        );
+    }
+
+    #[test]
+    #[serial(color_state)]
+    fn write_full_names_omitted_genesis() {
+        style::force_for_test(false);
+        let output = LogOutput {
+            output_kind: "log",
+            status: "completed",
+            repository_capability: "native-heddle".to_string(),
+            storage_model: "heddle".to_string(),
+            import_guidance: None,
+            omitted_genesis: Some("hs-initroot".to_string()),
+            states: vec![sample_entry()],
+        };
+        let mut buf = Vec::new();
+        write_full(&mut buf, &output, false).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("genesis hs-initroot from `heddle init` omitted")
+                && s.contains("heddle show hs-initroot"),
+            "omitted genesis must be named: {s}"
         );
     }
 }

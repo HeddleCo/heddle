@@ -2,6 +2,7 @@
 //! CLI argument structures.
 
 mod cli_base;
+mod command_suggestions;
 mod commands_agent;
 mod commands_args;
 mod commands_ci;
@@ -28,6 +29,7 @@ mod output_mode;
 
 pub use cli_base::{Cli, should_output_json};
 pub use cli_shared::OutputMode;
+pub use command_suggestions::{format_unrecognized_suggestion, suggested_command};
 pub use commands_agent::{
     AgentCommands, AgentFanoutCommands, AgentProvenanceCommands, AgentTaskCommands,
     PresenceCommands,

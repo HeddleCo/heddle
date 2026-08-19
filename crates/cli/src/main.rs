@@ -38,7 +38,7 @@ use cli::{
             cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_shell, cmd_show, cmd_snapshot,
             cmd_start, cmd_status, cmd_sync_smart, cmd_thread, cmd_timeline, cmd_try, cmd_undo,
             cmd_undo_recover, cmd_verify, cmd_watch, command_runtime_contract_for_command,
-            print_error_with_hint, print_parse_error_json_envelope,
+            print_error_with_hint, print_or_suggest_parse_error, print_parse_error_json_envelope,
             recover_incomplete_land_if_present,
         },
         render::write_json_stdout,
@@ -186,7 +186,7 @@ async fn async_main() -> Result<()> {
                 print_parse_error_json_envelope(&err);
                 std::process::exit(HeddleExitCode::from_clap(&err).into());
             }
-            err.print()?;
+            print_or_suggest_parse_error(&err)?;
             std::process::exit(HeddleExitCode::from_clap(&err).into());
         }
     };

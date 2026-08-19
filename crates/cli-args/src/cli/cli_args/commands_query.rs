@@ -35,6 +35,7 @@ pub struct QueryArgs {
     #[arg(long)]
     pub thread: Option<String>,
     /// Restrict to specific oplog verbs. Repeat to allow multiple.
+    /// `capture` matches the stored `snapshot` verb; matching is case-insensitive.
     #[arg(long = "verb")]
     pub verbs: Vec<String>,
     /// Maximum hits to return.

@@ -327,7 +327,7 @@ pub async fn cmd_snapshot(
             style::dim(&output.content_hash),
         );
         println!(
-            "Saved by: {} from {}",
+            "Captured by: {} from {}",
             style::principal(&output.principal.name, &output.principal.email),
             cli_shared::principal_source_display(&output.principal_source)
         );
