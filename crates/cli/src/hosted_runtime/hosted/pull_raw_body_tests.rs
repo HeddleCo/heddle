@@ -38,7 +38,7 @@ fn declared_length_under_ceiling_grows_from_chunks_only() {
     )
     .expect_err("short body must fail after receive");
     assert!(
-        matches!(error, ProtocolError::InvalidState(message) if message.contains("length changed")),
+        matches!(error, ProtocolError::InvalidState(ref message) if message.contains("length changed")),
         "got {error}"
     );
     assert_eq!(buf, b"abcd");
