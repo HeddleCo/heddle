@@ -1,25 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::net::Ipv4Addr;
+use std::{
+    collections::HashMap,
+    net::Ipv4Addr,
+    sync::{Arc, Mutex},
+};
 
 use api::{
     StreamingShape,
     framing::{
-        StreamFrame, decode_request_prelude, decode_stream_frame, encode_stream_message,
-        encode_success_response,
+        StreamFrame, decode_request_frame, decode_request_prelude, decode_stream_frame,
+        encode_stream_message, encode_success_response,
     },
     heddle::api::v1alpha1::{
-        GetContextHistoryPageEnd, GetContextHistoryResponse, ListContextPageEnd,
-        ListContextResponse, ListDiscussionsPageEnd, ListDiscussionsResponse, ListRefsPageEnd,
-        ListRefsResponse, ListThreadsPageEnd, ListThreadsResponse, PackChunk, PackStreamKind,
-        PullComplete, PullReady, PullServerFrame, PushClientFrame, PushComplete, PushReady,
-        PushServerFrame, SignedSpoolOwnerGenesis, StateId, TransferCheckpoint, TransportMode,
-        get_context_history_response, list_context_response, list_discussions_response,
-        list_refs_response, list_threads_response, pull_server_frame, push_client_frame,
-        push_server_frame,
+        BlobResponse, GetBlobRequest, GetContextHistoryPageEnd, GetContextHistoryResponse,
+        ListContextPageEnd, ListContextResponse, ListDiscussionsPageEnd, ListDiscussionsResponse,
+        ListRefsPageEnd, ListRefsResponse, ListThreadsPageEnd, ListThreadsResponse, PackChunk,
+        PackStreamKind, PullComplete, PullReady, PullServerFrame, PushClientFrame, PushComplete,
+        PushReady, PushServerFrame, SignedSpoolOwnerGenesis, StateId, TransferCheckpoint,
+        TransportMode, get_context_history_response, list_context_response,
+        list_discussions_response, list_refs_response, list_threads_response, pull_server_frame,
+        push_client_frame, push_server_frame,
     },
     method_descriptor,
 };
+use base64::Engine as _;
 use bytes::Bytes;
 use crypto::Ed25519Signer;
 use iroh::{Endpoint, RelayMode, endpoint::presets};
@@ -29,6 +34,7 @@ use tokio::task::JoinHandle;
 use super::{CallContextFactory, HostedClient};
 
 const OWNER_GENESIS_FIXTURE_HEX: &str = "0a380a10222222222222222222222222222222221224080112208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c12640a20def88318e44a809464c1022f22230567bae6805d17b1ccfc2bebe5326232c58a1240bfe677c0b6fec8d28e379f584f36dee7258d834222f9b75f61dc75b7db2d836d76d4fb6eaf9e7f561925b2e6882b51eadaf3ec77c565f5b638ad0febfc8cd304";
+const GET_BLOB_METHOD: &str = "/heddle.api.v1alpha1.RepositoryService/GetBlob";
 
 fn owner_genesis_fixture() -> SignedSpoolOwnerGenesis {
     let bytes = hex::decode(OWNER_GENESIS_FIXTURE_HEX).expect("published v2 fixture hex");
@@ -36,16 +42,19 @@ fn owner_genesis_fixture() -> SignedSpoolOwnerGenesis {
 }
 
 pub(crate) async fn start() -> (HostedClient, JoinHandle<()>) {
-    start_inner(None).await
+    start_inner(None, BlobFixture::default()).await
 }
 
 pub(crate) async fn start_with_remote_state(
     remote_state: StateId,
 ) -> (HostedClient, JoinHandle<()>) {
-    start_inner(Some(PullFixture {
-        remote_state,
-        pack: None,
-    }))
+    start_inner(
+        Some(PullFixture {
+            remote_state,
+            pack: None,
+        }),
+        BlobFixture::default(),
+    )
     .await
 }
 
@@ -54,11 +63,26 @@ pub(crate) async fn start_with_pull_pack(
     pack_data: Vec<u8>,
     index_data: Vec<u8>,
 ) -> (HostedClient, JoinHandle<()>) {
-    start_inner(Some(PullFixture {
-        remote_state,
-        pack: Some((pack_data, index_data)),
-    }))
+    start_inner(
+        Some(PullFixture {
+            remote_state,
+            pack: Some((pack_data, index_data)),
+        }),
+        BlobFixture::default(),
+    )
     .await
+}
+
+pub(crate) async fn start_with_get_blob_contents(
+    blobs: impl IntoIterator<Item = (String, Vec<u8>)>,
+) -> (HostedClient, JoinHandle<()>, Arc<Mutex<Vec<String>>>) {
+    let requested = Arc::new(Mutex::new(Vec::new()));
+    let fixture = BlobFixture {
+        contents: blobs.into_iter().collect(),
+        requested: Arc::clone(&requested),
+    };
+    let (client, server) = start_inner(None, fixture).await;
+    (client, server, requested)
 }
 
 #[derive(Clone)]
@@ -67,7 +91,16 @@ struct PullFixture {
     pack: Option<(Vec<u8>, Vec<u8>)>,
 }
 
-async fn start_inner(pull: Option<PullFixture>) -> (HostedClient, JoinHandle<()>) {
+#[derive(Clone, Default)]
+struct BlobFixture {
+    contents: HashMap<String, Vec<u8>>,
+    requested: Arc<Mutex<Vec<String>>>,
+}
+
+async fn start_inner(
+    pull: Option<PullFixture>,
+    blobs: BlobFixture,
+) -> (HostedClient, JoinHandle<()>) {
     let server = Endpoint::builder(presets::Minimal)
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
         .relay_mode(RelayMode::Disabled)
@@ -85,7 +118,7 @@ async fn start_inner(pull: Option<PullFixture>) -> (HostedClient, JoinHandle<()>
             .await
             .unwrap();
         while let Ok((send, recv)) = connection.accept_bi().await {
-            tokio::spawn(serve_call(send, recv, pull.clone()));
+            tokio::spawn(serve_call(send, recv, pull.clone(), blobs.clone()));
         }
         server.close().await;
     });
@@ -110,6 +143,7 @@ async fn serve_call(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     pull: Option<PullFixture>,
+    blobs: BlobFixture,
 ) {
     let mut request = Vec::new();
     let (method, prelude_len) = loop {
@@ -126,9 +160,13 @@ async fn serve_call(
     let descriptor = method_descriptor(&method).expect("registered hosted method");
     match descriptor.streaming {
         StreamingShape::Unary | StreamingShape::ClientStreaming => {
-            send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
-                .await
-                .unwrap();
+            if method == GET_BLOB_METHOD && !blobs.contents.is_empty() {
+                serve_get_blob(&mut send, &mut recv, &mut request, blobs).await;
+            } else {
+                send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
+                    .await
+                    .unwrap();
+            }
         }
         StreamingShape::ServerStreaming => {
             let body = terminal_page(&method);
@@ -315,6 +353,44 @@ fn bidi_responses(method: &str, pull: Option<PullFixture>) -> Vec<Vec<u8>> {
         }
         _ => Vec::new(),
     }
+}
+
+async fn serve_get_blob(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    blobs: BlobFixture,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let path = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| GetBlobRequest::decode(frame.body).ok())
+        .map(|body| body.path)
+        .unwrap_or_default();
+    blobs
+        .requested
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(path.clone());
+    let content = blobs.contents.get(&path).cloned().unwrap_or_default();
+    let is_binary = std::str::from_utf8(&content).is_err();
+    let encoded = if is_binary {
+        base64::engine::general_purpose::STANDARD.encode(&content)
+    } else {
+        String::from_utf8(content).unwrap_or_default()
+    };
+    let response = BlobResponse {
+        content: encoded,
+        is_binary,
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
 }
 
 fn pack_frame(stream_kind: PackStreamKind, data: Vec<u8>) -> Vec<u8> {
