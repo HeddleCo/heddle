@@ -6835,6 +6835,95 @@ fn native_capture_does_not_tip_overlay_commit() {
     );
 }
 
+/// Exact field-study walk from HeddleCo/heddle#1435 (native, no `.git`).
+#[test]
+fn field_study_1435_native_help_capture_commit_exits() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).expect("native init");
+    assert!(
+        !temp.path().join(".git").exists(),
+        "field study is native-only"
+    );
+
+    for args in [&["--help"][..], &["help"][..]] {
+        let help = heddle(args, Some(temp.path())).expect("first-screen help");
+        assert!(
+            !help.contains("-> heddle commit ->")
+                && !help.contains("authoritative Git checkout")
+                && !help.contains("\n  commit"),
+            "`heddle {}` must not teach overlay commit on native: {help}",
+            args.join(" ")
+        );
+        assert!(
+            help.contains("heddle capture -m"),
+            "`heddle {}` still teaches capture: {help}",
+            args.join(" ")
+        );
+    }
+
+    let usage = heddle(&["capture", "--help"], Some(temp.path())).expect("capture usage");
+    let usage_line = usage
+        .lines()
+        .find(|line| line.contains("Usage:"))
+        .unwrap_or(usage.as_str());
+    assert!(
+        usage_line.contains("-m") && usage_line.contains("<INTENT>") && !usage_line.contains("[-m"),
+        "capture usage must mark -m required: {usage}"
+    );
+
+    std::fs::write(temp.path().join("NOTES.md"), "field study\n").expect("dirty worktree");
+    let capture = heddle_output(&["capture", "-m", "field study"], Some(temp.path()))
+        .expect("invoke native capture");
+    assert_eq!(
+        capture.status.code(),
+        Some(0),
+        "native capture should succeed: {}",
+        String::from_utf8_lossy(&capture.stderr)
+    );
+    let capture_err = String::from_utf8_lossy(&capture.stderr);
+    assert!(
+        !capture_err.contains("tip: in Git Overlay, run heddle commit"),
+        "native capture must not print the overlay tip: {capture_err}"
+    );
+
+    let commit = heddle_output(&["commit"], Some(temp.path())).expect("invoke native commit");
+    assert_eq!(
+        commit.status.code(),
+        Some(65),
+        "native commit must stay a semantic refuse: stdout={} stderr={}",
+        String::from_utf8_lossy(&commit.stdout),
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    let commit_err = String::from_utf8_lossy(&commit.stderr);
+    assert!(
+        commit_err.contains("`heddle commit` writes Git-overlay source history"),
+        "native commit must name the overlay boundary: {commit_err}"
+    );
+    assert!(
+        !commit_err.contains("Next: heddle capture"),
+        "Next must not tell an already-captured native repo to capture again: {commit_err}"
+    );
+    assert!(
+        commit_err.contains("Next: heddle status"),
+        "already-captured native commit should point at status: {commit_err}"
+    );
+
+    let missing_intent =
+        heddle_output(&["capture"], Some(temp.path())).expect("invoke capture without -m");
+    assert_eq!(
+        missing_intent.status.code(),
+        Some(74),
+        "omitted -m must stay the intent refuse: stdout={} stderr={}",
+        String::from_utf8_lossy(&missing_intent.stdout),
+        String::from_utf8_lossy(&missing_intent.stderr)
+    );
+    let missing_err = String::from_utf8_lossy(&missing_intent.stderr);
+    assert!(
+        missing_err.contains("refusing to capture without an intent"),
+        "omitted -m must keep the intent refuse: {missing_err}"
+    );
+}
+
 #[test]
 fn global_flags_only_json_renders_command_catalog_for_agents() {
     let output = heddle_output(&["--output", "json"], None).expect("invoke heddle");
