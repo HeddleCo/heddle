@@ -118,7 +118,8 @@ impl BlobHydrator for LazyHostedHydrator {
         // Honor `hash`: fetch that object (plus whatever decode needs),
         // not every missing blob on the current tip. Partial-fetch
         // metadata records blake3 only, so the hosted client resolves a
-        // tip-tree path when one exists and otherwise wants this hash.
+        // tip-tree path when one exists and GetBlob-s that state. A
+        // moved-path mismatch falls through to a single-hash want.
 
         // Re-resolve the target state from the repo on EVERY call. If a
         // `pull --lazy` advanced the local thread between clone and now,

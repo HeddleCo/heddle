@@ -76,12 +76,35 @@ pub(crate) async fn start_with_pull_pack(
 pub(crate) async fn start_with_get_blob_contents(
     blobs: impl IntoIterator<Item = (String, Vec<u8>)>,
 ) -> (HostedClient, JoinHandle<()>, Arc<Mutex<Vec<String>>>) {
+    start_with_get_blob_contents_and_pull(blobs, None).await
+}
+
+pub(crate) async fn start_with_get_blob_contents_and_pull_pack(
+    blobs: impl IntoIterator<Item = (String, Vec<u8>)>,
+    remote_state: StateId,
+    pack_data: Vec<u8>,
+    index_data: Vec<u8>,
+) -> (HostedClient, JoinHandle<()>, Arc<Mutex<Vec<String>>>) {
+    start_with_get_blob_contents_and_pull(
+        blobs,
+        Some(PullFixture {
+            remote_state,
+            pack: Some((pack_data, index_data)),
+        }),
+    )
+    .await
+}
+
+async fn start_with_get_blob_contents_and_pull(
+    blobs: impl IntoIterator<Item = (String, Vec<u8>)>,
+    pull: Option<PullFixture>,
+) -> (HostedClient, JoinHandle<()>, Arc<Mutex<Vec<String>>>) {
     let requested = Arc::new(Mutex::new(Vec::new()));
     let fixture = BlobFixture {
         contents: blobs.into_iter().collect(),
         requested: Arc::clone(&requested),
     };
-    let (client, server) = start_inner(None, fixture).await;
+    let (client, server) = start_inner(pull, fixture).await;
     (client, server, requested)
 }
 
