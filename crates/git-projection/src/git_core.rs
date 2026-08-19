@@ -4215,7 +4215,8 @@ mod tests {
         let mut record = HashMap::new();
         record.insert("refs/heads/main".to_string(), owned);
         record.insert("refs/heads/kept".to_string(), owned);
-        let frontier = collect_managed_ref_updates(&repo, &record).expect("collect managed updates");
+        let frontier =
+            collect_managed_ref_updates(&repo, &record).expect("collect managed updates");
 
         let mut old_at_destination = HashMap::new();
         old_at_destination.insert("refs/heads/main".to_string(), owned);
