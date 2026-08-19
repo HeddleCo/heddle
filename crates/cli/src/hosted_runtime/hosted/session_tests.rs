@@ -257,8 +257,9 @@ fn pop_bound_credential_store_token_without_key_fails_before_connect() {
             None,
         );
 
-        let error = build_session(&UserConfig::default())
-            .expect_err("a PoP-bound keystore token with no key must fail locally");
+        let Err(error) = build_session(&UserConfig::default()) else {
+            panic!("a PoP-bound keystore token with no key must fail locally");
+        };
         let message = error.to_string();
         assert!(
             message.contains("proof-of-possession") && message.contains("no matching"),
@@ -279,8 +280,9 @@ fn same_host_identity_does_not_satisfy_a_derived_child() {
         repo::identity::link_device_key(&parent.public_key(), &parent_pem, SERVER)
             .expect("link ancestor identity");
 
-        let error = build_session(&UserConfig::default())
-            .expect_err("a token-only derived child must not borrow the ancestor same-host key");
+        let Err(error) = build_session(&UserConfig::default()) else {
+            panic!("a token-only derived child must not borrow the ancestor same-host key");
+        };
         let message = error.to_string();
         assert!(
             message.contains("proof-of-possession") && message.contains("no matching"),
@@ -300,8 +302,9 @@ fn credential_store_mismatched_key_fails_locally() {
             Some(other.to_pem().expect("other PEM")),
         );
 
-        let error = build_session(&UserConfig::default())
-            .expect_err("a keystore key that is not the leaf key must fail locally");
+        let Err(error) = build_session(&UserConfig::default()) else {
+            panic!("a keystore key that is not the leaf key must fail locally");
+        };
         assert!(
             error.to_string().contains("does not match"),
             "mismatch error must be actionable: {error}"
@@ -318,8 +321,9 @@ fn configured_key_mismatch_fails_locally() {
         std::fs::write(&pem_path, other.to_pem().expect("wrong PEM")).expect("write wrong PEM");
         store_credential(&mint_pop_token("alice", &bound), "alice", None);
 
-        let error = build_session(&user_config_with_proof_key(pem_path))
-            .expect_err("a configured key that is not the leaf key must fail locally");
+        let Err(error) = build_session(&user_config_with_proof_key(pem_path)) else {
+            panic!("a configured key that is not the leaf key must fail locally");
+        };
         assert!(
             error.to_string().contains("does not match"),
             "configured-key mismatch must be actionable: {error}"
