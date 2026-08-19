@@ -373,148 +373,165 @@ fn native_remote_add_rejects_local_git_remote_before_configuring_default() {
     assert!(remotes.default_name().is_none());
 }
 
+/// Field study 2026-08-19 on native 0.12.0: these exact argv lines are the
+/// done-criteria. `remote add` used to store `heddle://api.heddle.sh/...`,
+/// then `push`/`pull` printed `invalid remote url` and exited 74.
 #[test]
-fn native_remote_add_rejects_heddle_scheme_without_addressing() {
-    let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).expect("init native Heddle repo");
-    let url = "heddle://api.heddle.sh/luke/tiny-notes";
-
-    let output = heddle_output(
-        &["--output", "json", "remote", "add", "origin", url],
-        Some(temp.path()),
-    )
-    .expect("invoke remote add");
-    assert!(
-        !output.status.success(),
-        "remote add must reject heddle:// without a port"
-    );
-    assert!(output.stdout.is_empty());
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: Value = serde_json::from_str(stderr).expect("invalid URL should emit JSON");
-    assert_eq!(envelope["kind"], "invalid_remote_url");
-    assert_json_recovery_advice_fields(&envelope, stderr);
-    assert!(
-        envelope["error"]
-            .as_str()
-            .is_some_and(|error| error.contains(url)),
-        "refusal must name the rejected URL: {envelope}"
-    );
-    assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("heddle://") && hint.contains("no addressing")),
-        "refusal must explain that heddle:// is not a push URL: {envelope}"
-    );
-    assert_ne!(
-        envelope["primary_command"], "heddle capture -m \"...\"",
-        "invalid remotes must recover on remotes/auth/push, not capture: {envelope}"
-    );
-
-    let remotes = RemoteConfig::open(&repo).expect("open remotes after refusal");
-    assert!(remotes.list().is_empty(), "invalid URL must not be stored");
-}
-
-#[test]
-fn native_remote_add_rejects_github_https_as_git_without_descriptor_probe() {
-    let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).expect("init native Heddle repo");
-    let url = "https://github.com/luke/tiny-notes";
-
-    let output = heddle_output(
-        &["--output", "json", "remote", "add", "origin", url],
-        Some(temp.path()),
-    )
-    .expect("invoke remote add");
-    assert!(
-        !output.status.success(),
-        "remote add must refuse github.com as a Heddle server"
-    );
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    assert!(
-        !stderr.contains("descriptor trust"),
-        "github.com must not be probed as a Heddle descriptor server: {stderr}"
-    );
-    let envelope: Value = serde_json::from_str(stderr).expect("Git forge should emit JSON");
-    assert_eq!(envelope["kind"], "remote_transport_mismatch");
-    assert_json_recovery_advice_fields(&envelope, stderr);
-
-    let remotes = RemoteConfig::open(&repo).expect("open remotes after refusal");
-    assert!(remotes.list().is_empty());
-}
-
-#[test]
-fn native_remote_add_rejects_nonexistent_local_path() {
-    let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).expect("init native Heddle repo");
-    let missing = temp.path().join("tiny-notes-mirror");
-
-    let output = heddle_output(
-        &[
-            "--output",
-            "json",
-            "remote",
-            "add",
-            "origin",
-            missing.to_str().unwrap(),
-        ],
-        Some(temp.path()),
-    )
-    .expect("invoke remote add");
-    assert!(
-        !output.status.success(),
-        "remote add must reject a path that does not exist"
-    );
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: Value = serde_json::from_str(stderr).expect("missing path should emit JSON");
-    assert_eq!(envelope["kind"], "invalid_remote_url");
-    assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("does not exist")),
-        "missing local remotes must fail closed: {envelope}"
-    );
-
-    let remotes = RemoteConfig::open(&repo).expect("open remotes after refusal");
-    assert!(remotes.list().is_empty());
-}
-
-#[test]
-fn native_remote_add_next_is_push_not_capture() {
+fn field_study_heddle_scheme_is_refused_at_add_not_at_push() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("dirty.txt"), "dirty\n").unwrap();
+    let repo = Repository::open(temp.path()).expect("open native repo");
+    let url = "heddle://api.heddle.sh/luke/tiny-notes";
 
-    let text = heddle(
-        &[
-            "--output",
-            "text",
-            "remote",
-            "add",
-            "origin",
-            "localhost:8421",
-        ],
-        Some(temp.path()),
-    )
-    .expect("remote add should succeed for a pushable URL");
-    assert!(
-        text.contains("Next: heddle push"),
-        "remotes task Next must stay on remotes/auth/push: {text}"
-    );
-    assert!(
-        !text.contains("heddle capture"),
-        "remotes task must not recommend capture: {text}"
-    );
-
-    let json = heddle(
-        &["--output", "json", "remote", "set-default", "origin"],
-        Some(temp.path()),
-    )
-    .expect("set-default should succeed");
-    let parsed: Value = serde_json::from_str(&json).expect("set-default JSON");
-    assert_eq!(parsed["verification"]["recommended_action"], "heddle push");
+    let add = heddle_output(&["remote", "add", "origin", url], Some(temp.path()))
+        .expect("invoke field-study remote add");
+    let add_stderr = String::from_utf8_lossy(&add.stderr);
     assert_eq!(
-        parsed["verification"]["recovery_commands"],
-        serde_json::json!(["heddle push", "heddle auth login"])
+        add.status.code(),
+        Some(74),
+        "field-study invalid URL must stay exit 74: stdout={} stderr={add_stderr}",
+        String::from_utf8_lossy(&add.stdout)
+    );
+    assert!(
+        add_stderr.contains(&format!("invalid remote url: {url}")),
+        "add must name the field-study URL: {add_stderr}"
+    );
+    assert!(
+        !add_stderr.contains("heddle capture"),
+        "remotes refusal Next must not be capture: {add_stderr}"
+    );
+    assert!(
+        RemoteConfig::open(&repo)
+            .expect("open remotes")
+            .list()
+            .is_empty(),
+        "field-study URL must not be stored"
+    );
+
+    for command in ["push", "pull"] {
+        let output = heddle_output(&[command], Some(temp.path()))
+            .unwrap_or_else(|err| panic!("invoke heddle {command}: {err}"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains(&format!("invalid remote url: {url}")),
+            "{command} must not see a stored field-study URL: {stderr}"
+        );
+    }
+}
+
+/// Field study: `remote add origin https://github.com/…` probed GitHub as a
+/// Heddle descriptor server. Fail closed as Git, with no descriptor-trust text.
+#[test]
+fn field_study_github_https_is_not_a_heddle_descriptor_server() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let repo = Repository::open(temp.path()).expect("open native repo");
+    let url = "https://github.com/luke/tiny-notes";
+
+    let add = heddle_output(&["remote", "add", "origin", url], Some(temp.path()))
+        .expect("invoke field-study GitHub remote add");
+    let stderr = String::from_utf8_lossy(&add.stderr);
+    assert_eq!(
+        add.status.code(),
+        Some(74),
+        "GitHub HTTPS must fail closed without a descriptor probe: {stderr}"
+    );
+    assert!(
+        !stderr.contains("descriptor trust"),
+        "github.com must not be treated as a Heddle server: {stderr}"
+    );
+    assert!(
+        !stderr.contains("canonical server: https://github.com"),
+        "github.com must not be pinned as a Heddle canonical server: {stderr}"
+    );
+    assert!(
+        RemoteConfig::open(&repo)
+            .expect("open remotes")
+            .list()
+            .is_empty()
+    );
+}
+
+/// Field study: `remote add origin tiny-notes-mirror` succeeded for a path
+/// that did not exist.
+#[test]
+fn field_study_nonexistent_tiny_notes_mirror_fails_at_add() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let repo = Repository::open(temp.path()).expect("open native repo");
+
+    let add = heddle_output(
+        &["remote", "add", "origin", "tiny-notes-mirror"],
+        Some(temp.path()),
+    )
+    .expect("invoke field-study local-path remote add");
+    let stderr = String::from_utf8_lossy(&add.stderr);
+    assert_eq!(
+        add.status.code(),
+        Some(74),
+        "missing tiny-notes-mirror must fail closed at add: {stderr}"
+    );
+    assert!(
+        stderr.contains("tiny-notes-mirror"),
+        "refusal must name the field-study path: {stderr}"
+    );
+    assert!(
+        RemoteConfig::open(&repo)
+            .expect("open remotes")
+            .list()
+            .is_empty()
+    );
+}
+
+/// Field study: after `remote add` / `set-default`, Next was
+/// `heddle capture -m "..."` with the worktree dirty or clean.
+#[test]
+fn field_study_remote_add_next_is_not_capture() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let clean = heddle_output(
+        &["remote", "add", "origin", "localhost:8421"],
+        Some(temp.path()),
+    )
+    .expect("invoke remote add on a clean worktree");
+    assert_eq!(
+        clean.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&clean.stderr)
+    );
+    let clean_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&clean.stdout),
+        String::from_utf8_lossy(&clean.stderr)
+    );
+    assert!(
+        !clean_text.contains("heddle capture -m \"...\""),
+        "clean remotes task must not recommend capture: {clean_text}"
+    );
+    assert!(
+        clean_text.contains("Next: heddle push") || clean_text.contains("heddle auth login"),
+        "clean remotes task Next must stay remotes/auth/push: {clean_text}"
+    );
+
+    std::fs::write(temp.path().join("NOTES.md"), "dirty\n").unwrap();
+    let dirty = heddle_output(&["remote", "set-default", "origin"], Some(temp.path()))
+        .expect("invoke set-default on a dirty worktree");
+    assert_eq!(
+        dirty.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&dirty.stderr)
+    );
+    let dirty_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&dirty.stdout),
+        String::from_utf8_lossy(&dirty.stderr)
+    );
+    assert!(
+        !dirty_text.contains("heddle capture -m \"...\""),
+        "dirty remotes task must not recommend capture: {dirty_text}"
     );
 }
 

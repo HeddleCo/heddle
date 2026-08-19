@@ -1081,7 +1081,7 @@ impl RecoveryAdvice {
     pub fn invalid_remote_url(remote: &str, parse_error: &str) -> Self {
         Self::safety_refusal(
             heddle_core::remote_advice_kind::INVALID_REMOTE_URL,
-            format!("Invalid remote URL: {remote}"),
+            format!("invalid remote url: {remote}"),
             format!(
                 "{parse_error}. Use `https://<host>/<repo>` for a Heddle server, `host:port/repo` or `heddle://host:port/repo` with an explicit port, or an existing local repository path."
             ),
