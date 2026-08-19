@@ -74,7 +74,7 @@ jobs:
   # and would let a tagged rewrite replace the gate — forbidden.
   validate-tag:
     name: validate tag
-    uses: HeddleCo/heddle/.github/workflows/validate-release-tag.yml@ff7d5923e75d675c0e31715f93b8821aaf4da10e
+    uses: HeddleCo/heddle/.github/workflows/validate-release-tag.yml@e847f41b146e42e5bd688039469ed0a5ab9eff21
     permissions:
       contents: read
 
