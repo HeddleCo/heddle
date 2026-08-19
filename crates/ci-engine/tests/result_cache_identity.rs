@@ -78,8 +78,10 @@ fn plant_json(root: &Path, entry: &ci_engine::ResultCacheEntry) {
     let slot = std::fs::read_dir(root)
         .expect("cache")
         .filter_map(|entry| entry.ok())
+        .filter(|shard| shard.path().is_dir())
         .flat_map(|shard| std::fs::read_dir(shard.path()).ok())
         .flatten()
+        .filter_map(|file| file.ok())
         .map(|file| file.path())
         .find(|path| path.extension().is_some_and(|ext| ext == "json"))
         .expect("required cache slot");
