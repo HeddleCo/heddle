@@ -5,7 +5,8 @@ use std::{collections::BTreeMap, path::Path};
 
 use chrono::TimeZone;
 use objects::{
-    error::Result,
+    RecoveryDetails,
+    error::{HeddleError, Result},
     object::{OperationId, StateId},
     store::ObjectStore,
 };
@@ -75,7 +76,7 @@ const OPLOG_FALLBACK_SCAN_WINDOW: usize = 100_000;
 
 pub fn query(ctx: &ExecutionContext, req: QueryRequest) -> Result<QueryReport> {
     let repo = ctx.require_repo()?;
-    let q = build_query(&req);
+    let q = build_query(&req)?;
     let mut hits = query_combined(repo.heddle_dir(), &q)?;
     for hit in &mut hits {
         fill_actor_email_from_state(repo, hit)?;
@@ -86,22 +87,37 @@ pub fn query(ctx: &ExecutionContext, req: QueryRequest) -> Result<QueryReport> {
     })
 }
 
-/// Human-facing name for a stored oplog verb (`snapshot` → `capture`).
-pub fn query_verb_display(verb: &str) -> &str {
-    OpRecord::public_verb_name(verb)
+/// Map a user-facing query `--verb` onto the stored catalog name.
+/// `capture` is the CLI name for the durable `snapshot` verb. Unknown
+/// names return `None` so the filter can fail closed.
+fn canonicalize_query_verb(input: &str) -> Option<&'static str> {
+    let needle = input.trim();
+    if needle.is_empty() {
+        return None;
+    }
+    if needle.eq_ignore_ascii_case("capture") {
+        return Some("snapshot");
+    }
+    OpRecord::verbs(true)
+        .into_iter()
+        .find(|verb| verb.eq_ignore_ascii_case(needle))
 }
 
-fn resolve_query_verbs(verbs: &[String]) -> Vec<String> {
+fn resolve_query_verbs(verbs: &[String]) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for verb in verbs {
-        let canonical = OpRecord::resolve_verb(verb)
-            .unwrap_or(verb.as_str())
-            .to_string();
-        if !out.iter().any(|existing| existing == &canonical) {
-            out.push(canonical);
+        let Some(canonical) = canonicalize_query_verb(verb) else {
+            return Err(HeddleError::recovery(RecoveryDetails::invalid_usage(
+                "unknown_query_verb",
+                format!("unknown query verb '{verb}'"),
+                "Use a catalog verb such as `capture` (stored as `snapshot`).",
+            )));
+        };
+        if !out.iter().any(|existing| existing == canonical) {
+            out.push(canonical.to_string());
         }
     }
-    out
+    Ok(out)
 }
 
 fn fill_actor_email_from_state(repo: &repo::Repository, hit: &mut IndexedOperation) -> Result<()> {
@@ -121,16 +137,14 @@ fn fill_actor_email_from_state(repo: &repo::Repository, hit: &mut IndexedOperati
     Ok(())
 }
 
-fn build_query(req: &QueryRequest) -> OperationLogQuery {
+fn build_query(req: &QueryRequest) -> Result<OperationLogQuery> {
+    let resolved = resolve_query_verbs(&req.verbs)?;
     let mut q = OperationLogQuery {
         actor: (!req.actor.is_empty()).then(|| req.actor.clone()),
         symbol: (!req.symbol.is_empty()).then(|| req.symbol.clone()),
         signal_kind: (!req.signal_kind.is_empty()).then(|| req.signal_kind.clone()),
         thread: (!req.thread.is_empty()).then(|| req.thread.clone()),
-        verbs: {
-            let resolved = resolve_query_verbs(&req.verbs);
-            (!resolved.is_empty()).then_some(resolved)
-        },
+        verbs: (!resolved.is_empty()).then_some(resolved),
         since: parse_unix_secs(req.since_secs),
         until: parse_unix_secs(req.until_secs),
         limit: (req.limit > 0).then_some(req.limit as usize),
@@ -143,7 +157,7 @@ fn build_query(req: &QueryRequest) -> OperationLogQuery {
                 .collect(),
         );
     }
-    q
+    Ok(q)
 }
 
 fn parse_unix_secs(secs: i64) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -306,11 +320,11 @@ mod tests {
     #[test]
     fn resolve_query_verbs_maps_capture_case_insensitively() {
         assert_eq!(
-            resolve_query_verbs(&["capture".into(), "Capture".into()]),
+            resolve_query_verbs(&["capture".into(), "Capture".into()]).unwrap(),
             vec!["snapshot".to_string()]
         );
         assert_eq!(
-            resolve_query_verbs(&["SNAPSHOT".into()]),
+            resolve_query_verbs(&["SNAPSHOT".into()]).unwrap(),
             vec!["snapshot".to_string()]
         );
     }
@@ -321,16 +335,18 @@ mod tests {
             verbs: vec!["capture".into()],
             limit: 10,
             ..QueryRequest::default()
-        });
+        })
+        .unwrap();
         assert_eq!(q.verbs, Some(vec!["snapshot".to_string()]));
     }
 
     #[test]
-    fn query_verb_display_renames_snapshot() {
-        assert_eq!(query_verb_display("snapshot"), "capture");
-        assert_eq!(
-            query_verb_display("transaction_commit"),
-            "transaction_commit"
-        );
+    fn unknown_query_verb_is_an_error() {
+        let err = resolve_query_verbs(&["captur".into()]).expect_err("unknown verb");
+        let objects::error::HeddleError::Recovery(details) = err else {
+            panic!("expected recovery error, got {err:?}");
+        };
+        assert_eq!(details.kind, "unknown_query_verb");
+        assert!(details.error.contains("captur"));
     }
 }

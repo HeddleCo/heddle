@@ -206,7 +206,7 @@ pub use provenance_verify::{
     ProvenanceReport, StateProvenanceVerification, verify_repository_provenance,
 };
 pub use purge_plan::{PurgeApplyPlan, plan_purge_apply, purge_apply_message, purge_force_command};
-pub use query::{QueryHit, QueryReport, QueryRequest, query, query_verb_display};
+pub use query::{QueryHit, QueryReport, QueryRequest, query};
 pub use rebase_plan::{
     RebaseContinuePlan, RebaseStartFacts, RebaseStartPlan, no_rebase_in_progress_kind,
     plan_rebase_abort, plan_rebase_continue, plan_rebase_start, rebase_target_not_found_kind,

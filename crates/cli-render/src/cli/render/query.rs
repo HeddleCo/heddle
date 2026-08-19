@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
-use heddle_core::{QueryReport, query_verb_display};
+use heddle_core::QueryReport;
 
 use crate::cli::render::write_stdout;
 
@@ -24,10 +24,7 @@ pub fn query_text(report: &QueryReport) -> Result<()> {
                 .unwrap_or_else(|| hit.timestamp_secs.to_string());
             text.push_str(&format!(
                 "#{} {} {} <{}>",
-                hit.seq,
-                ts,
-                query_verb_display(&hit.verb),
-                hit.actor_email
+                hit.seq, ts, hit.verb, hit.actor_email
             ));
             if let Some(thread) = &hit.thread {
                 text.push_str(&format!(" thread={thread}"));

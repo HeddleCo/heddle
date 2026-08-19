@@ -3,7 +3,6 @@
 
 mod codec;
 mod types;
-mod verbs;
 
 pub use codec::{
     CURRENT_OP_RECORD_SCHEMA_VERSION, decode_current_record, encode_current_record,

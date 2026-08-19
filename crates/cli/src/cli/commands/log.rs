@@ -73,17 +73,10 @@ struct LogOutput {
     /// `heddle status --output json` instead.
     #[serde(skip)]
     import_guidance: Option<LogImportGuidanceOutput>,
-    /// Init's empty-tree seed is omitted from `states` so user work is
-    /// not mixed with the system principal. The omitted id is still
-    /// named so `log` does not hide genesis without a visible reason.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    omitted_genesis: Option<OmittedGenesis>,
-}
-
-#[derive(Serialize)]
-struct OmittedGenesis {
-    state_id: String,
-    reason: String,
+    /// Init seed id for the text renderer only. Not a JSON key: the
+    /// walk still omits genesis from `states` and names the id in text.
+    #[serde(skip)]
+    omitted_genesis: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -362,10 +355,7 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
     let omitted_genesis = states
         .iter()
         .find(|state| is_synthetic_root(state))
-        .map(|state| OmittedGenesis {
-            state_id: state.state_id.short(),
-            reason: "heddle init seed (Heddle <init@heddle>)".to_string(),
-        });
+        .map(|state| state.state_id.short());
     let visible_states = states
         .iter()
         .filter(|state| !is_synthetic_root(state))
@@ -1035,8 +1025,7 @@ fn write_omitted_genesis<W: std::io::Write>(
         out,
         "{}",
         style::dim(&format!(
-            "genesis {} from `heddle init` omitted; inspect with `heddle show {}`",
-            genesis.state_id, genesis.state_id
+            "genesis {genesis} from `heddle init` omitted; inspect with `heddle show {genesis}`"
         ))
     )
 }
@@ -1437,10 +1426,7 @@ mod tests {
             repository_capability: "native-heddle".to_string(),
             storage_model: "heddle".to_string(),
             import_guidance: None,
-            omitted_genesis: Some(OmittedGenesis {
-                state_id: "hs-initroot".to_string(),
-                reason: "heddle init seed (Heddle <init@heddle>)".to_string(),
-            }),
+            omitted_genesis: Some("hs-initroot".to_string()),
             states: vec![sample_entry()],
         };
         let mut buf = Vec::new();

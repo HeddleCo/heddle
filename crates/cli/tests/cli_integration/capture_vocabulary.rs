@@ -81,7 +81,8 @@ fn query_verb_capture_finds_captures_case_insensitively() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("note.txt"), "query slice\n").unwrap();
-    heddle(&["capture", "-m", "query slice capture"], Some(temp.path())).unwrap();
+    // Message must not contain "capture" — that substring is not a verb-column proof.
+    heddle(&["capture", "-m", "probe history"], Some(temp.path())).unwrap();
 
     for verb in ["capture", "Capture"] {
         let text = heddle(&["query", "--verb", verb], Some(temp.path()))
@@ -90,9 +91,14 @@ fn query_verb_capture_finds_captures_case_insensitively() {
             !text.contains("(no matches)"),
             "query --verb {verb} should not be empty: {text}"
         );
-        assert!(
-            text.contains("capture"),
-            "query text should show the public capture verb: {text}"
+        let hit_line = text
+            .lines()
+            .find(|line| line.starts_with('#'))
+            .unwrap_or_else(|| panic!("query --verb {verb} should print a hit line: {text}"));
+        assert_eq!(
+            query_text_verb_column(hit_line),
+            Some("snapshot"),
+            "text verb column is the stored catalog name: {hit_line}"
         );
         assert!(
             text.contains("heddle@example.com"),
@@ -109,8 +115,12 @@ fn query_verb_capture_finds_captures_case_insensitively() {
     assert_eq!(report["output_kind"], "query");
     let hits = report["hits"].as_array().expect("hits array");
     assert!(
-        hits.iter().any(|hit| hit["verb"] == "snapshot"),
-        "JSON keeps the stored snapshot verb: {report}"
+        !hits.is_empty(),
+        "query --verb capture JSON should return snapshot hits: {report}"
+    );
+    assert!(
+        hits.iter().all(|hit| hit["verb"] == "snapshot"),
+        "JSON verb field stays the stored snapshot name: {report}"
     );
     assert!(
         hits.iter().any(|hit| {
@@ -122,4 +132,38 @@ fn query_verb_capture_finds_captures_case_insensitively() {
         !json.contains("\"save\"") && !json.contains("\"saved\""),
         "query JSON must not grow save/saved keys: {json}"
     );
+}
+
+#[test]
+fn query_unknown_verb_errors_instead_of_empty_search() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("note.txt"), "query slice\n").unwrap();
+    heddle(&["capture", "-m", "probe history"], Some(temp.path())).unwrap();
+
+    let output = heddle_output(&["query", "--verb", "captur"], Some(temp.path()))
+        .expect("invoke query --verb captur");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "unknown query verb must fail closed; stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("(no matches)") && !stderr.contains("(no matches)"),
+        "unknown verb must not silently search: stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("unknown query verb") || stderr.contains("unknown_query_verb"),
+        "unknown verb should name the rejected filter: stderr={stderr}"
+    );
+}
+
+/// `#<seq> <rfc3339> <verb> <email…>`
+fn query_text_verb_column(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix('#')?;
+    let mut parts = rest.split_whitespace();
+    let _seq = parts.next()?;
+    let _ts = parts.next()?;
+    parts.next()
 }
