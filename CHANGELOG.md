@@ -38,6 +38,14 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Fixed
 
+- **PoP-bound hosted tokens fail locally without a matching proof key.**
+  Session construction now distinguishes an unbound bearer from a bearer
+  whose effective leaf proof-of-possession key requires proof, and refuses
+  to connect when that key is missing or does not match. Root device,
+  derived child, and PoP-bound service-account credentials still attach
+  proof with the matching key; historical unbound tokens stay token-only
+  (heddle#1027).
+
 - **Default fsmonitor is off.** `FsMonitorMode` now defaults to `Off`, so a
   stock install never binds the unauthenticated localhost helper or skips
   status/capture directories from its baseline. Enable `native`, `auto`, or

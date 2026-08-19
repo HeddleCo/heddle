@@ -3,7 +3,9 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
+use biscuit_auth::builder::BlockBuilder;
 use cli_shared::{ClientConfig, UserConfig};
+use crypto::{Ed25519Signer, Signer as _};
 use wire::ProtocolError;
 
 use super::{
@@ -88,6 +90,7 @@ impl HostedSession {
                 anyhow::bail!("hosted request signing has no stable signing identity");
             }
         }
+        enforce_bearer_proof(&config)?;
         Ok(Self {
             config,
             renewable_authority_credential,
@@ -167,6 +170,67 @@ impl HostedClient {
             .connect(addr)
             .await?)
     }
+}
+
+fn enforce_bearer_proof(config: &ClientConfig) -> Result<()> {
+    let Some(token) = config.token.as_ref() else {
+        return Ok(());
+    };
+    let Some(leaf_public_key_hex) = required_leaf_pop_key(&token.id)? else {
+        return Ok(());
+    };
+    let Some(pem) = config.auth_proof_key_pem.as_deref() else {
+        let server = config.server_key.as_deref().unwrap_or("<server>");
+        anyhow::bail!(
+            "this hosted bearer is bound to a proof-of-possession key, but no matching \
+             private key is configured; sending it would only fail at weft. Restore the \
+             matching leaf key with `heddle auth login --server {server}`, point \
+             HEDDLE_CREDENTIAL at a .hcred that includes the key, or set \
+             remote.auth_proof_key_pem_path to the leaf key PEM"
+        );
+    };
+    let signer = Ed25519Signer::from_pem(pem).context("loading the configured hosted proof key")?;
+    if !hex::encode(signer.public_key()).eq_ignore_ascii_case(&leaf_public_key_hex) {
+        anyhow::bail!(
+            "the configured hosted proof key does not match this bearer's effective \
+             leaf proof-of-possession key; sending it would only fail at weft. Use the \
+             private key bound to this token (the child key for a derived agent, or \
+             the device key for a root credential)"
+        );
+    }
+    Ok(())
+}
+
+fn required_leaf_pop_key(token: &str) -> Result<Option<String>> {
+    let Ok(biscuit) = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes()) else {
+        return Ok(None);
+    };
+    if !biscuit_declares_pop_binding(&biscuit)? {
+        return Ok(None);
+    }
+    crate::hosted_runtime::device_flow::effective_pop_public_key_hex(token)
+        .map(Some)
+        .context("reading the hosted bearer's effective leaf proof-of-possession key")
+}
+
+fn biscuit_declares_pop_binding(biscuit: &biscuit_auth::UnverifiedBiscuit) -> Result<bool> {
+    for index in 0..biscuit.block_count() {
+        let source = biscuit.print_block_source(index).with_context(|| {
+            format!("read Biscuit block {index} while classifying proof binding")
+        })?;
+        let block = BlockBuilder::new().code(&source).with_context(|| {
+            format!("parse Biscuit block {index} while classifying proof binding")
+        })?;
+        if block.facts.iter().any(|fact| {
+            matches!(
+                fact.predicate.name.as_str(),
+                "device_pop_key" | "pop_delegation"
+            )
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn shared_device_proof_key(server_key: &str, token: &str) -> Result<Option<String>> {
