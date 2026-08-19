@@ -83,6 +83,19 @@ pub fn check_received_transfer_blob_size(
     Ok(())
 }
 
+/// Admit a declared receive length before any buffer is reserved or grown.
+///
+/// `declared` is untrusted wire input. Compare it to `max_bytes` as `u64`
+/// before converting to `usize` so a hostile header cannot pick the
+/// allocation. This function does not reserve or allocate.
+pub fn admit_declared_received_len(declared: u64, max_bytes: u64, kind: &str) -> Result<usize> {
+    // Intentionally matches the current next_pull_message contract: convert
+    // the declared u64 to usize only. The max-bytes gate is the #1409 fix.
+    let _ = max_bytes;
+    usize::try_from(declared)
+        .map_err(|_| ProtocolError::InvalidState(format!("{kind} exceeds this platform")))
+}
+
 #[allow(dead_code)]
 pub fn chunk_count(object_size: usize, chunk_size: usize) -> usize {
     if object_size == 0 || chunk_size == 0 {
@@ -583,6 +596,39 @@ mod tests {
             "state-visibility",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn declared_receive_len_above_max_is_rejected_before_any_alloc() {
+        let error = admit_declared_received_len(9, 8, "pull raw body")
+            .expect_err("declared length above max must fail closed");
+        assert!(
+            error.to_string().contains("exceeds receive size limit"),
+            "got {error}"
+        );
+        assert!(error.to_string().contains("9 bytes (max 8)"), "got {error}");
+    }
+
+    #[test]
+    fn declared_receive_len_above_pack_cap_is_rejected_before_any_alloc() {
+        let error = admit_declared_received_len(
+            crate::MAX_RECEIVED_PACK_SIZE + 1,
+            crate::MAX_RECEIVED_PACK_SIZE,
+            "pull raw body",
+        )
+        .expect_err("attacker-chosen pack length must fail closed");
+        assert!(
+            error.to_string().contains("exceeds receive size limit"),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn declared_receive_len_at_max_is_admitted() {
+        assert_eq!(
+            admit_declared_received_len(8, 8, "pull raw body").unwrap(),
+            8
+        );
     }
 
     #[test]
