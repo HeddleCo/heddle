@@ -146,7 +146,7 @@ fn field_study_ready_then_double_land_thread_is_already_landed() {
     );
     assert_no_repair_git(&ready, "ready");
 
-    let first = run_land_thread(&main.path(), &checkout);
+    let first = run_land_thread(main.path(), &checkout);
     assert_eq!(
         first.status.code(),
         Some(0),
@@ -164,7 +164,7 @@ fn field_study_ready_then_double_land_thread_is_already_landed() {
         "find it\n"
     );
 
-    let second = run_land_thread(&main.path(), &checkout);
+    let second = run_land_thread(main.path(), &checkout);
     assert_eq!(
         second.status.code(),
         Some(0),
