@@ -126,7 +126,8 @@ pub use doctor::cmd_doctor;
 pub use doctor_docs::cmd_doctor_docs;
 pub use doctor_schemas::{cmd_doctor_schemas, documented_samples_with_bound_verbs};
 pub use error_envelope::{
-    print_error_with_hint, print_error_with_hint_with_config, print_parse_error_json_envelope,
+    print_error_with_hint, print_error_with_hint_with_config, print_or_suggest_parse_error,
+    print_parse_error_json_envelope,
 };
 pub use expand::cmd_expand;
 pub use fsck::{cmd_fsck, cmd_fsck_repair_git};

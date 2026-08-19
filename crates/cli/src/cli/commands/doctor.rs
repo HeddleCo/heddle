@@ -606,13 +606,13 @@ fn render_doctor(cli: &Cli, output: &DoctorOutput) {
         if cli.verbose > 0 {
             println!("State: {} ({})", state.state_id, state.tree);
         } else {
-            println!("Saved change: {}", state.state_id);
+            println!("Captured state: {}", state.state_id);
         }
         if let Some(intent) = &state.intent {
             if cli.verbose > 0 {
                 println!("Intent: \"{intent}\"");
             } else {
-                println!("Last save: {intent}");
+                println!("Last capture: {intent}");
             }
         }
         if cli.verbose > 0

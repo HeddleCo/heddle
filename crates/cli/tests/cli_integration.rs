@@ -262,6 +262,8 @@ impl<'a> TestReferenceTarget<'a> {
 
 #[path = "cli_integration/basics.rs"]
 mod basics;
+#[path = "cli_integration/capture_vocabulary.rs"]
+mod capture_vocabulary;
 #[path = "cli_integration/cli_help_consistency.rs"]
 mod cli_help_consistency;
 #[path = "cli_integration/cli_premium_output.rs"]

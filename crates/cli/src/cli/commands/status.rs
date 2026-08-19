@@ -932,7 +932,7 @@ fn render_status_thread(output: &StatusOutput, verbose: bool) {
                 style::dim(&state.content_hash)
             );
         } else {
-            println!("Saved change: {}", style::state_id(&state.state_id));
+            println!("Captured state: {}", style::state_id(&state.state_id));
         }
         if let Some(intent) = &state.intent {
             // Quote stays plain; the inner intent string is the
@@ -1387,24 +1387,24 @@ fn render_status_changes(output: &StatusOutput) {
         }
     }
     if !has_changes && output.trust.verified {
-        println!("{}", style::dim("No unsaved changes, worktree clean"));
+        println!("{}", style::dim("Nothing to capture, worktree clean"));
     } else if !has_changes && output.trust.worktree_state == "not_checked" {
         let message = if output.trust.status == "git_branch_advanced" {
-            "No unsaved worktree changes detected; import the external Git branch tip before comparing Heddle state"
+            "Nothing to capture in the worktree; import the external Git branch tip before comparing Heddle state"
         } else {
-            "No unsaved worktree changes detected; finish setup before comparing Heddle state"
+            "Nothing to capture in the worktree; finish setup before comparing Heddle state"
         };
         println!("{}", style::dim(message));
     } else if !has_changes && output.trust.worktree_state == "clean" {
         println!(
             "{}",
             style::dim(&format!(
-                "No unsaved worktree changes detected; repository verification is {}",
+                "Nothing to capture in the worktree; repository verification is {}",
                 output.trust.status
             ))
         );
     } else if !has_changes {
-        println!("{}", style::dim("No unsaved worktree changes detected"));
+        println!("{}", style::dim("Nothing to capture in the worktree"));
     }
 }
 

@@ -102,7 +102,7 @@ impl IndexedOperation {
             return false;
         }
         if let Some(ref verbs) = filter.verbs
-            && !verbs.iter().any(|v| v == &self.verb)
+            && !verbs.iter().any(|v| v.eq_ignore_ascii_case(&self.verb))
         {
             return false;
         }

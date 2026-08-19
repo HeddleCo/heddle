@@ -21,7 +21,7 @@ pub enum Tip {
     /// "tip: in Git Overlay, run `heddle commit` when the captured state is ready."
     /// Emitted after a successful capture in Git Overlay only.
     CheckpointAfterCapture,
-    /// "tip: `heddle query` searches saved change history."
+    /// "tip: `heddle query --verb capture` searches capture history."
     /// Emitted after the first heavy `heddle log` view.
     QueryFromLog,
     /// "tip: `heddle resolve --output json` returns conflicts as structured data."
@@ -43,7 +43,7 @@ impl Tip {
             Self::CheckpointAfterCapture => {
                 "tip: in Git Overlay, run `heddle commit` when the captured state is ready"
             }
-            Self::QueryFromLog => "tip: `heddle query` searches saved change history",
+            Self::QueryFromLog => "tip: `heddle query --verb capture` searches capture history",
             Self::ConflictForStructured => {
                 "tip: `heddle resolve --output json` returns conflicts as structured data agents can resolve programmatically"
             }
@@ -157,6 +157,14 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    #[test]
+    fn query_tip_teaches_capture_history() {
+        assert!(Tip::QueryFromLog.message().contains("capture history"));
+        assert!(Tip::QueryFromLog.message().contains("query --verb capture"));
+        assert!(!Tip::QueryFromLog.message().contains("saved"));
+    }
 
     #[test]
     fn tip_keys_are_unique_and_stable() {
