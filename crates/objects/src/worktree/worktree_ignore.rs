@@ -352,15 +352,24 @@ mod tests {
             vec!["**".to_string(), "!.heddle/".to_string()],
             Vec::new(),
         ];
-        for patterns in negations {
+        for patterns in &negations {
             assert!(
-                should_ignore(&PathBuf::from(".heddle/identity.toml"), &patterns),
+                should_ignore(&PathBuf::from(".heddle/identity.toml"), patterns),
                 "reserved identity must stay ignored under {patterns:?}"
             );
             assert!(
-                should_ignore(&PathBuf::from(".heddle"), &patterns),
+                should_ignore(&PathBuf::from(".heddle"), patterns),
                 "reserved root .heddle must stay ignored under {patterns:?}"
             );
+        }
+        // Nested fixtures are not reserved. User rules still apply, so
+        // only assert capturable when the pattern set does not ignore
+        // them on its own (`**` would).
+        for patterns in [
+            vec!["!.heddle/".to_string()],
+            vec!["!.heddle".to_string()],
+            Vec::new(),
+        ] {
             assert!(
                 !should_ignore(
                     &PathBuf::from("examples/calculator/.heddle/identity.toml"),

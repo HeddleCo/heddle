@@ -1330,6 +1330,7 @@ mod tests {
     use std::path::Path;
 
     use objects::object::{ContentHash, LeafPolicy, Tree, TreeEntry, resolve_tree_path};
+    use objects::store::ObjectStore;
     use tempfile::TempDir;
 
     use crate::{

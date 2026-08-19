@@ -374,7 +374,9 @@ fn native_capture_cannot_unignore_heddle_identity_via_gitignore() {
         "status must still list real worktree files: {paths:?}"
     );
     assert!(
-        paths.iter().all(|path| !path.starts_with(".heddle")),
+        paths
+            .iter()
+            .all(|path| *path != ".heddle" && !path.starts_with(".heddle/")),
         "status must not list reserved root .heddle paths: {paths:?}"
     );
     assert!(
@@ -399,6 +401,7 @@ fn native_capture_cannot_unignore_heddle_identity_via_gitignore() {
     ));
 }
 
+#[test]
 fn init_text_points_at_ignore_help_when_heddleignore_not_installed() {
     let temp = TempDir::new().unwrap();
     let out = heddle(&["init"], Some(temp.path())).unwrap();
