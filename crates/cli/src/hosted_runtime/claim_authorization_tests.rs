@@ -62,6 +62,7 @@ impl MockWeftAccount {
         promotion: &MockPromotion<'_>,
     ) -> bool {
         if self.root_credential_id.is_some()
+            || !claim.consent_unexpired(chrono::Utc::now().timestamp_millis())
             || Ed25519Signer::verify_with_public_key(
                 &pre_consent_message(claim, promotion.handle, promotion.nonce).unwrap(),
                 agent_public_key,
@@ -111,6 +112,103 @@ fn consent_signatures_match_the_landed_weft_contract() {
 
     assert_eq!(pre.account_id, OWNER_ID);
     assert_eq!(promote.account_id, OWNER_ID);
+}
+
+#[test]
+fn consent_messages_bind_expiry_and_claim_state_id() {
+    let mut claim = state("11".repeat(32));
+    assert!(claim.reissue(b"claim-secret", 1_700_000_000_000));
+    let nonce = b"0123456789abcdef";
+    let pre = pre_consent_message(&claim, "human-handle", nonce).expect("pre-consent bytes");
+    let promote = promote_consent_message(&claim, "human-handle", "Y3JlZGVudGlhbA")
+        .expect("promote-consent bytes");
+    let expiry = 1_700_000_000_000_i64.to_be_bytes();
+    let claim_id = claim.authorization_hash().as_bytes();
+    let pre_parts = counted_parts(&pre);
+    let promote_parts = counted_parts(&promote);
+    assert_eq!(pre_parts[pre_parts.len() - 2], claim_id);
+    assert_eq!(pre_parts[pre_parts.len() - 1], expiry);
+    assert_eq!(promote_parts[promote_parts.len() - 2], claim_id);
+    assert_eq!(promote_parts[promote_parts.len() - 1], expiry);
+
+    claim.expires_at_millis = 1_700_000_000_001;
+    assert_ne!(
+        pre,
+        pre_consent_message(&claim, "human-handle", nonce).unwrap()
+    );
+    assert!(claim.reissue(b"other-secret", 1_700_000_000_000));
+    assert_ne!(
+        pre,
+        pre_consent_message(&claim, "human-handle", nonce).unwrap()
+    );
+}
+
+#[test]
+fn expired_consent_is_not_produced_or_accepted() {
+    let signer = Ed25519Signer::generate().expect("signer");
+    let mut claim = state(hex::encode(signer.public_key()));
+    assert!(claim.reissue(b"claim-secret", chrono::Utc::now().timestamp_millis() - 1));
+    let nonce = b"0123456789abcdef";
+
+    assert!(
+        signed_pre_consent(&claim, "human-handle", nonce, &signer).is_err(),
+        "expired pre-consent must not be issued"
+    );
+    assert!(
+        signed_promote_consent(&claim, "human-handle", "Y3JlZGVudGlhbA", &signer).is_err(),
+        "expired promote-consent must not be issued"
+    );
+
+    let pre_bytes = pre_consent_message(&claim, "human-handle", nonce).expect("expired encoding");
+    let promote_bytes = promote_consent_message(&claim, "human-handle", "Y3JlZGVudGlhbA")
+        .expect("expired encoding");
+    let pre_signature = signer.sign(&pre_bytes).expect("sign stale pre-consent");
+    let promote_signature = signer
+        .sign(&promote_bytes)
+        .expect("sign stale promote-consent");
+    let mut account = MockWeftAccount {
+        owner_id: claim.owner_id,
+        spool_owner_id: claim.owner_id,
+        root_credential_id: None,
+    };
+    assert!(
+        !account.promote(
+            &claim,
+            signer.public_key(),
+            &MockPromotion {
+                handle: "human-handle",
+                nonce,
+                pre_signature: &pre_signature,
+                credential_id: "Y3JlZGVudGlhbA",
+                promote_signature: &promote_signature,
+            },
+        ),
+        "expired consent bytes must not be accepted locally"
+    );
+}
+
+#[test]
+fn dormant_consent_is_not_encoded_without_expiry() {
+    let claim = state("11".repeat(32));
+    assert!(pre_consent_message(&claim, "human-handle", b"0123456789abcdef").is_err());
+    assert!(promote_consent_message(&claim, "human-handle", "Y3JlZGVudGlhbA").is_err());
+}
+
+fn counted_parts(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut parts = Vec::new();
+    let mut rest = bytes;
+    while rest.len() >= 4 {
+        let length = usize::try_from(u32::from_be_bytes(rest[..4].try_into().unwrap())).unwrap();
+        rest = &rest[4..];
+        assert!(rest.len() >= length, "truncated counted consent field");
+        parts.push(rest[..length].to_vec());
+        rest = &rest[length..];
+    }
+    assert!(
+        rest.is_empty(),
+        "trailing bytes after counted consent fields"
+    );
+    parts
 }
 
 #[test]

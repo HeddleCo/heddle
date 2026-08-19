@@ -806,7 +806,7 @@ pub struct IdentityOutputSchema {
     pub subject: String,
     /// Stable lowercase-hex Iroh NodeId, present when a claim link is minted.
     pub node_id: Option<String>,
-    /// Short-lived heddle.sh bearer URL, present only on deliberate mint/reissue.
+    /// Short-lived claim URL on the selected server origin, present only on deliberate mint/reissue.
     pub claim_url: Option<String>,
 }
 

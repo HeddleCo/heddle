@@ -79,7 +79,16 @@ impl ClaimState {
 
     pub(crate) fn is_active(&self, now: i64) -> bool {
         matches!(self.status, ClaimStatus::Active | ClaimStatus::Prepared)
-            && now < self.expires_at_millis
+            && self.consent_unexpired(now)
+    }
+
+    /// True when this issuance has a bound expiry that has not yet elapsed.
+    ///
+    /// Promote consent is signed after [`Self::claim`] flips status to
+    /// `Claimed`, so callers that only need the signature TTL must use this
+    /// instead of [`Self::is_active`].
+    pub(crate) fn consent_unexpired(&self, now: i64) -> bool {
+        self.expires_at_millis > 0 && now < self.expires_at_millis
     }
 
     pub(crate) fn accepts(&self, secret: &[u8], now: i64) -> bool {
@@ -247,6 +256,8 @@ mod tests {
         let path = directory.path().join("claim.toml");
         let mut state = state();
         assert!(state.reissue(b"super-secret-value", 2_000));
+        assert!(state.consent_unexpired(1_999));
+        assert!(!state.consent_unexpired(2_000));
         assert!(!state.accepts(b"super-secret-value", 2_000));
         store_at(&path, &state).expect("store claim state");
         let contents = std::fs::read_to_string(path).expect("read claim state");
