@@ -1327,7 +1327,9 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{ContentHash, Tree, TreeEntry};
+    use std::path::Path;
+
+    use objects::object::{ContentHash, LeafPolicy, Tree, TreeEntry, resolve_tree_path};
     use tempfile::TempDir;
 
     use crate::{
@@ -1412,5 +1414,75 @@ mod tests {
         let hash = read_file_hash(&path, initial_size).unwrap();
 
         assert_eq!(hash, ContentHash::compute_typed("blob", b"abcdef"));
+    }
+
+    #[test]
+    fn build_tree_hard_denies_root_heddle_after_gitignore_unignore() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        std::fs::write(
+            temp_dir.path().join(".gitignore"),
+            "!.heddle/\n!.heddle/**\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temp_dir.path().join(".heddleignore"),
+            "!.heddle/\n!.heddle/identity.toml\n",
+        )
+        .unwrap();
+        std::fs::write(temp_dir.path().join("kept.txt"), "ok\n").unwrap();
+        std::fs::write(
+            temp_dir.path().join(".heddle").join("identity.toml"),
+            "secret-key-material\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(temp_dir.path().join("examples/calculator/.heddle")).unwrap();
+        std::fs::write(
+            temp_dir
+                .path()
+                .join("examples/calculator/.heddle/identity.toml"),
+            "fixture\n",
+        )
+        .unwrap();
+
+        let tree = repo.build_tree(temp_dir.path()).unwrap();
+        repo.store().put_tree(&tree).unwrap();
+        let hash = tree.hash();
+
+        assert!(
+            resolve_tree_path(
+                repo.store(),
+                &hash,
+                Path::new("kept.txt"),
+                LeafPolicy::Entry
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            tree.get(".heddle").is_none(),
+            "root .heddle must stay out of the captured tree"
+        );
+        assert!(
+            resolve_tree_path(
+                repo.store(),
+                &hash,
+                Path::new(".heddle/identity.toml"),
+                LeafPolicy::Entry,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            resolve_tree_path(
+                repo.store(),
+                &hash,
+                Path::new("examples/calculator/.heddle/identity.toml"),
+                LeafPolicy::Entry,
+            )
+            .unwrap()
+            .is_some(),
+            "nested fixture .heddle must remain capturable"
+        );
     }
 }

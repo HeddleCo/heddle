@@ -329,4 +329,36 @@ mod tests {
         let patterns = vec!["[unbalanced".to_string(), "*.log".to_string()];
         assert!(should_ignore(&PathBuf::from("foo.log"), &patterns));
     }
+
+    #[test]
+    fn user_negation_cannot_unignore_reserved_heddle_tree() {
+        // heddle#1413: last-match-wins would otherwise let `!.heddle/`
+        // pull identity.toml into capture. Reserved-path hard-deny
+        // wins after user rules, including an empty pattern list.
+        let negations = [
+            vec!["!.heddle/".to_string()],
+            vec!["!.heddle".to_string()],
+            vec!["!.heddle/**".to_string()],
+            vec!["!.heddle/identity.toml".to_string()],
+            vec!["**".to_string(), "!.heddle/".to_string()],
+            Vec::new(),
+        ];
+        for patterns in negations {
+            assert!(
+                should_ignore(&PathBuf::from(".heddle/identity.toml"), &patterns),
+                "reserved identity must stay ignored under {patterns:?}"
+            );
+            assert!(
+                should_ignore(&PathBuf::from(".heddle"), &patterns),
+                "reserved root .heddle must stay ignored under {patterns:?}"
+            );
+            assert!(
+                !should_ignore(
+                    &PathBuf::from("examples/calculator/.heddle/identity.toml"),
+                    &patterns
+                ),
+                "nested fixture .heddle must stay capturable under {patterns:?}"
+            );
+        }
+    }
 }

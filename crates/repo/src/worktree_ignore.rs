@@ -308,4 +308,26 @@ mod tests {
         assert!(matcher.should_ignore(&PathBuf::from("build/output")));
         assert!(!matcher.should_ignore(&PathBuf::from("nested/build/file")));
     }
+
+    #[test]
+    fn compiled_matcher_hard_denies_reserved_heddle_after_user_negation() {
+        let matcher = WorktreeIgnoreMatcher::new(&[
+            ".heddle".to_string(),
+            "!.heddle/".to_string(),
+            "!.heddle/identity.toml".to_string(),
+        ]);
+        assert!(matcher.should_ignore(&PathBuf::from(".heddle")));
+        assert!(matcher.should_ignore(&PathBuf::from(".heddle/identity.toml")));
+        assert!(matcher.should_prune_directory_child(Path::new(""), ".heddle"));
+        assert!(
+            !matcher.should_ignore(&PathBuf::from("examples/calculator/.heddle/identity.toml"))
+        );
+        assert_eq!(
+            matcher.should_ignore(&PathBuf::from(".heddle/identity.toml")),
+            should_ignore(
+                &PathBuf::from(".heddle/identity.toml"),
+                &[".heddle".to_string(), "!.heddle/".to_string(),]
+            ),
+        );
+    }
 }
