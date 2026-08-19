@@ -26,8 +26,9 @@ const DEFAULT_HOSTED_HYDRATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// [`Repository::require_blob`] hits a missing-blob marker left behind by a
 /// lazy hosted clone (`heddle clone --lazy <hosted-url>` /
 /// `--filter blob:none`), the read path delegates here, this hydrator re-runs
-/// the pull with full materialization for the *current* tip of `local_thread`,
-/// and the read is retried against the freshly populated store.
+/// a single-object fetch for the requested hash (path-resolved `GetBlob`,
+/// or a scoped pull that wants only that hash), and the read is retried
+/// against the freshly populated store.
 ///
 /// ## Runtime bridge
 ///
@@ -113,12 +114,12 @@ impl LazyHostedHydrator {
 }
 
 impl BlobHydrator for LazyHostedHydrator {
-    fn hydrate(&self, repo: &Repository, _hash: &ContentHash) -> objects::error::Result<()> {
-        // `_hash` is ignored: `hydrate_pulled_state` refetches every
-        // missing blob reachable from `target_state`, not just one. This
-        // matches the hosted-side strategy that already exists
-        // (sync.rs:541) and is the cheapest correct behaviour given the
-        // partial-fetch metadata records the blake3 only.
+    fn hydrate(&self, repo: &Repository, hash: &ContentHash) -> objects::error::Result<()> {
+        // Honor `hash`: fetch that object (plus whatever decode needs),
+        // not every missing blob on the current tip. Partial-fetch
+        // metadata records blake3 only, so the hosted client resolves a
+        // tip-tree path when one exists and GetBlob-s that state. A
+        // moved-path mismatch falls through to a single-hash want.
 
         // Re-resolve the target state from the repo on EVERY call. If a
         // `pull --lazy` advanced the local thread between clone and now,
@@ -146,7 +147,13 @@ impl BlobHydrator for LazyHostedHydrator {
 
         let bridge = self.ensure_bridge()?;
         bridge
-            .hydrate(repo, &self.repo_path, &self.remote_thread, target_state)
+            .hydrate(
+                repo,
+                &self.repo_path,
+                &self.remote_thread,
+                target_state,
+                *hash,
+            )
             .map(|_count| ())
             .map_err(|err| HeddleError::Io(std::io::Error::other(err.to_string())))
     }
@@ -173,6 +180,7 @@ enum HydrateMessage {
         repo_path: String,
         remote_thread: String,
         target_state: StateId,
+        hash: ContentHash,
         reply: mpsc::SyncSender<Result<usize, ProtocolError>>,
     },
 }
@@ -289,6 +297,7 @@ impl HydrationBridge {
                                 repo_path,
                                 remote_thread,
                                 target_state,
+                                hash,
                                 reply,
                             } => {
                                 let result = hydrate_with_rpc_timeout(
@@ -297,6 +306,7 @@ impl HydrationBridge {
                                     &repo_path,
                                     &remote_thread,
                                     target_state,
+                                    hash,
                                     DEFAULT_HOSTED_HYDRATION_TIMEOUT,
                                 )
                                 .await;
@@ -337,12 +347,14 @@ impl HydrationBridge {
         repo_path: &str,
         remote_thread: &str,
         target_state: StateId,
+        hash: ContentHash,
     ) -> Result<usize, ProtocolError> {
         self.hydrate_with_timeout(
             repo,
             repo_path,
             remote_thread,
             target_state,
+            hash,
             DEFAULT_HOSTED_HYDRATION_TIMEOUT,
         )
     }
@@ -353,6 +365,7 @@ impl HydrationBridge {
         repo_path: &str,
         remote_thread: &str,
         target_state: StateId,
+        hash: ContentHash,
         timeout: Duration,
     ) -> Result<usize, ProtocolError> {
         let repo = Arc::new(Repository::open(repo.root()).map_err(ProtocolError::from)?);
@@ -368,6 +381,7 @@ impl HydrationBridge {
                 repo_path: repo_path.to_string(),
                 remote_thread: remote_thread.to_string(),
                 target_state,
+                hash,
                 reply: reply_tx,
             })
             .map_err(|err| {
@@ -382,6 +396,7 @@ impl HydrationBridge {
                 repo_path,
                 remote_thread,
                 target_state,
+                hash,
             )),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 Err(ProtocolError::Io(std::io::Error::other(
@@ -407,11 +422,12 @@ async fn hydrate_with_rpc_timeout(
     repo_path: &str,
     remote_thread: &str,
     target_state: StateId,
+    hash: ContentHash,
     timeout: Duration,
 ) -> Result<usize, ProtocolError> {
     match tokio::time::timeout(
         timeout,
-        client.hydrate_missing_blobs_for_state(repo, repo_path, remote_thread, target_state),
+        client.hydrate_blob(repo, repo_path, remote_thread, target_state, hash),
     )
     .await
     {
@@ -421,6 +437,7 @@ async fn hydrate_with_rpc_timeout(
             repo_path,
             remote_thread,
             target_state,
+            hash,
         )),
     }
 }
@@ -430,13 +447,16 @@ fn hydration_timeout_error(
     repo_path: &str,
     remote_thread: &str,
     target_state: StateId,
+    hash: ContentHash,
 ) -> ProtocolError {
     ProtocolError::Io(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
         format!(
             "lazy hosted hydrator: blob hydration timed out after {} \
-             (repo={repo_path}, remote_thread={remote_thread}, target_state={target_state})",
-            format_duration(timeout)
+             (repo={repo_path}, remote_thread={remote_thread}, \
+             target_state={target_state}, hash={})",
+            format_duration(timeout),
+            hash.to_hex(),
         ),
     ))
 }
@@ -498,7 +518,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use objects::object::{Blob, StateId, ThreadName};
+    use objects::object::{Blob, ContentHash, StateId, ThreadName};
     use repo::Repository;
     use tempfile::TempDir;
 
@@ -677,6 +697,47 @@ mod tests {
         );
     }
 
+    /// Issue #1410: `hydrate` must forward the requested blake3, not
+    /// drop it and treat every miss as "hydrate the whole tip".
+    #[test]
+    fn hydrate_forwards_requested_hash_not_the_whole_tip() {
+        let recorded: Arc<std::sync::Mutex<Vec<ContentHash>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_for_worker = Arc::clone(&recorded);
+        let (tx, rx) = mpsc::channel::<super::HydrateMessage>();
+        let worker = thread::Builder::new()
+            .name("hash-inspect-hydrator".into())
+            .spawn(move || {
+                while let Ok(message) = rx.recv() {
+                    match message {
+                        super::HydrateMessage::Run { hash, reply, .. } => {
+                            recorded_for_worker.lock().unwrap().push(hash);
+                            let _ = reply.send(Ok(1));
+                        }
+                    }
+                }
+            })
+            .expect("spawn hash inspect worker");
+        let bridge = HydrationBridge {
+            tx: Some(tx),
+            worker: Some(worker),
+        };
+        let hydrator =
+            LazyHostedHydrator::new("ignored.example.test:443", "org/acme/repo", "main", "main");
+        hydrator.bridge.set(bridge).map_err(|_| ()).expect("set");
+
+        let (_temp, repo) = temp_repo();
+        let first = Blob::new(b"only-this-blob".to_vec()).hash();
+        let second = Blob::new(b"a-different-blob".to_vec()).hash();
+        assert_ne!(first, second, "fixture hashes must differ");
+
+        hydrator.hydrate(&repo, &first).expect("first hydrate");
+        hydrator.hydrate(&repo, &second).expect("second hydrate");
+
+        let seen = recorded.lock().unwrap().clone();
+        assert_eq!(seen, vec![first, second], "each miss forwards its own hash");
+    }
+
     /// Round-3 test from the task brief. With the round-2 design,
     /// concurrent first-time callers raced two separate `OnceLock::set`
     /// calls (runtime + inner) and could end up storing an inner whose
@@ -755,6 +816,7 @@ mod tests {
                 "org/acme/repo",
                 "main",
                 target,
+                Blob::new(b"timeout".to_vec()).hash(),
                 Duration::from_millis(50),
             )
             .expect_err("stalled worker must time out");
@@ -804,6 +866,7 @@ mod tests {
             repo_path: "org/acme/repo".to_string(),
             remote_thread: "main".to_string(),
             target_state: StateId::from_bytes([2; 32]),
+            hash: Blob::new(b"owned-handle".to_vec()).hash(),
             reply,
         };
         assert_send_static(&message);

@@ -61,6 +61,10 @@ struct PullOptions<'a> {
     target_state: Option<StateId>,
     materialization: PullMaterialization,
     publish_refs: bool,
+    /// When set, the pull wants only these blob hashes and never the
+    /// full tip closure. Used by on-demand lazy hydration so one
+    /// missing-blob read cannot pull every blob on the thread tip.
+    wanted_hashes: Option<&'a [ContentHash]>,
 }
 
 const PULL_BOOTSTRAP_LINE_PREFIX: &str = "heddle-pull-bootstrap-v1:";
@@ -1250,6 +1254,7 @@ impl HostedClient {
                 target_state: None,
                 materialization: PullMaterialization::Full,
                 publish_refs: true,
+                wanted_hashes: None,
             },
         )
         .await
@@ -1272,6 +1277,7 @@ impl HostedClient {
                 target_state: None,
                 materialization: PullMaterialization::Full,
                 publish_refs: true,
+                wanted_hashes: None,
             },
         )
         .await
@@ -1297,6 +1303,7 @@ impl HostedClient {
                 target_state: None,
                 materialization,
                 publish_refs: true,
+                wanted_hashes: None,
             },
         )
         .await
@@ -1320,6 +1327,7 @@ impl HostedClient {
                 target_state: None,
                 materialization,
                 publish_refs: false,
+                wanted_hashes: None,
             },
         )
         .await
@@ -1351,6 +1359,7 @@ impl HostedClient {
                     target_state: None,
                     materialization,
                     publish_refs: false,
+                    wanted_hashes: None,
                 },
                 Some(Box::new(initialize)),
             )
@@ -1397,6 +1406,7 @@ impl HostedClient {
                 target_state: Some(target_state),
                 materialization: PullMaterialization::Full,
                 publish_refs: true,
+                wanted_hashes: None,
             },
         )
         .await
@@ -1406,6 +1416,18 @@ impl HostedClient {
     pub async fn hydrate_blob_at_path(
         &mut self,
         repo: &Repository,
+        repo_path: &str,
+        reference: &str,
+        path: &str,
+    ) -> Result<objects::object::Blob, ProtocolError> {
+        let blob = self.fetch_blob_at_path(repo_path, reference, path).await?;
+        repo.store().put_blob(&blob)?;
+        repo.clear_missing_blob(&blob.hash())?;
+        Ok(blob)
+    }
+
+    async fn fetch_blob_at_path(
+        &mut self,
         repo_path: &str,
         reference: &str,
         path: &str,
@@ -1424,10 +1446,75 @@ impl HostedClient {
             .map_err(hosted_to_protocol_error)?;
 
         let content = super::helpers::decode_blob_content(response.content, response.is_binary)?;
-        let blob = objects::object::Blob::new(content);
-        repo.store().put_blob(&blob)?;
-        repo.clear_missing_blob(&blob.hash())?;
-        Ok(blob)
+        Ok(objects::object::Blob::new(content))
+    }
+
+    /// Hydrate one missing blob by hash (issue #1410).
+    ///
+    /// A lazy miss must not pull every blob reachable from the tip.
+    /// When the hash is in the local tip tree, this is a unary
+    /// [`GetBlob`] at that path, addressed at `target_state` so a
+    /// later remote-thread move cannot silently change the object.
+    /// A hash mismatch or GetBlob failure falls through to a scoped
+    /// pull that wants only this hash (`want_full_closure = false`).
+    pub async fn hydrate_blob(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        remote_thread: &str,
+        target_state: StateId,
+        hash: ContentHash,
+    ) -> Result<usize, ProtocolError> {
+        if repo.store().has_blob(&hash)? {
+            repo.clear_missing_blob(&hash)?;
+            return Ok(0);
+        }
+
+        if let Some(path) = first_blob_path_in_state(repo, target_state, &hash)? {
+            let reference = RevisionAddress::heddle(target_state).to_string();
+            match self.fetch_blob_at_path(repo_path, &reference, &path).await {
+                Ok(blob) if blob.hash() == hash => {
+                    repo.store().put_blob(&blob)?;
+                    repo.clear_missing_blob(&hash)?;
+                    return Ok(1);
+                }
+                Ok(_) | Err(_) => {}
+            }
+        }
+
+        self.hydrate_requested_hash(repo, repo_path, remote_thread, target_state, hash)
+            .await
+    }
+
+    async fn hydrate_requested_hash(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        remote_thread: &str,
+        target_state: StateId,
+        hash: ContentHash,
+    ) -> Result<usize, ProtocolError> {
+        let hashes = [hash];
+        let exchange = self
+            .pull_exchange(
+                repo,
+                repo_path,
+                remote_thread,
+                PullOptions {
+                    local_thread: None,
+                    depth: None,
+                    target_state: Some(target_state),
+                    materialization: PullMaterialization::Lazy,
+                    publish_refs: false,
+                    wanted_hashes: Some(&hashes),
+                },
+            )
+            .await?;
+        if !repo.store().has_blob(&hash)? {
+            return Err(ProtocolError::ObjectNotFound(hash.to_hex()));
+        }
+        repo.clear_missing_blob(&hash)?;
+        Ok(exchange.object_count)
     }
 
     pub async fn hydrate_missing_blobs_for_state(
@@ -1448,6 +1535,7 @@ impl HostedClient {
                     target_state: Some(target_state),
                     materialization: PullMaterialization::Full,
                     publish_refs: true,
+                    wanted_hashes: None,
                 },
             )
             .await?;
@@ -1639,13 +1727,17 @@ impl HostedClient {
             transfer_plan,
             wanted_types,
             want_full_closure,
-        } = plan_pull_wants(
-            repo,
-            &remote_state,
-            ready.full_closure_available,
-            ready.objects_to_fetch,
-            allow_partial_fetch,
-        )?;
+        } = if let Some(hashes) = options.wanted_hashes {
+            plan_on_demand_blob_wants(repo, hashes)?
+        } else {
+            plan_pull_wants(
+                repo,
+                &remote_state,
+                ready.full_closure_available,
+                ready.objects_to_fetch,
+                allow_partial_fetch,
+            )?
+        };
         let native_pack_required = native_pack_required_for_pull(want_full_closure, &transfer_plan);
 
         tx.send(PullClientFrame {
@@ -2532,6 +2624,57 @@ fn load_thread_metadata(
     Ok(thread_manager.find_synced_record_by_thread(repo, target_thread, Some(local_state))?)
 }
 
+fn first_blob_path_in_state(
+    repo: &Repository,
+    target_state: StateId,
+    hash: &ContentHash,
+) -> Result<Option<String>, ProtocolError> {
+    let paths = repo
+        .paths_to_blob_in_state(&target_state, hash)
+        .map_err(|err| ProtocolError::InvalidState(err.to_string()))?;
+    Ok(paths.into_iter().next())
+}
+
+fn plan_on_demand_blob_wants(
+    repo: &Repository,
+    hashes: &[ContentHash],
+) -> Result<PullWantPlan, ProtocolError> {
+    let mut wants = Vec::with_capacity(hashes.len());
+    let mut wanted_infos = Vec::with_capacity(hashes.len());
+    let mut wanted_types = HashMap::with_capacity(hashes.len());
+    for hash in hashes {
+        if repo.store().has_blob(hash)? {
+            continue;
+        }
+        let info = ObjectInfo {
+            id: wire::ObjectId::Hash(*hash),
+            obj_type: ObjectType::Blob,
+            size: 0,
+            delta_base: None,
+        };
+        record_wanted_type(
+            &mut wanted_types,
+            PackObjectId::Hash(*hash),
+            ObjectType::Blob,
+        );
+        wants.push(object_descriptor_with_status(
+            &info,
+            ObjectAvailabilityStatus::Missing,
+            "requested by lazy hydrator",
+        ));
+        wanted_infos.push(info);
+    }
+    Ok(PullWantPlan {
+        wants,
+        transfer_plan: RepositoryTransferPlan::from_object_infos(
+            wanted_infos,
+            GitLaneTransferIntent::HeddleObjectsOnly,
+        ),
+        wanted_types,
+        want_full_closure: false,
+    })
+}
+
 fn plan_pull_wants(
     repo: &Repository,
     remote_state: &StateId,
@@ -3357,6 +3500,170 @@ mod native_exchange_tests {
 
         client.close().await;
         server.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod on_demand_hydration_tests {
+    use objects::{
+        object::{Attribution, Blob, Principal, State, ThreadName, Tree, TreeEntry},
+        store::ObjectStore,
+    };
+    use repo::Repository;
+    use tempfile::TempDir;
+
+    use super::{first_blob_path_in_state, plan_on_demand_blob_wants};
+
+    fn lazy_two_file_repo() -> (TempDir, Repository, objects::object::StateId, Blob, Blob) {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let wanted = Blob::from("wanted file\n");
+        let other = Blob::from("sibling file\n");
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("wanted.txt", wanted.hash(), false).unwrap(),
+            TreeEntry::file("other.txt", other.hash(), false).unwrap(),
+        ]);
+        let tree_hash = repo.store().put_tree(&tree).unwrap();
+        let state = State::new(
+            tree_hash,
+            Vec::new(),
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        );
+        repo.store().put_state(&state).unwrap();
+        repo.refs()
+            .set_thread(&ThreadName::from("main"), &state.id())
+            .unwrap();
+        repo.record_missing_blob(wanted.hash()).unwrap();
+        repo.record_missing_blob(other.hash()).unwrap();
+        (temp, repo, state.id(), wanted, other)
+    }
+
+    #[test]
+    fn first_blob_path_resolves_only_the_requested_hash() {
+        let (_temp, repo, state, wanted, other) = lazy_two_file_repo();
+        assert_eq!(
+            first_blob_path_in_state(&repo, state, &wanted.hash())
+                .unwrap()
+                .as_deref(),
+            Some("wanted.txt")
+        );
+        assert_eq!(
+            first_blob_path_in_state(&repo, state, &other.hash())
+                .unwrap()
+                .as_deref(),
+            Some("other.txt")
+        );
+        assert_eq!(
+            first_blob_path_in_state(&repo, state, &Blob::from("absent\n").hash()).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn on_demand_wants_exclude_sibling_missing_blobs() {
+        let (_temp, repo, _state, wanted, other) = lazy_two_file_repo();
+        let plan = plan_on_demand_blob_wants(&repo, &[wanted.hash()]).unwrap();
+        assert!(!plan.want_full_closure, "on-demand must not want the tip");
+        assert_eq!(plan.wants.len(), 1);
+        assert_eq!(plan.wants[0].id, wanted.hash().to_hex());
+        assert!(
+            plan.wants
+                .iter()
+                .all(|want| want.id != other.hash().to_hex()),
+            "sibling missing blob must not be wanted"
+        );
+    }
+
+    #[tokio::test]
+    async fn hydrate_blob_fetches_only_the_requested_file() {
+        let (_temp, repo, state, wanted, other) = lazy_two_file_repo();
+        let (mut client, server, requested) =
+            crate::hosted_runtime::hosted::test_server::start_with_get_blob_contents([
+                ("wanted.txt".to_string(), wanted.content().to_vec()),
+                ("other.txt".to_string(), other.content().to_vec()),
+            ])
+            .await;
+
+        let fetched = client
+            .hydrate_blob(&repo, "acme/widgets", "main", state, wanted.hash())
+            .await
+            .unwrap();
+        assert_eq!(fetched, 1);
+        assert!(repo.store().has_blob(&wanted.hash()).unwrap());
+        assert!(!repo.store().has_blob(&other.hash()).unwrap());
+        assert!(!repo.is_missing_blob(&wanted.hash()).unwrap());
+        assert!(repo.is_missing_blob(&other.hash()).unwrap());
+        assert_eq!(
+            requested.lock().unwrap().clone(),
+            vec!["wanted.txt".to_string()],
+            "one missing-blob read must issue one GetBlob, not a tip fetch"
+        );
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hydrate_blob_falls_through_to_hash_pull_when_get_blob_returns_a_moved_path() {
+        let (_temp, repo, state, wanted, other) = lazy_two_file_repo();
+        let remote_state = super::super::helpers::proto_state_id(state).unwrap();
+        let (pack_data, index_data) = pack_containing_blob(&wanted);
+        let moved = Blob::from("live tip reused this path\n");
+        assert_ne!(moved.hash(), wanted.hash());
+
+        let (mut client, server, requested) =
+            crate::hosted_runtime::hosted::test_server::start_with_get_blob_contents_and_pull_pack(
+                [
+                    ("wanted.txt".to_string(), moved.content().to_vec()),
+                    ("other.txt".to_string(), other.content().to_vec()),
+                ],
+                remote_state,
+                pack_data,
+                index_data,
+            )
+            .await;
+
+        let fetched = client
+            .hydrate_blob(
+                &repo,
+                "acme/widgets",
+                super::PULL_CLONE_BOOTSTRAP_THREAD_PREFIX,
+                state,
+                wanted.hash(),
+            )
+            .await
+            .unwrap();
+        assert!(fetched >= 1);
+        assert!(repo.store().has_blob(&wanted.hash()).unwrap());
+        assert!(!repo.store().has_blob(&other.hash()).unwrap());
+        assert!(!repo.store().has_blob(&moved.hash()).unwrap());
+        assert!(!repo.is_missing_blob(&wanted.hash()).unwrap());
+        assert!(repo.is_missing_blob(&other.hash()).unwrap());
+        assert_eq!(
+            requested.lock().unwrap().clone(),
+            vec!["wanted.txt".to_string()],
+            "moved-path GetBlob must not fetch the sibling"
+        );
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    fn pack_containing_blob(blob: &Blob) -> (Vec<u8>, Vec<u8>) {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        repo.store().put_blob(blob).unwrap();
+        let pack = wire::build_native_pack(
+            repo.store(),
+            &[wire::ObjectInfo {
+                id: wire::ObjectId::Hash(blob.hash()),
+                obj_type: wire::ObjectType::Blob,
+                size: 0,
+                delta_base: None,
+            }],
+        )
+        .unwrap();
+        (pack.pack_data, pack.index_data)
     }
 }
 

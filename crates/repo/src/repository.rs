@@ -467,8 +467,8 @@ struct GitProjectionMappingFile {
 /// - Hosted clones: the CLI-owned lazy hosted hydrator
 ///   bridges sync `hydrate` calls to an async hosted call via a dedicated worker
 ///   thread + private Tokio runtime; on each call the worker invokes
-///   `HostedClient::hydrate_pulled_state` for the current local-thread
-///   tip.
+///   `HostedClient::hydrate_blob` for the requested hash on the current
+///   local-thread tip.
 ///
 /// On success the hydrator is expected to write the blob into
 /// `repo.store()`; the read path then clears the missing marker and
