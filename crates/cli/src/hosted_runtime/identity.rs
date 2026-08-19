@@ -14,6 +14,7 @@ use super::{
     hosted::{canonical_server_authority, resolve_hosted_credential},
     identity_server,
     identity_state::{self, ClaimState},
+    root_mint::{is_local_agent_root, mint_agent_root},
 };
 use crate::cli::IdentityCommands;
 
@@ -66,6 +67,9 @@ async fn ensure(
     match ensure_action(
         metadata.as_ref().map(|value| value.is_derived),
         invite.is_some(),
+        metadata
+            .as_ref()
+            .is_some_and(|value| is_local_agent_root(&value.subject, &value.proof_public_key_hex)),
     ) {
         EnsureAction::Reuse => {
             let metadata = metadata
@@ -116,9 +120,14 @@ async fn ensure(
     }
 }
 
-pub(crate) fn ensure_action(derived: Option<bool>, has_invite: bool) -> EnsureAction {
+pub(crate) fn ensure_action(
+    derived: Option<bool>,
+    has_invite: bool,
+    local_agent_root: bool,
+) -> EnsureAction {
     match derived {
         Some(true) => EnsureAction::Reuse,
+        Some(false) if local_agent_root => EnsureAction::Reuse,
         Some(false) => EnsureAction::Derive,
         None if has_invite => EnsureAction::Provision,
         None => EnsureAction::RequireInvite,
@@ -131,20 +140,25 @@ async fn create_on_behalf(
     invite: String,
 ) -> Result<()> {
     let identity = agent_node_identity::load_or_create()?;
-    let signer = Ed25519Signer::from_seed(&identity.secret_key().to_bytes())
+    let seed = identity.secret_key().to_bytes();
+    let signer = Ed25519Signer::from_seed(&seed)
         .context("deriving the agent credential key from the persisted node identity")?;
     let node_id = identity.node_id().to_string();
     if hex::encode(signer.public_key()) != node_id {
         bail!("persisted Iroh node key does not map to the agent credential key");
     }
-    let proof_pem = signer.to_pem().context("exporting agent proof key")?;
+    let root = mint_agent_root(&seed).context("minting the agent independent root locally")?;
+    if root.public_key_hex() != node_id {
+        bail!("agent independent root is not bound to this node key");
+    }
     let user_config = UserConfig::load_default()?;
     let session = HostedSession::build(
         &user_config,
         Some(server.clone()),
-        HostedAuthMode::ProofOnly {
-            proof_key_pem: proof_pem.clone(),
-            signing_identity: format!("principal:agent-key:{node_id}"),
+        HostedAuthMode::PresentedRoot {
+            token: root.token.clone(),
+            proof_key_pem: root.private_key_pem.clone(),
+            subject: root.subject.clone(),
         },
     )?;
     let mut client = session.connect(([127, 0, 0, 1], 0).into()).await?;
@@ -155,7 +169,7 @@ async fn create_on_behalf(
     let response = client
         .create_agent_account(CreateAgentAccountRequest {
             invite_code: invite,
-            agent_public_key: signer.public_key().to_vec(),
+            agent_public_key: root.public_key.to_vec(),
             client_operation_id: operation_id,
         })
         .await
@@ -164,22 +178,23 @@ async fn create_on_behalf(
         });
     client.close().await;
     let response = response?;
-    let token = String::from_utf8(response.agent_capability)
-        .context("server returned a non-text agent capability")?;
-    let metadata =
-        headless_token_metadata(&token).context("validating the returned agent capability")?;
-    if !metadata.is_derived || !metadata.proof_public_key_hex.eq_ignore_ascii_case(&node_id) {
-        bail!("server returned an agent capability not derived for this node key");
+    let metadata = headless_token_metadata(&root.token)
+        .context("validating the client-minted agent capability")?;
+    if metadata.is_derived
+        || !metadata.proof_public_key_hex.eq_ignore_ascii_case(&node_id)
+        || metadata.subject != root.subject
+    {
+        bail!("client-minted agent capability is not bound to this node key");
     }
     cli_shared::credentials::store_server_credential(
         &server,
         ServerCredential {
-            token,
+            token: root.token,
             subject: metadata.subject.clone(),
             device_id: None,
             credential_id: None,
-            private_key_pem: Some(proof_pem),
-            expires_at: metadata.expires_at,
+            private_key_pem: Some(root.private_key_pem),
+            expires_at: Some(root.expires_at.to_rfc3339()),
         },
     )?;
     let owner_id = uuid::Uuid::parse_str(&response.account_id)

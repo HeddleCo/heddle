@@ -101,8 +101,8 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
         "BindSignupInviteEmail",
         AgentAuthOperationDisposition::Denied,
     ),
-    // Durable invite claim mints a signup bearer; derived agents must not
-    // consume invite codes on behalf of a parent principal.
+    // Invite claim registers a client-minted signup root; derived agents
+    // must not consume invite codes on behalf of a parent principal.
     ("ClaimSignupInvite", AgentAuthOperationDisposition::Denied),
     // Public drop selection accepts an optional verified agent subject only
     // to choose the subject-scoped anti-abuse budget.
@@ -146,16 +146,13 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
     ("RevokeSession", AgentAuthOperationDisposition::Denied),
     ("RequestHeldName", AgentAuthOperationDisposition::Denied),
     ("ResolveHandle", AgentAuthOperationDisposition::ReviewedSafe),
-    // MintBiscuit authenticates its own keypair/device proof; an attached
-    // derived bearer cannot authorize or widen the minted credential.
-    ("MintBiscuit", AgentAuthOperationDisposition::ReviewedSafe),
+    // Clients mint every root locally. The RPC remains on the shared
+    // descriptor until Weft removes it; a derived bearer cannot mint.
+    ("MintBiscuit", AgentAuthOperationDisposition::Denied),
     // Presence currently re-mints an authority token instead of preserving
     // the caller's complete attenuation chain, so agents must not invoke it.
     ("IssuePresenceToken", AgentAuthOperationDisposition::Denied),
-    (
-        "MintAnonBiscuit",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
+    ("MintAnonBiscuit", AgentAuthOperationDisposition::Denied),
     (
         "DeclareRecoveryMethod",
         AgentAuthOperationDisposition::Denied,

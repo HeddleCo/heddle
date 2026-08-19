@@ -8,8 +8,8 @@
 > trust anchor it has been configured with.
 
 This walkthrough covers the local-only flow. For the hosted flow
-(where the server is the trust anchor and the CLI receives a Biscuit
-via `MintBiscuit` then attenuates it for sub-agents), see
+(where the client mints the root and Weft registers the public key,
+then the CLI attenuates offline for sub-agents), see
 [`.agents/agent-attenuation.md`](../.agents/agent-attenuation.md).
 
 ## When this applies
@@ -25,8 +25,9 @@ The self-sovereign path is the right shape when:
   identity layer (e.g. a workspace tool, a daemon) and that system
   is the trust anchor — not Heddle's hosted server.
 
-If you have a hosted Biscuit (issued via `MintBiscuit` or a device
-flow), you should attenuate *that* token instead. See `.agents/agent-attenuation.md`.
+If you already have a hosted Biscuit (client-minted at signup, claim,
+passkey finish, device login, or anon), you should attenuate *that*
+token instead. See `.agents/agent-attenuation.md`. Weft never remints.
 
 ## Concept
 
@@ -160,10 +161,10 @@ out of band: the system that consumes these tokens (your own
 service, a test harness, a non-hosted Heddle deployment) must be
 configured with `root.public()` from step 1.
 
-The hosted Heddle server is configured with its own root key and
-will reject Biscuits minted by a different root. If you need tokens
-that the hosted server will accept, use `MintBiscuit` or the device
-flow — see `.agents/agent-attenuation.md`.
+Weft verifies a hosted Biscuit against the public key it registered
+for that account. The client is the authority-block signer. Existing
+accounts attenuate offline; Weft never remints. See
+`.agents/agent-attenuation.md`.
 
 ## What you can't do
 

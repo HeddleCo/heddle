@@ -1,15 +1,35 @@
 use super::identity::{EnsureAction, claim_link_url, ensure_action};
 
 #[test]
+fn create_on_behalf_stores_the_client_minted_root() {
+    let source = include_str!("identity.rs");
+    assert!(
+        !source.contains("agent_capability"),
+        "CreateAgentAccount must store the locally minted root, not a weft-minted capability"
+    );
+    assert!(
+        source.contains("mint_agent_root"),
+        "CreateAgentAccount must reuse the independent-root mint"
+    );
+}
+
+#[test]
 fn invite_is_never_selected_when_any_credential_exists() {
-    assert_eq!(ensure_action(Some(true), true), EnsureAction::Reuse);
-    assert_eq!(ensure_action(Some(false), true), EnsureAction::Derive);
+    assert_eq!(ensure_action(Some(true), true, false), EnsureAction::Reuse);
+    assert_eq!(
+        ensure_action(Some(false), true, false),
+        EnsureAction::Derive
+    );
+    assert_eq!(ensure_action(Some(false), true, true), EnsureAction::Reuse);
 }
 
 #[test]
 fn provisioning_is_only_the_no_credential_fallback() {
-    assert_eq!(ensure_action(None, true), EnsureAction::Provision);
-    assert_eq!(ensure_action(None, false), EnsureAction::RequireInvite);
+    assert_eq!(ensure_action(None, true, false), EnsureAction::Provision);
+    assert_eq!(
+        ensure_action(None, false, false),
+        EnsureAction::RequireInvite
+    );
 }
 
 #[test]

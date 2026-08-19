@@ -275,73 +275,29 @@ impl HostedClient {
             tracing::debug!("credential rotation: stored authority has no renewal key");
             return;
         };
-        let signer = match Ed25519Signer::from_pem(&private_key_pem) {
-            Ok(signer) => signer,
+        let root = match crate::hosted_runtime::root_mint::remint_stored_root(
+            &private_key_pem,
+            &credential.subject,
+            Some(public_key_id.as_str()),
+        ) {
+            Ok(root) => root,
             Err(error) => {
-                tracing::warn!("credential rotation: failed to load signing key: {error}");
+                tracing::warn!("credential rotation: local remint failed: {error}");
                 return;
             }
         };
-        let timestamp = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-            Ok(duration) => duration.as_secs(),
-            Err(error) => {
-                tracing::warn!("credential rotation: clock skew: {error}");
-                return;
-            }
-        };
-        let signature = match signer.sign(format!("{timestamp}\n{public_key_id}\n").as_bytes()) {
-            Ok(signature) => signature,
-            Err(error) => {
-                tracing::warn!("credential rotation: failed to sign challenge: {error}");
-                return;
-            }
-        };
-        let request = api::heddle::api::v1alpha1::MintBiscuitRequest {
-            subject: credential.subject.clone(),
-            requested_scope: String::new(),
-            user_agent: String::new(),
-            ip: String::new(),
-            proof: Some(
-                api::heddle::api::v1alpha1::mint_biscuit_request::Proof::Keypair(
-                    api::heddle::api::v1alpha1::KeypairProof {
-                        public_key_id,
-                        timestamp,
-                        signature,
-                    },
-                ),
-            ),
-            client_operation_id: String::new(),
-        };
-        let response = match self.routes().mint_biscuit(&request).await {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::warn!("credential rotation: MintBiscuit failed: {error}");
-                return;
-            }
-        };
-        let expires_at = response
-            .expires_at
-            .as_ref()
-            .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp.seconds.max(0), 0))
-            .map(|timestamp| timestamp.to_rfc3339())
-            .or(credential.expires_at.clone());
         let updated = cli_shared::credentials::ServerCredential {
-            token: response.token.clone(),
-            subject: if response.subject.is_empty() {
-                credential.subject
-            } else {
-                response.subject
-            },
+            token: root.token.clone(),
+            subject: root.subject,
             device_id: credential.device_id,
-            credential_id: credential.credential_id,
+            credential_id: Some(public_key_id),
             private_key_pem: Some(private_key_pem),
-            expires_at,
+            expires_at: Some(root.expires_at.to_rfc3339()),
         };
         if let Err(error) = cli_shared::credentials::store_server_credential(&server_key, updated) {
             tracing::warn!("credential rotation: failed to persist credential: {error}");
         }
-        self.context
-            .set_bearer_capability(response.token.into_bytes());
+        self.context.set_bearer_capability(root.token.into_bytes());
     }
 
     pub async fn call_unary<Request, Response>(

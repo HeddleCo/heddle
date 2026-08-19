@@ -6,10 +6,10 @@
 ## Mental model
 
 A Biscuit is a chain of cryptographic blocks. The first (authority)
-block is signed by Heddle; every subsequent block is appended by
-whoever currently holds the token, no server contact required. The
-verifier runs every block's checks on every request — so a child
-block can only narrow authority, never widen it.
+block is signed by the client that minted the root; every subsequent
+block is appended by whoever currently holds the token, no server
+contact required. The verifier runs every block's checks on every
+request — so a child block can only narrow authority, never widen it.
 
 When you spawn a sub-agent, you don't ask the server for a new
 token. You append a new block to your own. The agent gets the
@@ -18,7 +18,7 @@ first call.
 
 ```
                   ┌─────────────────┐
-  server ────┤ authority block │  signed by Heddle
+  client ────┤ authority block │  signed by the client's independent root
                   ├─────────────────┤
   parent agent ───┤   block 1       │  parent's attenuation (e.g. "expires in 4h")
                   ├─────────────────┤
@@ -56,8 +56,8 @@ enrollment, and presence-token issuance, plus `DeleteRepository` and
 `DeleteNamespace`. Its `AuthService` table is checked for exact agreement with
 `auth.proto`, so a new auth RPC cannot land without an explicit agent-policy
 classification. These checks also apply to direct callers of the Rust helper.
-They restrict use of the derived token; they do not constrain
-device-key-authenticated `MintBiscuit`.
+They restrict use of the derived token. Clients mint every root
+locally, including anon; Weft only registers the public key.
 
 By default the child replaces the active stored credential for `--server`, so
 the next push/pull and any further derivation use that child and its fresh PoP
@@ -281,7 +281,7 @@ boundary is:
   client-side attenuation, no server registration.
 - **Persistent** (weeks to months, organizational principal) →
   service account with keypair, autonomous renewal via
-  `MintBiscuit + KeypairProof`.
+  a local remint of the same independent root. Weft never remints.
 
 ## What you can't do
 

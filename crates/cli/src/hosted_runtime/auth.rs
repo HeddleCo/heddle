@@ -4,10 +4,9 @@ use std::{collections::BTreeSet, path::Path};
 
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha1::{
-    CreateDeviceAuthorizationRequest, CreateServiceAccountRequest, DeviceAuthProof,
-    DeviceAuthorizationEvent, DeviceAuthorizationResponse, DeviceAuthorizationStatus,
-    ExchangeDeviceAuthorizationRequest, IssueServiceAccountCredentialRequest, MintBiscuitRequest,
-    WaitForDeviceAuthorizationRequest, mint_biscuit_request::Proof,
+    CreateDeviceAuthorizationRequest, CreateServiceAccountRequest, DeviceAuthorizationEvent,
+    DeviceAuthorizationResponse, DeviceAuthorizationStatus, ExchangeDeviceAuthorizationRequest,
+    IssueServiceAccountCredentialRequest, WaitForDeviceAuthorizationRequest,
 };
 use cli_shared::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
@@ -324,8 +323,8 @@ pub(crate) fn cmd_auth_derive_agent(
             token: child_token,
             proof_key_pem: child_private_key_pem,
             expires_at: Some(expires_at.to_rfc3339()),
-            // A derived child must never auto-rotate through MintBiscuit (that
-            // would drop this block's caveats), so it carries no credential id.
+            // A derived child must never auto-rotate (that would drop this
+            // block's caveats), so it carries no credential id.
             credential_id: None,
             provenance: Some(provenance),
         };
@@ -340,10 +339,10 @@ pub(crate) fn cmd_auth_derive_agent(
         return Ok(());
     }
 
-    // The installed derived token must not auto-rotate through MintBiscuit:
-    // renewal would produce a fresh authority token without this block's
-    // caveats. Keeping credential_id unset disables the client's rotation path
-    // while preserving the authority block and server-side revocation bindings.
+    // The installed derived token must not auto-rotate: reminting the
+    // authority block would drop this block's caveats. Keeping credential_id
+    // unset disables the client's rotation path while preserving the
+    // authority block and server-side revocation bindings.
     credentials::store_server_credential(
         server,
         ServerCredential {
@@ -584,7 +583,7 @@ pub(crate) fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetada
     let subject = string_fact("user")?
         .filter(|subject| !subject.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("Biscuit authority block is missing user(subject)"))?;
-    // An attenuated token must never use keypair renewal: MintBiscuit would
+    // An attenuated token must never use authority remint: that would
     // return a new authority token without the appended caveats. The
     // authority credential id remains cryptographically intact in the token,
     // but is intentionally omitted from the local child credential metadata.
@@ -727,7 +726,7 @@ async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
     // 6. Poll for approval.
     println!("Waiting for authorization...");
 
-    let access_token = poll_for_approval(
+    let registered = poll_for_approval(
         &mut auth_client,
         device_code,
         &public_key_bytes,
@@ -736,23 +735,24 @@ async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
     )
     .await;
     auth_client.close().await;
-    let access_token = access_token?;
+    let registered = registered?;
+    let root = crate::hosted_runtime::root_mint::mint_independent_root(
+        &signer.to_seed(),
+        &registered.subject,
+        crate::hosted_runtime::root_mint::IndependentRootKind::Account,
+        crate::hosted_runtime::root_mint::ACCOUNT_ROOT_TTL,
+        (!registered.credential_id.is_empty()).then_some(registered.credential_id.as_str()),
+    )?;
 
-    // 7. Store credential.
+    // 7. Store the client-minted root. Weft registered the public key; it
+    // does not mint or remint the bearer.
     let credential = ServerCredential {
-        token: access_token.token,
-        subject: access_token.subject.clone(),
+        token: root.token,
+        subject: root.subject.clone(),
         device_id: None,
-        credential_id: if access_token.credential_id.is_empty() {
-            None
-        } else {
-            Some(access_token.credential_id)
-        },
-        private_key_pem: Some(private_key_pem.clone()),
-        expires_at: access_token.expires_at.as_ref().and_then(|ts| {
-            chrono::DateTime::from_timestamp(ts.seconds, ts.nanos.max(0) as u32)
-                .map(|dt| dt.to_rfc3339())
-        }),
+        credential_id: root.credential_id.clone(),
+        private_key_pem: Some(root.private_key_pem),
+        expires_at: Some(root.expires_at.to_rfc3339()),
     };
 
     credentials::store_server_credential(server, credential)?;
@@ -768,10 +768,7 @@ async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
     }
 
     println!();
-    println!(
-        "Authenticated as {}. Credentials saved.",
-        access_token.subject
-    );
+    println!("Authenticated as {}. Credentials saved.", root.subject);
     Ok(())
 }
 
@@ -1200,15 +1197,15 @@ fn hosted_tls_trust_advice(message: &str) -> RecoveryAdvice {
     )
 }
 
-/// Poll `MintBiscuit(DeviceAuthProof)` until the device code is approved or
-/// the authorization expires.
+/// Wait until the device code is approved, then register the device public
+/// key. The caller mints the root locally; Weft does not return a bearer.
 async fn poll_for_approval(
     client: &mut HostedClient,
     device_code: &str,
     public_key: &[u8],
     signer: &Ed25519Signer,
     expires_at: Option<prost_types::Timestamp>,
-) -> Result<AccessToken> {
+) -> Result<RegisteredDevice> {
     let proof_bytes = device_authorization_signature(device_code, signer)?;
 
     let expires_at_secs = expires_at
@@ -1255,18 +1252,7 @@ async fn poll_for_approval(
         }
     }
 
-    match mint_biscuit_with_device_auth(client, device_code, public_key, proof_bytes.clone()).await
-    {
-        Ok(token) => Ok(token),
-        Err(error) if should_fallback_to_exchange_device_authorization(&error) => {
-            tracing::debug!(
-                error = %error,
-                "falling back to ExchangeDeviceAuthorization for lagging auth server"
-            );
-            exchange_device_authorization(client, device_code, public_key, proof_bytes).await
-        }
-        Err(error) => Err(anyhow::anyhow!("device authorization failed: {error}")),
-    }
+    exchange_device_authorization(client, device_code, public_key, proof_bytes).await
 }
 
 async fn wait_for_device_authorization_event(
@@ -1308,29 +1294,12 @@ fn device_authorization_wait_stream_error(
     anyhow::anyhow!("device authorization approval stream failed: {error}")
 }
 
-async fn mint_biscuit_with_device_auth(
-    client: &mut HostedClient,
-    device_code: &str,
-    public_key: &[u8],
-    signature: Vec<u8>,
-) -> std::result::Result<AccessToken, HostedError> {
-    let request = device_auth_mint_biscuit_request(device_code, public_key, signature);
-    let inner = client.routes().mint_biscuit(&request).await?;
-
-    Ok(AccessToken {
-        token: inner.token,
-        subject: inner.subject,
-        expires_at: inner.expires_at,
-        credential_id: inner.credential_id,
-    })
-}
-
 async fn exchange_device_authorization(
     client: &mut HostedClient,
     device_code: &str,
     public_key: &[u8],
     proof: Vec<u8>,
-) -> Result<AccessToken> {
+) -> Result<RegisteredDevice> {
     let inner = client
         .routes()
         .exchange_device_authorization(&ExchangeDeviceAuthorizationRequest {
@@ -1341,31 +1310,15 @@ async fn exchange_device_authorization(
         .await
         .map_err(|error| anyhow::anyhow!("device authorization failed: {error}"))?;
 
-    Ok(AccessToken {
-        token: inner.token,
-        subject: inner.subject,
-        expires_at: inner.expires_at,
+    let subject = if inner.subject.is_empty() {
+        format!("device:{}", hex::encode(public_key))
+    } else {
+        inner.subject
+    };
+    Ok(RegisteredDevice {
+        subject,
         credential_id: inner.credential_id,
     })
-}
-
-fn device_auth_mint_biscuit_request(
-    device_code: &str,
-    public_key: &[u8],
-    signature: Vec<u8>,
-) -> MintBiscuitRequest {
-    MintBiscuitRequest {
-        subject: String::new(),
-        requested_scope: String::new(),
-        user_agent: String::new(),
-        ip: String::new(),
-        proof: Some(Proof::DeviceAuth(DeviceAuthProof {
-            device_code: device_code.to_string(),
-            device_public_key: public_key.to_vec(),
-            signature,
-        })),
-        client_operation_id: String::new(),
-    }
 }
 
 fn device_authorization_signature(device_code: &str, signer: &Ed25519Signer) -> Result<Vec<u8>> {
@@ -1374,23 +1327,9 @@ fn device_authorization_signature(device_code: &str, signer: &Ed25519Signer) -> 
         .map_err(|e| anyhow::anyhow!("failed to sign proof: {e}"))
 }
 
-fn should_fallback_to_exchange_device_authorization(error: &HostedError) -> bool {
-    matches!(
-        error,
-        HostedError::Call {
-            code: api::heddle::api::v1alpha1::CallFailureCode::Unimplemented,
-            message,
-            ..
-        } if message.contains("DeviceAuthProof")
-            && message.contains("ExchangeDeviceAuthorization")
-    )
-}
-
-/// Extracted token fields from `AccessTokenResponse`.
-struct AccessToken {
-    token: String,
+/// Public-key registration result. The bearer is minted locally.
+struct RegisteredDevice {
     subject: String,
-    expires_at: Option<prost_types::Timestamp>,
     credential_id: String,
 }
 
@@ -1589,20 +1528,24 @@ mod tests {
     }
 
     #[test]
-    fn device_auth_mint_request_uses_device_auth_proof_variant() {
-        let request =
-            device_auth_mint_biscuit_request("device-123", &[1, 2, 3, 4], vec![5, 6, 7, 8]);
+    fn device_login_mints_the_bearer_from_the_registered_device_key() {
+        let signer = Ed25519Signer::generate().expect("device key");
+        let subject = "alice@example.com";
+        let root = crate::hosted_runtime::root_mint::mint_independent_root(
+            &signer.to_seed(),
+            subject,
+            crate::hosted_runtime::root_mint::IndependentRootKind::Account,
+            crate::hosted_runtime::root_mint::ACCOUNT_ROOT_TTL,
+            Some("cred-device"),
+        )
+        .expect("client-minted device root");
 
-        assert!(request.subject.is_empty());
-        assert!(request.requested_scope.is_empty());
-        match request.proof.expect("proof variant") {
-            Proof::DeviceAuth(proof) => {
-                assert_eq!(proof.device_code, "device-123");
-                assert_eq!(proof.device_public_key, vec![1, 2, 3, 4]);
-                assert_eq!(proof.signature, vec![5, 6, 7, 8]);
-            }
-            Proof::Keypair(_) => panic!("device login must use DeviceAuthProof"),
-        }
+        assert_eq!(root.subject, subject);
+        assert_eq!(root.public_key.as_slice(), signer.public_key());
+        let metadata = headless_token_metadata(&root.token).expect("metadata");
+        assert!(!metadata.is_derived);
+        assert_eq!(metadata.subject, subject);
+        assert_eq!(metadata.credential_id.as_deref(), Some("cred-device"));
     }
 
     #[test]
@@ -1730,31 +1673,16 @@ mod tests {
     }
 
     #[test]
-    fn device_auth_fallback_is_limited_to_lagging_weft_stub() {
-        let call_error = |code, message: &str| HostedError::Call {
-            code,
-            message: message.to_string(),
-            error: None,
-        };
-        let lagging = call_error(
-            api::heddle::api::v1alpha1::CallFailureCode::Unimplemented,
-            "MintBiscuit DeviceAuthProof is not implemented yet; use ExchangeDeviceAuthorization for now",
+    fn login_and_rotation_never_call_a_weft_mint_rpc() {
+        let source = include_str!("auth.rs");
+        assert!(
+            !source.contains(concat!("mint", "_biscuit")),
+            "device login must mint locally and must not call a weft mint RPC"
         );
-        assert!(should_fallback_to_exchange_device_authorization(&lagging));
-
-        let unrelated = call_error(
-            api::heddle::api::v1alpha1::CallFailureCode::Unimplemented,
-            "some other endpoint is missing",
+        assert!(
+            !source.contains(concat!("Mint", "AnonBiscuit")),
+            "anon roots are minted locally"
         );
-        assert!(!should_fallback_to_exchange_device_authorization(
-            &unrelated
-        ));
-
-        let denied = call_error(
-            api::heddle::api::v1alpha1::CallFailureCode::PermissionDenied,
-            "MintBiscuit DeviceAuthProof signature verification failed",
-        );
-        assert!(!should_fallback_to_exchange_device_authorization(&denied));
     }
 
     /// Minimal `CliContext` for the logout tests — text output, no repo.

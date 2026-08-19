@@ -78,13 +78,6 @@ impl HostedRoutes<'_> {
         IssuedCredentialResponse
     );
     unary_method!(
-        mint_biscuit,
-        "IdentityService",
-        "MintBiscuit",
-        MintBiscuitRequest,
-        AccessTokenResponse
-    );
-    unary_method!(
         create_agent_account,
         "IdentityService",
         "CreateAgentAccount",
@@ -433,7 +426,20 @@ mod tests {
     };
 
     #[test]
-    fn shipped_native_inventory_is_39_unary_seven_server_streams_and_two_bidi() {
+    fn hosted_rotation_never_calls_a_weft_mint_rpc() {
+        let source = include_str!("mod.rs");
+        assert!(
+            !source.contains(concat!("mint", "_biscuit")),
+            "rotation remints locally and must not call a weft mint RPC"
+        );
+        assert!(
+            !source.contains("MintBiscuitRequest"),
+            "rotation must not build a weft mint request"
+        );
+    }
+
+    #[test]
+    fn shipped_native_inventory_is_38_unary_seven_server_streams_and_two_bidi() {
         const ROUTES: &[MethodRoute] = &[
             MethodRoute::CollaborationServiceAppendTurn,
             MethodRoute::CollaborationServiceListByState,
@@ -443,7 +449,6 @@ mod tests {
             MethodRoute::IdentityServiceCreateServiceAccount,
             MethodRoute::IdentityServiceExchangeDeviceAuthorization,
             MethodRoute::IdentityServiceIssueServiceAccountCredential,
-            MethodRoute::IdentityServiceMintBiscuit,
             MethodRoute::IdentityServiceWaitForDeviceAuthorization,
             MethodRoute::IdentityServiceWhoAmI,
             MethodRoute::RegistryServiceCreateGrant,
@@ -493,13 +498,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(shipped.len(), 48);
+        assert_eq!(shipped.len(), 47);
         assert_eq!(
             shipped
                 .iter()
                 .filter(|method| method.streaming == StreamingShape::Unary)
                 .count(),
-            39
+            38
         );
         assert_eq!(
             shipped

@@ -86,6 +86,13 @@ impl Ed25519Signer {
             .map_err(|e| SignerError::Pkcs8(e.to_string()))
     }
 
+    /// 32-byte Ed25519 seed. The independent-root Biscuit mint uses the same
+    /// bytes as the biscuit-auth signing key so Weft can verify the authority
+    /// block against the registered public key.
+    pub fn to_seed(&self) -> [u8; 32] {
+        self.signing_key.to_bytes()
+    }
+
     pub fn verify_with_public_key(
         data: &[u8],
         public_key: &[u8],
