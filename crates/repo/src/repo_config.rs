@@ -652,7 +652,6 @@ source_authority = "native"
     }
 
     #[test]
-    #[test]
     fn empty_trust_tables_are_omitted_from_saved_config() {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("config.toml");
