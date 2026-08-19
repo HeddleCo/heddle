@@ -9,6 +9,20 @@ use heddle_core::completion_plan::{CompletionShell, CompletionShellError, parse_
 use super::advice::RecoveryAdvice;
 use crate::cli::{Cli, CompletionSubject};
 
+/// Public `heddle completions [SHELL]` entry.
+///
+/// No shell prints install lines. A known shell emits the same script as
+/// `heddle shell completion`.
+pub fn cmd_completions(shell: Option<String>) -> Result<()> {
+    match shell {
+        Some(shell) => cmd_completion(shell),
+        None => {
+            print!("{COMPLETIONS_INSTALL_GUIDE}");
+            Ok(())
+        }
+    }
+}
+
 pub fn cmd_completion(shell: String) -> Result<()> {
     let mut cmd = Cli::command();
 
@@ -31,13 +45,23 @@ pub fn cmd_completion(shell: String) -> Result<()> {
                 "completion_shell_unsupported",
                 format!("Unsupported shell: {shell}. Supported shells: bash, zsh, fish"),
                 "Use one of: bash, zsh, fish.",
-                "heddle shell completion bash",
+                "heddle completions bash",
             )));
         }
     }
 
     Ok(())
 }
+
+const COMPLETIONS_INSTALL_GUIDE: &str = "\
+Tab-completion scripts for bash, zsh, and fish.
+
+  heddle completions bash >> ~/.bashrc
+  heddle completions zsh  >> ~/.zshrc
+  heddle completions fish > ~/.config/fish/completions/heddle.fish
+
+Same as `heddle shell completion <SHELL>`.
+";
 
 pub fn cmd_complete(cli: &Cli, subject: CompletionSubject) -> Result<()> {
     let Ok(repo) = cli.open_repo() else {

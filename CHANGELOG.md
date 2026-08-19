@@ -15,6 +15,12 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Added
 
+- **`heddle completions` prints tab-completion scripts.** The field-study
+  verb emits install lines, or a bash/zsh/fish script. Same scripts as
+  `heddle shell completion`. First-screen help names it so it is findable
+  without `heddle help advanced`. Hidden `complete` / `__complete` stay
+  internal (heddle#1439).
+
 - **Parse-free semantic graph queries.** `heddle semantic refs` answers
   refs-of, callers-of, and importers-of at any indexed state from the
   attached semantic index and importer index, without re-parsing. The

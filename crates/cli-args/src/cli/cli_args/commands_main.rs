@@ -391,6 +391,16 @@ Examples:
         command: ShellCommands,
     },
 
+    /// Print a tab-completion script for bash, zsh, or fish.
+    ///
+    /// With no shell, prints install lines. With `bash`, `zsh`, or `fish`,
+    /// emits the same script as `heddle shell completion`.
+    Completions {
+        /// Shell to generate completion for: bash, zsh, or fish.
+        #[arg(value_name = "SHELL")]
+        shell: Option<String>,
+    },
+
     /// Internal shell-completion candidate helper.
     #[command(name = "complete", alias = "__complete", hide = true)]
     Complete {

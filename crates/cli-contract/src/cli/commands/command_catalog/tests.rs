@@ -396,6 +396,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["shell", "init"], &["shell", "init", "bash"]),
     sample(&["shell", "completion"], &["shell", "completion", "bash"]),
     sample(&["shell", "prompt"], &["shell", "prompt"]),
+    sample(&["completions"], &["completions", "bash"]),
     sample(&["complete"], &["__complete", "threads"]),
     sample(&["land"], &["land"]),
     sample(&["show"], &["show", "HEAD"]),
@@ -2229,6 +2230,7 @@ fn parsed_command_json_support_reads_contract_table() {
         (vec!["heddle", "status"], true),
         (vec!["heddle", "help"], true),
         (vec!["heddle", "shell", "completion", "bash"], false),
+        (vec!["heddle", "completions", "bash"], false),
         (vec!["heddle", "thread", "cd", "feature"], false),
     ] {
         let cli = Cli::try_parse_from(argv.clone())
