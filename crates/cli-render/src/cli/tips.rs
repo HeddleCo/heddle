@@ -159,7 +159,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[test]
     fn query_tip_teaches_capture_history() {
         assert!(Tip::QueryFromLog.message().contains("capture history"));
         assert!(Tip::QueryFromLog.message().contains("query --verb capture"));
