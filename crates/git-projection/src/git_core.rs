@@ -937,7 +937,9 @@ impl<'a> GitProjection<'a> {
 
         // Export only the managed frontier reconstructed from the store. A foreign
         // branch/tag heddle never wrote — even one at a heddle-minted commit —
-        // must not enter the destination's desired set.
+        // must not enter the destination's desired set. A managed name whose
+        // on-disk tip no longer matches the recorded OID is dropped the same
+        // way (heddle#1414): do not copy/push Git's fork under that name.
         let managed_record = read_projection_managed_refs(self.heddle_repo.heddle_dir())?;
         let served_frontier = collect_managed_ref_updates(&projection_repo, &managed_record)?;
         copy_reachable_objects(
@@ -2721,14 +2723,18 @@ pub fn materialize_projection_managed_refs(
 }
 
 /// The mirror refs heddle MANAGES, as [`RefUpdate`]s — [`collect_ref_updates`]
-/// filtered to the names in the managed-refs `record`, PLUS every `refs/notes/*`
-/// ref (heddle's metadata namespace, always heddle-managed and content-rebuilt
-/// rather than target-claimed through the reconcile). The export/push frontier
-/// MUST source from this rather than the raw [`collect_ref_updates`] so a foreign
-/// branch/tag heddle never wrote — even one pointing at a heddle-minted commit —
-/// never enters the served frontier nor the destination's desired set (heddle#316).
-/// Fetch/import paths keep using [`collect_ref_updates`] because they must see
-/// every ref; only the export/push frontier is managed-filtered.
+/// filtered to names in the managed-refs `record` whose on-disk tip still equals
+/// the recorded OID, PLUS every `refs/notes/*` ref (heddle's metadata namespace,
+/// always heddle-managed and content-rebuilt rather than target-claimed through
+/// the reconcile). The export/push frontier MUST source from this rather than
+/// the raw [`collect_ref_updates`] so a foreign branch/tag heddle never wrote —
+/// even one pointing at a heddle-minted commit — never enters the served
+/// frontier nor the destination's desired set (heddle#316). Name membership
+/// alone is not enough: a Git-side writer can advance a managed ref, and
+/// serving that on-disk tip would publish the fork. A recorded name whose
+/// on-disk target no longer matches is dropped until reconcile succeeds
+/// (heddle#1414). Fetch/import paths keep using [`collect_ref_updates`] because
+/// they must see every ref; only the export/push frontier is managed-filtered.
 pub fn collect_managed_ref_updates(
     repo: &SleyRepository,
     record: &HashMap<String, ObjectId>,
@@ -2737,7 +2743,7 @@ pub fn collect_managed_ref_updates(
         .into_iter()
         .filter(|update| {
             matches!(update.namespace, RefNamespace::Note)
-                || record.contains_key(&full_ref_name(update))
+                || record.get(&full_ref_name(update)) == Some(&update.target)
         })
         .collect())
 }

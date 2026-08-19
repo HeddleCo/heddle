@@ -929,6 +929,10 @@ fn export_scoped(
                 }
             }
             ReconcileOp::Diverged => {
+                // Preserve the Git-side tip and keep the last heddle-owned OID
+                // in the record so a later reset can still ForceRewind. Do not
+                // claim the foreign tip: `collect_managed_ref_updates` drops a
+                // name whose on-disk target no longer matches (heddle#1414).
                 stats.failed_refs.push((
                     branch_ref.clone(),
                     FailedRefExportReason::ModifiedConcurrentlyInGit {
@@ -1048,7 +1052,8 @@ fn export_scoped(
     }
 
     // Persist the updated ownership record so the next reconcile — and the push
-    // frontier (`collect_managed_ref_updates`) — read heddle's managed set by name.
+    // frontier (`collect_managed_ref_updates`) — read heddle's managed set by
+    // name and recorded tip. A diverged on-disk tip is not a managed update.
     write_projection_managed_refs(bridge.heddle_repo.heddle_dir(), &managed_record)?;
 
     for update in collect_ref_updates(&repo)?
