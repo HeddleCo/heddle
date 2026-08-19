@@ -13,7 +13,6 @@ use heddle_core::{
     ThreadRefreshOptions, ThreadRefreshPlan, format_refresh_conflict_markers,
     plan_cleanup_thread_drop, plan_thread_drop, plan_thread_promote, plan_thread_refresh,
     promote_confirm_in_place_removal, should_materialize_refresh_conflict_markers,
-    status::next_action::canonical_git_repair_ref_preview_command,
 };
 use objects::{
     fs_ops::remove_path_recursively,
@@ -991,18 +990,15 @@ pub(crate) fn thread_not_found_advice(thread_id: &str, action: &str) -> Recovery
 }
 
 fn imported_git_ref_not_managed_thread_advice(thread_id: &str) -> RecoveryAdvice {
-    let reconcile_preview = canonical_git_repair_ref_preview_command(None, thread_id);
     RecoveryAdvice::safety_refusal(
         "imported_git_ref_not_managed_thread",
         format!("'{thread_id}' is an imported Git ref, not a managed Heddle thread"),
-        format!(
-            "Preview Git/Heddle reconciliation with `{reconcile_preview}`. Use managed threads for `ready` and `land`."
-        ),
+        "Inspect managed threads with `heddle thread list`, then `ready`/`land` a managed thread.",
         format!("thread ref '{thread_id}' exists, but no managed thread metadata exists for it"),
         "ready/land require managed thread metadata and explicit integration authority; treating an imported Git ref as landable would be ambiguous",
-        "thread refs, Git refs, checkout files, and thread metadata were left unchanged",
-        reconcile_preview.clone(),
-        vec![reconcile_preview, "heddle thread list".to_string()],
+        "thread refs, checkout files, and thread metadata were left unchanged",
+        "heddle thread list",
+        vec!["heddle thread list".to_string()],
     )
 }
 
@@ -2279,6 +2275,22 @@ mod cleanup_tests {
         assert_eq!(
             resolved, state.state_id,
             "fallback must resolve thread-record short current_state values"
+        );
+    }
+
+    #[test]
+    fn unmanaged_thread_advice_stays_on_native_verbs() {
+        let advice = imported_git_ref_not_managed_thread_advice("main");
+        assert_eq!(advice.kind, "imported_git_ref_not_managed_thread");
+        assert_eq!(advice.primary_command, "heddle thread list");
+        assert!(
+            !advice.primary_command.contains("repair git")
+                && !advice.hint.contains("repair git")
+                && advice
+                    .recovery_commands
+                    .iter()
+                    .all(|command| !command.contains("repair git")),
+            "unmanaged-thread recovery must stay on native verbs: {advice:?}"
         );
     }
 }

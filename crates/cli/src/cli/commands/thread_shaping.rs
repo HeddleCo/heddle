@@ -580,23 +580,17 @@ fn map_thread_shaping_error(err: ThreadShapingError) -> anyhow::Error {
             ))
         }
         ThreadShapingError::ImportedGitRefNotManaged { thread_id } => {
-            let reconcile_preview =
-                heddle_core::status::next_action::canonical_git_repair_ref_preview_command(
-                    None, &thread_id,
-                );
             anyhow!(RecoveryAdvice::safety_refusal(
                 "imported_git_ref_not_managed_thread",
                 format!("'{thread_id}' is an imported Git ref, not a managed Heddle thread"),
-                format!(
-                    "Preview Git/Heddle reconciliation with `{reconcile_preview}`. Use managed threads for `ready` and `land`."
-                ),
+                "Inspect managed threads with `heddle thread list`, then `ready`/`land` a managed thread.",
                 format!(
                     "thread ref '{thread_id}' exists, but no managed thread metadata exists for it"
                 ),
                 "ready/land require managed thread metadata and explicit integration authority; treating an imported Git ref as landable would be ambiguous",
-                "thread refs, Git refs, checkout files, and thread metadata were left unchanged",
-                reconcile_preview.clone(),
-                vec![reconcile_preview, "heddle thread list".to_string()],
+                "thread refs, checkout files, and thread metadata were left unchanged",
+                "heddle thread list",
+                vec!["heddle thread list".to_string()],
             ))
         }
     }
@@ -824,6 +818,20 @@ mod tests {
             advice.primary_hint().contains("heddle thread show"),
             "hint should name the inspection command: {}",
             advice.primary_hint()
+        );
+
+        let unmanaged = map_thread_shaping_error(ThreadShapingError::ImportedGitRefNotManaged {
+            thread_id: "main".to_string(),
+        });
+        let advice = unmanaged
+            .downcast_ref::<RecoveryAdvice>()
+            .expect("mapped error should carry RecoveryAdvice");
+        assert_eq!(advice.kind, "imported_git_ref_not_managed_thread");
+        assert_eq!(advice.primary_command, "heddle thread list");
+        assert!(
+            !advice.primary_command.contains("repair git")
+                && !advice.primary_hint().contains("repair git"),
+            "unmanaged-thread recovery must stay on native verbs: {advice}"
         );
     }
 }
