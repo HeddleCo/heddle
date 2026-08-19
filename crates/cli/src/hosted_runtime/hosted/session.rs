@@ -94,6 +94,11 @@ impl HostedSession {
         })
     }
 
+    #[cfg(test)]
+    pub(super) fn client_config(&self) -> &ClientConfig {
+        &self.config
+    }
+
     pub fn with_allow_insecure(mut self, allow: bool) -> Self {
         if allow {
             self.config.allow_insecure = true;

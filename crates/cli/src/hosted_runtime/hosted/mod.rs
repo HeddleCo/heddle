@@ -24,6 +24,8 @@ mod provider_pull;
 mod provider_transport;
 mod resolver;
 mod session;
+#[cfg(test)]
+mod session_tests;
 mod state_review;
 mod sync;
 #[cfg(test)]
