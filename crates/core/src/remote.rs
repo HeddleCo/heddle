@@ -2212,14 +2212,19 @@ pub fn looks_like_git_remote_url(value: &str) -> bool {
 /// they published Heddle descriptor trust.
 pub fn looks_like_git_forge_remote(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
-    if lower.ends_with(".git")
-        || lower.starts_with("ssh://")
+    if lower.starts_with("file://") {
+        return false;
+    }
+    if looks_like_known_git_host(value) {
+        return true;
+    }
+    if lower.starts_with("ssh://")
         || lower.starts_with("git://")
         || (value.contains('@') && value.contains(':') && !lower.starts_with("heddle://"))
     {
         return true;
     }
-    looks_like_known_git_host(value)
+    lower.ends_with(".git") && (lower.starts_with("http://") || lower.starts_with("https://"))
 }
 
 /// Whether the authority of `value` is a well-known Git hosting hostname.
@@ -3866,6 +3871,8 @@ mod tests {
             "https://gitlab.com/org/repo.git"
         ));
         assert!(looks_like_git_forge_remote("https://example.com/r.git"));
+        assert!(!looks_like_git_forge_remote("/tmp/remote.git"));
+        assert!(!looks_like_git_forge_remote("file:///tmp/remote.git"));
         assert!(!looks_like_git_forge_remote(
             "https://api.heddle.sh/luke/tiny-notes"
         ));
