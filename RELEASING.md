@@ -34,7 +34,12 @@ release-plz → push-to-main flow documented in
 
 3. The `Release binaries` workflow (`.github/workflows/release.yml`)
    triggers on the stable-semver tag push. Before building anything it
-   runs a `validate-tag` gate that:
+   calls `validate-tag`, a reusable workflow pinned to a full commit SHA
+   on default-branch `main` (heddle#1415). A tag push evaluates the
+   *caller* from the tagged commit; GitHub fetches the gate from the
+   pin, so a tagged tree cannot rewrite the check that authenticates the
+   tag. Relative `./` and `$/` refs follow the caller commit and are
+   forbidden. The gate:
 
    - resolves the requested tag from the trigger (push or dispatch)
    - rejects refs that aren't real tags (catches `main`, typos, deleted
@@ -420,20 +425,26 @@ asserter on every PR and push to `main`. It checks
 `.github/workflows/release.yml` and `RELEASING.md` in two passes:
 
 - **Smoke (grep).** Cheap content checks: the five target triples, the
-  strict-semver push trigger, presence of the `validate-tag` trust gate
-  with its ancestry check, packaging/checksum/signing/upload steps, the
-  macOS cask DMG job, the macOS archive ownership by that cask job, the
-  Homebrew cask PR wiring, the draft+prerelease keying off
+  strict-semver push trigger, presence of the SHA-pinned `validate-tag`
+  reusable workflow with its ancestry check read from the pin (not the
+  working tree), packaging/checksum/signing/upload steps, the macOS cask
+  DMG job, the macOS archive ownership by that cask job, the Homebrew
+  cask PR wiring, the draft+prerelease keying off
   `validate-tag.outputs.kind`, and the stable-tag-refusal on the dispatch
   path.
-- **Strict (parsed YAML).** Per-job structural checks: `validate-tag`
-  exports `tag_sha`, and every downstream job (`build`,
-  `build-macos-cask`, `release`, `publish-manifests`) both declares
-  `needs: validate-tag` and pins its `actions/checkout` `ref`
-  to `${{ needs.validate-tag.outputs.tag_sha }}` rather than the
-  mutable `refs/tags/<tag>`. Grep alone would pass if *any* job kept
-  the `needs:` line; the parser confirms each downstream job
-  individually.
+- **Strict (parsed YAML).** Per-job structural checks: `validate-tag` is
+  `uses: HeddleCo/heddle/.github/workflows/validate-release-tag.yml@<sha>`
+  (not `./` or `$/`), the pinned workflow exports `tag_sha`, and every
+  downstream job (`build`, `build-macos-cask`, `release`,
+  `publish-manifests`) both declares `needs: validate-tag` and pins its
+  `actions/checkout` `ref` to `${{ needs.validate-tag.outputs.tag_sha }}`
+  rather than the mutable `refs/tags/<tag>`. Grep alone would pass if
+  *any* job kept the `needs:` line; the parser confirms each downstream
+  job individually.
+
+To change the gate, land the reusable-workflow edit on `main`, then bump
+the `uses:` SHA in `release.yml` to that new main commit in the same PR
+so the pin and the working tree stay identical.
 
 Every binary-signing or publishing job declares the `release` GitHub
 environment. Repository settings must keep that environment

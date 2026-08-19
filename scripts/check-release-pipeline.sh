@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Asserter for the binary-release pipeline contract (heddle#56).
+# Asserter for the binary-release pipeline contract (heddle#56, heddle#1415).
 #
 # The release pipeline is invoked only on `v*` tag pushes, so we can't
 # observe its artifacts in normal CI. Instead we statically verify that
@@ -27,6 +27,8 @@
 set -euo pipefail
 
 WF=".github/workflows/release.yml"
+GATE_WF=".github/workflows/validate-release-tag.yml"
+GATE_USES_PREFIX="HeddleCo/heddle/.github/workflows/validate-release-tag.yml@"
 fail=0
 
 err() { echo "::error::$*" >&2; fail=1; }
@@ -36,6 +38,61 @@ if [[ ! -f "$WF" ]]; then
   err "$WF does not exist"
   echo "::error::Release pipeline not implemented. See heddle#56."
   exit 1
+fi
+
+# heddle#1415: the authenticity gate must not be the tagged tree's copy of
+# this file. GitHub evaluates release.yml from the tag; it fetches a
+# `{owner}/{repo}/...@<sha>` reusable workflow from that SHA. `./` and `$/`
+# follow the caller commit and would let a tagged rewrite drop the gate.
+GATE_PIN=""
+if GATE_USES=$(sed -nE 's/^[[:space:]]*uses:[[:space:]]*(HeddleCo\/heddle\/\.github\/workflows\/validate-release-tag\.yml@[0-9a-f]{40}).*/\1/p' "$WF" | head -n1) \
+   && [[ -n "$GATE_USES" ]]; then
+  GATE_PIN="${GATE_USES##*@}"
+  ok "validate-tag calls $GATE_USES"
+else
+  err "validate-tag must call ${GATE_USES_PREFIX}<40-char-sha> (not ./, $/, @main, or an inline job)"
+fi
+
+if grep -E '^    uses:[[:space:]]*(\./|\$/)' "$WF" >/dev/null; then
+  err "release.yml must not call a reusable workflow via ./ or \$/ — those follow the tagged caller commit"
+else
+  ok "release.yml does not use ./ or \$/ reusable-workflow refs"
+fi
+
+if [[ -n "$GATE_PIN" ]]; then
+  if ! git cat-file -e "${GATE_PIN}:${GATE_WF}" 2>/dev/null; then
+    err "gate pin ${GATE_PIN} does not contain ${GATE_WF}"
+  else
+    ok "pinned SHA ${GATE_PIN} contains ${GATE_WF}"
+    if ! git show "${GATE_PIN}:${GATE_WF}" | cmp -s - "$GATE_WF"; then
+      err "working tree ${GATE_WF} differs from pin ${GATE_PIN}; bump the uses SHA in ${WF}"
+    else
+      ok "working tree ${GATE_WF} matches pinned SHA ${GATE_PIN}"
+    fi
+  fi
+  if git rev-parse --verify --quiet origin/main >/dev/null \
+     && git merge-base --is-ancestor HEAD origin/main 2>/dev/null \
+     && git merge-base --is-ancestor origin/main HEAD 2>/dev/null; then
+    if git merge-base --is-ancestor "$GATE_PIN" origin/main; then
+      ok "gate pin ${GATE_PIN} is on origin/main"
+    else
+      err "gate pin ${GATE_PIN} is not an ancestor of origin/main"
+    fi
+  elif git merge-base --is-ancestor "$GATE_PIN" HEAD 2>/dev/null; then
+    ok "gate pin ${GATE_PIN} is in this history (landing; not yet required to be on origin/main)"
+  else
+    err "gate pin ${GATE_PIN} is not reachable from HEAD"
+  fi
+fi
+
+# Gate semantics are read from the pinned object, not the working tree.
+# A tagged rewrite of the working copy therefore cannot satisfy these
+# checks unless the caller also retargets the pin — and a new pin is a
+# reviewable SHA on main, not an unreviewed tag tree.
+GATE_SRC="$GATE_WF"
+if [[ -n "$GATE_PIN" ]] && git cat-file -e "${GATE_PIN}:${GATE_WF}" 2>/dev/null; then
+  GATE_SRC="$(mktemp)"
+  git show "${GATE_PIN}:${GATE_WF}" > "$GATE_SRC"
 fi
 
 # Tag-push trigger. The contract is strict semver only (vX.Y.Z); RC
@@ -50,17 +107,23 @@ fi
 
 # Verification gate: a validate-tag job must run before build/release and
 # enforce (a) tag existence, (b) ancestry on origin/main, (c) pattern
-# classification. We assert the structural pieces here; the rule
-# content lives in the workflow itself.
+# classification. Rule content lives in the pinned reusable workflow.
 if grep -E "^\s*validate-tag:" "$WF" >/dev/null; then
   ok "validate-tag job present"
 else
   err "missing validate-tag job in $WF"
 fi
-if grep -E "git merge-base --is-ancestor" "$WF" >/dev/null; then
-  ok "validate-tag enforces ancestry on origin/main"
+if grep -E "git merge-base --is-ancestor" "$GATE_SRC" >/dev/null; then
+  ok "pinned gate enforces ancestry on origin/main"
 else
-  err "validate-tag must reject tags not reachable from origin/main"
+  err "pinned gate must reject tags not reachable from origin/main"
+fi
+if grep -E '^on:' "$GATE_SRC" >/dev/null \
+   && grep -E 'workflow_call:' "$GATE_SRC" >/dev/null \
+   && ! grep -E '^[[:space:]]+(push|workflow_dispatch):' "$GATE_SRC" >/dev/null; then
+  ok "pinned gate is workflow_call only (no second release path)"
+else
+  err "pinned gate must be workflow_call only; do not add push or workflow_dispatch"
 fi
 if grep -E "needs:\s*validate-tag|needs:\s*\[validate-tag" "$WF" >/dev/null; then
   ok "build/release jobs depend on validate-tag"
@@ -87,15 +150,16 @@ fi
 # appears near workflow_dispatch") so the assertion is robust to
 # variable renames but still flags a block deletion: removing the guard
 # also removes its error message.
-if grep -F 'workflow_dispatch refuses stable tag' "$WF" >/dev/null; then
-  ok "validate-tag refuses stable tags from workflow_dispatch (downgrade-attack guard)"
+if grep -F 'workflow_dispatch refuses stable tag' "$GATE_SRC" >/dev/null; then
+  ok "pinned gate refuses stable tags from workflow_dispatch (downgrade-attack guard)"
 else
-  err "validate-tag must refuse stable tags (vX.Y.Z) from workflow_dispatch; see RELEASING.md and release.yml comment on softprops update-if-exists"
+  err "pinned gate must refuse stable tags (vX.Y.Z) from workflow_dispatch; see RELEASING.md and release.yml comment on softprops update-if-exists"
 fi
 
 if grep -F 'branch_dry_run:' "$WF" >/dev/null \
-   && grep -F 'branch_dry_run is disabled:' "$WF" >/dev/null \
-   && ! grep -F 'tag_sha="$(git rev-parse HEAD)"' "$WF" >/dev/null; then
+   && grep -F 'branch_dry_run is disabled:' "$GATE_SRC" >/dev/null \
+   && ! grep -F 'tag_sha="$(git rev-parse HEAD)"' "$WF" >/dev/null \
+   && ! grep -F 'tag_sha="$(git rev-parse HEAD)"' "$GATE_SRC" >/dev/null; then
   ok "branch-selected release dry-runs fail explicitly before credentialed jobs"
 else
   err "branch_dry_run must fail explicitly; branch-selected workflow code cannot receive release credentials"
@@ -129,7 +193,7 @@ while IFS= read -r action; do
   else
     err "external action must use an exact 40-character commit SHA: $action"
   fi
-done < <(sed -nE 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*([^[:space:]#]+).*/\2/p' "$WF")
+done < <(sed -nE 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*([^[:space:]#]+).*/\2/p' "$WF" "$GATE_SRC")
 
 # Least privilege: OIDC is available only to the two artifact-signing jobs,
 # and repository write permission only to the GitHub Release publisher.
@@ -421,7 +485,7 @@ fi
 #     redirect build/release to a different commit than the one that
 #     passed the ancestry check)
 #
-# We also confirm validate-tag exports `tag_sha` as a documented output.
+# We also confirm the pinned reusable workflow exports `tag_sha`.
 # Without that output the pinning above can't reference anything.
 #
 # These are additive: the legacy "any needs: validate-tag" grep still
@@ -450,11 +514,13 @@ ensure_pyyaml() {
 }
 
 if command -v ruby >/dev/null 2>&1 && ruby --disable-gems -e 'require "yaml"' >/dev/null 2>&1; then
-  strict_report=$(ruby --disable-gems - "$WF" <<'RB'
+  strict_report=$(ruby --disable-gems - "$WF" "$GATE_SRC" <<'RB'
 require "yaml"
 
 wf_path = ARGV.fetch(0)
+gate_path = ARGV.fetch(1)
 wf = YAML.load_file(wf_path)
+gate = YAML.load_file(gate_path)
 
 jobs = wf.fetch("jobs", {}) || {}
 errors = []
@@ -464,7 +530,22 @@ vt = jobs["validate-tag"]
 if !vt.is_a?(Hash)
   errors << "validate-tag job missing or malformed"
 else
-  outs = vt.fetch("outputs", {}) || {}
+  uses = vt["uses"].to_s
+  if uses.match?(/\AHEddleCo\/heddle\/\.github\/workflows\/validate-release-tag\.yml@[0-9a-f]{40}\z/)
+    oks << "validate-tag is a SHA-pinned reusable workflow"
+  else
+    errors << "validate-tag must use HeddleCo/heddle/.github/workflows/validate-release-tag.yml@<40-char-sha>, got '#{uses}'"
+  end
+  if vt.key?("steps") || vt.key?("runs-on") || vt.key?("environment")
+    errors << "validate-tag caller must not inline steps/runs-on/environment; the pinned reusable workflow is the gate"
+  else
+    oks << "validate-tag caller has no inline steps"
+  end
+  # YAML 1.1 treats the key `on` as boolean true.
+  on_block = gate["on"]
+  on_block = gate[true] unless on_block.is_a?(Hash)
+  wc = (on_block.is_a?(Hash) ? on_block["workflow_call"] : nil) || {}
+  outs = wc.fetch("outputs", {}) || {}
   if !outs.key?("tag_sha")
     errors << "validate-tag must declare a 'tag_sha' output (used by downstream jobs to pin checkout to the validated commit)"
   else
@@ -603,23 +684,49 @@ elif ! command -v python3 >/dev/null 2>&1; then
 elif ! PY=$(ensure_pyyaml); then
   err "PyYAML not available and venv fallback failed; strict structural checks skipped"
 else
-  strict_report=$("$PY" - "$WF" <<'PY'
+  strict_report=$("$PY" - "$WF" "$GATE_SRC" <<'PY'
 import sys
 import yaml
+import re
 
 wf_path = sys.argv[1]
+gate_path = sys.argv[2]
 with open(wf_path) as f:
     wf = yaml.safe_load(f)
+with open(gate_path) as f:
+    gate = yaml.safe_load(f)
 
 jobs = wf.get("jobs", {}) or {}
 errors = []
 oks = []
 
+PINNED_USES = re.compile(
+    r"^HeddleCo/heddle/\.github/workflows/validate-release-tag\.yml@[0-9a-f]{40}$"
+)
+
 vt = jobs.get("validate-tag")
 if not isinstance(vt, dict):
     errors.append("validate-tag job missing or malformed")
 else:
-    outs = vt.get("outputs", {}) or {}
+    uses = str(vt.get("uses") or "")
+    if PINNED_USES.match(uses):
+        oks.append("validate-tag is a SHA-pinned reusable workflow")
+    else:
+        errors.append(
+            "validate-tag must use HeddleCo/heddle/.github/workflows/validate-release-tag.yml@<40-char-sha>, "
+            f"got '{uses}'"
+        )
+    if any(key in vt for key in ("steps", "runs-on", "environment")):
+        errors.append(
+            "validate-tag caller must not inline steps/runs-on/environment; the pinned reusable workflow is the gate"
+        )
+    else:
+        oks.append("validate-tag caller has no inline steps")
+    on = gate.get("on") if isinstance(gate, dict) else None
+    if not isinstance(on, dict) and isinstance(gate, dict):
+        on = gate.get(True)
+    wc = on.get("workflow_call") if isinstance(on, dict) else None
+    outs = (wc or {}).get("outputs", {}) or {}
     if "tag_sha" not in outs:
         errors.append("validate-tag must declare a 'tag_sha' output (used by downstream jobs to pin checkout to the validated commit)")
     else:
@@ -768,6 +875,27 @@ PY
       err "$line"
     fi
   done <<< "$strict_report"
+fi
+
+# Proof for heddle#1415: a tagged tree can rewrite the working copy of
+# the gate file. GitHub still fetches the object at GATE_PIN. The caller
+# pin is a literal SHA, so emptying a sibling copy cannot drop the check.
+if [[ -n "$GATE_PIN" ]] && git cat-file -e "${GATE_PIN}:${GATE_WF}" 2>/dev/null; then
+  proof_dir="$(mktemp -d)"
+  git show "${GATE_PIN}:${GATE_WF}" > "${proof_dir}/pinned.yml"
+  printf '%s\n' 'on:' '  workflow_call: {}' 'jobs: {}' > "${proof_dir}/rewritten.yml"
+  if grep -F 'git merge-base --is-ancestor' "${proof_dir}/pinned.yml" >/dev/null \
+     && ! grep -F 'git merge-base --is-ancestor' "${proof_dir}/rewritten.yml" >/dev/null \
+     && grep -F "${GATE_USES_PREFIX}${GATE_PIN}" "$WF" >/dev/null; then
+    ok "tagged-tree rewrite of ${GATE_WF} cannot drop the pin at ${GATE_PIN}"
+  else
+    err "could not prove the tagged-tree rewrite cannot drop the pinned gate"
+  fi
+  rm -rf "$proof_dir"
+fi
+
+if [[ "$GATE_SRC" != "$GATE_WF" ]]; then
+  rm -f "$GATE_SRC"
 fi
 
 if (( fail )); then
