@@ -15,10 +15,11 @@ pub struct ClassifiedDiffRefs {
 
 /// Split `from`/`to` into states and path filters.
 ///
-/// A spec that resolves as a state stays a state. Otherwise a path-shaped
-/// value (separator, extension, or a path that exists under `root`) becomes
-/// a worktree filter instead of a missing state. Arguments collected after
-/// `--` and `--path` are always filters.
+/// A spec that resolves as a state stays a state. An unresolved version-like
+/// tag (`v1.2.0`) stays a state so later resolution fails closed instead of
+/// becoming a silent empty filter. Otherwise a path-shaped value (separator
+/// or a path that exists under `root`) becomes a worktree filter. Arguments
+/// collected after `--` and `--path` are always filters.
 pub fn classify_diff_refs(
     root: &Path,
     repo: Option<&Repository>,
@@ -63,11 +64,38 @@ fn is_head_spec(spec: &str) -> bool {
 }
 
 fn spec_is_path_filter(root: &Path, spec: &str) -> bool {
+    if looks_like_version_tag(spec) {
+        return false;
+    }
     looks_path_shaped(spec) || root.join(spec).exists()
 }
 
 fn looks_path_shaped(spec: &str) -> bool {
-    spec.contains('/') || spec.contains('\\') || Path::new(spec).extension().is_some()
+    spec.contains('/') || spec.contains('\\')
+}
+
+/// Dotted numeric tags such as `v1.2.0` / `1.2.0`. These must not become
+/// path filters via a file-extension heuristic when they do not resolve.
+fn looks_like_version_tag(spec: &str) -> bool {
+    if spec.contains('/') || spec.contains('\\') {
+        return false;
+    }
+    let rest = spec.strip_prefix('v').unwrap_or(spec);
+    let mut parts = rest.split('.');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    if first.is_empty() || !first.chars().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    let mut rest_count = 0usize;
+    for part in parts {
+        if part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit()) {
+            return false;
+        }
+        rest_count += 1;
+    }
+    rest_count >= 1
 }
 
 #[cfg(test)]
@@ -124,5 +152,33 @@ mod tests {
             classify_diff_refs(root.path(), None, Some("src".to_string()), None, Vec::new());
         assert_eq!(classified.from, None);
         assert_eq!(classified.paths, ["src"]);
+    }
+
+    #[test]
+    fn unresolved_version_tag_stays_state_spec() {
+        let root = TempDir::new().unwrap();
+        let classified = classify_diff_refs(
+            root.path(),
+            None,
+            Some("v1.2.0".to_string()),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(classified.from.as_deref(), Some("v1.2.0"));
+        assert!(classified.paths.is_empty());
+    }
+
+    #[test]
+    fn missing_file_with_extension_is_not_a_silent_filter() {
+        let root = TempDir::new().unwrap();
+        let classified = classify_diff_refs(
+            root.path(),
+            None,
+            Some("NOTES.md".to_string()),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(classified.from.as_deref(), Some("NOTES.md"));
+        assert!(classified.paths.is_empty());
     }
 }

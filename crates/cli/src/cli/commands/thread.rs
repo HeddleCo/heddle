@@ -182,7 +182,7 @@ pub fn cmd_start(cli: &Cli, args: ThreadStartArgs) -> Result<()> {
     // Pure option preflight (name + path isolation flags) before materialization.
     let start_plan = plan_thread_start(&thread_start_options_from_args(&args))
         .map_err(|ThreadPlanError::InvalidName(err)| anyhow!(thread_name_invalid_advice(&err)))?;
-    if args.path.is_none() && args.workspace.is_none() {
+    if start_would_hide_checkout(&args) {
         return Err(anyhow!(start_requires_explicit_path_advice(&args.name)));
     }
     if start_plan.requires_clean_worktree {
@@ -1599,6 +1599,12 @@ fn resolve_auto_workspace_default(
 
 fn requested_workspace(args: &ThreadStartArgs) -> WorkspaceModeArg {
     args.workspace.unwrap_or(WorkspaceModeArg::Auto)
+}
+
+/// Omitted workspace and `--workspace auto` are the same default: without
+/// `--path` they hide the checkout under `.heddle/threads/`.
+fn start_would_hide_checkout(args: &ThreadStartArgs) -> bool {
+    args.path.is_none() && matches!(requested_workspace(args), WorkspaceModeArg::Auto)
 }
 
 fn workspace_mode_request_from_arg(arg: WorkspaceModeArg) -> WorkspaceModeRequest {

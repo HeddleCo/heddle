@@ -767,7 +767,7 @@ identically. The mode only controls bytes-on-disk semantics.\n\
 \n\
 - Use `heddle start <name> --path <dir>` when you want an isolated\n\
   checkout. It creates the thread ref and materializes the checkout in\n\
-  one step. `--path` is required for the default workspace; without it\n\
+  one step. `--path` is required when workspace is omitted or `auto`; without it\n\
   start refuses instead of hiding a checkout under `.heddle/threads/<name>/`.\n\
 - To stay on this checkout, use `heddle thread create <name>` then\n\
   `heddle thread switch <name>`.\n\

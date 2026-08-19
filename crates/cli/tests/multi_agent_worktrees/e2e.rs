@@ -424,7 +424,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
             "start",
             "feature/native-cli",
             "--workspace",
-            "auto",
+            "solid",
             "--agent-provider",
             "anthropic",
             "--agent-model",
@@ -436,17 +436,10 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     let started: Value = serde_json::from_str(&start_json).unwrap();
     let thread_path = started["execution_path"].as_str().unwrap();
     let thread = std::path::PathBuf::from(thread_path);
-    // Auto-mode resolves to materialized on reflink-capable filesystems
-    // (APFS, btrfs, xfs+reflink) and downgrades to solid on ext4 / HFS+ /
-    // NTFS so the mode label reflects on-disk truth.
-    let expected_mode = if objects::fs_clone::filesystem_supports_reflink(main.path()) {
-        "materialized"
-    } else {
-        "solid"
-    };
+    // Explicit `--workspace solid` uses the managed layout without hiding
+    // behind the Auto default that now requires `--path`.
+    let expected_mode = "solid";
     assert_eq!(started["thread"]["thread_mode"], expected_mode);
-    // Auto-mode threads materialize at a Heddle-managed path, surfaced
-    // both as the user-visible `path` and the work-site `execution_path`.
     assert_eq!(started["path"], started["execution_path"]);
 
     assert!(
@@ -594,7 +587,7 @@ fn ready_blocks_stale_or_heavy_impact_threads_and_status_reports_next_step() {
             "start",
             "feature/dep",
             "--workspace",
-            "auto",
+            "solid",
             "--task",
             "update dependencies",
         ],
@@ -690,7 +683,7 @@ fn genuine_blocked_thread_surfaces_coordination_axis_in_long_status() {
                 "start",
                 "feature/dep",
                 "--workspace",
-                "auto",
+                "solid",
                 "--task",
                 "update dependencies",
             ],
@@ -759,7 +752,7 @@ fn sync_refreshes_stale_thread_when_replay_is_clean() {
                 "start",
                 "feature/sync-me",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(main.path()),
         )
@@ -809,7 +802,7 @@ fn land_auto_captures_and_merges_clean_thread() {
                 "start",
                 "feature/land-it",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(main.path()),
         )
@@ -875,7 +868,7 @@ fn land_from_isolated_checkout_integrates_ready_fast_forward() {
                 "start",
                 "feature/land-from-thread",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(main.path()),
         )
@@ -938,7 +931,7 @@ fn ready_and_land_name_low_confidence_without_sync_loop() {
                 "start",
                 "feature/low-confidence",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(main.path()),
         )
@@ -1049,7 +1042,7 @@ fn delegate_assigns_per_task_agents_when_spec_includes_them() {
                 "start",
                 "feature/race",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(main.path()),
         )
@@ -1160,7 +1153,7 @@ fn delegate_creates_child_threads_with_parent_relationship() {
                 "start",
                 "feature/orchestrator",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(main.path()),
         )
@@ -1236,7 +1229,7 @@ fn undo_is_scoped_to_the_current_thread() {
                 "start",
                 "feature/auth",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(main.path()),
         )
@@ -1251,7 +1244,7 @@ fn undo_is_scoped_to_the_current_thread() {
                 "start",
                 "feature/search",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(main.path()),
         )
@@ -1346,7 +1339,7 @@ fn thread_and_workspace_json_match_dirty_current_checkout() {
             "start",
             "feature/dirty-json",
             "--workspace",
-            "auto",
+            "solid",
         ],
         Some(main.path()),
     )
@@ -1387,7 +1380,7 @@ fn lightweight_thread_capture_marks_heavy_impact_and_ready_blocks_it() {
             "start",
             "feature/deps",
             "--workspace",
-            "auto",
+            "solid",
             "--task",
             "update dependencies",
         ],
@@ -1457,7 +1450,7 @@ fn thread_promote_materializes_visible_checkout_without_changing_thread_identity
             "start",
             "feature/promote",
             "--workspace",
-            "auto",
+            "solid",
             "--task",
             "prepare visible thread",
         ],
@@ -1549,7 +1542,7 @@ fn status_watch_bounded_runs_are_transcript_friendly() {
 fn thread_show_watch_emits_initial_snapshot_for_local_repos() {
     let main = setup_repo("base.txt", "base");
     heddle(
-        &["start", "feature/watch-thread", "--workspace", "auto"],
+        &["start", "feature/watch-thread", "--workspace", "solid"],
         Some(main.path()),
     )
     .unwrap();
@@ -1585,7 +1578,7 @@ fn thread_list_shows_current_stacked_and_parallel_threads() {
                 "start",
                 "feature/orchestrator",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(main.path()),
         )
@@ -1599,6 +1592,8 @@ fn thread_list_shows_current_stacked_and_parallel_threads() {
             "json",
             "start",
             "feature/orchestrator/parser",
+            "--workspace",
+            "solid",
             "--parent-thread",
             "feature/orchestrator",
             "--task",
@@ -1608,7 +1603,7 @@ fn thread_list_shows_current_stacked_and_parallel_threads() {
     )
     .unwrap();
     heddle(
-        &["start", "feature/search", "--workspace", "auto"],
+        &["start", "feature/search", "--workspace", "solid"],
         Some(main.path()),
     )
     .unwrap();
@@ -1637,7 +1632,7 @@ fn capture_split_moves_selected_dirty_paths_into_target_thread() {
                 "start",
                 "feature/source",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(main.path()),
         )
@@ -1652,7 +1647,7 @@ fn capture_split_moves_selected_dirty_paths_into_target_thread() {
                 "start",
                 "feature/target",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(main.path()),
         )
@@ -1701,7 +1696,7 @@ fn thread_move_reassigns_selected_captured_paths_between_threads() {
                 "start",
                 "feature/source",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(main.path()),
         )
@@ -1716,7 +1711,7 @@ fn thread_move_reassigns_selected_captured_paths_between_threads() {
                 "start",
                 "feature/target",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(main.path()),
         )
@@ -1763,7 +1758,7 @@ fn thread_absorb_merges_child_thread_into_parent_workspace() {
                 "start",
                 "feature/orchestrator",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(main.path()),
         )
@@ -1822,7 +1817,7 @@ fn thread_resolve_refreshes_clean_stale_threads() {
                 "start",
                 "feature/stale",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(main.path()),
         )
@@ -1898,7 +1893,7 @@ fn log_never_surfaces_unknown_principal_after_init() {
     .unwrap();
 
     heddle(
-        &["start", "feature/parent", "--workspace", "auto"],
+        &["start", "feature/parent", "--workspace", "solid"],
         Some(temp.path()),
     )
     .unwrap();

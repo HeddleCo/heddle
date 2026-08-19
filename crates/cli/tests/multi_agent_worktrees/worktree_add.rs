@@ -54,6 +54,35 @@ fn top_level_start_without_path_refuses_hidden_checkout() {
 }
 
 #[test]
+fn top_level_start_workspace_auto_without_path_refuses_hidden_checkout() {
+    let main = setup_repo("hello.txt", "world");
+
+    let err = heddle(
+        &[
+            "--output",
+            "json",
+            "start",
+            "feature/search",
+            "--workspace",
+            "auto",
+        ],
+        Some(main.path()),
+    )
+    .expect_err("start --workspace auto without --path must refuse a hidden checkout");
+    assert!(
+        err.contains("start without --path")
+            && err.contains(".heddle/threads/")
+            && err.contains("heddle start feature/search --path ../feature/search"),
+        "start --workspace auto must name the hidden checkout and the --path recovery: {err}"
+    );
+    assert!(
+        !main.path().join(".heddle/threads").join("feature").exists()
+            && !main.path().join(".heddle/threads").join("search").exists(),
+        "refusing --workspace auto must not create a hidden checkout"
+    );
+}
+
+#[test]
 fn materialized_start_honors_from_state() {
     let main = setup_repo("v.txt", "v1");
 
@@ -86,7 +115,7 @@ fn thread_promote_preserves_thread_identity() {
     let thread_dir = TempDir::new().unwrap();
 
     heddle(
-        &["start", "feature/promote-me", "--workspace", "auto"],
+        &["start", "feature/promote-me", "--workspace", "solid"],
         Some(main.path()),
     )
     .unwrap();

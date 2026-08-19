@@ -724,8 +724,9 @@ Examples:
   heddle start scratch --path ../scratch            # place the checkout explicitly
   heddle start fix-flake --path ../fix-flake --task 'fix CI flake'
 
-`--path` is required for the default `auto` workspace. Without it, start
+`--path` is required when workspace is omitted or `auto`. Without it, start
 refuses instead of hiding a checkout under `.heddle/threads/<name>/`.
+`--workspace auto` is the same default and still requires `--path`.
 Pass `--path ../<name>`, or an explicit `--workspace solid|materialized|virtualized`
 if you want the managed layout. To stay on this checkout, use
 `heddle thread create <name>` then `heddle thread switch <name>`.
@@ -750,8 +751,8 @@ pub struct ThreadStartArgs {
     #[arg(long)]
     pub path: Option<std::path::PathBuf>,
 
-    /// Workspace mode for the thread. Omitted means `auto`, and then `--path`
-    /// is required so the checkout is not hidden under `.heddle/threads/`.
+    /// Workspace mode for the thread. Omitted or `auto` requires `--path`
+    /// so the checkout is not hidden under `.heddle/threads/`.
     #[arg(long, value_enum)]
     pub workspace: Option<WorkspaceModeArg>,
 

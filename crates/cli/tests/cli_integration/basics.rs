@@ -1947,7 +1947,7 @@ fn test_cli_start_bootstraps_current_state_in_plain_git_repo() {
                 "start",
                 "feature/overlay-thread",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(temp.path()),
         )

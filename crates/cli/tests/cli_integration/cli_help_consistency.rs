@@ -272,8 +272,9 @@ fn restore_story_is_documented_and_start_requires_path() {
     assert!(
         start.contains("`--path` is required")
             && start.contains(".heddle/threads/")
+            && start.contains("`--workspace auto`")
             && start.contains("heddle thread create"),
-        "start help must say --path is required so the checkout is not hidden: {start}"
+        "start help must say --path is required for omitted and auto workspace: {start}"
     );
 
     let model = heddle_help(&["help", "model"]);

@@ -411,3 +411,50 @@ fn path_shaped_diff_filters_worktree_instead_of_missing_state() {
         "`diff --path` must filter the worktree: {flag}"
     );
 }
+
+#[test]
+fn unresolved_version_tag_is_missing_state_not_empty_filter() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("NOTES.md"), "keep\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+    std::fs::write(temp.path().join("NOTES.md"), "dirty notes\n").unwrap();
+
+    let err = heddle(&["diff", "v1.2.0"], Some(temp.path()))
+        .expect_err("unresolved version tag must fail closed");
+    assert!(
+        err.contains("State not found") && err.contains("v1.2.0"),
+        "unresolved tag must be a missing state, not an empty path filter: {err}"
+    );
+}
+
+#[test]
+fn thread_named_feature_search_wins_as_diff_state() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("file.txt"), "main\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "main"], temp.path());
+
+    let checkout = temp.path().with_extension("feature-search");
+    let checkout_arg = checkout.to_str().expect("checkout path should be utf8");
+    heddle_must_succeed(
+        &["start", "feature/search", "--path", checkout_arg],
+        temp.path(),
+    );
+    std::fs::write(checkout.join("file.txt"), "thread\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "thread"], &checkout);
+    std::fs::write(temp.path().join("NOTES.md"), "dirty notes\n").unwrap();
+
+    let out = heddle_must_succeed(
+        &["diff", "--name-only", "feature/search", "HEAD"],
+        temp.path(),
+    );
+    assert!(
+        out.contains("file.txt"),
+        "thread name must resolve as a state, not a path filter: {out}"
+    );
+    assert!(
+        !out.contains("NOTES.md"),
+        "thread name must not become a worktree path filter: {out}"
+    );
+}
