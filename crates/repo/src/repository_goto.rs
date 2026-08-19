@@ -240,6 +240,25 @@ impl Repository {
         )
     }
 
+    /// Materialize `target` without recording a `Goto`.
+    ///
+    /// Clone uses this so a fresh checkout can attach HEAD to the selected
+    /// thread afterwards. A recorded `Goto` publishes detached HEAD, and a
+    /// later open/reconcile would replay that detach after clone attached.
+    pub fn goto_from_materialized_state_without_record(
+        &self,
+        target: &StateId,
+        materialized: Option<&StateId>,
+    ) -> Result<()> {
+        self.goto_internal(
+            target,
+            false,
+            false,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Materialized(materialized.copied()),
+        )
+    }
+
     /// Fast-forward the current checkout to `target`.
     ///
     /// If HEAD was attached to a thread, advance that thread's ref so the

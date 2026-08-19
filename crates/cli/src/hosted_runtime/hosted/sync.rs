@@ -101,6 +101,7 @@ pub(crate) struct ResolvedPullBootstrapMetadata {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PullBootstrapRefs {
+    pub head_thread: Option<String>,
     pub refs: Vec<HostedRefEntry>,
 }
 
@@ -180,7 +181,7 @@ pub(crate) fn decode_pull_refs(
         })?;
     let payload = hex::decode(payload)
         .map_err(|error| ProtocolError::InvalidState(format!("decode pull refs: {error}")))?;
-    let (_head_thread, head_state, refs): PullRefsPayload = rmp_serde::from_slice(&payload)
+    let (head_thread, head_state, refs): PullRefsPayload = rmp_serde::from_slice(&payload)
         .map_err(|error| ProtocolError::InvalidState(format!("decode pull refs: {error}")))?;
     let head_state = head_state
         .map(|value| decode_bootstrap_state_id(value, "head state"))
@@ -199,7 +200,15 @@ pub(crate) fn decode_pull_refs(
         })
         .collect::<Result<Vec<_>, ProtocolError>>()?;
     let _ = head_state;
-    Ok(Some(PullBootstrapRefs { refs }))
+    let head_thread = {
+        let trimmed = head_thread.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    };
+    Ok(Some(PullBootstrapRefs { head_thread, refs }))
 }
 
 fn decode_bootstrap_state_id(value: Vec<u8>, field: &str) -> Result<StateId, ProtocolError> {
@@ -3059,6 +3068,7 @@ mod pull_bootstrap_tests {
         let decoded = decode_pull_refs(checkpoint.as_bytes())
             .expect("decode folded refs")
             .expect("new server advertises refs");
+        assert_eq!(decoded.head_thread.as_deref(), Some("main"));
         assert_eq!(decoded.refs.len(), 2);
         assert_eq!(decoded.refs[0].name, "main");
         assert_eq!(decoded.refs[0].state_id, main);
