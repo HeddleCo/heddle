@@ -937,7 +937,9 @@ impl<'a> GitProjection<'a> {
 
         // Export only the managed frontier reconstructed from the store. A foreign
         // branch/tag heddle never wrote — even one at a heddle-minted commit —
-        // must not enter the destination's desired set.
+        // must not enter the destination's desired set. A managed name whose
+        // on-disk tip no longer matches the recorded OID is dropped the same
+        // way (heddle#1414): do not copy/push Git's fork under that name.
         let managed_record = read_projection_managed_refs(self.heddle_repo.heddle_dir())?;
         let served_frontier = collect_managed_ref_updates(&projection_repo, &managed_record)?;
         copy_reachable_objects(
@@ -2721,14 +2723,18 @@ pub fn materialize_projection_managed_refs(
 }
 
 /// The mirror refs heddle MANAGES, as [`RefUpdate`]s — [`collect_ref_updates`]
-/// filtered to the names in the managed-refs `record`, PLUS every `refs/notes/*`
-/// ref (heddle's metadata namespace, always heddle-managed and content-rebuilt
-/// rather than target-claimed through the reconcile). The export/push frontier
-/// MUST source from this rather than the raw [`collect_ref_updates`] so a foreign
-/// branch/tag heddle never wrote — even one pointing at a heddle-minted commit —
-/// never enters the served frontier nor the destination's desired set (heddle#316).
-/// Fetch/import paths keep using [`collect_ref_updates`] because they must see
-/// every ref; only the export/push frontier is managed-filtered.
+/// filtered to names in the managed-refs `record` whose on-disk tip still equals
+/// the recorded OID, PLUS every `refs/notes/*` ref (heddle's metadata namespace,
+/// always heddle-managed and content-rebuilt rather than target-claimed through
+/// the reconcile). The export/push frontier MUST source from this rather than
+/// the raw [`collect_ref_updates`] so a foreign branch/tag heddle never wrote —
+/// even one pointing at a heddle-minted commit — never enters the served
+/// frontier nor the destination's desired set (heddle#316). Name membership
+/// alone is not enough: a Git-side writer can advance a managed ref, and
+/// serving that on-disk tip would publish the fork. A recorded name whose
+/// on-disk target no longer matches is dropped until reconcile succeeds
+/// (heddle#1414). Fetch/import paths keep using [`collect_ref_updates`] because
+/// they must see every ref; only the export/push frontier is managed-filtered.
 pub fn collect_managed_ref_updates(
     repo: &SleyRepository,
     record: &HashMap<String, ObjectId>,
@@ -2737,7 +2743,7 @@ pub fn collect_managed_ref_updates(
         .into_iter()
         .filter(|update| {
             matches!(update.namespace, RefNamespace::Note)
-                || record.contains_key(&full_ref_name(update))
+                || record.get(&full_ref_name(update)) == Some(&update.target)
         })
         .collect())
 }
@@ -4110,6 +4116,143 @@ mod tests {
         let full_names = updates.iter().map(full_ref_name).collect::<Vec<_>>();
 
         assert_eq!(full_names, vec!["refs/heads/main".to_string()]);
+    }
+
+    /// heddle#1414: name membership is not enough. A Git-side writer can
+    /// advance a managed branch; the on-disk tip then no longer matches the
+    /// OID Heddle last recorded writing. The export/push frontier must drop
+    /// that name rather than serve the foreign tip under the managed name.
+    #[test]
+    fn collect_managed_ref_updates_drops_diverged_on_disk_tip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
+        let owned = seed_commit(&repo, "owned");
+        let foreign = seed_commit(&repo, "foreign");
+        let notes = seed_commit(&repo, "notes");
+        set_reference(
+            &repo,
+            "refs/heads/main",
+            foreign,
+            RefPrecondition::MustNotExist,
+            "test: diverged main",
+        )
+        .expect("write diverged main");
+        set_reference(
+            &repo,
+            "refs/heads/kept",
+            owned,
+            RefPrecondition::MustNotExist,
+            "test: matching kept",
+        )
+        .expect("write kept");
+        set_reference(
+            &repo,
+            "refs/heads/unmanaged",
+            owned,
+            RefPrecondition::MustNotExist,
+            "test: foreign name at a heddle oid",
+        )
+        .expect("write unmanaged");
+        set_reference(
+            &repo,
+            "refs/notes/heddle",
+            notes,
+            RefPrecondition::MustNotExist,
+            "test: notes",
+        )
+        .expect("write notes");
+
+        let mut record = HashMap::new();
+        record.insert("refs/heads/main".to_string(), owned);
+        record.insert("refs/heads/kept".to_string(), owned);
+
+        let updates = collect_managed_ref_updates(&repo, &record).expect("collect managed updates");
+        let mut names: Vec<String> = updates.iter().map(full_ref_name).collect();
+        names.sort();
+
+        assert_eq!(
+            names,
+            vec![
+                "refs/heads/kept".to_string(),
+                "refs/notes/heddle".to_string(),
+            ],
+            "diverged main must leave the frontier; matching kept and notes remain"
+        );
+        let main = updates.iter().find(|update| update.name == "main");
+        assert!(
+            main.is_none(),
+            "must not serve the on-disk foreign tip under refs/heads/main, got {main:?}"
+        );
+    }
+
+    /// heddle#1414: dropping a diverged name from the served frontier must
+    /// also keep `plan_destination_reconcile` from copying/pushing that
+    /// foreign tip. A previously exported heddle-owned dest tip is retracted
+    /// rather than fast-forwarded to Git's fork.
+    #[test]
+    fn destination_reconcile_does_not_push_diverged_foreign_tip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
+        let owned = seed_commit(&repo, "owned");
+        let foreign = seed_commit(&repo, "foreign");
+        set_reference(
+            &repo,
+            "refs/heads/main",
+            foreign,
+            RefPrecondition::MustNotExist,
+            "test: diverged main",
+        )
+        .expect("write diverged main");
+        set_reference(
+            &repo,
+            "refs/heads/kept",
+            owned,
+            RefPrecondition::MustNotExist,
+            "test: matching kept",
+        )
+        .expect("write kept");
+
+        let mut record = HashMap::new();
+        record.insert("refs/heads/main".to_string(), owned);
+        record.insert("refs/heads/kept".to_string(), owned);
+        let frontier =
+            collect_managed_ref_updates(&repo, &record).expect("collect managed updates");
+
+        let mut old_at_destination = HashMap::new();
+        old_at_destination.insert("refs/heads/main".to_string(), owned);
+        old_at_destination.insert("refs/heads/kept".to_string(), owned);
+        let previously_exported = old_at_destination.clone();
+
+        let plan = plan_destination_reconcile(
+            &repo,
+            &frontier,
+            None,
+            &old_at_destination,
+            &previously_exported,
+            false,
+        )
+        .expect("plan destination reconcile");
+
+        assert!(
+            plan.writes
+                .iter()
+                .all(|write| write.new != foreign && write.full_name != "refs/heads/main"),
+            "must not write the foreign tip under the managed name, writes={:?}",
+            plan.writes
+                .iter()
+                .map(|write| (&write.full_name, write.new))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            plan.deletes
+                .iter()
+                .any(|delete| delete.full_name == "refs/heads/main" && delete.old == owned),
+            "heddle-owned dest tip for a diverged mirror ref must retract, deletes={:?}",
+            plan.deletes
+                .iter()
+                .map(|delete| (&delete.full_name, delete.old))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
