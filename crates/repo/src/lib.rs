@@ -55,6 +55,9 @@ pub use repository_semantic_index::{ParentIndex, SemanticIndexBuilder};
 /// persisted index (heddle#1078).
 mod repository_semantic_query;
 pub use repository_semantic_query::SymbolDelta;
+mod repository_semantic_graph_query;
+#[cfg(test)]
+mod repository_semantic_graph_query_tests;
 #[cfg(feature = "semantic-recovery")]
 mod repository_semantic_recovery;
 #[cfg(feature = "semantic-recovery")]
@@ -69,6 +72,8 @@ mod repository_symbol_graph_frontier;
 mod repository_symbol_graph_load;
 mod repository_symbol_graph_query;
 pub use repository_symbol_graph_query::ResolvedSemanticEdgeSet;
+#[cfg(all(test, feature = "tree-sitter-symbols"))]
+mod repository_semantic_graph_e2e_tests;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_signals;
 mod repository_state_visibility;

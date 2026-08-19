@@ -302,6 +302,11 @@ name = "semantic_symbol_diff_cli"
 path = "tests/semantic_symbol_diff_cli.rs"
 required-features = ["semantic"]
 
+[[test]]
+name = "semantic_refs_cli"
+path = "tests/semantic_refs_cli.rs"
+required-features = ["semantic"]
+
 [[bench]]
 name = "local_ops"
 harness = false

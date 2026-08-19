@@ -16,6 +16,7 @@ mod object_availability;
 mod object_graph;
 mod object_transfer;
 mod provider_pack;
+mod semantic_graph;
 mod transfer_plan;
 
 pub use auth_token::AuthToken;
@@ -59,6 +60,9 @@ pub use object_transfer::{
 pub use provider_pack::{
     CompletedProviderPack, ProviderPackBundle, ProviderPackExtent, ProviderPackIndexEntry,
     ProviderPackManifest, ProviderPackSpool, ProviderPackWriter, assemble_provider_pack,
+};
+pub use semantic_graph::{
+    SemanticGraphQueryKind, SemanticGraphQueryRequest, SemanticGraphQueryResponse, SemanticGraphRef,
 };
 pub use transfer_plan::{
     GitLaneTransferIntent, RepositoryTransferPlan, TransferPartitions, TransferPlanStats,

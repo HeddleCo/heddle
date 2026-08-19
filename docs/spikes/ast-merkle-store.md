@@ -159,7 +159,7 @@ A memoized (Salsa-style) query engine: "refs of X at commit C", "callers of F", 
 2. **Layer B substrate — decided by #1272.** Extend a modularized Heddle-owned resolver and artifact; Stack Graphs is prior art only.
 3. **Ingest hook point for the semantic projection** — parse-on-ingest (eager, in `importer.rs` alongside `reasoning_extract`) vs parse-on-first-query (lazy).
 4. **Invalidation-frontier model — sketched by #1272.** Reverse imports select the frontier; resolved file edges are replacement records in a delta over the parent. #1274 owns implementation detail.
-5. **Query API surface — open.** Decide what weft/CLI RPCs expose (feeds the search + nav surfaces); Salsa vs hand-rolled memoization.
+5. **Query API surface — decided by #1276.** `refs_of(state, anchor)`, `callers_of(state, anchor)`, and `importers_of(state, path)` are always-compiled, tree-sitter-free store walks. CLI: `heddle semantic refs`. Wire body: `SemanticGraphQueryRequest` / `SemanticGraphQueryResponse` (weft#451 hosted RPCs remain residual). Salsa-style memoization is deferred; content-address short-circuiting of the persisted index is the first measurement.
 6. **Language scope and storage policy — open.** Finalize v1 languages, not-index filters, and packing/GC for semantic artifacts.
 
 ## Phasing (recommended)

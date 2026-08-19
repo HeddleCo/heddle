@@ -2551,6 +2551,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["semantic", "hot"],
         opaque_schemas(READ_JSON, &["semantic hot"]),
     ),
+    entry(
+        &["semantic", "refs"],
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["semantic refs"]),
+            &[json_discriminator(
+                Some("semantic refs"),
+                "output_kind",
+                "semantic_refs",
+            )],
+        ),
+    ),
     // `semantic index` backfills the merkle semantic index, attaching a
     // SemanticIndex sidecar to states that lack one. Metadata mutation, text
     // progress output, no op-id (idempotent + restartable).
@@ -4698,6 +4709,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             SemanticCommands::Diff { .. } => vec!["semantic", "diff"],
             SemanticCommands::Hot { .. } => vec!["semantic", "hot"],
             SemanticCommands::Index { .. } => vec!["semantic", "index"],
+            SemanticCommands::Refs { .. } => vec!["semantic", "refs"],
         },
         Commands::Daemon { command } => match command {
             DaemonCommands::Serve => vec!["daemon", "serve"],

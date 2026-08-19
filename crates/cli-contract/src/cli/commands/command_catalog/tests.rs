@@ -351,6 +351,11 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["semantic", "diff"], &["semantic", "diff", "HEAD", "HEAD"]),
     #[cfg(feature = "semantic")]
     sample(&["semantic", "hot"], &["semantic", "hot"]),
+    #[cfg(feature = "semantic")]
+    sample(
+        &["semantic", "refs"],
+        &["semantic", "refs", "src/api.rs:greet"],
+    ),
     sample(&["semantic", "index"], &["semantic", "index"]),
     sample(
         &["agent", "provenance", "begin"],
@@ -1719,6 +1724,8 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             // heddle#1271 exposes the stored symbol-index comparison through
             // a stable `semantic_diff` machine envelope.
             "semantic diff",
+            // heddle#1276 exposes parse-free refs-of / importers-of.
+            "semantic refs",
             // `land` advertises the single-peer and `--threads` batch
             // envelope discriminators.
             "land",
