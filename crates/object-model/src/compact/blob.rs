@@ -3,6 +3,7 @@
 use super::{
     Result,
     io::{Reader, Writer},
+    limits::{MAX_COMPACT_COUNT, MIN_BLOB_ITEM_BYTES},
 };
 use crate::object::ContentHash;
 
@@ -21,6 +22,12 @@ pub fn is_blob_frame(bytes: &[u8]) -> bool {
 /// Lengths precede the concatenated bodies, giving the frame reader an exact
 /// `(offset, len)` for every object while zstd sees one continuous lineage.
 pub fn encode_blob_frame(blobs: &[&[u8]]) -> Result<Vec<u8>> {
+    if blobs.len() > MAX_COMPACT_COUNT {
+        return Err(super::invalid(format!(
+            "blob frame count {} exceeds maximum {MAX_COMPACT_COUNT}",
+            blobs.len()
+        )));
+    }
     let mut output = Writer::new(BLOB_MAGIC);
     output.put_u64(blobs.len() as u64);
     if let Some((first, rest)) = blobs.split_first() {
@@ -43,7 +50,7 @@ pub fn encode_blob_frame(blobs: &[&[u8]]) -> Result<Vec<u8>> {
 /// Decode and whole-frame-verify every indexed blob slice.
 pub fn decode_blob_frame(bytes: &[u8]) -> Result<Vec<DecodedBlob<'_>>> {
     let mut input = Reader::verified(bytes, BLOB_MAGIC)?;
-    let count = input.get_count("blob frame")?;
+    let count = input.get_count("blob frame", MIN_BLOB_ITEM_BYTES)?;
     let mut lengths = Vec::with_capacity(count);
     if count > 0 {
         let first = input.get_u64()?;

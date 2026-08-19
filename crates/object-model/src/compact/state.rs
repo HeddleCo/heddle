@@ -3,7 +3,9 @@
 use super::{
     Result,
     dictionary::{PrincipalKey, StateDictionaries},
+    invalid,
     io::Writer,
+    limits::MAX_COMPACT_STATE_COUNT,
 };
 use crate::object::{ChangeLineageKind, State};
 
@@ -16,6 +18,12 @@ pub fn is_state_frame(bytes: &[u8]) -> bool {
 
 /// Encode states as lossless columns, omitting only the derivable state id.
 pub fn encode_state_frame(states: &[State]) -> Result<Vec<u8>> {
+    if states.len() > MAX_COMPACT_STATE_COUNT {
+        return Err(invalid(format!(
+            "state frame count {} exceeds maximum {MAX_COMPACT_STATE_COUNT}",
+            states.len()
+        )));
+    }
     let dictionaries = StateDictionaries::from_states(states);
     let mut output = Writer::new(STATE_MAGIC);
     output.put_u64(states.len() as u64);

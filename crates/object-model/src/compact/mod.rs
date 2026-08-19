@@ -5,6 +5,7 @@ mod blob;
 mod dictionary;
 mod extract;
 mod io;
+mod limits;
 mod state;
 mod state_decode;
 mod tree;
@@ -50,5 +51,7 @@ pub(crate) fn invalid(message: impl Into<String>) -> CompactError {
     CompactError::Invalid(message.into())
 }
 
+#[cfg(test)]
+mod hostile;
 #[cfg(test)]
 mod tests;

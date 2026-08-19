@@ -38,6 +38,12 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Fixed
 
+- **Compact frames reject attacker-declared object counts before prealloc.**
+  `get_count` now caps declarations against the 12 MiB writer frame object
+  ceiling and a real per-entry encoded floor, so a hostile pack cannot force
+  `Vec::with_capacity` or `blank_state()` from a count near the 1 GiB
+  decompress cap (heddle#1408).
+
 - **Compact repack reclaims loose metadata copies.** Loose trees and states are
   now included in repack inventory, solidified with typed-hash verification,
   and removed only after the durable replacement reconstructs the same object

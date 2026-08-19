@@ -5,6 +5,7 @@ use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 use super::{
     Result, invalid,
     io::{Reader, Writer, varint_len},
+    limits::{MAX_COMPACT_COUNT, MIN_TREE_ENTRY_BYTES, MIN_TREE_ITEM_BYTES},
 };
 use crate::object::{ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeEntry};
 
@@ -28,6 +29,21 @@ pub fn encoded_tree_size(tree: &Tree) -> usize {
 
 /// Encode name-sorted trees as columnar mode/kind/name/target payloads.
 pub fn encode_tree_frame(trees: &[Tree]) -> Result<Vec<u8>> {
+    if trees.len() > MAX_COMPACT_COUNT {
+        return Err(invalid(format!(
+            "tree frame count {} exceeds maximum {MAX_COMPACT_COUNT}",
+            trees.len()
+        )));
+    }
+    if let Some(count) = trees
+        .iter()
+        .map(Tree::len)
+        .find(|len| *len > MAX_COMPACT_COUNT)
+    {
+        return Err(invalid(format!(
+            "tree entry count {count} exceeds maximum {MAX_COMPACT_COUNT}"
+        )));
+    }
     let mut output = Writer::new(TREE_MAGIC);
     output.put_u64(trees.len() as u64);
     for tree in trees {
@@ -52,7 +68,7 @@ pub fn encode_tree_frame(trees: &[Tree]) -> Result<Vec<u8>> {
 /// Decode and whole-frame-verify every tree in a compact frame.
 pub fn decode_tree_frame(bytes: &[u8]) -> Result<Vec<Tree>> {
     let mut input = Reader::verified(bytes, TREE_MAGIC)?;
-    let tree_count = input.get_count("tree frame")?;
+    let tree_count = input.get_count("tree frame", MIN_TREE_ITEM_BYTES)?;
     let mut trees = Vec::with_capacity(tree_count);
     for _ in 0..tree_count {
         trees.push(decode_tree(&mut input)?);
@@ -67,7 +83,7 @@ pub fn decode_tree_frame(bytes: &[u8]) -> Result<Vec<Tree>> {
 /// SoA columns until `expected` matches the reconstructed typed hash.
 pub fn extract_tree(bytes: &[u8], expected: ContentHash) -> Result<Tree> {
     let mut input = Reader::verified(bytes, TREE_MAGIC)?;
-    let tree_count = input.get_count("tree frame")?;
+    let tree_count = input.get_count("tree frame", MIN_TREE_ITEM_BYTES)?;
     for _ in 0..tree_count {
         let tree = decode_tree(&mut input)?;
         if tree.hash() == expected {
@@ -78,7 +94,7 @@ pub fn extract_tree(bytes: &[u8], expected: ContentHash) -> Result<Tree> {
 }
 
 fn decode_tree(input: &mut Reader<'_>) -> Result<Tree> {
-    let count = input.get_count("tree entry")?;
+    let count = input.get_count("tree entry", MIN_TREE_ENTRY_BYTES)?;
     let modes = (0..count)
         .map(|_| decode_mode(input.get_u8()?))
         .collect::<Result<Vec<_>>>()?;
