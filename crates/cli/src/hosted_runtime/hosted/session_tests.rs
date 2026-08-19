@@ -240,7 +240,7 @@ fn same_host_identity_attaches_matching_root_key() {
         let pem = signer.to_pem().expect("device PEM");
         let token = mint_pop_token("alice", &signer);
         store_credential(&token, "alice", None);
-        repo::identity::link_device_key(&signer.public_key(), &pem, SERVER)
+        repo::identity::link_device_key(signer.public_key(), &pem, SERVER)
             .expect("link same-host identity");
 
         let session = build_session(&UserConfig::default()).expect("same-host session");
@@ -277,7 +277,7 @@ fn same_host_identity_does_not_satisfy_a_derived_child() {
         let parent_token = mint_pop_token("alice", &parent);
         let child_token = mint_derived_child(&parent_token, &parent, &child);
         store_credential(&child_token, "alice", None);
-        repo::identity::link_device_key(&parent.public_key(), &parent_pem, SERVER)
+        repo::identity::link_device_key(parent.public_key(), &parent_pem, SERVER)
             .expect("link ancestor identity");
 
         let Err(error) = build_session(&UserConfig::default()) else {
