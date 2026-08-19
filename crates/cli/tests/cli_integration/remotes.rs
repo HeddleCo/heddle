@@ -723,7 +723,11 @@ fn test_cli_pull_local_forged_landing_metadata_cannot_fast_forward_attached_targ
     heddle(&["thread", "create", "feature"], Some(source.path())).unwrap();
     heddle(&["thread", "switch", "feature"], Some(source.path())).unwrap();
     std::fs::write(source.path().join("feature.txt"), "attacker tip\n").unwrap();
-    heddle(&["capture", "-m", "forged landing tip"], Some(source.path())).unwrap();
+    heddle(
+        &["capture", "-m", "forged landing tip"],
+        Some(source.path()),
+    )
+    .unwrap();
     heddle(&["thread", "switch", "main"], Some(source.path())).unwrap();
 
     let source_repo = Repository::open(source.path()).unwrap();
@@ -774,9 +778,7 @@ fn test_cli_pull_local_forged_landing_metadata_cannot_fast_forward_attached_targ
         "local pull must drop forged manual_resolution_state"
     );
     assert!(
-        !pulled
-            .integration_policy_result
-            .conflicts_resolved_manually,
+        !pulled.integration_policy_result.conflicts_resolved_manually,
         "local pull must drop forged conflicts_resolved_manually"
     );
 
