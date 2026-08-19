@@ -31,11 +31,24 @@ const COMPACT_ALLOWED_KEYS: &[&str] = &[
     "changed_path_count",
     "conflicts",
     "conflict_count",
+    "state_id",
 ];
 
+/// Decision-surface keys for a compact *error* envelope. Same recovery
+/// message as `--output json`; this is a projection, not a second schema.
+const COMPACT_ERROR_KEYS: &[&str] = &["kind", "error", "exit_code", "hint", "primary_command"];
+
 pub(crate) fn retain_compact_surface_fields(value: &mut Value) {
+    retain_allowed_keys(value, COMPACT_ALLOWED_KEYS);
+}
+
+pub(crate) fn retain_compact_error_fields(value: &mut Value) {
+    retain_allowed_keys(value, COMPACT_ERROR_KEYS);
+}
+
+fn retain_allowed_keys(value: &mut Value, allowed: &[&str]) {
     if let Some(object) = value.as_object_mut() {
-        object.retain(|key, _| COMPACT_ALLOWED_KEYS.contains(&key.as_str()));
+        object.retain(|key, _| allowed.contains(&key.as_str()));
     }
 }
 
@@ -70,6 +83,11 @@ pub(crate) struct CompactOutput {
     pub conflicts: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conflict_count: Option<usize>,
+    /// Identifier the command just produced or is sitting on. Capture
+    /// needs this as the decision-surface fact; other verbs emit it when
+    /// they have a single current state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_id: Option<String>,
 }
 
 impl CompactOutput {
@@ -85,6 +103,7 @@ impl CompactOutput {
             changed_path_count: None,
             conflicts: None,
             conflict_count: None,
+            state_id: None,
         }
     }
 }

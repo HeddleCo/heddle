@@ -30,8 +30,10 @@ use serde::Serialize;
 use super::{
     action_line::{format_next_step_dim, print_next_step},
     advice::RecoveryAdvice,
+    compact::{CompactOutput, CompactProjection},
     expand::{CollapseAnnotation, collapse_annotations_for_states},
     history_target::resolve_state_id,
+    next_action::{normalized_action, write_projected_command_json},
     snapshot::ensure_current_state,
     verification_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
 };
@@ -388,7 +390,7 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
 
     let as_json = should_output_json(cli, Some(repo.config()));
     if as_json {
-        println!("{}", serde_json::to_string(&output)?);
+        write_projected_command_json(cli, &output, &["log"])?;
     } else {
         // Render to stdout via the writer-based helpers so the same
         // formatting logic is unit-testable against a `Vec<u8>` —
@@ -462,7 +464,7 @@ fn render_unbound_overlay_log(
         states: entries,
     };
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_projected_command_json(cli, &output, &["log"])?;
     } else {
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
@@ -475,21 +477,70 @@ fn render_unbound_overlay_log(
     Ok(())
 }
 
+#[derive(Serialize)]
+struct PlainGitLogOutput<'a> {
+    output_kind: &'static str,
+    status: &'static str,
+    repository_capability: &'static str,
+    storage_model: &'static str,
+    states: &'a [StateEntry],
+    #[serde(rename = "verification")]
+    trust: &'a heddle_core::RepositoryVerificationState,
+    recommended_action: &'a str,
+    recovery_commands: &'a [String],
+}
+
+impl CompactProjection for LogOutput {
+    fn compact(&self) -> CompactOutput {
+        let mut compact = CompactOutput::new(self.output_kind);
+        compact.status = Some(self.status.to_string());
+        compact.state_id = self.states.first().map(|state| state.state_id.clone());
+        compact
+    }
+}
+
+impl CompactProjection for ReflogOutput {
+    fn compact(&self) -> CompactOutput {
+        let mut compact = CompactOutput::new(self.output_kind);
+        compact.status = Some(self.status.to_string());
+        compact
+    }
+}
+
+impl CompactProjection for TimelineLogOutput {
+    fn compact(&self) -> CompactOutput {
+        let mut compact = CompactOutput::new(self.output_kind);
+        compact.status = Some(self.status.to_string());
+        compact.state_id = self.cursor.state.clone();
+        compact
+    }
+}
+
+impl CompactProjection for PlainGitLogOutput<'_> {
+    fn compact(&self) -> CompactOutput {
+        let mut compact = CompactOutput::new(self.output_kind);
+        compact.status = Some(self.status.to_string());
+        compact.next_action = normalized_action(self.recommended_action);
+        compact
+    }
+}
+
 fn render_plain_git_log(cli: &Cli, probe: &PlainGitVerificationProbe, oneline: bool) -> Result<()> {
     if should_output_json(cli, None) {
-        println!(
-            "{}",
-            serde_json::to_string(&serde_json::json!({
-                "output_kind": "log",
-                "status": "blocked",
-                "repository_capability": "plain-git",
-                "storage_model": "git",
-                "states": [],
-                "verification": &probe.trust,
-                "recommended_action": &probe.trust.recommended_action,
-                "recovery_commands": &probe.trust.recovery_commands,
-            }))?
-        );
+        write_projected_command_json(
+            cli,
+            &PlainGitLogOutput {
+                output_kind: "log",
+                status: "blocked",
+                repository_capability: "plain-git",
+                storage_model: "git",
+                states: &[],
+                trust: &probe.trust,
+                recommended_action: &probe.trust.recommended_action,
+                recovery_commands: &probe.trust.recovery_commands,
+            },
+            &["log"],
+        )?;
     } else if oneline {
         println!("plain-git Heddle not initialized; next: heddle init");
     } else {
@@ -515,7 +566,7 @@ fn cmd_log_timeline(cli: &Cli, repo: &Repository, thread: &str, oneline: bool) -
     let output = TimelineLogOutput::from_snapshot(repo, snapshot);
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_projected_command_json(cli, &output, &["log"])?;
     } else {
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
@@ -539,7 +590,7 @@ fn cmd_log_reflog(cli: &Cli, repo: &Repository, limit: usize, oneline: bool) -> 
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_projected_command_json(cli, &output, &["log"])?;
     } else {
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();

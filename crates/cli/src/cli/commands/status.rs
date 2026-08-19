@@ -309,11 +309,15 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
     let cli_repo_open_ms = repo_open_start.elapsed().as_millis();
     let repo_config = repo.config().clone();
     let as_json = should_output_json(cli, Some(&repo_config));
-    let compact_json = as_json && output_is_compact(cli);
     let detail = if short && !as_json {
         StatusDetail::ShortText
-    } else if compact_json || (short && as_json) {
+    } else if short && as_json {
         StatusDetail::CompactMachine
+    } else if as_json && output_is_compact(cli) {
+        // Compact is a projection of the same report text uses. The
+        // short machine path drops thread-ready `land` advice, which is
+        // exactly the next_action compact callers need after `ready`.
+        StatusDetail::DefaultText
     } else if cli.verbose > 0 || as_json {
         StatusDetail::Full
     } else {
@@ -547,6 +551,7 @@ impl super::compact::CompactProjection for StatusOutput {
         compact.next_action_template = next_action_template;
         compact.changed_paths = Some(self.changed_paths.clone());
         compact.changed_path_count = Some(self.changed_paths.len());
+        compact.state_id = self.current_state.clone();
         compact
     }
 }

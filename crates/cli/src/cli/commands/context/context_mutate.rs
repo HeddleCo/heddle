@@ -13,6 +13,7 @@ use objects::{
     object::{Annotation, ContextBlob},
 };
 use repo::compute_rewrite_pct;
+use serde::Serialize;
 
 use super::{
     compute_source_hash, context_root_for_state, parse_kind, parse_scope, put_context_attachment,
@@ -23,10 +24,12 @@ use crate::{
         Cli,
         commands::{
             RecoveryAdvice,
+            compact::{CompactOutput, CompactProjection},
             native_scope::{
                 AnnotationStore, AnnotationSurface, emit_locality_notice_once,
                 open_annotation_store, report_absent_store,
             },
+            next_action::write_projected_command_json,
             snapshot::resolve_attribution,
         },
         should_output_json,
@@ -43,6 +46,22 @@ fn content_source_advice(err: ContextContentPlanError) -> RecoveryAdvice {
             "Pass `-m <text>` or `--file <path>` with annotation content.",
             "heddle context set --path <path> -m \"...\"",
         ),
+    }
+}
+
+#[derive(Serialize)]
+struct ContextSetOutput {
+    output_kind: &'static str,
+    target: String,
+    annotations: usize,
+    state: String,
+}
+
+impl CompactProjection for ContextSetOutput {
+    fn compact(&self) -> CompactOutput {
+        let mut compact = CompactOutput::new(self.output_kind);
+        compact.state_id = Some(self.state.clone());
+        compact
     }
 }
 
@@ -101,15 +120,16 @@ pub async fn cmd_context_set(
     put_context_attachment(&repo, &head_state, Some(new_context_root))?;
 
     if should_output_json(cli, None) {
-        println!(
-            "{}",
-            serde_json::json!({
-                "output_kind": "context_set",
-                "target": label,
-                "annotations": blob.annotations.len(),
-                "state": head_state.state_id.short(),
-            })
-        );
+        write_projected_command_json(
+            cli,
+            &ContextSetOutput {
+                output_kind: "context_set",
+                target: label,
+                annotations: blob.annotations.len(),
+                state: head_state.state_id.short(),
+            },
+            &["context", "set"],
+        )?;
     } else {
         let active = count_active_annotations(&blob.annotations);
         println!(

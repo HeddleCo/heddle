@@ -212,8 +212,8 @@ fn unsupported_output_json_compact_is_data_err() {
     // compact projection. Same semantics, same code (HeddleCo/heddle#648).
     // The envelope's `exit_code` field must agree with the process exit.
     let repo = init_repo();
-    let output = heddle_output(&["--output", "json-compact", "log"], Some(repo.path()))
-        .expect("spawn log --output json-compact");
+    let output = heddle_output(&["--output", "json-compact", "query"], Some(repo.path()))
+        .expect("spawn query --output json-compact");
     assert_eq!(
         output.status.code(),
         Some(65),

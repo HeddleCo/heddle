@@ -46,8 +46,11 @@ use super::{
     action_line::{print_nested_next_step, print_nested_optional, print_next_step, print_optional},
     advice::RecoveryAdvice,
     command_catalog::{ActionTemplate, recommended_action_template},
+    compact::{CompactOutput, CompactProjection},
     mount_lifecycle,
-    next_action::{NextActionValidationContext, write_full_command_json},
+    next_action::{
+        NextActionValidationContext, write_full_command_json, write_projected_command_json,
+    },
     operator_loop::primary_next_action_with_verification,
     snapshot::{ensure_current_state, summarize_confidence, summarize_verification},
     start_atomic,
@@ -66,7 +69,10 @@ use super::{
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{
-    cli::{Cli, ThreadListArgs, ThreadStartArgs, WorkspaceModeArg, should_output_json, style},
+    cli::{
+        Cli, ThreadListArgs, ThreadStartArgs, WorkspaceModeArg, output_is_compact,
+        should_output_json, style,
+    },
     config::{UserConfig, UserThreadWorkspaceMode},
     perf::{ProfileField, ProfileMode, emit_profile, instrumentation_enabled, profile_mode},
 };
@@ -145,6 +151,16 @@ pub(crate) struct ThreadOpOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "verification")]
     pub trust: Option<RepositoryVerificationState>,
+}
+
+impl CompactProjection for ThreadOpOutput {
+    fn compact(&self) -> CompactOutput {
+        let mut compact = CompactOutput::new(self.output_kind);
+        compact.status = Some(self.status.to_string());
+        compact.next_action = self.next_action.clone();
+        compact.next_action_template = self.next_action_template.clone();
+        compact
+    }
 }
 
 #[derive(Serialize)]
@@ -2619,7 +2635,15 @@ pub(crate) fn cmd_thread_rename(
 
 fn render_thread_op(cli: &Cli, output: ThreadOpOutput) -> Result<()> {
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(&output)?);
+        if output_is_compact(cli) {
+            let emitting = match output.output_kind {
+                "thread_start" => &["start"][..],
+                _ => &["thread"][..],
+            };
+            write_projected_command_json(cli, &output, emitting)?;
+        } else {
+            println!("{}", serde_json::to_string(&output)?);
+        }
     } else {
         println!("{}", style::accent(&output.message));
         if let Some(thread) = &output.thread {

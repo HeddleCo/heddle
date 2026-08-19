@@ -83,6 +83,7 @@ impl super::compact::CompactProjection for SnapshotOutput {
     fn compact(&self) -> super::compact::CompactOutput {
         let mut compact = super::compact::CompactOutput::new(self.output_kind);
         compact.status = Some(self.status.to_string());
+        compact.state_id = Some(self.state_id.clone());
         let action = self
             .recommended_action
             .as_ref()

@@ -952,11 +952,17 @@ fn json_compact_runtime_contract_is_projection_or_rejection() {
     let expected_compact = BTreeSet::from([
         "abort".to_string(),
         "capture".to_string(),
+        "context set".to_string(),
         "continue".to_string(),
+        "diff".to_string(),
+        "discuss open".to_string(),
         "land".to_string(),
+        "log".to_string(),
         "ready".to_string(),
+        "start".to_string(),
         "status".to_string(),
         "sync".to_string(),
+        "verify".to_string(),
     ]);
     let actual_compact = active_command_contract_entries()
         .iter()

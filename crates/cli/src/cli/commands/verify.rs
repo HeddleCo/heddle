@@ -10,7 +10,7 @@ use heddle_core::{
 };
 use repo::{Repository, discover_heddle_root};
 
-use super::{RecoveryAdvice, action_line::print_next};
+use super::{RecoveryAdvice, action_line::print_next, next_action::write_projected_command_json};
 use crate::{
     cli::{Cli, should_output_json, style},
     config::UserConfig,
@@ -77,7 +77,7 @@ pub fn cmd_verify(cli: &Cli, verbose: bool, provenance: bool) -> Result<()> {
     if !output.clean && as_json {
         return Err(anyhow!(verify_failed_advice(&output)));
     }
-    render_verify(&output, verbose, as_json)?;
+    render_verify(cli, &output, verbose, as_json)?;
     if !output.clean {
         return Err(anyhow!(verify_failed_advice(&output)));
     }
@@ -153,9 +153,9 @@ fn heddle_sidecar_present(start: &Path) -> bool {
     })
 }
 
-fn render_verify(output: &VerifyReport, verbose: bool, as_json: bool) -> Result<()> {
+fn render_verify(cli: &Cli, output: &VerifyReport, verbose: bool, as_json: bool) -> Result<()> {
     if as_json {
-        crate::cli::render::write_json_stdout(output)?;
+        write_projected_command_json(cli, output, &["verify"])?;
         return Ok(());
     }
     if !verbose {

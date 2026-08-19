@@ -10,16 +10,19 @@ use objects::worktree::WorktreeStatus;
 use repo::{Config, Repository, RepositoryCapability};
 
 use super::{
-    super::verification_health::{
-        build_plain_git_verification_probe, build_repository_verification_state,
-        plain_git_setup_advice, trust_visible_worktree_status,
+    super::{
+        next_action::write_projected_command_json,
+        verification_health::{
+            build_plain_git_verification_probe, build_repository_verification_state,
+            plain_git_setup_advice, trust_visible_worktree_status,
+        },
     },
     diff_output::{
         print_context, print_diff, print_diff_patch, print_semantic_changes, print_stat,
     },
 };
 use crate::{
-    cli::{Cli, should_output_json},
+    cli::{Cli, output_is_compact, should_output_json},
     config::UserConfig,
 };
 
@@ -185,7 +188,11 @@ fn render_diff_report(
     patch: bool,
 ) -> Result<()> {
     if should_output_json(cli, config) {
-        println!("{}", serde_json::to_string(report)?);
+        if output_is_compact(cli) {
+            write_projected_command_json(cli, report, &["diff"])?;
+        } else {
+            println!("{}", serde_json::to_string(report)?);
+        }
     } else if name_only {
         for change in &report.changes {
             println!("{}", change.path);
