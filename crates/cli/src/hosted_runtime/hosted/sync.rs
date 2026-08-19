@@ -42,6 +42,7 @@ use tokio::sync::mpsc;
 use wire::{
     GitLaneTransferIntent, ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, ProtocolError,
     PullComplete, PushComplete, RefEntry, RefUpdated, RepositoryTransferPlan,
+    admit_declared_received_len,
 };
 
 use super::{
@@ -2434,24 +2435,59 @@ async fn next_pull_message(
                 "pull pack header was not followed by a raw body".to_string(),
             ));
         };
-        let capacity = usize::try_from(length).map_err(|_| {
-            ProtocolError::InvalidState("pull raw body exceeds this platform".to_string())
-        })?;
-        raw_target.reserve(capacity);
+        let declared_len =
+            admit_declared_received_len(length, wire::MAX_RECEIVED_PACK_SIZE, "pull raw body")?;
         while let Some(chunk) = response
             .read_raw_chunk(1024 * 1024)
             .await
             .map_err(hosted_to_protocol_error)?
         {
-            raw_target.extend_from_slice(&chunk);
+            append_pull_raw_chunk(raw_target, &chunk, declared_len)?;
         }
-        if raw_target.len() != capacity {
-            return Err(ProtocolError::InvalidState(
-                "pull raw body length changed during receive".to_string(),
-            ));
-        }
+        finish_pull_raw_body(raw_target, declared_len)?;
     }
     Ok(Some(message))
+}
+
+fn append_pull_raw_chunk(
+    raw_target: &mut Vec<u8>,
+    chunk: &[u8],
+    declared_len: usize,
+) -> Result<(), ProtocolError> {
+    let next_len = raw_target
+        .len()
+        .checked_add(chunk.len())
+        .ok_or_else(|| ProtocolError::InvalidState("pull raw body length overflow".to_string()))?;
+    if next_len > declared_len {
+        return Err(ProtocolError::InvalidState(
+            "pull raw body exceeded declared length during receive".to_string(),
+        ));
+    }
+    raw_target.extend_from_slice(chunk);
+    Ok(())
+}
+
+fn finish_pull_raw_body(raw_target: &[u8], declared_len: usize) -> Result<(), ProtocolError> {
+    if raw_target.len() != declared_len {
+        return Err(ProtocolError::InvalidState(
+            "pull raw body length changed during receive".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn receive_pull_raw_chunks<'a>(
+    raw_target: &mut Vec<u8>,
+    declared: u64,
+    max_bytes: u64,
+    chunks: impl IntoIterator<Item = &'a [u8]>,
+) -> Result<(), ProtocolError> {
+    let declared_len = admit_declared_received_len(declared, max_bytes, "pull raw body")?;
+    for chunk in chunks {
+        append_pull_raw_chunk(raw_target, chunk, declared_len)?;
+    }
+    finish_pull_raw_body(raw_target, declared_len)
 }
 
 fn redaction_push_message(
@@ -5663,3 +5699,7 @@ mod pure_helpers_tests {
 #[cfg(test)]
 #[path = "git_lane_pack_plan_tests.rs"]
 mod git_lane_pack_plan_tests;
+
+#[cfg(test)]
+#[path = "pull_raw_body_tests.rs"]
+mod pull_raw_body_tests;
