@@ -6801,6 +6801,22 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
 }
 
 #[test]
+fn overlay_help_teaches_commit_after_capture() {
+    let temp = TempDir::new().unwrap();
+    git_hermetic(&["init", "-b", "main"], temp.path());
+    heddle(&["init"], Some(temp.path())).expect("initialize Git Overlay");
+    let help = heddle(&["help"], Some(temp.path())).expect("overlay help");
+    assert!(
+        help.contains("Existing Git:") && help.contains("-> heddle commit ->"),
+        "overlay first screen must teach commit after capture: {help}"
+    );
+    assert!(
+        help.contains("\n  commit"),
+        "overlay first screen must list the commit verb: {help}"
+    );
+}
+
+#[test]
 fn native_capture_does_not_tip_overlay_commit() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).expect("native init");
