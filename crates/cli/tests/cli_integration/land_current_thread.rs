@@ -1,8 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Bare `land` from an isolated native checkout must land the current
-//! thread, not the target `main` ref (heddle#1436).
+//! Exact field-study repros from HeddleCo/heddle#1436 (comment 2026-08-19).
+//!
+//! Isolated native thread `feature/search` via
+//! `heddle start feature/search --path ../<repo>-search`.
+//! Done-criteria are those commands and exits:
+//! - bare `heddle land` must not exit 74 / treat `main` as an imported Git ref
+//! - bare `heddle land --dry-run` must preview the current thread, not `main`,
+//!   and must not claim Git-ref writes or network I/O
+//! - `heddle ready` then `land --thread feature/search` works; a second run
+//!   is already-landed, not another "automatic integration merge" at exit 0
+//! - Next verbs stay native (`heddle thread list`). No `repair git`.
 
-use std::{fs, path::PathBuf, str};
+use std::{fs, path::Path, path::PathBuf, process::Output, str};
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -17,13 +26,20 @@ fn sibling_checkout_path(repo: &std::path::Path, suffix: &str) -> PathBuf {
     repo.with_file_name(format!("{repo_name}-{suffix}"))
 }
 
-fn json_value(cwd: &std::path::Path, args: &[&str]) -> Value {
-    let stdout = heddle(args, Some(cwd)).unwrap_or_else(|err| panic!("{}: {err}", args.join(" ")));
-    serde_json::from_str(&stdout)
-        .unwrap_or_else(|err| panic!("JSON from `{}`: {err}\n{stdout}", args.join(" ")))
+fn stdout(output: &Output) -> &str {
+    str::from_utf8(&output.stdout).unwrap_or("")
 }
 
-fn setup_isolated_native_thread(thread: &str, file: &str, contents: &str) -> (TempDir, PathBuf) {
+fn stderr(output: &Output) -> &str {
+    str::from_utf8(&output.stderr).unwrap_or("")
+}
+
+fn combined(output: &Output) -> String {
+    format!("{}\n{}", stdout(output), stderr(output))
+}
+
+/// Native isolated checkout with captured work. Does not run `ready`.
+fn setup_feature_search() -> (TempDir, PathBuf) {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
@@ -32,95 +48,175 @@ fn setup_isolated_native_thread(thread: &str, file: &str, contents: &str) -> (Te
     let checkout = sibling_checkout_path(temp.path(), "search");
     let checkout_arg = checkout.to_str().expect("checkout path utf8");
     heddle(
-        &["start", thread, "--path", checkout_arg],
+        &["start", "feature/search", "--path", checkout_arg],
         Some(temp.path()),
     )
     .unwrap();
-    fs::write(checkout.join(file), contents).unwrap();
+    fs::write(checkout.join("search.txt"), "find it\n").unwrap();
     heddle(&["capture", "-m", "feature work"], Some(&checkout)).unwrap();
-    heddle(&["ready"], Some(&checkout)).unwrap();
     (temp, checkout)
 }
 
+fn assert_no_repair_git(output: &Output, context: &str) {
+    let text = combined(output);
+    assert!(
+        !text.contains("repair git") && !text.contains("fsck repair"),
+        "{context} must not recommend repair git on a native repo:\n{text}"
+    );
+}
+
+/// Field study: from the isolated checkout, `heddle land --dry-run` then
+/// bare `heddle land`. Pre-fix: dry-run previewed `main` and claimed Git
+/// writes; bare land exited 74 with `repair git --ref main`.
 #[test]
-fn bare_land_from_isolated_native_checkout_lands_current_thread() {
-    let (main, checkout) =
-        setup_isolated_native_thread("feature/search", "search.txt", "find it\n");
+fn field_study_bare_land_and_dry_run_use_current_thread() {
+    let (main, checkout) = setup_feature_search();
 
-    let dry = json_value(&checkout, &["--output", "json", "land", "--dry-run"]);
-    assert_eq!(dry["command"], "land", "{dry}");
-    assert!(
-        dry["summary"].as_str().is_some_and(
-            |summary| summary.contains("feature/search") && !summary.contains("'main'")
-        ),
-        "bare land --dry-run must preview the current thread, not main: {dry}"
+    let dry = heddle_output(&["land", "--dry-run"], Some(&checkout))
+        .expect("land --dry-run should spawn");
+    assert_eq!(
+        dry.status.code(),
+        Some(0),
+        "bare land --dry-run must succeed:\n{}",
+        combined(&dry)
     );
-    assert_eq!(dry["integrations"][0]["thread"], "feature/search", "{dry}");
-    assert_eq!(dry["integrations"][0]["target"], "main", "{dry}");
-    assert_eq!(dry["side_effects"]["writes_git_refs"], false, "{dry}");
-    assert_eq!(dry["side_effects"]["network_io"], false, "{dry}");
+    let dry_text = combined(&dry);
     assert!(
-        dry["blockers"]
-            .as_array()
-            .is_none_or(|blockers| blockers.is_empty()),
-        "current-thread dry-run should not invent a missing-main blocker: {dry}"
+        dry_text.contains("feature/search"),
+        "dry-run must preview the current thread:\n{dry_text}"
     );
+    assert!(
+        !dry_text.contains("land thread 'main'") && !dry_text.contains("thread 'main' not found"),
+        "dry-run must not preview main as the land subject:\n{dry_text}"
+    );
+    assert!(
+        !dry_text.contains("writes Git refs") && !dry_text.contains("network I/O"),
+        "native dry-run must not claim Git-ref writes or network I/O:\n{dry_text}"
+    );
+    assert_no_repair_git(&dry, "land --dry-run");
 
-    let landed = json_value(&checkout, &["--output", "json", "land"]);
-    assert_eq!(landed["status"], "landed", "{landed}");
-    assert_eq!(landed["thread"], "feature/search", "{landed}");
-    assert_eq!(landed["integrated"], true, "{landed}");
+    let land = heddle_output(&["land"], Some(&checkout)).expect("heddle land should spawn");
+    assert_ne!(
+        land.status.code(),
+        Some(74),
+        "bare land must not exit 74 treating main as an imported Git ref:\n{}",
+        combined(&land)
+    );
+    assert_eq!(
+        land.status.code(),
+        Some(0),
+        "bare land from the isolated checkout must land the current thread:\n{}",
+        combined(&land)
+    );
+    let land_text = combined(&land);
+    assert!(
+        land_text.contains("feature/search"),
+        "bare land must name the current thread:\n{land_text}"
+    );
+    assert!(
+        !land_text.contains("imported Git ref"),
+        "bare land must not treat main as an imported Git ref:\n{land_text}"
+    );
+    assert_no_repair_git(&land, "bare land");
+    assert_eq!(
+        fs::read_to_string(main.path().join("search.txt")).unwrap(),
+        "find it\n",
+        "bare land must integrate the current thread into the target"
+    );
+}
+
+/// Field study: `heddle ready` prints `heddle --repo … land --thread
+/// feature/search`. That command works. A second run must be already-landed,
+/// not another successful "automatic integration merge" at exit 0.
+#[test]
+fn field_study_ready_then_double_land_thread_is_already_landed() {
+    let (main, checkout) = setup_feature_search();
+
+    let ready = heddle_output(&["ready"], Some(&checkout)).expect("ready should spawn");
+    assert_eq!(
+        ready.status.code(),
+        Some(0),
+        "ready must succeed:\n{}",
+        combined(&ready)
+    );
+    let ready_text = combined(&ready);
+    assert!(
+        ready_text.contains("land --thread feature/search"),
+        "ready must recommend land --thread feature/search:\n{ready_text}"
+    );
+    assert_no_repair_git(&ready, "ready");
+
+    let first = run_land_thread(&main.path(), &checkout);
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "land --thread feature/search must succeed after ready:\n{}",
+        combined(&first)
+    );
+    assert!(
+        combined(&first).contains("feature/search"),
+        "first land --thread must name the thread:\n{}",
+        combined(&first)
+    );
+    assert_no_repair_git(&first, "first land --thread");
     assert_eq!(
         fs::read_to_string(main.path().join("search.txt")).unwrap(),
         "find it\n"
     );
 
-    let replay = json_value(&checkout, &["--output", "json", "land"]);
-    assert_eq!(replay["status"], "already_landed", "{replay}");
-    assert_eq!(replay["thread"], "feature/search", "{replay}");
-    assert_eq!(replay["integrated"], false, "{replay}");
-    assert_eq!(replay["chosen_path"], "already_integrated", "{replay}");
-    assert!(
-        replay["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("already landed")),
-        "second land must name already-landed, not a second merge: {replay}"
-    );
-    assert!(
-        !replay["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("automatic integration merge")),
-        "second land must not claim a new automatic merge: {replay}"
-    );
-    let next = replay["next_action"].as_str().unwrap_or("");
-    assert!(
-        !next.contains("repair git") && !next.contains("fsck"),
-        "already-landed next action must stay native: {replay}"
-    );
-
-    let replay_dry = json_value(&checkout, &["--output", "json", "land", "--dry-run"]);
+    let second = run_land_thread(&main.path(), &checkout);
     assert_eq!(
-        replay_dry["integrations"][0]["would_transition_to"], "already_landed",
-        "{replay_dry}"
+        second.status.code(),
+        Some(0),
+        "second land --thread must stay a clean exit 0:\n{}",
+        combined(&second)
     );
+    let second_text = combined(&second);
+    assert!(
+        second_text.contains("already landed"),
+        "second land --thread must be already-landed, not a second merge:\n{second_text}"
+    );
+    assert!(
+        !second_text.contains("automatic integration merge"),
+        "second land --thread must not claim another automatic integration merge:\n{second_text}"
+    );
+    assert_no_repair_git(&second, "second land --thread");
 }
 
+fn run_land_thread(main: &Path, checkout: &Path) -> Output {
+    // Field study ran the ready breadcrumb: `heddle --repo … land --thread feature/search`.
+    heddle_output(
+        &[
+            "--repo",
+            main.to_str().expect("main path utf8"),
+            "land",
+            "--thread",
+            "feature/search",
+        ],
+        Some(checkout),
+    )
+    .expect("land --thread feature/search should spawn")
+}
+
+/// Same comment: exit 74 / `repair git --ref main` is the wrong recovery
+/// when authority is native. Explicit `--thread main` must stay on
+/// `heddle thread list`.
 #[test]
 fn land_unmanaged_main_on_native_recommends_thread_list() {
-    let (_main, checkout) =
-        setup_isolated_native_thread("feature/search", "search.txt", "find it\n");
+    let (_main, checkout) = setup_feature_search();
 
     let output = heddle_output(
         &["--output", "json", "land", "--thread", "main"],
         Some(&checkout),
     )
     .expect("land --thread main should spawn");
-    assert_ne!(
+    assert_eq!(
         output.status.code(),
-        Some(0),
-        "landing unmanaged main must fail closed"
+        Some(74),
+        "unmanaged main still fails closed (field-study exit 74), but recovery must change:\n{}",
+        combined(&output)
     );
-    let stderr = str::from_utf8(&output.stderr).unwrap_or("");
+    let stderr = stderr(&output);
     let envelope: Value = serde_json::from_str(
         stderr
             .lines()
@@ -131,11 +227,5 @@ fn land_unmanaged_main_on_native_recommends_thread_list() {
     .unwrap_or_else(|err| panic!("JSON envelope: {err}\n{stderr}"));
     assert_eq!(envelope["kind"], "imported_git_ref_not_managed_thread");
     assert_eq!(envelope["primary_command"], "heddle thread list");
-    assert!(
-        !stderr.contains("repair git")
-            && !envelope["primary_command"]
-                .as_str()
-                .is_some_and(|command| command.contains("repair git")),
-        "native authority must not recommend repair git: {envelope}"
-    );
+    assert_no_repair_git(&output, "land --thread main");
 }
