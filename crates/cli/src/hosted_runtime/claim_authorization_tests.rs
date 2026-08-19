@@ -62,6 +62,7 @@ impl MockWeftAccount {
         promotion: &MockPromotion<'_>,
     ) -> bool {
         if self.root_credential_id.is_some()
+            || !claim.consent_unexpired(chrono::Utc::now().timestamp_millis())
             || Ed25519Signer::verify_with_public_key(
                 &pre_consent_message(claim, promotion.handle, promotion.nonce).unwrap(),
                 agent_public_key,
@@ -83,7 +84,7 @@ impl MockWeftAccount {
 }
 
 #[test]
-fn consent_signatures_match_the_landed_weft_contract() {
+fn consent_signatures_round_trip_the_local_builders() {
     let signer = Ed25519Signer::generate().expect("signer");
     let mut claim = state(hex::encode(signer.public_key()));
     assert!(claim.reissue(b"claim-secret", i64::MAX));
@@ -97,7 +98,7 @@ fn consent_signatures_match_the_landed_weft_contract() {
         signer.public_key(),
         &pre_signature,
     )
-    .expect("weft-compatible pre-consent verifies");
+    .expect("local pre-consent verifies");
 
     let promote = signed_promote_consent(&claim, "human-handle", "Y3JlZGVudGlhbA", &signer)
         .expect("signed promote-consent");
@@ -107,10 +108,94 @@ fn consent_signatures_match_the_landed_weft_contract() {
         signer.public_key(),
         &promote_signature,
     )
-    .expect("weft-compatible promote-consent verifies");
+    .expect("local promote-consent verifies");
 
     assert_eq!(pre.account_id, OWNER_ID);
     assert_eq!(promote.account_id, OWNER_ID);
+}
+
+#[test]
+fn consent_builders_encode_the_v1_counted_fields() {
+    let mut claim = state("11".repeat(32));
+    assert!(claim.reissue(b"claim-secret", 1_700_000_000_000));
+    let nonce = b"0123456789abcdef";
+    let pre = pre_consent_message(&claim, "human-handle", nonce).expect("pre-consent bytes");
+    let promote = promote_consent_message(&claim, "human-handle", "Y3JlZGVudGlhbA")
+        .expect("promote-consent bytes");
+
+    assert_eq!(
+        pre,
+        counted(&[
+            b"heddle-agent-pre-consent-v1",
+            OWNER_ID.as_bytes(),
+            b"human-handle",
+            claim.node_id.as_bytes(),
+            nonce,
+        ])
+    );
+    assert_eq!(
+        promote,
+        counted(&[
+            b"heddle-agent-promote-consent-v1",
+            OWNER_ID.as_bytes(),
+            b"human-handle",
+            b"Y3JlZGVudGlhbA",
+        ])
+    );
+}
+
+#[test]
+fn expired_consent_is_not_produced_or_accepted() {
+    let signer = Ed25519Signer::generate().expect("signer");
+    let mut claim = state(hex::encode(signer.public_key()));
+    assert!(claim.reissue(b"claim-secret", chrono::Utc::now().timestamp_millis() - 1));
+    let nonce = b"0123456789abcdef";
+
+    assert!(
+        signed_pre_consent(&claim, "human-handle", nonce, &signer).is_err(),
+        "expired pre-consent must not be issued"
+    );
+    assert!(
+        signed_promote_consent(&claim, "human-handle", "Y3JlZGVudGlhbA", &signer).is_err(),
+        "expired promote-consent must not be issued"
+    );
+
+    let pre_bytes = pre_consent_message(&claim, "human-handle", nonce).expect("expired encoding");
+    let promote_bytes = promote_consent_message(&claim, "human-handle", "Y3JlZGVudGlhbA")
+        .expect("expired encoding");
+    let pre_signature = signer.sign(&pre_bytes).expect("sign stale pre-consent");
+    let promote_signature = signer
+        .sign(&promote_bytes)
+        .expect("sign stale promote-consent");
+    let mut account = MockWeftAccount {
+        owner_id: claim.owner_id,
+        spool_owner_id: claim.owner_id,
+        root_credential_id: None,
+    };
+    assert!(
+        !account.promote(
+            &claim,
+            signer.public_key(),
+            &MockPromotion {
+                handle: "human-handle",
+                nonce,
+                pre_signature: &pre_signature,
+                credential_id: "Y3JlZGVudGlhbA",
+                promote_signature: &promote_signature,
+            },
+        ),
+        "expired consent must not be accepted locally"
+    );
+}
+
+fn counted(parts: &[&[u8]]) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    for part in parts {
+        let length = u32::try_from(part.len()).expect("test field fits in u32");
+        encoded.extend_from_slice(&length.to_be_bytes());
+        encoded.extend_from_slice(part);
+    }
+    encoded
 }
 
 #[test]

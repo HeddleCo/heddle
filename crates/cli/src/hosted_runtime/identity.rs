@@ -11,7 +11,7 @@ use weft_client_shim::CliContext;
 use super::{
     HostedAuthMode, HostedSession, agent_node_identity,
     auth::{cmd_auth_derive_agent, headless_token_metadata, resolve_server},
-    hosted::resolve_hosted_credential,
+    hosted::{canonical_server_authority, resolve_hosted_credential},
     identity_server,
     identity_state::{self, ClaimState},
 };
@@ -240,6 +240,7 @@ fn reissue(server: &str, ttl_secs: u64) -> Result<(String, String)> {
     if state.server != server {
         bail!("claim state belongs to {}, not {server}", state.server);
     }
+    let origin = claim_web_origin(server)?;
     let mut secret = [0_u8; 32];
     getrandom::fill(&mut secret).context("generating claim secret")?;
     let ttl_millis = i64::try_from(ttl_secs)?
@@ -254,11 +255,46 @@ fn reissue(server: &str, ttl_secs: u64) -> Result<(String, String)> {
     }
     identity_state::store(&state)?;
     let encoded_secret = URL_SAFE_NO_PAD.encode(secret);
-    let url = format!(
-        "https://heddle.sh/claim/hcl1.{}.{}",
-        state.node_id, encoded_secret
-    );
-    Ok((state.node_id, url))
+    let node_id = state.node_id;
+    let url = claim_url(&origin, &node_id, &encoded_secret);
+    Ok((node_id, url))
+}
+
+#[cfg(test)]
+pub(crate) fn claim_link_url(server: &str, node_id: &str, encoded_secret: &str) -> Result<String> {
+    Ok(claim_url(
+        &claim_web_origin(server)?,
+        node_id,
+        encoded_secret,
+    ))
+}
+
+/// Public web origin that may host `/claim/...` for `server`.
+///
+/// Default Heddle API hosts share `https://heddle.sh`. Any other HTTPS
+/// authority is used as-is. Non-HTTPS or unparseable servers are refused so a
+/// self-hosted claim secret is never placed on heddle.sh.
+pub(crate) fn claim_web_origin(server: &str) -> Result<String> {
+    let authority = canonical_server_authority(server).with_context(|| {
+        format!("refusing to mint a claim URL for {server}: need an HTTPS server origin")
+    })?;
+    let url = reqwest::Url::parse(&authority).context("claim server origin is not a valid URL")?;
+    let Some(host) = url.host_str() else {
+        bail!("refusing to mint a claim URL for {server}: origin has no host");
+    };
+    if hosted_heddle_web_host(host) {
+        return Ok("https://heddle.sh".to_string());
+    }
+    Ok(authority)
+}
+
+fn claim_url(origin: &str, node_id: &str, encoded_secret: &str) -> String {
+    format!("{origin}/claim/hcl1.{node_id}.{encoded_secret}")
+}
+
+fn hosted_heddle_web_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host == "heddle.sh" || host.ends_with(".heddle.sh")
 }
 
 fn print_identity(

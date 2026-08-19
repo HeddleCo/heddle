@@ -167,6 +167,12 @@ pub(crate) fn consent_reply(
             "account claim is already complete",
         ));
     }
+    if !state.consent_unexpired(chrono::Utc::now().timestamp_millis()) {
+        return Err(failure(
+            CallFailureCode::Unauthenticated,
+            "claim consent has expired",
+        ));
+    }
     match parse_request(body)? {
         ClaimRequest::PreConsent { handle, nonce } => {
             validate_handle(&handle)?;
@@ -205,6 +211,7 @@ pub(crate) fn signed_pre_consent(
     nonce: &[u8],
     signer: &Ed25519Signer,
 ) -> Result<AgentConsent, CallFailure> {
+    refuse_stale_consent(state)?;
     let statement = pre_consent_message(state, handle, nonce)?;
     let signature = URL_SAFE_NO_PAD.encode(signer.sign(&statement).map_err(internal_failure)?);
     Ok(AgentConsent {
@@ -220,6 +227,7 @@ pub(crate) fn signed_promote_consent(
     credential_id: &str,
     signer: &Ed25519Signer,
 ) -> Result<AgentConsent, CallFailure> {
+    refuse_stale_consent(state)?;
     let statement = promote_consent_message(state, handle, credential_id)?;
     let signature = URL_SAFE_NO_PAD.encode(signer.sign(&statement).map_err(internal_failure)?);
     Ok(AgentConsent {
@@ -254,6 +262,16 @@ pub(crate) fn promote_consent_message(
         handle.as_bytes(),
         credential_id.as_bytes(),
     ])
+}
+
+fn refuse_stale_consent(state: &ClaimState) -> Result<(), CallFailure> {
+    if state.consent_unexpired(chrono::Utc::now().timestamp_millis()) {
+        return Ok(());
+    }
+    Err(failure(
+        CallFailureCode::Unauthenticated,
+        "claim consent has expired",
+    ))
 }
 
 fn encode_counted(parts: &[&[u8]]) -> Result<Vec<u8>, CallFailure> {
