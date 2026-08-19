@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! CLI adapter for the core diff facade.
 
+use std::path::Path;
+
 use anyhow::{Result, anyhow};
 use heddle_core::{
     DiffOptions, DiffReport, PlainGitDiffProbe, diff as core_diff, diff_worktree_status,
     plain_git_head_diff,
 };
 use objects::worktree::WorktreeStatus;
-use repo::{Config, Repository, RepositoryCapability};
+use repo::{Config, Repository, RepositoryCapability, discover_heddle_root};
 
 use super::{
     super::verification_health::{
@@ -17,6 +19,7 @@ use super::{
     diff_output::{
         print_context, print_diff, print_diff_patch, print_semantic_changes, print_stat,
     },
+    diff_paths::classify_diff_refs,
 };
 use crate::{
     cli::{Cli, should_output_json},
@@ -28,6 +31,8 @@ pub fn cmd_diff(
     cli: &Cli,
     from: Option<String>,
     to: Option<String>,
+    path_filters: Vec<String>,
+    trailing_paths: Vec<String>,
     semantic: bool,
     stat: bool,
     name_only: bool,
@@ -37,12 +42,20 @@ pub fn cmd_diff(
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
+    let opened = open_repo_for_classification(start)?;
+    let mut extra_paths = path_filters;
+    extra_paths.extend(trailing_paths);
+    let classified = classify_diff_refs(start, opened.as_ref(), from, to, extra_paths);
+    let from = classified.from;
+    let to = classified.to;
+    let paths = classified.paths;
     let from_is_head_or_default = from
         .as_deref()
         .map(|spec| matches!(spec, "HEAD" | "@"))
         .unwrap_or(true);
 
-    if to.is_none()
+    if opened.is_none()
+        && to.is_none()
         && from_is_head_or_default
         && let Some(probe) = build_plain_git_verification_probe(start)?
     {
@@ -52,6 +65,7 @@ pub fn cmd_diff(
         let options = diff_options(
             from,
             to,
+            paths,
             semantic,
             stat,
             name_only,
@@ -70,13 +84,17 @@ pub fn cmd_diff(
         return render_diff_report(cli, None, &report, stat, name_only, show_context, patch);
     }
 
-    let repo = Repository::open(start)?;
+    let repo = match opened {
+        Some(repo) => repo,
+        None => Repository::open(start)?,
+    };
     let trust = (repo.capability() == RepositoryCapability::GitOverlay)
         .then(|| build_repository_verification_state(&repo));
     let json = should_output_json(cli, Some(repo.config()));
     let options = diff_options(
         from.clone(),
         to.clone(),
+        paths,
         semantic,
         stat,
         name_only,
@@ -155,6 +173,7 @@ pub fn cmd_diff(
 fn diff_options(
     from: Option<String>,
     to: Option<String>,
+    paths: Vec<String>,
     semantic: bool,
     stat: bool,
     name_only: bool,
@@ -172,6 +191,7 @@ fn diff_options(
         unified,
         show_context,
         include_patch_text: patch || json,
+        paths,
     }
 }
 
@@ -204,6 +224,16 @@ fn render_diff_report(
         }
     }
     Ok(())
+}
+
+/// Open an existing Heddle store for `diff` classification. Missing stores
+/// stay missing so plain Git can still be probed; any other open error
+/// is returned instead of being dropped.
+fn open_repo_for_classification(start: &Path) -> Result<Option<Repository>> {
+    if discover_heddle_root(start).is_none() {
+        return Ok(None);
+    }
+    Ok(Some(Repository::open(start)?))
 }
 
 fn clone_worktree_status(status: &WorktreeStatus) -> WorktreeStatus {

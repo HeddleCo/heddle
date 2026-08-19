@@ -11,9 +11,11 @@ it refuses without changing files only when the recovery state is absent or
 when recovery would overwrite a differing local change at the same path.
 
 Undo operations that materialize an earlier tree are explicitly destructive.
-Run `heddle undo --preview` to inspect them and `heddle undo --hard` to permit
-the worktree rewind. Plain `heddle undo` refuses before changing repository
-state or files when the selected inverse would rewrite the worktree.
+Run `heddle undo --preview` (or `heddle undo --hard --preview`) to inspect them
+and `heddle undo --hard` to permit the worktree rewind. `--preview` is a
+read-only alias of `--dry-run` and can be combined with `--hard`. Plain
+`heddle undo` refuses before changing repository state or files when the
+selected inverse would rewrite the worktree.
 
 This document describes the user-facing surface shipped under
 [HeddleCo/heddle#23](https://github.com/HeddleCo/heddle/issues/23). The
@@ -84,7 +86,8 @@ contracts below are enforced by integration tests in
 
 - **Explicit destructive opt-in.** If the selected inverse would materialize
   an earlier tree, plain `heddle undo` refuses before mutation and points to
-  `--preview` and `--hard`. `heddle undo --hard` still refuses if the worktree
+  `--preview` and `--hard`. `heddle undo --hard --preview` previews that
+  rewind without applying it. `heddle undo --hard` still refuses if the worktree
   is dirty and surfaces the exact paths that would otherwise be lost. Capture
   the changes with `heddle capture -m "..."` (or move them) and retry.
 - **Recovery overlays unrelated changes.** `heddle undo --recover` restores

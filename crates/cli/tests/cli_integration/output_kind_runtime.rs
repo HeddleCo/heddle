@@ -242,7 +242,17 @@ fn thread_operator_envelopes_emit_approved_thread_kinds() {
 #[test]
 fn thread_promote_and_cleanup_emit_approved_thread_kinds() {
     let temp = init_and_capture();
-    heddle(&["start", "promo"], Some(temp.path())).expect("start promo thread");
+    let promo = temp.path().join("promo-checkout");
+    heddle(
+        &[
+            "start",
+            "promo",
+            "--path",
+            promo.to_str().expect("utf-8 promo path"),
+        ],
+        Some(temp.path()),
+    )
+    .expect("start promo thread");
 
     let promote = heddle_json(&["thread", "promote", "promo"], &temp);
     assert_output_kind(&promote, "thread_promote");

@@ -177,7 +177,7 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
         name: thread_name.clone(),
         from: None,
         path: None,
-        workspace,
+        workspace: Some(workspace),
         agent_provider: None,
         agent_model: None,
         task: Some(format!("try: {}", display_cmd(&args.command))),

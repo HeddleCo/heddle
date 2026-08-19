@@ -3548,7 +3548,7 @@ fn test_cli_push_defaults_to_current_attached_thread() {
                 "start",
                 "feature/push-default",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(source.path()),
         )
@@ -3821,7 +3821,7 @@ fn native_push_named_mismatched_thread_refuses_without_force() {
     // tip differs from main's.
     let started: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "start", "feat-x", "--workspace", "auto"],
+            &["--output", "json", "start", "feat-x", "--workspace", "solid"],
             Some(source.path()),
         )
         .unwrap(),
@@ -3956,7 +3956,7 @@ fn native_push_explicit_state_overrides_named_thread_tip() {
 
     let started: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "start", "feat-x", "--workspace", "auto"],
+            &["--output", "json", "start", "feat-x", "--workspace", "solid"],
             Some(source.path()),
         )
         .unwrap(),
@@ -4004,7 +4004,7 @@ fn native_push_all_threads_fans_out_every_thread() {
 
     let started: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "start", "feat-x", "--workspace", "auto"],
+            &["--output", "json", "start", "feat-x", "--workspace", "solid"],
             Some(source.path()),
         )
         .unwrap(),

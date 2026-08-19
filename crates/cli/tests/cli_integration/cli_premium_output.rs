@@ -70,7 +70,7 @@ fn merged_thread_list_reads_integrated_not_actionable() {
                 "start",
                 "feature/polish",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(temp.path()),
         )

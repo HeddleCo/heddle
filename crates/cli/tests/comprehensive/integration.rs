@@ -18,7 +18,7 @@ fn test_full_workflow_basic() {
                 "start",
                 "feature",
                 "--workspace",
-                "auto",
+                "solid",
             ],
             Some(temp.path()),
         )

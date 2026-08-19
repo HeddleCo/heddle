@@ -182,6 +182,9 @@ pub fn cmd_start(cli: &Cli, args: ThreadStartArgs) -> Result<()> {
     // Pure option preflight (name + path isolation flags) before materialization.
     let start_plan = plan_thread_start(&thread_start_options_from_args(&args))
         .map_err(|ThreadPlanError::InvalidName(err)| anyhow!(thread_name_invalid_advice(&err)))?;
+    if start_would_hide_checkout(&args) {
+        return Err(anyhow!(start_requires_explicit_path_advice(&args.name)));
+    }
     if start_plan.requires_clean_worktree {
         ensure_worktree_clean(&repo, "start thread")?;
     }
@@ -928,6 +931,19 @@ pub(crate) fn thread_name_invalid_advice(err: &ThreadIdError) -> RecoveryAdvice 
     )
 }
 
+/// Refuse a user-facing `start` that would hide the checkout under `.heddle/threads/`.
+pub(crate) fn start_requires_explicit_path_advice(name: &str) -> RecoveryAdvice {
+    let primary = format!("heddle start {name} --path ../{name}");
+    RecoveryAdvice::invalid_usage(
+        "start_requires_path",
+        "start without --path would hide the checkout under .heddle/threads/",
+        format!(
+            "Pass an explicit checkout directory: `{primary}`. To stay on this checkout, use `heddle thread create {name}` then `heddle thread switch {name}`."
+        ),
+        primary,
+    )
+}
+
 pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<ThreadOpOutput> {
     // The single user/external creation boundary for every thread start
     // (`heddle start`, `heddle thread start`, `try`, `attempt`, workflow). Reject
@@ -1010,7 +1026,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // to stderr so JSON consumers on stdout are unaffected.
     // Pure warn decision lives in heddle-core; CLI still owns the message.
     if should_warn_materialized_without_reflink(
-        args.workspace == WorkspaceModeArg::Materialized,
+        args.workspace == Some(WorkspaceModeArg::Materialized),
         objects::fs_clone::filesystem_supports_reflink(repo.root()),
     ) {
         eprintln!(
@@ -1540,12 +1556,12 @@ fn resolve_thread_mode(repo: &Repository, args: &ThreadStartArgs) -> ThreadMode 
     let auto_default = resolve_auto_workspace_default(repo, args);
     let supports_reflink = objects::fs_clone::filesystem_supports_reflink(repo.root());
     let mode = plan_thread_mode(
-        workspace_mode_request_from_arg(args.workspace),
+        workspace_mode_request_from_arg(requested_workspace(args)),
         args.path.is_some(),
         auto_default,
         supports_reflink,
     );
-    if matches!(args.workspace, WorkspaceModeArg::Auto)
+    if matches!(requested_workspace(args), WorkspaceModeArg::Auto)
         && mode == ThreadMode::Solid
         && !supports_reflink
     {
@@ -1581,6 +1597,16 @@ fn resolve_auto_workspace_default(
     }
 }
 
+fn requested_workspace(args: &ThreadStartArgs) -> WorkspaceModeArg {
+    args.workspace.unwrap_or(WorkspaceModeArg::Auto)
+}
+
+/// Omitted workspace and `--workspace auto` are the same default: without
+/// `--path` they hide the checkout under `.heddle/threads/`.
+fn start_would_hide_checkout(args: &ThreadStartArgs) -> bool {
+    args.path.is_none() && matches!(requested_workspace(args), WorkspaceModeArg::Auto)
+}
+
 fn workspace_mode_request_from_arg(arg: WorkspaceModeArg) -> WorkspaceModeRequest {
     match arg {
         WorkspaceModeArg::Auto => WorkspaceModeRequest::Auto,
@@ -1595,7 +1621,7 @@ fn thread_start_options_from_args(args: &ThreadStartArgs) -> ThreadStartOptions 
         name: args.name.clone(),
         from: args.from.clone(),
         path: args.path.clone(),
-        workspace: workspace_mode_request_from_arg(args.workspace),
+        workspace: workspace_mode_request_from_arg(requested_workspace(args)),
         parent_thread: args.parent_thread.clone(),
         automated: args.automated,
         task: args.task.clone(),

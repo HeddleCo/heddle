@@ -724,6 +724,13 @@ Existing Git checkout:
 
 If a command refuses, read the first `Next:` line. Heddle fails closed when it
 cannot prove the move is safe.
+
+Restore:
+
+Heddle does not restore one file from a saved state (no restore/checkout/reset).
+Materialize one state in a new checkout with `heddle start <name> --from <state>
+--path <dir>`. Invert one state onto this worktree with `heddle revert <state>`.
+Restore the tree preserved by the last undo with `heddle undo --recover`.
 "#;
 
 const GIT_CONCEPTS_TOPIC: &str = r#"Git and Heddle own different layers.
@@ -810,7 +817,10 @@ identically. The mode only controls bytes-on-disk semantics.\n\
 \n\
 - Use `heddle start <name> --path <dir>` when you want an isolated\n\
   checkout. It creates the thread ref and materializes the checkout in\n\
-  one step.\n\
+  one step. `--path` is required when workspace is omitted or `auto`; without it\n\
+  start refuses instead of hiding a checkout under `.heddle/threads/<name>/`.\n\
+- To stay on this checkout, use `heddle thread create <name>` then\n\
+  `heddle thread switch <name>`.\n\
 - Advanced split form: `heddle thread create <name>` creates only the\n\
   ref, and `heddle thread promote <name> --path <dir>` materializes it\n\
   later. Use this only when you intentionally need to create the ref\n\

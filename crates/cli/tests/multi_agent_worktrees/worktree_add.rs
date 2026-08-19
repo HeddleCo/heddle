@@ -27,31 +27,58 @@ fn materialized_start_writes_base_state_files() {
 }
 
 #[test]
-fn top_level_start_defaults_to_lightweight_in_auto_mode() {
+fn top_level_start_without_path_refuses_hidden_checkout() {
     let main = setup_repo("hello.txt", "world");
 
-    let output = heddle(
+    let err = heddle(
         &["--output", "json", "start", "feature/default-visible"],
         Some(main.path()),
     )
-    .unwrap();
-    let started: Value = serde_json::from_str(&output).unwrap();
-
-    // Top-level `start` with no `--path` resolves to ThreadMode::Materialized
-    // on filesystems that support reflinks (APFS, btrfs, xfs+reflink). On
-    // ext4 / HFS+ / NTFS the auto-mode probe downgrades to `solid` so the
-    // mode label matches what's actually on disk. Both outcomes are correct
-    // — assert the FS-conditional shape.
-    let expected_mode = if objects::fs_clone::filesystem_supports_reflink(main.path()) {
-        "materialized"
-    } else {
-        "solid"
-    };
-    assert_eq!(started["thread"]["thread_mode"], expected_mode);
-    assert_eq!(started["path"], started["execution_path"]);
+    .expect_err("start without --path must refuse a hidden checkout");
     assert!(
-        started["execution_path"].as_str().is_some(),
-        "auto-mode thread still has a managed execution path"
+        err.contains("start without --path")
+            && err.contains(".heddle/threads/")
+            && err
+                .contains("heddle start feature/default-visible --path ../feature/default-visible"),
+        "start without --path must name the hidden checkout and the --path recovery: {err}"
+    );
+    assert!(
+        !main.path().join(".heddle/threads").join("feature").exists()
+            && !main
+                .path()
+                .join(".heddle/threads")
+                .join("default-visible")
+                .exists(),
+        "refusing start must not create a hidden checkout"
+    );
+}
+
+#[test]
+fn top_level_start_workspace_auto_without_path_refuses_hidden_checkout() {
+    let main = setup_repo("hello.txt", "world");
+
+    let err = heddle(
+        &[
+            "--output",
+            "json",
+            "start",
+            "feature/search",
+            "--workspace",
+            "auto",
+        ],
+        Some(main.path()),
+    )
+    .expect_err("start --workspace auto without --path must refuse a hidden checkout");
+    assert!(
+        err.contains("start without --path")
+            && err.contains(".heddle/threads/")
+            && err.contains("heddle start feature/search --path ../feature/search"),
+        "start --workspace auto must name the hidden checkout and the --path recovery: {err}"
+    );
+    assert!(
+        !main.path().join(".heddle/threads").join("feature").exists()
+            && !main.path().join(".heddle/threads").join("search").exists(),
+        "refusing --workspace auto must not create a hidden checkout"
     );
 }
 
@@ -88,7 +115,7 @@ fn thread_promote_preserves_thread_identity() {
     let thread_dir = TempDir::new().unwrap();
 
     heddle(
-        &["start", "feature/promote-me", "--workspace", "auto"],
+        &["start", "feature/promote-me", "--workspace", "solid"],
         Some(main.path()),
     )
     .unwrap();

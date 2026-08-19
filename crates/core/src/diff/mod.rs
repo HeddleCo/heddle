@@ -27,6 +27,7 @@ use sley::{EntryKind, Repository as SleyRepository};
 use crate::ExecutionContext;
 
 mod patch;
+mod path_filter;
 mod types;
 
 pub use patch::{render_diff_patch, render_diff_patch_bytes, write_diff_patch};
@@ -55,6 +56,8 @@ pub struct DiffOptions {
     /// patch-compatible representation is available. CLI callers set this for
     /// `--patch` and for JSON output, preserving the existing machine contract.
     pub include_patch_text: bool,
+    /// Repository-relative path filters. Empty means the full change set.
+    pub paths: Vec<String>,
 }
 
 impl Default for DiffOptions {
@@ -68,6 +71,7 @@ impl Default for DiffOptions {
             unified: 3,
             show_context: false,
             include_patch_text: false,
+            paths: Vec::new(),
         }
     }
 }
@@ -365,6 +369,7 @@ pub fn plain_git_head_diff(probe: &PlainGitDiffProbe, options: &DiffOptions) -> 
 }
 
 fn finalize_diff_report(mut output: DiffReport, options: &DiffOptions) -> Result<DiffReport> {
+    path_filter::apply_path_filters(&mut output, &options.paths)?;
     if options.include_patch_text {
         populate_patch_text(&mut output);
     }

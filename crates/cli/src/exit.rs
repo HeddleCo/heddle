@@ -117,6 +117,7 @@ impl HeddleExitCode {
             "nothing_to_capture"
             | "commit_requires_git_overlay"
             | "commit_capture_required"
+            | "start_requires_path"
             | "git_repair_requires_adoption"
             | "git_repair_requires_import"
             | "dirty_worktree"
@@ -498,6 +499,7 @@ mod tests {
             ("clone_invalid_remote_url", HeddleExitCode::DataErr),
             ("try_global_option_after_separator", HeddleExitCode::Usage),
             ("nothing_to_capture", HeddleExitCode::DataErr),
+            ("start_requires_path", HeddleExitCode::DataErr),
             ("dirty_worktree", HeddleExitCode::DataErr),
             ("state_corrupted", HeddleExitCode::DataErr),
             ("state_not_found", HeddleExitCode::DataErr),

@@ -855,7 +855,7 @@ fn marketing_moments_walkthrough_against_real_fixture() {
                 "start",
                 slug,
                 "--workspace",
-                "auto",
+                "solid",
                 "--task",
                 task,
                 "--agent-provider",

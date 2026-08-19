@@ -20,7 +20,7 @@ fn start_registers_thread_with_agent_metadata() {
             "start",
             "feature/spawned",
             "--workspace",
-            "auto",
+            "solid",
             "--agent-provider",
             "anthropic",
             "--agent-model",
@@ -54,12 +54,12 @@ fn thread_list_returns_all_started_threads() {
     let main = setup_repo("base.txt", "base");
 
     heddle(
-        &["start", "feature/list-a", "--workspace", "auto"],
+        &["start", "feature/list-a", "--workspace", "solid"],
         Some(main.path()),
     )
     .unwrap();
     heddle(
-        &["start", "feature/list-b", "--workspace", "auto"],
+        &["start", "feature/list-b", "--workspace", "solid"],
         Some(main.path()),
     )
     .unwrap();
@@ -146,7 +146,7 @@ fn actor_show_defaults_to_current_thread_actor() {
             "start",
             "feature/current-actor",
             "--workspace",
-            "auto",
+            "solid",
             "--agent-provider",
             "anthropic",
             "--agent-model",
@@ -184,7 +184,7 @@ fn actor_explain_reports_attach_reason_for_current_actor() {
             "start",
             "feature/explain-actor",
             "--workspace",
-            "auto",
+            "solid",
             "--agent-provider",
             "anthropic",
             "--agent-model",
