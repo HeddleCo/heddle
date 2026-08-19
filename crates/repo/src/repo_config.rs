@@ -37,9 +37,9 @@ pub struct RepoConfig {
     pub review: ReviewConfig,
     #[serde(default)]
     pub provenance: ProvenanceConfig,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "RedactConfig::is_empty")]
     pub redact: RedactConfig,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "MetadataConfig::is_empty")]
     pub metadata: MetadataConfig,
 }
 
@@ -60,8 +60,14 @@ pub struct RedactConfig {
     /// Trusted operator public keys. Every signed redaction received
     /// over the wire must match one of these (algorithm + hex-encoded
     /// public key) before the receiver persists the sidecar.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_keys: Vec<TrustedKey>,
+}
+
+impl RedactConfig {
+    fn is_empty(&self) -> bool {
+        self.trusted_keys.is_empty()
+    }
 }
 
 /// One trusted operator key entry. Algorithm and key strings use the
@@ -128,8 +134,14 @@ pub struct KeyBindingRegistryAnchor {
 /// visibility declarations.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MetadataConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_keys: Vec<TrustedKey>,
+}
+
+impl MetadataConfig {
+    fn is_empty(&self) -> bool {
+        self.trusted_keys.is_empty()
+    }
 }
 
 /// Review-epic configuration. Houses the `[review.signals]` sub-table read by
@@ -637,6 +649,23 @@ source_authority = "native"
         assert_eq!(config.storage.delta_search, DeltaSearchConfig::default());
         assert!(config.redact.trusted_keys.is_empty());
         assert!(config.metadata.trusted_keys.is_empty());
+    }
+
+    #[test]
+    #[test]
+    fn empty_trust_tables_are_omitted_from_saved_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("config.toml");
+        RepoConfig::default().save(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !saved.contains("[redact]"),
+            "empty redact trust must stay off disk: {saved}"
+        );
+        assert!(
+            !saved.contains("[metadata]"),
+            "empty metadata trust must stay off disk: {saved}"
+        );
     }
 
     #[test]

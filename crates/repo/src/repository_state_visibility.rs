@@ -985,17 +985,7 @@ mod tests {
             attacker.public_key(),
             "fixture keys must be distinct"
         );
-
-        let dir = TempDir::new().unwrap();
-        Repository::init_default(dir.path()).unwrap();
-        let config_path = dir.path().join(".heddle/config.toml");
-        let mut config = std::fs::read_to_string(&config_path).expect("read config");
-        config.push_str(&format!(
-            "\n[metadata]\ntrusted_keys = [{{ algorithm = \"ed25519\", public_key = \"{}\" }}]\n",
-            hex::encode(trusted.public_key())
-        ));
-        std::fs::write(&config_path, config).expect("write trusted metadata key");
-        let repo = Repository::open(dir.path()).expect("reopen with trust list");
+        let (_dir, repo) = repo_trusting_metadata(&trusted);
 
         let state = StateId::from_bytes([9u8; 32]);
         let mut record = sample_record(state, VisibilityTier::Internal);
