@@ -3,10 +3,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-#[cfg(feature = "tree-sitter-symbols")]
-use objects::object::ReverseDependencyIndex;
 use objects::{
-    object::{BindingDelta, ContentHash, ResolvedSemanticEdge, StateId},
+    object::{BindingDelta, ContentHash, ResolvedSemanticEdge, ReverseDependencyIndex, StateId},
     store::ObjectStore,
 };
 
@@ -58,7 +56,6 @@ impl Repository {
             }))
     }
 
-    #[cfg(feature = "tree-sitter-symbols")]
     pub(crate) fn load_reverse_dependency_index(
         &self,
         hash: &ContentHash,

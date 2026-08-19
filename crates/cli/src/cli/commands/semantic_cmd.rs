@@ -23,6 +23,12 @@ use crate::{
 pub fn cmd_semantic(cli: &Cli, command: SemanticCommands) -> Result<()> {
     match command {
         SemanticCommands::Diff { a, b } => super::semantic_diff_cmd::cmd_semantic_diff(cli, a, b),
+        SemanticCommands::Refs {
+            at,
+            importers,
+            callers,
+            anchor,
+        } => super::semantic_refs_cmd::cmd_semantic_refs(cli, at, importers, callers, anchor),
         SemanticCommands::Hot {
             from,
             limit,

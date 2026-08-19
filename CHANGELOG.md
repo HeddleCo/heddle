@@ -15,6 +15,12 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Added
 
+- **Parse-free semantic graph queries.** `heddle semantic refs` answers
+  refs-of, callers-of, and importers-of at any indexed state from the
+  attached semantic index and importer index, without re-parsing. The
+  JSON envelope is the weft#451 Tier-2 body; hosted RPCs remain residual
+  (heddle#1276).
+
 - **Compact-frame reader extracts one tree or state by typed hash.** SoA
   columns reconstruct the canonical object, BLAKE3 typed-hash is checked
   on extraction, and a single corrupt frame byte fails every contained

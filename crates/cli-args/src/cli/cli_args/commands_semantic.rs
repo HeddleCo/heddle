@@ -53,6 +53,24 @@ pub enum SemanticCommands {
         #[arg(long)]
         include_actors: bool,
     },
+    /// Query persisted refs-of, callers-of, or importers-of at a state.
+    ///
+    /// Walks the attached semantic index and importer index only — never
+    /// parses source. Time-travel is free: pass `--at` for any indexed state.
+    Refs {
+        /// State to query. Defaults to HEAD.
+        #[arg(long = "at")]
+        at: Option<String>,
+        /// Report files that import this path (`importers_of`).
+        #[arg(long, conflicts_with_all = ["callers", "anchor"])]
+        importers: Option<String>,
+        /// Restrict refs-of to call edges (`callers_of`).
+        #[arg(long)]
+        callers: bool,
+        /// Symbol anchor as `path:symbol` (for example `src/api.rs:greet`).
+        #[arg(required_unless_present = "importers")]
+        anchor: Option<String>,
+    },
     /// Backfill the content-addressed merkle semantic index over history.
     ///
     /// Native captures already index eagerly; this backfills states that

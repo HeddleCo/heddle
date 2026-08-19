@@ -109,6 +109,7 @@ const SWEPT: &[&str] = &[
     "review health",
     "resolve",
     "semantic diff",
+    "semantic refs",
     // heddle#662 — additive discriminator paths for state inspection,
     // rebase progress JSONL, and conflict-resolution success.
     "show",
@@ -1123,6 +1124,17 @@ fn runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
                 t,
                 vec!["semantic".to_string(), "diff".to_string(), first, second],
             )
+        }
+        "semantic_refs" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("api.rs"), "pub fn greet() -> u8 { 1 }\n").unwrap();
+            std::fs::write(
+                t.path().join("client.rs"),
+                "use crate::api::greet;\npub fn run() { greet(); }\n",
+            )
+            .unwrap();
+            heddle(&["capture", "-m", "graph"], Some(t.path())).expect("capture graph");
+            (t, sv(&["semantic", "refs", "api.rs:greet"]))
         }
         "discuss_open" => {
             let t = init_fixture();

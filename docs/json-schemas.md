@@ -3580,6 +3580,14 @@ for its two state arguments without parsing source:
 {"output_kind": "semantic_diff", "from_state": "hs-0000000000000000000000000000000000000000000000000000", "to_state": "hs-1111111111111111111111111111111111111111111111111111", "deltas": [{"change": "modified", "anchor": {"file": "src/lib.rs", "symbol": "calculate"}, "kind": "function", "old_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "new_hash": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}]}
 ```
 
+`heddle semantic refs --output json` emits persisted refs-of, callers-of, or
+importers-of at one state without parsing source. This envelope is the
+weft#451 Tier-2 body (`SemanticGraphQueryResponse`); hosted RPCs remain residual.
+
+```json
+{"output_kind": "semantic_refs", "state_id": "hs-0000000000000000000000000000000000000000000000000000", "kind": "refs_of", "anchor": {"file": "src/api.rs", "symbol": "greet"}, "path": null, "index_present": true, "refs": [{"source_path": "src/client.rs", "source_occurrence": 1, "name": "greet", "role": "call", "kind": "calls", "span": {"start": 40, "end": 45}, "target": {"file": "src/api.rs", "symbol": "greet"}, "target_definition": 0}], "importers": []}
+```
+
 ## Other verbs
 
 The following verbs also emit `--output json`. Their shapes follow the same

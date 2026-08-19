@@ -21,6 +21,7 @@ mod redaction;
 mod risk_signal;
 mod semantic_change;
 mod semantic_edges;
+mod semantic_graph_query;
 mod semantic_index;
 mod semantic_reverse_deps;
 mod session;
@@ -80,6 +81,9 @@ pub use risk_signal::{
 };
 pub use semantic_change::{ChangeImportance, ModificationKind, SemanticChange};
 pub use semantic_edges::{BindingDelta, FileBindingDelta, ResolvedSemanticEdge, SemanticEdgeKind};
+pub use semantic_graph_query::{
+    SemanticGraphQueryKind, SemanticGraphQueryRequest, SemanticGraphQueryResponse, SemanticGraphRef,
+};
 pub use semantic_index::{
     ByteSpan, ImportBinding, ImportEntry, ImportKindTag, OccurrenceEntry, OccurrenceRole,
     ScopeEntry, ScopeKind, SemanticEntryKind, SemanticFileFacts, SemanticFileNode,
