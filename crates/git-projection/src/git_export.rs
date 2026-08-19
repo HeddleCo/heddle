@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use objects::{
     error::HeddleError,
-    object::{ContentHash, MarkerName, State, StateId, ThreadName, TreeEntryTarget},
+    object::{AnnotatedTag, ContentHash, MarkerName, State, StateId, ThreadName, TreeEntryTarget},
     store::ObjectStore,
 };
 use repo::{AudienceTier, Repository as HeddleRepository, visible};
@@ -1377,8 +1377,8 @@ fn project_desired_refs(
             continue;
         };
         if let Some(git_oid) = mapping.get_git(&state_id) {
-            let target =
-                native_annotated_tag_oid(heddle_repo, marker_name, state_id)?.unwrap_or(git_oid);
+            let target = native_annotated_tag_oid(heddle_repo, marker_name, state_id, git_oid)?
+                .unwrap_or(git_oid);
             desired.insert(format!("refs/tags/{marker_name}"), target);
         }
     }
@@ -1405,6 +1405,7 @@ fn native_annotated_tag_oid(
     heddle_repo: &HeddleRepository,
     marker_name: &MarkerName,
     state_id: StateId,
+    mapped_commit: ObjectId,
 ) -> GitProjectionResult<Option<ObjectId>> {
     for hash in heddle_repo.store().list_annotated_tags()? {
         let Some(tag) = heddle_repo.store().get_annotated_tag(&hash)? else {
@@ -1413,6 +1414,12 @@ fn native_annotated_tag_oid(
         if tag.marker().is_some_and(|marker| {
             marker.name == marker_name.as_str() && marker.peeled_state == state_id
         }) {
+            let peeled = peel_native_annotated_tag(heddle_repo, &tag)?;
+            if peeled != mapped_commit {
+                return Err(GitProjectionError::Git(format!(
+                    "annotated tag {marker_name} Git target peels to {peeled}, which disagrees with mapped commit {mapped_commit} for peeled_state {state_id}"
+                )));
+            }
             return tag
                 .git_oid()
                 .map(Some)
@@ -1420,6 +1427,55 @@ fn native_annotated_tag_oid(
         }
     }
     Ok(None)
+}
+
+fn peel_native_annotated_tag(
+    heddle_repo: &HeddleRepository,
+    tag: &AnnotatedTag,
+) -> GitProjectionResult<ObjectId> {
+    let mut current = tag.clone();
+    let mut seen = HashSet::new();
+    loop {
+        let hash = current.hash();
+        if !seen.insert(hash) {
+            return Err(GitProjectionError::Git(format!(
+                "annotated tag {hash} has a cycle in target_tag"
+            )));
+        }
+        let git_target = current
+            .git_target()
+            .map_err(|error| GitProjectionError::Git(error.to_string()))?;
+        let git_type = current
+            .git_target_type()
+            .map_err(|error| GitProjectionError::Git(error.to_string()))?;
+        match git_type {
+            GitObjectType::Commit => return Ok(git_target),
+            GitObjectType::Tag => {
+                let inner_hash = current.target_tag().ok_or_else(|| {
+                    GitProjectionError::Git(format!(
+                        "annotated tag {hash} has Git type tag but no target_tag"
+                    ))
+                })?;
+                let inner = heddle_repo
+                    .store()
+                    .get_annotated_tag(&inner_hash)?
+                    .ok_or_else(|| {
+                        GitProjectionError::Git(format!(
+                            "annotated tag {hash} references missing inner tag {inner_hash}"
+                        ))
+                    })?;
+                current
+                    .bind_target_tag(&inner)
+                    .map_err(|error| GitProjectionError::Git(error.to_string()))?;
+                current = inner;
+            }
+            GitObjectType::Blob | GitObjectType::Tree => {
+                return Err(GitProjectionError::Git(format!(
+                    "annotated tag {hash} Git target {git_target} is a {git_type:?}, not a commit"
+                )));
+            }
+        }
+    }
 }
 
 /// The Git OID the public branch should lag to for a thread whose raw tip is
@@ -1533,3 +1589,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "git_export_annotated_tag_tests.rs"]
+mod annotated_tag_export_tests;
