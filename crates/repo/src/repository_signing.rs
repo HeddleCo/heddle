@@ -128,9 +128,12 @@ impl Repository {
         })
     }
 
-    /// Verify the author signature on client-authored metadata. Transport
-    /// write authority decides whether the principal may submit the record;
-    /// this signature only protects authorship and payload integrity.
+    /// Verify hosted metadata against this repository's trusted client keys.
+    ///
+    /// A signature only proves the payload was signed by the key *embedded in
+    /// the record*. Acceptance requires that key to appear in
+    /// `[metadata] trusted_keys`, and cryptographic verification uses that
+    /// configured key — not attacker-supplied key bytes.
     pub(crate) fn verify_client_metadata_signature(
         &self,
         payload: &[u8],
@@ -138,16 +141,27 @@ impl Repository {
     ) -> Result<()> {
         let signature = signature.ok_or_else(|| {
             HeddleError::InvalidObject(
-                "hosted metadata is unsigned; a client signature is required".to_string(),
+                "hosted metadata is unsigned; a trusted client signature is required".to_string(),
             )
         })?;
-        let public_key = hex::decode(&signature.public_key).map_err(|error| {
+        let trusted = super::repo_config::TrustedKey::find(
+            &self.config().metadata.trusted_keys,
+            &signature.algorithm,
+            &signature.public_key,
+        )
+        .ok_or_else(|| {
+            HeddleError::InvalidObject(format!(
+                "hosted metadata signer is not trusted ({}:{})",
+                signature.algorithm, signature.public_key
+            ))
+        })?;
+        let public_key = hex::decode(&trusted.public_key).map_err(|error| {
             HeddleError::InvalidObject(format!("invalid metadata public key: {error}"))
         })?;
         let signature_bytes = hex::decode(&signature.signature).map_err(|error| {
             HeddleError::InvalidObject(format!("invalid metadata signature: {error}"))
         })?;
-        verify_payload_signature(payload, &signature.algorithm, &public_key, &signature_bytes)
+        verify_payload_signature(payload, &trusted.algorithm, &public_key, &signature_bytes)
             .map_err(|error| {
                 HeddleError::InvalidObject(format!(
                     "hosted metadata signature failed verification: {error}"

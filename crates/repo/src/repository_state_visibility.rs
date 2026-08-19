@@ -913,6 +913,21 @@ mod tests {
         }
     }
 
+    fn repo_trusting_metadata(signer: &dyn Signer) -> (TempDir, Repository) {
+        let dir = TempDir::new().unwrap();
+        Repository::init_default(dir.path()).unwrap();
+        let config_path = dir.path().join(".heddle/config.toml");
+        let mut config = crate::repository::repo_config::RepoConfig::load(&config_path).unwrap();
+        config.metadata.trusted_keys.push(crate::TrustedKey {
+            algorithm: signer.algorithm().to_string(),
+            public_key: hex::encode(signer.public_key()),
+            label: Some("test-client".to_string()),
+        });
+        config.save(&config_path).unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        (dir, repo)
+    }
+
     fn sign_visibility(record: &mut StateVisibility, signer: &dyn Signer) {
         let signature = signer
             .sign(&record.canonical_signing_payload())
@@ -925,9 +940,9 @@ mod tests {
     }
 
     #[test]
-    fn writer_signed_visibility_needs_no_owner_capability_and_covers_tier() {
+    fn wire_visibility_requires_trusted_signature_and_covers_tier() {
         let signer = Ed25519Signer::generate().expect("keygen");
-        let (_dir, repo) = fresh_repo();
+        let (_dir, repo) = repo_trusting_metadata(&signer);
         let state = StateId::from_bytes([4u8; 32]);
         let mut record = sample_record(state, VisibilityTier::Internal);
 
@@ -942,7 +957,7 @@ mod tests {
             .encode()
             .unwrap();
         repo.accept_wire_state_visibility(state, &signed)
-            .expect("ordinary write-authorized visibility");
+            .expect("trusted signed visibility");
 
         let tampered_state = StateId::from_bytes([5u8; 32]);
         let mut tampered = sample_record(
@@ -956,6 +971,43 @@ mod tests {
         let forged = StateVisibilityBlob::new(vec![tampered]).encode().unwrap();
         repo.accept_wire_state_visibility(tampered_state, &forged)
             .expect_err("relay must not widen signed visibility");
+    }
+
+    #[test]
+    fn wire_visibility_rejects_self_signed_key_not_in_trusted_set() {
+        // heddle#1405: cryptographic validity against the key embedded in
+        // the sidecar is not enough. The signer must be in the receiver's
+        // configured `[metadata] trusted_keys` list.
+        let trusted = Ed25519Signer::generate().expect("trusted keygen");
+        let attacker = Ed25519Signer::generate().expect("attacker keygen");
+        assert_ne!(
+            trusted.public_key(),
+            attacker.public_key(),
+            "fixture keys must be distinct"
+        );
+        let (_dir, repo) = repo_trusting_metadata(&trusted);
+
+        let state = StateId::from_bytes([9u8; 32]);
+        let mut record = sample_record(state, VisibilityTier::Internal);
+        sign_visibility(&mut record, &attacker);
+        let signed = StateVisibilityBlob::new(vec![record]).encode().unwrap();
+        let err = repo
+            .accept_wire_state_visibility(state, &signed)
+            .expect_err(
+                "a sidecar signed by a key outside the trusted set must be rejected even when \
+                 the embedded key verifies the payload",
+            );
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("not trusted") || chain.contains("untrusted"),
+            "rejection must name the missing trust, got: {chain}"
+        );
+        assert!(
+            !repo
+                .has_visibility_for_state(&state)
+                .expect("has visibility"),
+            "untrusted visibility must not persist"
+        );
     }
 
     #[test]

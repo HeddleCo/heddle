@@ -18,6 +18,7 @@
 
 use std::{fs, process::Command};
 
+use crypto::Signer;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -26,6 +27,15 @@ use super::{assert_json_recovery_advice_fields, heddle, heddle_output};
 fn write_test_private_key(path: &std::path::Path, pem: &str) {
     objects::fs_atomic::write_file_atomic_secret(path, pem.as_bytes())
         .expect("write test private key");
+}
+
+fn trust_redact_public_key(repo: &std::path::Path, public_key_hex: &str) {
+    let config_path = repo.join(".heddle/config.toml");
+    let mut config = fs::read_to_string(&config_path).expect("read config");
+    config.push_str(&format!(
+        "\n[redact]\ntrusted_keys = [{{ algorithm = \"ed25519\", public_key = \"{public_key_hex}\" }}]\n"
+    ));
+    fs::write(&config_path, config).expect("write redact trust list");
 }
 
 /// Bootstrap a repo containing a fake-secret file in a captured state.
@@ -632,12 +642,12 @@ fn redact_apply_signed_propagates_to_cloned_replica() {
     let apply = signed_redact_on_repo_a(&a, &state, &pem_path);
     let redaction_id = apply["redaction_id"].as_str().unwrap().to_string();
 
-    // Set up B. Transport write authority admits the signed redaction;
-    // the signature protects authorship and integrity.
+    // Set up B: init empty repo, trust A's signing key, then pull.
     let b_dir = TempDir::new().unwrap();
     let b_path = b_dir.path().join("replica-b");
     fs::create_dir_all(&b_path).unwrap();
     heddle(&["init"], Some(&b_path)).expect("init B");
+    trust_redact_public_key(&b_path, &hex::encode(signer.public_key()));
     heddle(
         &["remote", "add", "origin", a.path().to_str().unwrap()],
         Some(&b_path),
@@ -742,6 +752,7 @@ fn ordinary_local_sync_does_not_propagate_owner_gated_purge() {
     let b_path = b_dir.path().join("replica-b");
     fs::create_dir_all(&b_path).unwrap();
     heddle(&["init"], Some(&b_path)).expect("init B");
+    trust_redact_public_key(&b_path, &hex::encode(signer.public_key()));
     heddle(
         &["remote", "add", "origin", a.path().to_str().unwrap()],
         Some(&b_path),
@@ -795,12 +806,14 @@ fn tampered_redaction_is_refused_at_pull_boundary() {
     // The above forfeits A's own materialize-side stub correctness;
     // the local invariant break is the point of the test.
 
-    // Transport write authority admits the operation; the rejection comes
-    // from signature verification failing on the tampered canonical payload.
+    // B trusts the signing key, so the trust gate passes — the
+    // rejection comes from signature verification failing on the
+    // tampered canonical payload (Tampered, not UntrustedKey).
     let b_dir = TempDir::new().unwrap();
     let b_path = b_dir.path().join("replica-b");
     fs::create_dir_all(&b_path).unwrap();
     heddle(&["init"], Some(&b_path)).expect("init B");
+    trust_redact_public_key(&b_path, &hex::encode(signer.public_key()));
     heddle(
         &["remote", "add", "origin", a.path().to_str().unwrap()],
         Some(&b_path),
@@ -1041,7 +1054,8 @@ fn redact_after_peer_pull_still_propagates_on_resync() {
     let _ = signed_redact_on_repo_a(&a, &state, &pem_path);
 
     // Re-sync ferries the ordinary sidecar even though every state/tree/blob
-    // is already present on B.
+    // is already present on B. B must trust A's signing key first.
+    trust_redact_public_key(&b_path, &hex::encode(signer.public_key()));
     heddle(
         &["remote", "add", "origin", a.path().to_str().unwrap()],
         Some(&b_path),
@@ -1066,9 +1080,12 @@ fn redact_after_peer_pull_still_propagates_on_resync() {
 }
 
 #[test]
-fn writer_signed_redaction_is_accepted_at_pull_boundary_without_owner_capability() {
+fn untrusted_signed_redaction_is_refused_at_pull_boundary() {
     use crypto::Ed25519Signer;
 
+    // Without a trust check the receiver accepts any self-signed
+    // redaction. B is initialized with an empty `[redact] trusted_keys`
+    // list. The pull must refuse with `UntrustedKey`.
     let (a, state) = setup_repo_with_secret();
     let attacker = Ed25519Signer::generate().unwrap();
     let pem = attacker.to_pem().unwrap();
@@ -1085,17 +1102,11 @@ fn writer_signed_redaction_is_accepted_at_pull_boundary_without_owner_capability
         Some(&b_path),
     )
     .expect("remote add origin");
-    heddle(&["pull", "origin"], Some(&b_path))
-        .expect("ordinary write authority accepts a valid author signature");
-
-    let list: Value = serde_json::from_str(
-        &heddle(&["--output", "json", "redact", "list"], Some(&b_path)).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        list["redactions"].as_array().unwrap().len(),
-        1,
-        "B must receive the writer-authorized redaction"
+    let err = heddle(&["pull", "origin"], Some(&b_path))
+        .expect_err("pull must refuse untrusted signed redaction");
+    assert!(
+        err.contains("untrusted operator key"),
+        "pull rejection must explain the untrusted-key cause: {err}"
     );
 }
 
