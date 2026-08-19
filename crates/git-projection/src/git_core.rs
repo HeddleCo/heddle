@@ -4112,6 +4112,142 @@ mod tests {
         assert_eq!(full_names, vec!["refs/heads/main".to_string()]);
     }
 
+    /// heddle#1414: name membership is not enough. A Git-side writer can
+    /// advance a managed branch; the on-disk tip then no longer matches the
+    /// OID Heddle last recorded writing. The export/push frontier must drop
+    /// that name rather than serve the foreign tip under the managed name.
+    #[test]
+    fn collect_managed_ref_updates_drops_diverged_on_disk_tip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
+        let owned = seed_commit(&repo, "owned");
+        let foreign = seed_commit(&repo, "foreign");
+        let notes = seed_commit(&repo, "notes");
+        set_reference(
+            &repo,
+            "refs/heads/main",
+            foreign,
+            RefPrecondition::MustNotExist,
+            "test: diverged main",
+        )
+        .expect("write diverged main");
+        set_reference(
+            &repo,
+            "refs/heads/kept",
+            owned,
+            RefPrecondition::MustNotExist,
+            "test: matching kept",
+        )
+        .expect("write kept");
+        set_reference(
+            &repo,
+            "refs/heads/unmanaged",
+            owned,
+            RefPrecondition::MustNotExist,
+            "test: foreign name at a heddle oid",
+        )
+        .expect("write unmanaged");
+        set_reference(
+            &repo,
+            "refs/notes/heddle",
+            notes,
+            RefPrecondition::MustNotExist,
+            "test: notes",
+        )
+        .expect("write notes");
+
+        let mut record = HashMap::new();
+        record.insert("refs/heads/main".to_string(), owned);
+        record.insert("refs/heads/kept".to_string(), owned);
+
+        let updates = collect_managed_ref_updates(&repo, &record).expect("collect managed updates");
+        let mut names: Vec<String> = updates.iter().map(full_ref_name).collect();
+        names.sort();
+
+        assert_eq!(
+            names,
+            vec![
+                "refs/heads/kept".to_string(),
+                "refs/notes/heddle".to_string(),
+            ],
+            "diverged main must leave the frontier; matching kept and notes remain"
+        );
+        let main = updates.iter().find(|update| update.name == "main");
+        assert!(
+            main.is_none(),
+            "must not serve the on-disk foreign tip under refs/heads/main, got {main:?}"
+        );
+    }
+
+    /// heddle#1414: dropping a diverged name from the served frontier must
+    /// also keep `plan_destination_reconcile` from copying/pushing that
+    /// foreign tip. A previously exported heddle-owned dest tip is retracted
+    /// rather than fast-forwarded to Git's fork.
+    #[test]
+    fn destination_reconcile_does_not_push_diverged_foreign_tip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
+        let owned = seed_commit(&repo, "owned");
+        let foreign = seed_commit(&repo, "foreign");
+        set_reference(
+            &repo,
+            "refs/heads/main",
+            foreign,
+            RefPrecondition::MustNotExist,
+            "test: diverged main",
+        )
+        .expect("write diverged main");
+        set_reference(
+            &repo,
+            "refs/heads/kept",
+            owned,
+            RefPrecondition::MustNotExist,
+            "test: matching kept",
+        )
+        .expect("write kept");
+
+        let mut record = HashMap::new();
+        record.insert("refs/heads/main".to_string(), owned);
+        record.insert("refs/heads/kept".to_string(), owned);
+        let frontier = collect_managed_ref_updates(&repo, &record).expect("collect managed updates");
+
+        let mut old_at_destination = HashMap::new();
+        old_at_destination.insert("refs/heads/main".to_string(), owned);
+        old_at_destination.insert("refs/heads/kept".to_string(), owned);
+        let previously_exported = old_at_destination.clone();
+
+        let plan = plan_destination_reconcile(
+            &repo,
+            &frontier,
+            None,
+            &old_at_destination,
+            &previously_exported,
+            false,
+        )
+        .expect("plan destination reconcile");
+
+        assert!(
+            plan.writes
+                .iter()
+                .all(|write| write.new != foreign && write.full_name != "refs/heads/main"),
+            "must not write the foreign tip under the managed name, writes={:?}",
+            plan.writes
+                .iter()
+                .map(|write| (&write.full_name, write.new))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            plan.deletes
+                .iter()
+                .any(|delete| delete.full_name == "refs/heads/main" && delete.old == owned),
+            "heddle-owned dest tip for a diverged mirror ref must retract, deletes={:?}",
+            plan.deletes
+                .iter()
+                .map(|delete| (&delete.full_name, delete.old))
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn fast_forward_guard_reports_exact_rewrite_before_after() {
         let tmp = tempfile::TempDir::new().unwrap();
