@@ -61,12 +61,14 @@ pub const CANONICAL_ROOT_COMMANDS: &[&str] = &[
 /// design and this list in the same review; otherwise the source and
 /// `doctor docs` conformance gates fail. `schemas` is retained as the audited
 /// pre-existing Phase 2 regression and must not be mistaken for a canonical
-/// root when that follow-up is handled.
+/// root when that follow-up is handled. `completions` is the public script
+/// verb from heddle#1439; `shell completion` remains the namespaced path.
 pub const APPROVED_NON_EVERYDAY_ROOT_COMMANDS: &[&str] = &[
     "capture",
     "ci",
     "collapse",
     "complete",
+    "completions",
     "daemon",
     "expand",
     "hook",

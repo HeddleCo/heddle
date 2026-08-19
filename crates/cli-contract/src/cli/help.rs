@@ -127,6 +127,10 @@ fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthori
     );
     let _ = writeln!(
         out,
+        "Tab-complete: `heddle completions bash` (also zsh, fish)."
+    );
+    let _ = writeln!(
+        out,
         "In Git Overlay, Heddle uses its embedded Sley engine to operate directly on the checkout's `.git`."
     );
     let _ = writeln!(
@@ -1170,6 +1174,23 @@ mod tests {
                 .lines()
                 .any(|line| line.trim_start().starts_with("commit  ")),
             "default first screen must hide the commit verb unless overlay: {help}"
+        );
+    }
+
+    /// heddle#1439. First-screen help names `heddle completions` so tab
+    /// scripts are findable without `heddle help advanced`.
+    #[test]
+    fn first_screen_mentions_completions() {
+        use clap::CommandFactory;
+        let cmd = crate::cli::cli_args::Cli::command();
+        let help = render_help_for_authority(&cmd, &[], repo::RepositorySourceAuthority::Native);
+        assert!(
+            help.contains("heddle completions"),
+            "first screen must name the public completions verb: {help}"
+        );
+        assert!(
+            help.contains("heddle completions bash"),
+            "first screen should show a concrete install invocation: {help}"
         );
     }
 

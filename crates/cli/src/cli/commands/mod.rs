@@ -112,7 +112,7 @@ pub use command_catalog::{
     root_commands_for_advanced_help, root_commands_for_help_visibility,
 };
 pub use commit::cmd_commit;
-pub use completion::{cmd_complete, cmd_completion};
+pub use completion::{cmd_complete, cmd_completion, cmd_completions};
 pub use context::{
     cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get, cmd_context_history,
     cmd_context_list, cmd_context_rm, cmd_context_set, cmd_context_suggest, cmd_context_supersede,

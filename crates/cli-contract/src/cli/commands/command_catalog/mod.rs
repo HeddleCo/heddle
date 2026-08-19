@@ -2575,6 +2575,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ..MUTATION_BASE
         },
     ),
+    entry(&["completions"], front_door(READ_TEXT, 200)),
     entry(&["shell"], category(READ_TEXT, "repo")),
     entry(&["shell", "init"], READ_TEXT),
     entry(&["shell", "completion"], READ_TEXT),
@@ -4637,6 +4638,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             ShellCommands::Completion { .. } => vec!["shell", "completion"],
             ShellCommands::Prompt => vec!["shell", "prompt"],
         },
+        Commands::Completions { .. } => vec!["completions"],
         Commands::Complete { .. } => vec!["complete"],
         Commands::Resolve(_) => vec!["resolve"],
         #[cfg(feature = "git-overlay")]
