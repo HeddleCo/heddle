@@ -1165,7 +1165,7 @@ export interface HookUninstallSchema {
 }
 
 export interface IdentityClaimLinkSchema {
-  /** Short-lived claim URL on the selected server origin, present only on deliberate mint/reissue. */
+  /** Short-lived heddle.sh bearer URL, present only on deliberate mint/reissue. */
   claim_url?: string | null;
   /** Stable lowercase-hex Iroh NodeId, present when a claim link is minted. */
   node_id?: string | null;
@@ -1177,7 +1177,7 @@ export interface IdentityClaimLinkSchema {
 }
 
 export interface IdentityEnsureSchema {
-  /** Short-lived claim URL on the selected server origin, present only on deliberate mint/reissue. */
+  /** Short-lived heddle.sh bearer URL, present only on deliberate mint/reissue. */
   claim_url?: string | null;
   idempotency_status?: string | null;
   /** Stable lowercase-hex Iroh NodeId, present when a claim link is minted. */
@@ -2231,11 +2231,6 @@ export interface SemanticDiffSchema {
 }
 
 export type SemanticHotSchema = Record<string, unknown>;
-
-export interface SemanticRefsSchema {
-  output_kind: "semantic_refs";
-  [key: string]: unknown;
-}
 
 export interface SessionEntrySchema {
   active: boolean;
@@ -3508,7 +3503,6 @@ export interface HeddleVerbOutputs {
   schemas: SchemasListSchema;
   "semantic diff": SemanticDiffSchema;
   "semantic hot": SemanticHotSchema;
-  "semantic refs": SemanticRefsSchema;
   show: ShowSchema;
   start: StartSchema;
   status: StatusSchema;
@@ -3673,7 +3667,6 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "schemas",
   "semantic diff",
   "semantic hot",
-  "semantic refs",
   "show",
   "start",
   "status",

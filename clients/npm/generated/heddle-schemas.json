@@ -14944,7 +14944,7 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "claim_url": {
-          "description": "Short-lived claim URL on the selected server origin, present only on deliberate mint/reissue.",
+          "description": "Short-lived heddle.sh bearer URL, present only on deliberate mint/reissue.",
           "type": [
             "string",
             "null"
@@ -14987,7 +14987,7 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "claim_url": {
-          "description": "Short-lived claim URL on the selected server origin, present only on deliberate mint/reissue.",
+          "description": "Short-lived heddle.sh bearer URL, present only on deliberate mint/reissue.",
           "type": [
             "string",
             "null"
@@ -27281,23 +27281,6 @@
     "semantic hot": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": true,
-      "title": "GenericJsonObjectSchema",
-      "type": "object"
-    },
-    "semantic refs": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": true,
-      "properties": {
-        "output_kind": {
-          "enum": [
-            "semantic_refs"
-          ],
-          "type": "string"
-        }
-      },
-      "required": [
-        "output_kind"
-      ],
       "title": "GenericJsonObjectSchema",
       "type": "object"
     },

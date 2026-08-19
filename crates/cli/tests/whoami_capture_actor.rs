@@ -119,6 +119,81 @@ fn whoami_reports_init_principal_then_unauthenticated_hosted() {
 }
 
 #[test]
+fn whoami_does_not_bootstrap_a_plain_git_tree() {
+    let temp = TempDir::new().expect("tempdir");
+    let home = temp.path().join("home");
+    let git = temp.path().join("plain-git");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::create_dir_all(&git).expect("git");
+    std::fs::write(
+        home.join("config.toml"),
+        "[principal]\nname = \"Luke\"\nemail = \"luke@example.com\"\n",
+    )
+    .expect("user_config");
+    let init = Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(&git)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("git init");
+    assert!(
+        init.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let whoami = isolated_command(&git, &home, &["whoami", "--output", "json"])
+        .output()
+        .expect("run whoami");
+    assert_success(&whoami, "whoami in plain git");
+    assert!(
+        !git.join(".heddle").exists(),
+        "whoami must not create .heddle"
+    );
+    let exclude = git.join(".git/info/exclude");
+    if exclude.is_file() {
+        let text = std::fs::read_to_string(&exclude).expect("read exclude");
+        assert!(
+            !text.contains(".heddle"),
+            "whoami must not write git excludes:\n{text}"
+        );
+    }
+    let value: Value = serde_json::from_slice(&whoami.stdout).expect("whoami json");
+    assert_eq!(value["capture_actor"]["name"], "Luke");
+    assert_eq!(value["capture_actor"]["source"], "user_config");
+}
+
+#[test]
+fn whoami_fails_closed_on_a_broken_heddle_store() {
+    let temp = TempDir::new().expect("tempdir");
+    let home = temp.path().join("home");
+    let repo = temp.path().join("broken");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::create_dir_all(repo.join(".heddle")).expect("broken sidecar");
+    std::fs::write(repo.join(".heddle/HEAD"), "ref: refs/heads/main\n").expect("HEAD member");
+    std::fs::write(
+        home.join("config.toml"),
+        "[principal]\nname = \"Luke\"\nemail = \"luke@example.com\"\n",
+    )
+    .expect("user_config");
+
+    let whoami = isolated_command(&repo, &home, &["whoami", "--output", "json"])
+        .output()
+        .expect("run whoami");
+    assert!(
+        !whoami.status.success(),
+        "broken store must fail closed, not report a user_config actor:\n{}",
+        output_text(&whoami)
+    );
+    let text = output_text(&whoami);
+    assert!(
+        !text.contains("\"name\":\"Luke\"") && !text.contains("\"name\": \"Luke\""),
+        "must not emit a successful capture actor for a broken store:\n{text}"
+    );
+}
+
+#[test]
 fn whoami_help_names_capture_actor_and_hosted_auth_as_different_objects() {
     let temp = TempDir::new().expect("tempdir");
     let help = isolated_command(temp.path(), temp.path(), &["whoami", "--help"])

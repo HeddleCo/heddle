@@ -80,9 +80,8 @@ pub trait WeftExtensions: Send + Sync {
         command: &(dyn Any + Send + Sync),
     ) -> Result<()>;
 
-    /// `heddle whoami` — report the capture actor (who the next capture is
-    /// attributed to), then hosted auth (token kind, scopes, TTL, signing,
-    /// reachability). These are different objects. `server` is the optional
-    /// `--server` override.
+    /// `heddle whoami` — resolve and report the acting identity (principal,
+    /// token kind, scopes, operation ceiling, TTL, signing + reachability).
+    /// `server` is the optional `--server` override.
     async fn whoami(&self, ctx: &(dyn CliContext + 'static), server: Option<String>) -> Result<()>;
 }
