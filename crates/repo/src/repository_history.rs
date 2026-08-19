@@ -76,7 +76,8 @@ impl ChangedPathFilters {
         self.filters.iter().map(|filter| filter.path.as_str())
     }
 
-    fn matches(&self, candidate: &str) -> bool {
+    /// True when `candidate` matches any filter (exact path or descendant).
+    pub fn matches(&self, candidate: &str) -> bool {
         self.filters.iter().any(|filter| filter.matches(candidate))
     }
 

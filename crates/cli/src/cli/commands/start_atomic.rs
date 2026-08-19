@@ -1402,7 +1402,7 @@ mod tests {
             name: name.to_string(),
             from: Some(from.to_string()),
             path: Some(path.to_path_buf()),
-            workspace: WorkspaceModeArg::Solid,
+            workspace: Some(WorkspaceModeArg::Solid),
             agent_provider: None,
             agent_model: None,
             task: None,
@@ -1425,7 +1425,7 @@ mod tests {
         hydrate: bool,
     ) -> ThreadStartArgs {
         let mut args = solid_args(name, path, from, hydrate);
-        args.workspace = WorkspaceModeArg::Materialized;
+        args.workspace = Some(WorkspaceModeArg::Materialized);
         args
     }
 

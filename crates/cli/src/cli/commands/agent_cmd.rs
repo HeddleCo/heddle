@@ -725,7 +725,7 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
                     name: lane.thread.clone(),
                     from: Some(base_state.clone()),
                     path: Some(lane.path.clone()),
-                    workspace: WorkspaceModeArg::Auto,
+                    workspace: Some(WorkspaceModeArg::Auto),
                     agent_provider: None,
                     agent_model: None,
                     task: Some(lane.title.clone()),

@@ -3,5 +3,6 @@
 
 mod diff_compute;
 mod diff_output;
+mod diff_paths;
 
 pub use diff_compute::cmd_diff;

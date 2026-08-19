@@ -740,6 +740,33 @@ fn test_undo_dry_run_alias_does_not_apply() {
     assert_eq!(head_short(temp.path()), before);
 }
 
+#[test]
+fn test_undo_hard_preview_previews_without_applying() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("a.txt"), "v1").unwrap();
+    heddle_must_succeed(&["capture", "-m", "first"], temp.path());
+    std::fs::write(temp.path().join("a.txt"), "v2").unwrap();
+    heddle_must_succeed(&["capture", "-m", "second"], temp.path());
+    let before = head_short(temp.path());
+
+    let out = heddle_must_succeed(&["undo", "--hard", "--preview"], temp.path());
+    assert_eq!(
+        head_short(temp.path()),
+        before,
+        "--hard --preview must not move HEAD"
+    );
+    assert!(
+        out.to_lowercase().contains("would undo"),
+        "--hard --preview must preview: {out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("a.txt")).unwrap(),
+        "v2",
+        "--hard --preview must not rewind the worktree"
+    );
+}
+
 /// When the state that undo would restore to has been removed from the object
 /// store (gc, oplog truncation, etc.), undo must refuse with a clear,
 /// actionable error rather than partially applying or surfacing a raw

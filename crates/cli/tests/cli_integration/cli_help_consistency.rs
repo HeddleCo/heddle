@@ -242,6 +242,48 @@ fn diff_help_explains_git_compatible_patch_headers() {
     );
 }
 
+#[test]
+fn restore_story_is_documented_and_start_requires_path() {
+    let diff = heddle_help(&["diff", "--help"]);
+    assert!(
+        diff.contains("Heddle does not restore one file")
+            && diff.contains("heddle undo --recover")
+            && diff.contains("heddle revert"),
+        "diff help must document the restore story: {diff}"
+    );
+
+    let revert = heddle_help(&["revert", "--help"]);
+    assert!(
+        revert.contains("no restore/checkout/reset")
+            && revert.contains("heddle start")
+            && revert.contains("heddle undo --recover"),
+        "revert help must say single-file restore is unavailable: {revert}"
+    );
+
+    let undo = heddle_help(&["undo", "--help"]);
+    assert!(
+        undo.contains("heddle undo --hard --preview")
+            && undo.contains("last undo")
+            && undo.contains("no restore/checkout/reset"),
+        "undo help must document --hard --preview and the restore limit: {undo}"
+    );
+
+    let start = heddle_help(&["start", "--help"]);
+    assert!(
+        start.contains("`--path` is required")
+            && start.contains(".heddle/threads/")
+            && start.contains("heddle thread create"),
+        "start help must say --path is required so the checkout is not hidden: {start}"
+    );
+
+    let model = heddle_help(&["help", "model"]);
+    assert!(
+        model.contains("Heddle does not restore one file")
+            && model.contains("heddle undo --recover"),
+        "help model must document the restore story: {model}"
+    );
+}
+
 /// Commit help must explain the capture-to-Git authority boundary.
 #[test]
 fn commit_help_explains_capture_boundary() {

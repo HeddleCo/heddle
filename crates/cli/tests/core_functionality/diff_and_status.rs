@@ -378,3 +378,36 @@ fn test_native_status_warms_helper_for_second_run() {
         "native helper must report a file changed after it becomes ready: {changed}"
     );
 }
+
+#[test]
+fn path_shaped_diff_filters_worktree_instead_of_missing_state() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("NOTES.md"), "keep\n").unwrap();
+    std::fs::write(temp.path().join("other.txt"), "other\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+    std::fs::write(temp.path().join("NOTES.md"), "dirty notes\n").unwrap();
+    std::fs::write(temp.path().join("other.txt"), "dirty other\n").unwrap();
+
+    let positional = heddle_must_succeed(&["diff", "--name-only", "NOTES.md"], temp.path());
+    assert!(
+        positional.contains("NOTES.md"),
+        "positional path must be a worktree filter: {positional}"
+    );
+    assert!(
+        !positional.contains("other.txt"),
+        "positional path must not include other dirty files: {positional}"
+    );
+
+    let separator = heddle_must_succeed(&["diff", "--name-only", "--", "NOTES.md"], temp.path());
+    assert!(
+        separator.contains("NOTES.md") && !separator.contains("other.txt"),
+        "`diff -- PATH` must filter the worktree: {separator}"
+    );
+
+    let flag = heddle_must_succeed(&["diff", "--name-only", "--path", "NOTES.md"], temp.path());
+    assert!(
+        flag.contains("NOTES.md") && !flag.contains("other.txt"),
+        "`diff --path` must filter the worktree: {flag}"
+    );
+}

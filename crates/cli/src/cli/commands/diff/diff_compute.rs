@@ -17,6 +17,7 @@ use super::{
     diff_output::{
         print_context, print_diff, print_diff_patch, print_semantic_changes, print_stat,
     },
+    diff_paths::classify_diff_refs,
 };
 use crate::{
     cli::{Cli, should_output_json},
@@ -28,6 +29,8 @@ pub fn cmd_diff(
     cli: &Cli,
     from: Option<String>,
     to: Option<String>,
+    path_filters: Vec<String>,
+    trailing_paths: Vec<String>,
     semantic: bool,
     stat: bool,
     name_only: bool,
@@ -37,6 +40,13 @@ pub fn cmd_diff(
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
+    let repo = Repository::open(start).ok();
+    let mut extra_paths = path_filters;
+    extra_paths.extend(trailing_paths);
+    let classified = classify_diff_refs(start, repo.as_ref(), from, to, extra_paths);
+    let from = classified.from;
+    let to = classified.to;
+    let paths = classified.paths;
     let from_is_head_or_default = from
         .as_deref()
         .map(|spec| matches!(spec, "HEAD" | "@"))
@@ -52,6 +62,7 @@ pub fn cmd_diff(
         let options = diff_options(
             from,
             to,
+            paths,
             semantic,
             stat,
             name_only,
@@ -77,6 +88,7 @@ pub fn cmd_diff(
     let options = diff_options(
         from.clone(),
         to.clone(),
+        paths,
         semantic,
         stat,
         name_only,
@@ -155,6 +167,7 @@ pub fn cmd_diff(
 fn diff_options(
     from: Option<String>,
     to: Option<String>,
+    paths: Vec<String>,
     semantic: bool,
     stat: bool,
     name_only: bool,
@@ -172,6 +185,7 @@ fn diff_options(
         unified,
         show_context,
         include_patch_text: patch || json,
+        paths,
     }
 }
 

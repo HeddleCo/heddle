@@ -3392,8 +3392,17 @@ fn dirty_git_repo_after_init_can_save_without_adoption() {
     assert_eq!(commit["verification"]["status"], "clean");
     assert_eq!(commit["recommended_action"], Value::Null);
 
+    let checkout = sibling_checkout_path(temp.path(), "improvements");
+    let checkout_str = checkout.to_str().expect("utf-8 path");
     let start = heddle_output(
-        &["--output", "json", "start", "feat/improvements"],
+        &[
+            "--output",
+            "json",
+            "start",
+            "feat/improvements",
+            "--path",
+            checkout_str,
+        ],
         Some(temp.path()),
     )
     .expect("start should run");
@@ -7553,8 +7562,17 @@ fn start_emits_cd_hint_in_text_mode() {
     )
     .unwrap();
 
+    let checkout = sibling_checkout_path(temp.path(), "scratch-thread");
+    let checkout_str = checkout.to_str().expect("utf-8 path");
     let output = heddle(
-        &["--output", "text", "start", "scratch-thread"],
+        &[
+            "--output",
+            "text",
+            "start",
+            "scratch-thread",
+            "--path",
+            checkout_str,
+        ],
         Some(temp.path()),
     )
     .expect("start scratch-thread");
@@ -7696,8 +7714,16 @@ fn start_print_cd_path_returns_only_the_path() {
     )
     .unwrap();
 
+    let checkout = sibling_checkout_path(temp.path(), "scratch-cd");
+    let checkout_str = checkout.to_str().expect("utf-8 path");
     let output = heddle_output(
-        &["start", "scratch-cd", "--print-cd-path"],
+        &[
+            "start",
+            "scratch-cd",
+            "--path",
+            checkout_str,
+            "--print-cd-path",
+        ],
         Some(temp.path()),
     )
     .expect("start --print-cd-path");

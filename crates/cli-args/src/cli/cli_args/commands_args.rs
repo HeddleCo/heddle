@@ -525,15 +525,39 @@ pub struct RetroArgs {
 /// Arguments for the `diff` command.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
+Examples:
+  heddle diff                     # worktree vs HEAD
+  heddle diff NOTES.md            # only that path
+  heddle diff -- NOTES.md         # same, after the path separator
+  heddle diff --path NOTES.md     # same, explicit path filter
+  heddle diff HEAD~1 HEAD -- src  # two states, filtered to src/
+
+Path-shaped positionals and arguments after `--` are worktree/path filters,
+not missing states. `log --path` uses the same filter spelling.
+
+Restore:
+  Heddle does not restore one file from a saved state (no restore/checkout/reset).
+  Materialize one state in a new checkout: heddle start <name> --from <state> --path <dir>
+  Apply the inverse of one state to this worktree: heddle revert <state> [--no-commit]
+  Restore the tree preserved by the last undo: heddle undo --recover
+
 Patch compatibility:
   --patch output uses Git-compatible unified diff, including extended headers for type and mode changes.
 ")]
 pub struct DiffArgs {
-    /// Base state (default: HEAD).
+    /// Base state (default: HEAD). A path-shaped value is a worktree filter.
     pub from: Option<String>,
 
-    /// Target state (default: worktree).
+    /// Target state (default: worktree). A path-shaped value is a worktree filter.
     pub to: Option<String>,
+
+    /// Restrict the diff to these repository-relative paths.
+    #[arg(long = "path", value_name = "PATH")]
+    pub path_filters: Vec<String>,
+
+    /// Paths after `--`. Always treated as worktree/path filters.
+    #[arg(last = true, value_name = "PATH")]
+    pub paths: Vec<String>,
 
     /// Show semantic changes.
     #[arg(long)]
@@ -562,6 +586,14 @@ pub struct DiffArgs {
 
 /// Arguments for the `revert` command.
 #[derive(Clone, Debug, clap::Args)]
+#[command(after_help = "\
+Restore:
+  `revert` applies the inverse of one state's changes. It is not a single-file
+  restore, and Heddle has no restore/checkout/reset verb.
+  Materialize one state in a new checkout: heddle start <name> --from <state> --path <dir>
+  Restore the tree preserved by the last undo: heddle undo --recover
+  Heddle cannot put one file back from a saved state.
+")]
 pub struct RevertArgs {
     /// State to revert.
     pub state: String,
@@ -570,7 +602,7 @@ pub struct RevertArgs {
     #[arg(short = 'm', long)]
     pub message: Option<String>,
 
-    /// Apply changes to worktree without committing.
+    /// Apply the inverse to the worktree without capturing a new state.
     #[arg(long)]
     pub no_commit: bool,
 }
@@ -580,11 +612,19 @@ pub struct RevertArgs {
 #[command(after_help = "\
 Examples:
   heddle undo --preview      # inspect the most recent operation
+  heddle undo --hard --preview  # preview the worktree rewind --hard would apply
   heddle undo --hard         # roll it back and rewind the worktree
   heddle undo -n 3 --hard    # roll back the last three operations
   heddle undo --recover      # restore the state preserved by the last undo
   heddle undo --list         # preview undoable operations on this thread
   heddle undo --dry-run      # show what would change without applying
+
+Restore:
+  `--recover` restores only the last undo's preserved tree as worktree changes.
+  Heddle does not restore one arbitrary file or an arbitrary saved state
+  (no restore/checkout/reset). Materialize a state with
+  `heddle start <name> --from <state> --path <dir>`, or invert one with
+  `heddle revert <state>`.
 
 Undoable operations:
   - heddle capture           (restores HEAD to the pre-capture parent)
@@ -633,7 +673,7 @@ pub struct UndoArgs {
     /// Permit undo to rewind worktree files to the selected operation's prior
     /// state. Without this explicit opt-in, an undo that would rewrite the
     /// worktree refuses before changing repository state or files.
-    #[arg(long, conflicts_with_all = ["list", "preview", "redo", "recover"])]
+    #[arg(long, conflicts_with_all = ["list", "redo", "recover"])]
     pub hard: bool,
 
     /// Re-apply operations that a prior `undo` rewound.
@@ -682,7 +722,13 @@ pub enum WorkspaceModeArg {
 Examples:
   heddle start feature/auth --path ../feature-auth  # create an isolated checkout
   heddle start scratch --path ../scratch            # place the checkout explicitly
-  heddle start fix-flake --task 'fix CI flake'      # attach a task description
+  heddle start fix-flake --path ../fix-flake --task 'fix CI flake'
+
+`--path` is required for the default `auto` workspace. Without it, start
+refuses instead of hiding a checkout under `.heddle/threads/<name>/`.
+Pass `--path ../<name>`, or an explicit `--workspace solid|materialized|virtualized`
+if you want the managed layout. To stay on this checkout, use
+`heddle thread create <name>` then `heddle thread switch <name>`.
 
 Isolated checkouts are Heddle-managed working directories. They do not contain a .git directory; use Heddle commands inside them, and run Git-authority operations through Heddle from the parent Git-overlay repository.
 
@@ -699,13 +745,15 @@ pub struct ThreadStartArgs {
     #[arg(long)]
     pub from: Option<String>,
 
-    /// Filesystem path for the isolated checkout.
+    /// Filesystem path for the isolated checkout. Required so the checkout
+    /// is not hidden under `.heddle/threads/`.
     #[arg(long)]
     pub path: Option<std::path::PathBuf>,
 
-    /// Workspace mode for the thread.
-    #[arg(long, value_enum, default_value_t = WorkspaceModeArg::Auto)]
-    pub workspace: WorkspaceModeArg,
+    /// Workspace mode for the thread. Omitted means `auto`, and then `--path`
+    /// is required so the checkout is not hidden under `.heddle/threads/`.
+    #[arg(long, value_enum)]
+    pub workspace: Option<WorkspaceModeArg>,
 
     /// AI provider name for the registered agent thread.
     #[arg(long, hide = true)]
