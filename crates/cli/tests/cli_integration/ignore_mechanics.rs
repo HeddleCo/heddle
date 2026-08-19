@@ -165,6 +165,10 @@ fn heddleignore_help_topic_prints_the_documented_contract() {
     assert!(help.contains("500 or more paths"));
     assert!(help.contains("[worktree] ignore"));
     assert!(help.contains("no `--path` filter") || help.contains("no `--path`"));
+    assert!(
+        help.contains("cannot un-ignore") && help.contains("identity.toml"),
+        "help must document the reserved .heddle hard-deny: {help}"
+    );
 }
 
 #[test]
@@ -323,6 +327,76 @@ fn removing_gitignore_rule_makes_junk_reappear_in_status_and_capture() {
     .unwrap();
     assert!(captured_path_exists(temp.path(), "__pycache__/app.pyc"));
     assert!(captured_path_exists(temp.path(), "kept.txt"));
+}
+
+#[test]
+fn native_capture_cannot_unignore_heddle_identity_via_gitignore() {
+    // heddle#1413: last-match-wins used to let `!.heddle/` pull
+    // identity.toml into captured history. Root `.heddle/` is reserved
+    // after user rules; nested fixture `.heddle/` stays ordinary content.
+    let temp = TempDir::new().unwrap();
+    std::fs::write(
+        temp.path().join(".gitignore"),
+        "!.heddle/\n!.heddle/**\n!.heddle/identity.toml\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join(".heddleignore"),
+        "!.heddle/\n!.heddle/identity.toml\n",
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("kept.txt"), "captured\n").unwrap();
+
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(
+        temp.path().join(".heddle").join("identity.toml"),
+        "secret-key-material\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(temp.path().join("examples/calculator/.heddle")).unwrap();
+    std::fs::write(
+        temp.path()
+            .join("examples/calculator/.heddle/identity.toml"),
+        "fixture\n",
+    )
+    .unwrap();
+
+    let status = heddle(&["status", "--output", "json-compact"], Some(temp.path())).unwrap();
+    let parsed: Value = serde_json::from_str(&status).expect("status json");
+    let paths: Vec<&str> = parsed["changed_paths"]
+        .as_array()
+        .unwrap_or_else(|| panic!("status must carry changed_paths: {status}"))
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        paths.contains(&"kept.txt"),
+        "status must still list real worktree files: {paths:?}"
+    );
+    assert!(
+        paths
+            .iter()
+            .all(|path| *path != ".heddle" && !path.starts_with(".heddle/")),
+        "status must not list reserved root .heddle paths: {paths:?}"
+    );
+    assert!(
+        paths.contains(&"examples/calculator/.heddle/identity.toml"),
+        "status must still list nested fixture .heddle: {paths:?}"
+    );
+
+    heddle(
+        &["capture", "-m", "must not capture reserved identity"],
+        Some(temp.path()),
+    )
+    .unwrap();
+
+    assert!(!captured_path_exists(temp.path(), ".heddle/identity.toml"));
+    assert!(!captured_path_exists(temp.path(), ".heddle"));
+    assert!(captured_path_exists(temp.path(), "kept.txt"));
+    assert!(captured_path_exists(
+        temp.path(),
+        "examples/calculator/.heddle/identity.toml"
+    ));
 }
 
 #[test]

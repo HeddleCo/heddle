@@ -16,10 +16,16 @@
 //! fixture) is *captured*, not silently dropped. Operators who want
 //! the gitignore-spec "match anywhere" behavior for those names can
 //! write `**/<name>` explicitly.
+//!
+//! Root `.heddle/` is also a reserved-path hard-deny evaluated after
+//! user rules. A later `!.heddle/` (or similar) cannot un-ignore
+//! identity material. Nested fixture `.heddle/` trees are not reserved.
 
 use std::path::Path;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+
+use super::worktree_reserved::is_reserved_worktree_path;
 
 /// Whether `path` is covered by any of the `.heddleignore` patterns.
 ///
@@ -111,6 +117,9 @@ fn canonical_line(pattern: &str) -> String {
 /// directory entry as well as paths inside it. See the docstring on
 /// `should_ignore` for the migration rationale.
 fn matched(gi: &Gitignore, path: &Path) -> bool {
+    if is_reserved_worktree_path(path) {
+        return true;
+    }
     matches!(
         gi.matched_path_or_any_parents(path, /* is_dir */ true),
         ignore::Match::Ignore(_)
@@ -328,5 +337,46 @@ mod tests {
         // pattern is dropped. Other rules continue to apply.
         let patterns = vec!["[unbalanced".to_string(), "*.log".to_string()];
         assert!(should_ignore(&PathBuf::from("foo.log"), &patterns));
+    }
+
+    #[test]
+    fn user_negation_cannot_unignore_reserved_heddle_tree() {
+        // heddle#1413: last-match-wins would otherwise let `!.heddle/`
+        // pull identity.toml into capture. Reserved-path hard-deny
+        // wins after user rules, including an empty pattern list.
+        let negations = [
+            vec!["!.heddle/".to_string()],
+            vec!["!.heddle".to_string()],
+            vec!["!.heddle/**".to_string()],
+            vec!["!.heddle/identity.toml".to_string()],
+            vec!["**".to_string(), "!.heddle/".to_string()],
+            Vec::new(),
+        ];
+        for patterns in &negations {
+            assert!(
+                should_ignore(&PathBuf::from(".heddle/identity.toml"), patterns),
+                "reserved identity must stay ignored under {patterns:?}"
+            );
+            assert!(
+                should_ignore(&PathBuf::from(".heddle"), patterns),
+                "reserved root .heddle must stay ignored under {patterns:?}"
+            );
+        }
+        // Nested fixtures are not reserved. User rules still apply, so
+        // only assert capturable when the pattern set does not ignore
+        // them on its own (`**` would).
+        for patterns in [
+            vec!["!.heddle/".to_string()],
+            vec!["!.heddle".to_string()],
+            Vec::new(),
+        ] {
+            assert!(
+                !should_ignore(
+                    &PathBuf::from("examples/calculator/.heddle/identity.toml"),
+                    &patterns
+                ),
+                "nested fixture .heddle must stay capturable under {patterns:?}"
+            );
+        }
     }
 }
