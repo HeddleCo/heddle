@@ -6,9 +6,8 @@
 //! graph. Salsa-style memoization is deferred; repeat queries short-circuit
 //! on the same content-addressed blobs.
 
-use objects::{
-    object::{ReverseDependencyIndex, SemanticEdgeKind, SemanticGraphRef, StateId, SymbolAnchor},
-    store::ObjectStore,
+use objects::object::{
+    ReverseDependencyIndex, SemanticEdgeKind, SemanticGraphRef, StateId, SymbolAnchor,
 };
 
 use crate::{HeddleError, Repository, Result};
@@ -26,12 +25,11 @@ impl Repository {
         let Some(hash) = root.importer_index else {
             return Ok(None);
         };
-        let Some(blob) = self.store().get_blob(&hash)? else {
-            return Ok(None);
-        };
-        ReverseDependencyIndex::decode(blob.content())
-            .map(Some)
-            .map_err(|err| HeddleError::InvalidObject(err.to_string()))
+        match self.load_reverse_dependency_index(&hash) {
+            Ok(index) => Ok(Some(index)),
+            Err(HeddleError::NotFound(_)) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
     /// Files that import `path` at `state_id`, from the persisted importer index.

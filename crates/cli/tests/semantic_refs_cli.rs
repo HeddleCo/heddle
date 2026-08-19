@@ -96,7 +96,15 @@ fn semantic_refs_time_travels_without_reparse() {
     assert!(old_importers.status.success());
     let importer_value: Value = serde_json::from_slice(&old_importers.stdout).unwrap();
     assert_eq!(importer_value["kind"], "importers_of");
-    assert_eq!(importer_value["importers"], ["src/client.rs"]);
+    assert_eq!(
+        importer_value["importers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["src/client.rs"]
+    );
 
     let new_importers = run_heddle(
         &temp,
