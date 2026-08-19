@@ -1096,6 +1096,29 @@ mod tests {
         }
     }
 
+    /// heddle#1435. Default first screen follows Native source authority:
+    /// capture is the save, and overlay `commit` stays off the front door.
+    #[test]
+    fn first_screen_hides_overlay_commit_by_default() {
+        use clap::CommandFactory;
+        let cmd = crate::cli::cli_args::Cli::command();
+        let help = render_help(&cmd, &[]);
+        assert!(
+            help.contains("heddle capture -m"),
+            "default first screen still teaches capture: {help}"
+        );
+        assert!(
+            !help.contains("-> heddle commit ->"),
+            "default first screen must not teach overlay commit: {help}"
+        );
+        assert!(
+            !help
+                .lines()
+                .any(|line| line.trim_start().starts_with("commit  ")),
+            "default first screen must hide the commit verb unless overlay: {help}"
+        );
+    }
+
     /// The everyday surface should mirror the core loop rather than
     /// mixing in every collaboration feature. A first-time user should
     /// be able to orient, commit work, check readiness, inspect,

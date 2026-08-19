@@ -6746,12 +6746,16 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         !stdout.contains("compatibility") && !stdout.contains(concat!("Git ", "adapter")),
         "default help should not frame Git Projection commands as old compatibility wording: {stdout}"
     );
-    for verb in ["status", "diff", "commit", "start", "ready", "land"] {
+    for verb in ["status", "diff", "capture", "start", "ready", "land"] {
         assert!(
             stdout.contains(&format!("\n  {verb}")),
             "core-loop verb `{verb}` should be on the curated surface: {stdout}"
         );
     }
+    assert!(
+        !stdout.contains("\n  commit"),
+        "no-repo first screen must hide overlay commit: {stdout}"
+    );
     for verb in [
         "review",
         "discuss",
@@ -6780,10 +6784,11 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         "default help should keep adjacent commands discoverable without expanding the first-screen loop: {stdout}"
     );
     assert!(
-        stdout.contains("Existing Git: heddle status -> heddle init -> heddle capture -m \"...\" -> heddle commit -> heddle push")
+        stdout.contains("Save: heddle init -> heddle capture -m \"...\"")
+            && !stdout.contains("-> heddle commit ->")
             && stdout
                 .contains("Isolated work: heddle start <name> --path ../<name> -> heddle capture -m \"...\" -> heddle ready -> heddle land"),
-        "default help should connect first-run adoption and isolated work to the same product loop: {stdout}"
+        "default help should teach native capture-as-save, not overlay commit: {stdout}"
     );
     assert!(
         !stdout.contains("error: 'heddle' requires a subcommand"),
@@ -6792,6 +6797,25 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
     assert!(
         !stderr.contains("error: 'heddle' requires a subcommand"),
         "clap's missing-subcommand error must not surface on stderr: stderr={stderr}"
+    );
+}
+
+#[test]
+fn native_capture_does_not_tip_overlay_commit() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).expect("native init");
+    std::fs::write(temp.path().join("note.txt"), "save me\n").expect("write worktree file");
+    let output = heddle_output(&["capture", "-m", "save the note"], Some(temp.path()))
+        .expect("invoke native capture");
+    assert!(
+        output.status.success(),
+        "native capture should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Git Overlay") && !stderr.contains("heddle commit"),
+        "native capture must not teach overlay commit: {stderr}"
     );
 }
 
@@ -7485,7 +7509,7 @@ fn command_catalog_exposes_public_surface_for_agents() {
     assert!(
         text.contains("Heddle")
             && text.contains("Common loop:")
-            && text.contains("Existing Git:")
+            && text.contains("Save:")
             && text.contains("Output:"),
         "help text should be scannable: {text}"
     );
