@@ -9,6 +9,11 @@ use super::{
     dictionary::{AgentKey, PrincipalKey},
     invalid,
     io::Reader,
+    limits::{
+        MAX_COMPACT_STATE_COUNT, MIN_AGENT_BYTES, MIN_EXTRA_HEADER_BYTES, MIN_LINEAGE_BYTES,
+        MIN_PRINCIPAL_BYTES, MIN_STATE_COLUMN_BYTES, MIN_STATE_PARENT_BYTES,
+        MIN_VERIFICATION_CUSTOM_BYTES, admit_count,
+    },
     state::STATE_MAGIC,
 };
 use crate::object::{
@@ -19,8 +24,15 @@ use crate::object::{
 /// Decode and whole-frame-verify every state, recomputing each state id.
 pub fn decode_state_frame(bytes: &[u8]) -> Result<Vec<State>> {
     let mut input = Reader::verified(bytes, STATE_MAGIC)?;
-    let count = input.get_count("state frame")?;
+    let count = input.get_count_at_most("state frame", 1, MAX_COMPACT_STATE_COUNT)?;
     let (principals, agents) = decode_dictionaries(&mut input)?;
+    admit_count(
+        "state frame",
+        count,
+        input.remaining(),
+        MIN_STATE_COLUMN_BYTES,
+        MAX_COMPACT_STATE_COUNT,
+    )?;
     let mut states = (0..count).map(|_| blank_state()).collect::<Vec<_>>();
     decode_structure(&mut input, &mut states)?;
     decode_attribution(&mut input, &mut states, &principals, &agents)?;
@@ -43,7 +55,7 @@ fn decode_structure(input: &mut Reader<'_>, states: &mut [State]) -> Result<()> 
         state.tree = ContentHash::from_bytes(input.get_fixed()?);
     }
     for state in states {
-        let count = input.get_count("state parent")?;
+        let count = input.get_count("state parent", MIN_STATE_PARENT_BYTES)?;
         state.parents = (0..count)
             .map(|_| Ok(StateId::from_bytes(input.get_fixed()?)))
             .collect::<Result<Vec<_>>>()?;
@@ -144,7 +156,7 @@ fn decode_fidelity(
         state.raw_message = input.get_optional_bytes()?;
     }
     for state in &mut *states {
-        let count = input.get_count("extra header")?;
+        let count = input.get_count("extra header", MIN_EXTRA_HEADER_BYTES)?;
         state.extra_headers = (0..count)
             .map(|_| Ok((input.get_bytes()?, input.get_bytes()?)))
             .collect::<Result<Vec<_>>>()?;
@@ -157,7 +169,7 @@ fn decode_fidelity(
 
 fn decode_lineage(input: &mut Reader<'_>, states: &mut [State]) -> Result<()> {
     for state in states {
-        let count = input.get_count("state lineage")?;
+        let count = input.get_count("state lineage", MIN_LINEAGE_BYTES)?;
         state.lineage = (0..count)
             .map(|_| {
                 Ok(ChangeLineage {
@@ -180,7 +192,7 @@ fn decode_verification(input: &mut Reader<'_>) -> Result<Option<Verification>> {
             let coverage_pct = get_optional_f32(input)?;
             let coverage_delta = get_optional_f32(input)?;
             let lint_warnings = get_optional_u32(input)?;
-            let count = input.get_count("verification custom")?;
+            let count = input.get_count("verification custom", MIN_VERIFICATION_CUSTOM_BYTES)?;
             let mut custom = BTreeMap::new();
             for _ in 0..count {
                 let key = String::from_utf8(input.get_bytes()?)
@@ -201,10 +213,10 @@ fn decode_verification(input: &mut Reader<'_>) -> Result<Option<Verification>> {
 }
 
 fn decode_dictionaries(input: &mut Reader<'_>) -> Result<(Vec<Principal>, Vec<Agent>)> {
-    let principals = (0..input.get_count("principal dictionary")?)
+    let principals = (0..input.get_count("principal dictionary", MIN_PRINCIPAL_BYTES)?)
         .map(|_| principal_from_key(PrincipalKey(input.get_bytes()?, input.get_bytes()?)))
         .collect::<Result<Vec<_>>>()?;
-    let agents = (0..input.get_count("agent dictionary")?)
+    let agents = (0..input.get_count("agent dictionary", MIN_AGENT_BYTES)?)
         .map(|_| {
             agent_from_key(AgentKey {
                 provider: input.get_bytes()?,

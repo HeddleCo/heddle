@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{decode_blob_frame, decode_state_frame, decode_tree_frame};
-
-/// Matches the packer writer split (`FRAME_LIMIT` in `objects`).
-const MAX_COMPACT_COUNT: usize = 12 * 1024 * 1024;
+use super::{
+    decode_blob_frame, decode_state_frame, decode_tree_frame, encode_state_frame,
+    limits::MAX_COMPACT_COUNT,
+};
+use crate::object::{Attribution, ContentHash, Principal, State};
 
 #[test]
 fn blob_frame_rejects_declared_count_above_object_cap() {
@@ -39,6 +40,17 @@ fn state_frame_count_that_fits_remaining_bytes_still_fails_column_floor() {
         error.to_string().contains("bytes per item"),
         "state count that only fits a 1-byte remaining() check must fail before blank_state materialization, got {error}"
     );
+}
+
+#[test]
+fn minimal_state_frame_survives_column_floor() {
+    let mut state = State::new(
+        ContentHash::from_bytes([1; 32]),
+        Vec::new(),
+        Attribution::human(Principal::new("A", "a@b.c")),
+    );
+    state.state_id = state.id();
+    decode_state_frame(&encode_state_frame(&[state]).unwrap()).unwrap();
 }
 
 fn frame(magic: &[u8; 4], after_magic: &[u8]) -> Vec<u8> {

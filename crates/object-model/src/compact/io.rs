@@ -139,15 +139,19 @@ impl<'a> Reader<'a> {
         Ok(((value >> 1) as i64) ^ (-((value & 1) as i64)))
     }
 
-    pub(super) fn get_count(&mut self, field: &str) -> Result<usize> {
+    pub(super) fn get_count(&mut self, field: &str, min_item_bytes: usize) -> Result<usize> {
+        self.get_count_at_most(field, min_item_bytes, super::limits::MAX_COMPACT_COUNT)
+    }
+
+    pub(super) fn get_count_at_most(
+        &mut self,
+        field: &str,
+        min_item_bytes: usize,
+        max_count: usize,
+    ) -> Result<usize> {
         let count = usize::try_from(self.get_u64()?)
             .map_err(|_| invalid(format!("{field} count exceeds platform limits")))?;
-        if count > self.remaining() {
-            return Err(invalid(format!(
-                "{field} count {count} exceeds remaining frame bytes {}",
-                self.remaining()
-            )));
-        }
+        super::limits::admit_count(field, count, self.remaining(), min_item_bytes, max_count)?;
         Ok(count)
     }
 
