@@ -1256,6 +1256,52 @@ mod tests {
     }
 
     #[test]
+    fn accept_wire_redactions_refuses_untrusted_signer_even_with_valid_signature() {
+        // heddle#1405: a mathematically valid self-signature is not
+        // authority. The receiver must honor only `[redact] trusted_keys`.
+        let trusted = crypto::Ed25519Signer::generate().expect("trusted keygen");
+        let attacker = crypto::Ed25519Signer::generate().expect("attacker keygen");
+        assert_ne!(
+            trusted.public_key(),
+            attacker.public_key(),
+            "fixture keys must be distinct"
+        );
+
+        let dir = TempDir::new().unwrap();
+        Repository::init_default(dir.path()).unwrap();
+        let config_path = dir.path().join(".heddle/config.toml");
+        let mut config = std::fs::read_to_string(&config_path).expect("read config");
+        config.push_str(&format!(
+            "\n[redact]\ntrusted_keys = [{{ algorithm = \"ed25519\", public_key = \"{}\" }}]\n",
+            hex::encode(trusted.public_key())
+        ));
+        std::fs::write(&config_path, config).expect("write trusted redact key");
+        let repo = Repository::open(dir.path()).expect("reopen with trust list");
+
+        let payload = RedactionsBlob::new(vec![signed_sample_redaction(&attacker)])
+            .encode()
+            .unwrap();
+        let err = repo
+            .accept_wire_redactions(sample_blob(), &payload)
+            .expect_err(
+                "a sidecar signed by a key outside the trusted set must be rejected even when \
+                 the embedded key verifies the payload",
+            );
+        let chain: Vec<String> = err.chain().map(|e| e.to_string()).collect();
+        assert!(
+            chain
+                .iter()
+                .any(|m| m.contains("untrusted") || m.contains("not trusted")),
+            "rejection reason must explain untrusted-key, got chain: {chain:?}"
+        );
+        let stored = repo.get_redactions_for_blob(&sample_blob()).unwrap();
+        assert!(
+            stored.redactions.is_empty(),
+            "untrusted redaction must not persist"
+        );
+    }
+
+    #[test]
     fn accept_wire_redactions_persists_signed_redaction_idempotently() {
         let signer = crypto::Ed25519Signer::generate().expect("keygen");
         let (_dir, repo) = fresh_repo();

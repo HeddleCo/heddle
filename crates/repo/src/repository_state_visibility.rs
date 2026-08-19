@@ -959,6 +959,53 @@ mod tests {
     }
 
     #[test]
+    fn wire_visibility_rejects_self_signed_key_not_in_trusted_set() {
+        // heddle#1405: cryptographic validity against the key embedded in
+        // the sidecar is not enough. The signer must be in the receiver's
+        // configured `[metadata] trusted_keys` list.
+        let trusted = Ed25519Signer::generate().expect("trusted keygen");
+        let attacker = Ed25519Signer::generate().expect("attacker keygen");
+        assert_ne!(
+            trusted.public_key(),
+            attacker.public_key(),
+            "fixture keys must be distinct"
+        );
+
+        let dir = TempDir::new().unwrap();
+        Repository::init_default(dir.path()).unwrap();
+        let config_path = dir.path().join(".heddle/config.toml");
+        let mut config = std::fs::read_to_string(&config_path).expect("read config");
+        config.push_str(&format!(
+            "\n[metadata]\ntrusted_keys = [{{ algorithm = \"ed25519\", public_key = \"{}\" }}]\n",
+            hex::encode(trusted.public_key())
+        ));
+        std::fs::write(&config_path, config).expect("write trusted metadata key");
+        let repo = Repository::open(dir.path()).expect("reopen with trust list");
+
+        let state = StateId::from_bytes([9u8; 32]);
+        let mut record = sample_record(state, VisibilityTier::Internal);
+        sign_visibility(&mut record, &attacker);
+        let signed = StateVisibilityBlob::new(vec![record]).encode().unwrap();
+        let err = repo
+            .accept_wire_state_visibility(state, &signed)
+            .expect_err(
+                "a sidecar signed by a key outside the trusted set must be rejected even when \
+                 the embedded key verifies the payload",
+            );
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("not trusted") || chain.contains("untrusted"),
+            "rejection must name the missing trust, got: {chain}"
+        );
+        assert!(
+            !repo
+                .has_visibility_for_state(&state)
+                .expect("has visibility"),
+            "untrusted visibility must not persist"
+        );
+    }
+
+    #[test]
     fn put_then_read_back_and_has_visibility_true() {
         let (_dir, repo) = fresh_repo();
         let state = StateId::from_bytes([5u8; 32]);
