@@ -242,16 +242,12 @@ pub(crate) fn pre_consent_message(
     handle: &str,
     nonce: &[u8],
 ) -> Result<Vec<u8>, CallFailure> {
-    let owner_id = state.owner_id.to_string();
-    let expires_at = consent_expiry_bytes(state)?;
     encode_counted(&[
         PRE_CONSENT_DOMAIN,
-        owner_id.as_bytes(),
+        state.owner_id.to_string().as_bytes(),
         handle.as_bytes(),
         state.node_id.as_bytes(),
         nonce,
-        claim_state_id(state)?,
-        &expires_at,
     ])
 }
 
@@ -260,15 +256,11 @@ pub(crate) fn promote_consent_message(
     handle: &str,
     credential_id: &str,
 ) -> Result<Vec<u8>, CallFailure> {
-    let owner_id = state.owner_id.to_string();
-    let expires_at = consent_expiry_bytes(state)?;
     encode_counted(&[
         PROMOTE_CONSENT_DOMAIN,
-        owner_id.as_bytes(),
+        state.owner_id.to_string().as_bytes(),
         handle.as_bytes(),
         credential_id.as_bytes(),
-        claim_state_id(state)?,
-        &expires_at,
     ])
 }
 
@@ -280,21 +272,6 @@ fn refuse_stale_consent(state: &ClaimState) -> Result<(), CallFailure> {
         CallFailureCode::Unauthenticated,
         "claim consent has expired",
     ))
-}
-
-fn claim_state_id(state: &ClaimState) -> Result<&[u8], CallFailure> {
-    let id = state.authorization_hash().as_bytes();
-    if id.is_empty() {
-        return Err(invalid_failure("claim state is missing an issuance id"));
-    }
-    Ok(id)
-}
-
-fn consent_expiry_bytes(state: &ClaimState) -> Result<[u8; 8], CallFailure> {
-    if state.expires_at_millis <= 0 {
-        return Err(invalid_failure("claim consent is missing an expiry"));
-    }
-    Ok(state.expires_at_millis.to_be_bytes())
 }
 
 fn encode_counted(parts: &[&[u8]]) -> Result<Vec<u8>, CallFailure> {

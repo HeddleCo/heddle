@@ -84,7 +84,7 @@ impl MockWeftAccount {
 }
 
 #[test]
-fn consent_signatures_match_the_landed_weft_contract() {
+fn consent_signatures_round_trip_the_local_builders() {
     let signer = Ed25519Signer::generate().expect("signer");
     let mut claim = state(hex::encode(signer.public_key()));
     assert!(claim.reissue(b"claim-secret", i64::MAX));
@@ -98,7 +98,7 @@ fn consent_signatures_match_the_landed_weft_contract() {
         signer.public_key(),
         &pre_signature,
     )
-    .expect("weft-compatible pre-consent verifies");
+    .expect("local pre-consent verifies");
 
     let promote = signed_promote_consent(&claim, "human-handle", "Y3JlZGVudGlhbA", &signer)
         .expect("signed promote-consent");
@@ -108,38 +108,39 @@ fn consent_signatures_match_the_landed_weft_contract() {
         signer.public_key(),
         &promote_signature,
     )
-    .expect("weft-compatible promote-consent verifies");
+    .expect("local promote-consent verifies");
 
     assert_eq!(pre.account_id, OWNER_ID);
     assert_eq!(promote.account_id, OWNER_ID);
 }
 
 #[test]
-fn consent_messages_bind_expiry_and_claim_state_id() {
+fn consent_builders_encode_the_v1_counted_fields() {
     let mut claim = state("11".repeat(32));
     assert!(claim.reissue(b"claim-secret", 1_700_000_000_000));
     let nonce = b"0123456789abcdef";
     let pre = pre_consent_message(&claim, "human-handle", nonce).expect("pre-consent bytes");
     let promote = promote_consent_message(&claim, "human-handle", "Y3JlZGVudGlhbA")
         .expect("promote-consent bytes");
-    let expiry = 1_700_000_000_000_i64.to_be_bytes();
-    let claim_id = claim.authorization_hash().as_bytes();
-    let pre_parts = counted_parts(&pre);
-    let promote_parts = counted_parts(&promote);
-    assert_eq!(pre_parts[pre_parts.len() - 2], claim_id);
-    assert_eq!(pre_parts[pre_parts.len() - 1], expiry);
-    assert_eq!(promote_parts[promote_parts.len() - 2], claim_id);
-    assert_eq!(promote_parts[promote_parts.len() - 1], expiry);
 
-    claim.expires_at_millis = 1_700_000_000_001;
-    assert_ne!(
+    assert_eq!(
         pre,
-        pre_consent_message(&claim, "human-handle", nonce).unwrap()
+        counted(&[
+            b"heddle-agent-pre-consent-v1",
+            OWNER_ID.as_bytes(),
+            b"human-handle",
+            claim.node_id.as_bytes(),
+            nonce,
+        ])
     );
-    assert!(claim.reissue(b"other-secret", 1_700_000_000_000));
-    assert_ne!(
-        pre,
-        pre_consent_message(&claim, "human-handle", nonce).unwrap()
+    assert_eq!(
+        promote,
+        counted(&[
+            b"heddle-agent-promote-consent-v1",
+            OWNER_ID.as_bytes(),
+            b"human-handle",
+            b"Y3JlZGVudGlhbA",
+        ])
     );
 }
 
@@ -183,32 +184,18 @@ fn expired_consent_is_not_produced_or_accepted() {
                 promote_signature: &promote_signature,
             },
         ),
-        "expired consent bytes must not be accepted locally"
+        "expired consent must not be accepted locally"
     );
 }
 
-#[test]
-fn dormant_consent_is_not_encoded_without_expiry() {
-    let claim = state("11".repeat(32));
-    assert!(pre_consent_message(&claim, "human-handle", b"0123456789abcdef").is_err());
-    assert!(promote_consent_message(&claim, "human-handle", "Y3JlZGVudGlhbA").is_err());
-}
-
-fn counted_parts(bytes: &[u8]) -> Vec<Vec<u8>> {
-    let mut parts = Vec::new();
-    let mut rest = bytes;
-    while rest.len() >= 4 {
-        let length = usize::try_from(u32::from_be_bytes(rest[..4].try_into().unwrap())).unwrap();
-        rest = &rest[4..];
-        assert!(rest.len() >= length, "truncated counted consent field");
-        parts.push(rest[..length].to_vec());
-        rest = &rest[length..];
+fn counted(parts: &[&[u8]]) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    for part in parts {
+        let length = u32::try_from(part.len()).expect("test field fits in u32");
+        encoded.extend_from_slice(&length.to_be_bytes());
+        encoded.extend_from_slice(part);
     }
-    assert!(
-        rest.is_empty(),
-        "trailing bytes after counted consent fields"
-    );
-    parts
+    encoded
 }
 
 #[test]
