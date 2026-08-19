@@ -318,6 +318,8 @@ mod identity_resolution;
 mod ignore_mechanics;
 #[path = "cli_integration/interactive_selection.rs"]
 mod interactive_selection;
+#[path = "cli_integration/land_current_thread.rs"]
+mod land_current_thread;
 #[path = "cli_integration/misc.rs"]
 mod misc;
 #[path = "cli_integration/native_scope_boundary.rs"]

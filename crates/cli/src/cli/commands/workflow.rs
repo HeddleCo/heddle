@@ -415,12 +415,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     });
     recover_incomplete_land_if_present(&repo)?;
     let user_config = UserConfig::load_default().unwrap_or_default();
-    let thread = resolve_thread(
-        &repo,
-        args.thread.as_deref(),
-        "land",
-        "heddle land --thread <name>",
-    )?;
+    let thread = resolve_land_subject_thread(cli, &repo, args.thread.as_deref())?;
     let thread_repo = if thread.execution_path.as_os_str().is_empty() {
         None
     } else if thread.execution_path.exists() {
@@ -494,6 +489,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         "heddle land --thread <name>",
     )?;
     refresh_thread_freshness(&repo, &mut refreshed_thread)?;
+    {
+        let already_preview = build_thread_preview_report(&repo, &mut refreshed_thread, true)?;
+        if already_preview.merge_relation == "already_integrated" {
+            return write_already_landed_output(cli, &repo, &refreshed_thread, captured, synced);
+        }
+    }
     if refreshed_thread.freshness == repo::ThreadFreshness::Stale {
         let preview = build_thread_preview_report(&repo, &mut refreshed_thread, true)?;
         let stale_blockers = non_staleness_blockers(&preview.blockers);
@@ -1443,6 +1444,82 @@ fn resolve_thread(
     }
 }
 
+/// Resolve the thread `land` integrates.
+///
+/// `--thread` wins. Otherwise the subject is the current thread of the
+/// working checkout, not the integration target. Isolated checkouts share
+/// the target's `.heddle` but have their own execution root; resolving
+/// against the target HEAD would land `main`.
+fn resolve_land_subject_thread(
+    cli: &Cli,
+    target_repo: &Repository,
+    explicit: Option<&str>,
+) -> Result<Thread> {
+    let thread_id = match explicit {
+        Some(thread) => thread.to_string(),
+        None => {
+            let checkout = cli.open_repo()?;
+            current_thread(&checkout)?
+                .ok_or_else(|| {
+                    anyhow!(RecoveryAdvice::no_current_thread(
+                        "land",
+                        Some("--thread"),
+                        "heddle land --thread <name>",
+                    ))
+                })?
+                .id
+        }
+    };
+    load_thread(target_repo, &thread_id)
+}
+
+fn write_already_landed_output(
+    cli: &Cli,
+    repo: &Repository,
+    thread: &Thread,
+    captured: bool,
+    synced: bool,
+) -> Result<()> {
+    let trust = build_repository_verification_state(repo);
+    let next_action = integrated_land_next_action(true, &trust);
+    write_land_output(
+        cli,
+        repo,
+        &LandOutput {
+            operator: OperatorCommandOutput {
+                status: "already_landed".to_string(),
+                action: OperatorAction::Land,
+                message: format!("Thread '{}' is already landed", thread.id),
+                blockers: Vec::new(),
+                warnings: Vec::new(),
+                next_action: next_action.clone(),
+                recommended_action: next_action,
+            },
+            thread: thread.id.clone(),
+            captured,
+            checkpointed: false,
+            git_commit: None,
+            synced,
+            integrated: false,
+            merge_state: None,
+            blocker_details: Vec::new(),
+            siblings_restacked: Vec::new(),
+            siblings_restack_failed: Vec::new(),
+            trust,
+            chosen_path: "already_integrated".to_string(),
+            performed_steps: land_performed_steps(captured, synced, false, false),
+            skipped_steps: {
+                let mut steps = land_skipped_steps(captured, synced, false, false);
+                steps
+                    .retain(|step| !step.starts_with("merge(") && !step.starts_with("checkpoint("));
+                steps.push("merge(already_integrated)".to_string());
+                steps.push("checkpoint(not needed)".to_string());
+                steps
+            },
+        },
+    )
+}
+
 fn update_integration_policy(
     repo: &Repository,
     thread_id: &str,
@@ -2146,7 +2223,7 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
         )?;
     } else {
         let marker = match output.operator.status.as_str() {
-            "landed" => style::ok_marker(),
+            "landed" | "already_landed" => style::ok_marker(),
             "blocked" => style::warn_marker(),
             _ => style::working_marker(),
         };
@@ -2937,10 +3014,9 @@ fn emit_land_dry_run(cli: &Cli, args: &LandArgs) -> Result<()> {
         }
     }
     if thread_ids.is_empty() {
-        // Fall back to the current thread, matching a bare `heddle land`.
-        if let Some(current) = current_thread(&repo)?.map(|thread| thread.id) {
-            thread_ids.push(current);
-        }
+        // Fall back to the current checkout thread, matching a bare `heddle land`.
+        // Do not read the target repo HEAD — that lands `main` from an isolated checkout.
+        thread_ids.push(resolve_land_subject_thread(cli, &repo, None)?.id);
     }
 
     let squash = should_squash_land(args, &UserConfig::load_default().unwrap_or_default());
@@ -2957,6 +3033,10 @@ fn emit_land_dry_run(cli: &Cli, args: &LandArgs) -> Result<()> {
             format!("land {} threads ({target_label})", thread_ids.len())
         },
     );
+    if repo.source_authority() == repo::RepositorySourceAuthority::Native {
+        dry.side_effects.writes_git_refs = false;
+        dry.side_effects.network_io = false;
+    }
 
     if thread_ids.is_empty() {
         dry.blockers
@@ -3002,7 +3082,11 @@ fn emit_land_dry_run(cli: &Cli, args: &LandArgs) -> Result<()> {
             conflict_count: report.conflict_count,
             conflicts: report.conflicts.clone(),
             changed_path_count: report.changed_path_count,
-            would_transition_to: Some("landed".to_string()),
+            would_transition_to: Some(if report.merge_relation == "already_integrated" {
+                "already_landed".to_string()
+            } else {
+                "landed".to_string()
+            }),
             would_capture_dirty: would_capture,
         });
         for blocker in &report.blockers {
