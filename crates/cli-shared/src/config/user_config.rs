@@ -459,14 +459,31 @@ impl UserConfig {
 
     /// Resolve the shared custom CA bundle used by hosted and Git transports.
     ///
-    /// `HEDDLE_REMOTE_TLS_CA_CERT` overrides the user-config path.
+    /// Precedence, highest first: `HEDDLE_REMOTE_TLS_CA_CERT`, user-config
+    /// `[remote] tls_ca_certificate_path`, then the same key in repository
+    /// `.heddle/config.toml` discovered from `start` (or the process cwd).
     pub fn remote_tls_ca_certificate_pem(&self) -> anyhow::Result<Option<String>> {
+        self.remote_tls_ca_certificate_pem_from(env::current_dir().ok().as_deref())
+    }
+
+    fn remote_tls_ca_certificate_pem_from(
+        &self,
+        repo_start: Option<&Path>,
+    ) -> anyhow::Result<Option<String>> {
         let mut ca_pem = self
             .remote
             .tls_ca_certificate_path
             .as_ref()
             .map(|path| read_security_config_file("remote.tls_ca_certificate_path", path))
             .transpose()?;
+        if ca_pem.is_none()
+            && let Some(path) = discovered_repo_tls_ca_certificate_path(repo_start)?
+        {
+            ca_pem = Some(read_security_config_file(
+                "remote.tls_ca_certificate_path",
+                &path,
+            )?);
+        }
         match env::var("HEDDLE_REMOTE_TLS_CA_CERT") {
             Ok(path) => {
                 ca_pem = Some(read_security_config_file(
@@ -768,6 +785,52 @@ where
         ));
     }
     Ok(Some(parsed))
+}
+
+fn discovered_repo_tls_ca_certificate_path(
+    start: Option<&Path>,
+) -> anyhow::Result<Option<PathBuf>> {
+    let Some(start) = start else {
+        return Ok(None);
+    };
+    let Some(root) = repo::discover_heddle_root(start) else {
+        return Ok(None);
+    };
+    let config_path = root.join(".heddle/config.toml");
+    let contents = match fs::read_to_string(&config_path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(security_config_error(
+                "remote.tls_ca_certificate_path",
+                format!("read repository config {}: {err}", config_path.display()),
+            ));
+        }
+    };
+    let probe = toml::from_str::<RepoRemoteProbe>(&contents).map_err(|err| {
+        security_config_error(
+            "remote.tls_ca_certificate_path",
+            format!("parse repository config {}: {err}", config_path.display()),
+        )
+    })?;
+    let Some(path) = probe
+        .remote
+        .tls_ca_certificate_path
+        .filter(|path| !path.as_os_str().is_empty())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RepoRemoteProbe {
+    #[serde(default)]
+    remote: repo::RepoRemoteConfig,
 }
 
 fn config_value_error(setting: &str, reason: String) -> anyhow::Error {
@@ -1183,5 +1246,87 @@ mod tests {
 
         assert!(message.contains("fatal TLS/auth configuration error"));
         assert!(message.contains("HEDDLE_REMOTE_TLS"));
+    }
+
+    fn write_discoverable_repo(root: &std::path::Path, remote_toml: &str) {
+        fs::create_dir_all(root.join(".heddle")).expect("create .heddle");
+        fs::write(root.join(".heddle/HEAD"), "ref: refs/heddle/heads/main\n").expect("write HEAD");
+        fs::write(
+            root.join(".heddle/config.toml"),
+            format!("[repository]\nversion = 4\nsource_authority = \"native\"\n{remote_toml}"),
+        )
+        .expect("write repo config");
+    }
+
+    #[test]
+    fn remote_tls_ca_honours_repo_config_when_user_config_is_unset() {
+        let _env = RemoteEnvGuard::clean();
+        let root = unique_temp_path("heddle-repo-tls-ca");
+        let ca_path = root.join("ca.pem");
+        fs::create_dir_all(&root).expect("create repo root");
+        fs::write(&ca_path, "repo ca pem").expect("write repo CA");
+        write_discoverable_repo(
+            &root,
+            &format!(
+                "\n[remote]\ntls_ca_certificate_path = \"{}\"\n",
+                ca_path.display()
+            ),
+        );
+
+        let pem = UserConfig::default()
+            .remote_tls_ca_certificate_pem_from(Some(&root))
+            .expect("repo CA should load");
+        assert_eq!(pem.as_deref(), Some("repo ca pem"));
+        fs::remove_dir_all(root).expect("remove temp dir");
+    }
+
+    #[test]
+    fn remote_tls_ca_user_config_overrides_repo_config() {
+        let _env = RemoteEnvGuard::clean();
+        let root = unique_temp_path("heddle-repo-tls-ca-override");
+        fs::create_dir_all(&root).expect("create repo root");
+        let repo_ca = root.join("repo-ca.pem");
+        let user_ca = root.join("user-ca.pem");
+        fs::write(&repo_ca, "repo ca pem").expect("write repo CA");
+        fs::write(&user_ca, "user ca pem").expect("write user CA");
+        write_discoverable_repo(
+            &root,
+            &format!(
+                "\n[remote]\ntls_ca_certificate_path = \"{}\"\n",
+                repo_ca.display()
+            ),
+        );
+
+        let user = UserConfig {
+            remote: UserRemoteConfig {
+                tls_ca_certificate_path: Some(user_ca),
+                ..UserRemoteConfig::default()
+            },
+            ..UserConfig::default()
+        };
+        let pem = user
+            .remote_tls_ca_certificate_pem_from(Some(&root))
+            .expect("user CA should win");
+        assert_eq!(pem.as_deref(), Some("user ca pem"));
+        fs::remove_dir_all(root).expect("remove temp dir");
+    }
+
+    #[test]
+    fn remote_tls_ca_unknown_repo_remote_key_fails_closed() {
+        let _env = RemoteEnvGuard::clean();
+        let root = unique_temp_path("heddle-repo-tls-ca-unknown");
+        fs::create_dir_all(&root).expect("create repo root");
+        write_discoverable_repo(&root, "\n[remote]\ntls_insecure = true\n");
+
+        let err = UserConfig::default()
+            .remote_tls_ca_certificate_pem_from(Some(&root))
+            .expect_err("unknown repo remote keys must fail closed");
+        let message = err.to_string();
+        assert!(message.contains("fatal TLS/auth configuration error"));
+        assert!(
+            message.contains("unknown field") || message.contains("tls_insecure"),
+            "unknown remote knob must be named: {message}"
+        );
+        fs::remove_dir_all(root).expect("remove temp dir");
     }
 }

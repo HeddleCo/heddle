@@ -754,6 +754,19 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
             "heddle thread list",
         );
     }
+    if cli_shared::is_tls_trust_failure(&top) {
+        return ErrorClassification::known(
+            "hosted_tls_trust",
+            format!(
+                "Trust this server's CA with {}=/path/to/ca.pem or [remote] tls_ca_certificate_path.",
+                cli_shared::REMOTE_TLS_CA_CERT_SETTING
+            ),
+            "the hosted bootstrap HTTPS request failed because the peer certificate is not trusted",
+            "retrying without a trusted CA will fail the same TLS handshake",
+            "no hosted session was opened and local state was left unchanged",
+            "heddle help remotes",
+        );
+    }
     ErrorClassification::runtime()
 }
 
@@ -989,5 +1002,31 @@ mod tests {
         assert_eq!(classified.kind, "state_not_found");
         assert_eq!(classified.primary_command, "heddle log");
         assert_eq!(classified.recovery_commands, vec!["heddle log"]);
+    }
+
+    #[test]
+    fn hosted_tls_trust_failure_names_ca_and_does_not_hint_status() {
+        let err = anyhow!(
+            "hosted bootstrap HTTPS request failed: invalid peer certificate: UnknownIssuer"
+        );
+        let classified = classify_error(&err);
+        assert_eq!(classified.kind, "hosted_tls_trust");
+        assert_eq!(classified.primary_command, "heddle help remotes");
+        assert!(
+            classified.hint.contains("HEDDLE_REMOTE_TLS_CA_CERT"),
+            "hint must name the CA configuration: {}",
+            classified.hint
+        );
+        assert!(
+            !classified.hint.contains("heddle status")
+                && classified.primary_command != "heddle status"
+                && !classified
+                    .recovery_commands
+                    .iter()
+                    .any(|command| command.contains("heddle status")),
+            "hosted TLS trust must not hint heddle status: {} / {:?}",
+            classified.primary_command,
+            classified.recovery_commands
+        );
     }
 }

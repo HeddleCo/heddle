@@ -11,6 +11,7 @@ pub mod credentials;
 pub mod logging;
 pub mod output;
 pub mod remote;
+pub mod tls_trust;
 
 pub use client_config::{
     ClientConfig, cleartext_connect_allowed, cleartext_refused_message, is_loopback_ip,
@@ -23,4 +24,8 @@ pub use output::OutputMode;
 pub use remote::{
     Remote, RemoteConfig, RemoteTarget, remote_allows_insecure, resolve_remote_with_key,
     resolve_remote_with_key_and_insecure,
+};
+pub use tls_trust::{
+    REMOTE_TLS_CA_CERT_SETTING, annotate_error_chain_tls_trust_failure, annotate_tls_trust_failure,
+    is_tls_trust_failure,
 };
