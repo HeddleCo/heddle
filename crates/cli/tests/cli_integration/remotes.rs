@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use cli::remote::RemoteConfig;
 use objects::object::{MarkerName, ThreadName};
-use repo::ThreadManager;
+use repo::{ThreadFreshness, ThreadManager, ThreadState};
 use sley::{ConfigEdit, ConfigEditPlan};
 
 use super::{git_overlay_fixtures::GitOverlayFixture, *};
@@ -708,6 +708,108 @@ fn test_cli_pull_local_updates_requested_track() {
     heddle(&["thread", "switch", "imported"], Some(target.path())).unwrap();
     let blob = std::fs::read_to_string(target.path().join("hello.txt")).unwrap();
     assert_eq!(blob, "from source");
+}
+
+/// heddle#1412: a source `ThreadRecord` can claim a manual resolution at the
+/// pulled tip. Hosted conversion zeros those fields; local pull must too, or
+/// `land` fast-forwards the attached target through `adopt_manual_resolution`.
+#[test]
+fn test_cli_pull_local_forged_landing_metadata_cannot_fast_forward_attached_target() {
+    let source = TempDir::new().unwrap();
+    heddle(&["init"], Some(source.path())).unwrap();
+    std::fs::write(source.path().join("shared.txt"), "base\n").unwrap();
+    heddle(&["capture", "-m", "base"], Some(source.path())).unwrap();
+
+    heddle(&["thread", "create", "feature"], Some(source.path())).unwrap();
+    heddle(&["thread", "switch", "feature"], Some(source.path())).unwrap();
+    std::fs::write(source.path().join("feature.txt"), "attacker tip\n").unwrap();
+    heddle(
+        &["capture", "-m", "forged landing tip"],
+        Some(source.path()),
+    )
+    .unwrap();
+    heddle(&["thread", "switch", "main"], Some(source.path())).unwrap();
+
+    let source_repo = Repository::open(source.path()).unwrap();
+    let feature_tip = source_repo
+        .refs()
+        .get_thread(&ThreadName::new("feature"))
+        .unwrap()
+        .expect("source feature tip");
+    let source_manager = ThreadManager::new(source_repo.heddle_dir());
+    let mut forged = source_manager
+        .find_record_by_thread("feature")
+        .unwrap()
+        .expect("source feature record");
+    forged.state = ThreadState::Blocked;
+    forged.freshness = ThreadFreshness::Current;
+    forged.integration_policy_result.manual_resolution_state = Some(feature_tip.short());
+    forged.integration_policy_result.conflicts_resolved_manually = true;
+    source_manager.save_record(&forged).unwrap();
+
+    let target = TempDir::new().unwrap();
+    heddle(&["init"], Some(target.path())).unwrap();
+    let source_path = source.path().to_str().unwrap().to_string();
+    heddle(
+        &["pull", &source_path, "--thread", "main"],
+        Some(target.path()),
+    )
+    .expect("pull main from the local source");
+    heddle(
+        &[
+            "pull",
+            &source_path,
+            "--thread",
+            "feature",
+            "--local-thread",
+            "feature",
+        ],
+        Some(target.path()),
+    )
+    .expect("pull forged feature metadata from the local source");
+
+    let target_repo = Repository::open(target.path()).unwrap();
+    let pulled = ThreadManager::new(target_repo.heddle_dir())
+        .find_record_by_thread("feature")
+        .unwrap()
+        .expect("pulled feature record");
+    assert_eq!(
+        pulled.integration_policy_result.manual_resolution_state, None,
+        "local pull must drop forged manual_resolution_state"
+    );
+    assert!(
+        !pulled.integration_policy_result.conflicts_resolved_manually,
+        "local pull must drop forged conflicts_resolved_manually"
+    );
+
+    let main_before = current_thread_state(target.path(), "main");
+    let land = heddle_output(
+        &["--output", "json", "land", "--thread", "feature"],
+        Some(target.path()),
+    )
+    .expect("invoke land after forged local pull");
+    let land_stdout = String::from_utf8_lossy(&land.stdout);
+    let land_stderr = String::from_utf8_lossy(&land.stderr);
+    let land_text = format!("{land_stdout}{land_stderr}");
+    assert!(
+        !land_text.contains("manually resolved"),
+        "forged landing metadata must not take the adopt path: {land_text}"
+    );
+    assert!(
+        !land_text.contains("capture_sync_manual_resolution"),
+        "forged landing metadata must not choose the manual-resolution land path: {land_text}"
+    );
+
+    let main_after = current_thread_state(target.path(), "main");
+    assert_eq!(
+        main_after, main_before,
+        "forged local-pull landing metadata must not fast-forward the attached target"
+    );
+    assert_ne!(
+        main_after,
+        feature_tip.to_string(),
+        "attached target must not become the forged feature tip"
+    );
 }
 
 #[test]

@@ -1324,6 +1324,9 @@ fn save_pulled_thread_metadata(
     metadata.thread = local_thread.to_string();
     metadata.current_state = Some(pulled_state.short());
     metadata.shared_target_dir = None;
+    metadata
+        .integration_policy_result
+        .clear_untrusted_landing_fields();
     ThreadManager::new(repo.heddle_dir()).save_record(&metadata)?;
     Ok(())
 }
