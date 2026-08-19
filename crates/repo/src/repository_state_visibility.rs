@@ -913,6 +913,21 @@ mod tests {
         }
     }
 
+    fn repo_trusting_metadata(signer: &dyn Signer) -> (TempDir, Repository) {
+        let dir = TempDir::new().unwrap();
+        Repository::init_default(dir.path()).unwrap();
+        let config_path = dir.path().join(".heddle/config.toml");
+        let mut config = crate::repository::repo_config::RepoConfig::load(&config_path).unwrap();
+        config.metadata.trusted_keys.push(crate::TrustedKey {
+            algorithm: signer.algorithm().to_string(),
+            public_key: hex::encode(signer.public_key()),
+            label: Some("test-client".to_string()),
+        });
+        config.save(&config_path).unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        (dir, repo)
+    }
+
     fn sign_visibility(record: &mut StateVisibility, signer: &dyn Signer) {
         let signature = signer
             .sign(&record.canonical_signing_payload())
@@ -925,9 +940,9 @@ mod tests {
     }
 
     #[test]
-    fn writer_signed_visibility_needs_no_owner_capability_and_covers_tier() {
+    fn wire_visibility_requires_trusted_signature_and_covers_tier() {
         let signer = Ed25519Signer::generate().expect("keygen");
-        let (_dir, repo) = fresh_repo();
+        let (_dir, repo) = repo_trusting_metadata(&signer);
         let state = StateId::from_bytes([4u8; 32]);
         let mut record = sample_record(state, VisibilityTier::Internal);
 
@@ -942,7 +957,7 @@ mod tests {
             .encode()
             .unwrap();
         repo.accept_wire_state_visibility(state, &signed)
-            .expect("ordinary write-authorized visibility");
+            .expect("trusted signed visibility");
 
         let tampered_state = StateId::from_bytes([5u8; 32]);
         let mut tampered = sample_record(

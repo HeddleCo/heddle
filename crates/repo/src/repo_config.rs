@@ -37,6 +37,31 @@ pub struct RepoConfig {
     pub review: ReviewConfig,
     #[serde(default)]
     pub provenance: ProvenanceConfig,
+    #[serde(default)]
+    pub redact: RedactConfig,
+    #[serde(default)]
+    pub metadata: MetadataConfig,
+}
+
+/// `[redact]` config section. Houses the list of operator public keys
+/// that the receiver trusts when accepting redactions over the wire
+/// (`Repository::accept_wire_redactions`). The list is fail-closed:
+/// an empty list rejects every incoming signed redaction. Operators
+/// populate it by editing `.heddle/config.toml`.
+///
+/// The reason the trust list lives in repo config rather than in the
+/// signed payload itself: a signature only proves *who* declared the
+/// redaction, not whether the receiver should *honor* that operator's
+/// authority for this workspace. Without a separate trust anchor an
+/// attacker can mint a redaction with their own key and pass
+/// signature verification trivially.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RedactConfig {
+    /// Trusted operator public keys. Every signed redaction received
+    /// over the wire must match one of these (algorithm + hex-encoded
+    /// public key) before the receiver persists the sidecar.
+    #[serde(default)]
+    pub trusted_keys: Vec<TrustedKey>,
 }
 
 /// One trusted operator key entry. Algorithm and key strings use the
@@ -51,6 +76,26 @@ pub struct TrustedKey {
     /// semantics. Optional; doesn't affect matching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+}
+
+impl TrustedKey {
+    /// Case-insensitive algorithm + hex public-key match against a
+    /// wire signature's claimed identity.
+    pub fn matches(&self, algorithm: &str, public_key_hex: &str) -> bool {
+        self.algorithm.eq_ignore_ascii_case(algorithm)
+            && self.public_key.eq_ignore_ascii_case(public_key_hex)
+    }
+
+    /// The configured entry whose identity matches `(algorithm, public_key_hex)`.
+    pub fn find<'a>(
+        trusted: &'a [Self],
+        algorithm: &str,
+        public_key_hex: &str,
+    ) -> Option<&'a Self> {
+        trusted
+            .iter()
+            .find(|key| key.matches(algorithm, public_key_hex))
+    }
 }
 
 /// `[provenance]` trust configuration for offline identity verification.
@@ -74,6 +119,17 @@ pub struct KeyBindingRegistryAnchor {
     pub epoch: u64,
     /// Authority allowed to endorse registry checkpoints and root bindings.
     pub authority: TrustedKey,
+}
+
+/// Trust anchors for client-authored metadata received from a remote host.
+///
+/// Hosted servers relay these records but are not trusted to author them.
+/// An empty list therefore fails closed for authoritative metadata such as
+/// visibility declarations.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MetadataConfig {
+    #[serde(default)]
+    pub trusted_keys: Vec<TrustedKey>,
 }
 
 /// Review-epic configuration. Houses the `[review.signals]` sub-table read by
@@ -436,6 +492,8 @@ impl Default for RepoConfig {
             hosted: HostedConfig::default(),
             review: ReviewConfig::default(),
             provenance: ProvenanceConfig::default(),
+            redact: RedactConfig::default(),
+            metadata: MetadataConfig::default(),
         }
     }
 }
@@ -558,6 +616,8 @@ mod tests {
         assert_eq!(config.output.format, None);
         assert!(config.policies.default_policy.is_none());
         assert_eq!(config.storage.delta_search, DeltaSearchConfig::default());
+        assert!(config.redact.trusted_keys.is_empty());
+        assert!(config.metadata.trusted_keys.is_empty());
     }
 
     #[test]
@@ -575,6 +635,20 @@ source_authority = "native"
         assert!(config.agent.provider.is_none());
         assert!(config.agent.model.is_none());
         assert_eq!(config.storage.delta_search, DeltaSearchConfig::default());
+        assert!(config.redact.trusted_keys.is_empty());
+        assert!(config.metadata.trusted_keys.is_empty());
+    }
+
+    #[test]
+    fn trusted_key_match_is_case_insensitive() {
+        let key = TrustedKey {
+            algorithm: "Ed25519".to_string(),
+            public_key: "aabb".to_string(),
+            label: None,
+        };
+        assert!(key.matches("ed25519", "AABB"));
+        assert!(TrustedKey::find(std::slice::from_ref(&key), "ED25519", "AaBb").is_some());
+        assert!(TrustedKey::find(&[key], "p256", "aabb").is_none());
     }
 
     #[test]
