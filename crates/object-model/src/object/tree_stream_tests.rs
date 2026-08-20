@@ -294,7 +294,8 @@ fn malformed_mode_and_oid_are_rejected() {
     );
     oid_bytes[TREE_HEADER_LEN..TREE_HEADER_LEN + 4].copy_from_slice(&(frame_len - 1).to_le_bytes());
     oid_bytes.pop();
-    write_payload_len(&mut oid_bytes, (oid_bytes.len() - TREE_HEADER_LEN) as u64);
+    let payload_len = (oid_bytes.len() - TREE_HEADER_LEN) as u64;
+    write_payload_len(&mut oid_bytes, payload_len);
     let eager = Tree::decode_canonical(&oid_bytes).expect_err("eager oid");
     let streamed = Tree::decode_canonical_streamed(&oid_bytes).expect_err("stream oid");
     assert!(eager.to_string().contains("object id"), "{eager}");
