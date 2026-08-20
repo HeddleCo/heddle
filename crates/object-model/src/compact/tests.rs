@@ -7,7 +7,8 @@ use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::{
     CompactError, decode_blob_frame, decode_state_frame, decode_tree_frame, encode_blob_frame,
-    encode_state_frame, encode_tree_frame, extract_state, extract_tree,
+    encode_state_frame, encode_tree_frame, extract_state, extract_tree, is_state_frame,
+    state::{STATE_MAGIC, STATE_MAGIC_V1, encode_state_frame_hcs1},
 };
 use crate::object::{
     Agent, Attribution, ChangeId, ChangeLineage, ChangeLineageKind, ContentHash, Principal,
@@ -213,11 +214,49 @@ fn compact_and_hash_include_thought_level_and_parent() {
         "thought_level and parent must not be interchangeable in the hash"
     );
     let encoded = encode_state_frame(&[with.clone()]).unwrap();
+    assert!(
+        encoded.starts_with(STATE_MAGIC),
+        "current encode must use the HCS2 cursor dictionary"
+    );
     let decoded = decode_state_frame(&encoded).unwrap();
     let agent = decoded[0].attribution.agent.as_ref().unwrap();
     assert_eq!(agent.thought_level.as_deref(), Some("high"));
     assert_eq!(agent.parent.as_deref(), Some("agent-1"));
     assert_eq!(decoded[0].id(), with.id());
+}
+
+#[test]
+fn hcs1_agent_frames_keep_the_five_field_dictionary() {
+    let created_at = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    let mut state = State::new(
+        ContentHash::from_bytes([70; 32]),
+        Vec::new(),
+        Attribution::with_agent(
+            Principal::new("Author", "author@example.com"),
+            Agent::new("anthropic", "opus"),
+        ),
+    );
+    state.created_at = created_at;
+    state.state_id = state.pre_cursor_id();
+    let encoded = encode_state_frame_hcs1(&[state.clone()]).unwrap();
+    assert!(
+        encoded.starts_with(STATE_MAGIC_V1),
+        "format-4 packs keep HCS1 magic, got {:x?}",
+        &encoded[..4.min(encoded.len())]
+    );
+    assert!(is_state_frame(&encoded));
+    let decoded = decode_state_frame(&encoded).unwrap();
+    let agent = decoded[0].attribution.agent.as_ref().unwrap();
+    assert_eq!(agent.provider, "anthropic");
+    assert_eq!(agent.model, "opus");
+    assert!(agent.thought_level.is_none());
+    assert!(agent.parent.is_none());
+    assert!(
+        decoded[0].accepts_stored_id(&state.pre_cursor_id()),
+        "HCS1 decode must not desync into the seven-field dictionary"
+    );
+    let extracted = extract_state(&encoded, state.pre_cursor_id()).unwrap();
+    assert_eq!(extracted.state_id, state.pre_cursor_id());
 }
 
 #[test]

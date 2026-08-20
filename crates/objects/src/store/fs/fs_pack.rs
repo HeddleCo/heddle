@@ -719,7 +719,7 @@ impl FsStore {
             };
             let loose_state = codec::decode_state(loose_data.as_slice())?;
             let packed_state = validate_state_serialized(&packed_data, *id)?;
-            if loose_state.id() != *id {
+            if !loose_state.accepts_stored_id(id) {
                 return Err(HeddleError::InvalidObject(format!(
                     "loose state id mismatch while pruning: expected {id}, computed {}",
                     loose_state.id()

@@ -10360,8 +10360,12 @@ fn verify_after_git_overlay_clone_reports_clone_verified() {
         serde_json::json!([])
     );
     let exclude = std::fs::read_to_string(work.join(".git/info/exclude")).unwrap();
-    {
-        let pattern = ".heddle/";
+    for pattern in [
+        ".heddle/",
+        ".heddle.identity",
+        ".identity.lock",
+        ".identity.tmp.*",
+    ] {
         assert!(
             exclude.lines().any(|line| line.trim() == pattern),
             "clone should install the same local Git exclude policy as init; missing {pattern:?}: {exclude}"

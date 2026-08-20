@@ -14,7 +14,7 @@ use super::{
         MIN_PRINCIPAL_BYTES, MIN_STATE_COLUMN_BYTES, MIN_STATE_PARENT_BYTES,
         MIN_VERIFICATION_CUSTOM_BYTES, admit_count,
     },
-    state::STATE_MAGIC,
+    state::{STATE_MAGIC, STATE_MAGIC_V1},
 };
 use crate::object::{
     Agent, Attribution, ChangeId, ChangeLineage, ChangeLineageKind, ContentHash, Principal, State,
@@ -23,9 +23,10 @@ use crate::object::{
 
 /// Decode and whole-frame-verify every state, recomputing each state id.
 pub fn decode_state_frame(bytes: &[u8]) -> Result<Vec<State>> {
-    let mut input = Reader::verified(bytes, STATE_MAGIC)?;
+    let magic = state_frame_magic(bytes)?;
+    let mut input = Reader::verified(bytes, magic)?;
     let count = input.get_count_at_most("state frame", 1, MAX_COMPACT_STATE_COUNT)?;
-    let (principals, agents) = decode_dictionaries(&mut input)?;
+    let (principals, agents) = decode_dictionaries(&mut input, magic == STATE_MAGIC)?;
     admit_count(
         "state frame",
         count,
@@ -212,11 +213,29 @@ fn decode_verification(input: &mut Reader<'_>) -> Result<Option<Verification>> {
     }
 }
 
-fn decode_dictionaries(input: &mut Reader<'_>) -> Result<(Vec<Principal>, Vec<Agent>)> {
+fn state_frame_magic(bytes: &[u8]) -> Result<&'static [u8; 4]> {
+    if bytes.starts_with(STATE_MAGIC) {
+        Ok(STATE_MAGIC)
+    } else if bytes.starts_with(STATE_MAGIC_V1) {
+        Ok(STATE_MAGIC_V1)
+    } else {
+        Err(invalid("frame magic does not match its object kind"))
+    }
+}
+
+fn decode_dictionaries(
+    input: &mut Reader<'_>,
+    include_cursor_fields: bool,
+) -> Result<(Vec<Principal>, Vec<Agent>)> {
     let principals = (0..input.get_count("principal dictionary", MIN_PRINCIPAL_BYTES)?)
         .map(|_| principal_from_key(PrincipalKey(input.get_bytes()?, input.get_bytes()?)))
         .collect::<Result<Vec<_>>>()?;
-    let agents = (0..input.get_count("agent dictionary", MIN_AGENT_BYTES)?)
+    let min_agent_bytes = if include_cursor_fields {
+        MIN_AGENT_BYTES
+    } else {
+        MIN_AGENT_BYTES.saturating_sub(2)
+    };
+    let agents = (0..input.get_count("agent dictionary", min_agent_bytes)?)
         .map(|_| {
             agent_from_key(AgentKey {
                 provider: input.get_bytes()?,
@@ -224,8 +243,16 @@ fn decode_dictionaries(input: &mut Reader<'_>) -> Result<(Vec<Principal>, Vec<Ag
                 session_id: input.get_optional_bytes()?,
                 segment_id: input.get_optional_bytes()?,
                 policy_id: input.get_optional_bytes()?,
-                thought_level: input.get_optional_bytes()?,
-                parent: input.get_optional_bytes()?,
+                thought_level: if include_cursor_fields {
+                    input.get_optional_bytes()?
+                } else {
+                    None
+                },
+                parent: if include_cursor_fields {
+                    input.get_optional_bytes()?
+                } else {
+                    None
+                },
             })
         })
         .collect::<Result<Vec<_>>>()?;

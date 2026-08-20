@@ -17,9 +17,11 @@
 //! the gitignore-spec "match anywhere" behavior for those names can
 //! write `**/<name>` explicitly.
 //!
-//! Root `.heddle/` is also a reserved-path hard-deny evaluated after
-//! user rules. A later `!.heddle/` (or similar) cannot un-ignore
-//! identity material. Nested fixture `.heddle/` trees are not reserved.
+//! Root `.heddle/` and pointer-checkout cursor files (`.heddle.identity`,
+//! `.identity.lock`, `.identity.tmp.*`) are reserved-path hard-denies
+//! evaluated after user rules. A later `!.heddle/` (or similar) cannot
+//! un-ignore identity material. Nested fixture `.heddle/` trees are not
+//! reserved.
 
 use std::path::Path;
 
@@ -360,6 +362,18 @@ mod tests {
             assert!(
                 should_ignore(&PathBuf::from(".heddle"), patterns),
                 "reserved root .heddle must stay ignored under {patterns:?}"
+            );
+            assert!(
+                should_ignore(&PathBuf::from(".heddle.identity"), patterns),
+                "reserved pointer cursor must stay ignored under {patterns:?}"
+            );
+            assert!(
+                should_ignore(&PathBuf::from(".identity.lock"), patterns),
+                "reserved pointer lock must stay ignored under {patterns:?}"
+            );
+            assert!(
+                should_ignore(&PathBuf::from(".identity.tmp.1.2"), patterns),
+                "reserved pointer tmp must stay ignored under {patterns:?}"
             );
         }
         // Nested fixtures are not reserved. User rules still apply, so

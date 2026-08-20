@@ -29,8 +29,10 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   `agent=null`. Codex `Stop` expires the cursor. OpenCode expire/merge go
   through locked `integration stamp`. A later parent-session event clears a
   stale subagent `parent`. Unpublished→published identity attaches to the
-  placeholder segment. User-scoped OpenCode discovers the workspace at
-  runtime (heddle#1518).
+  placeholder segment. User-scoped Claude, Codex, and OpenCode discover
+  the workspace at runtime (heddle#1518). Repository format 5 records the
+  cursor-hash / HCS2 boundary; format-4 agent states keep their stored
+  ids. Pointer-checkout cursor files are reserved from capture.
 
 - **`heddle completions` prints tab-completion scripts.** The field-study
   verb emits install lines, or a bash/zsh/fish script. Same scripts as
