@@ -8,10 +8,9 @@ on.
 ## Runtime introspection
 
 Schemas in this document are registered at runtime by
-`crates/cli-contract/src/cli/commands/schemas.rs`. Migrated verbs such as
-`init` derive the schema from the real output struct (see
-[`docs/cli-macro.md`](cli-macro.md)); remaining verbs still use a
-hand-written mirror. Generate the canonical JSON
+`crates/cli-contract/src/cli/commands/schemas.rs`. `init` registers the
+real `InitOutput` type (no hand-written `InitSchema` mirror); remaining
+verbs still use a hand-written mirror. Generate the canonical JSON
 Schema for any verb with:
 
     heddle schemas                    # list registered schema verbs

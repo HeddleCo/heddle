@@ -22,7 +22,7 @@ use super::{
     verification_health::build_repository_verification_state,
 };
 use crate::{
-    cli::{Cli, InitArgs, should_output_json, style},
+    cli::{Cli, INIT_VERB, InitArgs, should_output_json, style},
     config::UserConfig,
 };
 
@@ -180,9 +180,9 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
         .map(|principal| placeholder_principal_warning(&principal));
 
     let output = InitOutput {
-        output_kind: "init",
+        output_kind: INIT_VERB,
         status: "initialized".to_string(),
-        action: "init".to_string(),
+        action: INIT_VERB.to_string(),
         path: repo.heddle_dir().to_path_buf(),
         repository_mode: repo.capability_label().to_string(),
         git_detected,

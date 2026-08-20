@@ -3,8 +3,8 @@
 //!
 //! This module owns the JSON Schema registry for `--output json`
 //! verbs. Schema *membership* comes from the active command catalog.
-//! Constructed verbs (`verb_surface`) register their real output type
-//! so clap + schema cannot drift. Remaining verbs still use
+//! `init` registers the real [`InitOutput`] type so the published
+//! schema cannot drift from the serializer. Remaining verbs still use
 //! schemars-derived mirror structs to avoid threading `JsonSchema`
 //! through every workspace output type. `heddle doctor schemas`
 //! validates documented samples against the registered schemas.
@@ -20,7 +20,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::{RecoveryAdvice, command_catalog, init_output::InitOutput};
-use crate::cli::{Cli, should_output_json};
+use crate::cli::{Cli, INIT_VERB, should_output_json};
 
 static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
 static DOCUMENTED_SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -67,7 +67,7 @@ fn report_contract_schema_verbs() -> &'static [&'static str] {
 
 schema_registry! {
     (&["maintenance fsck repair git"], FsckReport),
-    (&["init"], InitOutput),
+    (&[INIT_VERB], InitOutput),
     (&["adopt"], AdoptSchema),
     (&["capture"], CaptureSchema),
     (&["commit"], CommitSchema),
@@ -622,10 +622,10 @@ fn normalize_schema_verb_parts(parts: &[String]) -> Result<Vec<String>> {
 // ---------------------------------------------------------------------------
 //
 // Unmigrated verbs still use a mirror struct: serde attributes match
-// the real serializer, and `schemars` emits the JSON Schema. Constructed
-// verbs (`verb_surface`) register the real output type instead — do not
-// add a mirror for those. When a remaining mirror's real output struct
-// changes, update the mirror here and `docs/json-schemas.md`.
+// the real serializer, and `schemars` emits the JSON Schema. `init`
+// registers the real output type instead — do not add a mirror for it.
+// When a remaining mirror's real output struct changes, update the
+// mirror here and `docs/json-schemas.md`.
 
 // ---- shared sub-types ------------------------------------------------------
 //

@@ -13,7 +13,6 @@ categories.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 heddle-cli-args = { path = "../cli-args", version = "0.12", default-features = false }
-heddle-cli-macro = { path = "../cli-macro", version = "0.12" }
 heddle-cli-render = { path = "../cli-render", version = "0.12", default-features = false }
 heddle-core = { path = "../core", version = "0.12", default-features = false }
 heddle-git-projection = { path = "../git-projection", version = "0.12", default-features = false }

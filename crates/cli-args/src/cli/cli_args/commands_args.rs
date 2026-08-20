@@ -4,9 +4,14 @@
 #[cfg(feature = "git-overlay")]
 use super::commands_git_projection::SyncCommands;
 
+/// Verb key for `heddle init`.
+///
+/// One literal. [`InitArgs`], the init JSON output, the command catalog,
+/// and `schema_registry!` import this identifier so they cannot disagree.
+pub const INIT_VERB: &str = "init";
+
 /// Arguments for the `init` command.
-#[derive(Clone, Debug, clap::Args, heddle_cli_macro::HeddleVerbArgs)]
-#[heddle_verb("init")]
+#[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
   heddle init                                                    # initialize here; existing Git becomes Git Overlay
@@ -40,6 +45,11 @@ pub struct InitArgs {
     /// Overwrite Heddle-managed integration entries when needed.
     #[arg(long)]
     pub harness_install_force: bool,
+}
+
+impl InitArgs {
+    /// Same identifier as [`INIT_VERB`].
+    pub const VERB: &'static str = INIT_VERB;
 }
 
 /// Arguments for the `adopt` command.

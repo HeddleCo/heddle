@@ -3,7 +3,6 @@ members = [
     "crates/cli",
     "crates/cli-args",
     "crates/cli-contract",
-    "crates/cli-macro",
     "crates/cli-render",
     "crates/cli-shared",
     "crates/ci-config",
@@ -82,7 +81,6 @@ proptest = "1"
 p256 = { version = "0.14", features = ["ecdsa", "pem", "getrandom"] }
 pkcs8 = { version = "0.11", features = ["pem", "encryption"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
-quote = "1"
 prost = "0.14"
 prost-reflect = "0.16"
 prost-types = "0.14"

@@ -5,6 +5,8 @@ use std::collections::BTreeSet;
 
 use clap::Command;
 
+use crate::cli::INIT_VERB;
+
 /// Canonical roots from the accepted whole-CLI consolidation decision, with
 /// the maintainer overrides applied.
 ///
@@ -27,7 +29,7 @@ pub const CANONICAL_ROOT_COMMANDS: &[&str] = &[
     "discuss",
     "doctor",
     "help",
-    "init",
+    INIT_VERB,
     "integration",
     "land",
     "log",

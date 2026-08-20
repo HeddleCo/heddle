@@ -1,21 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Wire shape for `heddle init --output json`.
 //!
-//! This is the real output struct, not a schema mirror. `Serialize` and
-//! `JsonSchema` are derived on the same type so clap's sibling args
-//! struct (`InitArgs`) and this output cannot drift at the schema layer.
+//! This is the registered schema type, not a mirror. `Serialize` and
+//! `JsonSchema` are derived on the same struct so skip-serialized
+//! fields cannot reappear on the published schema.
 
 use std::path::PathBuf;
 
-use heddle_cli_macro::HeddleVerbOutput;
+use heddle_cli_args::INIT_VERB;
 use schemars::JsonSchema;
 use serde::Serialize;
 
 use super::verification_health::RepositoryVerificationState;
 
 /// JSON payload for a successful `heddle init`.
-#[derive(Serialize, JsonSchema, HeddleVerbOutput)]
-#[heddle_verb("init")]
+#[derive(Serialize, JsonSchema)]
 #[schemars(rename = "InitSchema")]
 pub struct InitOutput {
     /// Stable machine discriminator. Always `init`.
@@ -65,10 +64,52 @@ pub struct InitOutput {
     pub trust: RepositoryVerificationState,
 }
 
+impl InitOutput {
+    /// Same identifier as [`INIT_VERB`].
+    pub const VERB: &'static str = INIT_VERB;
+}
+
 /// Principal identity included in init JSON when one is configured.
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "InitPrincipalSchema")]
 pub struct InitPrincipalOutput {
     pub name: String,
     pub email: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use schemars::schema_for;
+    use serde_json::Value;
+
+    use super::*;
+
+    fn property_keys(schema: &Value) -> Vec<String> {
+        let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+            return Vec::new();
+        };
+        properties.keys().cloned().collect()
+    }
+
+    #[test]
+    fn init_schema_is_the_real_output_type() {
+        let from_type = serde_json::to_value(schema_for!(InitOutput))
+            .expect("InitOutput schema should serialize");
+        let type_keys = property_keys(&from_type);
+        assert!(
+            !type_keys.iter().any(|key| key == "verification"),
+            "skip-serialized verification must not appear on the derived schema"
+        );
+        assert!(
+            !type_keys
+                .iter()
+                .any(|key| key == "placeholder_principal_warning"),
+            "text-only placeholder warning must not appear on the derived schema"
+        );
+        assert_eq!(
+            from_type.get("title").and_then(Value::as_str),
+            Some("InitSchema"),
+            "published schema title stays InitSchema"
+        );
+    }
 }

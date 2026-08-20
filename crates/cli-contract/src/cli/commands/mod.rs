@@ -8,7 +8,6 @@ pub mod doctor_schemas;
 pub mod init_output;
 pub mod schemas;
 pub mod surface_conformance;
-pub mod verb_surface;
 pub mod verification_health;
 
 pub use advice::RecoveryAdvice;
@@ -30,4 +29,3 @@ pub use surface_conformance::{
     CommandSurfaceViolation, command_surface_violations, is_approved_root_command,
     unapproved_root_command_names,
 };
-pub use verb_surface::{CONSTRUCTED_SCHEMA_VERBS, ConstructedVerb, constructed_verbs};
