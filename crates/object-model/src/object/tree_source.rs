@@ -12,15 +12,13 @@ use super::tree_stream::TreeStreamError;
 
 /// How a tree body may be trusted for content-address verification.
 ///
-/// Sequential reads from offset 0 can recompute the typed tree hash. Ranged
-/// resume skips the prefix, so it is allowed only for uncompressed loose HTR4
-/// files stored at the content-hash path. That hash-path placement is the
-/// documented verified-placement invariant: the filename is the tree id the
-/// bytes claim to be. Memory copies, pack extracts, and re-encoded bodies
-/// stay on [`Self::SequentialVerify`]. Silent weaker validation is not allowed.
+/// Sequential reads from offset 0 recompute the typed tree hash. Ranged
+/// resume skips the prefix and is allowed only after the caller has hashed
+/// these exact bytes. A hash-shaped path or an embedded tree id is not that
+/// proof. Object-store backends use [`Self::SequentialVerify`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TreeBodyIntegrity {
-    /// Loose uncompressed HTR4 at the content-hash path.
+    /// Caller hashed these exact bytes; prefix skip is allowed.
     VerifiedPlacement,
     /// The reader must start at entry 0 and call `finish_and_verify`.
     SequentialVerify,
@@ -93,8 +91,8 @@ impl TreeByteSource for BytesTreeSource {
     }
 }
 
-/// File-backed tree body. Resume seeks to the cursor offset; the prefix is
-/// not read.
+/// File-backed tree body. Sequential reads seek per frame; resume at
+/// ordinal > 0 is refused because a path is not a content-address proof.
 #[derive(Debug)]
 pub struct FileTreeSource {
     file: File,
@@ -104,11 +102,11 @@ pub struct FileTreeSource {
 }
 
 impl FileTreeSource {
-    pub fn verified_placement(file: File, len: u64) -> Self {
+    pub fn sequential_verify(file: File, len: u64) -> Self {
         Self {
             file,
             len,
-            integrity: TreeBodyIntegrity::VerifiedPlacement,
+            integrity: TreeBodyIntegrity::SequentialVerify,
             bytes_read: 0,
         }
     }

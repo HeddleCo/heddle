@@ -1032,8 +1032,8 @@ fn test_tree_roundtrip() {
 }
 
 #[test]
-fn loose_htr4_resume_skips_the_encoded_prefix() {
-    use crate::object::{TREE_HEADER_LEN, TreePageLimits};
+fn loose_htr4_open_is_sequential_and_hashes() {
+    use crate::object::{TreePageLimits, TreeStreamError};
 
     let (_temp, store) = create_test_store();
     let blob = ContentHash::compute(b"resume-leaf");
@@ -1042,28 +1042,26 @@ fn loose_htr4_resume_skips_the_encoded_prefix() {
         TreeEntry::file("b.txt", blob, true).unwrap(),
     ]);
     let hash = store.put_tree(&tree).unwrap();
-    let encoded_len = store.get_tree_serialized(&hash).unwrap().unwrap().len() as u64;
     let mut reader = store.open_tree(&hash, None).unwrap().unwrap();
     let first = reader
         .next_page(TreePageLimits::new(1, usize::MAX).unwrap())
         .unwrap()
         .unwrap();
-    let prefix_end = first.resume_cursor.byte_offset();
-    drop(reader);
-
-    let mut resumed = store
-        .open_tree(&hash, Some(&first.resume_cursor))
-        .unwrap()
-        .unwrap();
-    let rest = resumed
+    assert_eq!(first.entries[0].name(), "a.txt");
+    let rest = reader
         .next_page(TreePageLimits::new(8, usize::MAX).unwrap())
         .unwrap()
         .unwrap();
     assert_eq!(rest.entries[0].name(), "b.txt");
-    resumed.finish_and_verify().unwrap();
-    let suffix = encoded_len.saturating_sub(prefix_end);
-    assert!(resumed.bytes_read() <= TREE_HEADER_LEN as u64 + suffix);
-    assert!(resumed.bytes_read() < encoded_len);
+    reader.finish_and_verify().unwrap();
+
+    let error = store
+        .open_tree(&hash, Some(&first.resume_cursor))
+        .expect_err("hash-path is not a content-address proof");
+    assert!(matches!(
+        error,
+        HeddleError::TreeStream(TreeStreamError::UnverifiedRange)
+    ));
 }
 
 #[test]
