@@ -2168,6 +2168,7 @@ fn command_contract_table_drives_help_tiers() {
         (
             "whoami", "everyday", "native", "everyday", None, None, false,
         ),
+        ("help", "everyday", "native", "everyday", None, None, false),
         (
             "thread create",
             "advanced",

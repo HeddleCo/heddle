@@ -90,10 +90,8 @@ fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthori
     use heddle_core::source_authority::{SourceAction, SourceAuthorityActions};
 
     let catalog = crate::cli::commands::build_command_catalog();
-    let overlay = authority == repo::RepositorySourceAuthority::GitOverlay;
     let actions = SourceAuthorityActions::new(authority);
     let capture = actions.display(SourceAction::Capture);
-    let push = actions.display(SourceAction::Push);
 
     let _ = writeln!(out, "Heddle — agent-native version control");
     let _ = writeln!(out);
@@ -111,12 +109,6 @@ fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthori
         out,
         "Isolated work: heddle start <name> --path ../<name> -> {capture} -> heddle ready -> heddle land"
     );
-    if overlay {
-        let _ = writeln!(
-            out,
-            "Git Overlay: `ready` and {push} write the Git commit. Save is `capture`."
-        );
-    }
     let _ = writeln!(out);
     let _ = writeln!(
         out,
@@ -719,8 +711,7 @@ Everyday verbs:
     heddle doctor
     heddle help
 
-Save is `capture`. In Git Overlay, `ready` and `push` write the Git commit as a
-side effect; do not run `capture` then `commit`.
+Save is `capture`. The first-screen loop does not run `capture` then `commit`.
 
 Existing Git checkout:
 
@@ -1218,8 +1209,8 @@ mod tests {
             "overlay first screen still teaches capture as the save: {help}"
         );
         assert!(
-            help.contains("ready") && help.contains("heddle push") && help.contains("Git commit"),
-            "overlay first screen should say ready/push write the Git commit: {help}"
+            !help.contains("write the Git commit") && !help.contains("side effect"),
+            "overlay first screen must not claim ready/push write the Git commit: {help}"
         );
         assert!(
             !help.contains("-> heddle commit"),
@@ -1298,10 +1289,8 @@ mod tests {
             "help model must not teach default `land --thread`: {model}"
         );
         assert!(
-            !model.contains("heddle commit")
-                || model.contains("side effect")
-                || model.contains("ready") && model.contains("push"),
-            "help model must not teach capture then commit as the save path: {model}"
+            !model.contains("write the Git commit") && !model.contains("heddle commit"),
+            "help model must not claim ready/push write-through or teach heddle commit: {model}"
         );
         for verb in ["query", "review", "discuss", "context", "daemon", "whoami"] {
             assert!(
@@ -1319,15 +1308,23 @@ mod tests {
     /// everyday catalog labels, not advanced.
     #[test]
     fn locked_collab_and_identity_verbs_are_everyday() {
+        let catalog = crate::cli::commands::build_command_catalog();
         for verb in [
-            "query", "review", "discuss", "context", "daemon", "whoami", "continue",
+            "query", "review", "discuss", "context", "daemon", "whoami", "continue", "help",
         ] {
-            if crate::cli::commands::build_command_catalog()
-                .command_by_display(verb)
-                .is_none()
-            {
+            let Some(entry) = catalog.command_by_display(verb) else {
+                continue;
+            };
+            // Feature-gated roots (whoami without `client`) are advertised
+            // with an empty summary and no live clap node. Skip them the
+            // same way the first-screen renderer does.
+            if entry.summary.is_empty() {
                 continue;
             }
+            assert_eq!(
+                entry.help_visibility, "everyday",
+                "`{verb}` catalog label must be everyday, not advanced"
+            );
             assert_eq!(
                 tier_of(verb),
                 Tier::Everyday,
@@ -1345,7 +1342,7 @@ mod tests {
         for verb in [
             "init", "clone", "status", "start", "capture", "ready", "diff", "land", "resolve",
             "continue", "undo", "log", "show", "query", "review", "discuss", "context", "daemon",
-            "pull", "push", "doctor",
+            "pull", "push", "doctor", "help",
         ] {
             assert!(
                 everyday.contains(verb),
@@ -1355,7 +1352,7 @@ mod tests {
         }
         if crate::cli::commands::build_command_catalog()
             .command_by_display("whoami")
-            .is_some()
+            .is_some_and(|entry| !entry.summary.is_empty())
         {
             assert!(
                 everyday.contains("whoami"),

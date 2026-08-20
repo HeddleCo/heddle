@@ -1028,6 +1028,12 @@ fn build_machine_contract_coverage() -> MachineContractCoverage {
     }
 }
 fn machine_contract_verified_scope(command: &super::command_catalog::CommandCatalogEntry) -> bool {
+    // `help --output json` is the command-catalog dump: everyday for
+    // discovery, accepted-opaque for schema coverage. Keep it out of
+    // the concrete everyday/agent verification set.
+    if command.display == "help" {
+        return false;
+    }
     command.help_visibility == "everyday"
         || matches!(
             command.path.first().map(String::as_str),

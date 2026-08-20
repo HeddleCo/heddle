@@ -2065,12 +2065,15 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["help"],
-        category(
-            json_discriminators(
-                opaque_schemas(READ_JSON, &["help"]),
-                &[json_discriminator(Some("help"), "kind", "command_catalog")],
+        front_door(
+            category(
+                json_discriminators(
+                    opaque_schemas(READ_JSON, &["help"]),
+                    &[json_discriminator(Some("help"), "kind", "command_catalog")],
+                ),
+                "repo",
             ),
-            "repo",
+            230,
         ),
     ),
     entry(&["hook"], surface(GROUP, "automation")),

@@ -6807,10 +6807,9 @@ fn overlay_help_does_not_teach_capture_then_commit() {
     let help = heddle(&["help"], Some(temp.path())).expect("overlay help");
     assert!(
         help.contains("Save: heddle init -> heddle capture -m \"...\"")
-            && help.contains("Git Overlay:")
-            && help.contains("heddle push")
+            && !help.contains("write the Git commit")
             && !help.contains("-> heddle commit"),
-        "overlay first screen must not teach capture then commit: {help}"
+        "overlay first screen must not teach capture then commit or false write-through: {help}"
     );
     assert!(
         !help.contains("\n  commit"),

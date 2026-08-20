@@ -63,8 +63,8 @@ heddle doctor
 
 **Three verb families you will use most:**
 
-- **Save & publish:** `capture` is the save. In Git Overlay, `ready` and `push`
-  write the Git commit as a side effect. Do not run `capture` then `commit`.
+- **Save & publish:** `capture` is the save. The everyday loop does not run
+  `capture` then `commit`.
 - **Thread lifecycle:** `start` → `ready` → `land` (managed threads). Prefer
   `land` over the raw `merge`/`rebase` primitives.
 - **Collaboration & review:** `discuss` (open/append/resolve discussions
