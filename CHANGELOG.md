@@ -44,6 +44,11 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Fixed
 
+- **`whoami` does not adopt a plain Git checkout.** A read-only identity
+  query now probes with `Repository::open_existing` (the same
+  `discover_heddle_root` path other inspect commands use) and never
+  bootstraps a `.heddle` sidecar or rewrites Git excludes (heddle#1487).
+
 - **`whoami` reports the capture actor before hosted auth.** `init --principal-*`
   writes `user_config` and `status` already showed that principal. `whoami` now
   prints the same capture actor first and hosted authentication as a second

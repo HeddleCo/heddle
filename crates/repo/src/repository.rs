@@ -1132,6 +1132,20 @@ impl Repository {
         Self::open_with_mode(path.as_ref(), RepositoryOpenMode::Normal)
     }
 
+    /// Open a Heddle store only when one already exists at `path` or an ancestor.
+    ///
+    /// [`Repository::open`] bootstraps a `.heddle` sidecar and Git excludes
+    /// for a plain Git checkout. Observe-only commands (whoami, status,
+    /// verify, doctor) must probe with [`discover_heddle_root`] first so a
+    /// read-only query never adopts the tree.
+    pub fn open_existing(path: impl AsRef<Path>) -> Result<Option<Self>> {
+        let path = path.as_ref();
+        let Some(root) = discover_heddle_root(path) else {
+            return Ok(None);
+        };
+        Ok(Some(Self::open(&root)?))
+    }
+
     /// Open only enough repository state to run explicit oplog recovery.
     ///
     /// This deliberately bypasses oplog validation, open hooks, ref-tail

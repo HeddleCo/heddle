@@ -357,6 +357,21 @@ fn open_existing_does_not_bootstrap_plain_git() {
 }
 
 #[test]
+fn open_existing_opens_an_already_present_store() {
+    let (temp_dir, repo) = create_test_repo();
+    let root = temp_dir.path();
+    drop(repo);
+
+    let opened = Repository::open_existing(root)
+        .expect("existing store must open")
+        .expect("existing store must be present");
+    assert_eq!(
+        opened.root().canonicalize().expect("canonicalize opened root"),
+        root.canonicalize().expect("canonicalize fixture root")
+    );
+}
+
+#[test]
 fn open_bootstraps_plain_git_sidecar_for_mutators() {
     let temp_dir = TempDir::new().unwrap();
     let root = temp_dir.path();
