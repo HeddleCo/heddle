@@ -120,9 +120,11 @@ pub fn validate_thread_id(value: &str) -> Result<(), ThreadIdError> {
 /// `-`, collapse runs, drop `..`, and trim. Always returns a non-empty,
 /// [`validate_thread_id`]-valid string.
 fn suggest_thread_id(value: &str) -> String {
-    let value = objects::object::is_reserved_heddle_namespace(value)
-        .then(|| value.split_once('/').map(|(_, rest)| rest).unwrap_or(value))
-        .unwrap_or(value);
+    let value = if objects::object::is_reserved_heddle_namespace(value) {
+        value.split_once('/').map(|(_, rest)| rest).unwrap_or(value)
+    } else {
+        value
+    };
     let mut slug = String::with_capacity(value.len());
     for ch in value.chars() {
         if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
