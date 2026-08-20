@@ -46,18 +46,21 @@ impl Repository {
         prior: Option<&State>,
         new: &State,
         new_index: Option<&ContentHash>,
+        source_blobs: Option<&std::collections::HashMap<ContentHash, &[u8]>>,
+        source_trees: Option<&std::collections::HashMap<ContentHash, &objects::object::Tree>>,
     ) -> Result<Option<ContentHash>> {
         let cfg = signals_config_from_repo(&self.config().review.signals);
-        let ctx = match build_semantic_context(self, prior, new, new_index) {
-            Ok(ctx) => ctx,
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    "failed to build SemanticContext; running state-only signals"
-                );
-                state_review::SemanticContext::new()
-            }
-        };
+        let ctx =
+            match build_semantic_context(self, prior, new, new_index, source_blobs, source_trees) {
+                Ok(ctx) => ctx,
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        "failed to build SemanticContext; running state-only signals"
+                    );
+                    state_review::SemanticContext::new()
+                }
+            };
         // The registry expects a non-Option prior. Use the new state itself
         // when none is available (initial snapshot) — the modules fire on
         // their own diagnostic content, not on diff vs prior, except where
@@ -215,7 +218,11 @@ mod tests {
         std::fs::write(temp.path().join("hello.rs"), "fn foo() -> i32 { 1 }\n").unwrap();
         repo.snapshot_with_attribution(Some("seed".to_string()), None, attribution.clone())
             .unwrap();
-        std::fs::write(temp.path().join("hello.rs"), "fn foo() -> i32 {\n    1\n}\n").unwrap();
+        std::fs::write(
+            temp.path().join("hello.rs"),
+            "fn foo() -> i32 {\n    1\n}\n",
+        )
+        .unwrap();
         let reformatted = repo
             .snapshot_with_attribution(Some("fmt".to_string()), None, attribution)
             .unwrap();
