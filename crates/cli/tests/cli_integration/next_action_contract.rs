@@ -185,6 +185,104 @@ fn ready_thread_surfaces_land_across_ready_show_and_list() {
 }
 
 #[test]
+fn ready_from_isolated_checkout_recommends_bare_land() {
+    let (_main, checkout_owner, execution_path) = setup_managed_thread("feature/current-land");
+    let checkout = std::path::Path::new(&execution_path);
+    std::fs::write(checkout.join("feature.txt"), "feature\n").unwrap();
+    heddle(&["capture", "-m", "feature"], Some(checkout)).unwrap();
+
+    let ready = json(&["--output", "json", "ready"], checkout);
+    assert_eq!(ready["next_action"], "heddle land", "{ready}");
+    assert_eq!(ready["recommended_action"], "heddle land", "{ready}");
+    assert_eq!(
+        ready["report"]["recommended_action"], "heddle land",
+        "{ready}"
+    );
+    let next = ready["next_action"]
+        .as_str()
+        .expect("ready next_action should be a string");
+    assert!(
+        !next.contains("--thread") && !next.contains("--repo"),
+        "current-checkout land must not emit selectors: {ready}"
+    );
+    assert_no_banned_next_actions(&ready);
+
+    drop(checkout_owner);
+}
+
+#[test]
+fn presence_show_multi_match_next_is_not_help_catalog() {
+    use chrono::Utc;
+    use objects::store::{
+        ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
+    };
+
+    let repo = setup_native_repo();
+    let opened = Repository::open(repo.path()).unwrap();
+    let actors = ActorPresenceStore::new(opened.heddle_dir());
+    for session_id in ["agent-alpha", "agent-beta"] {
+        actors
+            .save(&ActorPresence {
+                session_id: session_id.to_string(),
+                client_instance_id: None,
+                native_actor_key: None,
+                native_parent_actor_key: None,
+                native_instance_key: None,
+                heddle_session_id: None,
+                thread_id: None,
+                thread: "main".to_string(),
+                anchor_state: None,
+                anchor_root: None,
+                path: Some(repo.path().to_path_buf()),
+                base_state: "test-base".to_string(),
+                started_at: Utc::now(),
+                provider: Some("openai".to_string()),
+                model: Some("gpt-test".to_string()),
+                harness: Some("codex".to_string()),
+                thinking_level: None,
+                usage_summary: AgentUsageSummary::default(),
+                last_progress_at: None,
+                report_flush_state: None,
+                attach_reason: Some("test fixture".to_string()),
+                task_assignment_id: None,
+                attach_precedence: vec![],
+                winning_attach_rule: None,
+                probe_source: None,
+                probe_confidence: None,
+                status: ActorPresenceStatus::Active,
+                completed_at: None,
+                context_queries: vec![],
+            })
+            .unwrap();
+    }
+
+    let output = heddle_output(&["--output", "json", "presence", "show"], Some(repo.path()))
+        .expect("presence show should spawn");
+    assert!(
+        !output.status.success(),
+        "multi-match presence show must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let envelope: Value = serde_json::from_str(
+        stderr
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or(stderr.trim()),
+    )
+    .unwrap_or_else(|err| panic!("JSON envelope: {err}\n{stderr}"));
+    assert_eq!(envelope["kind"], "ambiguous_actor_selection", "{envelope}");
+    assert_eq!(
+        envelope["primary_command"], "heddle presence show <session>",
+        "{envelope}"
+    );
+    assert_ne!(
+        envelope["primary_command"], "heddle help --output json",
+        "{envelope}"
+    );
+}
+
+#[test]
 fn ready_clean_stale_managed_thread_refreshes_and_surfaces_land() {
     let (main, checkout_owner, execution_path) = setup_managed_thread("feature/stale-sync");
     let checkout = std::path::Path::new(&execution_path);
