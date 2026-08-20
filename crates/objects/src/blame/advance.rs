@@ -40,13 +40,13 @@ pub fn advance_file_blame_slice<S: ObjectSource>(
     };
     mappings_fit_state_lines(&entry.mappings, entry.state_line_count)?;
 
+    budget.consume(ResourceKind::States, 1)?;
     let Some(entry_state) = source.get_state(&entry.state_id())? else {
         return Err(BlameSliceError::MissingObject {
             kind: "state",
             id: entry.state_id().to_string(),
         });
     };
-    budget.consume(ResourceKind::States, 1)?;
     heddle_perf_contract::record_ancestors_visited(1);
 
     let Some(entry_blob) = source.get_blob(&entry.blob_hash)? else {
@@ -71,12 +71,14 @@ pub fn advance_file_blame_slice<S: ObjectSource>(
 
     let mut next_parents = Vec::new();
     for parent_id in &entry_state.parents {
+        budget.consume(ResourceKind::States, 1)?;
         let Some(parent) = source.get_state(parent_id)? else {
             return Err(BlameSliceError::MissingObject {
                 kind: "state",
                 id: parent_id.to_string(),
             });
         };
+        heddle_perf_contract::record_ancestors_visited(1);
         match claim_parent(
             source,
             super::parent::ParentClaimInput {

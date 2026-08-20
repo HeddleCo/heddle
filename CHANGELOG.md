@@ -27,8 +27,9 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   bitmap; a mismatch is `InvalidFrontier`. Myers keeps similar's Compact
   tie-break: a partial slide splits the run (`b/a` vs `a/a` is `(1,0)`).
   Origin sets are reused like `ProvenanceBuilder`. Overlay, snapshot, and
-  merge visit original blob bytes. Slice usage reports work, lines, and
-  scratch on one live `ResourceBudget` (heddle#1454).
+  merge visit original blob bytes. Each parent state is charged against
+  the slice `states` cap before it is fetched. Slice usage reports work,
+  lines, and scratch on one live `ResourceBudget` (heddle#1454).
 
 - **`heddle completions` prints tab-completion scripts.** The field-study
   verb emits install lines, or a bash/zsh/fish script. Same scripts as

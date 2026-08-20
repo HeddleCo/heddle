@@ -3,11 +3,12 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::blame::{
-    BlamePreparation, BlameSliceError, BlameSliceLimits, advance_file_blame_slice, blame_file,
-    prepare_file_blame,
+    BlamePreparation, BlameSliceAdvance, BlameSliceError, BlameSliceLimits,
+    advance_file_blame_slice, blame_file, prepare_file_blame,
 };
 use crate::object::{Attribution, ContentHash, Principal, State, StateId, Tree, TreeEntry};
 use crate::store::ObjectStore;
+use crate::util::ResourceKind;
 
 use super::fixture::{put_state_with_file, store};
 
@@ -173,4 +174,62 @@ fn mapping_past_state_line_count_is_invalid_frontier() {
         matches!(err, BlameSliceError::InvalidFrontier(_)),
         "expected InvalidFrontier, got {err}"
     );
+}
+
+#[test]
+fn wide_merge_parent_reads_consume_state_budget() {
+    let store = store();
+    let p0 = put_state_with_file(&store, "file.txt", b"a\n", Vec::new(), "p0");
+    let p1 = put_state_with_file(&store, "file.txt", b"b\n", Vec::new(), "p1");
+    let p2 = put_state_with_file(&store, "file.txt", b"c\n", Vec::new(), "p2");
+    let p3 = put_state_with_file(&store, "file.txt", b"d\n", Vec::new(), "p3");
+    let merge = put_state_with_file(
+        &store,
+        "file.txt",
+        b"a\nb\nc\nd\n",
+        vec![p0.id(), p1.id(), p2.id(), p3.id()],
+        "merge",
+    );
+    let path = Path::new("file.txt");
+    let BlamePreparation::Active { frontier, .. } =
+        prepare_file_blame(&store, &merge, path, BlameSliceLimits::unlimited()).unwrap()
+    else {
+        panic!("expected active frontier");
+    };
+
+    let one = BlameSliceLimits {
+        states: 1,
+        ..BlameSliceLimits::unlimited()
+    };
+    let err = advance_file_blame_slice(&store, path, frontier.clone(), one)
+        .expect_err("states:1 must not walk merge parents");
+    match err {
+        BlameSliceError::BudgetExceeded(error) => {
+            assert_eq!(error.kind, ResourceKind::States);
+            assert_eq!(error.limit, 1);
+            assert_eq!(error.needed, 2);
+        }
+        other => panic!("expected States budget, got {other}"),
+    }
+
+    let two = BlameSliceLimits {
+        states: 2,
+        ..BlameSliceLimits::unlimited()
+    };
+    let err = advance_file_blame_slice(&store, path, frontier.clone(), two)
+        .expect_err("states:2 is entry plus one parent");
+    match err {
+        BlameSliceError::BudgetExceeded(error) => {
+            assert_eq!(error.kind, ResourceKind::States);
+            assert_eq!(error.limit, 2);
+            assert_eq!(error.needed, 3);
+        }
+        other => panic!("expected States budget, got {other}"),
+    }
+
+    match advance_file_blame_slice(&store, path, frontier, BlameSliceLimits::unlimited()).unwrap() {
+        BlameSliceAdvance::Progress { usage, .. } | BlameSliceAdvance::Complete { usage, .. } => {
+            assert_eq!(usage.states, 5);
+        }
+    }
 }
