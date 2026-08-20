@@ -34,6 +34,7 @@ pub mod mount_auth;
 pub mod mount_proto;
 #[cfg(unix)]
 pub mod peer;
+pub mod predecessor;
 pub mod protocol;
 pub mod server;
 #[cfg(unix)]
@@ -48,12 +49,14 @@ pub use mount_auth::{
 };
 pub use mount_proto::{
     ERR_MOUNT_CONFLICT, ERR_MOUNT_UNSUPPORTED, ERR_UNAUTHORIZED, ERR_VERSION_MISMATCH,
-    MOUNT_PROTOCOL_VERSION, MountDaemonRequest, MountDaemonResponse, MountRegistryFile,
-    MountStatus, PersistedMount, mount_daemon_endpoint_path, mount_daemon_registry_path,
-    mount_daemon_socket_path,
+    MOUNT_PROTOCOL_V2, MOUNT_PROTOCOL_VERSION, MountDaemonRequest, MountDaemonResponse,
+    MountEndpointDisposition, MountRegistryFile, MountStatus, PersistedMount,
+    mount_daemon_endpoint_path, mount_daemon_registry_path, mount_daemon_socket_path,
+    mount_endpoint_disposition,
 };
 #[cfg(unix)]
 pub use peer::check_peer_uid_matches_self;
+pub use predecessor::retire_live_tcp_predecessor;
 pub use protocol::{
     HELPER_HOST, HELPER_IDLE_POLL_MS, HELPER_IDLE_TIMEOUT_SECS, send_json_request,
     send_json_request_unix, send_mount_daemon_request,

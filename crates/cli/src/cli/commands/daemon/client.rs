@@ -24,7 +24,8 @@ use anyhow::{Context, Result, anyhow};
 use repo::daemon::{
     ERR_MOUNT_UNSUPPORTED, EndpointState, MOUNT_PROTOCOL_VERSION, MountDaemonRequest,
     MountDaemonResponse, MountRegistryFile, load_endpoint, mount_daemon_endpoint_path,
-    mount_daemon_registry_path, pid_alive, remove_endpoint, send_mount_daemon_request,
+    mount_daemon_registry_path, pid_alive, remove_endpoint, retire_live_tcp_predecessor,
+    send_mount_daemon_request,
 };
 use tracing::{debug, warn};
 
@@ -83,21 +84,31 @@ pub fn ensure_daemon_endpoint(
     repo_root: &Path,
     spawn_if_missing: bool,
 ) -> Result<Option<EndpointState>> {
+    ensure_daemon_endpoint_with(repo_root, spawn_if_missing, spawn_daemon_detached)
+}
+
+fn ensure_daemon_endpoint_with(
+    repo_root: &Path,
+    spawn_if_missing: bool,
+    spawn: impl FnOnce(&Path) -> Result<()>,
+) -> Result<Option<EndpointState>> {
     let endpoint_path = mount_daemon_endpoint_path(repo_root);
 
     if let Some(endpoint) = read_live_endpoint(&endpoint_path)? {
         return Ok(Some(endpoint));
     }
-    // Endpoint absent or stale. Sweep before respawning so we don't
-    // leave a wedged FUSE mount behind from the dead daemon.
-    sweep_stale_mounts(repo_root);
-    remove_endpoint(&endpoint_path);
-
     if !spawn_if_missing {
         return Ok(None);
     }
+    // A live v2 TCP daemon still owns mounts. Retire it before we
+    // sweep and spawn, or two daemons race the same FUSE sessions.
+    if let Ok(recorded) = load_endpoint(&endpoint_path) {
+        retire_live_tcp_predecessor(&recorded)?;
+    }
+    sweep_stale_mounts(repo_root);
+    remove_endpoint(&endpoint_path);
 
-    spawn_daemon_detached(repo_root)?;
+    spawn(repo_root)?;
     for _ in 0..SPAWN_RETRIES {
         if let Some(endpoint) = read_live_endpoint(&endpoint_path)? {
             return Ok(Some(endpoint));
@@ -408,11 +419,22 @@ mod tests {
     //! covered by the existing virtualized-mount integration test in
     //! `crates/cli/tests/multi_agent_worktrees/virtualized_mount.rs`.
 
-    use std::{io::Write, os::unix::net::UnixListener, path::PathBuf};
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::TcpListener,
+        os::unix::net::UnixListener,
+        path::PathBuf,
+        process::{Command, Stdio},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
     use repo::daemon::{
-        EndpointState, MOUNT_PROTOCOL_VERSION, MountDaemonRequest, MountRegistryFile,
-        PersistedMount, mount_daemon_endpoint_path, mount_daemon_registry_path, persist_endpoint,
+        EndpointState, MOUNT_PROTOCOL_V2, MOUNT_PROTOCOL_VERSION, MountDaemonRequest,
+        MountDaemonResponse, MountRegistryFile, PersistedMount, mount_daemon_endpoint_path,
+        mount_daemon_registry_path, persist_endpoint,
     };
     use tempfile::TempDir;
 
@@ -631,6 +653,70 @@ mod tests {
         assert!(
             chain.contains(&format!("v{MOUNT_PROTOCOL_VERSION}")),
             "expected CLI version in error chain, got: {chain}"
+        );
+    }
+
+    /// After upgrade, a still-running v2 TCP daemon must receive
+    /// `Shutdown` before `ensure` is allowed to spawn a replacement.
+    #[test]
+    fn ensure_retires_live_v2_before_spawn() {
+        let tmp = TempDir::new().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind v2 stand-in");
+        let port = listener.local_addr().unwrap().port();
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("stand-in v2 pid");
+        let pid = child.id();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&shutdown);
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut line = String::new();
+                let _ = BufReader::new(stream.try_clone().expect("clone")).read_line(&mut line);
+                if line.contains("shutdown") {
+                    flag.store(true, Ordering::Release);
+                    let reply = MountDaemonResponse::Shutdown {
+                        version: MOUNT_PROTOCOL_V2,
+                        ok: true,
+                    };
+                    let _ = serde_json::to_writer(&mut stream, &reply);
+                    let _ = stream.write_all(b"\n");
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        });
+
+        write_endpoint(
+            tmp.path(),
+            &EndpointState {
+                version: MOUNT_PROTOCOL_V2,
+                host: "127.0.0.1".to_string(),
+                port,
+                pid: Some(pid),
+                socket_path: None,
+            },
+        );
+
+        let spawned = Arc::new(AtomicBool::new(false));
+        let spawned_flag = Arc::clone(&spawned);
+        let err = ensure_daemon_endpoint_with(tmp.path(), true, move |_| {
+            assert!(
+                shutdown.load(Ordering::Acquire),
+                "spawn must not run until the live v2 daemon is retired"
+            );
+            spawned_flag.store(true, Ordering::Release);
+            Ok(())
+        })
+        .expect_err("no v3 endpoint was written");
+        let _ = server.join();
+        assert!(
+            spawned.load(Ordering::Acquire),
+            "replacement spawn must run after retire: {err:#}"
         );
     }
 }

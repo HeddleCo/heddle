@@ -29,19 +29,50 @@ pub trait UnixDaemonHandler {
     fn on_tick(&mut self, idle_for: Duration) -> IdleDecision;
 }
 
-/// Bind `path` as a mode-0600 Unix socket, replacing a leftover socket
-/// from a crashed daemon. Regular files at that path fail closed.
+/// Bind `path` as a mode-0600 Unix socket. A leftover socket from a
+/// crashed daemon may be replaced. A live, connectable socket is
+/// left intact — fail closed so a second `daemon serve` cannot steal
+/// the endpoint from a running daemon.
 pub fn bind_unix_socket(path: &Path) -> Result<UnixListener, HeddleError> {
-    remove_stale_unix_socket(path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    match bind_mode_0600(path) {
+        Ok(listener) => Ok(listener),
+        Err(error) if is_addr_in_use(&error) => {
+            if unix_socket_is_live(path) {
+                return Err(HeddleError::Config(format!(
+                    "refusing to replace live mount daemon socket {}",
+                    path.display()
+                )));
+            }
+            remove_stale_unix_socket(path)?;
+            bind_mode_0600(path).map_err(Into::into)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn bind_mode_0600(path: &Path) -> std::io::Result<UnixListener> {
     let listener = UnixListener::bind(path)?;
     let mut permissions = std::fs::metadata(path)?.permissions();
     permissions.set_mode(0o600);
     std::fs::set_permissions(path, permissions)?;
     listener.set_nonblocking(true)?;
     Ok(listener)
+}
+
+fn is_addr_in_use(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::AddrInUse | ErrorKind::AlreadyExists
+    )
+}
+
+/// True when something is accepting on `path`. Used to distinguish a
+/// crashed leftover from a live daemon before unlinking.
+pub fn unix_socket_is_live(path: &Path) -> bool {
+    UnixStream::connect(path).is_ok()
 }
 
 fn remove_stale_unix_socket(path: &Path) -> Result<(), HeddleError> {
@@ -71,7 +102,12 @@ pub fn run_unix_server_loop<H: UnixDaemonHandler>(
         match listener.accept() {
             Ok((stream, _)) => {
                 last_activity = Instant::now();
-                handler.handle(stream)?;
+                // A dropped connect (liveness probe) or a bad request
+                // must not take the daemon down. Fail that connection
+                // only.
+                if let Err(error) = handler.handle(stream) {
+                    tracing::debug!(%error, "mount daemon dropped a connection");
+                }
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
                 match handler.on_tick(last_activity.elapsed()) {
@@ -128,10 +164,41 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{bind_unix_socket, handle_authenticated_unix_connection};
+    use super::{bind_unix_socket, handle_authenticated_unix_connection, unix_socket_is_live};
     use crate::daemon::{
         ERR_UNAUTHORIZED, MOUNT_PROTOCOL_VERSION, MountDaemonRequest, MountDaemonResponse,
     };
+
+    #[test]
+    fn bind_unix_socket_refuses_to_unlink_a_live_socket() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("heddled.sock");
+        let first = bind_unix_socket(&path).expect("first bind");
+        let error = bind_unix_socket(&path).expect_err("live socket must not be stolen");
+        assert!(
+            error.to_string().contains("live mount daemon socket"),
+            "got {error}"
+        );
+        assert!(
+            unix_socket_is_live(&path),
+            "original listener must still own the socket name"
+        );
+        drop(first);
+    }
+
+    #[test]
+    fn bind_unix_socket_replaces_a_dead_leftover_socket() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("heddled.sock");
+        let first = bind_unix_socket(&path).expect("first bind");
+        drop(first);
+        let replacement = bind_unix_socket(&path).expect("stale leftover socket may be replaced");
+        assert!(
+            unix_socket_is_live(&path),
+            "replacement listener must be reachable"
+        );
+        drop(replacement);
+    }
 
     #[test]
     fn bind_unix_socket_rejects_a_regular_file() {

@@ -53,7 +53,8 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   binds a mode-0600 Unix socket and checks same-uid `SO_PEERCRED`
   before honoring a client-supplied `mount_path`. Loopback is not an
   authz boundary; a TCP-only `endpoint.json` is treated as stale
-  (heddle#901).
+  (heddle#901). A live socket is not unlinked, and a leftover v2 TCP
+  daemon is shut down before a replacement is spawned.
 
 - **`whoami` reports the capture actor before hosted auth.** `init --principal-*`
   writes `user_config` and `status` already showed that principal. `whoami` now
