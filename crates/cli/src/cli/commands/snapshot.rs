@@ -1493,6 +1493,34 @@ mod tests {
     }
 
     #[test]
+    fn session_end_expire_leaves_human_capture() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        heddle_core::write_identity_cursor(
+            repo.root(),
+            &heddle_core::IdentityCursor {
+                provider: Some("anthropic".into()),
+                model: Some("opus".into()),
+                thought_level: Some("high".into()),
+                session: Some("dead-session".into()),
+                parent: Some("agent-1".into()),
+            },
+        )
+        .unwrap();
+        heddle_core::expire_identity_cursor(repo.root()).unwrap();
+        let attribution = build_attribution(
+            &repo,
+            &user_config_with_principal(),
+            &empty_agent_overrides(),
+        )
+        .unwrap();
+        assert!(
+            attribution.agent.is_none(),
+            "expired SessionEnd cursor must not invent an agent on the next capture"
+        );
+    }
+
+    #[test]
     fn build_attribution_omits_unpublished_cursor_fields() {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();

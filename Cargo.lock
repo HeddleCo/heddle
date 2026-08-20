@@ -2382,6 +2382,7 @@ version = "0.12.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "fs2",
  "heddle-cli-shared",
  "heddle-crypto",
  "heddle-git-projection",

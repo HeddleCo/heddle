@@ -12,7 +12,8 @@ use std::{
 };
 
 use heddle_core::{
-    IdentityCursor, cursor_patch_from_stdin, stamp_harness_name, stamp_identity_cursor,
+    IdentityCursor, cursor_event_expires, cursor_patch_from_stdin, expire_identity_cursor,
+    stamp_harness_name, stamp_identity_cursor,
 };
 
 /// Run the stamp fast path when argv is `integration stamp`. Returns exit code.
@@ -29,11 +30,13 @@ struct StampArgs {
     repo: Option<PathBuf>,
     harness: String,
     chain: Option<String>,
+    expire: bool,
 }
 
 fn parse_stamp_args(args: &[String]) -> Option<StampArgs> {
     let mut repo = None;
     let mut chain = None;
+    let mut expire = false;
     let mut positional = Vec::new();
     let mut idx = 0;
     while idx < args.len() {
@@ -48,6 +51,8 @@ fn parse_stamp_args(args: &[String]) -> Option<StampArgs> {
             chain = args.get(idx).cloned();
         } else if let Some(value) = arg.strip_prefix("--chain=") {
             chain = Some(value.to_string());
+        } else if arg == "--expire" {
+            expire = true;
         } else if arg == "--" {
             positional.extend(args[idx + 1..].iter().cloned());
             break;
@@ -68,6 +73,7 @@ fn parse_stamp_args(args: &[String]) -> Option<StampArgs> {
         repo,
         harness,
         chain,
+        expire,
     })
 }
 
@@ -78,9 +84,25 @@ fn run_stamp(args: &StampArgs) -> io::Result<()> {
     let Some(root) = resolve_repo_root(args.repo.as_deref()) else {
         return chain_status_line(args.chain.as_deref(), &stdin);
     };
-    let patch = cursor_patch_from_stdin(&args.harness, &stdin_text);
-    let _ = stamp_identity_cursor(&root, &patch);
+    let _ = apply_identity_stamp(&root, &args.harness, &stdin_text, args.expire);
     chain_status_line(args.chain.as_deref(), &stdin)
+}
+
+fn apply_identity_stamp(
+    repo_root: &Path,
+    harness: &str,
+    stdin: &str,
+    expire: bool,
+) -> io::Result<IdentityCursor> {
+    let expires = expire
+        || serde_json::from_str::<serde_json::Value>(stdin.trim())
+            .ok()
+            .is_some_and(|payload| cursor_event_expires(&payload, None));
+    if expires {
+        expire_identity_cursor(repo_root)?;
+        return Ok(IdentityCursor::default());
+    }
+    stamp_identity_cursor(repo_root, &cursor_patch_from_stdin(harness, stdin))
 }
 
 fn resolve_repo_root(explicit: Option<&Path>) -> Option<PathBuf> {
@@ -126,8 +148,7 @@ pub fn stamp_bytes(
     harness: &str,
     stdin: &str,
 ) -> Result<IdentityCursor, io::Error> {
-    let patch = cursor_patch_from_stdin(harness, stdin);
-    stamp_identity_cursor(repo_root, &patch)
+    apply_identity_stamp(repo_root, harness, stdin, false)
 }
 
 #[cfg(test)]
@@ -182,5 +203,32 @@ mod tests {
         assert_eq!(cursor.session.as_deref(), Some("s1"));
         let raw = fs::read_to_string(identity_cursor_path(dir.path())).unwrap();
         assert!(raw.len() < 400);
+    }
+
+    #[test]
+    fn session_end_stamp_expires_cursor() {
+        let dir = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join(".heddle")).unwrap();
+        stamp_bytes(
+            dir.path(),
+            "claude-code",
+            r#"{"session_id":"s1","model":{"id":"claude-opus-4-7"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_identity_cursor(dir.path()).model.as_deref(),
+            Some("claude-opus-4-7")
+        );
+        stamp_bytes(
+            dir.path(),
+            "claude-code",
+            r#"{"hook_event_name":"SessionEnd","session_id":"s1"}"#,
+        )
+        .unwrap();
+        assert!(
+            read_identity_cursor(dir.path()).is_empty(),
+            "SessionEnd must expire the cursor so a later capture cannot freeze it"
+        );
+        assert!(!identity_cursor_path(dir.path()).exists());
     }
 }

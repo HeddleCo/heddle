@@ -316,6 +316,7 @@ fn relay_claude(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value
     })?;
     match event {
         "SessionEnd" => {
+            heddle_core::expire_identity_cursor(runtime.repo.root())?;
             runtime.close_session(CloseSessionParams {
                 heddle_session_id: opened.heddle_session_id,
                 summary: value_string(payload, &["reason"])
@@ -448,6 +449,9 @@ fn relay_claude(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value
 }
 
 fn relay_opencode(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value) -> Result<()> {
+    if heddle_core::cursor_event_expires(payload, Some(event)) {
+        heddle_core::expire_identity_cursor(runtime.repo.root())?;
+    }
     let metadata = map_from_pairs([
         (
             "session_id",

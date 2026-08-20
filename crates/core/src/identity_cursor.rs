@@ -7,11 +7,13 @@
 //! keep the pair they froze.
 
 use std::{
-    fs, io,
+    fs::{self, OpenOptions},
+    io,
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -99,6 +101,10 @@ pub fn identity_cursor_path(repo_root: &Path) -> std::path::PathBuf {
 
 /// Read the current cursor. Missing or unreadable → empty cursor.
 pub fn read_identity_cursor(repo_root: &Path) -> IdentityCursor {
+    read_identity_cursor_unlocked(repo_root)
+}
+
+fn read_identity_cursor_unlocked(repo_root: &Path) -> IdentityCursor {
     let path = identity_cursor_path(repo_root);
     let Ok(bytes) = fs::read(&path) else {
         return IdentityCursor::default();
@@ -110,6 +116,12 @@ pub fn read_identity_cursor(repo_root: &Path) -> IdentityCursor {
 
 /// Atomic rename of a reconstructible sidecar. No fsync — next hook rewrites.
 pub fn write_identity_cursor(repo_root: &Path, cursor: &IdentityCursor) -> io::Result<()> {
+    let dest = identity_cursor_path(repo_root);
+    let _guard = acquire_identity_lock(&dest)?;
+    write_identity_cursor_unlocked(repo_root, cursor)
+}
+
+fn write_identity_cursor_unlocked(repo_root: &Path, cursor: &IdentityCursor) -> io::Result<()> {
     let dest = identity_cursor_path(repo_root);
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
@@ -134,14 +146,54 @@ pub fn write_identity_cursor(repo_root: &Path, cursor: &IdentityCursor) -> io::R
 }
 
 /// Merge `patch` onto the on-disk cursor and publish it.
+///
+/// Holds an exclusive sidecar lock for the read-merge-write so StatusLine
+/// (model) and PreToolUse (effort) cannot clobber each other.
 pub fn stamp_identity_cursor(
     repo_root: &Path,
     patch: &IdentityCursor,
 ) -> io::Result<IdentityCursor> {
-    let current = read_identity_cursor(repo_root);
+    let dest = identity_cursor_path(repo_root);
+    let _guard = acquire_identity_lock(&dest)?;
+    let current = read_identity_cursor_unlocked(repo_root);
     let next = current.merge_event(patch);
-    write_identity_cursor(repo_root, &next)?;
+    write_identity_cursor_unlocked(repo_root, &next)?;
     Ok(next)
+}
+
+/// Drop the live cursor so a later human/Cursor capture cannot freeze a dead session.
+pub fn expire_identity_cursor(repo_root: &Path) -> io::Result<()> {
+    let dest = identity_cursor_path(repo_root);
+    let _guard = acquire_identity_lock(&dest)?;
+    match fs::remove_file(&dest) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+struct IdentityWriteGuard {
+    file: fs::File,
+}
+
+fn acquire_identity_lock(dest: &Path) -> io::Result<IdentityWriteGuard> {
+    let lock_path = dest.with_file_name(".identity.lock");
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    file.lock_exclusive()?;
+    Ok(IdentityWriteGuard { file })
+}
+
+impl Drop for IdentityWriteGuard {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 /// Walk `path` for a string, or an object's `id` / `level` field.
@@ -303,5 +355,76 @@ mod tests {
             leftovers.is_empty(),
             "unique tmp files must be renamed away"
         );
+    }
+
+    #[test]
+    fn two_writer_merge_keeps_model_and_thought_level() {
+        let dir = tempfile::TempDir::new().unwrap();
+        stamp_identity_cursor(
+            dir.path(),
+            &IdentityCursor {
+                provider: Some("anthropic".into()),
+                ..IdentityCursor::default()
+            },
+        )
+        .unwrap();
+        let ready = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                ready.wait();
+                for _ in 0..40 {
+                    stamp_identity_cursor(
+                        dir.path(),
+                        &IdentityCursor {
+                            model: Some("opus".into()),
+                            ..IdentityCursor::default()
+                        },
+                    )
+                    .unwrap();
+                }
+            });
+            scope.spawn(|| {
+                ready.wait();
+                for _ in 0..40 {
+                    stamp_identity_cursor(
+                        dir.path(),
+                        &IdentityCursor {
+                            thought_level: Some("high".into()),
+                            ..IdentityCursor::default()
+                        },
+                    )
+                    .unwrap();
+                }
+            });
+        });
+        let cursor = read_identity_cursor(dir.path());
+        assert_eq!(cursor.provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            cursor.model.as_deref(),
+            Some("opus"),
+            "StatusLine model must survive a concurrent PreToolUse effort stamp"
+        );
+        assert_eq!(
+            cursor.thought_level.as_deref(),
+            Some("high"),
+            "PreToolUse effort must survive a concurrent StatusLine model stamp"
+        );
+    }
+
+    #[test]
+    fn expire_removes_cursor_so_later_read_is_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        stamp_identity_cursor(
+            dir.path(),
+            &IdentityCursor {
+                provider: Some("anthropic".into()),
+                model: Some("opus".into()),
+                ..IdentityCursor::default()
+            },
+        )
+        .unwrap();
+        expire_identity_cursor(dir.path()).unwrap();
+        assert!(read_identity_cursor(dir.path()).is_empty());
+        assert!(!identity_cursor_path(dir.path()).exists());
     }
 }
