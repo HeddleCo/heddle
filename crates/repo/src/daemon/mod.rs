@@ -38,6 +38,8 @@ pub mod predecessor;
 pub mod protocol;
 pub mod server;
 #[cfg(unix)]
+mod unix_probe;
+#[cfg(unix)]
 pub mod unix_server;
 
 pub use endpoint::{

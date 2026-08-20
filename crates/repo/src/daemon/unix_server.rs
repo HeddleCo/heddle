@@ -17,10 +17,11 @@ use std::{
 use objects::error::HeddleError;
 
 use super::{
-    mount_proto::{ERR_UNAUTHORIZED, MOUNT_PROTOCOL_VERSION, MountDaemonResponse},
+    mount_proto::{MountDaemonResponse, ERR_UNAUTHORIZED, MOUNT_PROTOCOL_VERSION},
     peer::check_peer_uid_matches_self,
     protocol::HELPER_IDLE_POLL_MS,
-    server::{IdleDecision, handle_json_rw},
+    server::{handle_json_rw, IdleDecision},
+    unix_probe::{probe_unix_socket, UnixSocketProbe},
 };
 
 /// Per-connection hook for a Unix-domain helper daemon.
@@ -30,25 +31,30 @@ pub trait UnixDaemonHandler {
 }
 
 /// Bind `path` as a mode-0600 Unix socket. A leftover socket from a
-/// crashed daemon may be replaced. A live, connectable socket is
-/// left intact — fail closed so a second `daemon serve` cannot steal
-/// the endpoint from a running daemon.
+/// crashed daemon may be replaced. A live or permission-denied
+/// socket is left intact — fail closed so a second `daemon serve`
+/// cannot steal the endpoint (unlink is authorized by the parent
+/// dir, which may be shared across OS users).
 pub fn bind_unix_socket(path: &Path) -> Result<UnixListener, HeddleError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     match bind_mode_0600(path) {
         Ok(listener) => Ok(listener),
-        Err(error) if is_addr_in_use(&error) => {
-            if unix_socket_is_live(path) {
-                return Err(HeddleError::Config(format!(
-                    "refusing to replace live mount daemon socket {}",
-                    path.display()
-                )));
+        Err(error) if is_addr_in_use(&error) => match probe_unix_socket(path) {
+            UnixSocketProbe::Live => Err(HeddleError::Config(format!(
+                "refusing to replace live mount daemon socket {}",
+                path.display()
+            ))),
+            UnixSocketProbe::Inaccessible => Err(HeddleError::Config(format!(
+                "refusing to replace mount daemon socket {}: connect permission denied",
+                path.display()
+            ))),
+            UnixSocketProbe::Dead => {
+                remove_stale_unix_socket(path)?;
+                bind_mode_0600(path).map_err(Into::into)
             }
-            remove_stale_unix_socket(path)?;
-            bind_mode_0600(path).map_err(Into::into)
-        }
+        },
         Err(error) => Err(error.into()),
     }
 }
@@ -67,12 +73,6 @@ fn is_addr_in_use(error: &std::io::Error) -> bool {
         error.kind(),
         ErrorKind::AddrInUse | ErrorKind::AlreadyExists
     )
-}
-
-/// True when something is accepting on `path`. Used to distinguish a
-/// crashed leftover from a live daemon before unlinking.
-pub fn unix_socket_is_live(path: &Path) -> bool {
-    UnixStream::connect(path).is_ok()
 }
 
 fn remove_stale_unix_socket(path: &Path) -> Result<(), HeddleError> {
@@ -158,15 +158,16 @@ fn write_unauthorized(stream: &mut UnixStream, message: &str) {
 #[cfg(test)]
 mod tests {
     use std::{
-        io::{BufRead, BufReader, Write},
-        os::unix::net::UnixStream,
+        io::{BufRead, BufReader, ErrorKind, Write},
+        os::unix::{fs::PermissionsExt, net::UnixStream},
     };
 
     use tempfile::TempDir;
 
-    use super::{bind_unix_socket, handle_authenticated_unix_connection, unix_socket_is_live};
+    use super::{bind_unix_socket, handle_authenticated_unix_connection};
+    use crate::daemon::unix_probe::unix_socket_is_live;
     use crate::daemon::{
-        ERR_UNAUTHORIZED, MOUNT_PROTOCOL_VERSION, MountDaemonRequest, MountDaemonResponse,
+        MountDaemonRequest, MountDaemonResponse, ERR_UNAUTHORIZED, MOUNT_PROTOCOL_VERSION,
     };
 
     #[test]
@@ -179,6 +180,39 @@ mod tests {
             error.to_string().contains("live mount daemon socket"),
             "got {error}"
         );
+        assert!(
+            unix_socket_is_live(&path),
+            "original listener must still own the socket name"
+        );
+        drop(first);
+    }
+
+    #[test]
+    fn bind_unix_socket_does_not_unlink_on_permission_denied() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("heddled.sock");
+        let first = bind_unix_socket(&path).expect("first bind");
+
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        assert_eq!(
+            UnixStream::connect(&path)
+                .expect_err("mode 000 must deny connect")
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
+
+        let error = bind_unix_socket(&path).expect_err("must not steal a permission-denied socket");
+        assert!(
+            error.to_string().contains("permission denied"),
+            "got {error}"
+        );
+        assert!(path.exists(), "permission-denied live socket must stay");
+
+        let mut restore = std::fs::metadata(&path).unwrap().permissions();
+        restore.set_mode(0o600);
+        std::fs::set_permissions(&path, restore).unwrap();
         assert!(
             unix_socket_is_live(&path),
             "original listener must still own the socket name"
