@@ -3355,14 +3355,11 @@ mod pull_bootstrap_tests {
     }
 
     #[test]
-    #[test]
     fn synthetic_frontier_root_skips_only_when_requested_closure_is_complete() {
         let temp = TempDir::new().expect("temp repo");
         let repo = Repository::init_default(temp.path()).expect("init repo");
         let blob = Blob::from("frontier blob\n");
-        let tree = Tree::from_entries(vec![
-            TreeEntry::file("README", blob.hash(), false).unwrap(),
-        ]);
+        let tree = Tree::from_entries(vec![TreeEntry::file("README", blob.hash(), false).unwrap()]);
         let tree_hash = repo.store().put_tree(&tree).unwrap();
         let state = State::new(
             tree_hash,
@@ -3415,9 +3412,7 @@ mod pull_bootstrap_tests {
         let repo = Repository::init_default(temp.path()).expect("init repo");
         let blob = Blob::from("child\n");
         repo.store().put_blob(&blob).unwrap();
-        let tree = Tree::from_entries(vec![
-            TreeEntry::file("README", blob.hash(), false).unwrap(),
-        ]);
+        let tree = Tree::from_entries(vec![TreeEntry::file("README", blob.hash(), false).unwrap()]);
         let tree_hash = repo.store().put_tree(&tree).unwrap();
         let parent = State::new(
             tree_hash,
