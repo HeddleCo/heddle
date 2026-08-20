@@ -9,8 +9,9 @@
 //! CLI client side and tests can decode it without pulling the
 //! mount stack in.
 //!
-//! Wire posture: localhost TCP, no auth — same threat model as
-//! fsmonitor. Single-user dev workstation.
+//! Wire posture: Unix-domain socket, mode 0600, same-uid
+//! `SO_PEERCRED`. Localhost TCP is not an authz boundary and is
+//! refused (heddle#901).
 //!
 //! Versioning: `MOUNT_PROTOCOL_VERSION` is bumped together with the
 //! daemon binary. The endpoint file under
@@ -34,12 +35,18 @@ use super::endpoint::default_state_dir;
 /// any breaking change to the request/response enums below. CLI
 /// clients that find a different version on the endpoint file
 /// remove the file and respawn the daemon at their version.
-pub const MOUNT_PROTOCOL_VERSION: u32 = 2;
+pub const MOUNT_PROTOCOL_VERSION: u32 = 3;
 
 /// The endpoint file the mount daemon writes (and CLI clients read)
-/// to discover its TCP port + PID.
+/// to discover its UDS path + PID.
 pub fn mount_daemon_endpoint_path(repo_root: &Path) -> PathBuf {
     default_state_dir(repo_root).join("heddled.endpoint.json")
+}
+
+/// Unix-domain socket the mount daemon binds. Mode 0600 + same-uid
+/// `SO_PEERCRED`. Not the historical localhost TCP port.
+pub fn mount_daemon_socket_path(repo_root: &Path) -> PathBuf {
+    default_state_dir(repo_root).join("heddled.sock")
 }
 
 /// File where the daemon persists the list of currently-active
@@ -70,7 +77,7 @@ pub struct MountRegistryFile {
     pub mounts: Vec<PersistedMount>,
 }
 
-/// Mount-daemon request envelope. Single-line JSON over TCP. Adding
+/// Mount-daemon request envelope. Single-line JSON over UDS. Adding
 /// a new verb is additive; every existing client can ignore unknown
 /// verbs and the daemon sees the version mismatch first anyway.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,6 +282,8 @@ mod tests {
         let registry = mount_daemon_registry_path(tmp.path());
         assert!(endpoint.ends_with(".heddle/state/heddled.endpoint.json"));
         assert!(registry.ends_with(".heddle/state/mounts.json"));
+        let socket = mount_daemon_socket_path(tmp.path());
+        assert!(socket.ends_with(".heddle/state/heddled.sock"));
     }
 
     #[test]

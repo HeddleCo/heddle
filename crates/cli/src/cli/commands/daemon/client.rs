@@ -24,7 +24,7 @@ use anyhow::{Context, Result, anyhow};
 use repo::daemon::{
     ERR_MOUNT_UNSUPPORTED, EndpointState, MOUNT_PROTOCOL_VERSION, MountDaemonRequest,
     MountDaemonResponse, MountRegistryFile, load_endpoint, mount_daemon_endpoint_path,
-    mount_daemon_registry_path, pid_alive, remove_endpoint, send_json_request,
+    mount_daemon_registry_path, pid_alive, remove_endpoint, send_mount_daemon_request,
 };
 use tracing::{debug, warn};
 
@@ -136,6 +136,10 @@ fn read_live_endpoint(endpoint_path: &Path) -> Result<Option<EndpointState>> {
         );
         return Ok(None);
     }
+    if endpoint.socket_path.is_none() {
+        warn!("daemon endpoint has no authenticated socket; treating as stale");
+        return Ok(None);
+    }
     if let Some(pid) = endpoint.pid
         && !pid_alive(pid)
     {
@@ -239,7 +243,7 @@ pub fn rpc(
     let Some(endpoint) = ensure_daemon_endpoint(repo_root, spawn_if_missing)? else {
         return Ok(None);
     };
-    let response: MountDaemonResponse = match send_json_request(&endpoint, request) {
+    let response: MountDaemonResponse = match send_mount_daemon_request(&endpoint, request) {
         Ok(response) => response,
         Err(error) => {
             // The send/decode failed. Re-read the endpoint file before
@@ -283,10 +287,12 @@ fn refine_rpc_error(
             MOUNT_PROTOCOL_VERSION,
         ));
     }
-    anyhow!(error).context(format!(
-        "RPC to daemon at {}:{}",
-        endpoint.host, endpoint.port
-    ))
+    let target = endpoint
+        .socket_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| format!("{}:{}", endpoint.host, endpoint.port));
+    anyhow!(error).context(format!("RPC to daemon at {target}"))
 }
 
 /// Convenience helper used by the per-thread mount path. Classifies
@@ -328,12 +334,16 @@ pub fn mount_via_daemon_classified(
         mount_path: mount_path.to_path_buf(),
         repo_root: repo_root.to_path_buf(),
     };
-    let response: MountDaemonResponse = match send_json_request(&endpoint, &request) {
+    let response: MountDaemonResponse = match send_mount_daemon_request(&endpoint, &request) {
         Ok(response) => response,
         Err(error) => {
+            let target = endpoint
+                .socket_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| format!("{}:{}", endpoint.host, endpoint.port));
             return Err(DaemonMountError::Unavailable(format!(
-                "RPC to daemon at {}:{} failed: {error}",
-                endpoint.host, endpoint.port
+                "RPC to daemon at {target} failed: {error}"
             )));
         }
     };
@@ -398,7 +408,7 @@ mod tests {
     //! covered by the existing virtualized-mount integration test in
     //! `crates/cli/tests/multi_agent_worktrees/virtualized_mount.rs`.
 
-    use std::{io::Write, net::TcpListener, path::PathBuf};
+    use std::{io::Write, os::unix::net::UnixListener, path::PathBuf};
 
     use repo::daemon::{
         EndpointState, MOUNT_PROTOCOL_VERSION, MountDaemonRequest, MountRegistryFile,
@@ -428,9 +438,10 @@ mod tests {
             tmp.path(),
             &EndpointState {
                 version: MOUNT_PROTOCOL_VERSION + 99,
-                host: "127.0.0.1".to_string(),
-                port: 1,
+                host: "unix".to_string(),
+                port: 0,
                 pid: Some(1),
+                socket_path: Some(tmp.path().join("heddled.sock")),
             },
         );
         let endpoint_path = mount_daemon_endpoint_path(tmp.path());
@@ -452,9 +463,10 @@ mod tests {
             tmp.path(),
             &EndpointState {
                 version: MOUNT_PROTOCOL_VERSION,
-                host: "127.0.0.1".to_string(),
-                port: 9999,
+                host: "unix".to_string(),
+                port: 0,
                 pid: Some(1),
+                socket_path: Some(tmp.path().join("heddled.sock")),
             },
         );
         let endpoint_path = mount_daemon_endpoint_path(tmp.path());
@@ -472,14 +484,38 @@ mod tests {
             tmp.path(),
             &EndpointState {
                 version: MOUNT_PROTOCOL_VERSION,
-                host: "127.0.0.1".to_string(),
-                port: 9999,
+                host: "unix".to_string(),
+                port: 0,
                 pid: Some(0x7fff_fffe),
+                socket_path: Some(tmp.path().join("heddled.sock")),
             },
         );
         let endpoint_path = mount_daemon_endpoint_path(tmp.path());
         let result = read_live_endpoint(&endpoint_path).unwrap();
         assert!(result.is_none(), "endpoint with dead PID must be stale");
+    }
+
+    /// A v2 TCP endpoint (no socket_path) is stale. Loopback is not
+    /// an authz boundary (heddle#901).
+    #[test]
+    fn read_live_endpoint_treats_tcp_only_endpoint_as_stale() {
+        let tmp = TempDir::new().unwrap();
+        write_endpoint(
+            tmp.path(),
+            &EndpointState {
+                version: MOUNT_PROTOCOL_VERSION,
+                host: "127.0.0.1".to_string(),
+                port: 9999,
+                pid: Some(1),
+                socket_path: None,
+            },
+        );
+        let endpoint_path = mount_daemon_endpoint_path(tmp.path());
+        let result = read_live_endpoint(&endpoint_path).unwrap();
+        assert!(
+            result.is_none(),
+            "TCP-only endpoint must be treated as stale"
+        );
     }
 
     /// A missing endpoint file is silently treated as "no daemon
@@ -531,49 +567,28 @@ mod tests {
         sweep_stale_mounts(tmp.path()); // must not panic
     }
 
-    /// A v1 daemon binary that survived a CLI upgrade is observable
-    /// only as a successful TCP connect followed by an undecodable
-    /// response. After the decode failure the client must re-read the
-    /// endpoint file, notice the recorded version is below
-    /// `MOUNT_PROTOCOL_VERSION`, and surface a "stop the daemon" hint
-    /// rather than a raw `decode helper response: ...` line.
-    ///
-    /// We simulate the race in the realistic order: the endpoint file
-    /// initially advertises the current version (so
-    /// `ensure_daemon_endpoint` accepts it), then the fake daemon
-    /// "downgrades" the on-disk record to v1 just before sending a
-    /// garbage reply — exactly what a v1 binary would have written
-    /// had it been the one to claim the port.
+    /// A leftover older daemon that still answers on the socket but
+    /// writes an older endpoint version must surface a "stop the
+    /// daemon" hint instead of a raw decode error.
     #[test]
     fn rpc_hints_at_stale_daemon_when_endpoint_version_is_older() {
         let tmp = TempDir::new().unwrap();
         let repo_root: PathBuf = tmp.path().to_path_buf();
-
-        // Bind a real listener on a free port. A single accept loop
-        // serves the one request the test sends — we don't validate
-        // the bytes, we just write garbage back so JSON decoding
-        // fails, which is exactly what a v1 daemon's reply looks like
-        // to a v2-speaking CLI in the worst case.
-        let listener =
-            TcpListener::bind("127.0.0.1:0").expect("bind loopback listener for daemon RPC test");
-        let port = listener.local_addr().unwrap().port();
+        let socket_path = repo_root.join("heddled.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind uds for daemon RPC test");
         let server_repo = repo_root.clone();
+        let server_socket = socket_path.clone();
         let server = std::thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
-                // Stamp the on-disk endpoint with the version a real
-                // v1 daemon would have written, then send back
-                // something that is not parseable as a
-                // `MountDaemonResponse`. The client's decode failure
-                // must therefore consult an endpoint file that
-                // already reads as stale.
                 let endpoint_path = mount_daemon_endpoint_path(&server_repo);
                 persist_endpoint(
                     &endpoint_path,
                     &EndpointState {
                         version: MOUNT_PROTOCOL_VERSION - 1,
-                        host: "127.0.0.1".to_string(),
-                        port,
+                        host: "unix".to_string(),
+                        port: 0,
                         pid: Some(1),
+                        socket_path: Some(server_socket),
                     },
                 )
                 .unwrap();
@@ -585,16 +600,17 @@ mod tests {
             &repo_root,
             &EndpointState {
                 version: MOUNT_PROTOCOL_VERSION,
-                host: "127.0.0.1".to_string(),
-                port,
+                host: "unix".to_string(),
+                port: 0,
                 // Use init's PID (1) so `read_live_endpoint` accepts
                 // the file as live and we exercise the decode path.
                 pid: Some(1),
+                socket_path: Some(socket_path),
             },
         );
 
         let err = rpc(&repo_root, &MountDaemonRequest::Health {}, false)
-            .expect_err("v1 daemon reply must surface as an error");
+            .expect_err("older daemon reply must surface as an error");
         let _ = server.join();
 
         // The hint must reference both the recorded daemon version

@@ -3,7 +3,7 @@
 //! loop to a `MountRegistry`. Linux + `--features mount` only.
 
 use std::{
-    net::{TcpListener, TcpStream},
+    os::unix::net::UnixStream,
     path::Path,
     sync::{
         Arc, Mutex,
@@ -15,17 +15,18 @@ use std::{
 use anyhow::{Context, Result};
 use objects::{error::HeddleError, sync::LockExt};
 use repo::daemon::{
-    EndpointState, HELPER_HOST, MOUNT_PROTOCOL_VERSION, MountDaemonRequest, MountDaemonResponse,
-    MountStatus, mount_daemon_endpoint_path, mount_idle_policy, persist_endpoint, remove_endpoint,
-    server::{DaemonHandler, IdleDecision, handle_json_connection},
+    EndpointState, IdleDecision, MOUNT_PROTOCOL_VERSION, MountClientAuth, MountDaemonRequest,
+    UnixDaemonHandler, bind_unix_socket, handle_authenticated_unix_connection,
+    mount_daemon_endpoint_path, mount_daemon_socket_path, mount_idle_policy, persist_endpoint,
+    remove_endpoint, run_unix_server_loop,
 };
 use tracing::info;
 
-use super::registry::{MountOutcome, MountRegistry};
+use super::{dispatch::dispatch, registry::MountRegistry};
 
 /// Run the mount daemon for `repo_root` until idle. Binds a
-/// localhost TCP port, writes the endpoint file, listens for
-/// connections. Exits when both:
+/// mode-0600 Unix socket, writes the endpoint file, listens for
+/// same-uid peers. Exits when both:
 ///
 /// * no RPC has arrived for `HELPER_IDLE_TIMEOUT_SECS` (default
 ///   300s, mirrors fsmonitor),
@@ -41,20 +42,24 @@ pub fn run_mount_daemon(repo_root: &Path) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let listener = TcpListener::bind((HELPER_HOST, 0))?;
-    listener.set_nonblocking(true)?;
-    let port = listener.local_addr()?.port();
+    let socket_path = mount_daemon_socket_path(repo_root);
+    let listener = bind_unix_socket(&socket_path).context("bind mount daemon socket")?;
     persist_endpoint(
         &endpoint_path,
         &EndpointState {
             version: MOUNT_PROTOCOL_VERSION,
-            host: HELPER_HOST.to_string(),
-            port,
+            host: "unix".to_string(),
+            port: 0,
             pid: Some(std::process::id()),
+            socket_path: Some(socket_path.clone()),
         },
     )
     .context("persist daemon endpoint")?;
-    info!(port, pid = std::process::id(), "heddle daemon serving");
+    info!(
+        socket = %socket_path.display(),
+        pid = std::process::id(),
+        "heddle daemon serving"
+    );
 
     let registry = Arc::new(Mutex::new(MountRegistry::new(repo_root.to_path_buf())));
     let started = Instant::now();
@@ -65,7 +70,7 @@ pub fn run_mount_daemon(repo_root: &Path) -> Result<()> {
         started,
         shutdown_requested: Arc::clone(&shutdown_requested),
     };
-    let result = repo::daemon::run_server_loop(&listener, &mut handler);
+    let result = run_unix_server_loop(&listener, &mut handler);
 
     // Cleanup ordering — load-bearing for the `cmd_daemon_stop`
     // post-condition documented on that function:
@@ -87,6 +92,7 @@ pub fn run_mount_daemon(repo_root: &Path) -> Result<()> {
         guard.shutdown_all();
     }
     remove_endpoint(&endpoint_path);
+    let _ = std::fs::remove_file(&socket_path);
     info!("heddle daemon exiting");
     result.map_err(Into::into)
 }
@@ -97,15 +103,21 @@ struct MountDaemonHandler {
     shutdown_requested: Arc<AtomicBool>,
 }
 
-impl DaemonHandler for MountDaemonHandler {
-    fn handle(&mut self, stream: TcpStream) -> Result<(), HeddleError> {
+impl UnixDaemonHandler for MountDaemonHandler {
+    fn handle(&mut self, stream: UnixStream) -> Result<(), HeddleError> {
         // Capture state before the move so the closure body can
         // borrow them without lifetime headaches.
         let registry = Arc::clone(&self.registry);
         let started = self.started;
         let shutdown_requested = Arc::clone(&self.shutdown_requested);
-        handle_json_connection(stream, move |request: MountDaemonRequest| {
-            dispatch(&registry, started, &shutdown_requested, request)
+        handle_authenticated_unix_connection(stream, move |request: MountDaemonRequest| {
+            dispatch(
+                &registry,
+                started,
+                &shutdown_requested,
+                MountClientAuth::SameUid,
+                request,
+            )
         })
     }
 
@@ -119,86 +131,6 @@ impl DaemonHandler for MountDaemonHandler {
         let shutdown = self.shutdown_requested.load(Ordering::Acquire);
         let live_count = self.registry.lock_or_poisoned().len();
         mount_idle_policy(shutdown, live_count, idle_for)
-    }
-}
-
-fn dispatch(
-    registry: &Mutex<MountRegistry>,
-    started: Instant,
-    shutdown_requested: &AtomicBool,
-    request: MountDaemonRequest,
-) -> MountDaemonResponse {
-    match request {
-        MountDaemonRequest::Mount {
-            thread_id,
-            mount_path,
-            repo_root: _,
-        } => {
-            let mut guard = registry.lock_or_poisoned();
-            match guard.mount(&thread_id, &mount_path) {
-                Ok(MountOutcome::Created) => MountDaemonResponse::Mount {
-                    version: MOUNT_PROTOCOL_VERSION,
-                    ok: true,
-                    mount_path,
-                    status: MountStatus::Created,
-                },
-                Ok(MountOutcome::Existing) => MountDaemonResponse::Mount {
-                    version: MOUNT_PROTOCOL_VERSION,
-                    ok: true,
-                    mount_path,
-                    status: MountStatus::AlreadyMounted,
-                },
-                Err(error) => MountDaemonResponse::Error {
-                    version: MOUNT_PROTOCOL_VERSION,
-                    code: repo::daemon::ERR_MOUNT_CONFLICT.to_string(),
-                    message: error.to_string(),
-                },
-            }
-        }
-        MountDaemonRequest::Unmount { thread_id } => {
-            let mut guard = registry.lock_or_poisoned();
-            match guard.unmount(&thread_id) {
-                Ok(was_mounted) => MountDaemonResponse::Unmount {
-                    version: MOUNT_PROTOCOL_VERSION,
-                    ok: true,
-                    was_mounted,
-                },
-                Err(error) => MountDaemonResponse::Error {
-                    version: MOUNT_PROTOCOL_VERSION,
-                    code: "unmount_failed".to_string(),
-                    message: error.to_string(),
-                },
-            }
-        }
-        MountDaemonRequest::ListMounts {} => {
-            let guard = registry.lock_or_poisoned();
-            MountDaemonResponse::ListMounts {
-                version: MOUNT_PROTOCOL_VERSION,
-                mounts: guard.snapshot(),
-            }
-        }
-        MountDaemonRequest::Health {} => {
-            let guard = registry.lock_or_poisoned();
-            MountDaemonResponse::Health {
-                version: MOUNT_PROTOCOL_VERSION,
-                ok: true,
-                uptime_s: started.elapsed().as_secs(),
-                mount_count: guard.len(),
-            }
-        }
-        MountDaemonRequest::Shutdown {} => {
-            shutdown_requested.store(true, Ordering::Release);
-            MountDaemonResponse::Shutdown {
-                version: MOUNT_PROTOCOL_VERSION,
-                ok: true,
-            }
-        }
-        MountDaemonRequest::Unknown => MountDaemonResponse::Error {
-            version: MOUNT_PROTOCOL_VERSION,
-            code: "unknown_command".to_string(),
-            message: "daemon received an unrecognized command (likely client/server skew)"
-                .to_string(),
-        },
     }
 }
 

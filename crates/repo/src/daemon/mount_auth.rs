@@ -44,15 +44,16 @@ impl From<MountAuthDenied> for HeddleError {
 }
 
 /// Honor a client-supplied `mount_path` only for same-uid peers.
-///
-/// Intentionally still accepts unauthenticated paths so the first
-/// commit stays red (heddle#901). The follow-up flips this closed.
-pub fn trusted_mount_path<'a>(
+pub fn trusted_mount_path(
     auth: MountClientAuth,
-    supplied: &'a Path,
-) -> Result<&'a Path, MountAuthDenied> {
-    let _ = auth;
-    Ok(supplied)
+    supplied: &Path,
+) -> Result<&Path, MountAuthDenied> {
+    match auth {
+        MountClientAuth::SameUid => Ok(supplied),
+        MountClientAuth::Unauthenticated => Err(MountAuthDenied::unauthorized(
+            "refusing client-supplied mount_path over an unauthenticated transport; same-uid UDS is required",
+        )),
+    }
 }
 
 /// Every mount-daemon verb needs same-uid proof. Health and list leak
@@ -64,8 +65,8 @@ pub fn authorize_mount_request(
     match auth {
         MountClientAuth::SameUid => Ok(()),
         MountClientAuth::Unauthenticated => Err(MountAuthDenied::unauthorized(format!(
-            "refusing {:?} over an unauthenticated transport; same-uid UDS is required",
-            request_verb(request)
+            "refusing {verb} over an unauthenticated transport; same-uid UDS is required",
+            verb = request_verb(request)
         ))),
     }
 }
@@ -98,10 +99,7 @@ mod tests {
 
     #[test]
     fn unauthenticated_tcp_must_not_honor_client_mount_path() {
-        let denied = trusted_mount_path(
-            MountClientAuth::Unauthenticated,
-            Path::new("/tmp/evil"),
-        );
+        let denied = trusted_mount_path(MountClientAuth::Unauthenticated, Path::new("/tmp/evil"));
         assert!(
             denied.is_err(),
             "localhost TCP must not honor a client-supplied mount_path"

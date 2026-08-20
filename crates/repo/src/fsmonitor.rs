@@ -450,6 +450,7 @@ pub fn run_local_monitor_helper(repo_root: &Path) -> Result<(), HeddleError> {
         host: HELPER_HOST.to_string(),
         port,
         pid: Some(std::process::id()),
+        socket_path: None,
     };
     persist_endpoint(&endpoint_path, &endpoint)?;
     remove_starting_helper_if_owned(&state_path, std::process::id());
@@ -1594,6 +1595,7 @@ mod tests {
                             host: HELPER_HOST.to_string(),
                             port: 9911,
                             pid: Some(std::process::id()),
+                            socket_path: None,
                         },
                     )
                 })
@@ -1685,6 +1687,7 @@ mod tests {
                 // A stale endpoint can outlive its worker and its PID can be
                 // reused, so liveness alone cannot prove the socket is live.
                 pid: Some(std::process::id()),
+                socket_path: None,
             },
         )
         .unwrap();

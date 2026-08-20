@@ -32,6 +32,11 @@ pub struct EndpointState {
     /// existed; treated as "unknown, assume alive" when absent.
     #[serde(default)]
     pub pid: Option<u32>,
+    /// Unix-domain socket the mount daemon binds. Absent for the
+    /// fsmonitor TCP helper. Mount clients refuse host:port when
+    /// this is missing (heddle#901).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket_path: Option<PathBuf>,
 }
 
 /// Default state directory under a Heddle repo root:
@@ -135,6 +140,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 9999,
             pid: Some(12345),
+            socket_path: None,
         };
         persist_endpoint(&path, &original).unwrap();
         let loaded = load_endpoint(&path).unwrap();
@@ -167,6 +173,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 8001,
             pid: Some(100),
+            socket_path: None,
         };
         let replacement = EndpointState {
             port: 8002,

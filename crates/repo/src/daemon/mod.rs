@@ -1,18 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Long-lived helper-daemon scaffolding.
 //!
-//! Heddle's local helper subprocesses (today: the fsmonitor change
-//! watcher; tomorrow: the FUSE mount daemon) all share the same
-//! plumbing — a JSON-over-TCP protocol on `127.0.0.1`, an endpoint
-//! file at `.heddle/state/<name>.endpoint.json` that the spawning
-//! CLI uses for discovery, atomic write-on-bind, idle-timeout exit,
-//! crashed-PID detection via `kill -0`. The fsmonitor invented this
-//! pattern; the mount daemon reuses it.
+//! Heddle's local helper subprocesses share endpoint discovery
+//! (`.heddle/state/<name>.endpoint.json`), idle-timeout exit, and
+//! crashed-PID detection via `kill -0`. Transports differ:
 //!
-//! Threat model: the endpoint file binds to localhost with no auth.
-//! That matches the existing fsmonitor posture and assumes a
-//! single-user dev workstation. Anyone with a shell on the box can
-//! talk to the helper anyway; we are not a security boundary.
+//! * fsmonitor still speaks JSON-over-TCP on `127.0.0.1`.
+//! * the mount daemon binds a mode-0600 Unix socket and checks
+//!   same-uid `SO_PEERCRED`. Localhost TCP is not an authz
+//!   boundary (heddle#901).
 //!
 //! What lives here:
 //!
@@ -36,18 +32,34 @@
 pub mod endpoint;
 pub mod mount_auth;
 pub mod mount_proto;
+#[cfg(unix)]
+pub mod peer;
 pub mod protocol;
 pub mod server;
+#[cfg(unix)]
+pub mod unix_server;
 
 pub use endpoint::{
     EndpointState, default_state_dir, endpoint_path_for, load_endpoint, persist_endpoint,
     pid_alive, remove_endpoint, remove_endpoint_if_owned,
 };
-pub use mount_auth::{MountAuthDenied, MountClientAuth, authorize_mount_request, trusted_mount_path};
+pub use mount_auth::{
+    MountAuthDenied, MountClientAuth, authorize_mount_request, trusted_mount_path,
+};
 pub use mount_proto::{
     ERR_MOUNT_CONFLICT, ERR_MOUNT_UNSUPPORTED, ERR_UNAUTHORIZED, ERR_VERSION_MISMATCH,
-    MOUNT_PROTOCOL_VERSION, MountDaemonRequest, MountDaemonResponse, MountRegistryFile, MountStatus,
-    PersistedMount, mount_daemon_endpoint_path, mount_daemon_registry_path,
+    MOUNT_PROTOCOL_VERSION, MountDaemonRequest, MountDaemonResponse, MountRegistryFile,
+    MountStatus, PersistedMount, mount_daemon_endpoint_path, mount_daemon_registry_path,
+    mount_daemon_socket_path,
 };
-pub use protocol::{HELPER_HOST, HELPER_IDLE_POLL_MS, HELPER_IDLE_TIMEOUT_SECS, send_json_request};
+#[cfg(unix)]
+pub use peer::check_peer_uid_matches_self;
+pub use protocol::{
+    HELPER_HOST, HELPER_IDLE_POLL_MS, HELPER_IDLE_TIMEOUT_SECS, send_json_request,
+    send_json_request_unix, send_mount_daemon_request,
+};
 pub use server::{IdleDecision, mount_idle_policy, run_server_loop};
+#[cfg(unix)]
+pub use unix_server::{
+    UnixDaemonHandler, bind_unix_socket, handle_authenticated_unix_connection, run_unix_server_loop,
+};

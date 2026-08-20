@@ -2,11 +2,11 @@
 //! Long-lived mount daemon (`heddle daemon serve`).
 //!
 //! Reuses the helper-subprocess scaffolding in `repo::daemon` —
-//! endpoint file, JSON-over-TCP framing, idle-exit loop — but
-//! layers a `MountRegistry` on top so a single daemon process can
-//! own multiple FUSE sessions across CLI invocations. See
-//! `docs/design/mount-daemon.md` for the full lifecycle and
-//! failure-mode analysis.
+//! endpoint file, JSON-over-UDS framing with same-uid `SO_PEERCRED`,
+//! idle-exit loop — but layers a `MountRegistry` on top so a single
+//! daemon process can own multiple FUSE sessions across CLI
+//! invocations. See `docs/design/mount-daemon.md` for the full
+//! lifecycle and failure-mode analysis.
 //!
 //! Three CLI verbs hang off this module:
 //!
@@ -28,6 +28,8 @@
 
 pub mod client;
 
+#[cfg(all(target_os = "linux", feature = "mount"))]
+mod dispatch;
 #[cfg(all(target_os = "linux", feature = "mount"))]
 pub mod registry;
 #[cfg(all(target_os = "linux", feature = "mount"))]
