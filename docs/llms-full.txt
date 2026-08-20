@@ -3270,7 +3270,7 @@ The wire protocol is fully implemented and tested. All core VCS commands are ope
 Environment-based local testing:
 
 - `hosted` owns the server runtime and reads server config from its server config file or `HEDDLE_SERVER_*` overrides.
-- `heddle` client commands use user config plus `HEDDLE_REMOTE_*` overrides for TLS profiles.
+- `heddle` client commands use user config plus `HEDDLE_REMOTE_*` overrides for TLS profiles. `[remote] tls_ca_certificate_path` is honored from user config and from repository `.heddle/config.toml`; `HEDDLE_REMOTE_TLS_CA_CERT` overrides both. Unknown `[remote]` keys in repository config fail at load.
 - Client authentication follows a single precedence: `HEDDLE_CREDENTIAL=<path-to-.hcred>` (authoritative — a bad/expired/mismatched file is a hard error) → the per-server keystore entry (`heddle auth login`) → unauthenticated. There is no `HEDDLE_REMOTE_TOKEN` or `remote.token`; an agent authenticates by pointing `HEDDLE_CREDENTIAL` at a `.hcred` (see `heddle auth derive-agent --out` / `heddle auth create-service-token --out`).
 - `HEDDLE_REMOTE_TLS=1` enables TLS; `HEDDLE_REMOTE_INSECURE=1` allows cleartext to non-loopback hosts.
 - Provider pulls can be tuned in the user config under `[remote]` with `provider_global_concurrency`, `provider_per_endpoint_concurrency`, `provider_max_inflight_bytes`, and `provider_stall_timeout_secs`. The corresponding environment overrides are `HEDDLE_REMOTE_PROVIDER_GLOBAL_CONCURRENCY`, `HEDDLE_REMOTE_PROVIDER_PER_ENDPOINT_CONCURRENCY`, `HEDDLE_REMOTE_PROVIDER_MAX_INFLIGHT_BYTES`, and `HEDDLE_REMOTE_PROVIDER_STALL_TIMEOUT_SECS`.
@@ -3896,8 +3896,12 @@ and in isolated thread checkouts (`heddle start --path …`). Build junk that
 matches a root ignore rule is never listed as unsaved work and never enters
 permanent history.
 
-Heddle always protects its own `.heddle/` metadata. Other paths must
-be explicit in `.gitignore`, `.heddleignore`, or the config key below.
+Root `.heddle/` is reserved: identity, credentials, and repository-engine
+state. User ignore rules cannot un-ignore it. A `.gitignore` or
+`.heddleignore` negation such as `!.heddle/` does not pull
+`identity.toml` into capture. Nested `.heddle/` directories (fixtures)
+remain ordinary paths. Other paths must be explicit in `.gitignore`,
+`.heddleignore`, or the config key below.
 
 ## Config key: `[worktree] ignore`
 
@@ -3912,7 +3916,9 @@ Config patterns are loaded first, then root `.gitignore`, then
 `.heddle/info/exclude`, then root `.heddleignore`. Prefer the ignore files
 for project policy; use `[worktree] ignore` for operator-local or
 repo-engine defaults that should not appear as a tracked ignore file.
-Default config always includes `.heddle`.
+Default config always includes `.heddle`. That default is last-match
+and can be contradicted by a later user rule; the reserved-path hard-deny
+is what keeps root `.heddle/` out of capture.
 
 ## Capture path scoping
 
@@ -4039,8 +4045,10 @@ on.
 
 ## Runtime introspection
 
-Schemas in this document are mirrored at runtime by
-`crates/cli-contract/src/cli/commands/schemas.rs`. Generate the canonical JSON
+Schemas in this document are registered at runtime by
+`crates/cli-contract/src/cli/commands/schemas.rs`. `init` registers the
+real `InitOutput` type (no hand-written `InitSchema` mirror); remaining
+verbs still use a hand-written mirror. Generate the canonical JSON
 Schema for any verb with:
 
     heddle schemas                    # list registered schema verbs
@@ -4171,6 +4179,10 @@ metadata only; it does not import Git history or write Git-tracked files.
   "heddle_initialized": true,
   "installed_heddleignore": false,
   "principal_configured": false,
+  "principal_status": "not_configured",
+  "principal_source": null,
+  "principal": null,
+  "principal_recommended_action": "heddle init --principal-name <name> --principal-email <email>",
   "side_effects": [
     "created Heddle sidecar for the existing Git repository",
     "updated .git/info/exclude for Heddle metadata",
@@ -4191,6 +4203,10 @@ metadata only; it does not import Git history or write Git-tracked files.
 | `repository_mode` | string | required | Repository capability after init, e.g. `git-overlay` or native Heddle storage. |
 | `git_detected`, `heddle_initialized` | bool | required | Whether init detected an existing Git repo, and whether Heddle metadata is now present. |
 | `installed_heddleignore`, `principal_configured` | bool | required | Side effects outside `.heddle`, if any. `installed_heddleignore` is currently false; init does not install ignore-policy files. Git-overlay init uses local Git excludes only for Heddle metadata. |
+| `principal_status` | string | required | `configured` or `not_configured`. |
+| `principal_source` | string \| null | always present | Where the principal was resolved from, or `null` when none is configured. |
+| `principal` | object \| null | always present | `{ name, email }` when configured; otherwise `null`. |
+| `principal_recommended_action` | string \| null | always present | Command to set a principal when none is configured. |
 | `side_effects` | array<string> | required | Human-readable, machine-preserved list of what init changed or intentionally left untouched. |
 | `message` | string | required | Human summary. |
 | `next_action`, `recommended_action` | string \| null | required | Primary verification-guided next command. Git Overlay init proceeds directly to the normal save loop. |
@@ -5947,41 +5963,16 @@ the verdict schema is still settling.
 
 ---
 
-## `heddle identity ensure --output json`
-
-```json
-{
-  "output_kind": "identity_ensure",
-  "outcome": "created_on_behalf",
-  "server": "api.heddle.sh",
-  "subject": "account-01K2N",
-  "node_id": "b1a1cb0e0644173d6dc75f787fd203fdfd8f5ec116a0f70a854f12f54a67c121",
-  "claim_url": "https://heddle.sh/claim/hcl1.b1a1cb0e0644173d6dc75f787fd203fdfd8f5ec116a0f70a854f12f54a67c121.c2hvcnQtbGl2ZWQtY2xhaW0tc2VjcmV0"
-}
-```
-
----
-
-## `heddle identity claim-link --output json`
-
-```json
-{
-  "output_kind": "identity_claim_link",
-  "outcome": "claim_link_reissued",
-  "server": "api.heddle.sh",
-  "subject": "account-01K2N",
-  "node_id": "b1a1cb0e0644173d6dc75f787fd203fdfd8f5ec116a0f70a854f12f54a67c121",
-  "claim_url": "https://heddle.sh/claim/hcl1.b1a1cb0e0644173d6dc75f787fd203fdfd8f5ec116a0f70a854f12f54a67c121.bmV3LXNob3J0LWxpdmVkLWNsYWltLXNlY3JldA"
-}
-```
-
----
-
 ## `heddle whoami --output json`
 
 ```json
 {
   "output_kind": "whoami",
+  "capture_actor": {
+    "name": "Luke",
+    "email": "luke@example.com",
+    "source": "user_config"
+  },
   "server": "grpc.heddle.sh",
   "authenticated": true,
   "reachable": true,
@@ -6016,11 +6007,15 @@ the verdict schema is still settling.
 }
 ```
 
-`token_kind` is one of `root`, `agent`, or `service-account`. `scopes` and
-`operation_ceiling` are read from the local Biscuit delegation chain; an empty
-`scopes` list means full resource authority and a null `operation_ceiling` means
-no operation allowlist. When the server is unreachable, `reachable` is `false`,
-`identity` is `null`, and the locally-known token facts are still reported.
+`capture_actor` is who the next capture is attributed to (`environment`,
+`repository`, `git_config`, `user_config`, or `null` when unknown). Hosted auth
+fields (`server`, `authenticated`, `identity`, token facts) are a different
+object. `token_kind` is one of `root`, `agent`, or `service-account`. `scopes`
+and `operation_ceiling` are read from the local Biscuit delegation chain; an
+empty `scopes` list means full resource authority and a null `operation_ceiling`
+means no operation allowlist. When the server is unreachable, `reachable` is
+`false`, `identity` is `null`, and the locally-known token facts are still
+reported.
 
 ---
 
@@ -7156,6 +7151,9 @@ catalog-wide schema coverage.
 
 The command-contract coverage portion of this sample is generated from
 runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
+These counts describe the live parser catalog today. They are not the
+heddle#473 destination (~23 everyday verbs; umbrella nouns do not count
+as one; no `help advanced`).
 
 ```json
 {
@@ -7170,7 +7168,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact purge list",
       "visibility set"
     ],
-    "accepted_opaque_schema_verbs_total": 38,
+    "accepted_opaque_schema_verbs_total": 39,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
@@ -7182,14 +7180,14 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact purge list",
       "visibility set"
     ],
-    "advanced_scope_json_commands_total": 114,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 38,
+    "advanced_scope_json_commands_total": 115,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 39,
     "advanced_scope_mutating_commands_total": 65,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 21,
-    "catalog_commands_total": 190,
+    "catalog_commands_total": 192,
     "catalog_mutating_commands_total": 93,
-    "json_commands_total": 150,
-    "json_commands_with_accepted_opaque_schema": 38,
+    "json_commands_total": 151,
+    "json_commands_with_accepted_opaque_schema": 39,
     "json_commands_with_schema": 112,
     "json_commands_without_schema": 0,
     "json_mutating_commands_total": 88,
@@ -7199,9 +7197,9 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "mutating_commands_with_accepted_opaque_schema": 21,
     "mutating_commands_with_schema": 67,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 38,
+    "opaque_schema_verbs_total": 39,
     "status": "available",
-    "summary": "190 command(s), 150 JSON command(s), 93 mutating command(s), 88 mutating JSON command(s); verified everyday/agent machine surface has 36 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
+    "summary": "192 command(s), 151 JSON command(s), 93 mutating command(s), 88 mutating JSON command(s); verified everyday/agent machine surface has 36 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -7239,7 +7237,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "190 command(s), 150 JSON command(s), 93 mutating command(s), 88 mutating JSON command(s); verified everyday/agent machine surface has 36 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
+  "summary": "192 command(s), 151 JSON command(s), 93 mutating command(s), 88 mutating JSON command(s); verified everyday/agent machine surface has 36 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -7612,6 +7610,14 @@ for its two state arguments without parsing source:
 {"output_kind": "semantic_diff", "from_state": "hs-0000000000000000000000000000000000000000000000000000", "to_state": "hs-1111111111111111111111111111111111111111111111111111", "deltas": [{"change": "modified", "anchor": {"file": "src/lib.rs", "symbol": "calculate"}, "kind": "function", "old_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "new_hash": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}]}
 ```
 
+`heddle semantic refs --output json` emits persisted refs-of, callers-of, or
+importers-of at one state without parsing source. This envelope is the
+weft#451 Tier-2 body (`SemanticGraphQueryResponse`); hosted RPCs remain residual.
+
+```json
+{"output_kind": "semantic_refs", "state_id": "hs-0000000000000000000000000000000000000000000000000000", "kind": "refs_of", "anchor": {"file": "src/api.rs", "symbol": "greet"}, "path": null, "index_present": true, "refs": [{"source_path": "src/client.rs", "source_occurrence": 1, "name": "greet", "role": "call", "kind": "calls", "span": {"start": 40, "end": 45}, "target": {"file": "src/api.rs", "symbol": "greet"}, "target_definition": 0}], "importers": []}
+```
+
 ## Other verbs
 
 The following verbs also emit `--output json`. Their shapes follow the same
@@ -7888,9 +7894,11 @@ it refuses without changing files only when the recovery state is absent or
 when recovery would overwrite a differing local change at the same path.
 
 Undo operations that materialize an earlier tree are explicitly destructive.
-Run `heddle undo --preview` to inspect them and `heddle undo --hard` to permit
-the worktree rewind. Plain `heddle undo` refuses before changing repository
-state or files when the selected inverse would rewrite the worktree.
+Run `heddle undo --preview` (or `heddle undo --hard --preview`) to inspect them
+and `heddle undo --hard` to permit the worktree rewind. `--preview` is a
+read-only alias of `--dry-run` and can be combined with `--hard`. Plain
+`heddle undo` refuses before changing repository state or files when the
+selected inverse would rewrite the worktree.
 
 This document describes the user-facing surface shipped under
 [HeddleCo/heddle#23](https://github.com/HeddleCo/heddle/issues/23). The
@@ -7961,7 +7969,8 @@ contracts below are enforced by integration tests in
 
 - **Explicit destructive opt-in.** If the selected inverse would materialize
   an earlier tree, plain `heddle undo` refuses before mutation and points to
-  `--preview` and `--hard`. `heddle undo --hard` still refuses if the worktree
+  `--preview` and `--hard`. `heddle undo --hard --preview` previews that
+  rewind without applying it. `heddle undo --hard` still refuses if the worktree
   is dirty and surfaces the exact paths that would otherwise be lost. Capture
   the changes with `heddle capture -m "..."` (or move them) and retry.
 - **Recovery overlays unrelated changes.** `heddle undo --recover` restores
