@@ -84,6 +84,11 @@ fn assert_checked_out_thread(clone: &Path, expected: &str) {
         Some(expected),
         "fresh clone must be attached, not null/detached: {status}"
     );
+    assert_ne!(
+        status["thread"],
+        serde_json::Value::Null,
+        "current_lane after clone must be the selected thread, not detached: {status}"
+    );
 
     let list = json_cmd(&["--output", "json", "thread", "list"], clone);
     assert_eq!(

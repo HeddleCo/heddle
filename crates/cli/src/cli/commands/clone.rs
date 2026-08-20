@@ -43,7 +43,6 @@ use objects::{
     store::ObjectStore,
     sync::LockExt,
 };
-use refs::Head;
 use repo::{BlobHydrator, Repository};
 #[cfg(feature = "client")]
 use repo::{RepositorySourceAuthority, clone_intent::CloneIntent};
@@ -627,14 +626,7 @@ fn finish_git_overlay_clone(
             &remote_display
         ))
     })?;
-    // Materialize the imported tip from a fresh clone baseline. Imported
-    // refs may already make HEAD resolve to the target, but the files on
-    // disk do not yet represent that target.
-    repo.goto_from_materialized_state(&state_id, None)?;
-    // Keep Git and Heddle attached to the same imported branch.
-    repo.write_head_recorded(&Head::Attached {
-        thread: ThreadName::new(&track_name),
-    })?;
+    checkout_clone_thread(&repo, &track_name, &state_id)?;
     write_git_head_branch(&local_path.join(".git"), &track_name)?;
     configure_git_overlay_origin_tracking(local_path, &track_name)?;
     verify_git_overlay_clone(&repo, local_path, &track_name, &state_id)?;
@@ -1117,45 +1109,31 @@ fn format_clone_completion_lines(
 
 /// Pick which imported branch the clone should land on.
 ///
-/// Priority order:
-///
-/// 1. `--thread <name>` if the user asked for one explicitly. We
-///    accept the user-provided name even if it doesn't match a thread yet —
-///    the subsequent `get_thread` lookup will surface a clear error.
-/// 2. The branch the remote advertises as `HEAD` (passed in via
-///    `git_head_branch_hint`, read from `.git/HEAD` after the bare
-///    clone. This is what fixes heddle#141: cloning ripgrep should
-///    land on `master`, not the alphabetically-first imported branch
-///    `ag/bstr-migration`.
-/// 3. `"main"` if present — preserves the long-standing UX for
-///    repos that *do* have a `main` branch but somehow lack a
-///    `.git/HEAD` symref (e.g. transports that don't surface one).
-/// 4. Alphabetically first imported thread, as a last resort. We
-///    deliberately keep this fallback because erroring out on an
-///    unhinted clone would be worse than landing on a working ref.
+/// Same fail-closed rule as [`select_clone_checkout_thread`]: `--thread` must
+/// be advertised, else advertised HEAD, else `main`, else the first short name.
 fn select_clone_thread(
     repo: &Repository,
     requested: Option<&str>,
-    git_head_branch_hint: Option<&str>,
+    advertised_head: Option<&str>,
     remote_label: &str,
 ) -> Result<String> {
-    if let Some(requested) = requested {
-        return Ok(requested.to_string());
-    }
     let threads = repo.refs().list_threads()?;
-    if let Some(hint) = git_head_branch_hint
-        && threads.iter().any(|thread| thread == hint)
-    {
-        return Ok(hint.to_string());
-    }
-    if threads.iter().any(|thread| thread == "main") {
-        return Ok("main".to_string());
-    }
-    threads
-        .into_iter()
-        .next()
-        .map(|t| t.to_string())
-        .ok_or_else(|| anyhow!(clone_git_overlay_no_branch_refs_advice(remote_label)))
+    select_clone_checkout_thread(
+        requested,
+        advertised_head,
+        threads.iter().map(ThreadName::as_str),
+    )
+    .map_err(|err| match err {
+        CloneThreadSelectError::RequestedNotAdvertised { requested } => {
+            anyhow!(clone_git_overlay_branch_not_imported_advice(
+                &requested,
+                remote_label
+            ))
+        }
+        CloneThreadSelectError::NoAdvertisedThreads => {
+            anyhow!(clone_git_overlay_no_branch_refs_advice(remote_label))
+        }
+    })
 }
 
 /// Read `.git/HEAD` as a symbolic ref into `refs/heads/`, returning
@@ -1216,7 +1194,7 @@ async fn clone_local(
     // half-initialized clone directory.
     let sync = LocalSync::open(remote_path)?;
     let remote_repo = sync.source();
-    let advertised_head = remote_repo.current_lane().ok().flatten();
+    let advertised_head = advertised_clone_source_lane(remote_repo)?;
     let remote_threads = remote_repo.refs().list_threads()?;
     let track_name = select_clone_checkout_thread(
         thread.as_deref(),
@@ -1255,9 +1233,12 @@ async fn clone_local(
     }
 
     // Materialize saved history only. The source worktree is not copied:
-    // uncommitted files must not become contagious. Then attach HEAD to
-    // the selected thread and fail closed if the checkout is still detached.
-    materialize_and_attach_clone_thread(&local_repo, &track_name, &state_id)?;
+    // uncommitted files must not become contagious. Publish the selected
+    // thread attached, never a detached lane.
+    if let Err(error) = checkout_clone_thread(&local_repo, &track_name, &state_id) {
+        let _ = fs::remove_dir_all(local_path);
+        return Err(error);
+    }
 
     let origin_url = configure_local_clone_origin(&local_repo, remote_path)?;
 
@@ -1319,45 +1300,56 @@ fn configure_local_clone_origin(repo: &Repository, remote_path: &Path) -> Result
     Ok(origin_url)
 }
 
-fn materialize_and_attach_clone_thread(
+fn advertised_clone_source_lane(repo: &Repository) -> Result<Option<String>> {
+    repo.current_lane()
+        .map_err(|err| anyhow!(clone_source_head_unreadable_advice(&err.to_string())))
+}
+
+fn clone_source_head_unreadable_advice(cause: &str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "clone_source_head_unreadable",
+        format!("Cannot read the source repository HEAD: {cause}"),
+        "Repair the source repository, then retry `heddle clone`.",
+        format!("clone cannot choose a default thread because source current_lane failed: {cause}"),
+        "falling through to main would attach the clone to the wrong lane",
+        "destination path was left unchanged; no local clone repository was initialized",
+        "heddle status",
+        vec!["heddle status".to_string()],
+    )
+}
+
+/// Materialize the selected tip without moving HEAD, then publish the thread
+/// and an attached HEAD together. Never writes a detached lane.
+fn checkout_clone_thread(
     repo: &Repository,
     track_name: &str,
     state_id: &objects::object::StateId,
 ) -> Result<()> {
-    // Materialize from a fresh clone baseline before publishing the local
-    // thread ref. Otherwise HEAD can resolve to the target first and make
-    // the empty worktree look like deleted target files.
-    repo.goto_from_materialized_state_without_record(state_id, None)?;
-    repo.set_thread_recorded(&ThreadName::new(track_name), state_id)?;
-    attach_clone_head(repo, track_name)
-}
-
-fn attach_clone_head(repo: &Repository, track_name: &str) -> Result<()> {
-    repo.write_head_recorded(&Head::Attached {
-        thread: ThreadName::new(track_name),
-    })?;
-    match repo.current_lane()? {
-        Some(lane) if lane == track_name => Ok(()),
-        other => Err(anyhow!(clone_checkout_not_attached_advice(
-            track_name,
-            other.as_deref(),
-        ))),
+    repo.restore_worktree_state_only(state_id, None)?;
+    if !repo.worktree_matches_state(state_id)? {
+        return Err(anyhow!(clone_checkout_not_attached_advice(track_name)));
     }
+    publish_attached_clone_thread(repo, track_name, state_id)
 }
 
-fn clone_checkout_not_attached_advice(track_name: &str, actual: Option<&str>) -> RecoveryAdvice {
-    let found = actual.unwrap_or("detached HEAD");
+fn publish_attached_clone_thread(
+    repo: &Repository,
+    track_name: &str,
+    state_id: &objects::object::StateId,
+) -> Result<()> {
+    Ok(repo.publish_clone_checkout(&ThreadName::new(track_name), state_id)?)
+}
+
+fn clone_checkout_not_attached_advice(track_name: &str) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "clone_checkout_not_attached",
-        format!("Clone did not check out thread '{track_name}' (HEAD is {found})"),
-        format!(
-            "Retry `heddle clone --thread {track_name}`, or switch the existing clone with `heddle thread switch {track_name} --force`."
-        ),
-        format!("clone published thread '{track_name}' but current_lane is {found}"),
-        "a successful clone must leave the worktree attached to the selected thread",
-        "repository objects were written; HEAD was left detached or on a different thread",
-        format!("heddle thread switch {track_name} --force"),
-        vec![format!("heddle thread switch {track_name} --force")],
+        format!("Clone worktree does not match thread '{track_name}'"),
+        format!("Retry `heddle clone --thread {track_name}`."),
+        format!("clone materialized files that do not match the selected thread '{track_name}'"),
+        "refs and HEAD are not published until the worktree matches the selected tip",
+        "destination objects may have been written; the selected thread was not published",
+        format!("heddle clone --thread {track_name}"),
+        vec![format!("heddle clone --thread {track_name}")],
     )
 }
 
@@ -1640,24 +1632,14 @@ async fn clone_network_connected(
     }
 
     let mut cleanup = CloneDestinationCleanup::new(local_path);
-    let intent = CloneIntent {
-        origin: hosted_clone_origin_url(&endpoint_spec, repo_path),
-        endpoint: endpoint_spec.clone(),
-        repository: repo_path.to_string(),
-        thread: thread.clone(),
-        depth,
-        lazy,
-    };
-    intent.create(local_path)?;
-    // Failures after the durable intent are resumable and must remain on disk.
-    cleanup.disarm();
-    let durability = CloneDurabilityBatch::begin(local_path);
+    let mut durability = None;
     let materialization = if lazy {
         PullMaterialization::Lazy
     } else {
         PullMaterialization::Full
     };
     let mut folded = None;
+    let mut selected_track = None;
     let (mut result, local_repo) = client
         .clone_pull_with_depth_and_materialization(
             repo_path,
@@ -1676,17 +1658,29 @@ async fn clone_network_connected(
                             "server does not advertise folded clone refs".to_string(),
                         )
                     })?;
-                let track_name = select_hosted_clone_thread(
-                    thread.as_deref(),
+                let intent = CloneIntent {
+                    origin: hosted_clone_origin_url(&endpoint_spec, repo_path),
+                    endpoint: endpoint_spec.clone(),
+                    repository: repo_path.to_string(),
+                    thread: thread.clone(),
+                    advertised_head: refs.head_thread.clone(),
+                    depth,
+                    lazy,
+                };
+                let (_, track_name) = create_hosted_clone_intent_after_thread_select(
+                    local_path,
+                    intent,
                     refs.refs
                         .iter()
                         .filter(|entry| entry.is_thread)
                         .map(|entry| entry.name.as_str()),
-                    refs.head_thread.as_deref(),
-                    repo_path,
                 )
                 .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
+                // Failures after the durable intent are resumable and must remain on disk.
+                cleanup.disarm();
+                durability = Some(CloneDurabilityBatch::begin(local_path));
                 let repo = initialize_hosted_clone_repository(local_path, &refs.refs, &track_name)?;
+                selected_track = Some(track_name);
                 folded = Some(refs);
                 Ok(repo)
             },
@@ -1694,15 +1688,7 @@ async fn clone_network_connected(
         .await?;
     let folded = folded.context("folded clone response is missing its refs")?;
     let remote_refs = folded.refs;
-    let track_name = select_hosted_clone_thread(
-        thread.as_deref(),
-        remote_refs
-            .iter()
-            .filter(|entry| entry.is_thread)
-            .map(|entry| entry.name.as_str()),
-        folded.head_thread.as_deref(),
-        repo_path,
-    )?;
+    let track_name = selected_track.context("hosted clone did not select a thread")?;
     let git_overlay_clone = hosted_clone_thread_revision_address(&remote_refs, &track_name)
         .is_some_and(|address| address.starts_with("git:"));
     let origin_url = hosted_clone_origin_url(&endpoint_spec, repo_path);
@@ -1807,6 +1793,9 @@ async fn clone_network_connected(
         // Ordering invariant: the reachable object closure is hash-complete;
         // one whole-filesystem barrier commits all direct clone data; only
         // then may refs/HEAD become visible; the intent is cleared last.
+        let durability = durability
+            .as_ref()
+            .context("clone durability was not started")?;
         durability.commit()?;
         if durability.barrier_count() != 1 {
             return Err(HeddleError::InvalidObject(
@@ -1817,7 +1806,6 @@ async fn clone_network_connected(
         client
             .publish_clone_markers(&local_repo, repo_path, &result.checkpoint)
             .await?;
-        local_repo.set_thread_recorded(&ThreadName::new(&track_name), &final_state)?;
         // Lazy clone: persist the hydrator metadata so future
         // `Repository::open` calls (in any process) can reconstruct
         // the on-read hydrator. Without this, lazy clones would only
@@ -1825,14 +1813,14 @@ async fn clone_network_connected(
         // subsequent `heddle <verb>` would surface MissingObject on
         // any blob read.
         if lazy {
-            attach_clone_head(&local_repo, &track_name)?;
+            publish_attached_clone_thread(&local_repo, &track_name, &final_state)?;
         } else if git_overlay_clone {
             finish_hosted_git_overlay_checkout(&local_repo, &track_name)
                 .context("failed to finish hosted Git-overlay checkout")?;
             configure_git_overlay_origin_tracking(local_path, &track_name)?;
-            attach_clone_head(&local_repo, &track_name)?;
+            publish_attached_clone_thread(&local_repo, &track_name, &final_state)?;
         } else {
-            materialize_and_attach_clone_thread(&local_repo, &track_name, &final_state)
+            checkout_clone_thread(&local_repo, &track_name, &final_state)
                 .context("failed to materialize hosted clone worktree")?;
         }
         CloneIntent::clear(local_path)?;
@@ -1915,14 +1903,12 @@ async fn recover_interrupted_clone_connected(
     let remote_refs = client
         .list_refs_with_revision_addresses(&intent.repository)
         .await?;
-    let track_name = select_hosted_clone_thread(
-        intent.thread.as_deref(),
+    let track_name = select_recover_clone_thread(
+        intent,
         remote_refs
             .iter()
             .filter(|entry| entry.is_thread)
             .map(|entry| entry.name.as_str()),
-        None,
-        &intent.repository,
     )?;
     let git_overlay_clone = hosted_clone_thread_revision_address(&remote_refs, &track_name)
         .is_some_and(|address| address.starts_with("git:"));
@@ -2029,16 +2015,15 @@ async fn recover_interrupted_clone_connected(
     client
         .publish_clone_markers(&repo, &intent.repository, &result.checkpoint)
         .await?;
-    repo.set_thread_recorded(&ThreadName::new(&track_name), &final_state)?;
     if intent.lazy {
-        attach_clone_head(&repo, &track_name)?;
+        publish_attached_clone_thread(&repo, &track_name, &final_state)?;
     } else if git_overlay_clone {
         finish_hosted_git_overlay_checkout(&repo, &track_name)?;
         configure_git_overlay_origin(root, &intent.origin)?;
         configure_git_overlay_origin_tracking(root, &track_name)?;
-        attach_clone_head(&repo, &track_name)?;
+        publish_attached_clone_thread(&repo, &track_name, &final_state)?;
     } else {
-        materialize_and_attach_clone_thread(&repo, &track_name, &final_state)?;
+        checkout_clone_thread(&repo, &track_name, &final_state)?;
     }
     CloneIntent::clear(root)?;
     Ok(())
@@ -2457,6 +2442,37 @@ fn select_hosted_clone_thread<'a>(
     )
 }
 
+/// Validate the advertised thread, then persist the recovery intent. Dest is
+/// created only after selection succeeds.
+#[cfg(feature = "client")]
+fn create_hosted_clone_intent_after_thread_select<'a>(
+    local_path: &Path,
+    intent: CloneIntent,
+    advertised_threads: impl IntoIterator<Item = &'a str>,
+) -> Result<(CloneIntent, String)> {
+    let track_name = select_hosted_clone_thread(
+        intent.thread.as_deref(),
+        advertised_threads,
+        intent.advertised_head.as_deref(),
+        &intent.repository,
+    )?;
+    intent.create(local_path)?;
+    Ok((intent, track_name))
+}
+
+#[cfg(feature = "client")]
+fn select_recover_clone_thread<'a>(
+    intent: &CloneIntent,
+    remote_threads: impl IntoIterator<Item = &'a str>,
+) -> Result<String> {
+    select_hosted_clone_thread(
+        intent.thread.as_deref(),
+        remote_threads,
+        intent.advertised_head.as_deref(),
+        &intent.repository,
+    )
+}
+
 #[cfg(feature = "client")]
 fn clone_hosted_thread_not_found_advice(track_name: &str, remote_label: &str) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
@@ -2798,6 +2814,7 @@ mod tests {
             endpoint: "127.0.0.1:8421".to_string(),
             repository: "owner/repo".to_string(),
             thread: Some("main".to_string()),
+            advertised_head: Some("main".to_string()),
             depth: None,
             lazy: false,
         }
@@ -2831,6 +2848,7 @@ mod tests {
             endpoint: "127.0.0.1:8421".to_string(),
             repository: "owner/repo".to_string(),
             thread: Some("main".to_string()),
+            advertised_head: Some("main".to_string()),
             depth: None,
             lazy: false,
         }
@@ -3378,10 +3396,15 @@ mod tests {
         assert!(advice.error.contains("feature/x"));
         assert_eq!(advice.primary_command, "heddle thread list");
 
-        let advice = clone_checkout_not_attached_advice("main", None);
+        let advice = clone_checkout_not_attached_advice("main");
         assert_eq!(advice.kind, "clone_checkout_not_attached");
-        assert!(advice.error.contains("detached HEAD"));
-        assert_eq!(advice.primary_command, "heddle thread switch main --force");
+        assert!(advice.error.contains("main"));
+        assert_eq!(advice.primary_command, "heddle clone --thread main");
+
+        let advice = clone_source_head_unreadable_advice("corrupt HEAD");
+        assert_eq!(advice.kind, "clone_source_head_unreadable");
+        assert!(advice.error.contains("corrupt HEAD"));
+        assert_eq!(advice.primary_command, "heddle status");
 
         let advice = monorepo_requires_hosted_remote_advice("file:///tmp/x");
         assert_eq!(advice.kind, "monorepo_requires_hosted_remote");
@@ -3520,12 +3543,11 @@ mod tests {
                 .expect("create thread tip");
         }
 
-        // Explicit request wins even if it is not yet present as a thread.
         assert_eq!(
-            select_clone_thread(&repo, Some("requested"), Some("alpha"), "remote").unwrap(),
-            "requested"
+            select_clone_thread(&repo, Some("alpha"), Some("zeta"), "remote").unwrap(),
+            "alpha"
         );
-        // HEAD hint wins over alphabetical when present.
+        // Advertised HEAD wins over alphabetical when present.
         assert_eq!(
             select_clone_thread(&repo, None, Some("zeta"), "remote").unwrap(),
             "zeta"
@@ -3534,6 +3556,12 @@ mod tests {
         assert_eq!(
             select_clone_thread(&repo, None, None, "remote").unwrap(),
             "main"
+        );
+        let err = select_clone_thread(&repo, Some("missing"), Some("alpha"), "remote")
+            .expect_err("unknown --thread must fail closed");
+        assert!(
+            err.to_string().contains("missing"),
+            "unknown thread must be named: {err:#}"
         );
 
         // A second repo still has main from init/snapshot; selection stays on main.
@@ -3549,15 +3577,6 @@ mod tests {
         assert_eq!(
             select_clone_thread(&repo2, None, None, "remote").unwrap(),
             "main"
-        );
-        // Empty-thread remote must refuse.
-        let temp3 = tempfile::TempDir::new().expect("temp3");
-        let repo3 = Repository::init_default(temp3.path()).expect("init3");
-        // Wipe all threads by never snapshotting and clearing main if possible —
-        // a brand-new init may already have main; explicit request still works.
-        assert_eq!(
-            select_clone_thread(&repo3, Some("explicit"), None, "remote").unwrap(),
-            "explicit"
         );
     }
 
@@ -3583,5 +3602,109 @@ mod tests {
 
         let abs = validate_monorepo_destination(&root, Path::new("/etc/passwd"));
         assert!(abs.is_err(), "absolute path must be refused");
+    }
+
+    #[test]
+    fn advertised_clone_source_lane_fails_closed_on_unreadable_head() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let repo = Repository::init_default(temp.path()).expect("init");
+        std::fs::write(repo.heddle_dir().join("HEAD"), b"not-a-head\n").expect("corrupt HEAD");
+        let err = advertised_clone_source_lane(&repo)
+            .expect_err("unreadable source HEAD must fail closed");
+        assert!(
+            format!("{err:#}").contains("HEAD") || format!("{err:#}").contains("head"),
+            "refusal must mention HEAD: {err:#}"
+        );
+    }
+
+    #[test]
+    fn checkout_clone_thread_attaches_without_recording_goto() {
+        use objects::object::ThreadName;
+        use oplog::{OpLogBackend, OpRecord};
+        use refs::Head;
+
+        let temp = tempfile::TempDir::new().expect("temp");
+        let repo = Repository::init_default(temp.path()).expect("init");
+        std::fs::write(temp.path().join("README.md"), b"captured\n").unwrap();
+        let state = repo
+            .snapshot(Some("seed".into()), None)
+            .expect("snapshot")
+            .state_id;
+        repo.set_thread_recorded(&ThreadName::from("feature"), &state)
+            .expect("feature thread");
+
+        checkout_clone_thread(&repo, "feature", &state).expect("checkout");
+
+        assert_eq!(
+            repo.current_lane().expect("current lane").as_deref(),
+            Some("feature")
+        );
+        assert!(
+            matches!(
+                repo.head_ref().expect("HEAD"),
+                Head::Attached { thread } if thread.as_str() == "feature"
+            ),
+            "HEAD must be attached, not detached"
+        );
+        let recorded_goto = repo
+            .oplog()
+            .recent(200)
+            .expect("oplog")
+            .into_iter()
+            .any(|entry| matches!(entry.operation, OpRecord::Goto { .. }));
+        assert!(
+            !recorded_goto,
+            "clone checkout must not record a Goto that republishes detached HEAD"
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_unknown_thread_does_not_create_destination() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let dest = temp.path().join("clone");
+        let intent = CloneIntent {
+            origin: "heddle://127.0.0.1:8421/owner/repo".to_string(),
+            endpoint: "127.0.0.1:8421".to_string(),
+            repository: "owner/repo".to_string(),
+            thread: Some("missing".to_string()),
+            advertised_head: Some("main".to_string()),
+            depth: None,
+            lazy: false,
+        };
+        let err = create_hosted_clone_intent_after_thread_select(&dest, intent, ["main"])
+            .expect_err("unknown --thread must fail closed");
+        assert!(
+            format!("{err:#}").contains("missing"),
+            "refusal must name the missing thread: {err:#}"
+        );
+        assert!(
+            !dest.exists(),
+            "unknown --thread must not create the destination"
+        );
+        assert!(
+            !CloneIntent::path(&dest).exists(),
+            "unknown --thread must not persist a clone intent"
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn recover_keeps_non_main_advertised_default() {
+        let intent = CloneIntent {
+            origin: "heddle://127.0.0.1:8421/owner/repo".to_string(),
+            endpoint: "127.0.0.1:8421".to_string(),
+            repository: "owner/repo".to_string(),
+            thread: None,
+            advertised_head: Some("trunk".to_string()),
+            depth: None,
+            lazy: false,
+        };
+        let selected = select_recover_clone_thread(&intent, ["alpha", "main", "trunk"])
+            .expect("recover must keep the advertised default");
+        assert_eq!(
+            selected, "trunk",
+            "no-flag recover must not fall through to main"
+        );
     }
 }
