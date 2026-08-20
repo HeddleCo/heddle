@@ -329,6 +329,38 @@ fn truncated_frame_and_trailing_bytes_are_errors() {
 }
 
 #[test]
+fn mismatched_logical_len_fails_eager_and_streamed() {
+    let tree = Tree::from_entries(vec![blob("a", b"1"), blob("b", b"2")]);
+    let mut bytes = tree.encode_canonical().expect("encode");
+    let actual_logical = u64::from_le_bytes(bytes[53..61].try_into().expect("logical"));
+    let forged_logical = actual_logical.saturating_add(8);
+    bytes[53..61].copy_from_slice(&forged_logical.to_le_bytes());
+    let forged_id = ContentHash::compute_typed_with_len("tree", forged_logical, |hasher| {
+        for entry in tree.entries() {
+            entry.update_hasher(hasher);
+        }
+    });
+    bytes[5..37].copy_from_slice(forged_id.as_bytes());
+
+    let eager = Tree::decode_canonical(&bytes).expect_err("eager logical_len");
+    let streamed = Tree::decode_canonical_streamed(&bytes).expect_err("stream logical_len");
+    assert!(
+        matches!(
+            eager,
+            TreeStreamError::HashMismatch { .. } | TreeStreamError::Malformed(_)
+        ),
+        "{eager}"
+    );
+    assert!(
+        matches!(
+            streamed,
+            TreeStreamError::HashMismatch { .. } | TreeStreamError::Malformed(_)
+        ),
+        "{streamed}"
+    );
+}
+
+#[test]
 fn leftover_payload_after_declared_count_is_trailing_bytes() {
     let tree = Tree::from_entries(vec![blob("a", b"1"), blob("b", b"2")]);
     let bytes = tree.encode_canonical().expect("encode");

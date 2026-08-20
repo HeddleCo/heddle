@@ -133,6 +133,7 @@ pub struct TreeEntryReader<S: TreeByteSource> {
     header: TreeHeader,
     cursor: TreeResumeCursor,
     hasher: Option<blake3::Hasher>,
+    decoded_logical_len: u64,
     pending: Option<(TreeEntry, usize)>,
     finished: bool,
 }
@@ -177,6 +178,7 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
             header,
             cursor,
             hasher,
+            decoded_logical_len: 0,
             pending: None,
             finished: false,
         };
@@ -254,6 +256,11 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
             });
         }
         if let Some(hasher) = self.hasher.take() {
+            if self.decoded_logical_len != self.header.logical_len {
+                return Err(TreeStreamError::Malformed(
+                    "declared logical length does not match entries".into(),
+                ));
+            }
             let found = ContentHash::from_bytes(hasher.finalize().into());
             if found != self.header.tree_id {
                 return Err(TreeStreamError::HashMismatch {
@@ -309,6 +316,10 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
         if let Some(hasher) = &mut self.hasher {
             entry.update_hasher(hasher);
         }
+        self.decoded_logical_len = self
+            .decoded_logical_len
+            .checked_add(entry.encoded_len() as u64)
+            .ok_or_else(|| TreeStreamError::Malformed("logical length overflow".into()))?;
         self.cursor.ordinal += 1;
         self.cursor.byte_offset += consumed as u64;
         self.cursor.prev_name = Some(entry.name().to_string());
@@ -397,6 +408,14 @@ impl Tree {
             entries.push(entry);
         }
         reader.finish_and_verify()?;
-        Tree::try_from_decoded_entries(entries).map_err(TreeStreamError::from)
+        let tree = Tree::try_from_decoded_entries(entries).map_err(TreeStreamError::from)?;
+        let found = tree.hash();
+        if found != header.tree_id {
+            return Err(TreeStreamError::HashMismatch {
+                expected: header.tree_id,
+                found,
+            });
+        }
+        Ok(tree)
     }
 }
