@@ -689,6 +689,36 @@ fn test_compute_similarity_ast_fallback() {
 }
 
 #[test]
+fn ast_similarity_ignores_renamed_identifiers() {
+    let a = "fn get_user() { fetch_user(); }";
+    let b = "fn get_order() { fetch_order(); }";
+    let tokens = compute_similarity(a, b, SimilarityMethod::Tokens);
+    let ast =
+        super::analysis_similarity::try_compute_ast_similarity(a, b, crate::parser::Language::Rust)
+            .expect("both snippets must parse");
+    assert!(
+        tokens < 0.85,
+        "token Jaccard must treat renamed identifiers as distant: {tokens}"
+    );
+    assert!(
+        ast >= 0.85,
+        "AST kind bags must treat same-shape renames as similar: {ast}"
+    );
+}
+
+#[test]
+fn try_compute_ast_similarity_fail_closes_without_grammar() {
+    assert_eq!(
+        super::analysis_similarity::try_compute_ast_similarity(
+            "fn get_user() { fetch_user(); }",
+            "fn get_order() { fetch_order(); }",
+            crate::parser::Language::Unknown,
+        ),
+        None
+    );
+}
+
+#[test]
 fn test_classify_comments_only_handles_deep_ast_without_recursion() {
     let old = nested_rust_modules(512, "// old\nfn deeply_nested() { println!(\"hi\"); }");
     let new = nested_rust_modules(512, "// new\nfn deeply_nested() { println!(\"hi\"); }");

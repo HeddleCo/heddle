@@ -317,6 +317,31 @@ mod b {
 }
 
 #[test]
+fn extract_functions_includes_javascript_object_literal_methods() {
+    let source = r#"
+export const handlers = {
+    save: async () => {
+        await persist();
+    },
+    load: function () {
+        return fetchItem();
+    },
+};
+"#;
+    let parsed = ParsedFile::parse(source, Language::JavaScript).expect("Should parse");
+    let functions = parsed.extract_functions();
+    let names: Vec<&str> = functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"save"),
+        "object-literal arrow method must extract: {names:?}"
+    );
+    assert!(
+        names.contains(&"load"),
+        "object-literal function method must extract: {names:?}"
+    );
+}
+
+#[test]
 fn extract_calls_uses_tree_not_comment_or_string_substrings() {
     let source = r#"
 fn test_it() {

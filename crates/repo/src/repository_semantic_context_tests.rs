@@ -224,6 +224,52 @@ fn test_three() { assert!(true); }
 ";
 
 #[test]
+fn object_literal_methods_do_not_poison_the_corpus() {
+    let temp = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp.path()).unwrap();
+    std::fs::write(
+        temp.path().join("handlers.js"),
+        "export const handlers = {\n  save: async () => { persist(); },\n};\n",
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("changed.rs"), CORPUS).unwrap();
+    let seed = repo
+        .snapshot_with_attribution(Some("seed".to_string()), None, author())
+        .unwrap();
+    let edited = snapshot(
+        &repo,
+        temp.path(),
+        "changed.rs",
+        "\
+fn alpha() { let total = first + second + third + fourth; }
+fn beta() { for widget in inventory { ship(widget); } }
+fn gamma() { match colour { Red => stop(), Green => go() } }
+fn delta() { if ready { launch(); } else { wait(); } abort(); }
+",
+    );
+
+    let index_hash = attachment_hash(&repo, &edited, StateAttachmentKind::SemanticIndex);
+    let ctx = build_semantic_context(&repo, Some(&seed), &edited, index_hash.as_ref(), None, None)
+        .unwrap();
+    assert!(
+        ctx.corpus_complete,
+        "object-literal methods must not fail-close the corpus"
+    );
+    let js_fns = ctx
+        .new_functions
+        .get(&PathBuf::from("handlers.js"))
+        .expect("handlers.js must join the new-state corpus");
+    assert!(
+        js_fns.iter().any(|f| f.name == "save"),
+        "object-literal save must be extracted: {js_fns:?}"
+    );
+    assert!(
+        load_risk_kinds(&repo, &edited).contains(&RiskSignalKind::Novelty),
+        "complete corpus must still allow novelty on a novel rust shape"
+    );
+}
+
+#[test]
 fn unchanged_tests_join_corpus_and_fire_reachability() {
     let temp = TempDir::new().unwrap();
     let repo = Repository::init_default(temp.path()).unwrap();

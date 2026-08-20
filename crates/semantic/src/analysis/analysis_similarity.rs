@@ -84,6 +84,30 @@ pub fn compute_similarity_with_language(
     }
 }
 
+/// AST kind-bag similarity with no token fallback.
+///
+/// `None` means a language has no grammar or either side failed to
+/// parse. Callers that must not invent a novelty/uniqueness signal
+/// from identifier tokens should treat that as fail-closed.
+pub fn try_compute_ast_similarity(a: &str, b: &str, language: Language) -> Option<f64> {
+    try_compute_ast_similarity_for_languages(a, language, b, language)
+}
+
+/// Like [`try_compute_ast_similarity`], but each side uses its own grammar.
+pub fn try_compute_ast_similarity_for_languages(
+    a: &str,
+    a_language: Language,
+    b: &str,
+    b_language: Language,
+) -> Option<f64> {
+    if a_language == Language::Unknown || b_language == Language::Unknown {
+        return None;
+    }
+    let counts_a = ast_node_counts(a, a_language)?;
+    let counts_b = ast_node_counts(b, b_language)?;
+    Some(count_similarity(&counts_a, &counts_b))
+}
+
 pub(super) struct PreparedSimilarity {
     method: SimilarityMethod,
     lines: Option<HashSet<String>>,

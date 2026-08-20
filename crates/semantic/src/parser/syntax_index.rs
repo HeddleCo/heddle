@@ -974,18 +974,33 @@ fn is_function_node(node: &Node<'_>, language: Language) -> bool {
             matches!(
                 node.kind(),
                 "function_declaration" | "method_definition" | "generator_function_declaration"
-            ) || (node.kind() == "variable_declarator"
-                && node
-                    .child_by_field_name("value")
-                    .is_some_and(|value| is_javascript_function_value(value.kind())))
+            ) || javascript_bound_function(node)
         }
         _ => is_function_kind(node.kind(), language),
     }
 }
 
+fn javascript_bound_function(node: &Node<'_>) -> bool {
+    matches!(node.kind(), "variable_declarator" | "pair")
+        && node
+            .child_by_field_name("value")
+            .is_some_and(|value| is_javascript_function_value(value.kind()))
+}
+
 fn function_name<'a>(node: &Node<'_>, source: &'a str) -> Option<&'a str> {
     if let Some(name) = node.child_by_field_name("name") {
         return Some(&source[name.byte_range()]);
+    }
+    if let Some(key) = node.child_by_field_name("key") {
+        if matches!(
+            key.kind(),
+            "identifier" | "property_identifier" | "private_property_identifier"
+        ) {
+            return Some(&source[key.byte_range()]);
+        }
+        if let Some(name) = first_identifier_in_subtree(key, source) {
+            return Some(name);
+        }
     }
     if let Some(declarator) = node.child_by_field_name("declarator") {
         if let Some(name) = c_function_name(declarator, source) {
@@ -1222,7 +1237,7 @@ fn line_offsets(source: &str) -> Vec<usize> {
 fn is_javascript_function_value(kind: &str) -> bool {
     matches!(
         kind,
-        "arrow_function" | "function_expression" | "generator_function"
+        "arrow_function" | "function" | "function_expression" | "generator_function"
     )
 }
 
