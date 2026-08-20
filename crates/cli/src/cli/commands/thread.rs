@@ -412,7 +412,7 @@ pub(crate) fn thread_recovery_action_is_primary(
 
 pub(crate) fn thread_workspace_label(mode: &ThreadMode) -> &'static str {
     match mode {
-        ThreadMode::Materialized => "main checkout",
+        ThreadMode::Materialized => "attached checkout",
         ThreadMode::Virtualized => "virtual checkout",
         ThreadMode::Solid => "isolated checkout",
     }

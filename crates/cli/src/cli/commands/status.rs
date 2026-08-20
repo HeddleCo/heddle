@@ -1174,7 +1174,7 @@ fn status_workspace_label(output: &StatusOutput, mode: &ThreadMode) -> &'static 
         ThreadMode::Materialized if output.repository_capability == "git-overlay" => {
             "Git branch checkout"
         }
-        ThreadMode::Materialized => "main checkout",
+        ThreadMode::Materialized => "attached checkout",
         ThreadMode::Solid => "isolated checkout",
         ThreadMode::Virtualized => "virtual checkout",
     }
