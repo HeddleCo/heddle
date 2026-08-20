@@ -219,7 +219,7 @@ impl FsStore {
                 builder.add(
                     authored_hash,
                     PackObjectType::Tree,
-                    rmp_serde::to_vec_named(&authored_tree)?,
+                    authored_tree.encode_canonical()?,
                 );
                 staged_trees.push((authored_hash, authored_tree));
             }
@@ -230,7 +230,7 @@ impl FsStore {
             builder.add(
                 tree_hash,
                 PackObjectType::Tree,
-                rmp_serde::to_vec_named(tree)?,
+                tree.encode_canonical()?,
             );
             staged_trees.push((tree_hash, tree.clone()));
         }
@@ -503,7 +503,7 @@ impl FsStore {
                 continue;
             }
             if let Some(tree) = ObjectStore::get_tree(self, hash)? {
-                let data = rmp_serde::to_vec(&tree)?;
+                let data = tree.encode_canonical()?;
                 seen.insert(id);
                 builder.add(*hash, PackObjectType::Tree, data);
             }

@@ -902,7 +902,7 @@ fn decode_compact_object(
         {
             let tree = heddle_object_model::compact::extract_tree(data, *hash)
                 .map_err(|error| compact_extract_error(requested_id, error))?;
-            rmp_serde::to_vec_named(&tree)
+            tree.encode_canonical()
                 .map(Some)
                 .map_err(|error| StoreError::InvalidObject(error.to_string()))
         }
@@ -960,7 +960,8 @@ fn decode_compact_objects(
                 .into_iter()
                 .map(|tree| {
                     let id = PackObjectId::Hash(tree.hash());
-                    let bytes = rmp_serde::to_vec_named(&tree)
+                    let bytes = tree
+                        .encode_canonical()
                         .map_err(|error| StoreError::InvalidObject(error.to_string()))?;
                     Ok((id, ObjectType::Tree, bytes))
                 })

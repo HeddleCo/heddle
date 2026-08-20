@@ -25,6 +25,7 @@ pub fn run_compliance_tests<S: ObjectStore>(store: &S) {
     blob_list(store);
     tree_round_trip(store);
     tree_missing_returns_none(store);
+    tree_streaming_round_trip(store);
     state_round_trip(store);
     state_has(store);
     state_list(store);
@@ -86,6 +87,37 @@ fn tree_round_trip<S: ObjectStore>(store: &S) {
         .expect("get_tree failed")
         .expect("tree missing after put");
     assert_eq!(got.hash(), hash, "tree hash changed after round-trip");
+}
+
+fn tree_streaming_round_trip<S: ObjectStore>(store: &S) {
+    use crate::object::{TreeEntry, TreePageLimits};
+
+    let blob = ContentHash::compute(b"compliance-stream");
+    let tree = Tree::from_entries(vec![
+        TreeEntry::file("a.txt", blob, false).expect("a"),
+        TreeEntry::file("b.txt", blob, true).expect("b"),
+    ]);
+    let hash = store.put_tree(&tree).expect("put_tree failed");
+    let mut reader = store
+        .open_tree(&hash, None)
+        .expect("open_tree")
+        .expect("tree body");
+    let page = reader
+        .next_page(TreePageLimits::new(1, usize::MAX).expect("limits"))
+        .expect("page")
+        .expect("first page");
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].name(), "a.txt");
+    let mut resumed = store
+        .open_tree(&hash, Some(&page.resume_cursor))
+        .expect("resume")
+        .expect("tree body");
+    let rest = resumed
+        .next_page(TreePageLimits::new(8, usize::MAX).expect("limits"))
+        .expect("page")
+        .expect("rest");
+    assert_eq!(rest.entries[0].name(), "b.txt");
+    resumed.finish_and_verify().expect("verify");
 }
 
 fn tree_missing_returns_none<S: ObjectStore>(store: &S) {

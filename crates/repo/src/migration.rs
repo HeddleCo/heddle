@@ -207,6 +207,12 @@ pub static MIGRATIONS: &[Migration] = &[
         applies_to: SchemaTarget::AnnotatedTags,
         run: run_first_class_annotated_tags,
     },
+    Migration {
+        id: "0005_streamable_tree_encoding",
+        description: "Rewrite durable trees into the streamable HTR4 canonical encoding",
+        applies_to: SchemaTarget::Trees,
+        run: run_streamable_tree_encoding,
+    },
 ];
 
 /// Returns true when every registered migration id is already recorded in
@@ -296,6 +302,9 @@ fn run_canonicalize_tree_entries(ctx: &mut MigrationCtx<'_>) -> Result<()> {
         let Some(raw) = ctx.repo.store().get_tree_serialized(&tree_hash)? else {
             continue;
         };
+        if objects::object::is_canonical_tree(&raw) {
+            continue;
+        }
 
         if let Ok(tree) = rmp_serde::from_slice::<objects::object::Tree>(&raw) {
             tree.validate()?;
@@ -322,9 +331,9 @@ fn run_canonicalize_tree_entries(ctx: &mut MigrationCtx<'_>) -> Result<()> {
                 found,
             });
         }
-        let canonical = rmp_serde::to_vec(&tree).map_err(|err| {
+        let canonical = tree.encode_canonical().map_err(|err| {
             HeddleError::InvalidObject(format!(
-                "failed to encode canonical V2 tree {} during 0003_canonicalize_tree_entries: {err}",
+                "failed to encode canonical HTR4 tree {} during 0003_canonicalize_tree_entries: {err}",
                 tree_hash.short()
             ))
         })?;
@@ -339,6 +348,47 @@ fn run_canonicalize_tree_entries(ctx: &mut MigrationCtx<'_>) -> Result<()> {
             })?;
     }
 
+    Ok(())
+}
+
+fn run_streamable_tree_encoding(ctx: &mut MigrationCtx<'_>) -> Result<()> {
+    for tree_hash in ctx.repo.store().list_trees()? {
+        let Some(raw) = ctx.repo.store().get_tree_serialized(&tree_hash)? else {
+            continue;
+        };
+        if objects::object::is_canonical_tree(&raw) {
+            continue;
+        }
+        let tree = rmp_serde::from_slice::<objects::object::Tree>(&raw).map_err(|err| {
+            HeddleError::InvalidObject(format!(
+                "failed to decode msgpack tree {} during 0005_streamable_tree_encoding: {err}",
+                tree_hash.short()
+            ))
+        })?;
+        tree.validate()?;
+        let found = tree.hash();
+        if found != tree_hash {
+            return Err(HeddleError::Corruption {
+                expected: tree_hash,
+                found,
+            });
+        }
+        let canonical = tree.encode_canonical().map_err(|err| {
+            HeddleError::InvalidObject(format!(
+                "failed to encode HTR4 tree {} during 0005_streamable_tree_encoding: {err}",
+                tree_hash.short()
+            ))
+        })?;
+        ctx.repo
+            .store()
+            .put_tree_serialized(&canonical, tree_hash)
+            .map_err(|err| {
+                HeddleError::InvalidObject(format!(
+                    "failed to write HTR4 tree {} during 0005_streamable_tree_encoding: {err}",
+                    tree_hash.short()
+                ))
+            })?;
+    }
     Ok(())
 }
 
@@ -568,6 +618,7 @@ mod tests {
                 "0002_canonicalize_thread_records",
                 "0003_canonicalize_tree_entries",
                 "0004_first_class_annotated_tags",
+                "0005_streamable_tree_encoding",
             ],
             "the deletion-wave migration ids must stay ordered and reviewable",
         );
@@ -621,12 +672,48 @@ mod tests {
             .get_tree_serialized(&tree_hash)
             .unwrap()
             .expect("raw tree exists after migration");
-        rmp_serde::from_slice::<Tree>(&raw_after).expect("tree is canonical V2 after migration");
+        assert!(
+            objects::object::is_canonical_tree(&raw_after),
+            "tree is HTR4 after migration"
+        );
+        assert_eq!(
+            Tree::decode_canonical(&raw_after).expect("canonical decode"),
+            decoded
+        );
 
         let config = repo_config::RepoConfig::load(&config_path).unwrap();
         assert_eq!(
             config.repository.version,
             repo_config::SUPPORTED_REPO_FORMAT
+        );
+    }
+
+    #[test]
+    fn migration_0005_rewrites_msgpack_trees_to_htr4() {
+        let (_temp, repo) = fresh_repo();
+        remove_ledger(&repo);
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("file.txt", ContentHash::compute(b"body"), false).unwrap(),
+        ]);
+        let tree_hash = tree.hash();
+        let msgpack = rmp_serde::to_vec(&tree).unwrap();
+        write_loose_tree_bytes(&repo, tree_hash, &msgpack);
+        assert!(
+            !objects::object::is_canonical_tree(&msgpack),
+            "fixture must be the superseded msgpack body"
+        );
+
+        apply_pending(&repo).unwrap();
+
+        let raw = repo
+            .store()
+            .get_tree_serialized(&tree_hash)
+            .unwrap()
+            .expect("rewritten tree");
+        assert!(objects::object::is_canonical_tree(&raw));
+        assert_eq!(
+            repo.store().get_tree(&tree_hash).unwrap().unwrap(),
+            tree
         );
     }
 

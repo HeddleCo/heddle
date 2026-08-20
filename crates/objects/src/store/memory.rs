@@ -116,7 +116,7 @@ impl ObjectStore for InMemoryStore {
 
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
         match self.trees.read_or_poisoned().get(hash) {
-            Some(bytes) => Ok(Some(rmp_serde::from_slice(bytes)?)),
+            Some(bytes) => Ok(Some(Tree::decode_canonical(bytes)?)),
             None => Ok(None),
         }
     }
@@ -129,7 +129,7 @@ impl ObjectStore for InMemoryStore {
         let hash = tree.hash();
         self.trees
             .write_or_poisoned()
-            .insert(hash, rmp_serde::to_vec(tree)?);
+            .insert(hash, tree.encode_canonical()?);
         Ok(hash)
     }
 

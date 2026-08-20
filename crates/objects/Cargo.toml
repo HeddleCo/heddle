@@ -77,6 +77,11 @@ name = "tree_diff"
 harness = false
 required-features = ["bench"]
 
+[[bench]]
+name = "tree_stream"
+harness = false
+required-features = ["bench"]
+
 [[example]]
 name = "train_tree_state_dictionary"
 required-features = ["zstd"]
