@@ -76,14 +76,27 @@ const OPLOG_FALLBACK_SCAN_WINDOW: usize = 100_000;
 
 pub fn query(ctx: &ExecutionContext, req: QueryRequest) -> Result<QueryReport> {
     let repo = ctx.require_repo()?;
-    let q = build_query(&req)?;
-    let mut hits = query_combined(repo.heddle_dir(), &q)?;
-    for hit in &mut hits {
-        fill_actor_email_from_state(repo, hit)?;
+    let mut q = build_query(&req)?;
+    let actor = q.actor.take();
+    let limit = q.limit.take();
+    let hits = query_combined(repo.heddle_dir(), &q)?;
+    q.actor = actor;
+    let mut selected = Vec::new();
+    for mut hit in hits {
+        fill_actor_email_from_state(repo, &mut hit)?;
+        if !hit.matches(&q) {
+            continue;
+        }
+        selected.push(hit);
+        if let Some(limit) = limit
+            && selected.len() >= limit
+        {
+            break;
+        }
     }
     Ok(QueryReport {
         output_kind: "query",
-        hits: hits.into_iter().map(hit_to_report).collect(),
+        hits: selected.into_iter().map(hit_to_report).collect(),
     })
 }
 
@@ -348,5 +361,52 @@ mod tests {
         };
         assert_eq!(details.kind, "unknown_query_verb");
         assert!(details.error.contains("captur"));
+    }
+
+    #[test]
+    fn actor_filter_returns_backfilled_capture() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = repo::Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("note.txt"), "probe\n").unwrap();
+        repo.snapshot_with_attribution(
+            Some("probe history".into()),
+            None,
+            objects::object::Attribution::human(objects::object::Principal::new(
+                "Heddle Test",
+                "heddle@example.com",
+            )),
+        )
+        .unwrap();
+
+        let stored = indexed_from_oplog_entry(
+            &oplog::OpLog::new_unattributed(repo.heddle_dir())
+                .recent(100)
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.operation.verb() == "snapshot")
+                .expect("snapshot oplog entry"),
+        );
+        assert!(
+            stored.actor_email.is_empty(),
+            "fixture must store an empty oplog actor so the filter exercises backfill"
+        );
+
+        let ctx = ExecutionContext::builder().repo(repo).build();
+        let report = query(
+            &ctx,
+            QueryRequest {
+                actor: "heddle@example.com".into(),
+                verbs: vec!["capture".into()],
+                ..QueryRequest::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            report
+                .hits
+                .iter()
+                .any(|hit| hit.verb == "snapshot" && hit.actor_email == "heddle@example.com"),
+            "actor filter must match the backfilled capture: {report:?}"
+        );
     }
 }
