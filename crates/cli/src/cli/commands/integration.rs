@@ -811,14 +811,19 @@ fn install_claude(
         "Stop",
         "SessionEnd",
     ] {
-        let command = if event == "PreToolUse" {
-            stamp.clone()
+        let commands = if event == "PreToolUse" {
+            vec![stamp.clone()]
         } else if event == "SessionEnd" {
-            format!("{stamp} --expire")
+            vec![
+                format!("{heddle}{repo_flag} integration relay claude-code {event}"),
+                format!("{stamp} --expire"),
+            ]
         } else {
-            format!("{heddle}{repo_flag} integration relay claude-code {event}")
+            vec![format!(
+                "{heddle}{repo_flag} integration relay claude-code {event}"
+            )]
         };
-        upsert_claude_hook_group(hooks_obj, event, command)?;
+        upsert_claude_hook_group(hooks_obj, event, commands)?;
     }
     let root_obj = root
         .as_object_mut()
@@ -935,7 +940,7 @@ fn opencode_plugin_script(exe: &str, repo: Option<&str>) -> String {
       }});
       const allowed = new Set(["session.created","session.updated","session.diff","file.edited","tool.execute.before","tool.execute.after","permission.asked","permission.replied"]);
       if (allowed.has(event)) {{
-        Bun.spawn([{exe:?}, {repo_args}"integration", "relay", "opencode", event], {{
+        Bun.spawnSync([{exe:?}, {repo_args}"integration", "relay", "opencode", event], {{
           stdin: JSON.stringify(input),
         }});
       }}
@@ -1141,14 +1146,20 @@ fn upsert_manifest(manifest: &mut IntegrationManifest, entry: InstalledIntegrati
 fn upsert_claude_hook_group(
     hooks_obj: &mut serde_json::Map<String, Value>,
     event: &str,
-    command: String,
+    commands: impl IntoIterator<Item = String>,
 ) -> Result<()> {
+    let hooks: Vec<Value> = commands
+        .into_iter()
+        .map(|command| {
+            serde_json::json!({
+                "type": "command",
+                "command": command
+            })
+        })
+        .collect();
     let group = serde_json::json!({
         "matcher": "*",
-        "hooks": [{
-            "type": "command",
-            "command": command
-        }]
+        "hooks": hooks
     });
     let entry = hooks_obj
         .entry(event.to_string())
@@ -1318,7 +1329,7 @@ mod tests {
         assert!(contents.contains("integration relay claude-code SubagentStop"));
         assert!(contents.contains("integration relay claude-code Stop"));
         assert!(contents.contains("integration stamp claude-code --expire"));
-        assert!(!contents.contains("integration relay claude-code SessionEnd"));
+        assert!(contents.contains("integration relay claude-code SessionEnd"));
         assert!(contents.contains("statusLine"));
 
         // Default install must use the PATH-relative literal `heddle` and must
@@ -1384,6 +1395,10 @@ mod tests {
         assert!(
             contents.contains("heddle integration stamp claude-code --expire"),
             "user-scoped SessionEnd must expire, got: {contents}"
+        );
+        assert!(
+            contents.contains("heddle integration relay claude-code SessionEnd"),
+            "user-scoped SessionEnd must still relay close_session, got: {contents}"
         );
         assert!(
             contents.contains("heddle integration relay claude-code SessionStart"),
@@ -1537,6 +1552,10 @@ mod tests {
             plugin_contents.contains("\"integration\", \"stamp\", \"opencode\"")
                 && plugin_contents.contains("Bun.spawnSync"),
             "opencode writes must go through locked integration stamp, got: {plugin_contents}"
+        );
+        assert!(
+            !plugin_contents.contains("Bun.spawn("),
+            "OpenCode relays must await via spawnSync so before/after stay ordered, got: {plugin_contents}"
         );
         assert!(
             plugin_contents.contains("session.deleted") && plugin_contents.contains("--expire"),

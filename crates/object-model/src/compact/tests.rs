@@ -260,6 +260,35 @@ fn hcs1_agent_frames_keep_the_five_field_dictionary() {
 }
 
 #[test]
+fn hcs2_repack_accepts_format4_agent_stored_id() {
+    let created_at = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    let mut state = State::new(
+        ContentHash::from_bytes([71; 32]),
+        Vec::new(),
+        Attribution::with_agent(
+            Principal::new("Author", "author@example.com"),
+            Agent::new("anthropic", "opus"),
+        ),
+    );
+    state.created_at = created_at;
+    let stored_id = state.pre_cursor_id();
+    state.state_id = stored_id;
+    let encoded = encode_state_frame(&[state.clone()]).unwrap();
+    assert!(
+        encoded.starts_with(STATE_MAGIC),
+        "current encode must stay HCS2, got {:x?}",
+        &encoded[..4.min(encoded.len())]
+    );
+    let decoded = decode_state_frame(&encoded).unwrap();
+    assert!(
+        decoded[0].accepts_stored_id(&stored_id),
+        "HCS2 decode must keep the accepted format-4 stored id"
+    );
+    let extracted = extract_state(&encoded, stored_id).unwrap();
+    assert_eq!(extracted.state_id, stored_id);
+}
+
+#[test]
 fn corrupt_frame_byte_rejects_every_contained_object() {
     let hash = ContentHash::from_bytes([21; 32]);
     let trees = vec![

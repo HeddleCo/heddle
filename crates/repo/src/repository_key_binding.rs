@@ -99,8 +99,14 @@ impl Repository {
         registry: &KeyBindingRegistry,
         trusted_authority: &TrustedKey,
     ) -> Result<AuthorshipVerification> {
+        let stored_id = if state.accepts_stored_id(&state.state_id) {
+            state.state_id
+        } else {
+            state.id()
+        };
+        let hash = state.hash_for_stored_id(&stored_id);
         let signatures: Vec<_> = self
-            .list_state_attachments(&state.id())?
+            .list_state_attachments(&stored_id)?
             .into_iter()
             .filter_map(|attachment| match attachment.body {
                 StateAttachmentBody::Signature(signature) => Some(signature),
@@ -117,7 +123,7 @@ impl Repository {
         let mut unauthorized_role = None;
         let mut saw_invalid = false;
         for signature in &signatures {
-            if verify_state_signature_bytes(signature, &state.compute_hash()).is_err() {
+            if verify_state_signature_bytes(signature, &hash).is_err() {
                 saw_invalid = true;
                 continue;
             }

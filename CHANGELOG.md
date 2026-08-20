@@ -48,6 +48,13 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Fixed
 
+- **Format-4 agent states keep their signatures and pack ids.** Verification
+  and re-signing use the hash for the accepted stored id. Compact HCS2
+  repack accepts that pre-cursor id. Claude SessionEnd relays
+  `close_session` and then expires the cursor. A later main-agent Claude
+  event (`parent == session`) clears a stale subagent parent. OpenCode
+  relays await so timeline before/after stay ordered.
+
 - **Live annotations ride `diff --context`.** After `context set`,
   `heddle diff --context` shows the annotation on the existing `context` /
   `broader_guidance` fields, including Git-overlay worktrees and
