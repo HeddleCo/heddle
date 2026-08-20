@@ -46,6 +46,15 @@ pub fn everyday_verbs() -> Vec<&'static str> {
     crate::cli::commands::root_commands_for_help_visibility("everyday")
 }
 
+/// Design lock 2026-08-19 (heddle#473 / #1458): the first-screen everyday
+/// surface. Umbrella nouns do not count as one. Catalog labels and help
+/// copy only — this does not fold the live parser to these 23.
+pub const LOCKED_EVERYDAY_VERBS: &[&str] = &[
+    "init", "clone", "status", "diff", "capture", "start", "ready", "land", "undo", "pull", "push",
+    "resolve", "continue", "log", "show", "query", "review", "discuss", "context", "whoami",
+    "daemon", "doctor", "help",
+];
+
 /// The first screen of help is smaller than the complete everyday set:
 /// it shows the primary work loop, then points at setup, sync, proof,
 /// and recovery as nearby verbs. Overlay-only `commit` stays off the
@@ -1219,6 +1228,109 @@ mod tests {
                 .any(|line| line.trim_start().starts_with("commit  ")),
             "overlay first screen lists the commit verb: {help}"
         );
+    }
+
+    /// heddle#1458. First screen is the locked everyday surface: the ~23
+    /// verbs, no `help advanced`, no capture-then-commit, no default
+    /// `land --thread`, no leftover nearby `verify`.
+    #[test]
+    fn first_screen_is_the_locked_everyday_surface() {
+        use clap::CommandFactory;
+        let cmd = crate::cli::cli_args::Cli::command();
+        let catalog = crate::cli::commands::build_command_catalog();
+        for authority in [
+            repo::RepositorySourceAuthority::Native,
+            repo::RepositorySourceAuthority::GitOverlay,
+        ] {
+            let help = render_help_for_authority(&cmd, &[], authority);
+            assert!(
+                !help.contains("heddle help advanced"),
+                "first screen must not point at `help advanced`: {help}"
+            );
+            assert!(
+                !help.contains("land --thread"),
+                "first screen must not teach default `land --thread`: {help}"
+            );
+            assert!(
+                !help.contains("-> heddle commit"),
+                "first screen must not teach capture then commit: {help}"
+            );
+            assert!(
+                !help.contains("Nearby:") && !help.contains("`heddle verify`"),
+                "first screen must not park verify as a nearby leftover: {help}"
+            );
+            for verb in LOCKED_EVERYDAY_VERBS {
+                let Some(entry) = catalog.command_by_display(verb) else {
+                    continue;
+                };
+                if entry.summary.is_empty() {
+                    continue;
+                }
+                assert!(
+                    help.lines()
+                        .any(|line| line.trim_start().starts_with(&format!("{verb}  "))
+                            || line.trim_start().starts_with(&format!("{verb}\t"))),
+                    "first screen must list everyday verb `{verb}`: {help}"
+                );
+            }
+            assert!(
+                !help
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("commit  ")),
+                "first screen must not list overlay `commit`: {help}"
+            );
+        }
+    }
+
+    /// heddle#1458. `help model` matches the locked everyday surface.
+    #[test]
+    fn help_model_is_the_locked_everyday_surface() {
+        let model = topic_text("model").expect("model topic exists");
+        assert!(
+            !model.contains("heddle help advanced"),
+            "help model must not point at `help advanced`: {model}"
+        );
+        assert!(
+            !model.contains("land --thread"),
+            "help model must not teach default `land --thread`: {model}"
+        );
+        assert!(
+            !model.contains("heddle commit")
+                || model.contains("side effect")
+                || model.contains("ready") && model.contains("push"),
+            "help model must not teach capture then commit as the save path: {model}"
+        );
+        for verb in ["query", "review", "discuss", "context", "daemon", "whoami"] {
+            assert!(
+                model.contains(verb),
+                "help model must name everyday verb `{verb}`: {model}"
+            );
+        }
+        assert!(
+            model.contains("heddle capture") && model.contains("heddle land"),
+            "help model still teaches capture as the save and bare land: {model}"
+        );
+    }
+
+    /// heddle#1458. The six field-walk residuals plus continue are
+    /// everyday catalog labels, not advanced.
+    #[test]
+    fn locked_collab_and_identity_verbs_are_everyday() {
+        for verb in [
+            "query", "review", "discuss", "context", "daemon", "whoami", "continue",
+        ] {
+            if crate::cli::commands::build_command_catalog()
+                .command_by_display(verb)
+                .is_none()
+            {
+                continue;
+            }
+            assert_eq!(
+                tier_of(verb),
+                Tier::Everyday,
+                "`{verb}` must be everyday, not advanced"
+            );
+        }
     }
 
     /// The everyday surface should mirror the core loop rather than
