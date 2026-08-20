@@ -7284,10 +7284,12 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
 
     let ready = heddle(&["ready", "--output", "text"], Some(&checkout)).unwrap();
     assert!(
-        ready.contains("Next:")
-            && ready.contains("heddle --repo")
-            && ready.contains("land --thread feature/capture-next"),
-        "ready should use a shared next-action label that runs from the isolated checkout: {ready}"
+        ready.contains("Next:") && ready.contains("heddle land"),
+        "ready should recommend land from the isolated checkout: {ready}"
+    );
+    assert!(
+        !ready.contains("heddle --repo") && !ready.contains("land --thread"),
+        "ready next from the current checkout must omit --thread/--repo: {ready}"
     );
     assert!(
         !ready.contains("\nnext:"),

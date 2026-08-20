@@ -411,6 +411,8 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle start <name> --path <empty-path>",
     "heddle start <name> --path ../<name>",
     "heddle presence show <session>",
+    "heddle presence complete --session <session>",
+    "heddle presence explain <session>",
     "heddle thread show <THREAD>",
     // Remote setup requires filling in a real name and URL after
     // inspecting current configuration.
@@ -528,6 +530,18 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
     (
         "heddle presence show <session>",
         &["heddle", "presence", "show", "<session>"],
+        &["session"],
+        true,
+    ),
+    (
+        "heddle presence complete --session <session>",
+        &["heddle", "presence", "complete", "--session", "<session>"],
+        &["session"],
+        true,
+    ),
+    (
+        "heddle presence explain <session>",
+        &["heddle", "presence", "explain", "<session>"],
         &["session"],
         true,
     ),

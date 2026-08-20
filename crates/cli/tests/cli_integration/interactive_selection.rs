@@ -132,11 +132,25 @@ fn piped_actor_ambiguity_never_prompts_or_consumes_a_selection() {
         "1\n",
     )
     .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert_non_tty_ambiguity(
         output,
         "ambiguous_actor_selection",
-        "heddle presence show <SESSION>",
+        "heddle presence show <session>",
     );
+    let envelope: serde_json::Value = serde_json::from_str(
+        stderr
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or(stderr.trim()),
+    )
+    .unwrap_or_else(|err| panic!("JSON envelope: {err}\n{stderr}"));
+    assert_eq!(
+        envelope["primary_command"],
+        "heddle presence show <session>"
+    );
+    assert_ne!(envelope["primary_command"], "heddle help --output json");
 }
 
 #[test]
@@ -161,7 +175,7 @@ fn piped_actor_completion_never_picks_a_destructive_target() {
     assert_non_tty_ambiguity(
         output,
         "ambiguous_actor_selection",
-        "heddle presence complete --session <SESSION>",
+        "heddle presence complete --session <session>",
     );
     assert!(matches!(
         actors.load("agent-alpha").unwrap().unwrap().status,

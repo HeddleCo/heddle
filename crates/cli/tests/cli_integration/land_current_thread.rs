@@ -125,9 +125,10 @@ fn field_study_bare_land_and_dry_run_use_current_thread() {
     );
 }
 
-/// Field study: `heddle ready` prints `heddle --repo … land --thread
-/// feature/search`. That command works. A second run must be already-landed,
-/// not another successful "automatic integration merge" at exit 0.
+/// Field study: `heddle ready` from the isolated checkout now prints
+/// `heddle land` (heddle#1456). An explicit `--repo … land --thread`
+/// still works. A second run must be already-landed, not another
+/// successful "automatic integration merge" at exit 0.
 #[test]
 fn field_study_ready_then_double_land_thread_is_already_landed() {
     let (main, checkout) = setup_feature_search();
@@ -141,8 +142,12 @@ fn field_study_ready_then_double_land_thread_is_already_landed() {
     );
     let ready_text = combined(&ready);
     assert!(
-        ready_text.contains("land --thread feature/search"),
-        "ready must recommend land --thread feature/search:\n{ready_text}"
+        ready_text.contains("Next:") && ready_text.contains("heddle land"),
+        "ready must recommend land:\n{ready_text}"
+    );
+    assert!(
+        !ready_text.contains("land --thread") && !ready_text.contains("--repo"),
+        "ready next from the current checkout must omit --thread/--repo:\n{ready_text}"
     );
     assert_no_repair_git(&ready, "ready");
 
