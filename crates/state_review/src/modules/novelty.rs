@@ -29,7 +29,7 @@ pub fn run(
     cfg: &ReviewSignalsConfig,
     ctx: &SemanticContext,
 ) -> Vec<RiskSignal> {
-    if !cfg.novelty.enabled {
+    if !cfg.novelty.enabled || !ctx.corpus_complete {
         return Vec::new();
     }
     let tolerance = cfg.novelty.tolerance.clamp(0.0, 1.0);
@@ -61,7 +61,7 @@ pub fn run(
     let mut out = Vec::new();
     for (path, fn_def) in corpus
         .iter()
-        .filter(|(path, _)| ctx.changed_paths.contains(path))
+        .filter(|(path, fn_def)| ctx.is_emit_target(path, &fn_def.name))
     {
         let max_sim = corpus
             .iter()
@@ -176,5 +176,56 @@ mod tests {
         );
         assert_eq!(signals[0].anchor.file, "changed.rs");
         assert_eq!(signals[0].anchor.symbol.as_deref(), Some("delta"));
+    }
+
+    #[test]
+    fn novelty_scoped_to_changed_symbols() {
+        let cfg = ReviewSignalsConfig::default();
+        let mut ctx = SemanticContext::new();
+        ctx.new_functions.insert(
+            PathBuf::from("changed.rs"),
+            vec![
+                fdef("alpha", "let total = first + second + third + fourth;"),
+                fdef("beta", "for widget in inventory { ship(widget); }"),
+                fdef("gamma", "match colour { Red => stop(), Green => go() }"),
+                fdef("delta", "while pending { dequeue().handle(); } flush();"),
+            ],
+        );
+        ctx.changed_paths.insert(PathBuf::from("changed.rs"));
+        ctx.changed_symbols
+            .insert((PathBuf::from("changed.rs"), "delta".to_string()));
+
+        let signals = run(&empty_state(), &empty_state(), &cfg, &ctx);
+        assert_eq!(
+            signals.len(),
+            1,
+            "novelty must not fire on untouched siblings: {signals:?}"
+        );
+        assert_eq!(signals[0].anchor.symbol.as_deref(), Some("delta"));
+    }
+
+    #[test]
+    fn novelty_stays_quiet_when_corpus_incomplete() {
+        let cfg = ReviewSignalsConfig::default();
+        let mut ctx = SemanticContext::new();
+        ctx.corpus_complete = false;
+        ctx.new_functions.insert(
+            PathBuf::from("changed.rs"),
+            vec![
+                fdef("alpha", "let total = first + second + third + fourth;"),
+                fdef("beta", "for widget in inventory { ship(widget); }"),
+                fdef("gamma", "match colour { Red => stop(), Green => go() }"),
+                fdef("delta", "while pending { dequeue().handle(); } flush();"),
+            ],
+        );
+        ctx.changed_paths.insert(PathBuf::from("changed.rs"));
+        ctx.changed_symbols
+            .insert((PathBuf::from("changed.rs"), "delta".to_string()));
+
+        let signals = run(&empty_state(), &empty_state(), &cfg, &ctx);
+        assert!(
+            signals.is_empty(),
+            "incomplete corpus must fail-closed: {signals:?}"
+        );
     }
 }

@@ -33,7 +33,7 @@ pub fn run(
     cfg: &ReviewSignalsConfig,
     ctx: &SemanticContext,
 ) -> Vec<RiskSignal> {
-    if !cfg.test_reachability.enabled {
+    if !cfg.test_reachability.enabled || !ctx.corpus_complete {
         return Vec::new();
     }
     let computed_at = new
@@ -78,6 +78,9 @@ pub fn run(
     for (path, fns) in &ctx.new_functions {
         for fn_def in fns {
             let key = (path.as_path(), fn_def.name.as_str());
+            if !ctx.is_emit_target(path, &fn_def.name) {
+                continue;
+            }
             if test_set.contains(&key) {
                 continue;
             }
@@ -225,6 +228,7 @@ mod tests {
                 fdef("test_covered", "fn test_covered() { covered(); }"),
             ],
         );
+        ctx.changed_paths.insert(PathBuf::from("src/lib.rs"));
 
         let signals = run(
             &empty_state(),
@@ -250,6 +254,7 @@ mod tests {
                 fdef("test_covered", "fn test_covered() { helper(); }"),
             ],
         );
+        ctx.changed_paths.insert(PathBuf::from("src/lib.rs"));
 
         let signals = run(
             &empty_state(),
@@ -274,6 +279,7 @@ mod tests {
                 fdef("test_irrelevant", "fn test_irrelevant() { assert!(true); }"),
             ],
         );
+        ctx.changed_paths.insert(PathBuf::from("src/lib.rs"));
 
         let signals = run(
             &empty_state(),
@@ -297,6 +303,7 @@ mod tests {
                 fdef("test_irrelevant", "fn test_irrelevant() { assert!(true); }"),
             ],
         );
+        ctx.changed_paths.insert(PathBuf::from("src/lib.rs"));
 
         let signals = run(
             &empty_state(),
@@ -306,6 +313,56 @@ mod tests {
         );
 
         assert_eq!(signal_symbols(&signals), BTreeSet::from(["alpha", "beta"]));
+    }
+
+    #[test]
+    fn unreachable_scoped_to_changed_symbols() {
+        let mut ctx = SemanticContext::new();
+        ctx.new_functions.insert(
+            PathBuf::from("src/lib.rs"),
+            vec![
+                fdef("orphan", "fn orphan() { do_work(); }"),
+                fdef("sibling", "fn sibling() { do_other(); }"),
+                fdef("test_irrelevant", "fn test_irrelevant() { assert!(true); }"),
+            ],
+        );
+        ctx.changed_symbols
+            .insert((PathBuf::from("src/lib.rs"), "orphan".to_string()));
+
+        let signals = run(
+            &empty_state(),
+            &empty_state(),
+            &cfg_with_one_required_test(),
+            &ctx,
+        );
+
+        assert_eq!(signal_symbols(&signals), BTreeSet::from(["orphan"]));
+    }
+
+    #[test]
+    fn unreachable_stays_quiet_when_corpus_incomplete() {
+        let mut ctx = SemanticContext::new();
+        ctx.corpus_complete = false;
+        ctx.new_functions.insert(
+            PathBuf::from("src/lib.rs"),
+            vec![
+                fdef("orphan", "fn orphan() { do_work(); }"),
+                fdef("test_irrelevant", "fn test_irrelevant() { assert!(true); }"),
+            ],
+        );
+        ctx.changed_symbols
+            .insert((PathBuf::from("src/lib.rs"), "orphan".to_string()));
+
+        let signals = run(
+            &empty_state(),
+            &empty_state(),
+            &cfg_with_one_required_test(),
+            &ctx,
+        );
+        assert!(
+            signals.is_empty(),
+            "incomplete corpus must fail-closed: {signals:?}"
+        );
     }
 
     fn signal_symbols(signals: &[RiskSignal]) -> BTreeSet<&str> {

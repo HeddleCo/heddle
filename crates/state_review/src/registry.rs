@@ -3,7 +3,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use objects::object::{RiskSignal, State};
@@ -20,21 +20,53 @@ use crate::config::ReviewSignalsConfig;
 /// We hold extracted [`FunctionDef`]s rather than the parser's `ParsedFile`
 /// because `ParsedFile` owns a `TSTree` which isn't `Clone`/`Send`-friendly
 /// for sharing across modules.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct SemanticContext {
     pub prior_functions: BTreeMap<PathBuf, Vec<FunctionDef>>,
     pub new_functions: BTreeMap<PathBuf, Vec<FunctionDef>>,
-    /// Repo-relative paths that actually changed in this review pass. Modules
-    /// that should only report on the diff (e.g. novelty) scope their emitted
-    /// signals to this set while still comparing against the full
-    /// `new_functions` corpus. Empty means "no changed files known" — such a
-    /// module stays quiet rather than scanning the whole repo.
+    /// Repo-relative paths that actually changed in this review pass.
+    /// Emit-scope for modules that have no symbol-level delta. Empty
+    /// together with an empty `changed_symbols` emits nothing.
     pub changed_paths: BTreeSet<PathBuf>,
+    /// `(path, function name)` pairs that actually changed. Production
+    /// capture always fills this. Novelty / test_reachability /
+    /// pattern_deviation emit only for this set when it is non-empty.
+    pub changed_symbols: BTreeSet<(PathBuf, String)>,
+    /// Whether `new_functions` is a complete new-state corpus under the
+    /// capture-time page/byte budgets. Novelty and test_reachability
+    /// stay quiet when this is false rather than scoring a partial repo.
+    /// `Default` is `true` so hand-built unit-test contexts keep firing.
+    pub corpus_complete: bool,
+}
+
+impl Default for SemanticContext {
+    fn default() -> Self {
+        Self {
+            prior_functions: BTreeMap::new(),
+            new_functions: BTreeMap::new(),
+            changed_paths: BTreeSet::new(),
+            changed_symbols: BTreeSet::new(),
+            corpus_complete: true,
+        }
+    }
 }
 
 impl SemanticContext {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Diff-scoped emit check. Production fills `changed_symbols`.
+    /// Empty `changed_symbols` falls back to `changed_paths`. Empty
+    /// both (fmt-sweep, or an unscoped context) emits nothing.
+    pub fn is_emit_target(&self, path: &Path, name: &str) -> bool {
+        if !self.changed_symbols.is_empty() {
+            return self
+                .changed_symbols
+                .iter()
+                .any(|(changed_path, changed_name)| changed_path == path && changed_name == name);
+        }
+        !self.changed_paths.is_empty() && self.changed_paths.contains(path)
     }
 }
 
@@ -141,6 +173,8 @@ mod tests {
                 "fn score(socket: &mut Socket) -> usize { while socket.poll() { rotate_key(); } 0 }",
             )],
         );
+        ctx.changed_symbols
+            .insert((PathBuf::from("src/scoring.rs"), "score".to_string()));
 
         let signals = run_all(&prior, &new, &cfg, &ctx);
         let ordering: Vec<(String, String)> = signals

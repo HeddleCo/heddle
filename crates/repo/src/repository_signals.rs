@@ -50,7 +50,7 @@ impl Repository {
         source_trees: Option<&std::collections::HashMap<ContentHash, &objects::object::Tree>>,
     ) -> Result<Option<ContentHash>> {
         let cfg = signals_config_from_repo(&self.config().review.signals);
-        let ctx =
+        let ctx = if tree_sitter_producers_enabled(&cfg) {
             match build_semantic_context(self, prior, new, new_index, source_blobs, source_trees) {
                 Ok(ctx) => ctx,
                 Err(err) => {
@@ -60,7 +60,10 @@ impl Repository {
                     );
                     state_review::SemanticContext::new()
                 }
-            };
+            }
+        } else {
+            state_review::SemanticContext::new()
+        };
         // The registry expects a non-Option prior. Use the new state itself
         // when none is available (initial snapshot) — the modules fire on
         // their own diagnostic content, not on diff vs prior, except where
@@ -94,6 +97,10 @@ impl Repository {
     }
 }
 
+fn tree_sitter_producers_enabled(cfg: &ReviewSignalsConfig) -> bool {
+    cfg.novelty.enabled || cfg.test_reachability.enabled || cfg.pattern_deviation.enabled
+}
+
 /// Map the TOML-shaped repo config into the `state_review` crate's typed
 /// config. Kept as a free function so tests can exercise it without spinning
 /// up a `Repository`.
@@ -124,6 +131,7 @@ pub(crate) fn signals_config_from_repo(t: &ReviewSignalsToml) -> ReviewSignalsCo
 #[cfg(test)]
 mod tests {
     use objects::object::{Attribution, Principal, RiskSignalBlob};
+    use state_review::ReviewSignalsConfig;
     use tempfile::TempDir;
 
     use super::*;
@@ -238,6 +246,8 @@ mod tests {
 
     #[test]
     fn snapshot_novel_shape_persists_novelty() {
+        // Native SnapshotSource::Worktree: new.tree is not in repo.store()
+        // until stage_snapshot_objects returns. Overlay maps must resolve it.
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         let attribution = Attribution::human(Principal::new("Nov", "nov@example.com"));
@@ -256,7 +266,18 @@ mod tests {
         let modules = attached_risk_modules(&repo, &state);
         assert!(
             modules.iter().any(|module| module == "novelty.tree_sitter"),
-            "semantic change must persist novelty, got {modules:?}"
+            "worktree capture must persist novelty, got {modules:?}"
         );
+    }
+
+    #[test]
+    fn tree_sitter_producers_enabled_is_false_when_all_disabled() {
+        let mut cfg = ReviewSignalsConfig::default();
+        cfg.novelty.enabled = false;
+        cfg.test_reachability.enabled = false;
+        cfg.pattern_deviation.enabled = false;
+        assert!(!tree_sitter_producers_enabled(&cfg));
+        cfg.novelty.enabled = true;
+        assert!(tree_sitter_producers_enabled(&cfg));
     }
 }

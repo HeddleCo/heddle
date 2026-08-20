@@ -3,8 +3,10 @@
 //!
 //! `changed_paths` come from the snapshot tree diff, then formatting-only
 //! churn is pruned by the merkle index (`digest_at_path`, the same
-//! comparison [`Repository::semantic_changed`] uses). Functions are parsed
-//! only for that pruned set via the shared [`SemanticParseCache`].
+//! comparison [`Repository::semantic_changed`] uses). Emit-scope functions
+//! are parsed for that pruned set via the shared [`SemanticParseCache`].
+//! The new-state comparison corpus is then filled from the semantic index
+//! under fail-closed page/byte budgets.
 
 #![cfg(feature = "tree-sitter-symbols")]
 
@@ -31,7 +33,7 @@ use tracing::warn;
 use crate::{Repository, Result};
 
 /// Skip generated/vendored blobs the semantic index also treats as opaque.
-const PARSE_BUDGET_BYTES: usize = 1 << 20;
+pub(crate) const PARSE_BUDGET_BYTES: usize = 1 << 20;
 
 /// In-memory objects from a packed worktree snapshot, then the durable store.
 struct OverlaySource<'a, S: ObjectStore> {
@@ -134,10 +136,25 @@ pub(crate) fn build_semantic_context(
         }
     }
 
+    let corpus_complete = crate::repository_semantic_corpus::populate_new_function_corpus(
+        &overlay,
+        new_root.as_ref(),
+        &new.tree,
+        cache,
+        &mut new_functions,
+    )?;
+    let changed_symbols = crate::repository_semantic_corpus::collect_changed_symbols(
+        &changed_paths,
+        &prior_functions,
+        &new_functions,
+    );
+
     Ok(SemanticContext {
         prior_functions,
         new_functions,
         changed_paths,
+        changed_symbols,
+        corpus_complete,
     })
 }
 
@@ -206,7 +223,10 @@ fn digest_at_path(
     Ok(None)
 }
 
-fn load_semantic_tree(source: &impl ObjectSource, hash: &ContentHash) -> Result<SemanticTreeNode> {
+pub(crate) fn load_semantic_tree(
+    source: &impl ObjectSource,
+    hash: &ContentHash,
+) -> Result<SemanticTreeNode> {
     let blob = source
         .get_blob(hash)?
         .ok_or_else(|| HeddleError::NotFound(format!("semantic tree node {hash}")))?;
@@ -220,6 +240,15 @@ fn parse_tree_functions(
     path: &str,
     cache: &SemanticParseCache,
 ) -> Option<Vec<FunctionDef>> {
+    parse_tree_functions_sized(source, tree, path, cache).map(|(fns, _)| fns)
+}
+
+pub(crate) fn parse_tree_functions_sized(
+    source: &impl ObjectSource,
+    tree: Option<&ContentHash>,
+    path: &str,
+    cache: &SemanticParseCache,
+) -> Option<(Vec<FunctionDef>, usize)> {
     let tree = tree?;
     let language = Language::from_path(Path::new(path));
     if matches!(language, Language::Unknown) {
@@ -236,9 +265,10 @@ fn parse_tree_functions(
     if bytes.len() > PARSE_BUDGET_BYTES {
         return None;
     }
+    let byte_len = bytes.len();
     let source = std::str::from_utf8(&bytes).ok()?;
     let parsed = cache.parse(source, language)?;
-    Some(parsed.extract_functions())
+    Some((parsed.extract_functions(), byte_len))
 }
 
 fn blob_bytes_at_path(
