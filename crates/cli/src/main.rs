@@ -236,7 +236,11 @@ async fn async_main() -> Result<()> {
             std::process::exit(code.into());
         }
     };
-    let git_tls_ca_pem = match user_config.remote_tls_ca_certificate_pem() {
+    let repo_start = cli.repo.clone().or_else(|| std::env::current_dir().ok());
+    if let Some(path) = repo_start.as_ref() {
+        UserConfig::set_remote_tls_repo_start(path.clone());
+    }
+    let git_tls_ca_pem = match user_config.remote_tls_ca_certificate_pem(repo_start.as_deref()) {
         Ok(ca_pem) => ca_pem,
         Err(err) => {
             let code = HeddleExitCode::from_error(&err);

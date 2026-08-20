@@ -4,6 +4,7 @@ use std::{
     env, fs,
     io::Read,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use objects::{
@@ -18,6 +19,11 @@ use serde::{Deserialize, Serialize};
 use wire::AuthToken;
 
 use crate::client_config::ClientConfig;
+
+/// CLI-selected repository start (`-C` / `--repo`, else startup cwd).
+/// Recorded once so later `UserConfig::load_default()` calls still discover
+/// TLS CA from that checkout instead of a later process cwd.
+static REMOTE_TLS_REPO_START: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UserConfig {
@@ -457,13 +463,38 @@ impl UserConfig {
         Ok(matches!(mode, UserAutoCaptureMode::Command))
     }
 
+    /// Record the CLI-selected repository start used for TLS CA discovery.
+    ///
+    /// Startup sets this from `-C` / `--repo` (or the process cwd) before
+    /// commands open a repository, so later hosted config assembly honors
+    /// the same checkout.
+    pub fn set_remote_tls_repo_start(path: PathBuf) {
+        let _ = REMOTE_TLS_REPO_START.set(path);
+    }
+
     /// Resolve the shared custom CA bundle used by hosted and Git transports.
+    ///
+    /// `repo_start` is the CLI-selected repository path (`-C` / `--repo`).
+    /// When omitted, uses the start recorded at process startup, then the
+    /// process cwd.
     ///
     /// Precedence, highest first: `HEDDLE_REMOTE_TLS_CA_CERT`, user-config
     /// `[remote] tls_ca_certificate_path`, then the same key in repository
-    /// `.heddle/config.toml` discovered from `start` (or the process cwd).
-    pub fn remote_tls_ca_certificate_pem(&self) -> anyhow::Result<Option<String>> {
-        self.remote_tls_ca_certificate_pem_from(env::current_dir().ok().as_deref())
+    /// `.heddle/config.toml` discovered from that start path.
+    pub fn remote_tls_ca_certificate_pem(
+        &self,
+        repo_start: Option<&Path>,
+    ) -> anyhow::Result<Option<String>> {
+        let cwd;
+        let start = if let Some(path) = repo_start {
+            Some(path)
+        } else if let Some(path) = REMOTE_TLS_REPO_START.get() {
+            Some(path.as_path())
+        } else {
+            cwd = env::current_dir().ok();
+            cwd.as_deref()
+        };
+        self.remote_tls_ca_certificate_pem_from(start)
     }
 
     fn remote_tls_ca_certificate_pem_from(
@@ -520,7 +551,7 @@ impl UserConfig {
         if let Some(domain) = &self.remote.tls_domain_name {
             config = config.with_tls_domain_name(domain.clone());
         }
-        if let Some(pem) = self.remote_tls_ca_certificate_pem()? {
+        if let Some(pem) = self.remote_tls_ca_certificate_pem(None)? {
             config = config.with_tls_ca_certificate_pem(pem);
         }
         if let Some(path) = &self.remote.auth_proof_key_pem_path {
@@ -1331,6 +1362,44 @@ mod tests {
             .expect("user CA should win");
         assert_eq!(pem.as_deref(), Some("user ca pem"));
         fs::remove_dir_all(root).expect("remove temp dir");
+    }
+
+    #[test]
+    fn remote_tls_ca_selected_start_is_not_another_repo() {
+        let _env = RemoteEnvGuard::clean();
+        let parent = unique_temp_path("heddle-repo-tls-ca-dash-c");
+        let cwd_root = parent.join("cwd-repo");
+        let selected_root = parent.join("selected-repo");
+        fs::create_dir_all(&cwd_root).expect("create cwd repo");
+        fs::create_dir_all(&selected_root).expect("create selected repo");
+        let cwd_ca = cwd_root.join("ca.pem");
+        let selected_ca = selected_root.join("ca.pem");
+        fs::write(&cwd_ca, "cwd ca pem").expect("write cwd CA");
+        fs::write(&selected_ca, "selected ca pem").expect("write selected CA");
+        write_discoverable_repo(
+            &cwd_root,
+            &format!(
+                "\n[remote]\ntls_ca_certificate_path = \"{}\"\n",
+                cwd_ca.display()
+            ),
+        );
+        write_discoverable_repo(
+            &selected_root,
+            &format!(
+                "\n[remote]\ntls_ca_certificate_path = \"{}\"\n",
+                selected_ca.display()
+            ),
+        );
+
+        let selected = UserConfig::default()
+            .remote_tls_ca_certificate_pem(Some(&selected_root))
+            .expect("selected repo CA should load");
+        let other = UserConfig::default()
+            .remote_tls_ca_certificate_pem(Some(&cwd_root))
+            .expect("cwd repo CA should load");
+        assert_eq!(selected.as_deref(), Some("selected ca pem"));
+        assert_eq!(other.as_deref(), Some("cwd ca pem"));
+        fs::remove_dir_all(parent).expect("remove temp dir");
     }
 
     #[test]
