@@ -174,6 +174,19 @@ fn max_d_no_common_lines_does_not_panic() {
 }
 
 #[test]
+fn a_vs_baaab_takes_one_adjacent_right_shift() {
+    let old = "a\n";
+    let new = "b\na\na\na\nb\n";
+    let runs = collect_runs(old, new, LineDiffLimits::unlimited()).unwrap();
+    let pairs = expand_runs(&runs);
+    let old_lines = split_text_lines(old.as_bytes()).unwrap();
+    let new_lines = split_text_lines(new.as_bytes()).unwrap();
+    let similar = similar_pairs(&old_lines, &new_lines);
+    assert_eq!(pairs, similar, "ours={pairs:?} similar={similar:?}");
+    assert_eq!(pairs, vec![(0, 2)]);
+}
+
+#[test]
 fn ba_vs_abcbb_matches_similar_first_adjacent_b() {
     let old = "b\na\n";
     let new = "a\nb\nc\nb\nb\n";

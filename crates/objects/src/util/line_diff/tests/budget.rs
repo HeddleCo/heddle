@@ -132,6 +132,41 @@ fn visitor_cancel_stops_before_later_runs() {
 }
 
 #[test]
+fn visitor_cancel_runs_before_unrelated_tail() {
+    let mut old = String::from("b\na\n");
+    let mut new = String::from("a\nb\nb\n");
+    for index in 0..100 {
+        old.push_str(&format!("x{index}\n"));
+        new.push_str(&format!("y{index}\n"));
+    }
+    let full = visit_usage(&old, &new, LineDiffLimits::unlimited()).expect("unlimited");
+    let needed = scratch_bytes_for_line_counts(old.lines().count(), new.lines().count());
+    let mut scratch = vec![0u8; needed];
+    let mut budget = LineDiffLimits::unlimited().budget(scratch.len());
+    let mut seen = 0usize;
+    let err = visit_lcs_equal_runs(
+        old.as_bytes(),
+        new.as_bytes(),
+        &mut scratch,
+        &mut budget,
+        |run| {
+            seen += 1;
+            assert_eq!(run.old_start, 0);
+            assert_eq!(run.len, 1);
+            Err("stop")
+        },
+    );
+    assert!(matches!(err, Err(LineDiffError::Visitor("stop"))));
+    assert_eq!(seen, 1);
+    assert!(
+        budget.used().work.saturating_mul(10) < full.work,
+        "right-shifted first equal must cancel before the unrelated tail: used={} full={}",
+        budget.used().work,
+        full.work
+    );
+}
+
+#[test]
 fn line_matches_are_bounded_for_large_files() {
     let old = (0..50_000)
         .map(|index| format!("line {index}"))

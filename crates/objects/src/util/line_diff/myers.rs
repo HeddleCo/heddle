@@ -3,7 +3,7 @@
 //! search cannot finish inside the work budget it returns BudgetExceeded.
 
 use super::super::budget::{BudgetExceeded, ResourceBudget, ResourceKind};
-use super::emit::{EqualEmit, emit_slid, flush_pending};
+use super::emit::{EqualEmit, emit_slid};
 use super::myers_search::{common_prefix, common_suffix, find_middle_snake};
 use super::scan::LineOff;
 use super::scratch::{ConquerJob, JOB_EQUAL, JOB_RANGE};
@@ -44,10 +44,8 @@ pub(super) fn emit_equal_runs<E>(
     )?;
 
     let mut new_cursor = 0usize;
-    let mut pending = None;
     let mut emit = EqualEmit {
         new_cursor: &mut new_cursor,
-        pending: &mut pending,
     };
     while top > 0 {
         top -= 1;
@@ -84,7 +82,7 @@ pub(super) fn emit_equal_runs<E>(
             &mut visit,
         )?;
     }
-    flush_pending(old, new, emit.pending.take(), new.offs.len(), &mut visit)
+    Ok(())
 }
 
 struct ScratchViews<'a> {

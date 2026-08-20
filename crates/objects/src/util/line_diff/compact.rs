@@ -2,11 +2,12 @@
 //! Slide Myers equals the way similar's Compact hook does.
 //!
 //! Left-slide absorbs a preceding insert (`b/a` vs `a/a` → `(1,0)`).
-//! Right-slide absorbs a trailing insert only when that insert is adjacent
-//! (`b/a` vs `a/b/b` → `(0,2)`). An intervening different line is not a
-//! Compact shift (`b/a` vs `a/b/c/b/b` stays `(0,1)`). A left-justified
-//! prefix is not moved just because the same line repeats at the end
-//! (`a` vs `a/a` stays `(0,0)`).
+//! Right-slide absorbs one adjacent trailing insert (`b/a` vs `a/b/b` →
+//! `(0,2)`). Compact does not walk every later copy (`a` vs `b/a/a/a/b`
+//! stays `(0,2)`). An intervening different line is not a Compact shift
+//! (`b/a` vs `a/b/c/b/b` stays `(0,1)`). A left-justified prefix is not
+//! moved just because the same line repeats at the end (`a` vs `a/a`
+//! stays `(0,0)`).
 
 use super::EqualRun;
 use super::myers::LineView;
@@ -62,12 +63,13 @@ pub(super) fn slide_equal_run(
     slid
 }
 
-/// Slide a whole-run equal onto later new-side inserts, matching Compact
-/// insert shift-up against an *adjacent* insert only.
+/// Slide a whole-run equal one adjacent Compact shift-up, or leave it.
 ///
-/// Compact compares the equal to the immediately following insert. It does
-/// not jump the equal onto a later suffix after a different line. `b/a` vs
-/// `a/b/b` slides `(0,1)` → `(0,2)`; `b/a` vs `a/b/c/b/b` stays `(0,1)`.
+/// Compact compares the equal to the immediately following insert once. It
+/// does not walk every later copy, and it does not jump onto a later suffix
+/// after a different line. `b/a` vs `a/b/b` slides `(0,1)` → `(0,2)`;
+/// `a` vs `b/a/a/a/b` slides `(0,1)` → `(0,2)`; `b/a` vs `a/b/c/b/b`
+/// stays `(0,1)`.
 ///
 /// `gap_start` is the exclusive end of the original (pre-left-slide) run so a
 /// left-slide is not undone. Only a whole-run slide is applied.
@@ -82,23 +84,17 @@ pub(super) fn slide_equal_run_right(
     if left_justified || run.len == 0 || gap_end <= gap_start {
         return (None, run);
     }
-    let mut new_start = run.new_start;
-    let mut pos = gap_start;
-    while pos + run.len <= gap_end && run_matches_at(old, new, run, pos) {
-        new_start = pos;
-        pos += run.len;
-    }
-    if new_start == run.new_start {
-        (None, run)
-    } else {
+    if gap_start + run.len <= gap_end && run_matches_at(old, new, run, gap_start) {
         (
             None,
             EqualRun {
                 old_start: run.old_start,
-                new_start,
+                new_start: gap_start,
                 len: run.len,
             },
         )
+    } else {
+        (None, run)
     }
 }
 
