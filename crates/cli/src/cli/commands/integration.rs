@@ -689,7 +689,7 @@ fn validate_install_plan(harnesses: &[String], scope_value: &str) -> Result<()> 
 }
 
 fn install_codex(
-    repo: &Repository,
+    _repo: &Repository,
     manifest: &mut IntegrationManifest,
     scope: &IntegrationScope,
     force: bool,
@@ -718,11 +718,9 @@ fn install_codex(
         existing.parse::<toml::Value>()?
     };
     let heddle = HeddleInvocation::resolve(path_mode)?;
-    let command = format!(
-        "{} --repo {} integration stamp codex",
-        heddle,
-        shell_escape(repo.root())
-    );
+    // Workspace sidecar: discover `.heddle` from cwd. Do not bake the
+    // install-repo path — a second workspace would stamp the wrong tree.
+    let command = format!("{heddle} integration stamp codex");
     let table = value
         .as_table_mut()
         .ok_or_else(|| anyhow!("codex config root must be a TOML table"))?;
@@ -831,14 +829,10 @@ fn install_claude(
         .and_then(|obj| obj.get("command"))
         .and_then(Value::as_str)
         .map(str::to_string);
-    let heddle_owned = existing_status.as_deref().is_some_and(|command| {
-        command.contains("integration stamp claude-code")
-            || command.contains("integration relay claude-code StatusLine")
-    });
     let mut status_cmd = stamp;
-    if let Some(existing) = existing_status.filter(|_| !heddle_owned) {
+    if let Some(original) = status_line_user_command(existing_status.as_deref()) {
         status_cmd.push_str(" --chain ");
-        status_cmd.push_str(&shell_escape_arg(&existing));
+        status_cmd.push_str(&shell_escape_arg(&original));
     }
     root_obj.insert(
         "statusLine".to_string(),
@@ -921,9 +915,13 @@ fn install_opencode(
 fn opencode_plugin_script(exe: &str, repo: &str) -> String {
     format!(
         r#"const fs = require("fs");
-const destDir = {repo:?} + "/.heddle";
-const dest = destDir + "/identity";
-const tmp = destDir + "/.identity.tmp";
+const identityDest = () => {{
+  const marker = {repo:?} + "/.heddle";
+  try {{
+    if (fs.statSync(marker).isFile()) return {repo:?} + "/.heddle.identity";
+  }} catch {{}}
+  return marker + "/identity";
+}};
 const published = (value) => {{
   if (value == null) return undefined;
   const text = String(value).trim();
@@ -931,6 +929,7 @@ const published = (value) => {{
   return text;
 }};
 const mergeCursor = (patch) => {{
+  const dest = identityDest();
   let current = {{}};
   try {{ current = JSON.parse(fs.readFileSync(dest, "utf8")); }} catch {{}}
   const next = {{}};
@@ -938,7 +937,8 @@ const mergeCursor = (patch) => {{
     const value = published(patch[key]) || published(current[key]);
     if (value) next[key] = value;
   }}
-  fs.mkdirSync(destDir, {{ recursive: true }});
+  fs.mkdirSync(require("path").dirname(dest), {{ recursive: true }});
+  const tmp = dest + ".tmp." + process.pid + "." + Date.now();
   fs.writeFileSync(tmp, JSON.stringify(next));
   fs.renameSync(tmp, dest);
 }};
@@ -950,22 +950,19 @@ const modelPatch = (model) => {{
     thought_level: published(model.variant),
   }};
 }};
-export default async function(ctx) {{
+export default async function() {{
   return {{
     event: async (input) => {{
-      const event = input?.event?.type || input?.type || input?.event?.name || input?.name || "event";
-      const model = input?.properties?.model || input?.model;
+      const eventObj = input?.event || input;
+      const properties = eventObj?.properties || input?.properties || {{}};
+      const event = eventObj?.type || eventObj?.name || input?.type || input?.name || "event";
+      const model = properties.model || input?.model;
       const patch = {{
         ...modelPatch(model),
-        session: published(input?.sessionID || input?.session_id || input?.session?.id),
-        parent: published(input?.parentID || input?.parent_id),
+        session: published(properties.sessionID || properties.session_id || input?.sessionID || input?.session_id || input?.session?.id),
+        parent: published(properties.parentID || properties.parent_id || input?.parentID || input?.parent_id),
       }};
       mergeCursor(patch);
-      if (!patch.model && ctx?.client?.session?.get) {{
-        Promise.resolve(ctx.client.session.get({{ sessionID: patch.session }})).then((session) => {{
-          mergeCursor(modelPatch(session?.model || session));
-        }}).catch(() => {{}});
-      }}
       const allowed = new Set(["session.created","session.updated","session.diff","file.edited","tool.execute.before","tool.execute.after","permission.asked","permission.replied"]);
       if (allowed.has(event)) {{
         Bun.spawn([{exe:?}, "--repo", {repo:?}, "integration", "relay", "opencode", event], {{
@@ -976,8 +973,8 @@ export default async function(ctx) {{
   }};
 }}
 "#,
-        exe = exe,
         repo = repo,
+        exe = exe,
     )
 }
 
@@ -1231,6 +1228,42 @@ fn upsert_codex_hook_event(
     hooks_table.insert(event.to_string(), toml::Value::Array(groups));
 }
 
+fn status_line_user_command(existing: Option<&str>) -> Option<String> {
+    let command = existing?.trim();
+    if command.is_empty() {
+        return None;
+    }
+    if let Some(chained) = extract_status_line_chain(command) {
+        return Some(chained).filter(|value| !value.trim().is_empty());
+    }
+    if command.contains("integration stamp claude-code")
+        || command.contains("integration relay claude-code StatusLine")
+    {
+        return None;
+    }
+    Some(command.to_string())
+}
+
+fn extract_status_line_chain(command: &str) -> Option<String> {
+    if let Some(rest) = command.split_once(" --chain=").map(|(_, rest)| rest) {
+        return Some(unshell_escape_arg(rest.trim()));
+    }
+    command
+        .split_once(" --chain ")
+        .map(|(_, rest)| unshell_escape_arg(rest.trim()))
+}
+
+fn unshell_escape_arg(value: &str) -> String {
+    let value = value.trim();
+    if let Some(inner) = value.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+        return inner.replace("'\"'\"'", "'");
+    }
+    if let Some(inner) = value.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        return inner.replace("\\\"", "\"").replace("\\\\", "\\");
+    }
+    value.to_string()
+}
+
 fn shell_escape(path: &Path) -> String {
     shell_escape_arg(&path.display().to_string())
 }
@@ -1369,6 +1402,51 @@ mod tests {
     }
 
     #[test]
+    fn claude_status_line_reinstall_still_chains() {
+        let (_temp, repo) = init_repo();
+        let settings_path = repo.root().join(".claude").join("settings.json");
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        fs::write(
+            &settings_path,
+            r#"{"statusLine":{"type":"command","command":"echo custom-status"}}"#,
+        )
+        .unwrap();
+        let mut manifest = IntegrationManifest::default();
+        install_claude(
+            &repo,
+            &mut manifest,
+            &IntegrationScope::Repo,
+            false,
+            PathMode::Relative,
+        )
+        .unwrap();
+        install_claude(
+            &repo,
+            &mut manifest,
+            &IntegrationScope::Repo,
+            true,
+            PathMode::Relative,
+        )
+        .unwrap();
+        let parsed: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let status_line_cmd = parsed["statusLine"]["command"].as_str().unwrap();
+        assert!(status_line_cmd.contains("integration stamp claude-code"));
+        assert!(status_line_cmd.contains("--chain"));
+        assert!(
+            status_line_cmd.contains("echo custom-status"),
+            "reinstall/upgrade must keep the user's StatusLine, got: {status_line_cmd}"
+        );
+        assert_eq!(
+            status_line_cmd
+                .matches("integration stamp claude-code")
+                .count(),
+            1,
+            "must not nest stamp commands: {status_line_cmd}"
+        );
+    }
+
+    #[test]
     fn claude_repo_install_with_absolute_path_bakes_current_exe() {
         let (_temp, repo) = init_repo();
         let mut manifest = IntegrationManifest::default();
@@ -1435,16 +1513,29 @@ mod tests {
             "opencode plugin should reference PATH-relative `heddle`, got: {plugin_contents}"
         );
         assert!(
-            plugin_contents.contains("event?.type"),
+            plugin_contents.contains("event?.type") || plugin_contents.contains("eventObj?.type"),
             "opencode plugin must read event.type, got: {plugin_contents}"
+        );
+        assert!(
+            plugin_contents.contains("eventObj?.properties")
+                || plugin_contents.contains("event.properties"),
+            "opencode plugin must read nested event.properties, got: {plugin_contents}"
         );
         assert!(
             plugin_contents.contains("model.providerID"),
             "opencode plugin must read object model fields, got: {plugin_contents}"
         );
         assert!(
+            plugin_contents.contains(".heddle.identity"),
+            "opencode plugin must use .heddle.identity when .heddle is a file"
+        );
+        assert!(
             plugin_contents.contains(".heddle") && plugin_contents.contains("/identity"),
             "opencode plugin must write the workspace identity cursor"
+        );
+        assert!(
+            !plugin_contents.contains("session.get"),
+            "plugin must not hunt session.get, got: {plugin_contents}"
         );
         let timeline_manifest_path = repo
             .root()
@@ -1514,12 +1605,12 @@ mod tests {
         assert!(contents.contains("PreToolUse"));
         assert!(!contents.contains("notify ="));
         assert!(!contents.contains("/bin/sh"));
-        // Workspace sidecar: --repo is the install checkout, not ~/.codex.
-        assert!(contents.contains(&format!("heddle --repo {}", shell_escape(repo.root()))));
-        // The default codex install must invoke PATH-relative `heddle`, not the
-        // absolute path of the current binary.
         assert!(
-            contents.contains("heddle --repo "),
+            !contents.contains("--repo"),
+            "codex hook must discover the workspace from cwd, got: {contents}"
+        );
+        assert!(
+            contents.contains("heddle integration stamp codex"),
             "expected PATH-relative `heddle` in codex hook command, got: {contents}"
         );
         assert_eq!(manifest.integrations[0].harness, "codex");

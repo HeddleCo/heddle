@@ -49,12 +49,8 @@ impl HarnessActorProbe for OpenCodeProbe {
         let model = input
             .explicit_model
             .clone()
-            .or_else(|| attribution_env_hint(&input.env_hints, "HEDDLE_AGENT_MODEL"))
             .or_else(|| metadata.get("model").cloned())
             .or_else(|| metadata.get("agent_model").cloned())
-            .or_else(|| argv_value(argv, "--model"))
-            .or_else(|| input.env_hints.get("OPENCODE_MODEL").cloned())
-            .or_else(|| input.env_hints.get("MODEL").cloned())
             .or_else(|| input.current_model.clone());
         let probe_source = if metadata.get("hook_event").is_some() {
             ProbeSource::HookPayload

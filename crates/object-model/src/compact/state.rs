@@ -189,6 +189,8 @@ fn encode_dictionaries(output: &mut Writer, dictionaries: &StateDictionaries) {
         output.put_optional_bytes(agent.session_id.as_deref());
         output.put_optional_bytes(agent.segment_id.as_deref());
         output.put_optional_bytes(agent.policy_id.as_deref());
+        output.put_optional_bytes(agent.thought_level.as_deref());
+        output.put_optional_bytes(agent.parent.as_deref());
     }
 }
 

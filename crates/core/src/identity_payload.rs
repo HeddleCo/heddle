@@ -193,6 +193,28 @@ mod tests {
     }
 
     #[test]
+    fn opencode_nested_event_properties() {
+        let payload = json!({
+            "event": {
+                "type": "session.updated",
+                "properties": {
+                    "model": {
+                        "id": "claude-sonnet-4-6",
+                        "providerID": "anthropic",
+                        "variant": "max"
+                    },
+                    "sessionID": "ses-nested"
+                }
+            }
+        });
+        let patch = opencode_cursor_patch(&payload);
+        assert_eq!(patch.provider.as_deref(), Some("anthropic"));
+        assert_eq!(patch.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(patch.thought_level.as_deref(), Some("max"));
+        assert_eq!(patch.session.as_deref(), Some("ses-nested"));
+    }
+
+    #[test]
     fn opencode_object_model_and_event_type() {
         let payload = json!({
             "event": {"type": "session.updated"},

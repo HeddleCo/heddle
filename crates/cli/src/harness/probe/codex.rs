@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use super::{
     HarnessActorProbe, HarnessAttachHints, HarnessProbeInput, HarnessProbeResult, ProbeSource,
-    argv_matches_harness, argv_value, attribution_env_hint, csv_paths, parse_u64,
+    argv_matches_harness, attribution_env_hint, csv_paths, parse_u64,
 };
 
 pub(crate) struct CodexProbe;
@@ -130,7 +130,6 @@ impl HarnessActorProbe for CodexProbe {
 
     fn probe(&self, input: &HarnessProbeInput) -> Result<HarnessProbeResult> {
         let metadata = &input.probe_metadata;
-        let argv = input.argv.as_deref().unwrap_or(&[]);
         let thread_id = metadata
             .get("thread_id")
             .cloned()
@@ -148,11 +147,7 @@ impl HarnessActorProbe for CodexProbe {
         let model = input
             .explicit_model
             .clone()
-            .or_else(|| attribution_env_hint(&input.env_hints, "HEDDLE_AGENT_MODEL"))
             .or_else(|| metadata.get("model").cloned())
-            .or_else(|| argv_value(argv, "--model"))
-            .or_else(|| input.env_hints.get("CODEX_MODEL").cloned())
-            .or_else(|| input.env_hints.get("OPENAI_MODEL").cloned())
             .or_else(|| input.current_model.clone());
         let provider = input
             .explicit_provider

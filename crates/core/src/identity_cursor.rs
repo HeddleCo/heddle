@@ -6,7 +6,11 @@
 //! `/model` or `/effort` updates the cursor only; already-captured states
 //! keep the pair they froze.
 
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -110,15 +114,23 @@ pub fn write_identity_cursor(repo_root: &Path, cursor: &IdentityCursor) -> io::R
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = dest.with_file_name(".identity.tmp");
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmp = dest.with_file_name(format!(
+        ".identity.tmp.{}.{}",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     let body = cursor
         .clone()
         .omit_unpublished()
         .to_vec()
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    fs::write(&tmp, body)?;
-    fs::rename(&tmp, dest)?;
-    Ok(())
+    fs::write(&tmp, &body)?;
+    let renamed = fs::rename(&tmp, dest);
+    if renamed.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    renamed
 }
 
 /// Merge `patch` onto the on-disk cursor and publish it.
@@ -250,5 +262,46 @@ mod tests {
         assert!(!raw.contains("thought_level"));
         assert!(!raw.contains("parent"));
         assert_eq!(read_identity_cursor(dir.path()), written);
+    }
+
+    #[test]
+    fn concurrent_stamps_use_unique_tmp_and_leave_valid_cursor() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let root = dir.path();
+                scope.spawn(move || {
+                    stamp_identity_cursor(
+                        root,
+                        &IdentityCursor {
+                            provider: Some("anthropic".into()),
+                            model: Some(format!("m{i}")),
+                            ..IdentityCursor::default()
+                        },
+                    )
+                    .unwrap();
+                });
+            }
+        });
+        let cursor = read_identity_cursor(dir.path());
+        assert_eq!(cursor.provider.as_deref(), Some("anthropic"));
+        assert!(
+            cursor
+                .model
+                .as_deref()
+                .is_some_and(|model| model.starts_with('m')),
+            "last writer must leave a published model, got {:?}",
+            cursor.model
+        );
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".identity.tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "unique tmp files must be renamed away"
+        );
     }
 }

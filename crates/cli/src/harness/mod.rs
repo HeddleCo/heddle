@@ -111,6 +111,15 @@ fn detected_harness_argv() -> Option<Vec<String>> {
     detected_harness_argv_impl()
 }
 
+/// Parent walk is kind-only: basename of argv0, never `--model` or other args.
+fn harness_kind_argv_from_cmdline(raw: &[u8]) -> Option<Vec<String>> {
+    let program = raw
+        .split(|byte| *byte == 0)
+        .find(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part).to_string())?;
+    heddle_core::harness_kind_from_basename(&program).map(|_| vec![program])
+}
+
 #[cfg(target_os = "linux")]
 fn detected_harness_argv_impl() -> Option<Vec<String>> {
     let mut pid = std::process::id();
@@ -122,13 +131,7 @@ fn detected_harness_argv_impl() -> Option<Vec<String>> {
         }
         pid = ppid;
         let raw = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-        let argv = raw
-            .split(|byte| *byte == 0)
-            .filter(|part| !part.is_empty())
-            .map(|part| String::from_utf8_lossy(part).to_string())
-            .collect::<Vec<_>>();
-        let program = argv.first()?;
-        if heddle_core::harness_kind_from_basename(program).is_some() {
+        if let Some(argv) = harness_kind_argv_from_cmdline(&raw) {
             return Some(argv);
         }
     }
@@ -3117,6 +3120,23 @@ mod tests {
                 "harness default must match the canonical thread_dir for {id:?}"
             );
         }
+    }
+
+    #[test]
+    fn parent_walk_cmdline_is_kind_only_and_does_not_extract_model() {
+        let raw = b"/usr/bin/claude\0--model\0claude-opus-4-7\0--effort\0high\0";
+        let argv = super::harness_kind_argv_from_cmdline(raw).expect("claude basename is a kind");
+        assert_eq!(argv, vec!["/usr/bin/claude".to_string()]);
+        assert!(
+            !argv
+                .iter()
+                .any(|arg| arg.contains("opus") || arg == "--model"),
+            "parent walk must not extract a model from /proc cmdline"
+        );
+        let ignored = super::harness_kind_argv_from_cmdline(
+            b"/home/u/dev/claude/target/debug/heddle\0--model\0opus\0",
+        );
+        assert!(ignored.is_none());
     }
 
     #[test]
