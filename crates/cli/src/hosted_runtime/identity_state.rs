@@ -65,6 +65,7 @@ impl ClaimState {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn reissue(&mut self, secret: &[u8], expires_at_millis: i64) -> bool {
         if matches!(self.status, ClaimStatus::Claimed) {
             return false;

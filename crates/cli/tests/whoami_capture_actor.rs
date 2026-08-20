@@ -214,7 +214,9 @@ fn whoami_help_names_capture_actor_and_hosted_auth_as_different_objects() {
         "help must say these are different objects:\n{text}"
     );
     assert!(
-        text.contains("identity ensure"),
-        "help must distinguish identity ensure from the local actor:\n{text}"
+        text.contains("whoami never attaches")
+            || text.contains("never attaches a credential")
+            || text.contains("auth login"),
+        "help must say whoami is observe-only and point at auth login:\n{text}"
     );
 }

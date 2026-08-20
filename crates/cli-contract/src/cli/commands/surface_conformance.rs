@@ -74,7 +74,6 @@ pub const APPROVED_NON_EVERYDAY_ROOT_COMMANDS: &[&str] = &[
     "daemon",
     "expand",
     "hook",
-    "identity",
     "oplog",
     "retro",
     "revert",

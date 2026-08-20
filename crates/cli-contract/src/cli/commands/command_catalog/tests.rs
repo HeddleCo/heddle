@@ -158,15 +158,6 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         ],
     ),
     #[cfg(feature = "client")]
-    sample(&["identity", "ensure"], &["identity", "ensure"]),
-    #[cfg(feature = "client")]
-    sample(&["identity", "claim-link"], &["identity", "claim-link"]),
-    #[cfg(feature = "client")]
-    sample(
-        &["identity", "serve"],
-        &["identity", "serve", "--server", "api.heddle.test"],
-    ),
-    #[cfg(feature = "client")]
     sample(&["whoami"], &["whoami"]),
     #[cfg(feature = "git-overlay")]
     sample(&["bridge", "git", "import"], &["bridge", "git", "import"]),
@@ -514,6 +505,7 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
         "heddle bridge git import --path <full-git-repo> --ref <ref>",
         "heddle thread promote main",
         "heddle thread resolve main",
+        "heddle auth login --invite <code>",
     ] {
         validate_recommended_action(action)
             .unwrap_or_else(|err| panic!("expected `{action}` to validate: {err}"));
@@ -603,6 +595,15 @@ fn recommended_action_templates_describe_display_only_placeholders() {
     );
     assert_eq!(clone.required_inputs, vec!["remote", "path"]);
     assert!(!clone.agent_may_fill);
+
+    let invite = recommended_action_template("heddle auth login --invite <code>")
+        .expect("auth login invite recovery should resolve");
+    assert_eq!(
+        invite.argv_template,
+        vec!["heddle", "auth", "login", "--invite", "<code>"]
+    );
+    assert_eq!(invite.required_inputs, vec!["code"]);
+    assert!(invite.agent_may_fill);
 
     let start = recommended_action_template("heddle start feature/auth --path <dir>")
         .expect("start path placeholder should resolve");
@@ -1653,8 +1654,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "auth trust show",
             "auth trust replace",
             "auth create-service-token",
-            "identity ensure",
-            "identity claim-link",
             // heddle whoami (H6, weft#642): the machine-readable
             // acting-identity verb emits `output_kind: "whoami"`, so it
             // advertises its discriminator here alongside the other
@@ -2339,8 +2338,5 @@ fn feature_gated_command_roots_are_catalog_owned() {
     // These are the client-gated top-level roots: their clap
     // variants are `#[cfg(feature = "client")]` and their catalog entries carry
     // `feature_gate = "client"`. Any new feature-gated root MUST be listed here.
-    assert_eq!(
-        feature_gated_command_roots(),
-        &["auth", "identity", "whoami"]
-    );
+    assert_eq!(feature_gated_command_roots(), &["auth", "whoami"]);
 }
