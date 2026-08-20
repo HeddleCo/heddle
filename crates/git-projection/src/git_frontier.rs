@@ -225,7 +225,12 @@ mod tests {
 
     fn advertised_frontier(
         desired_git: SleyObjectId,
-    ) -> (TempDir, HeddleRepository, SyncMapping, SyntheticFrontierName) {
+    ) -> (
+        TempDir,
+        HeddleRepository,
+        SyncMapping,
+        SyntheticFrontierName,
+    ) {
         let heddle_temp = TempDir::new().unwrap();
         let heddle = HeddleRepository::init_default(heddle_temp.path()).unwrap();
         std::fs::write(heddle_temp.path().join("README"), "frontier\n").unwrap();
