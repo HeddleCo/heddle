@@ -975,7 +975,7 @@ mod tests {
     fn format4_agent_states_keep_pre_cursor_id_when_cursor_fields_are_unpublished() {
         use crate::object::Agent;
 
-        let created_at = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let created_at = DateTime::from_timestamp(1_700_000_000, 0).expect("fixed test timestamp");
         let tree = ContentHash::from_bytes([11; 32]);
         let mut agent_state = State::new(
             tree,

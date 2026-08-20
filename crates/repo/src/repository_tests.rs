@@ -274,13 +274,16 @@ fn open_migrates_format_4_identity_cursor_boundary_to_supported() {
     let repo = Repository::init_default(temp_dir.path()).unwrap();
     let config_path = repo.heddle_dir().join("config.toml");
     let ledger_path = repo.heddle_dir().join("state/schema_versions.toml");
-    let ledger = fs::read_to_string(&ledger_path).unwrap();
-    let stripped = ledger
-        .lines()
-        .filter(|line| !line.contains("0006_identity_cursor_attribution"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(&ledger_path, stripped).unwrap();
+    fs::write(
+        &ledger_path,
+        "applied = [\n\
+         \"0002_canonicalize_thread_records\",\n\
+         \"0003_canonicalize_tree_entries\",\n\
+         \"0004_first_class_annotated_tags\",\n\
+         \"0005_streamable_tree_encoding\",\n\
+         ]\n",
+    )
+    .unwrap();
     fs::write(
         &config_path,
         "[repository]\nversion = 4\nsource_authority = \"native\"\n",
@@ -288,14 +291,21 @@ fn open_migrates_format_4_identity_cursor_boundary_to_supported() {
     .unwrap();
     drop(repo);
 
-    let reopened = Repository::open(temp_dir.path())
+    let first = Repository::open(temp_dir.path())
         .expect("format 4 must open and migrate instead of state-id mismatch");
-    assert_eq!(reopened.config().repository.version, SUPPORTED_REPO_FORMAT);
+    drop(first);
+    let on_disk = fs::read_to_string(&config_path).unwrap();
+    assert!(
+        on_disk.contains(&format!("version = {SUPPORTED_REPO_FORMAT}")),
+        "0006 must bump the on-disk repository format, got: {on_disk}"
+    );
     let ledger = fs::read_to_string(&ledger_path).unwrap();
     assert!(
         ledger.contains("0006_identity_cursor_attribution"),
         "open must record the identity-cursor format boundary: {ledger}"
     );
+    let reopened = Repository::open(temp_dir.path()).expect("migrated format 5 must reopen");
+    assert_eq!(reopened.config().repository.version, SUPPORTED_REPO_FORMAT);
 }
 
 #[test]
