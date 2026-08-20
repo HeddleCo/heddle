@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Ref-name validation rules.
 
+use objects::object::is_reserved_heddle_namespace;
+
 /// Ref-name validation error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("invalid ref name: {name}")]
@@ -31,6 +33,9 @@ pub fn validate_ref_name(name: &str) -> Result<(), RefNameError> {
         .split('/')
         .any(|component| component.ends_with(".lock"))
     {
+        return Err(invalid(name));
+    }
+    if is_reserved_heddle_namespace(name) {
         return Err(invalid(name));
     }
     Ok(())
@@ -70,5 +75,16 @@ mod tests {
     #[test]
     fn allows_plain_ref() {
         assert!(validate_ref_name("refs/heads/main").is_ok());
+    }
+
+    #[test]
+    fn reserves_heddle_rooted_names() {
+        assert!(validate_ref_name("heddle/frontier/main/hc-abc").is_err());
+        assert!(validate_ref_name("Heddle/x").is_err());
+        assert!(validate_ref_name("heddle").is_ok());
+        assert!(validate_ref_name("heddlefoo").is_ok());
+        assert!(validate_ref_name("my/heddle").is_ok());
+        assert!(validate_ref_name("main@review").is_ok());
+        assert!(validate_ref_name("main@hd-abc").is_ok());
     }
 }

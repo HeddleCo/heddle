@@ -13,6 +13,7 @@ mod ref_summary_index;
 mod refs_head;
 mod refs_manager;
 mod refs_storage;
+mod refs_synthetic;
 mod refs_transactions;
 mod refs_types;
 mod resolve;

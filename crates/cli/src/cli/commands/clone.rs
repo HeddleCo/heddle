@@ -1672,7 +1672,7 @@ async fn clone_network_connected(
                     intent,
                     refs.refs
                         .iter()
-                        .filter(|entry| entry.is_thread)
+                        .filter(|entry| entry.is_user_thread())
                         .map(|entry| entry.name.as_str()),
                 )
                 .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
@@ -1907,7 +1907,7 @@ async fn recover_interrupted_clone_connected(
         intent,
         remote_refs
             .iter()
-            .filter(|entry| entry.is_thread)
+            .filter(|entry| entry.is_user_thread())
             .map(|entry| entry.name.as_str()),
     )?;
     let git_overlay_clone = hosted_clone_thread_revision_address(&remote_refs, &track_name)
@@ -2494,7 +2494,7 @@ fn hosted_clone_thread_revision_address<'a>(
 ) -> Option<&'a str> {
     remote_refs
         .iter()
-        .find(|entry| entry.name == thread && entry.is_thread)
+        .find(|entry| entry.name == thread && entry.is_user_thread())
         .map(|entry| entry.revision_address.as_str())
 }
 
@@ -2520,6 +2520,28 @@ fn initialize_hosted_clone_repository(
     Repository::init_clone(root, source_authority)
         .map(Repository::without_fsmonitor)
         .map_err(wire::ProtocolError::from)
+        .and_then(|repo| {
+            persist_advertised_synthetic_refs(&repo, remote_refs)?;
+            Ok(repo)
+        })
+}
+
+#[cfg(feature = "client")]
+fn persist_advertised_synthetic_refs(
+    repo: &Repository,
+    remote_refs: &[HostedRefEntry],
+) -> std::result::Result<(), wire::ProtocolError> {
+    for entry in remote_refs {
+        match entry.to_wire_entry().advertised() {
+            Ok(wire::AdvertisedRef::SyntheticFrontier(name)) => {
+                repo.refs()
+                    .set_synthetic_frontier(&name, &entry.state_id)
+                    .map_err(wire::ProtocolError::from)?;
+            }
+            Ok(wire::AdvertisedRef::Thread(_) | wire::AdvertisedRef::Marker(_)) | Err(_) => {}
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "client")]
@@ -2820,13 +2842,13 @@ mod tests {
         }
         .create(&root)
         .expect("create clone intent");
-        let remote_refs = vec![HostedRefEntry {
-            name: "main".to_string(),
-            state_id: objects::object::StateId::from_bytes([1; 32]),
-            is_thread: true,
-            revision_address: "git:5b2471720c93ee30e5764a19f3d3b3ae9ec9712a".to_string(),
-            thread_id: Some("thread-main".to_string()),
-        }];
+        let remote_refs = vec![HostedRefEntry::from_advertised(
+            "main".to_string(),
+            objects::object::StateId::from_bytes([1; 32]),
+            true,
+            "git:5b2471720c93ee30e5764a19f3d3b3ae9ec9712a".to_string(),
+            Some("thread-main".to_string()),
+        )];
 
         let repo = initialize_hosted_clone_repository(&root, &remote_refs, "main")
             .expect("initialize Git-lane clone");
@@ -2854,19 +2876,85 @@ mod tests {
         }
         .create(&root)
         .expect("create clone intent");
-        let remote_refs = vec![HostedRefEntry {
-            name: "main".to_string(),
-            state_id: objects::object::StateId::from_bytes([2; 32]),
-            is_thread: true,
-            revision_address: "heddle:0123456789abcdef".to_string(),
-            thread_id: Some("thread-main".to_string()),
-        }];
+        let remote_refs = vec![HostedRefEntry::from_advertised(
+            "main".to_string(),
+            objects::object::StateId::from_bytes([2; 32]),
+            true,
+            "heddle:0123456789abcdef".to_string(),
+            Some("thread-main".to_string()),
+        )];
 
         let repo = initialize_hosted_clone_repository(&root, &remote_refs, "main")
             .expect("initialize native clone");
 
         assert_eq!(repo.source_authority(), RepositorySourceAuthority::Native);
         assert!(!root.join(".git").exists());
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_clone_persists_synthetic_frontier_and_does_not_treat_it_as_a_thread() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let root = temp.path().join("clone");
+        CloneIntent {
+            origin: "heddle://127.0.0.1:8421/owner/repo".to_string(),
+            endpoint: "127.0.0.1:8421".to_string(),
+            repository: "owner/repo".to_string(),
+            thread: Some("main".to_string()),
+            advertised_head: Some("main".to_string()),
+            depth: None,
+            lazy: false,
+        }
+        .create(&root)
+        .expect("create clone intent");
+        let change = objects::object::ChangeId::from_bytes([9; 16]);
+        let frontier = objects::object::SyntheticFrontierName::new("main", change).unwrap();
+        let frontier_state = objects::object::StateId::from_bytes([3; 32]);
+        let remote_refs = vec![
+            HostedRefEntry::from_advertised(
+                "main".to_string(),
+                objects::object::StateId::from_bytes([2; 32]),
+                true,
+                "heddle:main".to_string(),
+                Some("thread-main".to_string()),
+            ),
+            HostedRefEntry::from_advertised(
+                frontier.as_name(),
+                frontier_state,
+                true,
+                "heddle:frontier".to_string(),
+                None,
+            ),
+        ];
+
+        assert!(!remote_refs[1].is_user_thread());
+        assert!(!remote_refs[1].is_marker());
+        let selected = select_hosted_clone_thread(
+            None,
+            remote_refs
+                .iter()
+                .filter(|entry| entry.is_user_thread())
+                .map(|entry| entry.name.as_str()),
+            Some("main"),
+            "owner/repo",
+        )
+        .expect("thread selected");
+        assert_eq!(selected, "main");
+
+        let repo = initialize_hosted_clone_repository(&root, &remote_refs, "main")
+            .expect("initialize clone with synthetic root");
+        assert_eq!(
+            repo.refs()
+                .get_synthetic_frontier(&frontier)
+                .expect("read synthetic"),
+            Some(frontier_state)
+        );
+        assert!(
+            repo.refs()
+                .get_thread(&objects::object::ThreadName::new(frontier.as_name()))
+                .is_err(),
+            "a synthetic root must not be readable as a ThreadName"
+        );
     }
 
     // weft#633: the hosted ListRefs response for a git-overlay repo carries

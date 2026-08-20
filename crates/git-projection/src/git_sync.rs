@@ -64,7 +64,15 @@ pub fn sync_branches(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
             continue;
         };
         if let Some(state_id) = bridge.mapping.get_heddle(target) {
-            let tn = ThreadName::new(name);
+            if crate::git_frontier::is_reserved_heddle_git_ref(&reference.name)
+                || objects::object::is_reserved_heddle_namespace(name)
+            {
+                return Err(GitProjectionError::InvalidMapping(format!(
+                    "refused to import reserved heddle/ Git branch '{name}'"
+                )));
+            }
+            let tn = ThreadName::try_new(name)
+                .map_err(|error| GitProjectionError::InvalidMapping(error.to_string()))?;
             if let Some(existing) = bridge.heddle_repo.refs().get_thread(&tn)?
                 && !thread_can_adopt_change(bridge, &existing, &state_id)?
             {
@@ -113,7 +121,15 @@ pub fn sync_tags(bridge: &mut GitProjection) -> GitProjectionResult<usize> {
         };
 
         if let Some(state_id) = bridge.mapping.get_heddle(oid) {
-            let mn = MarkerName::new(name);
+            if crate::git_frontier::is_reserved_heddle_git_ref(&reference.name)
+                || objects::object::is_reserved_heddle_namespace(name)
+            {
+                return Err(GitProjectionError::InvalidMapping(format!(
+                    "refused to import reserved heddle/ Git tag '{name}'"
+                )));
+            }
+            let mn = MarkerName::try_new(name)
+                .map_err(|error| GitProjectionError::InvalidMapping(error.to_string()))?;
             match bridge.heddle_repo.refs().get_marker(&mn) {
                 Ok(Some(existing)) if existing != state_id => bridge
                     .heddle_repo
@@ -241,7 +257,7 @@ pub fn sync_marker_to_tag(
     )
 }
 
-fn set_ref(
+pub(crate) fn set_ref(
     repo: &SleyRepository,
     name: &str,
     oid: SleyObjectId,

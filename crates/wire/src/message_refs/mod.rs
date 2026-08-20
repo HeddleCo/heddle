@@ -2,6 +2,10 @@
 use objects::object::StateId;
 use serde::{Deserialize, Serialize};
 
+mod kind;
+
+pub use kind::{AdvertisedRef, AdvertisedRefError, RefKind};
+
 /// Filter applied when listing repository refs.
 ///
 /// Retained as part of the published `heddle-wire` 0.11 surface while Weft
@@ -16,6 +20,10 @@ pub struct RefFilter {
     pub include_threads: bool,
     #[serde(default = "default_true")]
     pub include_markers: bool,
+    /// Synthetic frontier roots are an internal embargo mechanism and stay
+    /// hidden unless a caller opts in.
+    #[serde(default)]
+    pub include_synthetic: bool,
     #[serde(default)]
     pub limit: Option<usize>,
 }
@@ -31,6 +39,7 @@ impl Default for RefFilter {
             patterns: Vec::new(),
             include_threads: true,
             include_markers: true,
+            include_synthetic: false,
             limit: None,
         }
     }
@@ -49,6 +58,14 @@ impl RefFilter {
         self.patterns
             .iter()
             .any(|pattern| Self::matches_pattern(name, pattern))
+    }
+
+    pub fn includes_kind(&self, kind: RefKind) -> bool {
+        match kind {
+            RefKind::Thread => self.include_threads,
+            RefKind::Marker => self.include_markers,
+            RefKind::SyntheticFrontierRoot => self.include_synthetic,
+        }
     }
 
     fn matches_pattern(name: &str, pattern: &str) -> bool {
@@ -83,11 +100,12 @@ pub struct RefsList {
     pub refs: Vec<RefEntry>,
 }
 
+/// One advertised repository ref.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefEntry {
     pub name: String,
     pub state_id: StateId,
-    pub is_thread: bool,
+    pub kind: RefKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,7 +117,7 @@ pub struct RefUpdated {
 
 #[cfg(test)]
 mod tests {
-    use super::RefFilter;
+    use super::*;
 
     #[test]
     fn ref_filter_matches_union_of_names_and_patterns() {
@@ -122,6 +140,9 @@ mod tests {
         assert!(filter.matches("refs/heads/main"));
         assert!(filter.matches("refs/tags/v1.0.0"));
         assert!(filter.matches("threads/alice"));
+        assert!(!filter.includes_kind(RefKind::SyntheticFrontierRoot));
+        assert!(filter.includes_kind(RefKind::Thread));
+        assert!(filter.includes_kind(RefKind::Marker));
     }
 
     #[test]

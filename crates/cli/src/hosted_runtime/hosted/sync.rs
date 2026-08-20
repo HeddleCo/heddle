@@ -40,9 +40,9 @@ use sley::{
 use tempfile::NamedTempFile;
 use tokio::sync::mpsc;
 use wire::{
-    GitLaneTransferIntent, ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, ProtocolError,
-    PullComplete, PushComplete, RefEntry, RefUpdated, RepositoryTransferPlan,
-    admit_declared_received_len,
+    AdvertisedRef, GitLaneTransferIntent, ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject,
+    ProtocolError, PullComplete, PushComplete, RefEntry, RefKind, RefUpdated,
+    RepositoryTransferPlan, admit_declared_received_len,
 };
 
 use super::{
@@ -190,13 +190,13 @@ pub(crate) fn decode_pull_refs(
         .into_iter()
         .map(|(name, state_id, is_thread, revision_address)| {
             let state_id = decode_bootstrap_state_id(state_id, "ref state")?;
-            Ok(HostedRefEntry {
+            Ok(HostedRefEntry::from_advertised(
                 name,
                 state_id,
                 is_thread,
                 revision_address,
-                thread_id: None,
-            })
+                None,
+            ))
         })
         .collect::<Result<Vec<_>, ProtocolError>>()?;
     let _ = head_state;
@@ -382,9 +382,49 @@ pub struct PullObjectMix {
 pub struct HostedRefEntry {
     pub name: String,
     pub state_id: StateId,
-    pub is_thread: bool,
+    pub kind: RefKind,
     pub revision_address: String,
     pub thread_id: Option<String>,
+}
+
+impl HostedRefEntry {
+    pub fn from_advertised(
+        name: String,
+        state_id: StateId,
+        advertised_as_thread: bool,
+        revision_address: String,
+        thread_id: Option<String>,
+    ) -> Self {
+        let kind = RefKind::from_advertised_name(&name, advertised_as_thread);
+        let thread_id = if kind.is_user_thread() {
+            thread_id
+        } else {
+            None
+        };
+        Self {
+            name,
+            state_id,
+            kind,
+            revision_address,
+            thread_id,
+        }
+    }
+
+    pub fn is_user_thread(&self) -> bool {
+        self.kind.is_user_thread()
+    }
+
+    pub fn is_marker(&self) -> bool {
+        self.kind.is_marker()
+    }
+
+    pub fn to_wire_entry(&self) -> RefEntry {
+        RefEntry {
+            name: self.name.clone(),
+            state_id: self.state_id,
+            kind: self.kind,
+        }
+    }
 }
 
 impl PullObjectMix {
@@ -491,11 +531,7 @@ impl HostedClient {
             .list_refs_with_revision_addresses(repo_path)
             .await?
             .into_iter()
-            .map(|entry| RefEntry {
-                name: entry.name,
-                state_id: entry.state_id,
-                is_thread: entry.is_thread,
-            })
+            .map(|entry| entry.to_wire_entry())
             .collect())
     }
 
@@ -520,7 +556,8 @@ impl HostedClient {
             while let Some(response) = stream.next().await.map_err(hosted_to_protocol_error)? {
                 match response.frame {
                     Some(list_refs_response::Frame::Item(entry)) => {
-                        let thread_id = if entry.is_thread {
+                        let kind = RefKind::from_advertised_name(&entry.name, entry.is_thread);
+                        let thread_id = if kind.is_user_thread() {
                             if entry.thread_id.is_empty() {
                                 return Err(ProtocolError::InvalidState(format!(
                                     "hosted thread ref '{}' is missing its stable identity",
@@ -539,7 +576,7 @@ impl HostedClient {
                                         "ref is missing its state ID".to_string(),
                                     )
                                 })?,
-                            is_thread: entry.is_thread,
+                            kind,
                             revision_address: entry.revision_address,
                             thread_id,
                         });
@@ -643,7 +680,7 @@ impl HostedClient {
                 .as_deref()
                 .unwrap_or_default()
                 .iter()
-                .find(|entry| entry.is_thread && entry.name == name)
+                .find(|entry| entry.is_user_thread() && entry.name == name)
                 .and_then(|entry| entry.thread_id.clone())
                 .unwrap_or_default()
         } else {
@@ -926,7 +963,7 @@ impl HostedClient {
         let remote_refs = self.list_refs_with_revision_addresses(repo_path).await?;
         let remote_target = remote_refs
             .iter()
-            .find(|entry| entry.is_thread && entry.name == target_thread);
+            .find(|entry| entry.is_user_thread() && entry.name == target_thread);
         let target_thread_id = remote_target
             .and_then(|entry| entry.thread_id.clone())
             .unwrap_or_default();
@@ -2242,7 +2279,7 @@ impl HostedClient {
             .list_refs(repo_path)
             .await?
             .into_iter()
-            .filter(|entry| !entry.is_thread)
+            .filter(|entry| entry.is_marker())
             .map(|entry| (entry.name, entry.state_id))
             .collect::<HashMap<_, _>>();
         for marker in local_markers {
@@ -2288,19 +2325,26 @@ impl HostedClient {
         repo_path: &str,
     ) -> Result<(), ProtocolError> {
         let remote_markers = self.list_refs(repo_path).await?;
-        for marker in remote_markers.into_iter().filter(|entry| !entry.is_thread) {
-            if !repo.store().has_state(&marker.state_id)? {
+        for entry in remote_markers {
+            if !repo.store().has_state(&entry.state_id)? {
                 continue;
             }
-            let marker_name = MarkerName::from(marker.name.as_str());
-            match repo.refs().get_marker(&marker_name)? {
-                Some(existing) if existing == marker.state_id => {}
-                Some(existing) => repo.set_marker_recorded_cas(
-                    &marker_name,
-                    refs::RefExpectation::Value(existing),
-                    &marker.state_id,
-                )?,
-                None => repo.create_marker_recorded(&marker_name, &marker.state_id)?,
+            match entry.advertised() {
+                Ok(AdvertisedRef::Marker(marker_name)) => {
+                    match repo.refs().get_marker(&marker_name)? {
+                        Some(existing) if existing == entry.state_id => {}
+                        Some(existing) => repo.set_marker_recorded_cas(
+                            &marker_name,
+                            refs::RefExpectation::Value(existing),
+                            &entry.state_id,
+                        )?,
+                        None => repo.create_marker_recorded(&marker_name, &entry.state_id)?,
+                    }
+                }
+                Ok(AdvertisedRef::SyntheticFrontier(name)) => {
+                    repo.refs().set_synthetic_frontier(&name, &entry.state_id)?;
+                }
+                Ok(AdvertisedRef::Thread(_)) | Err(_) => {}
             }
         }
         Ok(())
@@ -2340,7 +2384,7 @@ fn expected_remote_head_from_refs(
 ) -> ExpectedRemoteHead {
     remote_refs
         .iter()
-        .find(|entry| entry.is_thread && entry.name == target_thread)
+        .find(|entry| entry.kind.is_user_thread() && entry.name == target_thread)
         .map(|entry| entry.state_id)
         .map_or(ExpectedRemoteHead::Missing, ExpectedRemoteHead::State)
 }
@@ -2980,6 +3024,7 @@ mod pull_bootstrap_tests {
         DiscussionTurn, Principal, StateAttachment, SymbolAnchor, VisibilityTier,
     };
     use tempfile::TempDir;
+    use wire::{AdvertisedRef, RefKind};
 
     use super::*;
 
@@ -3072,11 +3117,45 @@ mod pull_bootstrap_tests {
         assert_eq!(decoded.refs.len(), 2);
         assert_eq!(decoded.refs[0].name, "main");
         assert_eq!(decoded.refs[0].state_id, main);
-        assert!(decoded.refs[0].is_thread);
+        assert_eq!(decoded.refs[0].kind, RefKind::Thread);
         assert_eq!(decoded.refs[0].revision_address, "git:0123456789abcdef");
         assert_eq!(decoded.refs[1].name, "release");
         assert_eq!(decoded.refs[1].state_id, release);
-        assert!(!decoded.refs[1].is_thread);
+        assert_eq!(decoded.refs[1].kind, RefKind::Marker);
+    }
+
+    #[test]
+    fn folded_synthetic_frontier_is_not_a_thread_or_marker() {
+        let change = objects::object::ChangeId::from_bytes([9; 16]);
+        let frontier = objects::object::SyntheticFrontierName::new("main", change)
+            .unwrap()
+            .as_name();
+        let state = StateId::from_bytes([7; 32]);
+        let payload: PullRefsPayload = (
+            "main".to_string(),
+            Some(state.as_bytes().to_vec()),
+            vec![(
+                frontier.clone(),
+                state.as_bytes().to_vec(),
+                true,
+                String::new(),
+            )],
+        );
+        let checkpoint = format!(
+            "{PULL_REFS_LINE_PREFIX}{}\t{}\n",
+            hex::encode(rmp_serde::to_vec_named(&payload).expect("encode refs fixture")),
+            StateId::from_bytes([0; 32]).to_string_full(),
+        );
+        let decoded = decode_pull_refs(checkpoint.as_bytes())
+            .expect("decode")
+            .expect("refs");
+        assert_eq!(decoded.refs[0].kind, RefKind::SyntheticFrontierRoot);
+        assert!(!decoded.refs[0].is_user_thread());
+        assert!(!decoded.refs[0].is_marker());
+        match decoded.refs[0].to_wire_entry().advertised() {
+            Ok(AdvertisedRef::SyntheticFrontier(name)) => assert_eq!(name.as_name(), frontier),
+            other => panic!("synthetic must stay synthetic, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3175,7 +3254,7 @@ fn hosted_thread_id(
 ) -> Result<String, ProtocolError> {
     remote_refs
         .iter()
-        .find(|entry| entry.is_thread && entry.name == thread_name)
+        .find(|entry| entry.is_user_thread() && entry.name == thread_name)
         .and_then(|entry| entry.thread_id.clone())
         .ok_or_else(|| ProtocolError::ObjectNotFound(format!("hosted thread '{thread_name}'")))
 }
@@ -3755,7 +3834,8 @@ mod transfer_id_tests {
     use repo::Repository;
     use tempfile::TempDir;
     use wire::{
-        GitLaneTransferIntent, ObjectId, ObjectInfo, ObjectType, RefEntry, RepositoryTransferPlan,
+        GitLaneTransferIntent, ObjectId, ObjectInfo, ObjectType, RefEntry, RefKind,
+        RepositoryTransferPlan,
     };
 
     use super::{
@@ -3995,7 +4075,7 @@ mod transfer_id_tests {
         let remote = [RefEntry {
             name: "main".to_string(),
             state_id: base.state_id,
-            is_thread: true,
+            kind: RefKind::Thread,
         }];
 
         assert_eq!(

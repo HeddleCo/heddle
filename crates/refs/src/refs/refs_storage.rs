@@ -275,7 +275,7 @@ fn is_lock_contended(err: &io::Error) -> bool {
     }
 }
 
-fn encode_flat_thread_name(name: &str) -> String {
+pub(super) fn encode_flat_thread_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len() * 2 + FLAT_THREAD_SUFFIX.len());
     for byte in name.as_bytes() {
         use std::fmt::Write as _;
@@ -285,7 +285,7 @@ fn encode_flat_thread_name(name: &str) -> String {
     out
 }
 
-fn decode_flat_thread_name(file_name: &str) -> Option<String> {
+pub(super) fn decode_flat_thread_name(file_name: &str) -> Option<String> {
     let encoded = file_name.strip_suffix(FLAT_THREAD_SUFFIX)?;
     if encoded.len() % 2 != 0 {
         return None;

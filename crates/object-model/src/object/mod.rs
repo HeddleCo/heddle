@@ -12,6 +12,7 @@ mod blob;
 pub mod collaboration;
 mod diff;
 mod discussion;
+mod frontier_ref;
 mod hash;
 mod identifiers;
 mod key_binding;
@@ -57,8 +58,15 @@ pub use discussion::{
     Discussion, DiscussionError, DiscussionId, DiscussionReference, DiscussionReferenceKind,
     DiscussionResolution, DiscussionTurn, DiscussionsBlob, generate_discussion_id,
 };
+pub use frontier_ref::{
+    GIT_SYNTHETIC_FRONTIER_PREFIX, SYNTHETIC_FRONTIER_PREFIX, SyntheticFrontierName,
+    SyntheticFrontierNameError,
+};
 pub use hash::{ChangeId, ChangeIdParseError, ContentHash, StateId, StateIdParseError};
-pub use identifiers::{MarkerName, Scope, ThreadName};
+pub use identifiers::{
+    MarkerName, RESERVED_REF_SEGMENT, ReservedRefNameError, Scope, ThreadName,
+    is_reserved_heddle_namespace,
+};
 pub use key_binding::{
     KEY_BINDING_REGISTRY_SIGNING_PAYLOAD_VERSION_TAG, KEY_BINDING_SIGNING_PAYLOAD_VERSION_TAG,
     KeyBinding, KeyBindingError, KeyBindingRegistry, KeyRole,
