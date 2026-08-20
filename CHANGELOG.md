@@ -44,6 +44,11 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Fixed
 
+- **Live annotations ride `diff --context`.** After `context set`,
+  `heddle diff --context` shows the annotation on the existing `context` /
+  `broader_guidance` fields, including Git-overlay worktrees and
+  path-filtered clean diffs (heddle#1459).
+
 - **`whoami` reports the capture actor before hosted auth.** `init --principal-*`
   writes `user_config` and `status` already showed that principal. `whoami` now
   prints the same capture actor first and hosted authentication as a second
