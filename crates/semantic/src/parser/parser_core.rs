@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use objects::object::{ContentHash, OccurrenceRole};
+use objects::object::{ContentHash, OccurrenceRole, ScopeEntry, ScopeKind};
 use tree_sitter::{Node, Tree as TSTree};
 
 use super::{
@@ -107,6 +107,28 @@ impl ParsedFile {
             .collect()
     }
 
+    /// Calls owned by the outermost function in this parse.
+    /// Nested function and closure bodies are excluded.
+    pub fn extract_own_calls(&self) -> Vec<CallSite> {
+        let index = self.syntax_index();
+        let scopes = index.semantic_scopes();
+        let Some(owner) = outermost_function_scope(scopes) else {
+            return Vec::new();
+        };
+        index
+            .occurrences()
+            .iter()
+            .filter(|occurrence| {
+                occurrence.role == OccurrenceRole::Call
+                    && nearest_function_scope(scopes, occurrence.scope) == Some(owner)
+            })
+            .map(|occurrence| CallSite {
+                name: occurrence.name.clone(),
+                qualifier: occurrence.qualifier.clone(),
+            })
+            .collect()
+    }
+
     /// Extract imports from the file.
     pub fn extract_imports(&self) -> Vec<Import> {
         self.imports().map(ImportRef::to_owned).collect()
@@ -116,4 +138,33 @@ impl ParsedFile {
     pub fn is_function_kind(kind: &str, language: Language) -> bool {
         super::syntax_index::is_function_kind(kind, language)
     }
+}
+
+fn outermost_function_scope(scopes: &[ScopeEntry]) -> Option<u32> {
+    scopes.iter().find_map(|scope| {
+        if scope.kind != ScopeKind::Function {
+            return None;
+        }
+        let mut parent = scope.parent;
+        while let Some(id) = parent {
+            let entry = scopes.get(id as usize)?;
+            if entry.kind == ScopeKind::Function {
+                return None;
+            }
+            parent = entry.parent;
+        }
+        Some(scope.local_id)
+    })
+}
+
+fn nearest_function_scope(scopes: &[ScopeEntry], scope: u32) -> Option<u32> {
+    let mut current = Some(scope);
+    while let Some(id) = current {
+        let entry = scopes.get(id as usize)?;
+        if entry.kind == ScopeKind::Function {
+            return Some(id);
+        }
+        current = entry.parent;
+    }
+    None
 }

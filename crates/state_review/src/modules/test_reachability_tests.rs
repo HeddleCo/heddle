@@ -374,6 +374,85 @@ fn ambiguous_receiver_call_fail_closes_instead_of_warning() {
 }
 
 #[test]
+fn bare_call_resolves_to_caller_container() {
+    let path = PathBuf::from("src/lib.rs");
+    let target = fdef_in("a", "target", "fn target() { do_work(); }");
+    let mut ctx = SemanticContext::new();
+    ctx.new_functions.insert(
+        path.clone(),
+        vec![
+            target.clone(),
+            fdef_in("a", "test_target", "fn test_target() { target(); }"),
+        ],
+    );
+    ctx.changed_symbols.insert((path, target.symbol_identity()));
+
+    let signals = run(
+        &empty_state(),
+        &empty_state(),
+        &cfg_with_one_required_test(),
+        &ctx,
+    );
+    assert!(
+        signals.is_empty(),
+        "bare target() in mod a must cover a::target: {signals:?}"
+    );
+}
+
+#[test]
+fn nested_function_call_does_not_cover_outer_callee() {
+    let path = PathBuf::from("src/lib.rs");
+    let target = fdef("target", "fn target() { do_work(); }");
+    let mut ctx = SemanticContext::new();
+    ctx.new_functions.insert(
+        path.clone(),
+        vec![
+            target.clone(),
+            fdef("test_x", "fn test_x() { fn unused() { target(); } }"),
+        ],
+    );
+    ctx.changed_symbols.insert((path, target.symbol_identity()));
+
+    let signals = run(
+        &empty_state(),
+        &empty_state(),
+        &cfg_with_one_required_test(),
+        &ctx,
+    );
+    assert_eq!(
+        signal_symbols(&signals),
+        BTreeSet::from(["target"]),
+        "nested unused() call must not cover target: {signals:?}"
+    );
+}
+
+#[test]
+fn python_direct_call_covers_target() {
+    let path = PathBuf::from("mod.py");
+    let target = fdef("target", "def target():\n    return 1\n");
+    let mut ctx = SemanticContext::new();
+    ctx.new_functions.insert(
+        path.clone(),
+        vec![
+            target.clone(),
+            fdef("test_target", "def test_target():\n    target()\n"),
+        ],
+    );
+    ctx.changed_symbols.insert((path, target.symbol_identity()));
+
+    let signals = run(
+        &empty_state(),
+        &empty_state(),
+        &cfg_with_one_required_test(),
+        &ctx,
+    );
+    assert!(
+        signals.is_empty(),
+        "python test_target() must cover target: {signals:?}"
+    );
+}
+
+#[test]
 fn comment_todo_call_does_not_mark_reachable() {
     let path = PathBuf::from("src/lib.rs");
     let orphan = fdef("orphan", "fn orphan() { do_work(); }");

@@ -342,6 +342,64 @@ export const handlers = {
 }
 
 #[test]
+fn extract_calls_includes_python_call_nodes() {
+    let source = r#"
+def target():
+    return 1
+
+def test_target():
+    target()
+"#;
+    let parsed = ParsedFile::parse(source, Language::Python).expect("Should parse");
+    let calls = parsed.extract_calls();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.name == "target" && call.qualifier.is_empty()),
+        "python call nodes must be extracted: {calls:?}"
+    );
+}
+
+#[test]
+fn extract_own_calls_excludes_nested_function_and_closure() {
+    let rust = r#"
+fn test_x() {
+    fn unused() {
+        target();
+    }
+    let unused_closure = || {
+        other();
+    };
+}
+"#;
+    let parsed = ParsedFile::parse(rust, Language::Rust).expect("Should parse");
+    let own = parsed.extract_own_calls();
+    assert!(
+        own.iter()
+            .all(|call| call.name != "target" && call.name != "other"),
+        "nested rust calls must not leak to the outer function: {own:?}"
+    );
+
+    let js = r#"
+function test_x() {
+    function unused() {
+        target();
+    }
+    const unused_arrow = () => {
+        other();
+    };
+}
+"#;
+    let parsed = ParsedFile::parse(js, Language::JavaScript).expect("Should parse");
+    let own = parsed.extract_own_calls();
+    assert!(
+        own.iter()
+            .all(|call| call.name != "target" && call.name != "other"),
+        "nested js calls must not leak to the outer function: {own:?}"
+    );
+}
+
+#[test]
 fn extract_calls_uses_tree_not_comment_or_string_substrings() {
     let source = r#"
 fn test_it() {

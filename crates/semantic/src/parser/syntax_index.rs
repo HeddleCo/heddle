@@ -805,13 +805,17 @@ fn is_definition_name(node: Node<'_>) -> bool {
         )
 }
 
+fn is_call_expression(kind: &str) -> bool {
+    matches!(kind, "call_expression" | "call")
+}
+
 fn is_call_target(mut node: Node<'_>) -> bool {
     while let Some(parent) = node.parent() {
         if is_path_node(parent.kind()) {
             node = parent;
             continue;
         }
-        if parent.kind() == "call_expression" {
+        if is_call_expression(parent.kind()) {
             return parent
                 .child_by_field_name("function")
                 .is_some_and(|function| function.id() == node.id());

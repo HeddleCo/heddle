@@ -83,7 +83,7 @@ pub fn run(
         let caller_key = (caller.path, caller.identity.as_str());
         let calls = calls_in(caller.def, caller.path, cache);
         for call in calls {
-            match resolve_call(&call, &catalog, &containers) {
+            match resolve_call(&call, caller, &catalog, &containers) {
                 CallResolve::Hits(callees) => {
                     for callee in callees {
                         if caller.path == callee.path && caller.identity == callee.identity {
@@ -148,12 +148,13 @@ fn calls_in(def: &FunctionDef, path: &Path, cache: &SemanticParseCache) -> Vec<C
     }
     cache
         .parse(&def.content, language)
-        .map(|parsed| parsed.extract_calls())
+        .map(|parsed| parsed.extract_own_calls())
         .unwrap_or_default()
 }
 
 fn resolve_call<'a>(
     call: &CallSite,
+    caller: &CatalogEntry<'a>,
     catalog: &'a [CatalogEntry<'a>],
     containers: &HashSet<&str>,
 ) -> CallResolve<'a> {
@@ -165,12 +166,7 @@ fn resolve_call<'a>(
         return CallResolve::None;
     }
     if call.qualifier.is_empty() {
-        return CallResolve::Hits(
-            named
-                .into_iter()
-                .filter(|entry| entry.def.container.is_empty())
-                .collect(),
-        );
+        return resolve_bare_call(caller, named);
     }
     let joined = call.qualifier.join("::");
     let exact: Vec<&CatalogEntry<'_>> = named
@@ -192,6 +188,26 @@ fn resolve_call<'a>(
         return CallResolve::Hits(named);
     }
     CallResolve::Ambiguous
+}
+
+fn resolve_bare_call<'a>(
+    caller: &CatalogEntry<'a>,
+    named: Vec<&'a CatalogEntry<'a>>,
+) -> CallResolve<'a> {
+    let same_container: Vec<&CatalogEntry<'_>> = named
+        .iter()
+        .copied()
+        .filter(|entry| entry.def.container == caller.def.container)
+        .collect();
+    if !same_container.is_empty() {
+        return CallResolve::Hits(same_container);
+    }
+    CallResolve::Hits(
+        named
+            .into_iter()
+            .filter(|entry| entry.def.container.is_empty())
+            .collect(),
+    )
 }
 
 fn qualifier_matches_container(container: &str, qualifier: &[String], joined: &str) -> bool {
