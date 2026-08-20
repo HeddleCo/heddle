@@ -166,7 +166,7 @@ impl ObjectStore for InMemoryStore {
         match self.states.read_or_poisoned().get(id) {
             Some(bytes) => {
                 let mut state: State = rmp_serde::from_slice(bytes)?;
-                if state.id() != *id {
+                if !state.accepts_stored_id(id) {
                     return Err(crate::error::HeddleError::InvalidObject(format!(
                         "state id mismatch: requested {id}, computed {}",
                         state.id()

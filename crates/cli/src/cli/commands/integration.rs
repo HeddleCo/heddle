@@ -794,11 +794,13 @@ fn install_claude(
         .ok_or_else(|| anyhow!("claude settings hooks must be an object"))?;
 
     let heddle = HeddleInvocation::resolve(path_mode)?;
-    let stamp = format!(
-        "{} --repo {} integration stamp claude-code",
-        heddle,
-        shell_escape(repo.root())
-    );
+    // User-scoped hooks run in whichever workspace launched Claude. Do not
+    // bake the install-repo path — a second workspace would stamp the wrong tree.
+    let repo_flag = match scope {
+        IntegrationScope::Repo => format!(" --repo {}", shell_escape(repo.root())),
+        IntegrationScope::User => String::new(),
+    };
+    let stamp = format!("{heddle}{repo_flag} integration stamp claude-code");
     for event in [
         "SessionStart",
         "UserPromptSubmit",
@@ -814,12 +816,7 @@ fn install_claude(
         } else if event == "SessionEnd" {
             format!("{stamp} --expire")
         } else {
-            format!(
-                "{} --repo {} integration relay claude-code {}",
-                heddle,
-                shell_escape(repo.root()),
-                event
-            )
+            format!("{heddle}{repo_flag} integration relay claude-code {event}")
         };
         upsert_claude_hook_group(hooks_obj, event, command)?;
     }
@@ -1351,6 +1348,50 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn claude_user_install_discovers_workspace_at_runtime() {
+        static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_temp, repo) = init_repo();
+        let home = tempfile::TempDir::new().unwrap();
+        let _home_guard = HomeEnvGuard::set(home.path());
+        let mut manifest = IntegrationManifest::default();
+
+        install_claude(
+            &repo,
+            &mut manifest,
+            &IntegrationScope::User,
+            false,
+            PathMode::Relative,
+        )
+        .unwrap();
+
+        let settings_path = home.path().join(".claude").join("settings.json");
+        let contents = fs::read_to_string(&settings_path).unwrap();
+        let install_repo = repo.root().display().to_string();
+        assert!(
+            !contents.contains(&install_repo),
+            "user-scoped Claude hooks must not bake the install-time repo, got: {contents}"
+        );
+        assert!(
+            !contents.contains("--repo"),
+            "user-scoped Claude hooks must discover the workspace from cwd, got: {contents}"
+        );
+        assert!(
+            contents.contains("heddle integration stamp claude-code"),
+            "user-scoped Claude must still stamp, got: {contents}"
+        );
+        assert!(
+            contents.contains("heddle integration stamp claude-code --expire"),
+            "user-scoped SessionEnd must expire, got: {contents}"
+        );
+        assert!(
+            contents.contains("heddle integration relay claude-code SessionStart"),
+            "user-scoped Claude must still relay without a baked repo, got: {contents}"
+        );
+    }
+
+    #[test]
     fn claude_repo_install_chains_existing_status_line() {
         let (_temp, repo) = init_repo();
         let settings_path = repo.root().join(".claude").join("settings.json");
@@ -1679,9 +1720,7 @@ mod tests {
             "Codex Stop must expire, same as Claude SessionEnd, got: {contents}"
         );
         assert_eq!(
-            contents
-                .matches("heddle integration stamp codex\"")
-                .count(),
+            contents.matches("heddle integration stamp codex\"").count(),
             3,
             "SessionStart/SubagentStart/PreToolUse must stamp without expiring, got: {contents}"
         );

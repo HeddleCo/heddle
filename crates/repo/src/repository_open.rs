@@ -33,23 +33,7 @@ pub(super) fn has_git_metadata(path: &Path) -> bool {
 }
 
 fn ensure_supported_repo_format(config_path: &Path, config: &RepoConfig) -> Result<()> {
-    let found = config.repository.version;
-    let supported = super::repo_config::SUPPORTED_REPO_FORMAT;
-    if found > supported {
-        return Err(HeddleError::RepositoryFormatTooNew {
-            path: config_path.to_path_buf(),
-            found,
-            supported,
-        });
-    }
-    if found < supported {
-        return Err(HeddleError::RepositoryFormatMigrationRequired {
-            path: config_path.to_path_buf(),
-            found,
-            required: supported,
-        });
-    }
-    Ok(())
+    super::repo_config::reject_unsupported_repo_format(config_path, config.repository.version)
 }
 
 fn validate_snapshot_artifact_records(

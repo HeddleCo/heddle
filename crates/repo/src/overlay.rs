@@ -43,7 +43,12 @@ use super::{Repository, RepositoryCapability, open_git_repository_at_root};
 
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
 const GIT_CHECKPOINT_INTENT_FILE: &str = "git-checkpoint-intent.json";
-const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
+const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[
+    ".heddle/",
+    ".heddle.identity",
+    ".identity.lock",
+    ".identity.tmp.*",
+];
 
 #[derive(Debug)]
 pub struct GitOverlayShortStatus {

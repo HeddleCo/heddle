@@ -269,6 +269,36 @@ fn open_accepts_supported_repository_format() {
 }
 
 #[test]
+fn open_migrates_format_4_identity_cursor_boundary_to_supported() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let config_path = repo.heddle_dir().join("config.toml");
+    let ledger_path = repo.heddle_dir().join("state/schema_versions.toml");
+    let ledger = fs::read_to_string(&ledger_path).unwrap();
+    let stripped = ledger
+        .lines()
+        .filter(|line| !line.contains("0006_identity_cursor_attribution"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&ledger_path, stripped).unwrap();
+    fs::write(
+        &config_path,
+        "[repository]\nversion = 4\nsource_authority = \"native\"\n",
+    )
+    .unwrap();
+    drop(repo);
+
+    let reopened = Repository::open(temp_dir.path())
+        .expect("format 4 must open and migrate instead of state-id mismatch");
+    assert_eq!(reopened.config().repository.version, SUPPORTED_REPO_FORMAT);
+    let ledger = fs::read_to_string(&ledger_path).unwrap();
+    assert!(
+        ledger.contains("0006_identity_cursor_attribution"),
+        "open must record the identity-cursor format boundary: {ledger}"
+    );
+}
+
+#[test]
 fn open_refuses_v2_as_migration_required_without_rewriting_fixture() {
     let temp_dir = TempDir::new().unwrap();
     Repository::init_default(temp_dir.path()).unwrap();
