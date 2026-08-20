@@ -202,11 +202,8 @@ fn detected_harness_argv_impl() -> Option<Vec<String>> {
             .filter(|part| !part.is_empty())
             .map(|part| String::from_utf8_lossy(part).to_string())
             .collect::<Vec<_>>();
-        let program = argv.first().map(|arg| arg.to_ascii_lowercase())?;
-        if ["codex", "claude", "opencode", "aider"]
-            .iter()
-            .any(|needle| program.contains(needle))
-        {
+        let program = argv.first()?;
+        if verbs::harness_kind_from_basename(program).is_some() {
             return Some(argv);
         }
     }

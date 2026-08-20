@@ -160,6 +160,10 @@ _Avoid_: done agent, generic blocked agent
 Operational metadata that defines an agent's delegated work and execution policy, such as whether offline continuation is allowed. Its identifier can be referenced by collaboration operations as optional provenance, but it is not repository collaboration history in v1.
 _Avoid_: discussion task, collaboration assignment
 
+**Identity Cursor**:
+The current harness identity published into the workspace sidecar `.heddle/identity` by installed hooks. Fields use ACP names (`provider`, `model`, `thought_level`, `session`, `parent`). Each capture freezes that cursor onto that state. Mid-thread `/model` or `/effort` updates the cursor only; earlier states keep the pair they froze. Session segments rotate when a published provider, model, or thought_level changes. Empty → set is attach, not a rotate. Unpublished fields are omitted. Heddle does not invent a model from hoped-for env or `/proc`.
+_Avoid_: model of the thread, hoped-for env, /proc hunt, Cursor-guesses-Sonnet
+
 **Agent Timeline**:
 A Heddle-native record stream for an agent run's tool-call activity, cursor movement, branches, and captures. Foundation objects and local storage are in place; richer cursor views, capture automation, and hosted projection are still planned. The public `AgentGatewayService` and `AgentService` contracts are also planned and are not registered as live services in the current v1alpha1 API contract. Agent timelines are adjacent repository metadata that explain agent execution without becoming source history states.
 _Avoid_: raw transcript, runner log, chat history

@@ -1,0 +1,198 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Freeze the current identity cursor onto a capture, rotating the session
+//! segment when a published provider / model / thought_level changes.
+
+use std::collections::BTreeMap;
+
+use anyhow::Result;
+use verbs::{
+    IdentityCursor, SegmentRotation, cursor_patch_from_child_env, cursor_segment_rotation,
+    published_field, read_identity_cursor, write_identity_cursor,
+};
+use objects::object::Session;
+use repo::{Repository, SessionManager};
+
+/// Cursor values frozen onto one capture (ACP names).
+#[derive(Clone, Debug, Default)]
+pub struct FrozenIdentity {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub thought_level: Option<String>,
+    pub session: Option<String>,
+    pub parent: Option<String>,
+    pub segment_id: Option<String>,
+}
+
+/// Read the workspace cursor, attach child-env fallbacks, persist so later
+/// captures are not env-shaped, and rotate the Heddle segment when needed.
+pub fn freeze_identity_for_capture(repo: &Repository) -> Result<FrozenIdentity> {
+    let mut cursor = read_identity_cursor(repo.root());
+    let child = cursor_patch_from_child_env(&child_env_hints());
+    if !child.is_empty() {
+        cursor = cursor.merge_event(&child);
+        let _ = write_identity_cursor(repo.root(), &cursor);
+    }
+    let mut manager = SessionManager::new(repo.root());
+    let session = manager.get_current_session()?;
+    let (heddle_session, segment_id) =
+        apply_segment_policy(&mut manager, session.as_ref(), &cursor)?;
+    Ok(FrozenIdentity {
+        provider: cursor.provider,
+        model: cursor.model,
+        thought_level: cursor.thought_level,
+        session: cursor.session.or(heddle_session),
+        parent: cursor.parent,
+        segment_id,
+    })
+}
+
+fn child_env_hints() -> BTreeMap<String, String> {
+    std::env::vars()
+        .filter(|(key, value)| {
+            !value.trim().is_empty()
+                && matches!(
+                    key.as_str(),
+                    "CLAUDE_CODE_SESSION_ID"
+                        | "CLAUDE_EFFORT"
+                        | "PI_MODEL"
+                        | "PI_REASONING_LEVEL"
+                        | "PI_SESSION_ID"
+                        | "PI_PROVIDER"
+                        | "PI_PARENT_ID"
+                )
+        })
+        .collect()
+}
+
+fn apply_segment_policy(
+    manager: &mut SessionManager,
+    session: Option<&Session>,
+    cursor: &IdentityCursor,
+) -> Result<(Option<String>, Option<String>)> {
+    let Some(session) = session else {
+        return Ok((None, None));
+    };
+    let current = session.current_segment();
+    let rotation = cursor_segment_rotation(
+        current.map(|s| s.provider.as_str()),
+        current.map(|s| s.model.as_str()),
+        current.and_then(|s| s.thought_level.as_deref()),
+        cursor.provider.as_deref(),
+        cursor.model.as_deref(),
+        cursor.thought_level.as_deref(),
+    );
+    if rotation == SegmentRotation::Rotate {
+        let provider = cursor
+            .provider
+            .clone()
+            .or_else(|| current.map(|s| s.provider.clone()))
+            .unwrap_or_default();
+        let model = cursor
+            .model
+            .clone()
+            .or_else(|| current.map(|s| s.model.clone()))
+            .unwrap_or_default();
+        if published_field(Some(&provider)).is_some() && published_field(Some(&model)).is_some() {
+            let segment = manager.add_segment(&session.id, provider, model, None)?;
+            if let Some(thought_level) = cursor.thought_level.clone()
+                && let Some(mut updated) = manager.get_session(&session.id)?
+            {
+                if let Some(current) = updated.current_segment_mut() {
+                    current.thought_level = Some(thought_level);
+                }
+                manager.save_session(&updated)?;
+            }
+            return Ok((Some(session.id.clone()), Some(segment.id)));
+        }
+    } else if let Some(thought_level) = cursor.thought_level.clone()
+        && current.and_then(|s| s.thought_level.as_deref()).is_none()
+        && let Some(mut updated) = manager.get_session(&session.id)?
+    {
+        updated.attach_thought_level(thought_level);
+        manager.save_session(&updated)?;
+    }
+    Ok((Some(session.id.clone()), session.current_segment_id.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objects::object::Principal;
+    use repo::Repository;
+
+    fn principal() -> Principal {
+        Principal::new("Ada", "ada@example.com")
+    }
+
+    #[test]
+    fn freeze_rotates_on_model_change_and_attaches_thought_level() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let mut manager = SessionManager::new(repo.root());
+        manager
+            .start_session(principal(), "anthropic".into(), "opus".into(), None)
+            .unwrap();
+        write_identity_cursor(
+            repo.root(),
+            &IdentityCursor {
+                provider: Some("anthropic".into()),
+                model: Some("opus".into()),
+                thought_level: Some("high".into()),
+                session: Some("claude-sess".into()),
+                parent: None,
+            },
+        )
+        .unwrap();
+        let first = freeze_identity_for_capture(&repo).unwrap();
+        assert_eq!(first.model.as_deref(), Some("opus"));
+        assert_eq!(first.thought_level.as_deref(), Some("high"));
+        assert_eq!(first.session.as_deref(), Some("claude-sess"));
+        let first_seg = first.segment_id.clone();
+
+        write_identity_cursor(
+            repo.root(),
+            &IdentityCursor {
+                provider: Some("anthropic".into()),
+                model: Some("sonnet".into()),
+                thought_level: Some("high".into()),
+                session: Some("claude-sess".into()),
+                parent: None,
+            },
+        )
+        .unwrap();
+        let second = freeze_identity_for_capture(&repo).unwrap();
+        assert_eq!(second.model.as_deref(), Some("sonnet"));
+        assert_ne!(second.segment_id, first_seg);
+    }
+
+    #[test]
+    fn empty_thought_level_to_set_does_not_rotate() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let mut manager = SessionManager::new(repo.root());
+        manager
+            .start_session(principal(), "anthropic".into(), "opus".into(), None)
+            .unwrap();
+        write_identity_cursor(
+            repo.root(),
+            &IdentityCursor {
+                provider: Some("anthropic".into()),
+                model: Some("opus".into()),
+                thought_level: Some("max".into()),
+                ..IdentityCursor::default()
+            },
+        )
+        .unwrap();
+        let frozen = freeze_identity_for_capture(&repo).unwrap();
+        let session = SessionManager::new(repo.root())
+            .get_current_session()
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.segments.len(), 1);
+        assert_eq!(
+            session.current_segment().unwrap().thought_level.as_deref(),
+            Some("max")
+        );
+        assert_eq!(frozen.thought_level.as_deref(), Some("max"));
+    }
+}

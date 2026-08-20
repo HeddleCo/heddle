@@ -23,6 +23,10 @@ pub enum IntegrationCommands {
     /// Internal relay invoked by installed hooks/plugins.
     #[command(hide = true)]
     Relay(IntegrationRelayArgs),
+
+    /// Fast identity-cursor write. Prefer the argv fast path in `main`.
+    #[command(hide = true)]
+    Stamp(IntegrationStampArgs),
 }
 
 #[derive(Clone, Debug, clap::Args)]
@@ -63,4 +67,14 @@ pub struct IntegrationRelayArgs {
 
     /// Event name.
     pub event: String,
+}
+
+#[derive(Clone, Debug, clap::Args)]
+pub struct IntegrationStampArgs {
+    /// Harness name (`claude-code`, `codex`, `opencode`, `pi`).
+    pub harness: String,
+
+    /// Existing StatusLine command to run after the cursor write.
+    #[arg(long)]
+    pub chain: Option<String>,
 }

@@ -4,7 +4,8 @@
 //! Owns:
 //! - harness kind fingerprinting from argv / env hint maps
 //! - session attach-vs-create decision given caller-gathered probe facts
-//! - segment rotation when provider or model changes
+//! - segment rotation when provider, model, or thought_level changes
+//!   (empty → set is attach, not a rotate)
 //!
 //! Process detection, registry lookups, session store I/O, and path
 //! canonicalization remain CLI-owned. Callers pass pure facts in and apply
@@ -151,7 +152,6 @@ pub fn fingerprint_harness_from_hints(
         .and_then(clean_attribution_value)
         .or_else(|| env_hints.get("CODEX_MODEL").cloned())
         .or_else(|| env_hints.get("CLAUDE_MODEL").cloned())
-        .or_else(|| env_hints.get("ANTHROPIC_MODEL").cloned())
         .or_else(|| env_hints.get("OPENAI_MODEL").cloned())
         .or_else(|| env_hints.get("OPENCODE_MODEL").cloned())
         .or_else(|| env_hints.get("AIDER_MODEL").cloned())
@@ -533,31 +533,57 @@ pub enum SegmentRotation {
     Rotate,
 }
 
-/// Pure segment rotation policy: rotate when provider or model changes.
+/// Pure segment rotation policy: rotate when a published provider, model,
+/// or thought_level **changes**. Empty → set is attach (`Keep`), not a rotate.
 ///
 /// - No current segment → keep (caller creates the first segment elsewhere).
-/// - `new_*` is `None` → does not force rotation (blank hints fall through).
-/// - Rotation only when a new value is present and differs from current.
+/// - Incoming `None` / empty / `unknown` does not force rotation.
+/// - Rotation only when both sides have a published value and they differ.
 pub fn segment_rotation_policy(
     current_provider: Option<&str>,
     current_model: Option<&str>,
     new_provider: Option<&str>,
     new_model: Option<&str>,
 ) -> SegmentRotation {
-    let Some(current_provider) = current_provider else {
+    cursor_segment_rotation(
+        current_provider,
+        current_model,
+        None,
+        new_provider,
+        new_model,
+        None,
+    )
+}
+
+/// Same as [`segment_rotation_policy`] plus `thought_level`.
+pub fn cursor_segment_rotation(
+    current_provider: Option<&str>,
+    current_model: Option<&str>,
+    current_thought_level: Option<&str>,
+    new_provider: Option<&str>,
+    new_model: Option<&str>,
+    new_thought_level: Option<&str>,
+) -> SegmentRotation {
+    let Some(current_provider) = crate::identity_cursor::published_field(current_provider) else {
         return SegmentRotation::Keep;
     };
-    // Model may be missing on a segment only if caller has no current segment;
-    // when a segment exists both provider and model are set. Treat missing
-    // current model as empty for comparison only when provider was present.
-    let current_model = current_model.unwrap_or("");
-
-    let provider_changed = new_provider.is_some_and(|p| p != current_provider);
-    let model_changed = new_model.is_some_and(|m| m != current_model);
-    if provider_changed || model_changed {
+    if field_rotates(Some(current_provider), new_provider)
+        || field_rotates(current_model, new_model)
+        || field_rotates(current_thought_level, new_thought_level)
+    {
         SegmentRotation::Rotate
     } else {
         SegmentRotation::Keep
+    }
+}
+
+fn field_rotates(current: Option<&str>, incoming: Option<&str>) -> bool {
+    match (
+        crate::identity_cursor::published_field(current),
+        crate::identity_cursor::published_field(incoming),
+    ) {
+        (Some(current), Some(incoming)) => current != incoming,
+        _ => false,
     }
 }
 
@@ -747,6 +773,43 @@ mod tests {
                 Some("sonnet"),
             ),
             SegmentRotation::Rotate
+        );
+    }
+
+    #[test]
+    fn segment_rotates_on_thought_level_change_empty_set_is_attach() {
+        assert_eq!(
+            cursor_segment_rotation(
+                Some("anthropic"),
+                Some("opus"),
+                None,
+                Some("anthropic"),
+                Some("opus"),
+                Some("high"),
+            ),
+            SegmentRotation::Keep
+        );
+        assert_eq!(
+            cursor_segment_rotation(
+                Some("anthropic"),
+                Some("opus"),
+                Some("high"),
+                Some("anthropic"),
+                Some("opus"),
+                Some("low"),
+            ),
+            SegmentRotation::Rotate
+        );
+        assert_eq!(
+            cursor_segment_rotation(
+                Some("anthropic"),
+                Some(""),
+                None,
+                Some("anthropic"),
+                Some("opus"),
+                None,
+            ),
+            SegmentRotation::Keep
         );
     }
 

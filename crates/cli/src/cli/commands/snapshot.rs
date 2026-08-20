@@ -930,10 +930,12 @@ fn build_capture_attribution_with_env(
         });
     }
 
+    let frozen = crate::identity_freeze::freeze_identity_for_capture(repo).unwrap_or_default();
     let current_session = SessionManager::new(repo.root()).get_current_session()?;
     let explicit_provider = agent.provider.clone().or(env.provider.clone());
     let explicit_model = agent.model.clone().or(env.model.clone());
     let explicit_agent_identity = explicit_provider.is_some() && explicit_model.is_some();
+    let cursor_agent_identity = frozen.provider.is_some() && frozen.model.is_some();
 
     // Pull the thread's declared actor — set when the user ran
     // `heddle start --agent-provider X --agent-model Y` to dedicate this
@@ -990,7 +992,7 @@ fn build_capture_attribution_with_env(
         .and_then(|session| session.current_segment())
         .and_then(|segment| segment.policy_id.clone())
         .and_then(clean_attribution_value);
-    let harness_probe = (!explicit_agent_identity)
+    let harness_probe = (!explicit_agent_identity && !cursor_agent_identity)
         .then(|| {
             crate::harness::probe_current_process_harness(
                 repo,
@@ -1015,6 +1017,7 @@ fn build_capture_attribution_with_env(
         .and_then(clean_attribution_value);
 
     let provider = explicit_provider
+        .or(frozen.provider.clone())
         .or(thread_provider)
         .or(harness_provider)
         .or(session_provider)
@@ -1033,6 +1036,7 @@ fn build_capture_attribution_with_env(
                 .and_then(clean_attribution_value)
         });
     let model = explicit_model
+        .or(frozen.model.clone())
         .or(thread_model)
         .or(harness_model)
         .or(session_model)
@@ -1054,12 +1058,18 @@ fn build_capture_attribution_with_env(
         .session
         .clone()
         .or(env.session)
+        .or(frozen.session.clone())
         .or_else(|| current_session.as_ref().map(|session| session.id.clone()));
-    let segment_id = agent.segment.clone().or(env.segment).or_else(|| {
-        current_session
-            .as_ref()
-            .and_then(|session| session.current_segment_id.clone())
-    });
+    let segment_id = agent
+        .segment
+        .clone()
+        .or(env.segment)
+        .or(frozen.segment_id.clone())
+        .or_else(|| {
+            current_session
+                .as_ref()
+                .and_then(|session| session.current_segment_id.clone())
+        });
     let policy = if agent.no_policy {
         None
     } else {
@@ -1081,6 +1091,12 @@ fn build_capture_attribution_with_env(
             }
             if let Some(pol) = policy {
                 agent = agent.with_policy(pol);
+            }
+            if let Some(thought_level) = frozen.thought_level {
+                agent = agent.with_thought_level(thought_level);
+            }
+            if let Some(parent) = frozen.parent {
+                agent = agent.with_parent(parent);
             }
             Attribution::with_agent(principal, agent)
         }
@@ -1235,6 +1251,83 @@ mod tests {
             .expect("detected harness actor should set agent");
         assert_eq!(agent.provider, "anthropic");
         assert_eq!(agent.model, "claude-opus-4-8[1m]");
+    }
+
+    #[test]
+    fn build_attribution_freezes_cursor_and_keeps_old_pair_after_model_change() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        verbs::write_identity_cursor(
+            repo.root(),
+            &verbs::IdentityCursor {
+                provider: Some("anthropic".into()),
+                model: Some("opus".into()),
+                thought_level: Some("high".into()),
+                session: Some("sess-live".into()),
+                parent: Some("agent-1".into()),
+            },
+        )
+        .unwrap();
+        let first = build_attribution_with_env(
+            &repo,
+            &user_config_with_principal(),
+            &empty_agent_overrides(),
+            AgentEnv::default(),
+        )
+        .unwrap();
+        let first_agent = first.agent.expect("cursor should freeze agent");
+        assert_eq!(first_agent.model, "opus");
+        assert_eq!(first_agent.thought_level.as_deref(), Some("high"));
+        assert_eq!(first_agent.parent.as_deref(), Some("agent-1"));
+
+        verbs::write_identity_cursor(
+            repo.root(),
+            &verbs::IdentityCursor {
+                provider: Some("anthropic".into()),
+                model: Some("sonnet".into()),
+                thought_level: Some("low".into()),
+                session: Some("sess-live".into()),
+                parent: Some("agent-1".into()),
+            },
+        )
+        .unwrap();
+        let second = build_attribution_with_env(
+            &repo,
+            &user_config_with_principal(),
+            &empty_agent_overrides(),
+            AgentEnv::default(),
+        )
+        .unwrap();
+        let second_agent = second.agent.expect("updated cursor should freeze");
+        assert_eq!(second_agent.model, "sonnet");
+        assert_eq!(second_agent.thought_level.as_deref(), Some("low"));
+        assert_eq!(first_agent.model, "opus");
+        assert_eq!(first_agent.thought_level.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn build_attribution_omits_unpublished_cursor_fields() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        verbs::write_identity_cursor(
+            repo.root(),
+            &verbs::IdentityCursor {
+                provider: Some("anthropic".into()),
+                model: Some("opus".into()),
+                ..verbs::IdentityCursor::default()
+            },
+        )
+        .unwrap();
+        let attribution = build_attribution_with_env(
+            &repo,
+            &user_config_with_principal(),
+            &empty_agent_overrides(),
+            AgentEnv::default(),
+        )
+        .unwrap();
+        let agent = attribution.agent.expect("published model should freeze");
+        assert!(agent.thought_level.is_none());
+        assert!(agent.parent.is_none());
     }
 
     #[test]
