@@ -7324,8 +7324,8 @@ Refresh the active or named thread, or report the verification/action blocker.
   "message": "Refreshed thread 'feature/parser'",
   "blockers": [],
   "warnings": [],
-  "next_action": "heddle land",
-  "recommended_action": "heddle land",
+  "next_action": null,
+  "recommended_action": null,
   "thread": "feature/parser",
   "current_state": "hc-sqr398dvx9ay",
   "chosen_path": "refresh"

@@ -382,4 +382,5 @@ pub use workflow::{
     ready_scoped_next_action, ready_status_summary, ready_verification_preflight_blocks,
     ready_verification_status_blocks, recovery_scope_checkout, scope_action_to_repo,
     should_squash_land, state_id_matches_display, state_id_matches_op_display,
+    sync_completed_next_action, sync_is_already_current,
 };

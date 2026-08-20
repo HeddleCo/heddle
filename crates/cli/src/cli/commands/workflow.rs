@@ -16,6 +16,8 @@ use heddle_core::{
     op_targets_merge_state as core_op_targets_merge_state,
     recovery_scope_checkout as core_recovery_scope_checkout,
     should_squash_land as core_should_squash_land,
+    sync_completed_next_action as core_sync_completed_next_action,
+    sync_is_already_current as core_sync_is_already_current,
 };
 use objects::{
     lock::{RepositoryLockExt, WriteLockGuard},
@@ -30,7 +32,7 @@ use repo::{
 use serde::{Deserialize, Serialize};
 
 use super::{
-    action_line::print_next,
+    action_line::{print_next, print_next_step},
     advice::RecoveryAdvice,
     checkpoint::{GitCheckpointRequest, create_git_checkpoint},
     collapse::{CollapsePublishedRef, collapse_resolved_states},
@@ -225,24 +227,19 @@ thread_local! {
 
 pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
     let repo = cli.open_repo()?;
-    let mut thread = resolve_thread(
-        &repo,
-        args.thread.as_deref(),
-        "sync",
-        "heddle sync --thread <name>",
-    )?;
+    let mut thread = resolve_sync_thread(&repo, args.thread.as_deref())?;
 
     let stale_report = build_thread_preview_report(&repo, &mut thread, true)?;
     let stale_blockers = non_staleness_blockers(&stale_report.blockers);
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
     let import_hint = repo.git_import_guidance()?;
-    let mut output = if thread.freshness == repo::ThreadFreshness::Current {
-        let recommended_action = primary_next_action(
+    let synthesized_checkout = thread_manager(&repo).load(&thread.id)?.is_none();
+    let mut output = if sync_is_already_current(&thread, synthesized_checkout) {
+        let recommended_action = sync_completed_next_action(
             operation.as_ref(),
             remote_tracking.as_ref(),
             import_hint.as_ref(),
-            Some(&land_local_command(&thread.id)),
         );
         let trust = build_repository_verification_state(&repo);
         SyncOutput {
@@ -252,8 +249,8 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
                 message: format!("Thread '{}' is already current", thread.id),
                 blockers: vec![],
                 warnings: Vec::new(),
-                next_action: Some(recommended_action.clone()),
-                recommended_action: Some(recommended_action),
+                next_action: recommended_action.clone(),
+                recommended_action,
             },
             trust,
             thread: thread.id.clone(),
@@ -311,8 +308,8 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
         // heddle#464 r2: the old conflict branch returned here early and
         // emitted `heddle resolve --list` with no merge in progress — a dead
         // breadcrumb that failed with `no_merge_in_progress`. A previewed
-        // conflict that the 3-way merge resolves cleanly also completes here
-        // and recommends `land`.
+        // conflict that the 3-way merge resolves cleanly also completes here.
+        // Sync does not prescribe `land --thread`; landing is a separate job.
         match refresh_thread(&repo, &thread.id, cli) {
             Ok(refreshed) => {
                 update_integration_policy(
@@ -321,11 +318,10 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
                     "current",
                     "thread refreshed cleanly",
                 )?;
-                let recommended_action = primary_next_action(
+                let recommended_action = sync_completed_next_action(
                     operation.as_ref(),
                     remote_tracking.as_ref(),
                     import_hint.as_ref(),
-                    Some(&land_local_command(&refreshed.id)),
                 );
                 let trust = build_repository_verification_state(&repo);
                 SyncOutput {
@@ -335,8 +331,8 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
                         message: format!("Refreshed thread '{}'", refreshed.id),
                         blockers: vec![],
                         warnings: Vec::new(),
-                        next_action: Some(recommended_action.clone()),
-                        recommended_action: Some(recommended_action),
+                        next_action: recommended_action.clone(),
+                        recommended_action,
                     },
                     trust,
                     thread: refreshed.id.clone(),
@@ -1444,6 +1440,40 @@ fn resolve_thread(
     }
 }
 
+/// Resolve the thread `sync` refreshes onto its target.
+///
+/// Omit `--thread` to use the current checkout, including a synthesized
+/// default thread such as `main` (ref from `seed_default_thread`, no
+/// ThreadManager record). An explicit `--thread` always goes through
+/// `load_thread` so unmanaged imported refs keep their typed advice.
+fn resolve_sync_thread(repo: &Repository, thread: Option<&str>) -> Result<Thread> {
+    match thread {
+        Some(name) => load_thread(repo, name),
+        None => current_thread(repo)?.ok_or_else(|| {
+            anyhow!(RecoveryAdvice::no_current_thread(
+                "sync",
+                Some("--thread"),
+                "heddle sync --thread <name>",
+            ))
+        }),
+    }
+}
+
+fn sync_is_already_current(thread: &Thread, synthesized_checkout: bool) -> bool {
+    core_sync_is_already_current(
+        thread.freshness == repo::ThreadFreshness::Current,
+        synthesized_checkout,
+    )
+}
+
+fn sync_completed_next_action(
+    operation: Option<&repo::RepositoryOperationStatus>,
+    remote_tracking: Option<&repo::GitRemoteTrackingStatus>,
+    import_hint: Option<&repo::GitImportGuidance>,
+) -> Option<String> {
+    core_sync_completed_next_action(operation, remote_tracking, import_hint)
+}
+
 /// Resolve the thread `land` integrates.
 ///
 /// `--thread` wins. Otherwise the subject is the current thread of the
@@ -2143,7 +2173,26 @@ fn write_sync_output(cli: &Cli, repo: &Repository, output: &SyncOutput) -> Resul
             NextActionValidationContext::new(&["sync"], repo.capability()),
         )?;
     } else {
-        println!("{}", serde_json::to_string_pretty(output)?);
+        let message = match output.operator.status.as_str() {
+            "blocked" => style::warn(&output.operator.message),
+            "current" | "refreshed" => style::accent(&output.operator.message),
+            _ => output.operator.message.clone(),
+        };
+        println!("{message}");
+        if !output.operator.blockers.is_empty() {
+            println!("{}", style::warn("Blocked by"));
+            for blocker in &output.operator.blockers {
+                println!("  - {}", style::warn(blocker));
+            }
+        }
+        if let Some(next) = output
+            .operator
+            .recommended_action
+            .as_ref()
+            .or(output.operator.next_action.as_ref())
+        {
+            print_next_step(next);
+        }
     }
     Ok(())
 }
@@ -3692,6 +3741,32 @@ mod tests {
     // isolated thread (execution_path differs from the current checkout) scopes;
     // the in-thread case (paths equal) and a worktree-less thread (empty path)
     // do not.
+    #[test]
+    fn sync_treats_synthesized_checkout_as_already_current() {
+        let mut thread = thread_with_execution_path(PathBuf::from("/tmp/main"));
+        thread.id = "main".to_string();
+        thread.thread = "main".to_string();
+        thread.target_thread = None;
+        thread.freshness = repo::ThreadFreshness::Unknown;
+        assert!(sync_is_already_current(&thread, true));
+        assert!(
+            !sync_is_already_current(&thread, false),
+            "a persisted managed thread with no target is not a no-op"
+        );
+
+        thread.target_thread = Some("main".to_string());
+        thread.freshness = repo::ThreadFreshness::Stale;
+        assert!(!sync_is_already_current(&thread, false));
+
+        thread.freshness = repo::ThreadFreshness::Current;
+        assert!(sync_is_already_current(&thread, false));
+    }
+
+    #[test]
+    fn sync_completed_next_action_is_not_land_thread() {
+        assert_eq!(sync_completed_next_action(None, None, None), None);
+    }
+
     #[test]
     fn recovery_scope_checkout_distinguishes_isolated_from_in_thread() {
         let isolated = thread_with_execution_path(PathBuf::from("/work/threads/agent-thread"));
