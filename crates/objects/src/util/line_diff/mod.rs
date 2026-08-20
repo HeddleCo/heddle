@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Scratch-budgeted equal-run LCS used by native blame and Git-overlay blame.
 
+mod compact;
 mod myers;
 mod myers_search;
 mod scan;

@@ -13,7 +13,14 @@ pub(super) struct ConquerJob {
     pub old_hi: u32,
     pub new_lo: u32,
     pub new_hi: u32,
+    pub kind: u8,
+    pub eq_old: u32,
+    pub eq_new: u32,
+    pub eq_len: u32,
 }
+
+pub(super) const JOB_RANGE: u8 = 0;
+pub(super) const JOB_EQUAL: u8 = 1;
 
 pub fn max_scratch_align() -> usize {
     align_of::<LineOff>()

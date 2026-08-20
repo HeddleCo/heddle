@@ -90,11 +90,11 @@ fn ba_vs_aa_matches_similar_leftmost_new() {
     let new = "a\na\n";
     let runs = collect_runs(old, new, LineDiffLimits::unlimited()).unwrap();
     let pairs = expand_runs(&runs);
-    assert_eq!(pairs, vec![(1, 0)]);
-
     let old_lines = split_text_lines(old.as_bytes()).unwrap();
     let new_lines = split_text_lines(new.as_bytes()).unwrap();
-    assert_eq!(pairs, similar_pairs(&old_lines, &new_lines));
+    let similar = similar_pairs(&old_lines, &new_lines);
+    assert_eq!(pairs, similar, "ours={pairs:?} similar={similar:?}");
+    assert_eq!(pairs, vec![(1, 0)]);
 }
 
 #[test]
