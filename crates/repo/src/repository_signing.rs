@@ -418,7 +418,7 @@ mod tests {
         let (_temp, repo) = setup_repo();
         let tree = Tree::new();
         let tree_hash = repo.store().put_tree(&tree).expect("put tree");
-        let mut state = objects::object::State::new(
+        let state = objects::object::State::new(
             tree_hash,
             vec![],
             Attribution::with_agent(
