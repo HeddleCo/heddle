@@ -7,13 +7,13 @@ use clap::Command;
 
 use crate::cli::INIT_VERB;
 
-/// Canonical roots from the accepted whole-CLI consolidation decision, with
-/// the maintainer overrides applied.
+/// Closed-world roots the current parser may expose. This is not the
+/// heddle#473 destination (~23 everyday verbs; umbrella nouns do not
+/// count as one; no `help advanced`).
 ///
-/// `switch` and `clean` are reserved here even though the current parser does
-/// not expose them at the root. The Phase 5 gate prevents an unreviewed root
-/// from appearing; it does not silently fold those separately audited surface
-/// regressions into this phase.
+/// `switch` and `clean` are reserved here even though the current parser
+/// does not expose them at the root. Unreviewed roots still fail this
+/// gate; reserved names stay listed so they cannot appear silently.
 pub const CANONICAL_ROOT_COMMANDS: &[&str] = &[
     "abort",
     "adopt",

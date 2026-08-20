@@ -3143,6 +3143,9 @@ catalog-wide schema coverage.
 
 The command-contract coverage portion of this sample is generated from
 runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
+These counts describe the live parser catalog today. They are not the
+heddle#473 destination (~23 everyday verbs; umbrella nouns do not count
+as one; no `help advanced`).
 
 ```json
 {
