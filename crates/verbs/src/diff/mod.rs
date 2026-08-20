@@ -201,7 +201,7 @@ pub fn diff(ctx: &ExecutionContext, options: DiffOptions) -> Result<DiffReport> 
     output.worktree_mode = options.to.is_none();
     let mut output = finalize_diff_report(output, &options)?;
     if let Some(state) = context_state.as_ref() {
-        attach_show_context(repo, &mut output, state, options.paths.is_empty())?;
+        attach_show_context(repo, &mut output, state, &options.paths)?;
     }
     Ok(output)
 }
@@ -358,7 +358,7 @@ pub fn diff_worktree_status(
         && let Some(repo) = repo
         && let Some(state) = worktree_context_state(repo)?
     {
-        attach_show_context(repo, &mut output, &state, options.paths.is_empty())?;
+        attach_show_context(repo, &mut output, &state, &options.paths)?;
     }
     Ok(output)
 }

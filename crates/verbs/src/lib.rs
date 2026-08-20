@@ -270,11 +270,10 @@ pub use revert_plan::{
 pub use save::{
     CaptureAgentReport, CaptureAttribution, CaptureDiagnostics, CaptureOptions,
     CapturePrincipalReport, CaptureProfile, CaptureReport, CommitGitIndexPlan, GitScope, SavePlan,
-    SaveReport, SaveVerb, capture,
-    commit_next_action_from_trust, commit_scope_text, complete_current_thread_manual_resolution,
-    execute_save, plan_commit_git_index, plan_commit_git_index_only, plan_creates_new_state,
-    plan_git_scope, plan_writes_git_checkpoint, recover_published_git_checkpoint,
-    split_git_extra_paths, staged_commit_summary, tree_leaf_name,
+    SaveReport, SaveVerb, capture, commit_next_action_from_trust, commit_scope_text,
+    complete_current_thread_manual_resolution, execute_save, plan_commit_git_index,
+    plan_commit_git_index_only, plan_creates_new_state, plan_git_scope, plan_writes_git_checkpoint,
+    recover_published_git_checkpoint, split_git_extra_paths, staged_commit_summary, tree_leaf_name,
 };
 pub use semantic_plan::{
     HOT_EVENT_KIND_TOKENS, HotEventKindToken, hot_event_kind_label, human_event_kind,

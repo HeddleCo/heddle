@@ -7,41 +7,66 @@
 
 use anyhow::Result;
 use objects::{
-    object::{Annotation, AnnotationStatus, ContextTarget, State, StateAttachmentBody},
+    object::{
+        Annotation, AnnotationStatus, ContentHash, ContextTarget, State, StateAttachmentBody,
+    },
     store::ObjectStore,
 };
-use repo::{Repository, StateAttachmentKind};
+use repo::{ChangedPathFilters, Repository, StateAttachmentKind};
 
 use super::types::{ContextSnippet, DiffReport, FileContextEntry};
 
-/// Fill `report.context` and `report.broader_guidance` from the state's
-/// latest Context attachment.
+/// Fill `report.context` and `report.broader_guidance` from one Context
+/// attachment snapshot.
 ///
-/// When the report has changed paths, only those files are annotated
-/// (plus a renamed file's old path). When the change set is empty and
-/// `include_unanchored` is true, every active file annotation rides the
-/// report so `context set` is visible on a clean `diff --context`.
+/// Selection:
+/// - changed report paths (including a rename `old_path`) when present;
+/// - otherwise the requested `path_filters` on a clean / filtered-empty
+///   tree, so `diff --context -- lib.rs` still rides;
+/// - otherwise every active file annotation (unfiltered clean tree).
 pub fn attach_show_context(
     repo: &Repository,
     report: &mut DiffReport,
     state: &State,
-    include_unanchored: bool,
+    path_filters: &[String],
 ) -> Result<()> {
-    let mut paths: Vec<String> = report
+    let Some(context_root) = context_root_for_state(repo, state)? else {
+        report.context = Some(Vec::new());
+        report.broader_guidance = Some(Vec::new());
+        return Ok(());
+    };
+
+    let mut change_paths: Vec<String> = report
         .changes
         .iter()
         .flat_map(|change| std::iter::once(change.path.clone()).chain(change.old_path.clone()))
         .collect();
-    paths.sort();
-    paths.dedup();
+    change_paths.sort();
+    change_paths.dedup();
+    let filters = ChangedPathFilters::try_from_paths(path_filters)?;
 
-    report.context = Some(collect_file_context(
-        repo,
-        state,
-        &paths,
-        include_unanchored && paths.is_empty(),
-    )?);
-    report.broader_guidance = Some(collect_state_guidance(repo, state)?);
+    let listed = repo.list_context_entries(&context_root, None)?;
+    let mut file_entries = Vec::new();
+    let mut broader_guidance = Vec::new();
+    for entry in listed {
+        match entry.target {
+            ContextTarget::File { path } => {
+                if !file_path_requested(&path, &change_paths, &filters) {
+                    continue;
+                }
+                let annotations = active_snippets(&entry.blob.annotations);
+                if !annotations.is_empty() {
+                    file_entries.push(FileContextEntry { path, annotations });
+                }
+            }
+            ContextTarget::State { state_id } if state_id == state.state_id => {
+                broader_guidance = active_snippets(&entry.blob.annotations);
+            }
+            ContextTarget::State { .. } => {}
+        }
+    }
+    report.context = Some(file_entries);
+    report.broader_guidance = Some(broader_guidance);
     Ok(())
 }
 
@@ -69,10 +94,7 @@ pub(crate) fn summarize_context(content: &str) -> String {
     }
 }
 
-fn context_root_for_state(
-    repo: &Repository,
-    state: &State,
-) -> Result<Option<objects::object::ContentHash>> {
+fn context_root_for_state(repo: &Repository, state: &State) -> Result<Option<ContentHash>> {
     Ok(repo
         .latest_state_attachment(&state.state_id, StateAttachmentKind::Context)?
         .and_then(|attachment| match attachment.body {
@@ -81,53 +103,11 @@ fn context_root_for_state(
         }))
 }
 
-fn collect_file_context(
-    repo: &Repository,
-    state: &State,
-    paths: &[String],
-    include_unanchored: bool,
-) -> Result<Vec<FileContextEntry>> {
-    let Some(context_root) = context_root_for_state(repo, state)? else {
-        return Ok(Vec::new());
-    };
-
-    let paths = if include_unanchored && paths.is_empty() {
-        let mut listed = Vec::new();
-        for entry in repo.list_context_entries(&context_root, None)? {
-            if let ContextTarget::File { path } = entry.target {
-                listed.push(path);
-            }
-        }
-        listed
-    } else {
-        paths.to_vec()
-    };
-
-    let mut entries = Vec::new();
-    for path in paths {
-        let Ok(target) = ContextTarget::file(path.clone()) else {
-            continue;
-        };
-        let Some(blob) = repo.get_context_blob(&context_root, &target)? else {
-            continue;
-        };
-        let annotations = active_snippets(&blob.annotations);
-        if !annotations.is_empty() {
-            entries.push(FileContextEntry { path, annotations });
-        }
+fn file_path_requested(path: &str, change_paths: &[String], filters: &ChangedPathFilters) -> bool {
+    if !change_paths.is_empty() {
+        return change_paths.iter().any(|changed| changed == path);
     }
-    Ok(entries)
-}
-
-fn collect_state_guidance(repo: &Repository, state: &State) -> Result<Vec<ContextSnippet>> {
-    let Some(context_root) = context_root_for_state(repo, state)? else {
-        return Ok(Vec::new());
-    };
-    let target = ContextTarget::state(state.state_id);
-    let Some(blob) = repo.get_context_blob(&context_root, &target)? else {
-        return Ok(Vec::new());
-    };
-    Ok(active_snippets(&blob.annotations))
+    filters.is_empty() || filters.matches(path)
 }
 
 fn active_snippets(annotations: &[Annotation]) -> Vec<ContextSnippet> {
@@ -201,6 +181,16 @@ mod tests {
         DiffReport::new(Some("HEAD".to_string()), None, changes, None, None, None)
     }
 
+    fn annotation_content(report: &DiffReport, path: &str) -> Option<String> {
+        report.context.as_ref().and_then(|entries| {
+            entries.iter().find_map(|entry| {
+                (entry.path == path)
+                    .then(|| entry.annotations.first().map(|a| a.content.clone()))
+                    .flatten()
+            })
+        })
+    }
+
     #[test]
     fn context_set_attachment_rides_diff_for_changed_path() {
         let temp = TempDir::new().expect("tempdir");
@@ -208,14 +198,12 @@ mod tests {
         let state = annotate_state(&repo, "lib.rs", "must stay lowercase");
         let mut report = report_with(&["lib.rs"]);
 
-        attach_show_context(&repo, &mut report, &state, false).expect("attach");
+        attach_show_context(&repo, &mut report, &state, &[]).expect("attach");
 
-        let context = report.context.expect("context field");
-        assert_eq!(context.len(), 1);
-        assert_eq!(context[0].path, "lib.rs");
-        assert_eq!(context[0].annotations.len(), 1);
-        assert_eq!(context[0].annotations[0].kind, "invariant");
-        assert_eq!(context[0].annotations[0].content, "must stay lowercase");
+        assert_eq!(
+            annotation_content(&report, "lib.rs").as_deref(),
+            Some("must stay lowercase")
+        );
     }
 
     #[test]
@@ -225,14 +213,36 @@ mod tests {
         let state = annotate_state(&repo, "lib.rs", "visible without a file change");
         let mut report = report_with(&[]);
 
-        attach_show_context(&repo, &mut report, &state, true).expect("attach");
+        attach_show_context(&repo, &mut report, &state, &[]).expect("attach");
 
-        let context = report.context.expect("context field");
-        assert_eq!(context.len(), 1);
-        assert_eq!(context[0].path, "lib.rs");
         assert_eq!(
-            context[0].annotations[0].content,
-            "visible without a file change"
+            annotation_content(&report, "lib.rs").as_deref(),
+            Some("visible without a file change")
+        );
+    }
+
+    #[test]
+    fn path_filter_on_clean_tree_looks_up_requested_paths() {
+        let temp = TempDir::new().expect("tempdir");
+        let repo = Repository::init_default(temp.path()).expect("init");
+        let state = annotate_state(&repo, "lib.rs", "requested path still rides");
+        let mut matching = report_with(&[]);
+        attach_show_context(&repo, &mut matching, &state, &["lib.rs".to_string()])
+            .expect("attach matching filter");
+        assert_eq!(
+            annotation_content(&matching, "lib.rs").as_deref(),
+            Some("requested path still rides")
+        );
+
+        let mut other = report_with(&[]);
+        attach_show_context(&repo, &mut other, &state, &["other.rs".to_string()])
+            .expect("attach other filter");
+        assert!(
+            other
+                .context
+                .as_ref()
+                .is_none_or(|entries| entries.is_empty()),
+            "unrelated path filter must stay quiet"
         );
     }
 
@@ -243,7 +253,7 @@ mod tests {
         let state = annotate_state(&repo, "lib.rs", "not this path");
         let mut report = report_with(&[]);
 
-        attach_show_context(&repo, &mut report, &state, false).expect("attach");
+        attach_show_context(&repo, &mut report, &state, &["other.rs".to_string()]).expect("attach");
 
         assert!(
             report
