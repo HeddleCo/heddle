@@ -77,9 +77,16 @@ const OPLOG_FALLBACK_SCAN_WINDOW: usize = 100_000;
 pub fn query(ctx: &ExecutionContext, req: QueryRequest) -> Result<QueryReport> {
     let repo = ctx.require_repo()?;
     let q = build_query(&req)?;
-    let mut hits = query_combined(repo.heddle_dir(), &q)?;
+    let mut scan = q.clone();
+    scan.actor = None;
+    scan.limit = None;
+    let mut hits = query_combined(repo.heddle_dir(), &scan)?;
     for hit in &mut hits {
         fill_actor_email_from_state(repo, hit)?;
+    }
+    hits.retain(|hit| hit.matches(&q));
+    if let Some(limit) = q.limit {
+        hits.truncate(limit);
     }
     Ok(QueryReport {
         output_kind: "query",
@@ -389,9 +396,10 @@ mod tests {
         )
         .unwrap();
         assert!(
-            report.hits.iter().any(|hit| {
-                hit.verb == "snapshot" && hit.actor_email == "heddle@example.com"
-            }),
+            report
+                .hits
+                .iter()
+                .any(|hit| hit.verb == "snapshot" && hit.actor_email == "heddle@example.com"),
             "actor filter must match the backfilled capture: {report:?}"
         );
     }
