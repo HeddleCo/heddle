@@ -1652,13 +1652,13 @@ mod tests {
         ActorInfo, ChangesInfo, PlainGitStatusReport, RepositoryVerificationState,
         repository_mode_label,
     };
-    use repo::{AgentUsageSummary, Repository};
+    use repo::{AgentUsageSummary, Repository, ThreadMode};
     use serde_json::Value;
     use tempfile::TempDir;
 
     use super::{
         MaterializedThreadInfo, assess_materialized_threads, build_status_output,
-        render_status_materialized,
+        render_status_materialized, status_workspace_label,
     };
 
     const AGENT_CONTEXT_STATUS_KEYS: &[&str] = &[
@@ -1706,6 +1706,52 @@ mod tests {
         repo.materialize_thread("main", &dest, &repo::AudienceTier::Internal)
             .unwrap();
         (repo_dir, dest_holder, repo)
+    }
+
+    #[test]
+    fn status_workspace_label_pairs_native_modes_without_main() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+        let cli = status_cli(repo_dir.path());
+        let mut output = build_status_output(&cli, false).expect("build status output");
+
+        output.repository_capability = "native-heddle".into();
+        output.repository_context = None;
+        assert_eq!(
+            status_workspace_label(&output, &ThreadMode::Materialized),
+            "attached checkout"
+        );
+        assert_eq!(
+            status_workspace_label(&output, &ThreadMode::Solid),
+            "isolated checkout"
+        );
+        assert_eq!(
+            status_workspace_label(&output, &ThreadMode::Virtualized),
+            "virtual checkout"
+        );
+        assert!(
+            !status_workspace_label(&output, &ThreadMode::Materialized).contains("main"),
+            "native materialized label must not hard-code main"
+        );
+
+        output.repository_capability = "git-overlay".into();
+        assert_eq!(
+            status_workspace_label(&output, &ThreadMode::Materialized),
+            "Git branch checkout"
+        );
+
+        output.repository_context = Some(heddle_core::RepositoryContextInfo {
+            kind: "git-overlay-isolated-checkout".into(),
+            parent_repository: None,
+            target_thread: None,
+            parent_thread: None,
+        });
+        assert_eq!(
+            status_workspace_label(&output, &ThreadMode::Materialized),
+            "Git-overlay isolated checkout"
+        );
     }
 
     #[test]

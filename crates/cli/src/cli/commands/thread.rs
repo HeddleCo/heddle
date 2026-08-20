@@ -2901,6 +2901,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn thread_workspace_label_pairs_modes_without_main() {
+        assert_eq!(
+            thread_workspace_label(&ThreadMode::Materialized),
+            "attached checkout"
+        );
+        assert_eq!(
+            thread_workspace_label(&ThreadMode::Solid),
+            "isolated checkout"
+        );
+        assert_eq!(
+            thread_workspace_label(&ThreadMode::Virtualized),
+            "virtual checkout"
+        );
+        assert!(
+            !thread_workspace_label(&ThreadMode::Materialized).contains("main"),
+            "native materialized label must not hard-code main"
+        );
+    }
+
+    #[test]
     fn empty_execution_paths_are_suppressed() {
         assert_eq!(display_path_string(&PathBuf::new()), None);
         assert_eq!(non_empty_string(Some("")), None);
