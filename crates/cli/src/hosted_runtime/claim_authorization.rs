@@ -264,7 +264,9 @@ pub(crate) fn promote_consent_message(
 ///
 /// Rejects when the bound `expiresAt` has elapsed, the pair is not the same
 /// issuance, or either signature fails over the counted statement that includes
-/// the claim-state id and expiry.
+/// the claim-state id and expiry. This is the weft-matching check; the CLI
+/// only issues consents.
+#[cfg(test)]
 pub(crate) fn verify_promotion_consents(
     agent_public_key: &[u8],
     handle: &str,
@@ -391,6 +393,7 @@ struct ConsentBinding<'a> {
     expires_at: [u8; 8],
 }
 
+#[cfg(test)]
 fn verify_consent_signature(
     statement: &[u8],
     agent_public_key: &[u8],
