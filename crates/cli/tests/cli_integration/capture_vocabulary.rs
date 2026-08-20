@@ -135,6 +135,37 @@ fn query_verb_capture_finds_captures_case_insensitively() {
 }
 
 #[test]
+fn query_actor_filter_returns_backfilled_capture() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("note.txt"), "query actor slice\n").unwrap();
+    heddle(&["capture", "-m", "probe history"], Some(temp.path())).unwrap();
+
+    let json = heddle(
+        &[
+            "query",
+            "--actor",
+            "heddle@example.com",
+            "--verb",
+            "capture",
+            "--output",
+            "json",
+        ],
+        Some(temp.path()),
+    )
+    .unwrap_or_else(|err| panic!("query --actor should find the backfilled capture: {err}"));
+    let report: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(report["output_kind"], "query");
+    let hits = report["hits"].as_array().expect("hits array");
+    assert!(
+        hits.iter().any(|hit| {
+            hit["verb"] == "snapshot" && hit["actor_email"].as_str() == Some("heddle@example.com")
+        }),
+        "filtered query must return the capture after actor backfill: {report}"
+    );
+}
+
+#[test]
 fn query_unknown_verb_errors_instead_of_empty_search() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
