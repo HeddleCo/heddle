@@ -2168,6 +2168,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
         )),
     ),
     entry(
+        &["integration", "stamp"],
+        hidden(surface(
+            opaque_schemas(METADATA_MUTATION_NO_OP_ID, &["integration stamp"]),
+            "admin",
+        )),
+    ),
+    entry(
         &["log"],
         front_door(
             json_discriminators(
