@@ -2307,6 +2307,7 @@ dependencies = [
  "anyhow",
  "clap",
  "heddle-api 0.10.0",
+ "heddle-cli-macro",
  "heddle-cli-shared",
  "heddle-objects",
  "heddle-repo",
@@ -2320,6 +2321,7 @@ dependencies = [
  "anyhow",
  "clap",
  "heddle-cli-args",
+ "heddle-cli-macro",
  "heddle-cli-render",
  "heddle-core",
  "heddle-git-projection",
@@ -2332,6 +2334,15 @@ dependencies = [
  "sley",
  "tempfile",
  "tracing",
+]
+
+[[package]]
+name = "heddle-cli-macro"
+version = "0.12.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

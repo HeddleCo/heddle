@@ -5,7 +5,8 @@
 use super::commands_git_projection::SyncCommands;
 
 /// Arguments for the `init` command.
-#[derive(Clone, Debug, clap::Args)]
+#[derive(Clone, Debug, clap::Args, heddle_cli_macro::HeddleVerbArgs)]
+#[heddle_verb("init")]
 #[command(after_help = "\
 Examples:
   heddle init                                                    # initialize here; existing Git becomes Git Overlay

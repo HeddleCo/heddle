@@ -7,8 +7,11 @@ on.
 
 ## Runtime introspection
 
-Schemas in this document are mirrored at runtime by
-`crates/cli-contract/src/cli/commands/schemas.rs`. Generate the canonical JSON
+Schemas in this document are registered at runtime by
+`crates/cli-contract/src/cli/commands/schemas.rs`. Migrated verbs such as
+`init` derive the schema from the real output struct (see
+[`docs/cli-macro.md`](cli-macro.md)); remaining verbs still use a
+hand-written mirror. Generate the canonical JSON
 Schema for any verb with:
 
     heddle schemas                    # list registered schema verbs
@@ -139,6 +142,10 @@ metadata only; it does not import Git history or write Git-tracked files.
   "heddle_initialized": true,
   "installed_heddleignore": false,
   "principal_configured": false,
+  "principal_status": "not_configured",
+  "principal_source": null,
+  "principal": null,
+  "principal_recommended_action": "heddle init --principal-name <name> --principal-email <email>",
   "side_effects": [
     "created Heddle sidecar for the existing Git repository",
     "updated .git/info/exclude for Heddle metadata",
@@ -159,6 +166,10 @@ metadata only; it does not import Git history or write Git-tracked files.
 | `repository_mode` | string | required | Repository capability after init, e.g. `git-overlay` or native Heddle storage. |
 | `git_detected`, `heddle_initialized` | bool | required | Whether init detected an existing Git repo, and whether Heddle metadata is now present. |
 | `installed_heddleignore`, `principal_configured` | bool | required | Side effects outside `.heddle`, if any. `installed_heddleignore` is currently false; init does not install ignore-policy files. Git-overlay init uses local Git excludes only for Heddle metadata. |
+| `principal_status` | string | required | `configured` or `not_configured`. |
+| `principal_source` | string \| null | always present | Where the principal was resolved from, or `null` when none is configured. |
+| `principal` | object \| null | always present | `{ name, email }` when configured; otherwise `null`. |
+| `principal_recommended_action` | string \| null | always present | Command to set a principal when none is configured. |
 | `side_effects` | array<string> | required | Human-readable, machine-preserved list of what init changed or intentionally left untouched. |
 | `message` | string | required | Human summary. |
 | `next_action`, `recommended_action` | string \| null | required | Primary verification-guided next command. Git Overlay init proceeds directly to the normal save loop. |
