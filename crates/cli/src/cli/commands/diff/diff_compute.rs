@@ -270,7 +270,7 @@ fn authority_worktree_diff(
     if options.show_context
         && let Some(state) = worktree_context_state(repo)?
     {
-        attach_show_context(repo, &mut report, &state, options.paths.is_empty())?;
+        attach_show_context(repo, &mut report, &state, &options.paths)?;
     }
     Ok(report)
 }

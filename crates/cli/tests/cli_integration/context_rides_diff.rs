@@ -131,3 +131,49 @@ fn context_set_rides_clean_native_diff() {
 
     assert_annotation_rides(dir, "lib.rs", "visible on a clean tree");
 }
+
+#[test]
+fn context_set_rides_path_filtered_clean_diff() {
+    let temp = TempDir::new().expect("tempdir");
+    let dir = temp.path();
+    heddle(&["init"], Some(dir)).expect("init");
+    std::fs::write(dir.join("lib.rs"), "fn seed() {}\n").expect("write lib.rs");
+    std::fs::write(dir.join("other.rs"), "fn other() {}\n").expect("write other.rs");
+    heddle(&["capture", "-m", "seed"], Some(dir)).expect("capture");
+    heddle(
+        &[
+            "context",
+            "set",
+            "--path",
+            "lib.rs",
+            "--kind",
+            "rationale",
+            "-m",
+            "requested path still rides",
+        ],
+        Some(dir),
+    )
+    .expect("context set");
+
+    let matching = heddle(&["diff", "--context", "--", "lib.rs"], Some(dir))
+        .unwrap_or_else(|err| panic!("diff --context -- lib.rs should succeed: {err}"));
+    assert!(
+        matching.contains("Applicable Context:"),
+        "filtered clean diff must render context for the requested path:\n{matching}"
+    );
+    assert!(
+        matching.contains("requested path still rides"),
+        "filtered clean diff must show the lib.rs annotation:\n{matching}"
+    );
+
+    let other = heddle(&["diff", "--context", "--", "other.rs"], Some(dir))
+        .unwrap_or_else(|err| panic!("diff --context -- other.rs should succeed: {err}"));
+    assert!(
+        !other.contains("requested path still rides"),
+        "unrelated path filter must stay quiet:\n{other}"
+    );
+    assert!(
+        !other.contains("Applicable Context:"),
+        "unrelated path filter must not render a context header:\n{other}"
+    );
+}
