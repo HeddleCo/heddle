@@ -48,6 +48,10 @@ name = "heddle-oplog"
 release = true
 
 [[package]]
+name = "heddle-semantic-recovery"
+release = true
+
+[[package]]
 name = "heddle-repo"
 release = true
 
@@ -85,6 +89,14 @@ release = true
 
 [[package]]
 name = "heddle-daemon"
+release = true
+
+[[package]]
+name = "heddle-ci-config"
+release = true
+
+[[package]]
+name = "heddle-ci-engine"
 release = true
 
 [[package]]

@@ -88,6 +88,7 @@ env:
     heddle-refs
     heddle-merge
     heddle-semantic
+    heddle-semantic-recovery
     heddle-state-review
     heddle-wire
     heddle-repo
@@ -98,6 +99,8 @@ env:
     heddle-core
     heddle-daemon
     heddle-mount
+    heddle-ci-config
+    heddle-ci-engine
     heddle-cli-args
     heddle-cli-render
     heddle-cli-contract
@@ -229,15 +232,17 @@ jobs:
               404)
                 # Crate-or-version not found. Could be: (a) this crate
                 # is brand-new (never published), or (b) only this
-                # version is new. We don't need to distinguish — both
-                # are "publish" actions for us. We still check the
-                # crate-level endpoint to detect downgrades.
+                # version is new. Both are publish actions. The
+                # crate-level probe distinguishes them so first-time
+                # uploads can be spaced for crates.io's 1-per-10-minutes
+                # new-crate quota, and so we can refuse downgrades.
                 latest_url="https://crates.io/api/v1/crates/${crate}"
                 latest_status=$(curl -sS -o /tmp/latest.json -w '%{http_code}' \
                                   -H 'User-Agent: heddle-publish-workflow (https://github.com/HeddleCo/heddle)' \
                                   --max-time 30 \
                                   --retry 3 --retry-delay 4 --retry-connrefused \
                                   "$latest_url" || echo 'CURL_FAIL')
+                first_publish=false
                 if [[ "$latest_status" == "200" ]]; then
                   # Downgrade guard. `jq // empty` falls through both
                   # the stable and total max fields; if both are
@@ -253,13 +258,18 @@ jobs:
                       exit 1
                     fi
                   fi
-                elif [[ "$latest_status" != "404" ]]; then
+                elif [[ "$latest_status" == "404" ]]; then
+                  # Brand-new crate. crates.io allows one new crate per
+                  # 10 minutes; the publish job uses this flag to space
+                  # first-time uploads instead of treating a 429 as fatal.
+                  first_publish=true
+                else
                   echo "::error::crates.io lookup for ${crate} returned ${latest_status}"
                   exit 1
                 fi
-                echo "publish: ${crate}@${local_version}"
-                to_publish=$(jq -c --arg c "$crate" --arg v "$local_version" \
-                  '. + [{crate: $c, version: $v}]' <<<"$to_publish")
+                echo "publish: ${crate}@${local_version}${first_publish:+ (first publish)}"
+                to_publish=$(jq -c --arg c "$crate" --arg v "$local_version" --argjson first "$first_publish" \
+                  '. + [{crate: $c, version: $v, first_publish: $first}]' <<<"$to_publish")
                 had_action=1
                 ;;
               *)
@@ -293,7 +303,7 @@ jobs:
     # merge to main.
     if: needs.validate-publish.outputs.has_publishes == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     environment: release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -330,14 +340,19 @@ jobs:
           # Pretty-print the publish plan up front so the workflow log
           # has a clean record before any side effects.
           echo "Publish plan:"
-          jq -r '.[] | "  - \(.crate)@\(.version)"' <<<"$TO_PUBLISH"
+          jq -r '.[] | "  - \(.crate)@\(.version)\(if .first_publish then " (first publish)" else "" end)"' <<<"$TO_PUBLISH"
 
           published_summary=()
+          mapfile -t publish_lines < <(jq -r '.[] | "\(.crate)\t\(.version)\t\(.first_publish // false)"' <<<"$TO_PUBLISH")
+          publish_count=${#publish_lines[@]}
+          publish_idx=0
 
-          while read -r line; do
+          for line in "${publish_lines[@]}"; do
             [[ -z "$line" ]] && continue
             crate=$(echo "$line" | cut -f1)
             version=$(echo "$line" | cut -f2)
+            first_publish=$(echo "$line" | cut -f3)
+            publish_idx=$((publish_idx+1))
 
             attempt=0
             max_attempts=3
@@ -371,6 +386,20 @@ jobs:
                 break
               fi
 
+              # crates.io returns 429 for the new-crate quota (1 per
+              # 10 minutes) and the existing-crate quota (1 per minute).
+              # Those are transient; fail-closed only after retries.
+              if echo "$out" | grep -qiE '429|rate.?limit|too many requests'; then
+                if (( attempt >= max_attempts )); then
+                  echo "::error::${crate}@${version} failed after ${max_attempts} rate-limit retries"
+                  exit 1
+                fi
+                sleep_for=600
+                echo "=== crates.io rate limit, sleeping ${sleep_for}s before retry ==="
+                sleep "$sleep_for"
+                continue
+              fi
+
               # Retry policy: 5xx-shaped errors (status codes,
               # connection drops, timeouts) get exponential backoff.
               # Anything else fails loud — we don't want to retry
@@ -392,14 +421,19 @@ jobs:
               exit 1
             done
 
-            # crates.io's index propagates within seconds for the
-            # sparse index, but the registry still has a brief window
-            # where a freshly-published crate isn't visible to the
-            # NEXT `cargo publish` that depends on it. A 30s pause
-            # between publishes keeps the dep chain happy without
-            # adding meaningful wall-clock cost on small bumps.
-            sleep 30
-          done < <(jq -r '.[] | "\(.crate)\t\(.version)"' <<<"$TO_PUBLISH")
+            # Space publishes to match crates.io quotas and give the
+            # sparse index a moment to see the crate the next publish
+            # may depend on. Skip the pause after the last crate.
+            if (( publish_idx < publish_count )); then
+              if [[ "$first_publish" == "true" ]]; then
+                sleep_for=600
+              else
+                sleep_for=60
+              fi
+              echo "=== waiting ${sleep_for}s before next publish ==="
+              sleep "$sleep_for"
+            fi
+          done
 
           # GitHub Actions step summary — a tidy receipt of what
           # shipped. Visible on the workflow run page; surviving even
