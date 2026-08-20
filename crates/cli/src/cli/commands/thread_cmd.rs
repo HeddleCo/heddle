@@ -963,7 +963,7 @@ fn thread_refresh_checkout_unavailable_advice(
         "thread_refresh_checkout_unavailable",
         format!("Thread '{thread_id}' checkout could not be opened"),
         format!(
-            "Inspect the recorded checkout with `{inspect_command}`. If this is a branch-like thread, run `{switch_command}` from the main checkout before refreshing."
+            "Inspect the recorded checkout with `{inspect_command}`. If this is a branch-like thread, run `{switch_command}` from the attached checkout before refreshing."
         ),
         format!(
             "recorded checkout path '{}' is unavailable: {error}",
@@ -2291,6 +2291,22 @@ mod cleanup_tests {
                     .iter()
                     .all(|command| !command.contains("repair git")),
             "unmanaged-thread recovery must stay on native verbs: {advice:?}"
+        );
+    }
+
+    /// heddle#1452: refresh-unavailable advice names the attached
+    /// checkout, matching status after #1451 — not git-main.
+    #[test]
+    fn refresh_unavailable_advice_names_attached_checkout() {
+        let advice = thread_refresh_checkout_unavailable_advice(
+            "feature/stale",
+            Path::new("/missing-checkout"),
+            "checkout path is unavailable",
+        );
+        assert_eq!(advice.kind, "thread_refresh_checkout_unavailable");
+        assert!(
+            advice.hint.contains("attached checkout") && !advice.hint.contains("main checkout"),
+            "refresh-unavailable advice should name the attached checkout: {advice:?}"
         );
     }
 }

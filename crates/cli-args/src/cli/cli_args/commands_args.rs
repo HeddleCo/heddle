@@ -1325,7 +1325,7 @@ pub struct PullArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Behavior:
-  Clones native Heddle or Git repositories and checks out the selected default branch. Git transport runs through Sley and does not require a Git executable. Never prompts. Full details: `heddle help clone`.
+  Clones native Heddle or Git repositories. Native clones follow the remote default thread; `--thread` overrides. Git clones check out the selected default branch. Git transport runs through Sley and does not require a Git executable. Never prompts. Full details: `heddle help clone`.
 
 Advanced/planned flags: see `heddle help clone`.
 
