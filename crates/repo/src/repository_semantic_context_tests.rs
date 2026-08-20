@@ -313,6 +313,35 @@ fn unchanged_tests_join_corpus_and_fire_reachability() {
 }
 
 #[test]
+fn more_than_thirty_two_function_files_can_complete_the_corpus() {
+    let count = 40;
+    let temp = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp.path()).unwrap();
+    for index in 0..count {
+        std::fs::write(
+            temp.path().join(format!("f{index}.rs")),
+            format!("fn f{index}() {{ {index} }}\n"),
+        )
+        .unwrap();
+    }
+    let state = repo
+        .snapshot_with_attribution(Some("wide-ok".to_string()), None, author())
+        .unwrap();
+    let index_hash = attachment_hash(&repo, &state, StateAttachmentKind::SemanticIndex);
+    let ctx = build_semantic_context(&repo, None, &state, index_hash.as_ref(), None, None).unwrap();
+    assert!(
+        ctx.corpus_complete,
+        "40 function files are inside the shared page and must complete"
+    );
+    assert_eq!(
+        ctx.new_functions.len(),
+        count,
+        "all function files must join the corpus: {}",
+        ctx.new_functions.len()
+    );
+}
+
+#[test]
 fn wide_changed_path_parse_marks_corpus_incomplete_when_file_budget_exceeded() {
     use crate::repository_semantic_corpus::CORPUS_FILE_BUDGET;
 

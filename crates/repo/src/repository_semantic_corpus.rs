@@ -19,12 +19,9 @@ use super::repository_semantic_context::{
     PARSE_BUDGET_BYTES, load_semantic_tree, parse_tree_functions_sized,
 };
 
-/// Shared new-state parse budget for changed-path parsing and the
-/// remaining index walk. Hitting either bound fail-closes
-/// (`corpus_complete = false`) so novelty / test_reachability stay
-/// quiet rather than scoring a partial or unbounded repo. Tens of
-/// files — well under the shared [`SemanticParseCache`] page cap (256).
-pub(crate) const CORPUS_FILE_BUDGET: usize = 32;
+/// File page for the new-state corpus. Alias of the shared parse-cache
+/// page so a filled page is a bound, not a smaller product universe.
+pub(crate) const CORPUS_FILE_BUDGET: usize = SemanticParseCache::DEFAULT_MAX_ENTRIES;
 /// Aggregate bytes parsed for the new-state function corpus.
 /// Two times the per-file semantic-index opaque threshold.
 pub(crate) const CORPUS_BYTE_BUDGET: usize = PARSE_BUDGET_BYTES.saturating_mul(2);
@@ -107,9 +104,6 @@ pub(crate) fn populate_new_function_corpus(
     let Some(root) = new_root else {
         return Ok(false);
     };
-    if !budget.has_room() {
-        return Ok(false);
-    }
     let skip: BTreeSet<PathBuf> = new_functions.keys().cloned().collect();
     let mut files = Vec::new();
     if !collect_function_file_paths(source, root, budget.remaining_files(), &skip, &mut files)? {
@@ -119,9 +113,6 @@ pub(crate) fn populate_new_function_corpus(
         let rel = PathBuf::from(&path);
         if new_functions.contains_key(&rel) {
             continue;
-        }
-        if !budget.has_room() {
-            return Ok(false);
         }
         let Some((functions, bytes)) =
             parse_tree_functions_sized(source, Some(new_tree), &path, cache)
@@ -157,9 +148,6 @@ pub(crate) fn collect_function_file_paths(
     let mut stack = vec![(String::new(), root.tree, 0usize)];
     let mut inspected = 0usize;
     while let Some((prefix, hash, depth)) = stack.pop() {
-        if out.len() >= remaining {
-            return Ok(false);
-        }
         if depth > MAX_SEMANTIC_TREE_DEPTH {
             return Ok(false);
         }
@@ -182,12 +170,17 @@ pub(crate) fn collect_function_file_paths(
                     if skip.contains(&PathBuf::from(&path)) {
                         continue;
                     }
-                    if out.len() >= remaining || inspected >= remaining {
+                    if remaining > 0 && inspected >= remaining {
                         return Ok(false);
                     }
                     inspected += 1;
                     match load_semantic_file(source, &entry.node) {
-                        Ok(file) if file_has_function(&file) => out.push(path),
+                        Ok(file) if file_has_function(&file) => {
+                            if remaining == 0 || out.len() >= remaining {
+                                return Ok(false);
+                            }
+                            out.push(path);
+                        }
                         Ok(_) => {}
                         Err(err) => {
                             warn!(

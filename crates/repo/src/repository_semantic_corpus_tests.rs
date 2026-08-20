@@ -268,6 +268,62 @@ fn function_index_file(name: &str) -> SemanticFileNode {
 }
 
 #[test]
+fn page_full_with_no_remaining_function_files_is_complete() {
+    let (root, source) = index_with_function_files(3);
+    let mut budget = CorpusBudget::default();
+    for _ in 0..CORPUS_FILE_BUDGET {
+        assert!(budget.try_add(1));
+    }
+    let mut new_functions = BTreeMap::new();
+    for index in 0..3 {
+        new_functions.insert(
+            PathBuf::from(format!("f{index}.rs")),
+            vec![fdef(&format!("f{index}"), "fn f() { 1 }")],
+        );
+    }
+    assert!(
+        populate_new_function_corpus(
+            &source,
+            Some(&root),
+            &ContentHash::compute(b"tree"),
+            SemanticParseCache::shared(),
+            &mut budget,
+            &mut new_functions,
+        )
+        .unwrap(),
+        "a full page must still be complete when the leftover index is empty"
+    );
+}
+
+#[test]
+fn page_full_with_remaining_function_files_is_incomplete() {
+    let (root, source) = index_with_function_files(4);
+    let mut budget = CorpusBudget::default();
+    for _ in 0..CORPUS_FILE_BUDGET {
+        assert!(budget.try_add(1));
+    }
+    let mut new_functions = BTreeMap::new();
+    for index in 0..3 {
+        new_functions.insert(
+            PathBuf::from(format!("f{index}.rs")),
+            vec![fdef(&format!("f{index}"), "fn f() { 1 }")],
+        );
+    }
+    assert!(
+        !populate_new_function_corpus(
+            &source,
+            Some(&root),
+            &ContentHash::compute(b"tree"),
+            SemanticParseCache::shared(),
+            &mut budget,
+            &mut new_functions,
+        )
+        .unwrap(),
+        "a full page with leftover function files must stay incomplete"
+    );
+}
+
+#[test]
 fn missing_index_is_incomplete() {
     assert!(
         !populate_new_function_corpus(
