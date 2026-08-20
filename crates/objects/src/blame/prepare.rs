@@ -9,11 +9,11 @@ use crate::{
 };
 
 use super::{
-    lookup::lookup_blob_at_path,
+    lookup::{load_blob_within_budget, lookup_blob_at_path},
     mapping::identity_mapping,
     types::{
-        BlameFrontierGroup, BlameFrontierRecord, BlamePreparation, BlameSliceError,
-        BlameSliceLimits, origin_from_state,
+        origin_from_state, BlameFrontierGroup, BlameFrontierRecord, BlamePreparation,
+        BlameSliceError, BlameSliceLimits,
     },
 };
 
@@ -43,13 +43,7 @@ pub fn prepare_file_blame<S: ObjectSource>(
     let Some(blob_hash) = lookup_blob_at_path(source, &state.tree, path)? else {
         return Ok(BlamePreparation::MissingPath);
     };
-    let Some(blob) = source.get_blob(&blob_hash)? else {
-        return Err(BlameSliceError::MissingObject {
-            kind: "blob",
-            id: blob_hash.to_string(),
-        });
-    };
-    budget.consume(ResourceKind::DecodedBytes, blob.content().len() as u64)?;
+    let blob = load_blob_within_budget(source, &blob_hash, &mut budget)?;
     let Ok(line_count) = count_lines(blob.content()) else {
         return Ok(BlamePreparation::Unblamable);
     };

@@ -9,10 +9,12 @@ use crate::{
 };
 
 use super::{
+    lookup::{load_blob_within_budget, lookup_blob_at_path},
     mapping::{blob_line_count_matches_frontier, finalize_unmoved, mappings_fit_state_lines},
-    parent::{ParentClaim, claim_parent, parent_record},
+    parent::{claim_parent, parent_record, ParentClaim},
     types::{
-        BlameFrontierGroup, BlameSliceAdvance, BlameSliceError, BlameSliceLimits, OriginRange,
+        origin_from_state, BlameFrontierGroup, BlameSliceAdvance, BlameSliceError,
+        BlameSliceLimits, OriginRange,
     },
 };
 
@@ -49,16 +51,24 @@ pub fn advance_file_blame_slice<S: ObjectSource>(
     };
     heddle_perf_contract::record_ancestors_visited(1);
 
-    let Some(entry_blob) = source.get_blob(&entry.blob_hash)? else {
-        return Err(BlameSliceError::MissingObject {
-            kind: "blob",
-            id: entry.blob_hash.to_string(),
-        });
+    let expected_origin = origin_from_state(&entry_state);
+    if entry.origin != expected_origin {
+        return Err(BlameSliceError::InvalidFrontier(
+            "origin does not match loaded state".into(),
+        ));
+    }
+    let Some(tree_blob) = lookup_blob_at_path(source, &entry_state.tree, path)? else {
+        return Err(BlameSliceError::InvalidFrontier(
+            "path is absent from entry state tree".into(),
+        ));
     };
-    budget.consume(
-        ResourceKind::DecodedBytes,
-        entry_blob.content().len() as u64,
-    )?;
+    if tree_blob != entry.blob_hash {
+        return Err(BlameSliceError::InvalidFrontier(
+            "frontier blob does not belong to entry state".into(),
+        ));
+    }
+
+    let entry_blob = load_blob_within_budget(source, &entry.blob_hash, &mut budget)?;
     let entry_bytes = entry_blob.content();
     let line_count = blob_line_count_matches_frontier(entry_bytes, entry.state_line_count)?;
     budget.consume(ResourceKind::Lines, line_count as u64)?;

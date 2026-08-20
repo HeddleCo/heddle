@@ -28,7 +28,11 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   tie-break: a partial slide splits the run (`b/a` vs `a/a` is `(1,0)`).
   Origin sets are reused like `ProvenanceBuilder`. Overlay, snapshot, and
   merge visit original blob bytes. Each parent state is charged against
-  the slice `states` cap before it is fetched. Slice usage reports work,
+  the slice `states` cap before it is fetched. Each parent file's lines
+  are consumed before its diff. Frontier origin, blob hash, and state-side
+  mappings are checked against the loaded state. Blobs are size-probed
+  before `get_blob`. Compact also right-slides trailing repeats
+  (`b/a` vs `a/b/b` is `(0,2)`). Slice usage reports work,
   lines, and scratch on one live `ResourceBudget` (heddle#1454).
 
 - **`heddle completions` prints tab-completion scripts.** The field-study

@@ -3,8 +3,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::blame::{
-    BlamePreparation, BlameSliceAdvance, BlameSliceError, BlameSliceLimits,
-    advance_file_blame_slice, blame_file, prepare_file_blame,
+    advance_file_blame_slice, blame_file, prepare_file_blame, BlamePreparation, BlameSliceAdvance,
+    BlameSliceError, BlameSliceLimits,
 };
 use crate::object::{Attribution, ContentHash, Principal, State, StateId, Tree, TreeEntry};
 use crate::store::ObjectStore;
@@ -45,9 +45,12 @@ fn tree_present_blob_missing_parent_is_missing_object_not_missing_path() {
     let store = store();
     let missing_blob = ContentHash::compute(b"absent-parent-blob");
     let parent_tree = store
-        .put_tree(&Tree::from_entries(vec![
-            TreeEntry::file("file.txt".to_string(), missing_blob, false).unwrap(),
-        ]))
+        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
+            "file.txt".to_string(),
+            missing_blob,
+            false,
+        )
+        .unwrap()]))
         .unwrap();
     let parent = State::new(
         parent_tree,
@@ -230,6 +233,54 @@ fn wide_merge_parent_reads_consume_state_budget() {
     match advance_file_blame_slice(&store, path, frontier, BlameSliceLimits::unlimited()).unwrap() {
         BlameSliceAdvance::Progress { usage, .. } | BlameSliceAdvance::Complete { usage, .. } => {
             assert_eq!(usage.states, 5);
+        }
+    }
+}
+
+fn sixty_lines(tag: &str) -> Vec<u8> {
+    (0..60)
+        .map(|index| format!("{tag}{index}\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+#[test]
+fn multi_parent_lines_consume_each_parent_file() {
+    let store = store();
+    let p0 = put_state_with_file(&store, "file.txt", &sixty_lines("a"), Vec::new(), "p0");
+    let p1 = put_state_with_file(&store, "file.txt", &sixty_lines("b"), Vec::new(), "p1");
+    let merge = put_state_with_file(
+        &store,
+        "file.txt",
+        &sixty_lines("m"),
+        vec![p0.id(), p1.id()],
+        "merge",
+    );
+    let path = Path::new("file.txt");
+    let BlamePreparation::Active { frontier, .. } =
+        prepare_file_blame(&store, &merge, path, BlameSliceLimits::unlimited()).unwrap()
+    else {
+        panic!("expected active frontier");
+    };
+
+    let capped = BlameSliceLimits {
+        lines: 100,
+        ..BlameSliceLimits::unlimited()
+    };
+    let err = advance_file_blame_slice(&store, path, frontier.clone(), capped)
+        .expect_err("lines:100 cannot scan entry plus two 60-line parents");
+    match err {
+        BlameSliceError::BudgetExceeded(error) => {
+            assert_eq!(error.kind, ResourceKind::Lines);
+            assert_eq!(error.limit, 100);
+            assert_eq!(error.needed, 120);
+        }
+        other => panic!("expected Lines budget, got {other}"),
+    }
+
+    match advance_file_blame_slice(&store, path, frontier, BlameSliceLimits::unlimited()).unwrap() {
+        BlameSliceAdvance::Progress { usage, .. } | BlameSliceAdvance::Complete { usage, .. } => {
+            assert_eq!(usage.lines, 180);
         }
     }
 }

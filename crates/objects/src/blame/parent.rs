@@ -5,13 +5,13 @@ use std::path::Path;
 
 use crate::{
     object::{ContentHash, ObjectSource, State},
-    util::{ResourceBudget, ResourceKind, scratch_bytes_for_line_counts, visit_lcs_equal_runs},
+    util::{scratch_bytes_for_line_counts, visit_lcs_equal_runs, ResourceBudget, ResourceKind},
 };
 
 use super::{
-    lookup::lookup_blob_at_path,
+    lookup::{load_blob_within_budget, lookup_blob_at_path},
     mapping::{claim_equal_run, claim_same_blob_maps},
-    types::{BlameFrontierRecord, BlameLineMap, BlameSliceError, origin_from_state},
+    types::{origin_from_state, BlameFrontierRecord, BlameLineMap, BlameSliceError},
 };
 
 pub(super) enum ParentClaim {
@@ -56,22 +56,13 @@ pub(super) fn claim_parent<S: ObjectSource>(
         });
     }
 
-    let Some(parent_blob) = source.get_blob(&parent_blob_hash)? else {
-        return Err(BlameSliceError::MissingObject {
-            kind: "blob",
-            id: parent_blob_hash.to_string(),
-        });
-    };
-    budget.consume(
-        ResourceKind::DecodedBytes,
-        parent_blob.content().len() as u64,
-    )?;
+    let parent_blob = load_blob_within_budget(source, &parent_blob_hash, budget)?;
     let parent_bytes = parent_blob.content();
     let parent_lines = match std::str::from_utf8(parent_bytes) {
         Ok(text) => text.lines().count(),
         Err(_) => return Ok(ParentClaim::MissingPath),
     };
-    budget.require(ResourceKind::Lines, parent_lines as u64)?;
+    budget.consume(ResourceKind::Lines, parent_lines as u64)?;
 
     let entry_lines = std::str::from_utf8(entry_bytes)
         .map(|text| text.lines().count())

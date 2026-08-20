@@ -155,16 +155,42 @@ pub(super) fn mappings_fit_state_lines(
     mappings: &[BlameLineMap],
     state_line_count: u32,
 ) -> Result<(), BlameSliceError> {
+    if mappings.is_empty() {
+        if state_line_count == 0 {
+            return Ok(());
+        }
+        return Err(BlameSliceError::InvalidFrontier(
+            "nonempty state has no mappings".into(),
+        ));
+    }
+    let mut prev_end = 0u32;
     for mapping in mappings {
-        let end = mapping
+        if mapping.len == 0 {
+            return Err(BlameSliceError::InvalidFrontier(
+                "zero-length mapping".into(),
+            ));
+        }
+        let state_end = mapping
             .state_start
             .checked_add(mapping.len)
-            .ok_or_else(|| BlameSliceError::InvalidFrontier("mapping end overflow".into()))?;
-        if end > state_line_count {
+            .ok_or_else(|| BlameSliceError::InvalidFrontier("mapping state end overflow".into()))?;
+        let _target_end = mapping
+            .target_start
+            .checked_add(mapping.len)
+            .ok_or_else(|| {
+                BlameSliceError::InvalidFrontier("mapping target end overflow".into())
+            })?;
+        if mapping.state_start < prev_end {
+            return Err(BlameSliceError::InvalidFrontier(
+                "overlapping or unordered state mapping".into(),
+            ));
+        }
+        if state_end > state_line_count {
             return Err(BlameSliceError::InvalidFrontier(format!(
-                "mapping end {end} exceeds state_line_count {state_line_count}"
+                "mapping end {state_end} exceeds state_line_count {state_line_count}"
             )));
         }
+        prev_end = state_end;
     }
     Ok(())
 }

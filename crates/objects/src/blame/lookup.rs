@@ -3,7 +3,8 @@
 
 use std::path::{Component, Path};
 
-use crate::object::{ContentHash, ObjectSource, Tree};
+use crate::object::{Blob, ContentHash, ObjectSource, Tree};
+use crate::util::{ResourceBudget, ResourceKind};
 
 use super::types::BlameSliceError;
 
@@ -53,12 +54,39 @@ fn walk_blob<S: ObjectSource>(
         let Some(child_hash) = entry.tree_hash() else {
             return Ok(None);
         };
-        tree = source.get_tree(&child_hash)?.ok_or_else(|| {
-            BlameSliceError::MissingObject {
+        tree = source
+            .get_tree(&child_hash)?
+            .ok_or_else(|| BlameSliceError::MissingObject {
                 kind: "tree",
                 id: child_hash.to_string(),
-            }
-        })?;
+            })?;
     }
     Ok(None)
+}
+
+/// Size-check then load. An oversized blob must not be materialized.
+pub(super) fn load_blob_within_budget<S: ObjectSource>(
+    source: &S,
+    hash: &ContentHash,
+    budget: &mut ResourceBudget,
+) -> Result<Blob, BlameSliceError> {
+    let Some(size) = source.decoded_blob_len(hash)? else {
+        return Err(BlameSliceError::MissingObject {
+            kind: "blob",
+            id: hash.to_string(),
+        });
+    };
+    budget.consume(ResourceKind::DecodedBytes, size)?;
+    let Some(blob) = source.get_blob(hash)? else {
+        return Err(BlameSliceError::MissingObject {
+            kind: "blob",
+            id: hash.to_string(),
+        });
+    };
+    if blob.content().len() as u64 != size {
+        return Err(BlameSliceError::InvalidFrontier(
+            "blob size changed between probe and load".into(),
+        ));
+    }
+    Ok(blob)
 }

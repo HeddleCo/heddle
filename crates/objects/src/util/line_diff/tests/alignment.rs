@@ -114,6 +114,32 @@ fn partial_slide_does_not_move_the_unmatched_tail() {
 }
 
 #[test]
+fn ba_vs_abb_matches_similar_rightmost_new() {
+    let old = "b\na\n";
+    let new = "a\nb\nb\n";
+    let runs = collect_runs(old, new, LineDiffLimits::unlimited()).unwrap();
+    let pairs = expand_runs(&runs);
+    let old_lines = split_text_lines(old.as_bytes()).unwrap();
+    let new_lines = split_text_lines(new.as_bytes()).unwrap();
+    let similar = similar_pairs(&old_lines, &new_lines);
+    assert_eq!(pairs, similar, "ours={pairs:?} similar={similar:?}");
+    assert_eq!(pairs, vec![(0, 2)]);
+}
+
+#[test]
+fn ab_vs_abb_slides_repeated_suffix_right() {
+    let old = "a\nb\n";
+    let new = "a\nb\nb\n";
+    let runs = collect_runs(old, new, LineDiffLimits::unlimited()).unwrap();
+    let pairs = expand_runs(&runs);
+    let old_lines = split_text_lines(old.as_bytes()).unwrap();
+    let new_lines = split_text_lines(new.as_bytes()).unwrap();
+    let similar = similar_pairs(&old_lines, &new_lines);
+    assert_eq!(pairs, similar, "ours={pairs:?} similar={similar:?}");
+    assert_eq!(pairs, vec![(0, 0), (1, 2)]);
+}
+
+#[test]
 fn max_d_no_common_lines_does_not_panic() {
     let old = "a\nb\nc\nd\ne\nf\ng\nh\n";
     let new = "1\n2\n3\n4\n5\n6\n7\n8\n";

@@ -2,6 +2,7 @@
 mod fail_closed;
 mod finalize;
 mod fixture;
+mod frontier;
 mod golden;
 mod prop;
 mod restart;
