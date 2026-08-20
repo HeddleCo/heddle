@@ -28,11 +28,11 @@ use repo::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use verbs::{
-    ExplicitAgentBind, HarnessKind, SessionAttachFacts, SessionLookupFact, SessionPolicy,
-    TokenSidFact, WorktreeSessionFact, decide_session_attach, detect_harness_kind,
-    first_value_string, map_from_pairs, merge_string_vec, opencode_tool_name, opencode_tool_status,
-    parse_relay_payload as core_parse_relay_payload,
-    should_rotate_segment as pure_should_rotate_segment, value_array_join, value_cost_micros,
+    ExplicitAgentBind, HarnessKind, SegmentRotation, SessionAttachFacts, SessionLookupFact,
+    SessionPolicy, TokenSidFact, WorktreeSessionFact, attach_published_segment_fields,
+    cursor_segment_rotation, decide_session_attach, detect_harness_kind, first_value_string,
+    map_from_pairs, merge_string_vec, opencode_tool_name, opencode_tool_status,
+    parse_relay_payload as core_parse_relay_payload, value_array_join, value_cost_micros,
     value_cost_micros_u64, value_string, value_string_array, value_u64, value_u64_string,
 };
 use wire::{
@@ -1094,20 +1094,8 @@ impl HarnessBridgeRuntime {
         )?;
 
         let mut segment_id = session.current_segment_id.clone().unwrap_or_default();
-        if should_rotate_segment(&session, &identity) {
-            let segment = sessions.add_segment(
-                &session.id,
-                identity
-                    .provider
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                identity
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                identity.policy.clone(),
-            )?;
-            segment_id = segment.id;
+        if let Some(next_segment) = apply_identity_segment(&mut sessions, &session, &identity)? {
+            segment_id = next_segment;
         }
 
         let base_state = self
@@ -1616,22 +1604,13 @@ impl HarnessBridgeRuntime {
         let Some(session) = sessions.get_session(&report.heddle_session_id)? else {
             return Ok(());
         };
-        if !session.is_active() || !should_rotate_segment(&session, identity) {
+        if !session.is_active() {
             return Ok(());
         }
-        let segment = sessions.add_segment(
-            &report.heddle_session_id,
-            identity
-                .provider
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            identity
-                .model
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            identity.policy.clone(),
-        )?;
-        report.heddle_segment_id = Some(segment.id);
+        let Some(segment_id) = apply_identity_segment(&mut sessions, &session, identity)? else {
+            return Ok(());
+        };
+        report.heddle_segment_id = Some(segment_id);
         if identity.provider.is_some() {
             report.harness.provider = identity.provider.clone();
         }
@@ -2368,16 +2347,59 @@ struct TokenClaims {
     agent_model: Option<String>,
 }
 
-fn should_rotate_segment(session: &objects::object::Session, identity: &ResolvedIdentity) -> bool {
-    let Some(segment) = session.current_segment() else {
-        return false;
-    };
-    pure_should_rotate_segment(
-        Some(segment.provider.as_str()),
-        Some(segment.model.as_str()),
+fn apply_identity_segment(
+    sessions: &mut SessionManager,
+    session: &Session,
+    identity: &ResolvedIdentity,
+) -> Result<Option<String>> {
+    let current = session.current_segment();
+    match cursor_segment_rotation(
+        current.map(|segment| segment.provider.as_str()),
+        current.map(|segment| segment.model.as_str()),
+        current.and_then(|segment| segment.thought_level.as_deref()),
         identity.provider.as_deref(),
         identity.model.as_deref(),
-    )
+        identity.thinking_level.as_deref(),
+    ) {
+        SegmentRotation::Rotate => {
+            let segment = sessions.add_segment(
+                &session.id,
+                identity
+                    .provider
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                identity
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                identity.policy.clone(),
+            )?;
+            if let Some(thought_level) = identity.thinking_level.clone()
+                && let Some(mut updated) = sessions.get_session(&session.id)?
+            {
+                if let Some(current) = updated.current_segment_mut() {
+                    current.thought_level = Some(thought_level);
+                }
+                sessions.save_session(&updated)?;
+            }
+            Ok(Some(segment.id))
+        }
+        SegmentRotation::Attach => {
+            if let Some(mut updated) = sessions.get_session(&session.id)? {
+                if let Some(segment) = updated.current_segment_mut() {
+                    attach_published_segment_fields(
+                        segment,
+                        identity.provider.as_deref(),
+                        identity.model.as_deref(),
+                        identity.thinking_level.as_deref(),
+                    );
+                }
+                sessions.save_session(&updated)?;
+            }
+            Ok(session.current_segment_id.clone())
+        }
+        SegmentRotation::Keep => Ok(session.current_segment_id.clone()),
+    }
 }
 
 fn thread_id_for_name(repo: &Repository, thread_name: Option<&str>) -> Result<Option<String>> {
@@ -3491,6 +3513,50 @@ mod tests {
             report.heddle_segment_id.as_deref(),
             Some(expected_segment.as_str())
         );
+    }
+
+    #[test]
+    fn unpublished_identity_attaches_to_placeholder_segment() {
+        let (_temp, repo) = init_repo();
+        let user_config = UserConfig::default();
+        let mut runtime = HarnessBridgeRuntime::new(repo, user_config, test_bridge());
+
+        let opened = runtime
+            .open_session(OpenSessionParams {
+                harness: Some("aider".to_string()),
+                ..OpenSessionParams::default()
+            })
+            .unwrap();
+        let first_segment = opened.heddle_segment_id.clone();
+        runtime
+            .update_progress(UpdateProgressParams {
+                heddle_session_id: opened.heddle_session_id.clone(),
+                provider: Some("anthropic".to_string()),
+                model: Some("opus".to_string()),
+                thinking_level: Some("high".to_string()),
+                ..UpdateProgressParams::default()
+            })
+            .unwrap();
+
+        let session = SessionManager::new(runtime.repo.root())
+            .get_session(&opened.heddle_session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            session.segments.len(),
+            1,
+            "empty → set must attach, not rotate"
+        );
+        let segment = session.current_segment().unwrap();
+        assert_eq!(segment.provider, "anthropic");
+        assert_eq!(segment.model, "opus");
+        assert_eq!(segment.thought_level.as_deref(), Some("high"));
+        let report = runtime
+            .reports
+            .load(&opened.heddle_session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.heddle_segment_id, first_segment);
     }
 
     #[test]

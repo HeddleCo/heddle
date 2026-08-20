@@ -177,6 +177,41 @@ fn compact_and_hash_include_thought_level_and_parent() {
         with.id(),
         "thought_level and parent must participate in the state hash"
     );
+    let mut thought_only = State::new(
+        tree,
+        Vec::new(),
+        Attribution::with_agent(
+            Principal::new("Author", "author@example.com"),
+            Agent::new("anthropic", "opus").with_thought_level("high"),
+        ),
+    );
+    thought_only.created_at = created_at;
+    thought_only.state_id = thought_only.id();
+    let mut parent_only = State::new(
+        tree,
+        Vec::new(),
+        Attribution::with_agent(
+            Principal::new("Author", "author@example.com"),
+            Agent::new("anthropic", "opus").with_parent("agent-1"),
+        ),
+    );
+    parent_only.created_at = created_at;
+    parent_only.state_id = parent_only.id();
+    assert_ne!(
+        without.id(),
+        thought_only.id(),
+        "changing thought_level must change the state id"
+    );
+    assert_ne!(
+        without.id(),
+        parent_only.id(),
+        "changing parent must change the state id"
+    );
+    assert_ne!(
+        thought_only.id(),
+        parent_only.id(),
+        "thought_level and parent must not be interchangeable in the hash"
+    );
     let encoded = encode_state_frame(&[with.clone()]).unwrap();
     let decoded = decode_state_frame(&encoded).unwrap();
     let agent = decoded[0].attribution.agent.as_ref().unwrap();

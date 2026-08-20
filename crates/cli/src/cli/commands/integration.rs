@@ -890,7 +890,11 @@ fn install_opencode(
     }
     let timeline_manifest_path = plugin_path.with_file_name("heddle.timeline.json");
     let heddle_raw = HeddleInvocation::raw(path_mode)?;
-    let script = opencode_plugin_script(&heddle_raw, &repo.root().display().to_string());
+    let baked_repo = match scope {
+        IntegrationScope::Repo => Some(repo.root().display().to_string()),
+        IntegrationScope::User => None,
+    };
+    let script = opencode_plugin_script(&heddle_raw, baked_repo.as_deref());
     write_file_atomic(&plugin_path, script.as_bytes())?;
     let capabilities = opencode_timeline_capabilities(repo, &heddle_raw);
     write_file_atomic(
@@ -915,7 +919,11 @@ fn install_opencode(
     Ok(())
 }
 
-fn opencode_plugin_script(exe: &str, repo: &str) -> String {
+fn opencode_plugin_script(exe: &str, repo: Option<&str>) -> String {
+    let repo_args = match repo {
+        Some(repo) => format!(r#""--repo", {repo:?}, "#),
+        None => String::new(),
+    };
     format!(
         r#"export default async function() {{
   return {{
@@ -923,14 +931,14 @@ fn opencode_plugin_script(exe: &str, repo: &str) -> String {
       const eventObj = input?.event || input;
       const event = eventObj?.type || eventObj?.name || input?.type || input?.name || "event";
       const expire = ["session.deleted","session.closed","session.end","session.idle","SessionEnd"].includes(event);
-      const stamp = ["--repo", {repo:?}, "integration", "stamp", "opencode"];
+      const stamp = [{repo_args}"integration", "stamp", "opencode"];
       if (expire) stamp.push("--expire");
       Bun.spawnSync([{exe:?}, ...stamp], {{
         stdin: JSON.stringify(input),
       }});
       const allowed = new Set(["session.created","session.updated","session.diff","file.edited","tool.execute.before","tool.execute.after","permission.asked","permission.replied"]);
       if (allowed.has(event)) {{
-        Bun.spawn([{exe:?}, "--repo", {repo:?}, "integration", "relay", "opencode", event], {{
+        Bun.spawn([{exe:?}, {repo_args}"integration", "relay", "opencode", event], {{
           stdin: JSON.stringify(input),
         }});
       }}
@@ -938,7 +946,7 @@ fn opencode_plugin_script(exe: &str, repo: &str) -> String {
   }};
 }}
 "#,
-        repo = repo,
+        repo_args = repo_args,
         exe = exe,
     )
 }
@@ -1581,6 +1589,48 @@ mod tests {
         assert!(
             heddle_core::read_identity_cursor(repo.root()).is_empty(),
             "uninstall must expire the identity cursor"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn opencode_user_install_discovers_workspace_at_runtime() {
+        static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_temp, repo) = init_repo();
+        let home = tempfile::TempDir::new().unwrap();
+        let _home_guard = HomeEnvGuard::set(home.path());
+        let mut manifest = IntegrationManifest::default();
+
+        install_opencode(
+            &repo,
+            &mut manifest,
+            &IntegrationScope::User,
+            false,
+            PathMode::Relative,
+        )
+        .unwrap();
+
+        let plugin_path = home
+            .path()
+            .join(".config")
+            .join("opencode")
+            .join("plugins")
+            .join("heddle.js");
+        let contents = fs::read_to_string(&plugin_path).unwrap();
+        let install_repo = repo.root().display().to_string();
+        assert!(
+            !contents.contains(&install_repo),
+            "user-scoped plugin must not bake the install-time repo, got: {contents}"
+        );
+        assert!(
+            !contents.contains("--repo"),
+            "user-scoped plugin must discover the workspace from cwd, got: {contents}"
+        );
+        assert!(
+            contents.contains("\"integration\", \"stamp\", \"opencode\"")
+                && contents.contains("Bun.spawnSync"),
+            "user-scoped plugin must still stamp through the locked path, got: {contents}"
         );
     }
 

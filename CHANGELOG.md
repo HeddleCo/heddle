@@ -28,7 +28,9 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   Parent walk is last-resort kind only (exact basename). Cursor/Grok stay
   `agent=null`. Codex `Stop` expires the cursor. OpenCode expire/merge go
   through locked `integration stamp`. A later parent-session event clears a
-  stale subagent `parent` (heddle#1518).
+  stale subagent `parent`. Unpublished→published identity attaches to the
+  placeholder segment. User-scoped OpenCode discovers the workspace at
+  runtime (heddle#1518).
 
 - **Streamable HTR4 tree encoding.** Trees store uncompressed
   length-prefixed frames so a reader can page entries and persist a

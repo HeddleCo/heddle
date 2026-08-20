@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use verbs::{
-    IdentityCursor, SegmentRotation, cursor_patch_from_child_env, cursor_segment_rotation,
-    published_field, read_identity_cursor, stamp_identity_cursor,
+    IdentityCursor, SegmentRotation, attach_published_segment_fields, cursor_patch_from_child_env,
+    cursor_segment_rotation, published_field, read_identity_cursor, stamp_identity_cursor,
 };
 use objects::{lock::RepositoryLockExt, object::Session};
 use repo::{Repository, SessionManager};
@@ -107,32 +107,20 @@ fn apply_segment_policy(
             }
             return Ok(Some(segment.id));
         }
-    } else if let Some(mut updated) = manager.get_session(&session.id)? {
-        attach_unpublished_segment_fields(&mut updated, cursor);
+    } else if rotation == SegmentRotation::Attach
+        && let Some(mut updated) = manager.get_session(&session.id)?
+    {
+        if let Some(segment) = updated.current_segment_mut() {
+            attach_published_segment_fields(
+                segment,
+                cursor.provider.as_deref(),
+                cursor.model.as_deref(),
+                cursor.thought_level.as_deref(),
+            );
+        }
         manager.save_session(&updated)?;
     }
     Ok(session.current_segment_id.clone())
-}
-
-fn attach_unpublished_segment_fields(session: &mut Session, cursor: &IdentityCursor) {
-    let Some(segment) = session.current_segment_mut() else {
-        return;
-    };
-    if published_field(Some(&segment.provider)).is_none()
-        && let Some(provider) = cursor.provider.clone()
-    {
-        segment.provider = provider;
-    }
-    if published_field(Some(&segment.model)).is_none()
-        && let Some(model) = cursor.model.clone()
-    {
-        segment.model = model;
-    }
-    if segment.thought_level.is_none()
-        && let Some(thought_level) = cursor.thought_level.clone()
-    {
-        segment.thought_level = Some(thought_level);
-    }
 }
 
 #[cfg(test)]
