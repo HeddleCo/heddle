@@ -806,6 +806,8 @@ fn install_claude(
     ] {
         let command = if event == "PreToolUse" {
             stamp.clone()
+        } else if event == "SessionEnd" {
+            format!("{stamp} --expire")
         } else {
             format!(
                 "{} --repo {} integration relay claude-code {}",
@@ -952,6 +954,10 @@ export default async function() {{
       const eventObj = input?.event || input;
       const properties = eventObj?.properties || input?.properties || {{}};
       const event = eventObj?.type || eventObj?.name || input?.type || input?.name || "event";
+      if (["session.deleted","session.closed","session.end","session.idle","SessionEnd"].includes(event)) {{
+        try {{ fs.unlinkSync(identityDest()); }} catch {{}}
+        return;
+      }}
       const model = properties.model || input?.model;
       const patch = {{
         ...modelPatch(model),
@@ -1149,7 +1155,7 @@ fn uninstall_one(
     manifest
         .integrations
         .retain(|entry| entry.harness != harness);
-    let _ = repo;
+    heddle_core::expire_identity_cursor(repo.root()).map_err(anyhow::Error::from)?;
     Ok(())
 }
 
@@ -1342,6 +1348,8 @@ mod tests {
         assert!(contents.contains("integration relay claude-code PostToolUse"));
         assert!(contents.contains("integration relay claude-code SubagentStop"));
         assert!(contents.contains("integration relay claude-code Stop"));
+        assert!(contents.contains("integration stamp claude-code --expire"));
+        assert!(!contents.contains("integration relay claude-code SessionEnd"));
         assert!(contents.contains("statusLine"));
 
         // Default install must use the PATH-relative literal `heddle` and must
@@ -1533,6 +1541,10 @@ mod tests {
             !plugin_contents.contains("session.get"),
             "plugin must not hunt session.get, got: {plugin_contents}"
         );
+        assert!(
+            plugin_contents.contains("session.deleted") && plugin_contents.contains("unlinkSync"),
+            "plugin must expire the cursor on session end"
+        );
         let timeline_manifest_path = repo
             .root()
             .join(".opencode")
@@ -1595,10 +1607,23 @@ mod tests {
             vec![timeline_manifest_path.display().to_string()]
         );
 
+        heddle_core::write_identity_cursor(
+            repo.root(),
+            &heddle_core::IdentityCursor {
+                provider: Some("opencode".into()),
+                model: Some("sonnet".into()),
+                ..heddle_core::IdentityCursor::default()
+            },
+        )
+        .unwrap();
         uninstall_one(&repo, &mut manifest, "opencode").unwrap();
         assert!(!plugin_path.exists());
         assert!(!timeline_manifest_path.exists());
         assert!(manifest.integrations.is_empty());
+        assert!(
+            heddle_core::read_identity_cursor(repo.root()).is_empty(),
+            "uninstall must expire the identity cursor"
+        );
     }
 
     #[test]

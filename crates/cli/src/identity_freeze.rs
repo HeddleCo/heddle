@@ -7,9 +7,9 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use verbs::{
     IdentityCursor, SegmentRotation, cursor_patch_from_child_env, cursor_segment_rotation,
-    published_field, read_identity_cursor, write_identity_cursor,
+    published_field, read_identity_cursor, stamp_identity_cursor,
 };
-use objects::object::Session;
+use objects::{lock::RepositoryLockExt, object::Session};
 use repo::{Repository, SessionManager};
 
 /// Cursor values frozen onto one capture (ACP names).
@@ -26,11 +26,15 @@ pub struct FrozenIdentity {
 /// Read the workspace cursor, attach child-env fallbacks, persist so later
 /// captures are not env-shaped, and rotate the Heddle segment when needed.
 pub fn freeze_identity_for_capture(repo: &Repository) -> Result<FrozenIdentity> {
+    let _guard = repo.locker().write()?;
+    freeze_identity_for_capture_locked(repo)
+}
+
+fn freeze_identity_for_capture_locked(repo: &Repository) -> Result<FrozenIdentity> {
     let mut cursor = read_identity_cursor(repo.root());
     let child = cursor_patch_from_child_env(&child_env_hints());
     if !child.is_empty() {
-        cursor = cursor.merge_event(&child);
-        let _ = write_identity_cursor(repo.root(), &cursor);
+        cursor = stamp_identity_cursor(repo.root(), &child)?;
     }
     let mut manager = SessionManager::new(repo.root());
     let session = manager.get_current_session()?;
@@ -134,6 +138,7 @@ fn attach_unpublished_segment_fields(session: &mut Session, cursor: &IdentityCur
 #[cfg(test)]
 mod tests {
     use super::*;
+    use heddle_core::write_identity_cursor;
     use objects::object::Principal;
     use repo::Repository;
 
@@ -247,5 +252,40 @@ mod tests {
             frozen.session.is_none(),
             "harness session stays unset; do not pair Heddle Session.id"
         );
+    }
+
+    #[test]
+    fn freeze_waits_for_repo_write_lock() {
+        use std::{sync::mpsc, time::Duration};
+
+        use objects::lock::RepositoryLockExt;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        write_identity_cursor(
+            repo.root(),
+            &IdentityCursor {
+                provider: Some("anthropic".into()),
+                model: Some("opus".into()),
+                ..IdentityCursor::default()
+            },
+        )
+        .unwrap();
+        let hold = repo.locker().write().unwrap();
+        let root = repo.root().to_path_buf();
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let repo = Repository::open(root).unwrap();
+            let frozen = freeze_identity_for_capture(&repo);
+            let _ = tx.send(frozen.is_ok());
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(150)).is_err(),
+            "freeze must not mutate sessions until it holds the repo write lock"
+        );
+        drop(hold);
+        let ok = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(ok, "freeze must succeed after the write lock is released");
+        worker.join().unwrap();
     }
 }

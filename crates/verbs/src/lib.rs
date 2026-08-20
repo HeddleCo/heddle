@@ -160,13 +160,14 @@ pub use hook_plan::{
     hook_install_source_required_kind, hook_unknown_kind, plan_hook_install_source,
 };
 pub use identity_cursor::{
-    IDENTITY_CURSOR_FILE, IdentityCursor, harness_kind_from_basename, identity_cursor_path,
-    published_field, read_identity_cursor, stamp_identity_cursor, thought_level_from_payload,
-    value_string_or_named, write_identity_cursor,
+    IDENTITY_CURSOR_FILE, IdentityCursor, expire_identity_cursor, harness_kind_from_basename,
+    identity_cursor_path, published_field, read_identity_cursor, stamp_identity_cursor,
+    thought_level_from_payload, value_string_or_named, write_identity_cursor,
 };
 pub use identity_payload::{
-    claude_cursor_patch, codex_cursor_patch, cursor_patch_from_child_env, cursor_patch_from_stdin,
-    opencode_cursor_patch, opencode_event_type, pi_cursor_patch, stamp_harness_name,
+    claude_cursor_patch, codex_cursor_patch, cursor_event_expires, cursor_patch_from_child_env,
+    cursor_patch_from_stdin, opencode_cursor_patch, opencode_event_type, pi_cursor_patch,
+    stamp_harness_name,
 };
 pub use init_plan::{
     InitPrincipalPlan, SET_PRINCIPAL_COMMAND, init_recommended_action, init_side_effects,

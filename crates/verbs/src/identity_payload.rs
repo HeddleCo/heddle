@@ -144,6 +144,33 @@ pub fn cursor_patch_from_child_env(env: &BTreeMap<String, String>) -> IdentityCu
     .omit_unpublished()
 }
 
+/// SessionEnd / session.deleted / session.closed expire the live cursor.
+pub fn cursor_event_expires(payload: &Value, event_hint: Option<&str>) -> bool {
+    expire_event_name(event_hint)
+        || first_value_string(
+            payload,
+            &[
+                &["hook_event_name"],
+                &["hook_event"],
+                &["event", "type"],
+                &["type"],
+                &["event", "name"],
+                &["name"],
+            ],
+        )
+        .is_some_and(|name| expire_event_name(Some(&name)))
+}
+
+fn expire_event_name(name: Option<&str>) -> bool {
+    let Some(name) = published_field(name) else {
+        return false;
+    };
+    matches!(
+        name,
+        "SessionEnd" | "session.end" | "session.deleted" | "session.closed" | "session.idle"
+    ) || name.eq_ignore_ascii_case("sessionend")
+}
+
 /// OpenCode plugin should key on `event.type`, not `event.name`.
 pub fn opencode_event_type(payload: &Value) -> Option<String> {
     first_value_string(
@@ -157,6 +184,27 @@ pub fn opencode_event_type(payload: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn session_end_payload_expires_cursor() {
+        assert!(cursor_event_expires(
+            &json!({"hook_event_name": "SessionEnd", "session_id": "s1"}),
+            None
+        ));
+        assert!(cursor_event_expires(
+            &json!({"event": {"type": "session.deleted"}}),
+            None
+        ));
+        assert!(cursor_event_expires(&json!({}), Some("SessionEnd")));
+        assert!(!cursor_event_expires(
+            &json!({"hook_event_name": "PreToolUse"}),
+            None
+        ));
+        assert!(!cursor_event_expires(
+            &json!({"event": {"type": "session.updated"}}),
+            None
+        ));
+    }
 
     #[test]
     fn claude_effort_level_object_and_no_anthropic_model_invent() {
