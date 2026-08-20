@@ -26,10 +26,14 @@ first call.
                   └─────────────────┘
 ```
 
-Revocation works the same way. The server's revocation cache is
-keyed on the `session()` fact in the authority block; a sub-agent
-inherits that fact, so revoking the parent's session id rejects
-every descendant on the next request.
+Revocation works the same way. The verifier's revocation cache is
+keyed on the `session()` fact in the authority block — the registered
+client public key (`key:{hex}`) or `issued_credentials.id`
+(`cred:{id}`), or a server-issued session id when Weft returns one.
+A remint of the same registered key keeps that fact, so
+`RevokeSession` cannot be escaped by minting a fresh random UUID. A
+sub-agent inherits the fact, so revoking the parent's session id
+rejects every descendant on the next request.
 
 ## CLI: `heddle auth derive-agent`
 
@@ -57,7 +61,8 @@ enrollment, and presence-token issuance, plus `DeleteRepository` and
 `auth.proto`, so a new auth RPC cannot land without an explicit agent-policy
 classification. These checks also apply to direct callers of the Rust helper.
 They restrict use of the derived token. Clients mint every root
-locally, including anon; Weft only registers the public key.
+locally; Weft only registers the public key. Anon mint is not a
+Heddle CLI surface (`MintAnonBiscuit` is intentionally unsupported).
 
 By default the child replaces the active stored credential for `--server`, so
 the next push/pull and any further derivation use that child and its fresh PoP
@@ -293,14 +298,13 @@ child credential.
   checks. There is no way to add rights the parent didn't have.
 - **Remove a parent's checks.** If the parent restricts itself to
   read-only, a child that "needs write" is simply impossible — the
-  child must come from a different parent or directly from the
-  server's mint.
+  child must come from a different parent root.
 - **Hide an attenuation block.** Every block is visible to the
   verifier; an agent can't strip checks before presenting the
   token.
-- **Re-sign the chain.** The server's public key is the trust
-  anchor. The server rejects any chain whose authority block
-  doesn't trace back to it.
+- **Re-sign the chain.** The registered client public key is the
+  trust anchor. Weft rejects any chain whose authority block is
+  not signed by a key it registered.
 - **Enforce CLI `--scope` on today's server.** W1 carries each scope as an
   `agent_scope` fact and prevents sub-derivation from declaring a broader
   scope. Request-level repository enforcement begins with W3. Operation and

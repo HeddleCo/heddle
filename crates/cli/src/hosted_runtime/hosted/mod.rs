@@ -275,10 +275,13 @@ impl HostedClient {
             tracing::debug!("credential rotation: stored authority has no renewal key");
             return;
         };
+        let session_id =
+            crate::hosted_runtime::root_mint::authority_session_fact(&credential.token).ok();
         let root = match crate::hosted_runtime::root_mint::remint_stored_root(
             &private_key_pem,
             &credential.subject,
             Some(public_key_id.as_str()),
+            session_id.as_deref(),
         ) {
             Ok(root) => root,
             Err(error) => {

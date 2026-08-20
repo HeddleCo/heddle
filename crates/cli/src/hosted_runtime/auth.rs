@@ -515,6 +515,7 @@ fn scope_is_within(child: &(String, String), parent: &(String, String)) -> bool 
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct HeadlessTokenMetadata {
     pub(crate) subject: String,
     pub(crate) is_derived: bool,
@@ -736,12 +737,18 @@ async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
     .await;
     auth_client.close().await;
     let registered = registered?;
+    let expires_at = device_root_expiry(registered.expires_at.as_ref())?;
     let root = crate::hosted_runtime::root_mint::mint_independent_root(
-        &signer.to_seed(),
-        &registered.subject,
-        crate::hosted_runtime::root_mint::IndependentRootKind::Account,
-        crate::hosted_runtime::root_mint::ACCOUNT_ROOT_TTL,
-        (!registered.credential_id.is_empty()).then_some(registered.credential_id.as_str()),
+        crate::hosted_runtime::root_mint::IndependentRootMint {
+            seed: &signer.to_seed(),
+            subject: &registered.subject,
+            ttl: crate::hosted_runtime::root_mint::ACCOUNT_ROOT_TTL,
+            credential_id: (!registered.credential_id.is_empty())
+                .then_some(registered.credential_id.as_str()),
+            session_id: (!registered.session_id.is_empty())
+                .then_some(registered.session_id.as_str()),
+            expires_at,
+        },
     )?;
 
     // 7. Store the client-minted root. Weft registered the public key; it
@@ -1318,7 +1325,27 @@ async fn exchange_device_authorization(
     Ok(RegisteredDevice {
         subject,
         credential_id: inner.credential_id,
+        session_id: inner.session_id,
+        expires_at: inner.expires_at,
     })
+}
+
+fn device_root_expiry(
+    expires_at: Option<&prost_types::Timestamp>,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+    let Some(expires_at) = expires_at else {
+        return Ok(None);
+    };
+    let nanos = u32::try_from(expires_at.nanos.max(0))
+        .map_err(|_| anyhow::anyhow!("device authorization expiry nanos are invalid"))?;
+    let expires_at =
+        chrono::DateTime::from_timestamp(expires_at.seconds, nanos).ok_or_else(|| {
+            anyhow::anyhow!("device authorization expiry is outside the supported range")
+        })?;
+    if expires_at <= chrono::Utc::now() {
+        bail!("device authorization returned an expired credential");
+    }
+    Ok(Some(expires_at))
 }
 
 fn device_authorization_signature(device_code: &str, signer: &Ed25519Signer) -> Result<Vec<u8>> {
@@ -1331,6 +1358,8 @@ fn device_authorization_signature(device_code: &str, signer: &Ed25519Signer) -> 
 struct RegisteredDevice {
     subject: String,
     credential_id: String,
+    session_id: String,
+    expires_at: Option<prost_types::Timestamp>,
 }
 
 /// Validate a URL before handing it to a browser helper.
@@ -1532,11 +1561,14 @@ mod tests {
         let signer = Ed25519Signer::generate().expect("device key");
         let subject = "alice@example.com";
         let root = crate::hosted_runtime::root_mint::mint_independent_root(
-            &signer.to_seed(),
-            subject,
-            crate::hosted_runtime::root_mint::IndependentRootKind::Account,
-            crate::hosted_runtime::root_mint::ACCOUNT_ROOT_TTL,
-            Some("cred-device"),
+            crate::hosted_runtime::root_mint::IndependentRootMint {
+                seed: &signer.to_seed(),
+                subject,
+                ttl: crate::hosted_runtime::root_mint::ACCOUNT_ROOT_TTL,
+                credential_id: Some("cred-device"),
+                session_id: None,
+                expires_at: None,
+            },
         )
         .expect("client-minted device root");
 
@@ -1546,6 +1578,32 @@ mod tests {
         assert!(!metadata.is_derived);
         assert_eq!(metadata.subject, subject);
         assert_eq!(metadata.credential_id.as_deref(), Some("cred-device"));
+        assert_eq!(
+            crate::hosted_runtime::root_mint::authority_session_fact(&root.token)
+                .expect("device session"),
+            "cred:cred-device"
+        );
+    }
+
+    #[test]
+    fn device_root_honors_returned_expiry_and_rejects_an_already_expired_one() {
+        let future = chrono::Utc::now() + chrono::Duration::hours(6);
+        let honored = device_root_expiry(Some(&prost_types::Timestamp {
+            seconds: future.timestamp(),
+            nanos: 0,
+        }))
+        .expect("future expiry")
+        .expect("present");
+        assert!((honored - future).num_seconds().abs() <= 1);
+
+        let past = chrono::Utc::now() - chrono::Duration::hours(1);
+        let error = device_root_expiry(Some(&prost_types::Timestamp {
+            seconds: past.timestamp(),
+            nanos: 0,
+        }))
+        .expect_err("expired server expiry must fail closed");
+        assert!(error.to_string().contains("expired credential"));
+        assert!(device_root_expiry(None).expect("omitted expiry").is_none());
     }
 
     #[test]

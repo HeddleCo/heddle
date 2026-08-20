@@ -402,6 +402,34 @@ impl AgentAttenuation {
 /// chains off the parent's keys, and the server validates the full
 /// chain against its trust list when the agent presents the token.
 /// The CLI never holds the server's signing key.
+/// Narrow a client-minted agent account root with the same deny floor and
+/// safe-operation ceiling that `heddle auth derive-agent` applies. The leaf
+/// PoP stays the registered Iroh key (self-delegation) so identity ensure
+/// can remint from that seed after expiry.
+pub(crate) fn restrict_agent_account_root(
+    root_token: &str,
+    signer: &Ed25519Signer,
+    expires_at: DateTime<Utc>,
+) -> Result<String> {
+    attenuate_for_agent(
+        root_token,
+        AgentAttenuation {
+            agent_id: "local-agent-root".to_string(),
+            expires_at,
+            allowed_operations: Some(
+                SAFE_AGENT_OPERATIONS
+                    .iter()
+                    .map(|operation| (*operation).to_string())
+                    .collect(),
+            ),
+            allowed_resources: None,
+            declared_scopes: Vec::new(),
+        },
+        signer,
+        signer.public_key(),
+    )
+}
+
 pub fn attenuate_for_agent(
     parent_token_b64: &str,
     restrictions: AgentAttenuation,

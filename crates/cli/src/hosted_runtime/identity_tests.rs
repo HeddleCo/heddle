@@ -1,4 +1,5 @@
 use super::identity::{EnsureAction, claim_link_url, ensure_action};
+use super::root_mint::local_agent_credential_needs_refresh;
 
 #[test]
 fn create_on_behalf_stores_the_client_minted_root() {
@@ -11,6 +12,23 @@ fn create_on_behalf_stores_the_client_minted_root() {
         source.contains("mint_agent_root"),
         "CreateAgentAccount must reuse the independent-root mint"
     );
+    assert!(
+        source.contains("restrict_agent_account_root"),
+        "CreateAgentAccount must keep the local deny floor after Weft registers the key"
+    );
+    assert!(
+        source.contains("refresh_expired_local_agent"),
+        "identity ensure must remint an expired local agent root without an invite"
+    );
+}
+
+#[test]
+fn expired_local_agent_root_is_refreshed_without_an_invite() {
+    assert_eq!(ensure_action(Some(false), false, true), EnsureAction::Reuse);
+    assert!(local_agent_credential_needs_refresh(
+        Some("2020-01-01T00:00:00+00:00"),
+        chrono::Utc::now()
+    ));
 }
 
 #[test]

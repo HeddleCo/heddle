@@ -1,8 +1,13 @@
 //! Client-side independent-root Biscuit mint.
 //!
 //! One ceremony: the caller's Ed25519 seed is the Biscuit authority key and
-//! the request-proof key. Signup, claim, passkey finish, anon, and
-//! `CreateAgentAccount` all call this. Weft only registers the public key.
+//! the request-proof key. Device login, rotation, and `CreateAgentAccount`
+//! call this. Weft only registers the public key.
+//!
+//! `session()` is the RevokeSession id. It is never a caller-chosen random
+//! UUID: a server-issued session id wins, otherwise `cred:{credential_id}`
+//! or `key:{public_key}`. Reminting the same registered key cannot mint a
+//! new live session.
 
 use anyhow::{Context, Result, bail};
 use biscuit_auth::{Algorithm, KeyPair, PrivateKey};
@@ -11,14 +16,6 @@ use crypto::{Ed25519Signer, Signer as _};
 
 /// Default lifetime for an account, claim, passkey, or device root.
 pub(crate) const ACCOUNT_ROOT_TTL: Duration = Duration::days(30);
-/// Anon roots stay short-lived; continuity is a local remint of the same seed.
-pub(crate) const ANON_ROOT_TTL: Duration = Duration::hours(24);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum IndependentRootKind {
-    Account,
-    Anon,
-}
 
 #[derive(Clone, Debug)]
 pub(crate) struct IndependentRoot {
@@ -36,26 +33,40 @@ impl IndependentRoot {
     }
 }
 
+/// Inputs for one independent-root mint. `expires_at` wins when set
+/// (device login honors the server's returned expiry); otherwise `ttl`
+/// is added to now.
+pub(crate) struct IndependentRootMint<'a> {
+    pub seed: &'a [u8; 32],
+    pub subject: &'a str,
+    pub ttl: Duration,
+    pub credential_id: Option<&'a str>,
+    pub session_id: Option<&'a str>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
 /// Mint a root from an existing seed. `CreateAgentAccount` uses the persisted
 /// Iroh node seed so the claim signer and the authority key stay the same key.
-pub(crate) fn mint_independent_root(
-    seed: &[u8; 32],
-    subject: &str,
-    kind: IndependentRootKind,
-    ttl: Duration,
-    credential_id: Option<&str>,
-) -> Result<IndependentRoot> {
-    validate_root_string("subject", subject)?;
-    if let Some(credential_id) = credential_id {
+pub(crate) fn mint_independent_root(mint: IndependentRootMint<'_>) -> Result<IndependentRoot> {
+    validate_root_string("subject", mint.subject)?;
+    if let Some(credential_id) = mint.credential_id {
         validate_root_string("credential_id", credential_id)?;
     }
-    if ttl <= Duration::zero() {
-        bail!("independent-root TTL must be greater than zero");
+    let now = Utc::now();
+    let expires_at = match mint.expires_at {
+        Some(expires_at) => expires_at,
+        None => {
+            if mint.ttl <= Duration::zero() {
+                bail!("independent-root TTL must be greater than zero");
+            }
+            now.checked_add_signed(mint.ttl)
+                .context("independent-root TTL overflows the calendar")?
+        }
+    };
+    if expires_at <= now {
+        bail!("independent-root expiry must be in the future");
     }
-    let expires_at = Utc::now()
-        .checked_add_signed(ttl)
-        .context("independent-root TTL overflows the calendar")?;
-    let signer = Ed25519Signer::from_seed(seed).context("loading independent-root seed")?;
+    let signer = Ed25519Signer::from_seed(mint.seed).context("loading independent-root seed")?;
     let public_key: [u8; 32] = signer
         .public_key()
         .try_into()
@@ -63,13 +74,13 @@ pub(crate) fn mint_independent_root(
     let private_key_pem = signer
         .to_pem()
         .context("exporting independent-root proof key")?;
-    let authority = authority_keypair(seed)?;
+    let authority = authority_keypair(mint.seed)?;
     let pop_hex = hex::encode(public_key);
-    let session = format!("sess-{}", uuid::Uuid::new_v4());
+    let session = resolve_revocation_session(&pop_hex, mint.credential_id, mint.session_id)?;
     let expiry = expires_at.to_rfc3339();
     let mut builder = biscuit_auth::Biscuit::builder();
     builder = builder
-        .fact(format!("user({})", quote(subject)).as_str())
+        .fact(format!("user({})", quote(mint.subject)).as_str())
         .context("independent-root user fact")?;
     builder = builder
         .fact(format!("session({})", quote(&session)).as_str())
@@ -77,18 +88,10 @@ pub(crate) fn mint_independent_root(
     builder = builder
         .fact(format!("device_pop_key({})", quote(&pop_hex)).as_str())
         .context("independent-root device_pop_key fact")?;
-    if let Some(credential_id) = credential_id {
+    if let Some(credential_id) = mint.credential_id {
         builder = builder
             .fact(format!("credential_id({})", quote(credential_id)).as_str())
             .context("independent-root credential_id fact")?;
-    }
-    match kind {
-        IndependentRootKind::Account => {}
-        IndependentRootKind::Anon => {
-            builder = builder
-                .fact(r#"subject_kind("anon")"#)
-                .context("independent-root anon subject_kind fact")?;
-        }
     }
     builder = builder
         .fact(format!("expires_at({expiry})").as_str())
@@ -103,57 +106,43 @@ pub(crate) fn mint_independent_root(
         .context("encoding the independent-root token")?;
     Ok(IndependentRoot {
         token,
-        subject: subject.to_string(),
+        subject: mint.subject.to_string(),
         public_key,
         private_key_pem,
         expires_at,
-        credential_id: credential_id.map(ToOwned::to_owned),
+        credential_id: mint.credential_id.map(ToOwned::to_owned),
     })
-}
-
-/// Fresh seed plus mint. Anon and device-login roots start here.
-pub(crate) fn mint_new_independent_root(
-    subject: &str,
-    kind: IndependentRootKind,
-    ttl: Duration,
-    credential_id: Option<&str>,
-) -> Result<IndependentRoot> {
-    let mut seed = [0_u8; 32];
-    getrandom::fill(&mut seed).context("generating independent-root seed")?;
-    mint_independent_root(&seed, subject, kind, ttl, credential_id)
 }
 
 pub(crate) fn mint_agent_root(seed: &[u8; 32]) -> Result<IndependentRoot> {
     let signer = Ed25519Signer::from_seed(seed).context("loading agent root seed")?;
-    let subject = format!("agent-key:{}", hex::encode(signer.public_key()));
-    mint_independent_root(
+    let subject = agent_root_subject(signer.public_key());
+    mint_independent_root(IndependentRootMint {
         seed,
-        &subject,
-        IndependentRootKind::Account,
-        ACCOUNT_ROOT_TTL,
-        None,
-    )
-}
-
-pub(crate) fn mint_anon_root() -> Result<IndependentRoot> {
-    let subject = format!("anon:{}", uuid::Uuid::new_v4());
-    mint_new_independent_root(&subject, IndependentRootKind::Anon, ANON_ROOT_TTL, None)
+        subject: &subject,
+        ttl: ACCOUNT_ROOT_TTL,
+        credential_id: None,
+        session_id: None,
+        expires_at: None,
+    })
 }
 
 pub(crate) fn remint_stored_root(
     private_key_pem: &str,
     subject: &str,
     credential_id: Option<&str>,
+    session_id: Option<&str>,
 ) -> Result<IndependentRoot> {
     let signer =
         Ed25519Signer::from_pem(private_key_pem).context("loading stored independent-root key")?;
-    mint_independent_root(
-        &signer.to_seed(),
+    mint_independent_root(IndependentRootMint {
+        seed: &signer.to_seed(),
         subject,
-        IndependentRootKind::Account,
-        ACCOUNT_ROOT_TTL,
+        ttl: ACCOUNT_ROOT_TTL,
         credential_id,
-    )
+        session_id,
+        expires_at: None,
+    })
 }
 
 pub(crate) fn agent_root_subject(public_key: &[u8]) -> String {
@@ -173,6 +162,64 @@ pub(crate) fn is_local_agent_root(subject: &str, proof_public_key_hex: &str) -> 
             Err(_) => return false,
         },
     ))
+}
+
+/// True when a stored local agent root is missing expiry or is already stale.
+pub(crate) fn local_agent_credential_needs_refresh(
+    expires_at: Option<&str>,
+    now: DateTime<Utc>,
+) -> bool {
+    match expires_at {
+        None => true,
+        Some(value) => chrono::DateTime::parse_from_rfc3339(value)
+            .map(|parsed| parsed.with_timezone(&Utc) <= now)
+            .unwrap_or(true),
+    }
+}
+
+pub(crate) fn authority_session_fact(token: &str) -> Result<String> {
+    use biscuit_auth::builder::{BlockBuilder, Term};
+
+    let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
+        .context("parsing independent-root session")?;
+    let source = biscuit
+        .print_block_source(0)
+        .context("reading independent-root authority block")?;
+    let authority = BlockBuilder::new()
+        .code(&source)
+        .context("parsing independent-root authority facts")?;
+    let mut sessions = authority.facts.iter().filter_map(|fact| {
+        if fact.predicate.name != "session" || fact.predicate.terms.len() != 1 {
+            return None;
+        }
+        match &fact.predicate.terms[0] {
+            Term::Str(value) => Some(value.clone()),
+            _ => None,
+        }
+    });
+    let session = sessions
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("independent-root authority is missing session"))?;
+    if sessions.next().is_some() {
+        bail!("independent-root authority contains multiple session facts");
+    }
+    Ok(session)
+}
+
+fn resolve_revocation_session(
+    public_key_hex: &str,
+    credential_id: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<String> {
+    if let Some(session) = session_id.filter(|value| !value.is_empty()) {
+        validate_root_string("session", session)?;
+        return Ok(session.to_string());
+    }
+    if let Some(credential_id) = credential_id.filter(|value| !value.is_empty()) {
+        validate_root_string("credential_id", credential_id)?;
+        return Ok(format!("cred:{credential_id}"));
+    }
+    Ok(format!("key:{public_key_hex}"))
 }
 
 fn validate_root_string(field: &str, value: &str) -> Result<()> {
