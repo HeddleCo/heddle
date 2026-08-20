@@ -12,7 +12,7 @@ use std::{
 };
 
 use verbs::{
-    IdentityCursor, cursor_event_expires, cursor_patch_from_stdin, expire_identity_cursor,
+    IdentityCursor, cursor_patch_from_stdin, expire_identity_cursor, stamp_event_expires,
     stamp_harness_name, stamp_identity_cursor,
 };
 
@@ -97,7 +97,7 @@ fn apply_identity_stamp(
     let expires = expire
         || serde_json::from_str::<serde_json::Value>(stdin.trim())
             .ok()
-            .is_some_and(|payload| cursor_event_expires(&payload, None));
+            .is_some_and(|payload| stamp_event_expires(harness, &payload, None));
     if expires {
         expire_identity_cursor(repo_root)?;
         return Ok(IdentityCursor::default());
@@ -230,5 +230,88 @@ mod tests {
             "SessionEnd must expire the cursor so a later capture cannot freeze it"
         );
         assert!(!identity_cursor_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn parse_recognises_expire_flag() {
+        let parsed = parse_stamp_args(&[
+            "integration".into(),
+            "stamp".into(),
+            "codex".into(),
+            "--expire".into(),
+        ])
+        .expect("codex stamp --expire is a stamp invocation");
+        assert!(parsed.expire);
+        assert_eq!(parsed.harness, "codex");
+    }
+
+    #[test]
+    fn codex_stop_stamp_expires_cursor() {
+        let dir = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join(".heddle")).unwrap();
+        stamp_bytes(
+            dir.path(),
+            "codex",
+            r#"{"model":"gpt-5.4","session_id":"c1"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_identity_cursor(dir.path()).model.as_deref(),
+            Some("gpt-5.4")
+        );
+        stamp_bytes(
+            dir.path(),
+            "codex",
+            r#"{"hook_event_name":"Stop","session_id":"c1"}"#,
+        )
+        .unwrap();
+        assert!(
+            read_identity_cursor(dir.path()).is_empty(),
+            "Codex Stop must expire the cursor so a later capture cannot freeze it"
+        );
+        assert!(!identity_cursor_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn expire_flag_removes_cursor_without_payload() {
+        let dir = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join(".heddle")).unwrap();
+        stamp_bytes(
+            dir.path(),
+            "codex",
+            r#"{"model":"gpt-5.4","session_id":"c1"}"#,
+        )
+        .unwrap();
+        apply_identity_stamp(dir.path(), "codex", "", true).unwrap();
+        assert!(read_identity_cursor(dir.path()).is_empty());
+        assert!(!identity_cursor_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn parent_session_stamp_clears_stale_subagent_parent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join(".heddle")).unwrap();
+        stamp_bytes(
+            dir.path(),
+            "codex",
+            r#"{"session_id":"sub-1","parent_id":"parent-1","model":"gpt-5.4"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_identity_cursor(dir.path()).parent.as_deref(),
+            Some("parent-1")
+        );
+        stamp_bytes(
+            dir.path(),
+            "codex",
+            r#"{"session_id":"parent-1","model":"gpt-5.4"}"#,
+        )
+        .unwrap();
+        let cursor = read_identity_cursor(dir.path());
+        assert_eq!(cursor.session.as_deref(), Some("parent-1"));
+        assert!(
+            cursor.parent.is_none(),
+            "later parent-session stamp must not keep the subagent parent"
+        );
     }
 }

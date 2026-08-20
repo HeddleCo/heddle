@@ -1200,6 +1200,40 @@ mod tests {
     }
 
     #[test]
+    fn codex_stop_expire_leaves_human_capture() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        crate::identity_stamp::stamp_bytes(
+            repo.root(),
+            "codex",
+            r#"{"model":"gpt-5.4","session_id":"c1"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            heddle_core::read_identity_cursor(repo.root())
+                .model
+                .as_deref(),
+            Some("gpt-5.4")
+        );
+        crate::identity_stamp::stamp_bytes(
+            repo.root(),
+            "codex",
+            r#"{"hook_event_name":"Stop","session_id":"c1"}"#,
+        )
+        .unwrap();
+        let attribution = build_attribution(
+            &repo,
+            &user_config_with_principal(),
+            &empty_agent_overrides(),
+        )
+        .unwrap();
+        assert!(
+            attribution.agent.is_none(),
+            "expired Codex Stop cursor must not invent an agent on the next capture"
+        );
+    }
+
+    #[test]
     fn build_attribution_omits_unpublished_cursor_fields() {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();

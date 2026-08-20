@@ -49,6 +49,10 @@ impl IdentityCursor {
     }
 
     /// Merge an event patch: missing incoming fields keep the last cursor value.
+    ///
+    /// `parent` is the exception: a later parent-session event (incoming
+    /// `session` equals the stored parent, and the patch omits `parent`)
+    /// clears the stale subagent parent instead of keeping it.
     pub fn merge_event(&self, patch: &IdentityCursor) -> Self {
         Self {
             provider: published_owned(patch.provider.clone()).or_else(|| self.provider.clone()),
@@ -56,7 +60,7 @@ impl IdentityCursor {
             thought_level: published_owned(patch.thought_level.clone())
                 .or_else(|| self.thought_level.clone()),
             session: published_owned(patch.session.clone()).or_else(|| self.session.clone()),
-            parent: published_owned(patch.parent.clone()).or_else(|| self.parent.clone()),
+            parent: merge_parent(self, patch),
         }
         .omit_unpublished()
     }
@@ -84,6 +88,21 @@ pub fn published_field(value: Option<&str>) -> Option<&str> {
 
 fn published_owned(value: Option<String>) -> Option<String> {
     published_field(value.as_deref()).map(str::to_string)
+}
+
+fn merge_parent(current: &IdentityCursor, patch: &IdentityCursor) -> Option<String> {
+    if let Some(incoming) = published_owned(patch.parent.clone()) {
+        return Some(incoming);
+    }
+    let incoming_session = published_owned(patch.session.clone());
+    if incoming_session
+        .as_ref()
+        .zip(current.parent.as_ref())
+        .is_some_and(|(session, parent)| session == parent)
+    {
+        return None;
+    }
+    current.parent.clone()
 }
 
 /// Workspace sidecar path.
@@ -250,6 +269,35 @@ mod tests {
         assert_eq!(next.model.as_deref(), Some("opus"));
         assert_eq!(next.thought_level.as_deref(), Some("low"));
         assert_eq!(next.session.as_deref(), Some("sess-1"));
+        assert_eq!(next.parent.as_deref(), Some("agent-1"));
+    }
+
+    #[test]
+    fn parent_session_event_clears_stale_subagent_parent() {
+        let current = IdentityCursor {
+            provider: Some("openai".into()),
+            model: Some("gpt-5.4".into()),
+            thought_level: None,
+            session: Some("sub-1".into()),
+            parent: Some("parent-1".into()),
+        };
+        let back_on_parent = current.merge_event(&IdentityCursor {
+            session: Some("parent-1".into()),
+            ..IdentityCursor::default()
+        });
+        assert_eq!(back_on_parent.session.as_deref(), Some("parent-1"));
+        assert!(
+            back_on_parent.parent.is_none(),
+            "parent-session event must not keep the subagent parent"
+        );
+
+        let still_subagent = current.merge_event(&IdentityCursor {
+            session: Some("sub-1".into()),
+            thought_level: Some("low".into()),
+            ..IdentityCursor::default()
+        });
+        assert_eq!(still_subagent.parent.as_deref(), Some("parent-1"));
+        assert_eq!(still_subagent.thought_level.as_deref(), Some("low"));
     }
 
     #[test]

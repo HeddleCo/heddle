@@ -26,7 +26,9 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   StatusLine chains an existing command. Codex writes user-scope `[hooks]`
   to a workspace sidecar. OpenCode reads `event.type` and object `model`.
   Parent walk is last-resort kind only (exact basename). Cursor/Grok stay
-  `agent=null` (heddle#1518).
+  `agent=null`. Codex `Stop` expires the cursor. OpenCode expire/merge go
+  through locked `integration stamp`. A later parent-session event clears a
+  stale subagent `parent` (heddle#1518).
 
 - **Streamable HTR4 tree encoding.** Trees store uncompressed
   length-prefixed frames so a reader can page entries and persist a
