@@ -48,10 +48,6 @@ impl CorpusBudget {
         true
     }
 
-    pub(crate) fn has_room(&self) -> bool {
-        self.files < CORPUS_FILE_BUDGET && self.bytes <= CORPUS_BYTE_BUDGET
-    }
-
     pub(crate) fn remaining_files(&self) -> usize {
         CORPUS_FILE_BUDGET.saturating_sub(self.files)
     }
