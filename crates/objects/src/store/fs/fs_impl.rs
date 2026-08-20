@@ -585,7 +585,7 @@ impl FsStore {
         {
             let file = File::open(&path)?;
             return Ok(Some(TreeEntryReader::open(
-                OpenedTreeBody::File(FileTreeSource::verified_placement(file, len)),
+                OpenedTreeBody::File(FileTreeSource::sequential_verify(file, len)),
                 *tree_id,
                 cursor,
             )?));

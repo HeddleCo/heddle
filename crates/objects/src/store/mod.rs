@@ -607,8 +607,8 @@ pub trait ObjectStore: Send + Sync {
         self.has_blob(hash)
     }
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>>;
-    /// Open a streamable HTR4 tree body. Resume skips the encoded prefix when
-    /// the backend exposes verified placement or a ranged file handle.
+    /// Open a streamable HTR4 tree body. Store backends use sequential
+    /// verify: resume at ordinal > 0 is refused until the bytes are hashed.
     fn open_tree(
         &self,
         tree_id: &ContentHash,
