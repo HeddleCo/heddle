@@ -184,12 +184,11 @@ pub(crate) fn decode_entry_at(
             .map_err(|_| TreeStreamError::Malformed("frame length slice is not 4 bytes".into()))?,
     ) as usize;
     let frame_start = offset + 4;
-    let frame_end =
-        frame_start
-            .checked_add(frame_len)
-            .ok_or_else(|| TreeStreamError::TruncatedFrame {
-                offset: offset as u64,
-            })?;
+    let frame_end = frame_start
+        .checked_add(frame_len)
+        .ok_or(TreeStreamError::TruncatedFrame {
+            offset: offset as u64,
+        })?;
     if frame_end > payload_end {
         return Err(TreeStreamError::TruncatedFrame {
             offset: offset as u64,

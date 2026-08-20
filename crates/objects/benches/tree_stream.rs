@@ -124,6 +124,8 @@ fn bench_tree_stream(c: &mut Criterion) {
     let limits = TreePageLimits::new(512, usize::MAX).expect("limits");
     while resumed.next_page(limits).expect("page").is_some() {}
     resumed.finish_and_verify().expect("verify");
+    let bytes_read = resumed.bytes_read();
+    drop(resumed);
     let prefix = cursor.byte_offset();
     let reread_prefix: u64 = spy
         .reads
@@ -132,8 +134,7 @@ fn bench_tree_stream(c: &mut Criterion) {
         .map(|(_, len)| *len as u64)
         .sum();
     eprintln!(
-        "wide-tree resume: prefix_end={prefix} bytes_read={} prefix_bytes_reread={reread_prefix} peak_rss_kb_after={:?}",
-        resumed.bytes_read(),
+        "wide-tree resume: prefix_end={prefix} bytes_read={bytes_read} prefix_bytes_reread={reread_prefix} peak_rss_kb_after={:?}",
         peak_rss_kb()
     );
 }
