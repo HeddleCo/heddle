@@ -61,9 +61,11 @@ fn model_help_topic_gives_short_first_time_mental_model() {
             && help.contains("State:")
             && help.contains("Thread:")
             && help.contains("Capture:")
-            && help.contains("Commit:")
-            && help.contains("Verify:")
-            && help.contains("heddle land --thread <name>"),
+            && help.contains("Annotation:")
+            && help.contains("Discussion:")
+            && help.contains("heddle land")
+            && !help.contains("land --thread")
+            && !help.contains("heddle help advanced"),
         "model topic should explain the everyday concepts without the long thread manual: {help}"
     );
     assert!(
@@ -6755,42 +6757,30 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         !stdout.contains("compatibility") && !stdout.contains(concat!("Git ", "adapter")),
         "default help should not frame Git Projection commands as old compatibility wording: {stdout}"
     );
-    for verb in ["status", "diff", "capture", "start", "ready", "land"] {
+    for verb in [
+        "status", "diff", "capture", "start", "ready", "land", "query", "review", "discuss",
+        "context", "daemon", "whoami", "doctor", "help",
+    ] {
         assert!(
             stdout.contains(&format!("\n  {verb}")),
-            "core-loop verb `{verb}` should be on the curated surface: {stdout}"
+            "everyday verb `{verb}` should be on the first screen: {stdout}"
         );
     }
     assert!(
         !stdout.contains("\n  commit"),
         "no-repo first screen must hide overlay commit: {stdout}"
     );
-    for verb in [
-        "review",
-        "discuss",
-        "context",
-        "switch",
-        "thread",
-        "git-projection",
-        "push",
-        "pull",
-        "doctor",
-        "verify",
-        "init",
-        "adopt",
-        "clone",
-        "log",
-        "show",
-    ] {
+    for verb in ["switch", "thread", "git-projection", "adopt", "verify"] {
         assert!(
             !stdout.contains(&format!("\n  {verb}")),
-            "non-core verb `{verb}` should stay behind advanced/topic help: {stdout}"
+            "folded or advanced verb `{verb}` should stay off the first screen: {stdout}"
         );
     }
     assert!(
-        stdout.contains("Nearby: `heddle pull`, `heddle undo`, and `heddle verify`.")
+        !stdout.contains("heddle help advanced")
+            && !stdout.contains("Nearby:")
             && stdout.contains("Start here: `heddle init`, `heddle clone`, or `heddle capture`."),
-        "default help should keep adjacent commands discoverable without expanding the first-screen loop: {stdout}"
+        "first screen is the locked everyday surface, not a nearby/advanced pointer: {stdout}"
     );
     assert!(
         stdout.contains("Save: heddle init -> heddle capture -m \"...\"")
@@ -6810,18 +6800,21 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
 }
 
 #[test]
-fn overlay_help_teaches_commit_after_capture() {
+fn overlay_help_does_not_teach_capture_then_commit() {
     let temp = TempDir::new().unwrap();
     git_hermetic(&["init", "-b", "main"], temp.path());
     heddle(&["init"], Some(temp.path())).expect("initialize Git Overlay");
     let help = heddle(&["help"], Some(temp.path())).expect("overlay help");
     assert!(
-        help.contains("Existing Git:") && help.contains("-> heddle commit ->"),
-        "overlay first screen must teach commit after capture: {help}"
+        help.contains("Save: heddle init -> heddle capture -m \"...\"")
+            && help.contains("Git Overlay:")
+            && help.contains("heddle push")
+            && !help.contains("-> heddle commit"),
+        "overlay first screen must not teach capture then commit: {help}"
     );
     assert!(
-        help.contains("\n  commit"),
-        "overlay first screen must list the commit verb: {help}"
+        !help.contains("\n  commit"),
+        "overlay first screen must not list the commit verb: {help}"
     );
 }
 

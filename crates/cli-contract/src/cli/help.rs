@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Progressive-disclosure help: curated default, advanced surface,
-//! topic-scoped help.
+//! Progressive-disclosure help: locked everyday first screen, topic pages.
 //!
-//! The Heddle CLI's default `heddle help` lists only the authority-aware loop
-//! from the command contract table. Advanced affordances, automation,
-//! admin commands, and Git projection commands are reachable
-//! via `heddle help advanced` or `heddle help <topic>`. Per-verb help
-//! via `heddle <verb> --help` continues to derive from clap
-//! doc-comments.
+//! The Heddle CLI's default `heddle help` lists the locked everyday verbs
+//! from the 2026-08-19 design lock (heddle#1458). Help topics stay
+//! (`heddle help <topic>`); they are not verbs. Per-verb help via
+//! `heddle <verb> --help` continues to derive from clap doc-comments.
 //!
 //! # Cultural deliverable
 //!
@@ -18,12 +15,12 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
-    /// Front-door verbs in the core loop: setup, orient, isolate work,
-    /// commit, check readiness, inspect, integrate, recover, and
-    /// diagnose. See [`everyday_verbs`] for the authoritative list.
+    /// Front-door verbs in the locked everyday surface. See
+    /// [`LOCKED_EVERYDAY_VERBS`] for the first-screen list and
+    /// [`everyday_verbs`] for the catalog everyday set.
     Everyday,
-    /// Reachable via `heddle help advanced` or `heddle help <topic>`.
-    /// Most agent-loop and operational verbs land here.
+    /// Reachable via `heddle help <topic>` or `heddle <verb> --help`.
+    /// Not advertised from the first screen.
     Advanced,
     /// Hidden verbs that should not be advertised at all.
     Hidden,
@@ -55,23 +52,19 @@ pub const LOCKED_EVERYDAY_VERBS: &[&str] = &[
     "daemon", "doctor", "help",
 ];
 
-/// The first screen of help is smaller than the complete everyday set:
-/// it shows the primary work loop, then points at setup, sync, proof,
-/// and recovery as nearby verbs. Overlay-only `commit` stays off the
-/// native / no-repo front door (heddle#1435).
+/// First-screen verbs: the locked everyday surface, in lock order.
+/// Feature-gated verbs with no catalog summary are skipped at print time.
 fn primary_loop_verbs(
     catalog: &crate::cli::commands::CommandCatalogOutput,
-    authority: repo::RepositorySourceAuthority,
+    _authority: repo::RepositorySourceAuthority,
 ) -> Vec<&'static str> {
-    everyday_verbs()
-        .into_iter()
+    LOCKED_EVERYDAY_VERBS
+        .iter()
+        .copied()
         .filter(|verb| {
             catalog
                 .command_by_display(verb)
-                .is_some_and(|entry| entry.help_rank <= 70)
-        })
-        .filter(|verb| {
-            *verb != "commit" || authority == repo::RepositorySourceAuthority::GitOverlay
+                .is_some_and(|entry| !entry.summary.is_empty())
         })
         .collect()
 }
@@ -113,23 +106,18 @@ fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthori
         let _ = writeln!(out, "  {:<10}  {}", name, blurb);
     }
     let _ = writeln!(out);
-    if overlay {
-        let _ = writeln!(
-            out,
-            "Existing Git: heddle status -> heddle init -> {capture} -> heddle commit -> {push}"
-        );
-    } else {
-        let _ = writeln!(out, "Save: heddle init -> {capture}");
-    }
+    let _ = writeln!(out, "Save: heddle init -> {capture}");
     let _ = writeln!(
         out,
         "Isolated work: heddle start <name> --path ../<name> -> {capture} -> heddle ready -> heddle land"
     );
+    if overlay {
+        let _ = writeln!(
+            out,
+            "Git Overlay: `ready` and {push} write the Git commit. Save is `capture`."
+        );
+    }
     let _ = writeln!(out);
-    let _ = writeln!(
-        out,
-        "Nearby: `heddle pull`, `heddle undo`, and `heddle verify`."
-    );
     let _ = writeln!(
         out,
         "Start here: `heddle init`, `heddle clone`, or `heddle capture`."
@@ -163,7 +151,6 @@ fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthori
     let _ = writeln!(
         out,
         "Run `heddle help model` for the short mental model, \
-         `heddle help advanced` for power surfaces, automation, and Git interop, \
          or `heddle help <topic>` for a topic page (e.g. `git-concepts`, \
          `git-overlay`, \
          `threads`, `daemon`, `signals`, `git-projection`, `operation-ids`, \
@@ -188,9 +175,9 @@ fn catalog_summary(catalog: &crate::cli::commands::CommandCatalogOutput, verb: &
 }
 
 /// Entry point for the `Commands::Help { topics }` dispatch arm
-/// AND the bare-help intercept in `main.rs`. Routes between everyday
-/// / advanced / topic surfaces and falls through to clap-derived help
-/// for command paths without a dedicated topic.
+/// AND the bare-help intercept in `main.rs`. Routes between the everyday
+/// first screen, topic pages, and clap-derived help for command paths
+/// without a dedicated topic.
 ///
 /// All output goes to stdout (this is help, not diagnostic). Returns
 /// `Ok(())` even for unknown topics; the printer surfaces the
@@ -265,9 +252,8 @@ pub fn render_help_for_authority(
                 let name = path.join(" ");
                 let _ = writeln!(
                     out,
-                    "no topic or command '{name}'. Run `heddle help advanced` for \
-                     the full advanced list, or `heddle help` for the \
-                     curated everyday surface."
+                    "no topic or command '{name}'. Run `heddle help` for the \
+                     everyday surface, or `heddle help model` for the mental model."
                 );
             }
         }
@@ -536,7 +522,7 @@ pub fn render_for_args(args: &[&str]) -> Option<String> {
     if let Ok(cli) = Cli::try_parse_from(std::iter::once("heddle".to_string()).chain(raw.clone()))
         && let Commands::Help { topics } = &cli.command
     {
-        // `heddle help <topics>` — curated topic / advanced / command-path help.
+        // `heddle help <topics>` — curated topic / command-path help.
         return Some(render_help(&command, topics));
     }
     if let Ok(cli) = Cli::try_parse_from(std::iter::once("heddle".to_string()).chain(raw.clone()))
@@ -705,35 +691,43 @@ an output and interop layer, not the thing you have to think about first.
 Core nouns:
 
 - State: a captured tree with a stable change id, attribution, intent, and
-  provenance. States are what `log`, `show`, `diff`, `undo`, and agents can
+  provenance. States are what `log`, `show`, `diff`, `undo`, and `query` can
   reason about.
 - Thread: a named line of work with its own checkout and captured history.
   Use it for risky edits, agent work, or parallel experiments without
   serializing everything through one checkout.
-- Capture: the Heddle save boundary for provenance, undo, and review.
-- Commit: publish captured source history to `.git` in Git Overlay.
-- Verify: the proof surface. It says whether Heddle, Git mapping, worktree,
-  remotes, active operations, clone state, and machine contracts agree.
+- Capture: the save. Provenance, undo, and review start here.
+- Annotation: durable context that lives with the code (`heddle context`).
+- Discussion: scoped chats that open, get turns, and resolve (`heddle discuss`).
 
-Everyday loop:
+Everyday verbs:
 
+    heddle init / clone
     heddle status
     heddle diff
     heddle capture -m "..."
-    heddle commit
     heddle start <name> --path ../<name>
     heddle ready
-    heddle land --thread <name>
+    heddle land
     heddle undo
-    heddle verify
+    heddle pull / push
+    heddle resolve / continue
+    heddle log / show / query
+    heddle review / discuss / context
+    heddle whoami
+    heddle daemon
+    heddle doctor
+    heddle help
+
+Save is `capture`. In Git Overlay, `ready` and `push` write the Git commit as a
+side effect; do not run `capture` then `commit`.
 
 Existing Git checkout:
 
     heddle status
     heddle init                  # initialize Heddle metadata; Git commits stay in .git
     heddle capture -m "..."
-    heddle commit                # Sley writes directly to .git
-    heddle verify
+    heddle doctor
 
 If a command refuses, read the first `Next:` line. Heddle fails closed when it
 cannot prove the move is safe.
@@ -1160,7 +1154,7 @@ mod tests {
     #[test]
     fn advanced_verbs_lists_tip_referenced_commands() {
         let advanced: std::collections::HashSet<&str> = advanced_verbs().into_iter().collect();
-        for verb in ["query", "continue", "abort", "shell"] {
+        for verb in ["abort", "shell"] {
             assert!(
                 advanced.contains(verb),
                 "`{verb}` is referenced in user-facing tips but is not \
@@ -1214,19 +1208,28 @@ mod tests {
     }
 
     #[test]
-    fn first_screen_shows_overlay_commit_for_git_overlay() {
+    fn first_screen_does_not_teach_capture_then_commit_on_overlay() {
         use clap::CommandFactory;
         let cmd = crate::cli::cli_args::Cli::command();
         let help =
             render_help_for_authority(&cmd, &[], repo::RepositorySourceAuthority::GitOverlay);
         assert!(
-            help.contains("Existing Git: heddle status -> heddle init -> heddle capture -m \"...\" -> heddle commit -> heddle push"),
-            "overlay first screen still teaches commit after capture: {help}"
+            help.contains("Save: heddle init -> heddle capture -m \"...\""),
+            "overlay first screen still teaches capture as the save: {help}"
         );
         assert!(
-            help.lines()
+            help.contains("ready") && help.contains("heddle push") && help.contains("Git commit"),
+            "overlay first screen should say ready/push write the Git commit: {help}"
+        );
+        assert!(
+            !help.contains("-> heddle commit"),
+            "overlay first screen must not teach capture then commit: {help}"
+        );
+        assert!(
+            !help
+                .lines()
                 .any(|line| line.trim_start().starts_with("commit  ")),
-            "overlay first screen lists the commit verb: {help}"
+            "overlay first screen must not list the commit verb: {help}"
         );
     }
 
@@ -1333,27 +1336,36 @@ mod tests {
         }
     }
 
-    /// The everyday surface should mirror the core loop rather than
-    /// mixing in every collaboration feature. A first-time user should
-    /// be able to orient, commit work, check readiness, inspect,
-    /// integrate, recover, and diagnose from the first help screen.
+    /// The catalog everyday set includes the locked first-screen verbs
+    /// that have a contract entry in this build, plus leftover everyday
+    /// labels that the 85→23 fold has not removed.
     #[test]
     fn everyday_verbs_surface_the_core_loop() {
         let everyday: std::collections::HashSet<&str> = everyday_verbs().into_iter().collect();
         for verb in [
-            "init", "clone", "status", "start", "capture", "commit", "ready", "diff", "land",
-            "resolve", "undo", "log", "show", "pull", "push", "doctor", "verify",
+            "init", "clone", "status", "start", "capture", "ready", "diff", "land", "resolve",
+            "continue", "undo", "log", "show", "query", "review", "discuss", "context", "daemon",
+            "pull", "push", "doctor",
         ] {
             assert!(
                 everyday.contains(verb),
-                "`{verb}` is part of the core loop but is not advertised on \
-                 the everyday surface"
+                "`{verb}` is part of the locked everyday surface but is not \
+                 advertised as everyday"
             );
         }
-        for verb in ["review", "discuss", "context", "thread", "git-projection"] {
+        if crate::cli::commands::build_command_catalog()
+            .command_by_display("whoami")
+            .is_some()
+        {
+            assert!(
+                everyday.contains("whoami"),
+                "`whoami` is part of the locked everyday surface"
+            );
+        }
+        for verb in ["thread", "git-projection"] {
             assert!(
                 !everyday.contains(verb),
-                "`{verb}` belongs behind advanced/topic help, not the core-loop surface"
+                "`{verb}` is not an everyday first-screen verb"
             );
         }
     }

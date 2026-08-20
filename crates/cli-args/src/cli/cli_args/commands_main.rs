@@ -88,14 +88,13 @@ pub enum Commands {
 
     /// Curated, progressive-disclosure help.
     ///
-    /// `heddle help` prints the curated everyday verbs and points at
-    /// `heddle help advanced` for everything else. `heddle help
-    /// <topic>` prints the topic page (e.g. `daemon`, `signals`,
-    /// `bridge`). `heddle help <command path>` falls through to that
-    /// command's `--help` so the printer never duplicates clap's
-    /// per-verb derivation.
+    /// `heddle help` prints the locked everyday verbs. `heddle help
+    /// <topic>` prints the topic page (e.g. `model`, `daemon`,
+    /// `signals`, `git-concepts`). `heddle help <command path>` falls
+    /// through to that command's `--help` so the printer never
+    /// duplicates clap's per-verb derivation.
     Help {
-        /// Topic name (`advanced`, `daemon`, `signals`, …) or command
+        /// Topic name (`model`, `daemon`, `signals`, …) or command
         /// path. When omitted, prints the curated default.
         #[arg(value_name = "TOPIC_OR_COMMAND")]
         topics: Vec<String>,

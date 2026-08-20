@@ -1562,17 +1562,18 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["whoami"],
-        category(
-            feature_gated(
-                json_discriminators(
-                    documented_schemas(READ_JSON, &["whoami"]),
-                    &[json_discriminator(Some("whoami"), "output_kind", "whoami")],
+        front_door(
+            category(
+                feature_gated(
+                    json_discriminators(
+                        documented_schemas(READ_JSON, &["whoami"]),
+                        &[json_discriminator(Some("whoami"), "output_kind", "whoami")],
+                    ),
+                    "client",
                 ),
-                "client",
+                "repo",
             ),
-            // Groups under "Repo and environment" in `heddle help advanced`,
-            // alongside the `auth` identity commands.
-            "repo",
+            190,
         ),
     ),
     entry(&["bridge"], surface(GROUP, "git_projection")),
@@ -1758,19 +1759,25 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["continue"],
-        category(
-            json_discriminators(
-                documented_schemas(operator_envelope(compact_json(REF_MUTATION)), &["continue"]),
-                &[json_discriminator(
-                    Some("continue"),
-                    "output_kind",
-                    "continue",
-                )],
+        front_door(
+            category(
+                json_discriminators(
+                    documented_schemas(
+                        operator_envelope(compact_json(REF_MUTATION)),
+                        &["continue"],
+                    ),
+                    &[json_discriminator(
+                        Some("continue"),
+                        "output_kind",
+                        "continue",
+                    )],
+                ),
+                "recovery",
             ),
-            "recovery",
+            95,
         ),
     ),
-    entry(&["context"], category(GROUP, "collab")),
+    entry(&["context"], front_door(category(GROUP, "collab"), 180)),
     entry(
         &["context", "set"],
         json_discriminators(
@@ -1891,7 +1898,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "git_projection",
         ),
     ),
-    entry(&["daemon"], surface(GROUP, "admin")),
+    entry(&["daemon"], front_door(surface(GROUP, "admin"), 195)),
     entry(
         &["daemon", "serve"],
         surface(opaque_schemas(DAEMON_MUTATION, &["daemon serve"]), "admin"),
@@ -1921,7 +1928,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             20,
         ),
     ),
-    entry(&["discuss"], category(GROUP, "collab")),
+    entry(&["discuss"], front_door(category(GROUP, "collab"), 170)),
     entry(
         &["discuss", "open"],
         json_discriminators(
@@ -2303,15 +2310,18 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["query"],
-        category(
-            json_discriminators(
-                documented_schemas(
-                    documented_core_report_schema(READ_JSON, QueryReport::CONTRACT),
-                    QUERY_ATTRIBUTION_SCHEMA_VERBS,
+        front_door(
+            category(
+                json_discriminators(
+                    documented_schemas(
+                        documented_core_report_schema(READ_JSON, QueryReport::CONTRACT),
+                        QUERY_ATTRIBUTION_SCHEMA_VERBS,
+                    ),
+                    QUERY_JSON_DISCRIMINATORS,
                 ),
-                QUERY_JSON_DISCRIMINATORS,
+                "states",
             ),
-            "states",
+            150,
         ),
     ),
     entry(
@@ -2482,7 +2492,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "states",
         ),
     ),
-    entry(&["review"], category(GROUP, "collab")),
+    entry(&["review"], front_door(category(GROUP, "collab"), 160)),
     entry(
         &["review", "show"],
         json_discriminators(
