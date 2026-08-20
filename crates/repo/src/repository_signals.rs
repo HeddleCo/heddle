@@ -18,7 +18,7 @@ use objects::{
     store::ObjectStore,
 };
 use state_review::{
-    ReviewSignalsConfig, SemanticContext,
+    ReviewSignalsConfig,
     config::{
         InvariantAdjacencyConfig, NoveltyConfig, PatternDeviationConfig,
         SelfFlaggedUncertaintyConfig, TestReachabilityConfig,
@@ -26,6 +26,8 @@ use state_review::{
     registry::run_all,
 };
 use tracing::warn;
+
+use crate::repository_semantic_context::build_semantic_context;
 
 use crate::{Repository, Result, repository::ReviewSignalsToml};
 
@@ -43,15 +45,19 @@ impl Repository {
         &self,
         prior: Option<&State>,
         new: &State,
+        new_index: Option<&ContentHash>,
     ) -> Result<Option<ContentHash>> {
         let cfg = signals_config_from_repo(&self.config().review.signals);
-        // The default empty `SemanticContext` covers self-flagged-uncertainty
-        // and invariant-adjacency, both of which only need state-level
-        // metadata. Tree-sitter-driven modules (novelty, test-reachability,
-        // pattern-deviation) stay quiet rather than failing — that's a
-        // first-ship trade-off, not a permanent one. Follow-on work
-        // populates `SemanticContext` from the snapshot's tree.
-        let ctx = SemanticContext::new();
+        let ctx = match build_semantic_context(self, prior, new, new_index) {
+            Ok(ctx) => ctx,
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "failed to build SemanticContext; running state-only signals"
+                );
+                state_review::SemanticContext::new()
+            }
+        };
         // The registry expects a non-Option prior. Use the new state itself
         // when none is available (initial snapshot) — the modules fire on
         // their own diagnostic content, not on diff vs prior, except where
@@ -179,6 +185,71 @@ mod tests {
             repo.latest_state_attachment(&state.id(), crate::StateAttachmentKind::RiskSignals)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    fn attached_risk_modules(repo: &Repository, state: &objects::object::State) -> Vec<String> {
+        let Some(attachment) = repo
+            .latest_state_attachment(&state.id(), crate::StateAttachmentKind::RiskSignals)
+            .unwrap()
+        else {
+            return Vec::new();
+        };
+        let objects::object::StateAttachmentBody::RiskSignals(hash) = attachment.body else {
+            panic!("expected risk-signals attachment");
+        };
+        let blob = repo.store().get_blob(&hash).unwrap().unwrap();
+        RiskSignalBlob::decode(blob.content())
+            .unwrap()
+            .signals
+            .into_iter()
+            .map(|signal| signal.producer.module)
+            .collect()
+    }
+
+    #[test]
+    fn snapshot_fmt_sweep_persists_no_tree_sitter_signals() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let attribution = Attribution::human(Principal::new("Fmt", "fmt@example.com"));
+        std::fs::write(temp.path().join("hello.rs"), "fn foo() -> i32 { 1 }\n").unwrap();
+        repo.snapshot_with_attribution(Some("seed".to_string()), None, attribution.clone())
+            .unwrap();
+        std::fs::write(temp.path().join("hello.rs"), "fn foo() -> i32 {\n    1\n}\n").unwrap();
+        let reformatted = repo
+            .snapshot_with_attribution(Some("fmt".to_string()), None, attribution)
+            .unwrap();
+
+        assert!(
+            attached_risk_modules(&repo, &reformatted)
+                .iter()
+                .all(|module| !module.contains("tree_sitter")),
+            "fmt-sweep must not persist tree-sitter signals: {:?}",
+            attached_risk_modules(&repo, &reformatted)
+        );
+    }
+
+    #[test]
+    fn snapshot_novel_shape_persists_novelty() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let attribution = Attribution::human(Principal::new("Nov", "nov@example.com"));
+        std::fs::write(
+            temp.path().join("changed.rs"),
+            "fn alpha() { let total = first + second + third + fourth; }\n\
+             fn beta() { for widget in inventory { ship(widget); } }\n\
+             fn gamma() { match colour { Red => stop(), Green => go() } }\n\
+             fn delta() { while pending { dequeue().handle(); } flush(); }\n",
+        )
+        .unwrap();
+        let state = repo
+            .snapshot_with_attribution(Some("novel".to_string()), None, attribution)
+            .unwrap();
+
+        let modules = attached_risk_modules(&repo, &state);
+        assert!(
+            modules.iter().any(|module| module == "novelty.tree_sitter"),
+            "semantic change must persist novelty, got {modules:?}"
         );
     }
 }

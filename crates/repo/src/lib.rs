@@ -75,6 +75,8 @@ pub use repository_symbol_graph_query::ResolvedSemanticEdgeSet;
 #[cfg(all(test, feature = "tree-sitter-symbols"))]
 mod repository_semantic_graph_e2e_tests;
 #[cfg(feature = "tree-sitter-symbols")]
+mod repository_semantic_context;
+#[cfg(feature = "tree-sitter-symbols")]
 mod repository_signals;
 mod repository_state_visibility;
 #[cfg(all(test, feature = "tree-sitter-symbols"))]

@@ -610,6 +610,43 @@ fn discuss_open_show_append_emit_output_kind() {
 }
 
 #[test]
+fn review_show_and_health_emit_real_signals_when_semantic_diff_sees_a_change() {
+    let temp = TempDir::new().expect("tempdir");
+    heddle(&["init"], Some(temp.path())).expect("heddle init");
+    fs::write(
+        temp.path().join("changed.rs"),
+        "fn alpha() { let total = first + second + third + fourth; }\n\
+         fn beta() { for widget in inventory { ship(widget); } }\n\
+         fn gamma() { match colour { Red => stop(), Green => go() } }\n\
+         fn delta() { while pending { dequeue().handle(); } flush(); }\n",
+    )
+    .expect("write novel functions");
+    heddle(&["capture", "-m", "novel shape"], Some(temp.path())).expect("capture");
+
+    let show = heddle_json(&["review", "show"], &temp);
+    assert_output_kind(&show, "review_show");
+    let signals = show["in_budget_signals"]
+        .as_array()
+        .expect("in_budget_signals array");
+    assert!(
+        signals.iter().any(|signal| {
+            signal["kind"] != "diff_summary" && signal["producer"] == "novelty.tree_sitter"
+        }),
+        "review show must emit a real SemanticContext signal, got {show}"
+    );
+
+    let health = heddle_json(&["review", "health"], &temp);
+    assert_output_kind(&health, "review_health");
+    let entries = health["entries"].as_array().expect("health entries");
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["module_id"] == "novelty.tree_sitter"),
+        "review health must not be empty after a semantic change: {health}"
+    );
+}
+
+#[test]
 fn review_show_emits_output_kind() {
     let temp = init_and_capture();
     let value = heddle_json(&["review", "show", "HEAD"], &temp);
