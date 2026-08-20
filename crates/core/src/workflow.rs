@@ -421,6 +421,32 @@ pub fn land_skipped_steps(
     .collect()
 }
 
+/// Next action after a successful sync (already current or refreshed).
+///
+/// Sync is its own job — refresh this thread onto its target — not land.
+/// Operation / remote / import still win. There is no `land --thread`
+/// fallback: a completed sync does not prescribe landing.
+pub fn sync_completed_next_action(
+    operation: Option<&RepositoryOperationStatus>,
+    remote_tracking: Option<&GitRemoteTrackingStatus>,
+    import_hint: Option<&GitImportGuidance>,
+) -> Option<String> {
+    non_empty_action(Some(&effective_next_action(NextActionInput::default(
+        operation,
+        remote_tracking,
+        import_hint,
+        None,
+    ))))
+    .map(str::to_string)
+}
+
+/// Whether sync has nothing left to refresh: the thread is already
+/// current, or it has no integration target (the default checkout,
+/// including a thread named `main`).
+pub fn sync_is_already_current(freshness_is_current: bool, has_target_thread: bool) -> bool {
+    freshness_is_current || !has_target_thread
+}
+
 /// Next action after a successful local land (push if trust says so, else cleanup).
 pub fn integrated_land_next_action(
     integrated: bool,
@@ -774,6 +800,28 @@ mod tests {
             Some("heddle push".to_string())
         );
         assert_eq!(integrated_land_next_action(false, "heddle push"), None);
+    }
+
+    #[test]
+    fn sync_completed_next_action_is_not_land_thread() {
+        assert_eq!(sync_completed_next_action(None, None, None), None);
+
+        let operation = RepositoryOperationStatus {
+            scope: OperationScope::Heddle,
+            kind: OperationKind::Merge,
+            in_progress: true,
+            state: "in_progress".to_string(),
+            message: "merge in progress".to_string(),
+            next_action: "heddle continue".to_string(),
+        };
+        assert_eq!(
+            sync_completed_next_action(Some(&operation), None, None),
+            Some("heddle continue".to_string())
+        );
+
+        assert!(sync_is_already_current(true, true));
+        assert!(sync_is_already_current(false, false));
+        assert!(!sync_is_already_current(false, true));
     }
 
     #[test]

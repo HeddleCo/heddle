@@ -379,3 +379,75 @@ fn sync_conflicting_stale_thread_emits_runnable_resolve_breadcrumb() {
 
     drop(checkout_owner);
 }
+
+/// heddle#1461: the default checkout thread is named `main` and has a ref
+/// but often no ThreadManager record. `heddle sync` must treat that as the
+/// current / default thread, not `Thread 'main' not found`.
+#[test]
+fn sync_on_default_main_thread_succeeds() {
+    let repo = setup_native_repo();
+
+    let sync = json(&["--output", "json", "sync"], repo.path());
+    assert_eq!(sync["status"], "current", "{sync}");
+    assert_eq!(sync["thread"], "main", "{sync}");
+    assert_eq!(sync["chosen_path"], "no_op", "{sync}");
+    assert_eq!(sync["output_kind"], "sync", "{sync}");
+    let next = sync["next_action"].as_str().unwrap_or("");
+    assert!(
+        !next.contains("land --thread"),
+        "sync next_action must not unconditionally recommend land --thread: {sync}"
+    );
+    assert_no_banned_next_actions(&sync);
+
+    let named = json(
+        &["--output", "json", "sync", "--thread", "main"],
+        repo.path(),
+    );
+    assert_eq!(named["status"], "current", "{named}");
+    assert_eq!(named["thread"], "main", "{named}");
+}
+
+/// heddle#1461: default human output is prose, not the JSON envelope.
+#[test]
+fn sync_default_text_is_prose_not_json() {
+    let repo = setup_native_repo();
+    let text = heddle(&["sync"], Some(repo.path())).expect("sync text");
+    assert!(
+        text.contains("Thread 'main' is already current"),
+        "sync text should name the current thread in prose:\n{text}"
+    );
+    assert!(
+        !text.trim_start().starts_with('{'),
+        "sync default text must not be a JSON blob:\n{text}"
+    );
+    assert!(
+        !text.contains("land --thread"),
+        "sync text must not unconditionally recommend land --thread:\n{text}"
+    );
+}
+
+/// heddle#1461: after a clean refresh, sync is done — next is not land --thread.
+#[test]
+fn sync_refresh_does_not_prescribe_land_thread() {
+    let (main, checkout_owner, execution_path) = setup_managed_thread("feature/sync-next");
+    let checkout = std::path::Path::new(&execution_path);
+    std::fs::write(checkout.join("feature.txt"), "feature\n").unwrap();
+    heddle(&["capture", "-m", "feature"], Some(checkout)).unwrap();
+
+    std::fs::write(main.path().join("base.txt"), "base changed\n").unwrap();
+    heddle(&["capture", "-m", "advance main"], Some(main.path())).unwrap();
+
+    let sync = json(
+        &["--output", "json", "sync", "--thread", "feature/sync-next"],
+        main.path(),
+    );
+    assert_eq!(sync["status"], "refreshed", "{sync}");
+    let next = sync["next_action"].as_str().unwrap_or("");
+    assert!(
+        !next.contains("land --thread"),
+        "refreshed sync must not unconditionally recommend land --thread: {sync}"
+    );
+    assert_no_banned_next_actions(&sync);
+
+    drop(checkout_owner);
+}
