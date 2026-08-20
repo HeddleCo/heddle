@@ -174,7 +174,7 @@ pub async fn show(cli: &Cli, session_id: Option<String>) -> Result<()> {
         &repo,
         &registry,
         session_id.as_deref(),
-        "heddle presence show <SESSION>",
+        "heddle presence show <session>",
     )?;
     let show = show_actor_from_entry(&registry, &entry)?;
 
@@ -281,7 +281,7 @@ pub async fn complete(cli: &Cli, session_id: Option<String>) -> Result<()> {
         &repo,
         &registry,
         session_id.as_deref(),
-        "heddle presence complete --session <SESSION>",
+        "heddle presence complete --session <session>",
     )?;
     let plan = plan_actor_done(&entry);
     mark_actor_done(&registry, &plan.session_id)?;
@@ -333,7 +333,7 @@ pub async fn explain(cli: &Cli, session_id: Option<String>) -> Result<()> {
         &repo,
         &registry,
         session_id.as_deref(),
-        "heddle presence explain <SESSION>",
+        "heddle presence explain <session>",
     ) {
         Ok(entry) => entry,
         Err(err) if session_id.is_none() && is_no_active_actor_error(&err) => {
@@ -614,7 +614,7 @@ fn select_actor_candidate(
         .collect();
     let selected = super::interactive_select::select_ambiguous_target(
         "actor",
-        "<SESSION>",
+        "<session>",
         command_template,
         choices,
     )?;

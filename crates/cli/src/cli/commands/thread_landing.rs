@@ -17,6 +17,27 @@ pub(crate) fn land_command_for_thread(_repo: &repo::Repository, thread_id: &str)
     land_local_command(thread_id)
 }
 
+/// Land of the current checkout is `heddle land`. `--thread` / `--repo` are
+/// invisible defaults once the caller is already on that thread (heddle#1456).
+pub(crate) fn land_action_when(thread_id: &str, current_checkout: bool) -> String {
+    if current_checkout {
+        heddle_action(["land"])
+    } else {
+        land_local_command(thread_id)
+    }
+}
+
+pub(crate) fn land_action_for_ready(repo: &repo::Repository, thread_id: &str) -> String {
+    land_action_when(thread_id, checkout_is_thread(repo, thread_id))
+}
+
+fn checkout_is_thread(repo: &repo::Repository, thread_id: &str) -> bool {
+    super::thread_cmd::current_thread(repo)
+        .ok()
+        .flatten()
+        .is_some_and(|thread| thread.id == thread_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -29,6 +50,11 @@ mod tests {
         );
         assert_eq!(
             land_local_command("feature/demo"),
+            "heddle land --thread feature/demo"
+        );
+        assert_eq!(land_action_when("feature/demo", true), "heddle land");
+        assert_eq!(
+            land_action_when("feature/demo", false),
             "heddle land --thread feature/demo"
         );
         assert_eq!(
@@ -51,6 +77,9 @@ mod tests {
                 panic!("breadcrumb `{cmd}` must validate for a leading-dash id: {e}")
             });
         }
+        assert_eq!(land_action_when(id, true), "heddle land");
+        validate_recommended_action("heddle land")
+            .unwrap_or_else(|e| panic!("current-checkout land breadcrumb must validate: {e}"));
         assert_eq!(land_local_command(id), "heddle land '--thread=-foo'");
         assert_eq!(merge_preview_command(id), "heddle ready '--thread=-foo'");
         assert_eq!(switch_thread_command(id), "heddle thread switch -- -foo");

@@ -35,7 +35,7 @@ use super::{
     thread_cmd::{
         current_thread, load_thread, refresh_thread, thread_manager, thread_not_found_advice,
     },
-    thread_landing::land_local_command,
+    thread_landing::land_action_for_ready,
     verification_health::{
         RepositoryVerificationState, build_plain_git_verification_probe,
         build_repository_verification_state,
@@ -400,7 +400,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
         && decision.integration_clear
     {
         report.thread_health = "ready".to_string();
-        report.recommended_action = land_local_command(&thread.id);
+        report.recommended_action = land_action_for_ready(&repo, &thread.id);
         report.refresh_recommended_action_metadata();
     }
 

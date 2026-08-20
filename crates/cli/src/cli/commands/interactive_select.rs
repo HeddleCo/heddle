@@ -172,4 +172,28 @@ mod tests {
         assert_eq!(advice.kind, "ambiguous_thread_selection");
         assert_eq!(advice.primary_command, "heddle thread show <THREAD>");
     }
+
+    #[test]
+    fn actor_ambiguity_primary_command_stays_a_presence_show() {
+        use super::super::command_catalog::validate_recommended_action;
+
+        let advice = ambiguous_target_advice(
+            "actor",
+            "<session>",
+            "heddle presence show <session>",
+            &choices(),
+        );
+        assert_eq!(advice.kind, "ambiguous_actor_selection");
+        assert_eq!(advice.primary_command, "heddle presence show <session>");
+        assert_ne!(advice.primary_command, "heddle help --output json");
+        validate_recommended_action(&advice.primary_command)
+            .unwrap_or_else(|err| panic!("presence show multi-match next must validate: {err}"));
+        assert_eq!(
+            advice.recovery_commands,
+            vec![
+                "heddle presence show alpha".to_string(),
+                "heddle presence show beta".to_string(),
+            ]
+        );
+    }
 }
