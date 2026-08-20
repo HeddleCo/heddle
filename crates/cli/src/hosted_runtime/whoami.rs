@@ -13,7 +13,7 @@ use cli_shared::{
     resolve_principal_without_repo,
 };
 use crypto::Ed25519Signer;
-use repo::{Repository, discover_heddle_root};
+use repo::Repository;
 use serde::Serialize;
 use weft_client_shim::CliContext;
 
@@ -148,22 +148,21 @@ async fn resolve_whoami(ctx: &dyn CliContext, server: &str) -> Result<WhoamiOutp
 
 /// Who the next capture is attributed to.
 ///
-/// Observe-only: probe with [`discover_heddle_root`] and open only an
-/// already-present store. `Repository::open` on a plain Git tree would
-/// bootstrap a `.heddle` sidecar. A discovered store that fails to open is
-/// surfaced, not rewritten as "no repository."
+/// Observe-only: [`Repository::open_existing`] probes with
+/// [`repo::discover_heddle_root`] and opens only an already-present store.
+/// [`Repository::open`] on a plain Git tree would bootstrap a `.heddle`
+/// sidecar and rewrite Git excludes. A discovered store that fails to open
+/// is surfaced, not rewritten as "no repository."
 fn resolve_capture_actor(ctx: &dyn CliContext) -> Result<CaptureActor> {
     let user_config = UserConfig::load_default()?;
     let start = match ctx.repo_path() {
         Some(path) => path.to_path_buf(),
         None => std::env::current_dir().context("get current working directory")?,
     };
-    let resolved = match discover_heddle_root(&start) {
-        Some(root) => resolve_principal(
-            &Repository::open(&root)
-                .with_context(|| format!("open Heddle store at {}", root.display()))?,
-            &user_config,
-        )?,
+    let resolved = match Repository::open_existing(&start)
+        .with_context(|| format!("open Heddle store at {}", start.display()))?
+    {
+        Some(repo) => resolve_principal(&repo, &user_config)?,
         None => resolve_principal_without_repo(&user_config),
     };
     Ok(CaptureActor::from_resolved(&resolved))

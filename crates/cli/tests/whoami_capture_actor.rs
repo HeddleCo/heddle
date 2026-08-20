@@ -142,23 +142,32 @@ fn whoami_does_not_bootstrap_a_plain_git_tree() {
         "git init failed: {}",
         String::from_utf8_lossy(&init.stderr)
     );
+    let exclude = git.join(".git/info/exclude");
+    if let Some(parent) = exclude.parent() {
+        std::fs::create_dir_all(parent).expect("exclude dir");
+    }
+    let exclude_before = "# project\n*.tmp\n";
+    std::fs::write(&exclude, exclude_before).expect("seed exclude");
+    let nested = git.join("src");
+    std::fs::create_dir_all(&nested).expect("nested dir");
 
     let whoami = isolated_command(&git, &home, &["whoami", "--output", "json"])
         .output()
         .expect("run whoami");
     assert_success(&whoami, "whoami in plain git");
+    let nested_whoami = isolated_command(&nested, &home, &["whoami"])
+        .output()
+        .expect("run whoami from subdirectory");
+    assert_success(&nested_whoami, "whoami from subdirectory of plain git");
     assert!(
         !git.join(".heddle").exists(),
         "whoami must not create .heddle"
     );
-    let exclude = git.join(".git/info/exclude");
-    if exclude.is_file() {
-        let text = std::fs::read_to_string(&exclude).expect("read exclude");
-        assert!(
-            !text.contains(".heddle"),
-            "whoami must not write git excludes:\n{text}"
-        );
-    }
+    let text = std::fs::read_to_string(&exclude).expect("read exclude");
+    assert_eq!(
+        text, exclude_before,
+        "whoami must not rewrite git excludes:\n{text}"
+    );
     let value: Value = serde_json::from_slice(&whoami.stdout).expect("whoami json");
     assert_eq!(value["capture_actor"]["name"], "Luke");
     assert_eq!(value["capture_actor"]["source"], "user_config");

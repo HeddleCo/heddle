@@ -329,8 +329,51 @@ fn open_refuses_legacy_oplog_before_mutating_repository() {
 }
 
 /// Mutating commands historically bootstrap plain Git via `Repository::open`.
-/// Observe-only CLI paths (status/verify/doctor) must not call open until a
-/// `.heddle` sidecar already exists — see `verify_execution_context_from_cli`.
+/// Observe-only CLI paths (status/verify/doctor/whoami) must not call open
+/// until a `.heddle` sidecar already exists — see `verify_execution_context_from_cli`.
+#[test]
+fn open_existing_does_not_bootstrap_plain_git() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+    sley::Repository::init(root).expect("init valid Git worktree");
+    let exclude = root.join(".git/info/exclude");
+    if let Some(parent) = exclude.parent() {
+        fs::create_dir_all(parent).expect("exclude dir");
+    }
+    fs::write(&exclude, "# project\n").expect("seed exclude");
+
+    let opened =
+        Repository::open_existing(root).expect("observe-only open must not fail on plain Git");
+    assert!(opened.is_none(), "plain Git must stay unadopted");
+    assert!(
+        !root.join(".heddle").exists(),
+        "open_existing must not create .heddle"
+    );
+    let text = fs::read_to_string(&exclude).expect("read exclude");
+    assert_eq!(
+        text, "# project\n",
+        "open_existing must not rewrite Git excludes"
+    );
+}
+
+#[test]
+fn open_existing_opens_an_already_present_store() {
+    let (temp_dir, repo) = create_test_repo();
+    let root = temp_dir.path();
+    drop(repo);
+
+    let opened = Repository::open_existing(root)
+        .expect("existing store must open")
+        .expect("existing store must be present");
+    assert_eq!(
+        opened
+            .root()
+            .canonicalize()
+            .expect("canonicalize opened root"),
+        root.canonicalize().expect("canonicalize fixture root")
+    );
+}
+
 #[test]
 fn open_bootstraps_plain_git_sidecar_for_mutators() {
     let temp_dir = TempDir::new().unwrap();
