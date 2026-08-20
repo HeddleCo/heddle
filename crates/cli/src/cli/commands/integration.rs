@@ -715,7 +715,7 @@ fn install_codex(
     let mut value = if existing.trim().is_empty() {
         toml::Value::Table(toml::map::Map::new())
     } else {
-        existing.parse::<toml::Value>()?
+        toml::from_str(&existing)?
     };
     let heddle = HeddleInvocation::resolve(path_mode)?;
     // Workspace sidecar: discover `.heddle` from cwd. Do not bake the
@@ -1039,12 +1039,14 @@ fn uninstall_one(
     else {
         return Ok(());
     };
+    heddle_core::expire_identity_cursor(repo.root()).map_err(anyhow::Error::from)?;
     match harness {
         "codex" => {
             if let Some(path) = existing.paths.first() {
                 let config_path = PathBuf::from(path);
                 if config_path.exists() {
-                    let mut value = fs::read_to_string(&config_path)?.parse::<toml::Value>()?;
+                    let mut value: toml::Value =
+                        toml::from_str(&fs::read_to_string(&config_path)?)?;
                     if let Some(table) = value.as_table_mut() {
                         if let Some(hooks) = table.get_mut("hooks").and_then(|v| v.as_table_mut()) {
                             for event in ["SessionStart", "SubagentStart", "PreToolUse", "Stop"] {
@@ -1122,7 +1124,6 @@ fn uninstall_one(
     manifest
         .integrations
         .retain(|entry| entry.harness != harness);
-    heddle_core::expire_identity_cursor(repo.root()).map_err(anyhow::Error::from)?;
     Ok(())
 }
 
@@ -1595,25 +1596,25 @@ mod tests {
             contents.contains("heddle integration stamp codex"),
             "expected PATH-relative `heddle` in codex hook command, got: {contents}"
         );
-        let parsed: toml::Value = contents.parse().unwrap();
-        let hook_command = |event: &str| {
-            parsed["hooks"][event][0]["hooks"][0]["command"]
-                .as_str()
-                .unwrap_or("")
-                .to_string()
-        };
         assert_eq!(
-            hook_command("Stop"),
-            "heddle integration stamp codex --expire",
-            "Codex Stop must expire, same as Claude SessionEnd"
+            contents
+                .matches("heddle integration stamp codex --expire\"")
+                .count(),
+            1,
+            "Codex Stop must expire, same as Claude SessionEnd, got: {contents}"
         );
-        for event in ["SessionStart", "SubagentStart", "PreToolUse"] {
-            assert_eq!(
-                hook_command(event),
-                "heddle integration stamp codex",
-                "{event} must stamp without expiring"
-            );
-        }
+        assert_eq!(
+            contents
+                .matches("heddle integration stamp codex\"")
+                .count(),
+            3,
+            "SessionStart/SubagentStart/PreToolUse must stamp without expiring, got: {contents}"
+        );
+        assert!(
+            contents.contains("[[hooks.Stop]]")
+                && contents.contains("heddle integration stamp codex --expire"),
+            "Stop hook must be the expire command, got: {contents}"
+        );
         assert_eq!(manifest.integrations[0].harness, "codex");
         assert_eq!(manifest.integrations[0].path_mode, PathMode::Relative);
 
@@ -1630,6 +1631,11 @@ mod tests {
         assert!(
             heddle_core::read_identity_cursor(repo.root()).is_empty(),
             "codex uninstall must expire the identity cursor"
+        );
+        let after = fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !after.contains("integration stamp"),
+            "codex uninstall must remove stamp hooks, got: {after}"
         );
     }
 
