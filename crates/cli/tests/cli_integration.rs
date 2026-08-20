@@ -276,6 +276,8 @@ mod clone_output_contract;
 mod compact_output;
 #[path = "cli_integration/context_recovery_advice.rs"]
 mod context_recovery_advice;
+#[path = "cli_integration/context_rides_diff.rs"]
+mod context_rides_diff;
 #[path = "cli_integration/current_context_advice.rs"]
 mod current_context_advice;
 #[path = "cli_integration/diff_patch_conformance.rs"]

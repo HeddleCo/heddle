@@ -128,9 +128,10 @@ pub use contract::{
 pub use diff::{
     ContextSnippet, DiffOptions, DiffReport, DiffStats, FileChange, FileContextEntry, FileEolState,
     LineCounts, LineDiff, PlainGitDiffProbe, SemanticChangeEntry, SymlinkChange,
-    change_line_counts, compute_state_diff, compute_tree_diff, diff, diff_worktree_status,
-    plain_git_head_diff, render_diff_patch, render_diff_patch_bytes, should_render_modified_pair,
-    trim_added_decorations_for_display, write_diff_patch,
+    attach_show_context, change_line_counts, compute_state_diff, compute_tree_diff, diff,
+    diff_worktree_status, plain_git_head_diff, render_diff_patch, render_diff_patch_bytes,
+    should_render_modified_pair, trim_added_decorations_for_display, worktree_context_state,
+    write_diff_patch,
 };
 pub use fsck::{FsckError, FsckOptions, FsckRepair, FsckReport, fsck};
 pub use gc_plan::{

@@ -5,8 +5,8 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow};
 use heddle_core::{
-    DiffOptions, DiffReport, PlainGitDiffProbe, diff as core_diff, diff_worktree_status,
-    plain_git_head_diff,
+    DiffOptions, DiffReport, PlainGitDiffProbe, attach_show_context, diff as core_diff,
+    diff_worktree_status, plain_git_head_diff, worktree_context_state,
 };
 use objects::worktree::WorktreeStatus;
 use repo::{Config, Repository, RepositoryCapability, discover_heddle_root};
@@ -256,14 +256,21 @@ fn authority_worktree_diff(
     status: &WorktreeStatus,
     options: &DiffOptions,
 ) -> Result<DiffReport> {
-    if repo.capability() == RepositoryCapability::GitOverlay {
-        return plain_git_head_diff(
+    let mut report = if repo.capability() == RepositoryCapability::GitOverlay {
+        plain_git_head_diff(
             &PlainGitDiffProbe {
                 root: repo.root().to_path_buf(),
                 changes: clone_worktree_status(status),
             },
             options,
-        );
+        )?
+    } else {
+        diff_worktree_status(status, options, Some(repo), true)?
+    };
+    if options.show_context
+        && let Some(state) = worktree_context_state(repo)?
+    {
+        attach_show_context(repo, &mut report, &state, options.paths.is_empty())?;
     }
-    diff_worktree_status(status, options, Some(repo), true)
+    Ok(report)
 }
