@@ -99,6 +99,6 @@ pub(super) fn parent_record(
         blob_hash,
         state_line_count: line_count,
         mappings: maps,
-        target: entry.target,
+        target: entry.target.clone(),
     })
 }

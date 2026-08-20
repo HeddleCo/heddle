@@ -33,6 +33,34 @@ pub(super) fn put_state_with_file(
     state
 }
 
+pub(super) fn put_state_with_files(
+    store: &InMemoryStore,
+    files: &[(&str, &[u8])],
+    parents: Vec<StateId>,
+    principal_name: &str,
+) -> State {
+    let entries = files
+        .iter()
+        .map(|(name, content)| {
+            let blob_hash = store.put_blob(&Blob::from_slice(content)).unwrap();
+            TreeEntry::file((*name).to_string(), blob_hash, false).unwrap()
+        })
+        .collect();
+    let tree_hash = store
+        .put_tree(&Tree::from_entries(entries))
+        .unwrap();
+    let state = State::new(
+        tree_hash,
+        parents,
+        Attribution::human(Principal::new(
+            principal_name,
+            format!("{principal_name}@example.com"),
+        )),
+    );
+    store.put_state(&state).unwrap();
+    state
+}
+
 pub(super) fn principals_at(provenance: &FileProvenance, line_idx: usize) -> Vec<String> {
     let line_origins = provenance.line_origin_set_indexes().unwrap();
     let set_idx = line_origins[line_idx];

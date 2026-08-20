@@ -58,15 +58,12 @@ pub fn prepare_file_blame<S: ObjectSource>(
     }
 
     let line_count = u32::try_from(line_count).map_err(|_| BlameSliceError::Unblamable)?;
-    let target = BlameTarget {
-        blob: blob_hash,
-        line_count,
-    };
+    let target = BlameTarget::bind(state.id(), path, blob_hash, line_count)?;
     Ok(BlamePreparation::Active {
         file_blob: blob_hash,
         line_count,
         frontier: BlameFrontierGroup {
-            target,
+            target: target.clone(),
             records: vec![BlameFrontierRecord {
                 origin,
                 blob_hash,

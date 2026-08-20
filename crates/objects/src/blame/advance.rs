@@ -37,6 +37,7 @@ pub fn advance_file_blame_slice<S: ObjectSource>(
         decoded_bytes: limits.decoded_bytes,
     });
 
+    frontier_group.require_path(path)?;
     frontier_group.require_consistent_target()?;
     let Some(entry) = frontier_group.pop() else {
         return Ok(BlameSliceAdvance::Complete {

@@ -40,7 +40,8 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   wait for a later flush. Inspected-but-unprocessed parents
   are not counted as blame frontiers (`ancestors_visited` stays one visit
   on a no-overlap parent). A persisted frontier is bound to its prepared
-  target blob and line count; mixing another job's target fails closed.
+  target state, normalized path, blob, and line count; mixing another
+  job's target fails closed even when the blobs match.
   Slice usage reports work, lines, and scratch on one live
   `ResourceBudget` (heddle#1454).
 

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Persistence-friendly blame slice records.
 
+use std::path::{Component, Path};
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -40,10 +42,66 @@ pub struct BlameLineMap {
 }
 
 /// Prepared target file a persisted frontier may attribute.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Blob and line count alone are not a job: two paths or states can share
+/// the same bytes. The bound state and normalized path keep those jobs apart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlameTarget {
     pub blob: ContentHash,
     pub line_count: u32,
+    pub state_id: StateId,
+    pub path: String,
+}
+
+impl BlameTarget {
+    /// Bind a prepared job. The path is stored in lookup-normalized form.
+    pub fn bind(
+        state_id: StateId,
+        path: &Path,
+        blob: ContentHash,
+        line_count: u32,
+    ) -> Result<Self, BlameSliceError> {
+        Ok(Self {
+            blob,
+            line_count,
+            state_id,
+            path: normalize_blame_path(path)?,
+        })
+    }
+
+    pub fn matches_path(&self, path: &Path) -> Result<bool, BlameSliceError> {
+        Ok(self.path == normalize_blame_path(path)?)
+    }
+}
+
+/// Stable repo path: normal components joined by `/`. `.` is ignored;
+/// `..` and non-UTF-8 names are rejected.
+pub(super) fn normalize_blame_path(path: &Path) -> Result<String, BlameSliceError> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(name) => {
+                let Some(name) = name.to_str() else {
+                    return Err(BlameSliceError::InvalidFrontier(
+                        "target path is not valid UTF-8".into(),
+                    ));
+                };
+                parts.push(name);
+            }
+            Component::CurDir => {}
+            _ => {
+                return Err(BlameSliceError::InvalidFrontier(
+                    "target path is not a normalized repo path".into(),
+                ));
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Err(BlameSliceError::InvalidFrontier(
+            "target path is empty".into(),
+        ));
+    }
+    Ok(parts.join("/"))
 }
 
 /// One unfinalized hunk still walking toward older ancestors.
@@ -86,17 +144,23 @@ impl BlameFrontierGroup {
     }
 
     /// Fail closed when this group is replayed against a different prepare.
-    pub fn require_target(
-        &self,
-        blob: ContentHash,
-        line_count: u32,
-    ) -> Result<(), BlameSliceError> {
-        if self.target.blob != blob || self.target.line_count != line_count {
+    pub fn require_target(&self, expected: &BlameTarget) -> Result<(), BlameSliceError> {
+        if &self.target != expected {
             return Err(BlameSliceError::InvalidFrontier(
                 "frontier target does not match prepared target".into(),
             ));
         }
         self.require_consistent_target()
+    }
+
+    /// Fail closed when an advance path is not this group's prepared path.
+    pub fn require_path(&self, path: &Path) -> Result<(), BlameSliceError> {
+        if !self.target.matches_path(path)? {
+            return Err(BlameSliceError::InvalidFrontier(
+                "frontier target path does not match advance path".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn require_consistent_target(&self) -> Result<(), BlameSliceError> {

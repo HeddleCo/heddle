@@ -9,7 +9,10 @@ use super::{
     advance::advance_file_blame_slice,
     finalize::finalize_file_provenance,
     prepare::prepare_file_blame,
-    types::{BlamePreparation, BlameSliceAdvance, BlameSliceError, BlameSliceLimits, OriginRange},
+    types::{
+        BlamePreparation, BlameSliceAdvance, BlameSliceError, BlameSliceLimits, BlameTarget,
+        OriginRange,
+    },
 };
 
 /// Walk `path` at `state` by repeating [`advance_file_blame_slice`] until the
@@ -38,10 +41,11 @@ pub fn blame_file<S: ObjectSource>(
             line_count,
             mut frontier,
         } => {
-            frontier.require_target(file_blob, line_count)?;
+            let expected = BlameTarget::bind(state.id(), path, file_blob, line_count)?;
+            frontier.require_target(&expected)?;
             let mut finalized = Vec::new();
             loop {
-                frontier.require_target(file_blob, line_count)?;
+                frontier.require_target(&expected)?;
                 match advance_file_blame_slice(source, path, frontier, limits)? {
                     BlameSliceAdvance::Progress {
                         next,
