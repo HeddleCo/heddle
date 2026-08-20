@@ -948,6 +948,16 @@ fn snapshot_transaction_id(
         hasher.update(agent.segment_id.as_deref().unwrap_or_default().as_bytes());
         hasher.update(b"\0");
         hasher.update(agent.policy_id.as_deref().unwrap_or_default().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(
+            agent
+                .thought_level
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        hasher.update(b"\0");
+        hasher.update(agent.parent.as_deref().unwrap_or_default().as_bytes());
     }
     hasher.update(b"\0lineage\0");
     hasher.update(

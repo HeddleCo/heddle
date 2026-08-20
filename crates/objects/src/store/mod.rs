@@ -564,10 +564,10 @@ pub trait ObjectStore: Send + Sync {
 
     fn put_state_serialized(&self, data: &[u8], id: StateId) -> Result<()> {
         let state: State = rmp_serde::from_slice(data)?;
-        let found = state.id();
-        if found != id {
+        if !state.accepts_stored_id(&id) {
             return Err(HeddleError::InvalidObject(format!(
-                "state id mismatch: expected {id}, computed {found}"
+                "state id mismatch: expected {id}, computed {}",
+                state.id()
             )));
         }
         self.put_state(&state)

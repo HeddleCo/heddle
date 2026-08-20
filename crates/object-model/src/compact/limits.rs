@@ -34,7 +34,7 @@ pub(super) const MIN_EXTRA_HEADER_BYTES: usize = 2;
 pub(super) const MIN_LINEAGE_BYTES: usize = 1 + 16 + 32;
 pub(super) const MIN_VERIFICATION_CUSTOM_BYTES: usize = 2;
 pub(super) const MIN_PRINCIPAL_BYTES: usize = 2;
-pub(super) const MIN_AGENT_BYTES: usize = 5;
+pub(super) const MIN_AGENT_BYTES: usize = 7;
 
 /// Reject a declared count before any `Vec::with_capacity` or `blank_state`.
 pub(super) fn admit_count(

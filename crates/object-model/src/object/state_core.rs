@@ -527,6 +527,26 @@ impl State {
         StateId::from_content_hash(self.compute_hash())
     }
 
+    /// Format-4 identity for agent states hashed before `thought_level` and
+    /// `parent` entered the transcript. Graph edges keep this id.
+    pub fn pre_cursor_id(&self) -> StateId {
+        StateId::from_content_hash(self.compute_pre_cursor_hash())
+    }
+
+    /// Accept the current id, or a format-4 agent id that omitted unpublished
+    /// cursor fields. Published cursor fields require the current hash.
+    pub fn accepts_stored_id(&self, stored: &StateId) -> bool {
+        if self.id() == *stored {
+            return true;
+        }
+        let unpublished_cursor = self
+            .attribution
+            .agent
+            .as_ref()
+            .is_none_or(|agent| agent.thought_level.is_none() && agent.parent.is_none());
+        unpublished_cursor && self.pre_cursor_id() == *stored
+    }
+
     pub fn is_root(&self) -> bool {
         self.parents.is_empty()
     }
@@ -547,8 +567,20 @@ impl State {
         self.hash_len_core() + self.hash_len_fidelity()
     }
 
+    fn hash_len_pre_cursor(&self) -> u64 {
+        self.hash_len_core_pre_cursor() + self.hash_len_fidelity()
+    }
+
     /// Hashed length of the core state fields. Mirrors [`Self::update_hash_core`].
     fn hash_len_core(&self) -> u64 {
+        self.hash_len_core_versioned(true)
+    }
+
+    fn hash_len_core_pre_cursor(&self) -> u64 {
+        self.hash_len_core_versioned(false)
+    }
+
+    fn hash_len_core_versioned(&self, include_cursor_fields: bool) -> u64 {
         let principal = &self.attribution.principal;
         let mut len = 0u64;
 
@@ -579,6 +611,18 @@ impl State {
             len += 1;
             if let Some(policy_id) = &agent.policy_id {
                 len += policy_id.len() as u64 + 1;
+            }
+
+            if include_cursor_fields {
+                len += 1;
+                if let Some(thought_level) = &agent.thought_level {
+                    len += thought_level.len() as u64 + 1;
+                }
+
+                len += 1;
+                if let Some(parent) = &agent.parent {
+                    len += parent.len() as u64 + 1;
+                }
             }
         }
 
@@ -655,10 +699,30 @@ impl State {
         self.update_hash_fidelity(hasher);
     }
 
+    fn compute_pre_cursor_hash(&self) -> ContentHash {
+        let content_len = self.hash_len_pre_cursor();
+        ContentHash::compute_typed_with_len("state", content_len, |hasher| {
+            self.update_hash_pre_cursor(hasher);
+        })
+    }
+
+    fn update_hash_pre_cursor(&self, hasher: &mut blake3::Hasher) {
+        self.update_hash_core_pre_cursor(hasher);
+        self.update_hash_fidelity(hasher);
+    }
+
     /// Hash the pre-#565 fields (everything through the status byte). Mirrors
     /// [`Self::hash_len_core`]. The migration-only pre-bump hash is exactly
     /// this with no fidelity block appended.
     fn update_hash_core(&self, hasher: &mut blake3::Hasher) {
+        self.update_hash_core_versioned(hasher, true);
+    }
+
+    fn update_hash_core_pre_cursor(&self, hasher: &mut blake3::Hasher) {
+        self.update_hash_core_versioned(hasher, false);
+    }
+
+    fn update_hash_core_versioned(&self, hasher: &mut blake3::Hasher, include_cursor_fields: bool) {
         let principal = &self.attribution.principal;
 
         hasher.update(self.change_id.as_bytes());
@@ -683,6 +747,10 @@ impl State {
             write_optional_string(hasher, &agent.session_id);
             write_optional_string(hasher, &agent.segment_id);
             write_optional_string(hasher, &agent.policy_id);
+            if include_cursor_fields {
+                write_optional_string(hasher, &agent.thought_level);
+                write_optional_string(hasher, &agent.parent);
+            }
         } else {
             hasher.update(&[0]);
         }
@@ -901,6 +969,59 @@ mod tests {
 
     fn sample_attribution() -> Attribution {
         Attribution::human(Principal::new("Alice", "alice@example.com"))
+    }
+
+    #[test]
+    fn format4_agent_states_keep_pre_cursor_id_when_cursor_fields_are_unpublished() {
+        use crate::object::Agent;
+
+        let created_at = DateTime::from_timestamp(1_700_000_000, 0).expect("fixed test timestamp");
+        let tree = ContentHash::from_bytes([11; 32]);
+        let mut agent_state = State::new(
+            tree,
+            Vec::new(),
+            Attribution::with_agent(
+                Principal::new("Author", "author@example.com"),
+                Agent::new("anthropic", "opus"),
+            ),
+        );
+        agent_state.created_at = created_at;
+        agent_state.state_id = agent_state.id();
+        assert_ne!(
+            agent_state.id(),
+            agent_state.pre_cursor_id(),
+            "None cursor tags must change the current id of every agent state"
+        );
+        assert!(
+            agent_state.accepts_stored_id(&agent_state.pre_cursor_id()),
+            "format-4 agent ids must still validate after the cursor hash bump"
+        );
+        assert!(agent_state.accepts_stored_id(&agent_state.id()));
+
+        let mut published = agent_state.clone();
+        published.attribution.agent = Some(
+            Agent::new("anthropic", "opus")
+                .with_thought_level("high")
+                .with_parent("agent-1"),
+        );
+        published.state_id = published.id();
+        assert!(
+            !published.accepts_stored_id(&agent_state.pre_cursor_id()),
+            "published cursor fields must not validate against a format-4 id"
+        );
+        assert_ne!(published.id(), agent_state.id());
+
+        let mut human = State::new(
+            tree,
+            Vec::new(),
+            Attribution::human(Principal::new("Author", "author@example.com")),
+        );
+        human.created_at = created_at;
+        assert_eq!(
+            human.id(),
+            human.pre_cursor_id(),
+            "human states never hashed the agent cursor tags"
+        );
     }
 
     #[test]

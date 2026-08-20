@@ -1242,6 +1242,10 @@ pub struct CommitAgentSchema {
     pub segment_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

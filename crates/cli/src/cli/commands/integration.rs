@@ -179,6 +179,7 @@ pub fn cmd_integration(cli: &Cli, command: IntegrationCommands) -> Result<()> {
         IntegrationCommands::Uninstall(args) => uninstall_integrations(cli, &repo, args),
         IntegrationCommands::Upgrade(args) => upgrade_integrations(cli, &repo, args),
         IntegrationCommands::Relay(args) => relay_integration(&repo, args),
+        IntegrationCommands::Stamp(args) => stamp_integration(&repo, args),
     }
 }
 
@@ -447,8 +448,20 @@ fn detect_path_mode(harness: &str, entry: &InstalledIntegration) -> Option<PathM
             Some(path_mode_from_command(&cmd))
         }
         "codex" => {
-            // notify is `["/bin/sh", "-lc", "<cmd>"]` — read the third arg.
             let value: toml::Value = toml::from_str(&contents).ok()?;
+            if let Some(cmd) = value.get("hooks").and_then(|hooks| {
+                hooks.as_table()?.values().find_map(|event| {
+                    event.as_array()?.iter().find_map(|group| {
+                        group
+                            .get("hooks")?
+                            .as_array()?
+                            .iter()
+                            .find_map(|hook| hook.get("command")?.as_str().map(str::to_string))
+                    })
+                })
+            }) {
+                return Some(path_mode_from_command(&cmd));
+            }
             let arr = value.get("notify")?.as_array()?;
             let cmd = arr.get(2)?.as_str()?;
             Some(path_mode_from_command(cmd))
@@ -475,6 +488,13 @@ fn relay_integration(repo: &Repository, args: IntegrationRelayArgs) -> Result<()
     let mut payload = String::new();
     io::stdin().read_to_string(&mut payload)?;
     harness::relay_harness_event(repo, &args.harness, &args.event, &payload)
+}
+
+fn stamp_integration(repo: &Repository, args: crate::cli::IntegrationStampArgs) -> Result<()> {
+    let mut payload = String::new();
+    io::stdin().read_to_string(&mut payload)?;
+    crate::identity_stamp::stamp_bytes(repo.root(), &args.harness, &payload)?;
+    Ok(())
 }
 
 fn manifest_path(repo: &Repository) -> PathBuf {
@@ -669,7 +689,7 @@ fn validate_install_plan(harnesses: &[String], scope_value: &str) -> Result<()> 
 }
 
 fn install_codex(
-    repo: &Repository,
+    _repo: &Repository,
     manifest: &mut IntegrationManifest,
     scope: &IntegrationScope,
     force: bool,
@@ -684,7 +704,8 @@ fn install_codex(
         String::new()
     };
     if existing.contains("notify =")
-        && !existing.contains("integration relay codex notify")
+        && !existing.contains("integration relay codex")
+        && !existing.contains("integration stamp codex")
         && !force
     {
         return Err(anyhow!(
@@ -694,25 +715,42 @@ fn install_codex(
     let mut value = if existing.trim().is_empty() {
         toml::Value::Table(toml::map::Map::new())
     } else {
-        existing.parse::<toml::Value>()?
+        toml::from_str(&existing)?
     };
     let heddle = HeddleInvocation::resolve(path_mode)?;
-    let command = format!(
-        "{} --repo {} integration relay codex notify",
-        heddle,
-        shell_escape(repo.root())
-    );
+    // Workspace sidecar: discover `.heddle` from cwd. Do not bake the
+    // install-repo path — a second workspace would stamp the wrong tree.
+    let stamp = format!("{heddle} integration stamp codex");
     let table = value
         .as_table_mut()
         .ok_or_else(|| anyhow!("codex config root must be a TOML table"))?;
-    table.insert(
-        "notify".to_string(),
-        toml::Value::Array(vec![
-            toml::Value::String("/bin/sh".to_string()),
-            toml::Value::String("-lc".to_string()),
-            toml::Value::String(command),
-        ]),
-    );
+    let features = table
+        .entry("features")
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    features
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("codex features must be a table"))?
+        .insert("hooks".to_string(), toml::Value::Boolean(true));
+    let hooks = table
+        .entry("hooks")
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let hooks_table = hooks
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("codex hooks must be a table"))?;
+    for event in ["SessionStart", "SubagentStart", "PreToolUse", "Stop"] {
+        let command = if event == "Stop" {
+            format!("{stamp} --expire")
+        } else {
+            stamp.clone()
+        };
+        upsert_codex_hook_event(hooks_table, event, &command);
+    }
+    if table.get("notify").is_some_and(|notify| {
+        let text = notify.to_string();
+        text.contains("integration relay codex") || text.contains("integration stamp codex")
+    }) {
+        table.remove("notify");
+    }
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -722,7 +760,7 @@ fn install_codex(
         InstalledIntegration {
             harness: "codex".to_string(),
             scope: scope.clone(),
-            method: "notify".to_string(),
+            method: "hooks".to_string(),
             paths: vec![config_path.display().to_string()],
             status: "installed".to_string(),
             heddle_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -760,6 +798,13 @@ fn install_claude(
         .ok_or_else(|| anyhow!("claude settings hooks must be an object"))?;
 
     let heddle = HeddleInvocation::resolve(path_mode)?;
+    // User-scoped hooks run in whichever workspace launched Claude. Do not
+    // bake the install-repo path — a second workspace would stamp the wrong tree.
+    let repo_flag = match scope {
+        IntegrationScope::Repo => format!(" --repo {}", shell_escape(repo.root())),
+        IntegrationScope::User => String::new(),
+    };
+    let stamp = format!("{heddle}{repo_flag} integration stamp claude-code");
     for event in [
         "SessionStart",
         "UserPromptSubmit",
@@ -770,56 +815,36 @@ fn install_claude(
         "Stop",
         "SessionEnd",
     ] {
-        let command = format!(
-            "{} --repo {} integration relay claude-code {}",
-            heddle,
-            shell_escape(repo.root()),
-            event
-        );
-        let group = serde_json::json!({
-            "matcher": "*",
-            "hooks": [{
-                "type": "command",
-                "command": command
-            }]
-        });
-        let entry = hooks_obj
-            .entry(event.to_string())
-            .or_insert_with(|| Value::Array(Vec::new()));
-        let groups = entry
-            .as_array_mut()
-            .ok_or_else(|| anyhow!("claude hook event entries must be arrays"))?;
-        let exists = groups
-            .iter()
-            .any(|group| group.to_string().contains("integration relay claude-code"));
-        if !exists {
-            groups.push(group);
-        }
+        let command = if event == "PreToolUse" {
+            stamp.clone()
+        } else if event == "SessionEnd" {
+            format!("{stamp} --expire")
+        } else {
+            format!("{heddle}{repo_flag} integration relay claude-code {event}")
+        };
+        upsert_claude_hook_group(hooks_obj, event, command)?;
     }
     let root_obj = root
         .as_object_mut()
         .ok_or_else(|| anyhow!("claude settings root must be a JSON object"))?;
-    let install_status_line = match root_obj.get("statusLine") {
-        None => true,
-        Some(value) => value
-            .as_object()
-            .and_then(|obj| obj.get("command"))
-            .and_then(Value::as_str)
-            .is_some_and(|command| command.contains("integration relay claude-code StatusLine")),
-    };
-    if install_status_line {
-        root_obj.insert(
-            "statusLine".to_string(),
-            serde_json::json!({
-                "type": "command",
-                "command": format!(
-                    "{} --repo {} integration relay claude-code StatusLine",
-                    heddle,
-                    shell_escape(repo.root())
-                )
-            }),
-        );
+    let existing_status = root_obj
+        .get("statusLine")
+        .and_then(Value::as_object)
+        .and_then(|obj| obj.get("command"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let mut status_cmd = stamp;
+    if let Some(original) = status_line_user_command(existing_status.as_deref()) {
+        status_cmd.push_str(" --chain ");
+        status_cmd.push_str(&shell_escape_arg(&original));
     }
+    root_obj.insert(
+        "statusLine".to_string(),
+        serde_json::json!({
+            "type": "command",
+            "command": status_cmd
+        }),
+    );
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -866,28 +891,11 @@ fn install_opencode(
     }
     let timeline_manifest_path = plugin_path.with_file_name("heddle.timeline.json");
     let heddle_raw = HeddleInvocation::raw(path_mode)?;
-    let script = format!(
-        "const relay = async (event, payload) => {{
-  const proc = Bun.spawnSync([{exe:?}, '--repo', {repo:?}, 'integration', 'relay', 'opencode', event], {{
-    stdin: JSON.stringify(payload),
-  }});
-  if (proc.exitCode !== 0) console.error(new TextDecoder().decode(proc.stderr));
-}};
-
-export default async function(ctx) {{
-  return {{
-    event: async (input) => {{
-      const event = input?.event?.name || input?.name || 'event';
-      const allowed = new Set(['session.created','session.updated','session.diff','file.edited','tool.execute.before','tool.execute.after','permission.asked','permission.replied']);
-      if (allowed.has(event)) {{
-        await relay(event, input);
-      }}
-    }},
-  }};
-}}",
-        exe = heddle_raw,
-        repo = repo.root().display().to_string(),
-    );
+    let baked_repo = match scope {
+        IntegrationScope::Repo => Some(repo.root().display().to_string()),
+        IntegrationScope::User => None,
+    };
+    let script = opencode_plugin_script(&heddle_raw, baked_repo.as_deref());
     write_file_atomic(&plugin_path, script.as_bytes())?;
     let capabilities = opencode_timeline_capabilities(repo, &heddle_raw);
     write_file_atomic(
@@ -910,6 +918,38 @@ export default async function(ctx) {{
         },
     );
     Ok(())
+}
+
+fn opencode_plugin_script(exe: &str, repo: Option<&str>) -> String {
+    let repo_args = match repo {
+        Some(repo) => format!(r#""--repo", {repo:?}, "#),
+        None => String::new(),
+    };
+    format!(
+        r#"export default async function() {{
+  return {{
+    event: async (input) => {{
+      const eventObj = input?.event || input;
+      const event = eventObj?.type || eventObj?.name || input?.type || input?.name || "event";
+      const expire = ["session.deleted","session.closed","session.end","session.idle","SessionEnd"].includes(event);
+      const stamp = [{repo_args}"integration", "stamp", "opencode"];
+      if (expire) stamp.push("--expire");
+      Bun.spawnSync([{exe:?}, ...stamp], {{
+        stdin: JSON.stringify(input),
+      }});
+      const allowed = new Set(["session.created","session.updated","session.diff","file.edited","tool.execute.before","tool.execute.after","permission.asked","permission.replied"]);
+      if (allowed.has(event)) {{
+        Bun.spawn([{exe:?}, {repo_args}"integration", "relay", "opencode", event], {{
+          stdin: JSON.stringify(input),
+        }});
+      }}
+    }},
+  }};
+}}
+"#,
+        repo_args = repo_args,
+        exe = exe,
+    )
 }
 
 fn opencode_timeline_capabilities(repo: &Repository, heddle_raw: &str) -> Value {
@@ -1004,20 +1044,36 @@ fn uninstall_one(
     else {
         return Ok(());
     };
+    heddle_core::expire_identity_cursor(repo.root()).map_err(anyhow::Error::from)?;
     match harness {
         "codex" => {
             if let Some(path) = existing.paths.first() {
                 let config_path = PathBuf::from(path);
                 if config_path.exists() {
-                    let mut value = fs::read_to_string(&config_path)?.parse::<toml::Value>()?;
-                    if let Some(table) = value.as_table_mut()
-                        && table.get("notify").is_some_and(|notify| {
-                            notify
-                                .to_string()
-                                .contains("integration relay codex notify")
-                        })
-                    {
-                        table.remove("notify");
+                    let mut value: toml::Value =
+                        toml::from_str(&fs::read_to_string(&config_path)?)?;
+                    if let Some(table) = value.as_table_mut() {
+                        if let Some(hooks) = table.get_mut("hooks").and_then(|v| v.as_table_mut()) {
+                            for event in ["SessionStart", "SubagentStart", "PreToolUse", "Stop"] {
+                                if let Some(groups) =
+                                    hooks.get_mut(event).and_then(|v| v.as_array_mut())
+                                {
+                                    groups.retain(|group| !is_heddle_hook_text(&group.to_string()));
+                                    if groups.is_empty() {
+                                        hooks.remove(event);
+                                    }
+                                }
+                            }
+                            if hooks.is_empty() {
+                                table.remove("hooks");
+                            }
+                        }
+                        if table
+                            .get("notify")
+                            .is_some_and(|notify| is_heddle_hook_text(&notify.to_string()))
+                        {
+                            table.remove("notify");
+                        }
                         write_file_atomic(
                             &config_path,
                             toml::to_string_pretty(&value)?.as_bytes(),
@@ -1036,7 +1092,9 @@ fn uninstall_one(
                         for groups in hooks.values_mut() {
                             if let Some(array) = groups.as_array_mut() {
                                 array.retain(|group| {
-                                    !group.to_string().contains("integration relay claude-code")
+                                    let text = group.to_string();
+                                    !text.contains("integration relay claude-code")
+                                        && !text.contains("integration stamp claude-code")
                                 });
                             }
                         }
@@ -1046,7 +1104,8 @@ fn uninstall_one(
                         .and_then(Value::as_object)
                         .and_then(|obj| obj.get("command"))
                         .and_then(Value::as_str)
-                        && command.contains("integration relay claude-code StatusLine")
+                        && (command.contains("integration relay claude-code StatusLine")
+                            || command.contains("integration stamp claude-code"))
                     {
                         root.as_object_mut().map(|obj| obj.remove("statusLine"));
                     }
@@ -1070,7 +1129,6 @@ fn uninstall_one(
     manifest
         .integrations
         .retain(|entry| entry.harness != harness);
-    let _ = repo;
     Ok(())
 }
 
@@ -1084,8 +1142,109 @@ fn upsert_manifest(manifest: &mut IntegrationManifest, entry: InstalledIntegrati
         .sort_by(|a, b| a.harness.cmp(&b.harness));
 }
 
+fn upsert_claude_hook_group(
+    hooks_obj: &mut serde_json::Map<String, Value>,
+    event: &str,
+    command: String,
+) -> Result<()> {
+    let group = serde_json::json!({
+        "matcher": "*",
+        "hooks": [{
+            "type": "command",
+            "command": command
+        }]
+    });
+    let entry = hooks_obj
+        .entry(event.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let groups = entry
+        .as_array_mut()
+        .ok_or_else(|| anyhow!("claude hook event entries must be arrays"))?;
+    groups.retain(|group| {
+        let text = group.to_string();
+        !text.contains("integration relay claude-code")
+            && !text.contains("integration stamp claude-code")
+    });
+    groups.push(group);
+    Ok(())
+}
+
+fn is_heddle_hook_text(text: &str) -> bool {
+    text.contains("integration stamp") || text.contains("integration relay")
+}
+
+fn upsert_codex_hook_event(
+    hooks_table: &mut toml::map::Map<String, toml::Value>,
+    event: &str,
+    command: &str,
+) {
+    let mut groups = hooks_table
+        .get(event)
+        .and_then(toml::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    groups.retain(|group| !is_heddle_hook_text(&group.to_string()));
+    let mut hook = toml::map::Map::new();
+    hook.insert(
+        "type".to_string(),
+        toml::Value::String("command".to_string()),
+    );
+    hook.insert(
+        "command".to_string(),
+        toml::Value::String(command.to_string()),
+    );
+    let mut group = toml::map::Map::new();
+    group.insert("matcher".to_string(), toml::Value::String("*".to_string()));
+    group.insert(
+        "hooks".to_string(),
+        toml::Value::Array(vec![toml::Value::Table(hook)]),
+    );
+    groups.push(toml::Value::Table(group));
+    hooks_table.insert(event.to_string(), toml::Value::Array(groups));
+}
+
+fn status_line_user_command(existing: Option<&str>) -> Option<String> {
+    let command = existing?.trim();
+    if command.is_empty() {
+        return None;
+    }
+    if let Some(chained) = extract_status_line_chain(command) {
+        return Some(chained).filter(|value| !value.trim().is_empty());
+    }
+    if command.contains("integration stamp claude-code")
+        || command.contains("integration relay claude-code StatusLine")
+    {
+        return None;
+    }
+    Some(command.to_string())
+}
+
+fn extract_status_line_chain(command: &str) -> Option<String> {
+    if let Some(rest) = command.split_once(" --chain=").map(|(_, rest)| rest) {
+        return Some(unshell_escape_arg(rest.trim()));
+    }
+    command
+        .split_once(" --chain ")
+        .map(|(_, rest)| unshell_escape_arg(rest.trim()))
+}
+
+fn unshell_escape_arg(value: &str) -> String {
+    let value = value.trim();
+    if let Some(inner) = value.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+        return inner.replace("'\"'\"'", "'");
+    }
+    if let Some(inner) = value.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        return inner.replace("\\\"", "\"").replace("\\\\", "\\");
+    }
+    value.to_string()
+}
+
 fn shell_escape(path: &Path) -> String {
-    format!("'{}'", path.display().to_string().replace('\'', "'\"'\"'"))
+    shell_escape_arg(&path.display().to_string())
+}
+
+fn shell_escape_arg(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]
@@ -1157,11 +1316,14 @@ mod tests {
         let contents = fs::read_to_string(&settings_path).unwrap();
         assert!(contents.contains("integration relay claude-code SessionStart"));
         assert!(contents.contains("integration relay claude-code UserPromptSubmit"));
-        assert!(contents.contains("integration relay claude-code PreToolUse"));
+        assert!(contents.contains("integration stamp claude-code"));
+        assert!(!contents.contains("integration relay claude-code PreToolUse"));
         assert!(contents.contains("integration relay claude-code PostToolUse"));
         assert!(contents.contains("integration relay claude-code SubagentStop"));
         assert!(contents.contains("integration relay claude-code Stop"));
-        assert!(contents.contains("integration relay claude-code StatusLine"));
+        assert!(contents.contains("integration stamp claude-code --expire"));
+        assert!(!contents.contains("integration relay claude-code SessionEnd"));
+        assert!(contents.contains("statusLine"));
 
         // Default install must use the PATH-relative literal `heddle` and must
         // NOT bake in an absolute path. We assert the exact command shape so a
@@ -1187,6 +1349,122 @@ mod tests {
         assert_eq!(manifest.integrations.len(), 1);
         assert_eq!(manifest.integrations[0].harness, "claude-code");
         assert_eq!(manifest.integrations[0].path_mode, PathMode::Relative);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn claude_user_install_discovers_workspace_at_runtime() {
+        static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_temp, repo) = init_repo();
+        let home = tempfile::TempDir::new().unwrap();
+        let _home_guard = HomeEnvGuard::set(home.path());
+        let mut manifest = IntegrationManifest::default();
+
+        install_claude(
+            &repo,
+            &mut manifest,
+            &IntegrationScope::User,
+            false,
+            PathMode::Relative,
+        )
+        .unwrap();
+
+        let settings_path = home.path().join(".claude").join("settings.json");
+        let contents = fs::read_to_string(&settings_path).unwrap();
+        let install_repo = repo.root().display().to_string();
+        assert!(
+            !contents.contains(&install_repo),
+            "user-scoped Claude hooks must not bake the install-time repo, got: {contents}"
+        );
+        assert!(
+            !contents.contains("--repo"),
+            "user-scoped Claude hooks must discover the workspace from cwd, got: {contents}"
+        );
+        assert!(
+            contents.contains("heddle integration stamp claude-code"),
+            "user-scoped Claude must still stamp, got: {contents}"
+        );
+        assert!(
+            contents.contains("heddle integration stamp claude-code --expire"),
+            "user-scoped SessionEnd must expire, got: {contents}"
+        );
+        assert!(
+            contents.contains("heddle integration relay claude-code SessionStart"),
+            "user-scoped Claude must still relay without a baked repo, got: {contents}"
+        );
+    }
+
+    #[test]
+    fn claude_repo_install_chains_existing_status_line() {
+        let (_temp, repo) = init_repo();
+        let settings_path = repo.root().join(".claude").join("settings.json");
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        fs::write(
+            &settings_path,
+            r#"{"statusLine":{"type":"command","command":"echo custom-status"}}"#,
+        )
+        .unwrap();
+        let mut manifest = IntegrationManifest::default();
+        install_claude(
+            &repo,
+            &mut manifest,
+            &IntegrationScope::Repo,
+            false,
+            PathMode::Relative,
+        )
+        .unwrap();
+        let parsed: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let status_line_cmd = parsed["statusLine"]["command"].as_str().unwrap();
+        assert!(status_line_cmd.contains("integration stamp claude-code"));
+        assert!(status_line_cmd.contains("--chain"));
+        assert!(status_line_cmd.contains("echo custom-status"));
+    }
+
+    #[test]
+    fn claude_status_line_reinstall_still_chains() {
+        let (_temp, repo) = init_repo();
+        let settings_path = repo.root().join(".claude").join("settings.json");
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        fs::write(
+            &settings_path,
+            r#"{"statusLine":{"type":"command","command":"echo custom-status"}}"#,
+        )
+        .unwrap();
+        let mut manifest = IntegrationManifest::default();
+        install_claude(
+            &repo,
+            &mut manifest,
+            &IntegrationScope::Repo,
+            false,
+            PathMode::Relative,
+        )
+        .unwrap();
+        install_claude(
+            &repo,
+            &mut manifest,
+            &IntegrationScope::Repo,
+            true,
+            PathMode::Relative,
+        )
+        .unwrap();
+        let parsed: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let status_line_cmd = parsed["statusLine"]["command"].as_str().unwrap();
+        assert!(status_line_cmd.contains("integration stamp claude-code"));
+        assert!(status_line_cmd.contains("--chain"));
+        assert!(
+            status_line_cmd.contains("echo custom-status"),
+            "reinstall/upgrade must keep the user's StatusLine, got: {status_line_cmd}"
+        );
+        assert_eq!(
+            status_line_cmd
+                .matches("integration stamp claude-code")
+                .count(),
+            1,
+            "must not nest stamp commands: {status_line_cmd}"
+        );
     }
 
     #[test]
@@ -1255,6 +1533,29 @@ mod tests {
             plugin_contents.contains("\"heddle\""),
             "opencode plugin should reference PATH-relative `heddle`, got: {plugin_contents}"
         );
+        assert!(
+            plugin_contents.contains("event?.type") || plugin_contents.contains("eventObj?.type"),
+            "opencode plugin must read event.type, got: {plugin_contents}"
+        );
+        assert!(
+            plugin_contents.contains("\"integration\", \"stamp\", \"opencode\"")
+                && plugin_contents.contains("Bun.spawnSync"),
+            "opencode writes must go through locked integration stamp, got: {plugin_contents}"
+        );
+        assert!(
+            plugin_contents.contains("session.deleted") && plugin_contents.contains("--expire"),
+            "plugin must expire the cursor on session end through stamp --expire"
+        );
+        assert!(
+            !plugin_contents.contains("mergeCursor")
+                && !plugin_contents.contains("unlinkSync")
+                && !plugin_contents.contains("writeFileSync"),
+            "plugin must not unlocked-RMW the identity sidecar, got: {plugin_contents}"
+        );
+        assert!(
+            !plugin_contents.contains("session.get"),
+            "plugin must not hunt session.get, got: {plugin_contents}"
+        );
         let timeline_manifest_path = repo
             .root()
             .join(".opencode")
@@ -1288,15 +1589,70 @@ mod tests {
             vec![timeline_manifest_path.display().to_string()]
         );
 
+        heddle_core::write_identity_cursor(
+            repo.root(),
+            &heddle_core::IdentityCursor {
+                provider: Some("opencode".into()),
+                model: Some("sonnet".into()),
+                ..heddle_core::IdentityCursor::default()
+            },
+        )
+        .unwrap();
         uninstall_one(&repo, &mut manifest, "opencode").unwrap();
         assert!(!plugin_path.exists());
         assert!(!timeline_manifest_path.exists());
         assert!(manifest.integrations.is_empty());
+        assert!(
+            heddle_core::read_identity_cursor(repo.root()).is_empty(),
+            "uninstall must expire the identity cursor"
+        );
     }
 
     #[test]
     #[serial_test::serial]
-    fn codex_user_install_writes_notify_command() {
+    fn opencode_user_install_discovers_workspace_at_runtime() {
+        static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_temp, repo) = init_repo();
+        let home = tempfile::TempDir::new().unwrap();
+        let _home_guard = HomeEnvGuard::set(home.path());
+        let mut manifest = IntegrationManifest::default();
+
+        install_opencode(
+            &repo,
+            &mut manifest,
+            &IntegrationScope::User,
+            false,
+            PathMode::Relative,
+        )
+        .unwrap();
+
+        let plugin_path = home
+            .path()
+            .join(".config")
+            .join("opencode")
+            .join("plugins")
+            .join("heddle.js");
+        let contents = fs::read_to_string(&plugin_path).unwrap();
+        let install_repo = repo.root().display().to_string();
+        assert!(
+            !contents.contains(&install_repo),
+            "user-scoped plugin must not bake the install-time repo, got: {contents}"
+        );
+        assert!(
+            !contents.contains("--repo"),
+            "user-scoped plugin must discover the workspace from cwd, got: {contents}"
+        );
+        assert!(
+            contents.contains("\"integration\", \"stamp\", \"opencode\"")
+                && contents.contains("Bun.spawnSync"),
+            "user-scoped plugin must still stamp through the locked path, got: {contents}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn codex_user_install_writes_workspace_stamp_hooks() {
         // Serialize env-var access across tests. The credential store
         // (in CLI-owned hosted runtime when the client feature is enabled) has its own mutex; this is
         // a local fallback for cli-only builds.
@@ -1318,15 +1674,58 @@ mod tests {
 
         let config_path = home.path().join(".codex").join("config.toml");
         let contents = fs::read_to_string(&config_path).unwrap();
-        assert!(contents.contains("integration relay codex notify"));
-        // The default codex install must invoke PATH-relative `heddle`, not the
-        // absolute path of the current binary.
+        assert!(contents.contains("integration stamp codex"));
+        assert!(contents.contains("SessionStart"));
+        assert!(contents.contains("PreToolUse"));
+        assert!(!contents.contains("notify ="));
+        assert!(!contents.contains("/bin/sh"));
         assert!(
-            contents.contains("\"heddle --repo "),
-            "expected PATH-relative `heddle` in codex notify command, got: {contents}"
+            !contents.contains("--repo"),
+            "codex hook must discover the workspace from cwd, got: {contents}"
+        );
+        assert!(
+            contents.contains("heddle integration stamp codex"),
+            "expected PATH-relative `heddle` in codex hook command, got: {contents}"
+        );
+        assert_eq!(
+            contents
+                .matches("heddle integration stamp codex --expire\"")
+                .count(),
+            1,
+            "Codex Stop must expire, same as Claude SessionEnd, got: {contents}"
+        );
+        assert_eq!(
+            contents.matches("heddle integration stamp codex\"").count(),
+            3,
+            "SessionStart/SubagentStart/PreToolUse must stamp without expiring, got: {contents}"
+        );
+        assert!(
+            contents.contains("[[hooks.Stop]]")
+                && contents.contains("heddle integration stamp codex --expire"),
+            "Stop hook must be the expire command, got: {contents}"
         );
         assert_eq!(manifest.integrations[0].harness, "codex");
         assert_eq!(manifest.integrations[0].path_mode, PathMode::Relative);
+
+        heddle_core::write_identity_cursor(
+            repo.root(),
+            &heddle_core::IdentityCursor {
+                provider: Some("openai".into()),
+                model: Some("gpt-5.4".into()),
+                ..heddle_core::IdentityCursor::default()
+            },
+        )
+        .unwrap();
+        uninstall_one(&repo, &mut manifest, "codex").unwrap();
+        assert!(
+            heddle_core::read_identity_cursor(repo.root()).is_empty(),
+            "codex uninstall must expire the identity cursor"
+        );
+        let after = fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !after.contains("integration stamp"),
+            "codex uninstall must remove stamp hooks, got: {after}"
+        );
     }
 
     #[test]

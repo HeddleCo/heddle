@@ -11,7 +11,11 @@ use crate::object::{State, StateId};
 pub fn extract_state(bytes: &[u8], expected: StateId) -> Result<State> {
     decode_state_frame(bytes)?
         .into_iter()
-        .find(|state| state.id() == expected)
+        .find(|state| state.accepts_stored_id(&expected))
+        .map(|mut state| {
+            state.state_id = expected;
+            state
+        })
         .ok_or(CompactError::Missing)
 }
 

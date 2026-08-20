@@ -400,6 +400,66 @@ fn native_capture_cannot_unignore_heddle_identity_via_gitignore() {
 }
 
 #[test]
+fn native_capture_cannot_ingest_pointer_checkout_cursor_artifacts() {
+    let temp = TempDir::new().unwrap();
+    std::fs::write(temp.path().join("kept.txt"), "captured\n").unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(
+        temp.path().join(".heddle.identity"),
+        "{\"provider\":\"anthropic\"}\n",
+    )
+    .unwrap();
+    std::fs::write(temp.path().join(".identity.lock"), "").unwrap();
+    std::fs::write(temp.path().join(".identity.tmp.1.2"), "{}").unwrap();
+    std::fs::create_dir_all(temp.path().join("examples/foo")).unwrap();
+    std::fs::write(
+        temp.path().join("examples/foo/.heddle.identity"),
+        "fixture\n",
+    )
+    .unwrap();
+
+    let status = heddle(&["status", "--output", "json-compact"], Some(temp.path())).unwrap();
+    let parsed: Value = serde_json::from_str(&status).expect("status json");
+    let paths: Vec<&str> = parsed["changed_paths"]
+        .as_array()
+        .unwrap_or_else(|| panic!("status must carry changed_paths: {status}"))
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        paths.contains(&"kept.txt"),
+        "status must still list real worktree files: {paths:?}"
+    );
+    assert!(
+        paths.iter().all(|path| {
+            *path != ".heddle.identity"
+                && *path != ".identity.lock"
+                && !path.starts_with(".identity.tmp")
+        }),
+        "status must not list pointer-cursor artifacts: {paths:?}"
+    );
+    assert!(
+        paths.contains(&"examples/foo/.heddle.identity"),
+        "status must still list nested cursor-named fixtures: {paths:?}"
+    );
+
+    heddle(
+        &["capture", "-m", "must not capture pointer cursor files"],
+        Some(temp.path()),
+    )
+    .unwrap();
+
+    assert!(!captured_path_exists(temp.path(), ".heddle.identity"));
+    assert!(!captured_path_exists(temp.path(), ".identity.lock"));
+    assert!(!captured_path_exists(temp.path(), ".identity.tmp.1.2"));
+    assert!(captured_path_exists(temp.path(), "kept.txt"));
+    assert!(captured_path_exists(
+        temp.path(),
+        "examples/foo/.heddle.identity"
+    ));
+}
+
+#[test]
 fn init_text_points_at_ignore_help_when_heddleignore_not_installed() {
     let temp = TempDir::new().unwrap();
     let out = heddle(&["init"], Some(temp.path())).unwrap();

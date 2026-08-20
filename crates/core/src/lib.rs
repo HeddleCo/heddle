@@ -22,6 +22,8 @@ pub mod git_projection_io_plan;
 pub mod harness_json;
 pub mod harness_policy;
 pub mod hook_plan;
+pub mod identity_cursor;
+pub mod identity_payload;
 pub mod index_plan;
 pub mod init_plan;
 pub mod integration_plan;
@@ -149,13 +151,23 @@ pub use harness_json::{
 pub use harness_policy::{
     ExplicitAgentBind, HarnessFingerprint, HarnessKind, HarnessProbeDecision, SegmentRotation,
     SessionAttachDecision, SessionAttachFacts, SessionAttachRule, SessionLookupFact, SessionPolicy,
-    TokenSidFact, WorktreeSessionFact, decide_harness_probe, decide_session_attach,
-    detect_harness_kind, fingerprint_harness_from_hints, segment_rotation_policy,
-    should_rotate_segment,
+    TokenSidFact, WorktreeSessionFact, attach_published_segment_fields, cursor_segment_rotation,
+    decide_harness_probe, decide_session_attach, detect_harness_kind,
+    fingerprint_harness_from_hints, segment_rotation_policy, should_rotate_segment,
 };
 pub use hook_plan::{
     HookInstallSourceKind, HookInstallSourcePlan, hook_install_empty_stdin_kind,
     hook_install_source_required_kind, hook_unknown_kind, plan_hook_install_source,
+};
+pub use identity_cursor::{
+    IDENTITY_CURSOR_FILE, IdentityCursor, expire_identity_cursor, harness_kind_from_basename,
+    identity_cursor_path, published_field, read_identity_cursor, stamp_identity_cursor,
+    thought_level_from_payload, value_string_or_named, write_identity_cursor,
+};
+pub use identity_payload::{
+    claude_cursor_patch, codex_cursor_patch, cursor_event_expires, cursor_patch_from_child_env,
+    cursor_patch_from_stdin, opencode_cursor_patch, opencode_event_type, pi_cursor_patch,
+    stamp_event_expires, stamp_harness_name,
 };
 pub use init_plan::{
     InitPrincipalPlan, SET_PRINCIPAL_COMMAND, init_recommended_action, init_side_effects,

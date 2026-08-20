@@ -7,7 +7,8 @@ use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::{
     CompactError, decode_blob_frame, decode_state_frame, decode_tree_frame, encode_blob_frame,
-    encode_state_frame, encode_tree_frame, extract_state, extract_tree,
+    encode_state_frame, encode_tree_frame, extract_state, extract_tree, is_state_frame,
+    state::{STATE_MAGIC, STATE_MAGIC_V1, encode_state_frame_hcs1},
 };
 use crate::object::{
     Agent, Attribution, ChangeId, ChangeLineage, ChangeLineageKind, ContentHash, Principal,
@@ -53,7 +54,9 @@ fn state_frame_round_trips_every_fidelity_field_and_recomputes_id() {
     let committer = Principal::new("Committer", "committer@example.com");
     let agent = Agent::new("openai", "gpt-test")
         .with_session("session", "segment")
-        .with_policy("policy");
+        .with_policy("policy")
+        .with_thought_level("high")
+        .with_parent("agent-1");
     let mut custom = BTreeMap::new();
     custom.insert(
         "nested".to_string(),
@@ -113,6 +116,26 @@ fn state_frame_round_trips_every_fidelity_field_and_recomputes_id() {
             rmp_serde::to_vec_named(expected).unwrap()
         );
     }
+    assert_eq!(
+        decoded[0]
+            .attribution
+            .agent
+            .as_ref()
+            .unwrap()
+            .thought_level
+            .as_deref(),
+        Some("high")
+    );
+    assert_eq!(
+        decoded[0]
+            .attribution
+            .agent
+            .as_ref()
+            .unwrap()
+            .parent
+            .as_deref(),
+        Some("agent-1")
+    );
     assert_eq!(decoded[0].confidence.unwrap().to_bits(), 0x7fc0_0123);
     assert_eq!(
         decoded[0]
@@ -124,6 +147,116 @@ fn state_frame_round_trips_every_fidelity_field_and_recomputes_id() {
             .to_bits(),
         0xffc0_0456
     );
+}
+
+#[test]
+fn compact_and_hash_include_thought_level_and_parent() {
+    let principal = Principal::new("Author", "author@example.com");
+    let created_at = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    let tree = ContentHash::from_bytes([70; 32]);
+    let mut without = State::new(
+        tree,
+        Vec::new(),
+        Attribution::with_agent(principal.clone(), Agent::new("anthropic", "opus")),
+    );
+    without.created_at = created_at;
+    without.state_id = without.id();
+    let mut with = State::new(
+        tree,
+        Vec::new(),
+        Attribution::with_agent(
+            principal,
+            Agent::new("anthropic", "opus")
+                .with_thought_level("high")
+                .with_parent("agent-1"),
+        ),
+    );
+    with.created_at = created_at;
+    with.state_id = with.id();
+    assert_ne!(
+        without.id(),
+        with.id(),
+        "thought_level and parent must participate in the state hash"
+    );
+    let mut thought_only = State::new(
+        tree,
+        Vec::new(),
+        Attribution::with_agent(
+            Principal::new("Author", "author@example.com"),
+            Agent::new("anthropic", "opus").with_thought_level("high"),
+        ),
+    );
+    thought_only.created_at = created_at;
+    thought_only.state_id = thought_only.id();
+    let mut parent_only = State::new(
+        tree,
+        Vec::new(),
+        Attribution::with_agent(
+            Principal::new("Author", "author@example.com"),
+            Agent::new("anthropic", "opus").with_parent("agent-1"),
+        ),
+    );
+    parent_only.created_at = created_at;
+    parent_only.state_id = parent_only.id();
+    assert_ne!(
+        without.id(),
+        thought_only.id(),
+        "changing thought_level must change the state id"
+    );
+    assert_ne!(
+        without.id(),
+        parent_only.id(),
+        "changing parent must change the state id"
+    );
+    assert_ne!(
+        thought_only.id(),
+        parent_only.id(),
+        "thought_level and parent must not be interchangeable in the hash"
+    );
+    let encoded = encode_state_frame(&[with.clone()]).unwrap();
+    assert!(
+        encoded.starts_with(STATE_MAGIC),
+        "current encode must use the HCS2 cursor dictionary"
+    );
+    let decoded = decode_state_frame(&encoded).unwrap();
+    let agent = decoded[0].attribution.agent.as_ref().unwrap();
+    assert_eq!(agent.thought_level.as_deref(), Some("high"));
+    assert_eq!(agent.parent.as_deref(), Some("agent-1"));
+    assert_eq!(decoded[0].id(), with.id());
+}
+
+#[test]
+fn hcs1_agent_frames_keep_the_five_field_dictionary() {
+    let created_at = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    let mut state = State::new(
+        ContentHash::from_bytes([70; 32]),
+        Vec::new(),
+        Attribution::with_agent(
+            Principal::new("Author", "author@example.com"),
+            Agent::new("anthropic", "opus"),
+        ),
+    );
+    state.created_at = created_at;
+    state.state_id = state.pre_cursor_id();
+    let encoded = encode_state_frame_hcs1(&[state.clone()]).unwrap();
+    assert!(
+        encoded.starts_with(STATE_MAGIC_V1),
+        "format-4 packs keep HCS1 magic, got {:x?}",
+        &encoded[..4.min(encoded.len())]
+    );
+    assert!(is_state_frame(&encoded));
+    let decoded = decode_state_frame(&encoded).unwrap();
+    let agent = decoded[0].attribution.agent.as_ref().unwrap();
+    assert_eq!(agent.provider, "anthropic");
+    assert_eq!(agent.model, "opus");
+    assert!(agent.thought_level.is_none());
+    assert!(agent.parent.is_none());
+    assert!(
+        decoded[0].accepts_stored_id(&state.pre_cursor_id()),
+        "HCS1 decode must not desync into the seven-field dictionary"
+    );
+    let extracted = extract_state(&encoded, state.pre_cursor_id()).unwrap();
+    assert_eq!(extracted.state_id, state.pre_cursor_id());
 }
 
 #[test]

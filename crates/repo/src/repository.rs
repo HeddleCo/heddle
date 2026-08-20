@@ -139,7 +139,12 @@ mod status_untracked_scan;
 
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
 const GIT_CHECKPOINT_INTENT_FILE: &str = "git-checkpoint-intent.json";
-const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
+const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[
+    ".heddle/",
+    ".heddle.identity",
+    ".identity.lock",
+    ".identity.tmp.*",
+];
 const HEDDLE_REPOSITORY_MEMBERS: &[&str] = &["HEAD", "objects", "objectstore", "oplog", "refs"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -598,23 +603,7 @@ pub(crate) fn compute_op_scope(root: &Path) -> String {
 }
 
 fn ensure_supported_repo_format(config_path: &Path, config: &RepoConfig) -> Result<()> {
-    let found = config.repository.version;
-    let supported = repo_config::SUPPORTED_REPO_FORMAT;
-    if found > supported {
-        return Err(HeddleError::RepositoryFormatTooNew {
-            path: config_path.to_path_buf(),
-            found,
-            supported,
-        });
-    }
-    if found < supported {
-        return Err(HeddleError::RepositoryFormatMigrationRequired {
-            path: config_path.to_path_buf(),
-            found,
-            required: supported,
-        });
-    }
-    Ok(())
+    repo_config::reject_unsupported_repo_format(config_path, config.repository.version)
 }
 
 fn validate_snapshot_artifact_records(

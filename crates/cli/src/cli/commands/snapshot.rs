@@ -119,6 +119,10 @@ pub(crate) struct SnapshotAgentOutput {
     segment_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     policy_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thought_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<String>,
 }
 
 impl From<&Principal> for SnapshotPrincipalOutput {
@@ -138,6 +142,8 @@ impl From<&Agent> for SnapshotAgentOutput {
             session_id: agent.session_id.clone(),
             segment_id: agent.segment_id.clone(),
             policy_id: agent.policy_id.clone(),
+            thought_level: agent.thought_level.clone(),
+            parent: agent.parent.clone(),
         }
     }
 }
@@ -180,15 +186,6 @@ pub struct SnapshotAgentOverrides {
     pub policy: Option<String>,
     pub no_policy: bool,
     pub no_agent: bool,
-}
-
-#[derive(Clone, Debug, Default)]
-struct AgentEnv {
-    provider: Option<String>,
-    model: Option<String>,
-    policy: Option<String>,
-    session: Option<String>,
-    segment: Option<String>,
 }
 
 pub async fn cmd_snapshot(
@@ -1121,31 +1118,6 @@ pub(crate) fn build_attribution(
     user_config: &UserConfig,
     agent: &SnapshotAgentOverrides,
 ) -> Result<Attribution> {
-    build_attribution_with_env(repo, user_config, agent, current_agent_env())
-}
-
-fn current_agent_env() -> AgentEnv {
-    AgentEnv {
-        provider: std::env::var("HEDDLE_AGENT_PROVIDER")
-            .ok()
-            .and_then(clean_attribution_value),
-        model: std::env::var("HEDDLE_AGENT_MODEL")
-            .ok()
-            .and_then(clean_attribution_value),
-        policy: std::env::var("HEDDLE_AGENT_POLICY")
-            .ok()
-            .and_then(clean_attribution_value),
-        session: std::env::var("HEDDLE_SESSION_ID").ok(),
-        segment: std::env::var("HEDDLE_SESSION_SEGMENT").ok(),
-    }
-}
-
-fn build_attribution_with_env(
-    repo: &Repository,
-    user_config: &UserConfig,
-    agent: &SnapshotAgentOverrides,
-    env: AgentEnv,
-) -> Result<Attribution> {
     let principal = resolve_principal(repo, user_config)?;
     if is_default_unknown_principal(&principal) {
         return Err(anyhow!(missing_capture_identity_advice()));
@@ -1155,144 +1127,51 @@ fn build_attribution_with_env(
         return Ok(Attribution::human(principal));
     }
 
+    // Put state in. Do not hunt `/proc`, hoped-for env, thread actor, or
+    // repo/user `agent.model` after a cursor miss. Cursor/Grok stay
+    // `agent=null`. Never invent a model.
+    let frozen = crate::identity_freeze::freeze_identity_for_capture(repo).unwrap_or_default();
     let current_session = SessionManager::new(repo.root()).get_current_session()?;
-    let explicit_provider = agent.provider.clone().or(env.provider.clone());
-    let explicit_model = agent.model.clone().or(env.model.clone());
-    let explicit_agent_identity = explicit_provider.is_some() && explicit_model.is_some();
-
-    // Pull the thread's declared actor — set when the user ran
-    // `heddle start --agent-provider X --agent-model Y` to dedicate this
-    // thread to a specific agent. The `start` command writes an
-    // `ActorPresence` into the `ActorPresenceStore`; `heddle status` already
-    // surfaces it via `build_thread_view`. We look it up here so
-    // `heddle capture` propagates it onto the resulting state's
-    // `attribution.agent` — otherwise every captured state on an agent
-    // thread would show `Principal: Unknown`, which broke the
-    // provenance demo and the `heddle query --attribution --context` story.
-    //
-    // Precedence: explicit CLI overrides and `HEDDLE_AGENT_*` env are
-    // user-supplied attribution for this capture, so they must not be
-    // silently masked by a detected harness actor. The active thread
-    // actor remains the zero-config fallback for agent threads when no
-    // explicit attribution is present.
-    let thread_actor = (!explicit_agent_identity)
-        .then(|| {
-            current_thread(repo)
-                .ok()
-                .flatten()
-                .and_then(|t| find_active_thread_entry(repo, &t.id).ok().flatten())
-        })
-        .flatten();
-    // Harness probing writes the literal "unknown" placeholder into
-    // `ActorPresence.model` and `SessionSegment.model` when it can't
-    // identify the model from argv/env (see `harness::open_session`
-    // and `claude_hook::handle_user_prompt_segment_rotate`). If we
-    // let that placeholder participate in the precedence chain, an
-    // ambient `HEDDLE_AGENT_MODEL=claude-opus-4-7` set by the user
-    // never wins — captures keep surfacing as `anthropic/unknown`.
-    // Strip the placeholder at every non-env source so explicit env
-    // vars and config can fill in real data.
-    let thread_provider = thread_actor
-        .as_ref()
-        .and_then(|e| e.provider.clone())
+    let provider = agent
+        .provider
+        .clone()
+        .or(frozen.provider.clone())
         .and_then(clean_attribution_value);
-    let thread_model = thread_actor
-        .as_ref()
-        .and_then(|e| e.model.clone())
-        .and_then(clean_attribution_value);
-    let session_provider = current_session
-        .as_ref()
-        .and_then(|session| session.current_segment())
-        .map(|segment| segment.provider.clone())
-        .and_then(clean_attribution_value);
-    let session_model = current_session
-        .as_ref()
-        .and_then(|session| session.current_segment())
-        .map(|segment| segment.model.clone())
+    let model = agent
+        .model
+        .clone()
+        .or(frozen.model.clone())
         .and_then(clean_attribution_value);
     let session_policy = current_session
         .as_ref()
         .and_then(|session| session.current_segment())
         .and_then(|segment| segment.policy_id.clone())
         .and_then(clean_attribution_value);
-    let harness_probe = (!explicit_agent_identity)
-        .then(|| {
-            crate::harness::probe_current_process_harness(
-                repo,
-                thread_provider.clone().or_else(|| session_provider.clone()),
-                thread_model.clone().or_else(|| session_model.clone()),
-                session_policy.clone(),
-            )
-            .ok()
-        })
-        .flatten();
-    let harness_provider = harness_probe
-        .as_ref()
-        .and_then(|probe| probe.provider.clone())
-        .and_then(clean_attribution_value);
-    let harness_model = harness_probe
-        .as_ref()
-        .and_then(|probe| probe.model.clone())
-        .and_then(clean_attribution_value);
-    let harness_policy = harness_probe
-        .as_ref()
-        .and_then(|probe| probe.policy.clone())
-        .and_then(clean_attribution_value);
-
-    let provider = explicit_provider
-        .or(thread_provider)
-        .or(harness_provider)
-        .or(session_provider)
-        .or_else(|| {
-            user_config
-                .agent
-                .provider
-                .clone()
-                .and_then(clean_attribution_value)
-        })
-        .or_else(|| {
-            repo.config()
-                .agent
-                .provider
-                .clone()
-                .and_then(clean_attribution_value)
-        });
-    let model = explicit_model
-        .or(thread_model)
-        .or(harness_model)
-        .or(session_model)
-        .or_else(|| {
-            user_config
-                .agent
-                .model
-                .clone()
-                .and_then(clean_attribution_value)
-        })
-        .or_else(|| {
-            repo.config()
-                .agent
-                .model
-                .clone()
-                .and_then(clean_attribution_value)
-        });
+    // Heddle Session.id — never the sidecar harness session.
     let session_id = agent
         .session
         .clone()
-        .or(env.session)
         .or_else(|| current_session.as_ref().map(|session| session.id.clone()));
-    let segment_id = agent.segment.clone().or(env.segment).or_else(|| {
-        current_session
-            .as_ref()
-            .and_then(|session| session.current_segment_id.clone())
-    });
+    let segment_id = agent
+        .segment
+        .clone()
+        .or(frozen.segment_id.clone())
+        .or_else(|| {
+            current_session
+                .as_ref()
+                .and_then(|session| session.current_segment_id.clone())
+        });
     let policy = if agent.no_policy {
         None
     } else {
         agent
             .policy
             .clone()
-            .or(env.policy)
-            .or(harness_policy)
+            .or_else(|| {
+                std::env::var("HEDDLE_AGENT_POLICY")
+                    .ok()
+                    .and_then(clean_attribution_value)
+            })
             .or(session_policy)
             .or_else(|| user_config.agent.default_policy.clone())
             .or_else(|| repo.config().policies.default_policy.clone())
@@ -1306,6 +1185,12 @@ fn build_attribution_with_env(
             }
             if let Some(pol) = policy {
                 agent = agent.with_policy(pol);
+            }
+            if let Some(thought_level) = frozen.thought_level {
+                agent = agent.with_thought_level(thought_level);
+            }
+            if let Some(parent) = frozen.parent {
+                agent = agent.with_parent(parent);
             }
             Ok(Attribution::with_agent(principal, agent))
         }
@@ -1431,6 +1316,28 @@ mod tests {
 
     use super::*;
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
     fn user_config_with_principal() -> UserConfig {
         UserConfig {
             principal: Some(crate::config::UserPrincipalConfig {
@@ -1498,47 +1405,185 @@ mod tests {
     }
 
     #[test]
-    fn build_attribution_explicit_env_wins_over_active_harness_actor() {
+    #[serial_test::serial]
+    fn cursor_grok_stays_agent_null_when_env_or_repo_model_set() {
+        let _model = EnvVarGuard::set("HEDDLE_AGENT_MODEL", "claude-opus-4-7");
+        let _provider = EnvVarGuard::set("HEDDLE_AGENT_PROVIDER", "anthropic");
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         save_active_harness_entry(&repo, "anthropic", "claude-opus-4-8[1m]");
+        let config_path = temp.path().join(".heddle/config.toml");
+        let mut config = repo::RepoConfig::load(&config_path).unwrap();
+        config.agent.provider = Some("anthropic".into());
+        config.agent.model = Some("claude-opus-4-7".into());
+        config.save(&config_path).unwrap();
+        let repo = Repository::open(temp.path()).unwrap();
 
-        let attribution = build_attribution_with_env(
-            &repo,
-            &user_config_with_principal(),
-            &empty_agent_overrides(),
-            AgentEnv {
-                provider: Some("openai".to_string()),
-                model: Some("gpt-5-codex".to_string()),
-                ..AgentEnv::default()
-            },
-        )
-        .unwrap();
+        let mut user_config = user_config_with_principal();
+        user_config.agent.provider = Some("openai".into());
+        user_config.agent.model = Some("gpt-5".into());
 
-        let agent = attribution.agent.expect("explicit env should set agent");
-        assert_eq!(agent.provider, "openai");
-        assert_eq!(agent.model, "gpt-5-codex");
+        let attribution = build_attribution(&repo, &user_config, &empty_agent_overrides()).unwrap();
+        assert!(
+            attribution.agent.is_none(),
+            "Cursor/Grok must stay agent=null; do not invent from env, repo, or thread actor"
+        );
     }
 
     #[test]
-    fn build_attribution_uses_detected_harness_actor_when_env_absent() {
+    fn model_change_mid_thread_rotates_segment_and_leaves_old_state() {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
-        save_active_harness_entry(&repo, "anthropic", "claude-opus-4-8[1m]");
-
-        let attribution = build_attribution_with_env(
+        let mut manager = SessionManager::new(repo.root());
+        manager
+            .start_session(
+                objects::object::Principal::new("Ada Lovelace", "ada@example.com"),
+                "anthropic".into(),
+                "opus".into(),
+                None,
+            )
+            .unwrap();
+        heddle_core::write_identity_cursor(
+            repo.root(),
+            &heddle_core::IdentityCursor {
+                provider: Some("anthropic".into()),
+                model: Some("opus".into()),
+                thought_level: Some("high".into()),
+                session: Some("sess-live".into()),
+                parent: Some("agent-1".into()),
+            },
+        )
+        .unwrap();
+        let first = build_attribution(
             &repo,
             &user_config_with_principal(),
             &empty_agent_overrides(),
-            AgentEnv::default(),
         )
         .unwrap();
+        let first_agent = first.agent.expect("cursor should freeze agent");
+        assert_eq!(first_agent.model, "opus");
+        assert_eq!(first_agent.thought_level.as_deref(), Some("high"));
+        assert_eq!(first_agent.parent.as_deref(), Some("agent-1"));
+        let first_segment = first_agent.segment_id.clone();
 
-        let agent = attribution
-            .agent
-            .expect("detected harness actor should set agent");
-        assert_eq!(agent.provider, "anthropic");
-        assert_eq!(agent.model, "claude-opus-4-8[1m]");
+        heddle_core::write_identity_cursor(
+            repo.root(),
+            &heddle_core::IdentityCursor {
+                provider: Some("anthropic".into()),
+                model: Some("sonnet".into()),
+                thought_level: Some("low".into()),
+                session: Some("sess-live".into()),
+                parent: Some("agent-1".into()),
+            },
+        )
+        .unwrap();
+        let second = build_attribution(
+            &repo,
+            &user_config_with_principal(),
+            &empty_agent_overrides(),
+        )
+        .unwrap();
+        let second_agent = second.agent.expect("updated cursor should freeze");
+        assert_eq!(second_agent.model, "sonnet");
+        assert_eq!(second_agent.thought_level.as_deref(), Some("low"));
+        assert_ne!(second_agent.segment_id, first_segment);
+        assert_eq!(first_agent.model, "opus");
+        assert_eq!(first_agent.thought_level.as_deref(), Some("high"));
+        assert_eq!(first_agent.segment_id, first_segment);
+    }
+
+    #[test]
+    fn session_end_expire_leaves_human_capture() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        heddle_core::write_identity_cursor(
+            repo.root(),
+            &heddle_core::IdentityCursor {
+                provider: Some("anthropic".into()),
+                model: Some("opus".into()),
+                thought_level: Some("high".into()),
+                session: Some("dead-session".into()),
+                parent: Some("agent-1".into()),
+            },
+        )
+        .unwrap();
+        heddle_core::expire_identity_cursor(repo.root()).unwrap();
+        let attribution = build_attribution(
+            &repo,
+            &user_config_with_principal(),
+            &empty_agent_overrides(),
+        )
+        .unwrap();
+        assert!(
+            attribution.agent.is_none(),
+            "expired SessionEnd cursor must not invent an agent on the next capture"
+        );
+    }
+
+    #[test]
+    fn codex_stop_expire_leaves_human_capture() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        crate::identity_stamp::stamp_bytes(
+            repo.root(),
+            "codex",
+            r#"{"model":"gpt-5.4","session_id":"c1"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            heddle_core::read_identity_cursor(repo.root())
+                .model
+                .as_deref(),
+            Some("gpt-5.4")
+        );
+        crate::identity_stamp::stamp_bytes(
+            repo.root(),
+            "codex",
+            r#"{"hook_event_name":"Stop","session_id":"c1"}"#,
+        )
+        .unwrap();
+        let attribution = build_attribution(
+            &repo,
+            &user_config_with_principal(),
+            &empty_agent_overrides(),
+        )
+        .unwrap();
+        assert!(
+            attribution.agent.is_none(),
+            "expired Codex Stop cursor must not invent an agent on the next capture"
+        );
+    }
+
+    #[test]
+    fn build_attribution_omits_unpublished_cursor_fields() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        heddle_core::write_identity_cursor(
+            repo.root(),
+            &heddle_core::IdentityCursor {
+                provider: Some("anthropic".into()),
+                model: Some("opus".into()),
+                ..heddle_core::IdentityCursor::default()
+            },
+        )
+        .unwrap();
+        let attribution = build_attribution(
+            &repo,
+            &user_config_with_principal(),
+            &empty_agent_overrides(),
+        )
+        .unwrap();
+        let agent = attribution.agent.expect("published model should freeze");
+        assert!(agent.thought_level.is_none());
+        assert!(agent.parent.is_none());
+        assert!(
+            agent.session_id.is_none()
+                || !agent
+                    .session_id
+                    .as_deref()
+                    .is_some_and(|s| s == "sess-live"),
+            "harness session must not be stuffed into Heddle Session.id"
+        );
     }
 
     #[test]

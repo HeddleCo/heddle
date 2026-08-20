@@ -1748,8 +1748,12 @@ fn git_overlay_matrix_init_excludes_only_heddle_metadata() {
     );
 
     let exclude = std::fs::read_to_string(temp.path().join(".git/info/exclude")).unwrap();
-    {
-        let pattern = ".heddle/";
+    for pattern in [
+        ".heddle/",
+        ".heddle.identity",
+        ".identity.lock",
+        ".identity.tmp.*",
+    ] {
         assert!(
             exclude.lines().any(|line| line.trim() == pattern),
             "local Git exclude should contain {pattern:?}: {exclude}"

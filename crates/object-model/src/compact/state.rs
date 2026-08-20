@@ -9,15 +9,25 @@ use super::{
 };
 use crate::object::{ChangeLineageKind, State};
 
-pub(super) const STATE_MAGIC: &[u8; 4] = b"HCS1";
+pub(super) const STATE_MAGIC_V1: &[u8; 4] = b"HCS1";
+pub(super) const STATE_MAGIC: &[u8; 4] = b"HCS2";
 
-/// Whether `bytes` begin with the compact-state frame discriminator.
+/// Whether `bytes` begin with a compact-state frame discriminator.
 pub fn is_state_frame(bytes: &[u8]) -> bool {
-    bytes.starts_with(STATE_MAGIC)
+    bytes.starts_with(STATE_MAGIC) || bytes.starts_with(STATE_MAGIC_V1)
 }
 
 /// Encode states as lossless columns, omitting only the derivable state id.
 pub fn encode_state_frame(states: &[State]) -> Result<Vec<u8>> {
+    encode_state_frame_versioned(states, STATE_MAGIC)
+}
+
+#[cfg(test)]
+pub(super) fn encode_state_frame_hcs1(states: &[State]) -> Result<Vec<u8>> {
+    encode_state_frame_versioned(states, STATE_MAGIC_V1)
+}
+
+fn encode_state_frame_versioned(states: &[State], magic: &[u8; 4]) -> Result<Vec<u8>> {
     if states.len() > MAX_COMPACT_STATE_COUNT {
         return Err(invalid(format!(
             "state frame count {} exceeds maximum {MAX_COMPACT_STATE_COUNT}",
@@ -25,9 +35,9 @@ pub fn encode_state_frame(states: &[State]) -> Result<Vec<u8>> {
         )));
     }
     let dictionaries = StateDictionaries::from_states(states);
-    let mut output = Writer::new(STATE_MAGIC);
+    let mut output = Writer::new(magic);
     output.put_u64(states.len() as u64);
-    encode_dictionaries(&mut output, &dictionaries);
+    encode_dictionaries(&mut output, &dictionaries, magic == STATE_MAGIC);
     encode_structure(&mut output, states);
     encode_attribution(&mut output, states, &dictionaries);
     encode_intent_and_verification(&mut output, states)?;
@@ -176,7 +186,11 @@ fn encode_verification(output: &mut Writer, state: &State) -> Result<()> {
     Ok(())
 }
 
-fn encode_dictionaries(output: &mut Writer, dictionaries: &StateDictionaries) {
+fn encode_dictionaries(
+    output: &mut Writer,
+    dictionaries: &StateDictionaries,
+    include_cursor_fields: bool,
+) {
     output.put_u64(dictionaries.principals.len() as u64);
     for PrincipalKey(name, email) in &dictionaries.principals {
         output.put_bytes(name);
@@ -189,6 +203,10 @@ fn encode_dictionaries(output: &mut Writer, dictionaries: &StateDictionaries) {
         output.put_optional_bytes(agent.session_id.as_deref());
         output.put_optional_bytes(agent.segment_id.as_deref());
         output.put_optional_bytes(agent.policy_id.as_deref());
+        if include_cursor_fields {
+            output.put_optional_bytes(agent.thought_level.as_deref());
+            output.put_optional_bytes(agent.parent.as_deref());
+        }
     }
 }
 
