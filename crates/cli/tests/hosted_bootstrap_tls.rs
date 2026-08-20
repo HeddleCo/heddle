@@ -167,18 +167,7 @@ impl LoginFixture {
                 .expect("write user config CA");
                 command.env("HEDDLE_CONFIG", config);
             }
-            CaSource::RepoConfig => {
-                let repo_config = self.repo.join(".heddle/config.toml");
-                let current = std::fs::read_to_string(&repo_config).expect("read repo config");
-                std::fs::write(
-                    repo_config,
-                    format!(
-                        "{current}\n[remote]\ntls_ca_certificate_path = \"{}\"\n",
-                        self.ca_path.display()
-                    ),
-                )
-                .expect("write repo config CA");
-            }
+            CaSource::RepoConfig => write_repo_tls_ca(&self.repo, &self.ca_path),
         }
         command.output().expect("run heddle auth login")
     }
@@ -228,10 +217,51 @@ fn auth_login_honours_repo_config_tls_ca_certificate_path() {
 }
 
 #[test]
+fn auth_login_honours_dash_c_repo_ca_not_cwd() {
+    let fixture = LoginFixture::new();
+    write_repo_tls_ca(&fixture.repo, &fixture.ca_path);
+
+    let cwd_repo = fixture.temp.path().join("cwd-repo");
+    std::fs::create_dir_all(&cwd_repo).expect("create cwd repo dir");
+    let init = heddle_command(&fixture.temp, &cwd_repo)
+        .args(["init"])
+        .output()
+        .expect("init cwd repo");
+    assert!(init.status.success(), "init cwd repo: {}", stderr(&init));
+
+    let CertifiedKey { cert, .. } =
+        generate_simple_self_signed(vec!["127.0.0.1".to_string()]).expect("cwd decoy CA");
+    let cwd_ca = fixture.temp.path().join("cwd-ca.pem");
+    std::fs::write(&cwd_ca, cert.pem()).expect("write cwd decoy CA");
+    write_repo_tls_ca(&cwd_repo, &cwd_ca);
+
+    let output = heddle_command(&fixture.temp, &cwd_repo)
+        .arg("-C")
+        .arg(&fixture.repo)
+        .args(["auth", "login", "--server", &fixture.server])
+        .output()
+        .expect("run heddle -C auth login");
+    assert_tls_honored(&output, "-C selected repo config");
+}
+
+#[test]
 fn auth_login_honours_env_tls_ca_cert() {
     let fixture = LoginFixture::new();
     let output = fixture.login(CaSource::Env);
     assert_tls_honored(&output, "HEDDLE_REMOTE_TLS_CA_CERT");
+}
+
+fn write_repo_tls_ca(repo: &Path, ca_path: &Path) {
+    let repo_config = repo.join(".heddle/config.toml");
+    let current = std::fs::read_to_string(&repo_config).expect("read repo config");
+    std::fs::write(
+        repo_config,
+        format!(
+            "{current}\n[remote]\ntls_ca_certificate_path = \"{}\"\n",
+            ca_path.display()
+        ),
+    )
+    .expect("write repo config CA");
 }
 
 fn assert_tls_honored(output: &Output, source: &str) {
