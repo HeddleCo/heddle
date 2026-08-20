@@ -11,8 +11,9 @@ use tokio::sync::Mutex;
 
 use super::{
     claim_authorization::{
-        consent_reply, pre_consent_message, promote_consent_message, resolved_reply,
+        AgentConsent, consent_reply, pre_consent_message, promote_consent_message, resolved_reply,
         signed_pre_consent, signed_promote_consent, validate_credential_id, validate_handle,
+        verify_promotion_consents,
     },
     hosted::claim_protocol::{
         CLAIM_ALPN_V1, CLAIM_CONSENT_METHOD, CLAIM_RESOLVE_METHOD, ClaimHandler, ClaimProtocol,
@@ -33,10 +34,8 @@ fn state(node_id: String) -> ClaimState {
     )
 }
 
-fn signature(value: &serde_json::Value) -> Vec<u8> {
-    URL_SAFE_NO_PAD
-        .decode(value["consent"]["signature"].as_str().unwrap())
-        .expect("signature encoding")
+fn consent_from_reply(value: &serde_json::Value) -> AgentConsent {
+    serde_json::from_value(value["consent"].clone()).expect("consent payload")
 }
 
 #[derive(Clone)]
@@ -49,32 +48,27 @@ struct MockWeftAccount {
 struct MockPromotion<'a> {
     handle: &'a str,
     nonce: &'a [u8],
-    pre_signature: &'a [u8],
     credential_id: &'a str,
-    promote_signature: &'a [u8],
+    pre: &'a AgentConsent,
+    promote: &'a AgentConsent,
+    now_millis: i64,
 }
 
 impl MockWeftAccount {
-    fn promote(
-        &mut self,
-        claim: &ClaimState,
-        agent_public_key: &[u8],
-        promotion: &MockPromotion<'_>,
-    ) -> bool {
-        if self.root_credential_id.is_some()
-            || !claim.consent_unexpired(chrono::Utc::now().timestamp_millis())
-            || Ed25519Signer::verify_with_public_key(
-                &pre_consent_message(claim, promotion.handle, promotion.nonce).unwrap(),
-                agent_public_key,
-                promotion.pre_signature,
-            )
-            .is_err()
-            || Ed25519Signer::verify_with_public_key(
-                &promote_consent_message(claim, promotion.handle, promotion.credential_id).unwrap(),
-                agent_public_key,
-                promotion.promote_signature,
-            )
-            .is_err()
+    fn promote(&mut self, agent_public_key: &[u8], promotion: &MockPromotion<'_>) -> bool {
+        if self.root_credential_id.is_some() {
+            return false;
+        }
+        if verify_promotion_consents(
+            agent_public_key,
+            promotion.handle,
+            promotion.nonce,
+            promotion.credential_id,
+            promotion.pre,
+            promotion.promote,
+            promotion.now_millis,
+        )
+        .is_err()
         {
             return false;
         }
@@ -112,6 +106,10 @@ fn consent_signatures_round_trip_the_local_builders() {
 
     assert_eq!(pre.account_id, OWNER_ID);
     assert_eq!(promote.account_id, OWNER_ID);
+    assert_eq!(pre.authorization_hash, claim.authorization_hash());
+    assert_eq!(promote.authorization_hash, claim.authorization_hash());
+    assert_eq!(pre.expires_at, claim.expires_at_millis);
+    assert_eq!(promote.expires_at, claim.expires_at_millis);
 }
 
 #[test]
@@ -131,6 +129,8 @@ fn consent_builders_encode_the_v1_counted_fields() {
             b"human-handle",
             claim.node_id.as_bytes(),
             nonce,
+            claim.authorization_hash().as_bytes(),
+            &claim.expires_at_millis.to_be_bytes(),
         ])
     );
     assert_eq!(
@@ -140,6 +140,8 @@ fn consent_builders_encode_the_v1_counted_fields() {
             OWNER_ID.as_bytes(),
             b"human-handle",
             b"Y3JlZGVudGlhbA",
+            claim.authorization_hash().as_bytes(),
+            &claim.expires_at_millis.to_be_bytes(),
         ])
     );
 }
@@ -163,10 +165,24 @@ fn expired_consent_is_not_produced_or_accepted() {
     let pre_bytes = pre_consent_message(&claim, "human-handle", nonce).expect("expired encoding");
     let promote_bytes = promote_consent_message(&claim, "human-handle", "Y3JlZGVudGlhbA")
         .expect("expired encoding");
-    let pre_signature = signer.sign(&pre_bytes).expect("sign stale pre-consent");
-    let promote_signature = signer
-        .sign(&promote_bytes)
-        .expect("sign stale promote-consent");
+    let pre = AgentConsent {
+        account_id: claim.owner_id.to_string(),
+        node_id: claim.node_id.clone(),
+        signature: URL_SAFE_NO_PAD.encode(signer.sign(&pre_bytes).expect("sign stale pre-consent")),
+        authorization_hash: claim.authorization_hash().to_string(),
+        expires_at: claim.expires_at_millis,
+    };
+    let promote = AgentConsent {
+        account_id: claim.owner_id.to_string(),
+        node_id: claim.node_id.clone(),
+        signature: URL_SAFE_NO_PAD.encode(
+            signer
+                .sign(&promote_bytes)
+                .expect("sign stale promote-consent"),
+        ),
+        authorization_hash: claim.authorization_hash().to_string(),
+        expires_at: claim.expires_at_millis,
+    };
     let mut account = MockWeftAccount {
         owner_id: claim.owner_id,
         spool_owner_id: claim.owner_id,
@@ -174,17 +190,78 @@ fn expired_consent_is_not_produced_or_accepted() {
     };
     assert!(
         !account.promote(
-            &claim,
             signer.public_key(),
             &MockPromotion {
                 handle: "human-handle",
                 nonce,
-                pre_signature: &pre_signature,
                 credential_id: "Y3JlZGVudGlhbA",
-                promote_signature: &promote_signature,
+                pre: &pre,
+                promote: &promote,
+                now_millis: chrono::Utc::now().timestamp_millis(),
             },
         ),
-        "expired consent must not be accepted locally"
+        "expired consent must not be accepted from the bound expiry"
+    );
+}
+
+#[test]
+fn expired_consent_signature_is_rejected_after_bound_expiry() {
+    let signer = Ed25519Signer::generate().expect("signer");
+    let mut claim = state(hex::encode(signer.public_key()));
+    let expires_at = chrono::Utc::now().timestamp_millis() + 60_000;
+    assert!(claim.reissue(b"claim-secret", expires_at));
+    let nonce = b"0123456789abcdef";
+
+    let pre =
+        signed_pre_consent(&claim, "human-handle", nonce, &signer).expect("signed pre-consent");
+    let promote = signed_promote_consent(&claim, "human-handle", "Y3JlZGVudGlhbA", &signer)
+        .expect("signed promote-consent");
+
+    verify_promotion_consents(
+        signer.public_key(),
+        "human-handle",
+        nonce,
+        "Y3JlZGVudGlhbA",
+        &pre,
+        &promote,
+        expires_at - 1,
+    )
+    .expect("signature must verify before the bound expiry");
+
+    let mut later_local_ttl = state(hex::encode(signer.public_key()));
+    assert!(later_local_ttl.reissue(b"later-secret", expires_at + 60_000));
+    assert!(
+        later_local_ttl.consent_unexpired(expires_at),
+        "local claim TTL remaining must not keep a stale signature alive"
+    );
+    assert!(
+        verify_promotion_consents(
+            signer.public_key(),
+            "human-handle",
+            nonce,
+            "Y3JlZGVudGlhbA",
+            &pre,
+            &promote,
+            expires_at,
+        )
+        .is_err(),
+        "server-side verify must reject once now >= signed expiresAt"
+    );
+
+    let mut stretched = pre.clone();
+    stretched.expires_at = expires_at + 60_000;
+    assert!(
+        verify_promotion_consents(
+            signer.public_key(),
+            "human-handle",
+            nonce,
+            "Y3JlZGVudGlhbA",
+            &stretched,
+            &promote,
+            expires_at,
+        )
+        .is_err(),
+        "extending expiresAt on the payload must not revive the signature"
     );
 }
 
@@ -196,6 +273,19 @@ fn counted(parts: &[&[u8]]) -> Vec<u8> {
         encoded.extend_from_slice(part);
     }
     encoded
+}
+
+#[test]
+fn unbound_claim_state_cannot_encode_consent() {
+    let claim = state("11".repeat(32));
+    assert!(
+        pre_consent_message(&claim, "human-handle", b"0123456789abcdef").is_err(),
+        "dormant state has no claim-state id or expiry to bind"
+    );
+    assert!(
+        promote_consent_message(&claim, "human-handle", "Y3JlZGVudGlhbA").is_err(),
+        "dormant state has no claim-state id or expiry to bind"
+    );
 }
 
 #[test]
@@ -394,6 +484,7 @@ async fn iroh_claim_happy_path_and_deny_paths_match_weft_promotion() {
         panic!("pre-consent must succeed");
     };
     let pre: serde_json::Value = serde_json::from_slice(&pre).unwrap();
+    let pre_consent = consent_from_reply(&pre);
 
     let credential_id = "Y3JlZGVudGlhbA";
     let promote_body = serde_json::json!({
@@ -413,8 +504,10 @@ async fn iroh_claim_happy_path_and_deny_paths_match_weft_promotion() {
         panic!("promote-consent must succeed");
     };
     let promote: serde_json::Value = serde_json::from_slice(&promote).unwrap();
+    let promote_consent = consent_from_reply(&promote);
 
     let state = authorization.state.lock().await;
+    let now = chrono::Utc::now().timestamp_millis();
     let mut account = MockWeftAccount {
         owner_id: state.owner_id,
         spool_owner_id: state.owner_id,
@@ -423,27 +516,27 @@ async fn iroh_claim_happy_path_and_deny_paths_match_weft_promotion() {
     let mut forged = account.clone();
     assert!(
         !forged.promote(
-            &state,
             authorization.signer.public_key(),
             &MockPromotion {
                 handle: "human-handle",
                 nonce,
-                pre_signature: &signature(&pre),
                 credential_id: "Zm9yZ2Vk",
-                promote_signature: &signature(&promote),
+                pre: &pre_consent,
+                promote: &promote_consent,
+                now_millis: now,
             },
         ),
         "a forged credential binding must be rejected"
     );
     assert!(account.promote(
-        &state,
         authorization.signer.public_key(),
         &MockPromotion {
             handle: "human-handle",
             nonce,
-            pre_signature: &signature(&pre),
             credential_id,
-            promote_signature: &signature(&promote),
+            pre: &pre_consent,
+            promote: &promote_consent,
+            now_millis: now,
         },
     ));
     assert_eq!(
@@ -457,14 +550,14 @@ async fn iroh_claim_happy_path_and_deny_paths_match_weft_promotion() {
         "spool ownership remains anchored to the stable owner UUID"
     );
     assert!(!account.promote(
-        &state,
         authorization.signer.public_key(),
         &MockPromotion {
             handle: "human-handle",
             nonce,
-            pre_signature: &signature(&pre),
             credential_id,
-            promote_signature: &signature(&promote),
+            pre: &pre_consent,
+            promote: &promote_consent,
+            now_millis: now,
         },
     ));
     assert!(state.is_claimed());
