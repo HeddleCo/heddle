@@ -151,9 +151,9 @@ pub use harness_json::{
 pub use harness_policy::{
     ExplicitAgentBind, HarnessFingerprint, HarnessKind, HarnessProbeDecision, SegmentRotation,
     SessionAttachDecision, SessionAttachFacts, SessionAttachRule, SessionLookupFact, SessionPolicy,
-    TokenSidFact, WorktreeSessionFact, cursor_segment_rotation, decide_harness_probe,
-    decide_session_attach, detect_harness_kind, fingerprint_harness_from_hints,
-    segment_rotation_policy, should_rotate_segment,
+    TokenSidFact, WorktreeSessionFact, attach_published_segment_fields, cursor_segment_rotation,
+    decide_harness_probe, decide_session_attach, detect_harness_kind,
+    fingerprint_harness_from_hints, segment_rotation_policy, should_rotate_segment,
 };
 pub use hook_plan::{
     HookInstallSourceKind, HookInstallSourcePlan, hook_install_empty_stdin_kind,

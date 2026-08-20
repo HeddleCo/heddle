@@ -508,19 +508,23 @@ fn create_decision(
 // Segment rotation
 // ---------------------------------------------------------------------------
 
-/// Whether the current session segment should rotate for a new identity.
+/// Whether the current session segment should rotate or attach for a new identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegmentRotation {
     Keep,
+    /// Unpublished → published: write onto the current placeholder segment.
+    Attach,
     Rotate,
 }
 
 /// Pure segment rotation policy: rotate when a published provider, model,
-/// or thought_level **changes**. Empty → set is attach (`Keep`), not a rotate.
+/// or thought_level **changes**. Empty → set is [`SegmentRotation::Attach`],
+/// not a rotate.
 ///
-/// - No current segment → keep (caller creates the first segment elsewhere).
 /// - Incoming `None` / empty / `unknown` does not force rotation.
 /// - Rotation only when both sides have a published value and they differ.
+/// - Each field is evaluated independently so an unpublished provider cannot
+///   mask a published model / thought_level change.
 pub fn segment_rotation_policy(
     current_provider: Option<&str>,
     current_model: Option<&str>,
@@ -546,14 +550,16 @@ pub fn cursor_segment_rotation(
     new_model: Option<&str>,
     new_thought_level: Option<&str>,
 ) -> SegmentRotation {
-    let Some(current_provider) = crate::identity_cursor::published_field(current_provider) else {
-        return SegmentRotation::Keep;
-    };
-    if field_rotates(Some(current_provider), new_provider)
+    if field_rotates(current_provider, new_provider)
         || field_rotates(current_model, new_model)
         || field_rotates(current_thought_level, new_thought_level)
     {
         SegmentRotation::Rotate
+    } else if field_attaches(current_provider, new_provider)
+        || field_attaches(current_model, new_model)
+        || field_attaches(current_thought_level, new_thought_level)
+    {
+        SegmentRotation::Attach
     } else {
         SegmentRotation::Keep
     }
@@ -566,6 +572,35 @@ fn field_rotates(current: Option<&str>, incoming: Option<&str>) -> bool {
     ) {
         (Some(current), Some(incoming)) => current != incoming,
         _ => false,
+    }
+}
+
+fn field_attaches(current: Option<&str>, incoming: Option<&str>) -> bool {
+    crate::identity_cursor::published_field(current).is_none()
+        && crate::identity_cursor::published_field(incoming).is_some()
+}
+
+/// Write newly published values onto a placeholder segment (empty → set).
+pub fn attach_published_segment_fields(
+    segment: &mut objects::object::SessionSegment,
+    provider: Option<&str>,
+    model: Option<&str>,
+    thought_level: Option<&str>,
+) {
+    if crate::identity_cursor::published_field(Some(segment.provider.as_str())).is_none()
+        && let Some(provider) = crate::identity_cursor::published_field(provider)
+    {
+        segment.provider = provider.to_string();
+    }
+    if crate::identity_cursor::published_field(Some(segment.model.as_str())).is_none()
+        && let Some(model) = crate::identity_cursor::published_field(model)
+    {
+        segment.model = model.to_string();
+    }
+    if crate::identity_cursor::published_field(segment.thought_level.as_deref()).is_none()
+        && let Some(thought_level) = crate::identity_cursor::published_field(thought_level)
+    {
+        segment.thought_level = Some(thought_level.to_string());
     }
 }
 
@@ -774,7 +809,7 @@ mod tests {
                 Some("opus"),
                 Some("high"),
             ),
-            SegmentRotation::Keep
+            SegmentRotation::Attach
         );
         assert_eq!(
             cursor_segment_rotation(
@@ -796,7 +831,56 @@ mod tests {
                 Some("opus"),
                 None,
             ),
-            SegmentRotation::Keep
+            SegmentRotation::Attach
+        );
+    }
+
+    #[test]
+    fn unpublished_to_published_attaches_placeholder_segment() {
+        assert_eq!(
+            cursor_segment_rotation(
+                Some("unknown"),
+                Some("unknown"),
+                None,
+                Some("anthropic"),
+                Some("opus"),
+                Some("high"),
+            ),
+            SegmentRotation::Attach
+        );
+        assert!(!should_rotate_segment(
+            Some("unknown"),
+            Some("unknown"),
+            Some("anthropic"),
+            Some("opus"),
+        ));
+        let mut segment = objects::object::SessionSegment {
+            id: "sess-1-seg-1".into(),
+            provider: "unknown".into(),
+            model: "unknown".into(),
+            started_at: chrono::Utc::now(),
+            policy_id: None,
+            thought_level: None,
+        };
+        attach_published_segment_fields(
+            &mut segment,
+            Some("anthropic"),
+            Some("opus"),
+            Some("high"),
+        );
+        assert_eq!(segment.provider, "anthropic");
+        assert_eq!(segment.model, "opus");
+        assert_eq!(segment.thought_level.as_deref(), Some("high"));
+        assert_eq!(
+            cursor_segment_rotation(
+                Some("anthropic"),
+                Some("opus"),
+                Some("high"),
+                Some("anthropic"),
+                Some("sonnet"),
+                Some("high"),
+            ),
+            SegmentRotation::Rotate
         );
     }
 
