@@ -59,6 +59,9 @@ use tracing::debug;
 // multi-thread flavor pays for thread-pool creation + teardown.
 fn main() -> Result<()> {
     install_broken_pipe_panic_hook();
+    if let Some(code) = cli::identity_stamp::maybe_run_fast_path() {
+        std::process::exit(code);
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -906,7 +909,7 @@ fn is_harness_relay_invocation(command: &Commands) -> bool {
     matches!(
         command,
         Commands::Integration {
-            command: IntegrationCommands::Relay(_),
+            command: IntegrationCommands::Relay(_) | IntegrationCommands::Stamp(_),
         }
     )
 }

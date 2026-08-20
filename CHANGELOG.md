@@ -15,6 +15,19 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Added
 
+- **Harness identity cursor on each capture.** `integration install` writes
+  per-harness hooks that stamp a workspace `.heddle/identity` sidecar
+  (`provider`, `model`, `thought_level`, `session`, `parent`). Each
+  `capture` freezes that cursor onto that state. Mid-thread `/model` or
+  `/effort` updates the cursor only; earlier states keep the old pair.
+  Session segments rotate when a published provider, model, or
+  thought_level changes (empty → set is attach). Claude PreToolUse and
+  StatusLine stay on the stamp hot path (~200-byte atomic rename);
+  StatusLine chains an existing command. Codex writes user-scope `[hooks]`
+  to a workspace sidecar. OpenCode reads `event.type` and object `model`.
+  Parent walk is last-resort kind only (exact basename). Cursor/Grok stay
+  `agent=null` (heddle#1518).
+
 - **`heddle completions` prints tab-completion scripts.** The field-study
   verb emits install lines, or a bash/zsh/fish script. Same scripts as
   `heddle shell completion`. First-screen help names it so it is findable

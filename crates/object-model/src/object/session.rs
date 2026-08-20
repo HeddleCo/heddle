@@ -43,6 +43,7 @@ impl Session {
             model,
             started_at: Utc::now(),
             policy_id,
+            thought_level: None,
         };
         Self {
             id,
@@ -78,10 +79,28 @@ impl Session {
             model,
             started_at: Utc::now(),
             policy_id,
+            thought_level: None,
         };
         self.segments.push(segment);
         self.current_segment_id = Some(segment_id);
         self.segments.last().expect("segment was just pushed")
+    }
+
+    /// Attach unpublished thought_level onto the current segment (empty → set).
+    pub fn attach_thought_level(&mut self, thought_level: impl Into<String>) {
+        let Some(id) = self.current_segment_id.clone() else {
+            return;
+        };
+        if let Some(segment) = self.segments.iter_mut().find(|segment| segment.id == id)
+            && segment.thought_level.is_none()
+        {
+            segment.thought_level = Some(thought_level.into());
+        }
+    }
+
+    pub fn current_segment_mut(&mut self) -> Option<&mut SessionSegment> {
+        let id = self.current_segment_id.as_ref()?;
+        self.segments.iter_mut().find(|segment| &segment.id == id)
     }
 
     pub fn end(&mut self) {
@@ -97,6 +116,9 @@ pub struct SessionSegment {
     pub model: String,
     pub started_at: DateTime<Utc>,
     pub policy_id: Option<String>,
+    /// Published thought_level for this segment. Empty → set attaches in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_level: Option<String>,
 }
 
 #[cfg(test)]

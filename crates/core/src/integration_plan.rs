@@ -91,13 +91,19 @@ pub fn classify_command_path_mode(cmd: &str) -> PathModeKind {
     }
 }
 
-/// Probe OpenCode plugin script text for relative vs absolute `Bun.spawnSync`.
+/// Probe OpenCode plugin script text for relative vs absolute Bun spawn.
 pub fn classify_opencode_plugin_path_mode(contents: &str) -> Option<PathModeKind> {
-    if contents.contains("Bun.spawnSync([\"heddle\"")
+    let relative = contents.contains("Bun.spawnSync([\"heddle\"")
         || contents.contains("Bun.spawnSync(['heddle'")
-    {
+        || contents.contains("Bun.spawn([\"heddle\"")
+        || contents.contains("Bun.spawn(['heddle'");
+    let absolute = contents.contains("Bun.spawnSync([\"/")
+        || contents.contains("Bun.spawnSync(['/")
+        || contents.contains("Bun.spawn([\"/")
+        || contents.contains("Bun.spawn(['/");
+    if relative {
         Some(PathModeKind::Relative)
-    } else if contents.contains("Bun.spawnSync([\"/") || contents.contains("Bun.spawnSync(['/") {
+    } else if absolute {
         Some(PathModeKind::Absolute)
     } else {
         None
@@ -212,14 +218,15 @@ pub fn plan_harness_selection(
     }
 }
 
-/// Whether a claude settings body still contains the Heddle relay marker.
+/// Whether a claude settings body still contains a Heddle hook marker.
 pub fn claude_settings_has_relay(contents: &str) -> bool {
     contents.contains("heddle integration relay claude-code")
+        || contents.contains("integration stamp claude-code")
 }
 
-/// Whether a codex config body still contains the Heddle notify marker.
+/// Whether a codex config body still contains a Heddle hook marker.
 pub fn codex_config_has_relay(contents: &str) -> bool {
-    contents.contains("integration relay codex notify")
+    contents.contains("integration stamp codex") || contents.contains("integration relay codex")
 }
 
 /// Timeline capability path filter for opencode installs.
@@ -410,8 +417,10 @@ mod tests {
         assert!(claude_settings_has_relay(
             "heddle integration relay claude-code SessionStart"
         ));
+        assert!(claude_settings_has_relay("integration stamp claude-code"));
         assert!(!claude_settings_has_relay("{}"));
         assert!(codex_config_has_relay("integration relay codex notify"));
+        assert!(codex_config_has_relay("integration stamp codex"));
         assert!(is_timeline_capability_path(
             "/repo/.opencode/plugins/heddle.timeline.json"
         ));

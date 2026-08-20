@@ -20,6 +20,8 @@ pub mod harness;
 mod hosted_failure;
 #[cfg(feature = "client")]
 mod hosted_runtime;
+pub mod identity_freeze;
+pub mod identity_stamp;
 pub mod operation_id;
 pub mod perf;
 #[cfg(feature = "semantic")]

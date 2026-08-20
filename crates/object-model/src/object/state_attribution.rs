@@ -66,6 +66,12 @@ pub struct Agent {
     pub segment_id: Option<String>,
     /// Policy or prompt template identifier.
     pub policy_id: Option<String>,
+    /// Frozen harness thought_level (ACP name: Claude effort, Codex reasoning, OpenCode variant).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_level: Option<String>,
+    /// Frozen harness parent actor / agent_id (ACP name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 impl Agent {
@@ -77,6 +83,8 @@ impl Agent {
             session_id: None,
             segment_id: None,
             policy_id: None,
+            thought_level: None,
+            parent: None,
         }
     }
 
@@ -110,7 +118,21 @@ impl Agent {
             session_id,
             segment_id,
             policy_id,
+            thought_level: None,
+            parent: None,
         })
+    }
+
+    /// Freeze a published thought_level onto this agent.
+    pub fn with_thought_level(mut self, thought_level: impl Into<String>) -> Self {
+        self.thought_level = Some(thought_level.into());
+        self
+    }
+
+    /// Freeze a published parent actor onto this agent.
+    pub fn with_parent(mut self, parent: impl Into<String>) -> Self {
+        self.parent = Some(parent.into());
+        self
     }
 }
 

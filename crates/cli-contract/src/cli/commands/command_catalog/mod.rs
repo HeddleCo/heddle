@@ -4726,6 +4726,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             IntegrationCommands::Uninstall(_) => vec!["integration", "uninstall"],
             IntegrationCommands::Upgrade(_) => vec!["integration", "upgrade"],
             IntegrationCommands::Relay(_) => vec!["integration", "relay"],
+            IntegrationCommands::Stamp(_) => vec!["integration", "stamp"],
         },
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => match command {

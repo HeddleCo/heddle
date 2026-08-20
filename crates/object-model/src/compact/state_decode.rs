@@ -245,6 +245,8 @@ fn agent_from_key(value: AgentKey) -> Result<Agent> {
         session_id: optional_string(value.session_id, "agent session id")?,
         segment_id: optional_string(value.segment_id, "agent segment id")?,
         policy_id: optional_string(value.policy_id, "agent policy id")?,
+        thought_level: None,
+        parent: None,
     })
 }
 
