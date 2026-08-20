@@ -280,6 +280,54 @@ fn ready_via_repo_flag_from_another_cwd_keeps_repo_on_land() {
 }
 
 #[test]
+fn ready_via_repo_flag_quotes_shell_metacharacters() {
+    let main = setup_native_repo();
+    let checkout_owner = TempDir::new().unwrap();
+    let checkout_arg = checkout_owner.path().join("work-$(whoami)");
+    let started = json(
+        &[
+            "--output",
+            "json",
+            "start",
+            "feature/meta-ready",
+            "--path",
+            checkout_arg.to_str().expect("utf8 path"),
+        ],
+        main.path(),
+    );
+    let execution_path = started["execution_path"]
+        .as_str()
+        .expect("start should report execution_path")
+        .to_string();
+    let checkout = std::path::Path::new(&execution_path);
+    std::fs::write(checkout.join("feature.txt"), "feature\n").unwrap();
+    heddle(&["capture", "-m", "feature"], Some(checkout)).unwrap();
+
+    let ready = json(
+        &["--repo", &execution_path, "--output", "json", "ready"],
+        main.path(),
+    );
+    let quoted = repo::shell_quote(&execution_path);
+    let expected = format!("heddle --repo {quoted} land");
+    assert_eq!(ready["next_action"], expected, "{ready}");
+    assert_eq!(ready["recommended_action"], expected, "{ready}");
+    assert!(
+        quoted.starts_with('\'') && quoted.ends_with('\''),
+        "metacharacter --repo must be single-quoted: {quoted}"
+    );
+    assert!(
+        !ready["next_action"]
+            .as_str()
+            .expect("ready next_action should be a string")
+            .contains(&format!("\"{execution_path}\"")),
+        "must not double-quote a $() path: {ready}"
+    );
+    assert_no_banned_next_actions(&ready);
+
+    drop(checkout_owner);
+}
+
+#[test]
 fn presence_show_multi_match_next_is_not_help_catalog() {
     use chrono::Utc;
     use objects::store::{
