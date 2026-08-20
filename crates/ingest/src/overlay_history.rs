@@ -252,6 +252,7 @@ fn blame_file_origins(
             let mut any_moved = false;
             for (parent_index, frontier_index) in
                 lcs_line_matches(&parent_lines, &frontier.commit_lines)
+                    .map_err(|error| IngestError::Other(error.to_string()))?
             {
                 if moved[frontier_index] {
                     continue;

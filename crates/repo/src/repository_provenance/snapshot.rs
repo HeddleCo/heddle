@@ -263,7 +263,7 @@ impl Repository {
         let mut resolved_sets = vec![BTreeSet::<u32>::new(); final_lines.len()];
 
         for (lines, origin_sets) in source_lines.iter().zip(source_sets.iter()) {
-            let matches = lcs_line_matches(lines, final_lines);
+            let matches = lcs_line_matches(lines, final_lines)?;
             for (old_index, new_index) in matches {
                 if let Some(set_index) = origin_sets.get(old_index) {
                     resolved_sets[new_index].insert(*set_index);

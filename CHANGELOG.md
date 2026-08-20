@@ -15,6 +15,13 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Added
 
+- **Scratch-budgeted equal-run LCS and storage-neutral blame slices.**
+  `visit_lcs_equal_runs` emits Myers equal ranges from caller scratch
+  without owning every line or a match vector. `advance_file_blame_slice`
+  walks one path-targeted frontier and returns persistence-friendly origin
+  ranges; Heddle's own `blame` now loops those slices. Work exhaustion is
+  typed `BudgetExceeded`, never approximate blame (heddle#1454).
+
 - **`heddle completions` prints tab-completion scripts.** The field-study
   verb emits install lines, or a bash/zsh/fish script. Same scripts as
   `heddle shell completion`. First-screen help names it so it is findable

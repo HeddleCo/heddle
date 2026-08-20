@@ -17,7 +17,7 @@ use crate::Repository;
 fn lcs_preserves_existing_line_matches() {
     let old_lines = vec!["a".to_string(), "b".to_string(), "c".to_string()];
     let new_lines = vec!["a".to_string(), "x".to_string(), "c".to_string()];
-    let matches = lcs_line_matches(&old_lines, &new_lines);
+    let matches = lcs_line_matches(&old_lines, &new_lines).expect("lcs should succeed");
     assert_eq!(matches, vec![(0, 0), (2, 2)]);
 }
 

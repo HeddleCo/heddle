@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::{collections::HashMap, path::Path};
 
-pub(super) use objects::util::{lcs_line_matches, split_text_lines};
 use objects::{
     object::{
         Blob, ContentHash, FileProvenance, LeafPolicy, LineSpan, Origin, ProvenanceError, State,
@@ -11,6 +10,16 @@ use objects::{
 };
 
 use super::{HeddleError, Repository, Result, builder::ProvenanceBuilder};
+
+pub(super) use objects::util::split_text_lines;
+
+pub(super) fn lcs_line_matches(
+    old_lines: &[String],
+    new_lines: &[String],
+) -> Result<Vec<(usize, usize)>> {
+    objects::util::lcs_line_matches(old_lines, new_lines)
+        .map_err(|error| HeddleError::InvalidObject(error.to_string()))
+}
 
 pub(super) fn build_single_origin_provenance(
     file_blob: ContentHash,
