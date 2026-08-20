@@ -33,7 +33,7 @@ pub use backend::CoreRefBackend;
 pub use facet::SpoolFacet;
 pub use head::{Head, HeadParseError};
 pub use heddle_schema::refs::PackedRefsModel;
-pub use name::{RefNameError, validate_ref_name};
+pub use name::{RefNameError, require_user_ref_name, validate_ref_name};
 pub use operation_index::{IndexedOperation, OperationLogIndex, OperationLogQuery};
 #[cfg(feature = "postgres")]
 pub use pg_refs::PgRefBackend;

@@ -1314,21 +1314,24 @@ impl HostedClient {
         remote_thread: &str,
         local_thread: Option<&str>,
     ) -> Result<(PullComplete, PullProfile), ProtocolError> {
-        self.pull_exchange(
-            repo,
-            repo_path,
-            remote_thread,
-            PullOptions {
-                local_thread,
-                depth: None,
-                target_state: None,
-                materialization: PullMaterialization::Full,
-                publish_refs: true,
-                wanted_hashes: None,
-            },
-        )
-        .await
-        .map(|exchange| (exchange.result, exchange.profile))
+        let exchange = self
+            .pull_exchange(
+                repo,
+                repo_path,
+                remote_thread,
+                PullOptions {
+                    local_thread,
+                    depth: None,
+                    target_state: None,
+                    materialization: PullMaterialization::Full,
+                    publish_refs: true,
+                    wanted_hashes: None,
+                },
+            )
+            .await?;
+        self.sync_synthetic_frontiers(repo, repo_path, None, PullMaterialization::Full)
+            .await?;
+        Ok((exchange.result, exchange.profile))
     }
 
     pub async fn pull_with_depth_and_materialization(
@@ -1597,9 +1600,20 @@ impl HostedClient {
         remote_thread: &str,
         options: PullOptions<'_>,
     ) -> Result<PullComplete, ProtocolError> {
-        self.pull_exchange(repo, repo_path, remote_thread, options)
+        let result = self
+            .pull_exchange(repo, repo_path, remote_thread, options)
             .await
-            .map(|exchange| exchange.result)
+            .map(|exchange| exchange.result)?;
+        if options.publish_refs {
+            self.sync_synthetic_frontiers(
+                repo,
+                repo_path,
+                options.depth,
+                options.materialization,
+            )
+            .await?;
+        }
+        Ok(result)
     }
 
     async fn pull_exchange(
@@ -2341,11 +2355,99 @@ impl HostedClient {
                         None => repo.create_marker_recorded(&marker_name, &entry.state_id)?,
                     }
                 }
-                Ok(AdvertisedRef::SyntheticFrontier(name)) => {
-                    repo.refs().set_synthetic_frontier(&name, &entry.state_id)?;
-                }
-                Ok(AdvertisedRef::Thread(_)) | Err(_) => {}
+                Ok(AdvertisedRef::SyntheticFrontier(_) | AdvertisedRef::Thread(_)) | Err(_) => {}
             }
+        }
+        Ok(())
+    }
+
+    async fn sync_synthetic_frontiers(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        depth: Option<u32>,
+        materialization: PullMaterialization,
+    ) -> Result<(), ProtocolError> {
+        let remote_refs = self.list_refs(repo_path).await?;
+        for entry in remote_refs {
+            match entry.advertised() {
+                Ok(AdvertisedRef::SyntheticFrontier(name)) => {
+                    self.fetch_synthetic_frontier_root(
+                        repo,
+                        repo_path,
+                        &entry.name,
+                        entry.state_id,
+                        depth,
+                        materialization,
+                    )
+                    .await?;
+                    persist_synthetic_frontier(repo, &name, entry.state_id)?;
+                }
+                Ok(AdvertisedRef::Marker(_) | AdvertisedRef::Thread(_)) | Err(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn fetch_advertised_synthetic_frontier_objects(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        advertised: &[HostedRefEntry],
+        depth: Option<u32>,
+        materialization: PullMaterialization,
+    ) -> Result<(), ProtocolError> {
+        for entry in advertised {
+            if !matches!(
+                entry.to_wire_entry().advertised(),
+                Ok(AdvertisedRef::SyntheticFrontier(_))
+            ) {
+                continue;
+            }
+            self.fetch_synthetic_frontier_root(
+                repo,
+                repo_path,
+                &entry.name,
+                entry.state_id,
+                depth,
+                materialization,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn fetch_synthetic_frontier_root(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        remote_thread: &str,
+        state_id: StateId,
+        depth: Option<u32>,
+        materialization: PullMaterialization,
+    ) -> Result<(), ProtocolError> {
+        if repo.store().has_state(&state_id)? {
+            return Ok(());
+        }
+        self.pull_exchange(
+            repo,
+            repo_path,
+            remote_thread,
+            PullOptions {
+                local_thread: None,
+                depth,
+                target_state: Some(state_id),
+                materialization,
+                publish_refs: false,
+                wanted_hashes: None,
+            },
+        )
+        .await?;
+        if !repo.store().has_state(&state_id)? {
+            return Err(ProtocolError::InvalidState(format!(
+                "synthetic frontier {remote_thread} advertised {} but the target state is still absent after pull",
+                state_id.to_string_full()
+            )));
         }
         Ok(())
     }
@@ -2359,8 +2461,26 @@ impl HostedClient {
         if !apply_marker_snapshot(repo, checkpoint)? {
             self.sync_local_markers(repo, repo_path).await?;
         }
+        self.sync_synthetic_frontiers(repo, repo_path, None, PullMaterialization::Full)
+            .await?;
         Ok(())
     }
+}
+
+fn persist_synthetic_frontier(
+    repo: &Repository,
+    name: &objects::object::SyntheticFrontierName,
+    state_id: StateId,
+) -> Result<(), ProtocolError> {
+    if !repo.store().has_state(&state_id)? {
+        return Err(ProtocolError::InvalidState(format!(
+            "synthetic frontier {} advertised {} but the target state is absent",
+            name.as_name(),
+            state_id.to_string_full()
+        )));
+    }
+    repo.refs().set_synthetic_frontier(name, &state_id)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3156,6 +3276,45 @@ mod pull_bootstrap_tests {
             Ok(AdvertisedRef::SyntheticFrontier(name)) => assert_eq!(name.as_name(), frontier),
             other => panic!("synthetic must stay synthetic, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn folded_synthetic_frontier_survives_marker_snapshot() {
+        let temp = TempDir::new().expect("temp repo");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        std::fs::write(temp.path().join("README.md"), "frontier\n").expect("write fixture");
+        let snapshot = repo
+            .snapshot(Some("seed".to_string()), None)
+            .expect("snapshot");
+        let checkpoint = format!(
+            "heddle-markers-v1\nrelease\t{}\n",
+            snapshot.state_id.to_string_full()
+        );
+        assert!(
+            apply_marker_snapshot(&repo, checkpoint.as_bytes()).expect("apply snapshot"),
+            "a folded marker snapshot must still leave room for synthetic sync"
+        );
+        let change = objects::object::ChangeId::from_bytes([9; 16]);
+        let frontier = objects::object::SyntheticFrontierName::new("main", change).unwrap();
+        persist_synthetic_frontier(&repo, &frontier, snapshot.state_id)
+            .expect("synthetic persist is independent of the marker snapshot");
+        assert!(
+            repo.store()
+                .has_state(&snapshot.state_id)
+                .expect("has_state")
+        );
+        assert_eq!(
+            repo.refs()
+                .get_marker(&MarkerName::from("release"))
+                .expect("read marker"),
+            Some(snapshot.state_id)
+        );
+        assert_eq!(
+            repo.refs()
+                .get_synthetic_frontier(&frontier)
+                .expect("read synthetic"),
+            Some(snapshot.state_id)
+        );
     }
 
     #[test]

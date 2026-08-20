@@ -539,6 +539,9 @@ fn export_scoped(
             frontier_roots.push(state_id);
         }
     }
+    for (_name, state_id) in bridge.heddle_repo.refs().list_synthetic_frontiers()? {
+        frontier_roots.push(state_id);
+    }
     let frontier_reachable = reachable_states(bridge.heddle_repo, &frontier_roots)?;
 
     // Re-validate the served set against CURRENT visibility before anything treats
@@ -1051,6 +1054,13 @@ fn export_scoped(
         }
     }
 
+    crate::git_frontier::reconcile_synthetic_frontier_refs(
+        &repo,
+        bridge.heddle_repo,
+        &bridge.mapping,
+        &mut managed_record,
+    )?;
+
     // Persist the updated ownership record so the next reconcile — and the push
     // frontier (`collect_managed_ref_updates`) — read heddle's managed set by
     // name and recorded tip. A diverged on-disk tip is not a managed update.
@@ -1380,6 +1390,11 @@ fn project_desired_refs(
             let target = native_annotated_tag_oid(heddle_repo, marker_name, state_id, git_oid)?
                 .unwrap_or(git_oid);
             desired.insert(format!("refs/tags/{marker_name}"), target);
+        }
+    }
+    for (name, state_id) in heddle_repo.refs().list_synthetic_frontiers()? {
+        if let Some(git_oid) = mapping.get_git(&state_id) {
+            desired.insert(name.git_ref(), git_oid);
         }
     }
     Ok(desired)

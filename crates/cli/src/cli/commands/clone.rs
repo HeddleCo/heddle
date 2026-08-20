@@ -1728,6 +1728,15 @@ async fn clone_network_connected(
             verify_hosted_clone(&local_repo, final_state, depth, lazy)
                 .context("clone remained incomplete after targeted remote repair")?;
         }
+        client
+            .fetch_advertised_synthetic_frontier_objects(
+                &local_repo,
+                repo_path,
+                &remote_refs,
+                depth,
+                materialization,
+            )
+            .await?;
 
         let bootstrap = crate::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
             .context("decode hosted clone bootstrap")?
@@ -1803,6 +1812,7 @@ async fn clone_network_connected(
             )
             .into());
         }
+        persist_advertised_synthetic_refs(&local_repo, &remote_refs)?;
         client
             .publish_clone_markers(&local_repo, repo_path, &result.checkpoint)
             .await?;
@@ -1959,6 +1969,15 @@ async fn recover_interrupted_clone_connected(
             .context("clone repair retry completed without a final state")?;
         verify_hosted_clone(&repo, final_state, intent.depth, intent.lazy)?;
     }
+    client
+        .fetch_advertised_synthetic_frontier_objects(
+            &repo,
+            &intent.repository,
+            &remote_refs,
+            intent.depth,
+            materialization,
+        )
+        .await?;
 
     if intent.lazy {
         use repo::lazy_hydrator::LazyHydratorConfig;
@@ -2012,6 +2031,7 @@ async fn recover_interrupted_clone_connected(
         )
         .into());
     }
+    persist_advertised_synthetic_refs(&repo, &remote_refs)?;
     client
         .publish_clone_markers(&repo, &intent.repository, &result.checkpoint)
         .await?;
@@ -2520,10 +2540,6 @@ fn initialize_hosted_clone_repository(
     Repository::init_clone(root, source_authority)
         .map(Repository::without_fsmonitor)
         .map_err(wire::ProtocolError::from)
-        .and_then(|repo| {
-            persist_advertised_synthetic_refs(&repo, remote_refs)?;
-            Ok(repo)
-        })
 }
 
 #[cfg(feature = "client")]
@@ -2534,6 +2550,13 @@ fn persist_advertised_synthetic_refs(
     for entry in remote_refs {
         match entry.to_wire_entry().advertised() {
             Ok(wire::AdvertisedRef::SyntheticFrontier(name)) => {
+                if !repo.store().has_state(&entry.state_id)? {
+                    return Err(wire::ProtocolError::InvalidState(format!(
+                        "synthetic frontier {} advertised {} but the target state is absent",
+                        name.as_name(),
+                        entry.state_id.to_string_full()
+                    )));
+                }
                 repo.refs()
                     .set_synthetic_frontier(&name, &entry.state_id)
                     .map_err(wire::ProtocolError::from)?;
@@ -2947,7 +2970,44 @@ mod tests {
             repo.refs()
                 .get_synthetic_frontier(&frontier)
                 .expect("read synthetic"),
-            Some(frontier_state)
+            None,
+            "initialize must not publish a synthetic ref before its objects exist"
+        );
+        persist_advertised_synthetic_refs(&repo, &remote_refs)
+            .expect_err("persist must fail closed when the advertised state is absent");
+
+        std::fs::write(root.join("README"), "frontier\n").expect("seed worktree");
+        let snapshot = repo
+            .snapshot(Some("frontier".to_string()), None)
+            .expect("seed state");
+        let remote_refs = vec![
+            HostedRefEntry::from_advertised(
+                "main".to_string(),
+                snapshot.state_id,
+                true,
+                "heddle:main".to_string(),
+                Some("thread-main".to_string()),
+            ),
+            HostedRefEntry::from_advertised(
+                frontier.as_name(),
+                snapshot.state_id,
+                true,
+                "heddle:frontier".to_string(),
+                None,
+            ),
+        ];
+        persist_advertised_synthetic_refs(&repo, &remote_refs).expect("persist after objects exist");
+        assert!(
+            repo.store()
+                .has_state(&snapshot.state_id)
+                .expect("has_state"),
+            "clone must store the synthetic target state, not only the ref"
+        );
+        assert_eq!(
+            repo.refs()
+                .get_synthetic_frontier(&frontier)
+                .expect("read synthetic"),
+            Some(snapshot.state_id)
         );
         assert!(
             repo.refs()

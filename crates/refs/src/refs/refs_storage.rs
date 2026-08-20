@@ -15,7 +15,7 @@ use objects::{
     object::ThreadName,
 };
 
-use super::{RefManager, name::validate_ref_name};
+use super::{name::require_user_ref_name, RefManager};
 use crate::fs_atomic::{create_dir_all_durable, write_file_atomic};
 
 const MAX_LOCK_WAIT_SECS: u64 = 10;
@@ -97,7 +97,7 @@ impl RefManager {
     /// fallback to a nested legacy layout is performed. Top-level (non-slashed)
     /// names never needed nesting and are stored plainly at `threads/<name>`.
     pub(super) fn thread_path(&self, name: &ThreadName) -> Result<PathBuf> {
-        validate_ref_name(name).map_err(|error| HeddleError::InvalidRefName(error.name))?;
+        require_user_ref_name(name)?;
         if name.contains('/') {
             self.flat_thread_path(name)
         } else {
@@ -108,11 +108,11 @@ impl RefManager {
     /// name. Only valid for non-slashed names; slashed names use the flat
     /// layout via [`flat_thread_path`](Self::flat_thread_path).
     pub(super) fn plain_thread_path(&self, name: &str) -> Result<PathBuf> {
-        validate_ref_name(name).map_err(|error| HeddleError::InvalidRefName(error.name))?;
+        require_user_ref_name(name)?;
         Ok(self.threads_dir().join(name))
     }
     pub(super) fn flat_thread_path(&self, name: &str) -> Result<PathBuf> {
-        validate_ref_name(name).map_err(|error| HeddleError::InvalidRefName(error.name))?;
+        require_user_ref_name(name)?;
         Ok(self.flat_threads_dir().join(encode_flat_thread_name(name)))
     }
     pub(super) fn decode_flat_thread_entry(&self, entry: &str) -> Option<String> {
@@ -123,12 +123,12 @@ impl RefManager {
         decode_flat_thread_name(encoded)
     }
     pub(super) fn marker_path(&self, name: &str) -> Result<PathBuf> {
-        validate_ref_name(name).map_err(|error| HeddleError::InvalidRefName(error.name))?;
+        require_user_ref_name(name)?;
         Ok(self.markers_dir().join(name))
     }
     pub(super) fn remote_thread_path(&self, remote: &str, thread: &str) -> Result<PathBuf> {
-        validate_ref_name(remote).map_err(|error| HeddleError::InvalidRefName(error.name))?;
-        validate_ref_name(thread).map_err(|error| HeddleError::InvalidRefName(error.name))?;
+        require_user_ref_name(remote)?;
+        require_user_ref_name(thread)?;
         Ok(self.remotes_dir().join(remote).join(thread))
     }
     pub(super) fn read_string(&self, path: &Path) -> Result<String> {
@@ -341,11 +341,9 @@ mod tests {
         });
 
         started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(
-            acquired_rx
-                .recv_timeout(Duration::from_millis(100))
-                .is_err()
-        );
+        assert!(acquired_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
         assert!(lock_path.exists());
         assert_eq!(fs::read_to_string(&lock_path).unwrap(), old_lock_body);
 

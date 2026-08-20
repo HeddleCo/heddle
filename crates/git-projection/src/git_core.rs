@@ -2969,7 +2969,10 @@ fn creatable_ref_names(
                     .iter()
                     .filter(|update| {
                         (matches!(update.namespace, RefNamespace::Branch) && update.name == branch)
-                            || matches!(update.namespace, RefNamespace::Note)
+                            || matches!(
+                                update.namespace,
+                                RefNamespace::Note | RefNamespace::Heddle
+                            )
                     })
                     .map(full_ref_name)
                     .collect(),
@@ -3091,7 +3094,7 @@ pub fn plan_destination_reconcile(
                         matches!(movement, RefMove::Rewind),
                     )
                 }
-                RefNamespace::Tag => {
+                RefNamespace::Tag | RefNamespace::Heddle => {
                     let verdict = classify_tag_move(old, update.target, recorded);
                     (
                         verdict,
@@ -3792,13 +3795,16 @@ pub fn push_authoritative_git_refs(
     let served_frontier = collect_ref_updates(source)?
         .into_iter()
         .filter(|update| {
-            matches!(update.namespace, RefNamespace::Branch | RefNamespace::Tag)
-                || (update.namespace == RefNamespace::Note && update.name == "heddle")
+            matches!(
+                update.namespace,
+                RefNamespace::Branch | RefNamespace::Tag | RefNamespace::Heddle
+            ) || (update.namespace == RefNamespace::Note && update.name == "heddle")
         })
         .filter(|update| match scope {
             GitPushScope::AllThreads => true,
             GitPushScope::CurrentThread => {
                 update.namespace == RefNamespace::Note
+                    || update.namespace == RefNamespace::Heddle
                     || (update.namespace == RefNamespace::Branch
                         && Some(update.name.as_str()) == current_branch)
             }

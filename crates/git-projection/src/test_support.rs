@@ -17,6 +17,7 @@ pub enum RefNamespace {
     Branch,
     Tag,
     Note,
+    Heddle,
 }
 
 impl From<RefNamespace> for git_core::RefNamespace {
@@ -25,6 +26,7 @@ impl From<RefNamespace> for git_core::RefNamespace {
             RefNamespace::Branch => Self::Branch,
             RefNamespace::Tag => Self::Tag,
             RefNamespace::Note => Self::Note,
+            RefNamespace::Heddle => Self::Heddle,
         }
     }
 }
@@ -35,6 +37,7 @@ impl From<git_core::RefNamespace> for RefNamespace {
             git_core::RefNamespace::Branch => Self::Branch,
             git_core::RefNamespace::Tag => Self::Tag,
             git_core::RefNamespace::Note => Self::Note,
+            git_core::RefNamespace::Heddle => Self::Heddle,
         }
     }
 }

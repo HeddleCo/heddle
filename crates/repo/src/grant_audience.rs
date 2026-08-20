@@ -46,6 +46,16 @@ pub fn audience_tier_for_grant(
     role: Option<GrantRole>,
     audience_label: Option<&str>,
 ) -> AudienceTier {
+    // Role is authoritative. A stale or untrusted label must not promote a
+    // missing/unknown grant into Restricted (which can disclose Private).
+    match role {
+        None | Some(GrantRole::Unspecified) => return AudienceTier::Public,
+        Some(GrantRole::Reader)
+        | Some(GrantRole::Developer)
+        | Some(GrantRole::Maintainer)
+        | Some(GrantRole::Admin)
+        | Some(GrantRole::Owner) => {}
+    }
     if let Some(label) = audience_label
         .map(str::trim)
         .filter(|label| !label.is_empty())
@@ -106,6 +116,25 @@ mod tests {
         assert_eq!(
             audience_tier_for_grant(Some(GrantRole::Owner), Some("  ")),
             AudienceTier::Internal
+        );
+    }
+
+    #[test]
+    fn missing_or_unknown_role_with_label_is_public() {
+        assert_eq!(
+            audience_tier_for_grant(None, Some("sec-embargo")),
+            AudienceTier::Public
+        );
+        assert_eq!(
+            audience_tier_for_grant(Some(GrantRole::Unspecified), Some("sec-embargo")),
+            AudienceTier::Public
+        );
+        assert_eq!(
+            audience_tier_for_grant(
+                Some(GrantRole::from_hosted_role_i32(99)),
+                Some("sec-embargo")
+            ),
+            AudienceTier::Public
         );
     }
 }
