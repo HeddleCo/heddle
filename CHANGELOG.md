@@ -31,8 +31,9 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   the slice `states` cap before it is fetched. Each parent file's lines
   are consumed before its diff. Frontier origin, blob hash, and state-side
   mappings are checked against the loaded state. Blobs are size-probed
-  before `get_blob`. Compact also right-slides trailing repeats
-  (`b/a` vs `a/b/b` is `(0,2)`). Slice usage reports work,
+  before `get_blob`. Compact right-slides trailing repeats only when the
+  equal is not already a left-justified prefix (`b/a` vs `a/b/b` is
+  `(0,2)`; `a` vs `a/a` stays `(0,0)`). Slice usage reports work,
   lines, and scratch on one live `ResourceBudget` (heddle#1454).
 
 - **`heddle completions` prints tab-completion scripts.** The field-study

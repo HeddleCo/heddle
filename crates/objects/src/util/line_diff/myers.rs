@@ -3,7 +3,7 @@
 //! search cannot finish inside the work budget it returns BudgetExceeded.
 
 use super::super::budget::{BudgetExceeded, ResourceBudget, ResourceKind};
-use super::compact::{slide_equal_run, slide_equal_run_right, trailing_insert_can_take_equal};
+use super::emit::{EqualEmit, emit_slid, flush_pending};
 use super::myers_search::{common_prefix, common_suffix, find_middle_snake};
 use super::scan::LineOff;
 use super::scratch::{ConquerJob, JOB_EQUAL, JOB_RANGE};
@@ -199,65 +199,6 @@ fn conquer_range<E>(
         },
     )?;
     Ok(())
-}
-
-struct PendingEqual {
-    run: EqualRun,
-    original_end: usize,
-}
-
-fn emit_slid<E>(
-    old: LineView<'_>,
-    new: LineView<'_>,
-    run: EqualRun,
-    emit: &mut EqualEmit<'_>,
-    visit: &mut impl FnMut(EqualRun) -> Result<(), E>,
-) -> Result<(), LineDiffError<E>> {
-    if let Some(prev) = emit.pending.take() {
-        visit(prev.run).map_err(LineDiffError::Visitor)?;
-    }
-    let original_end = run.new_start + run.len;
-    let (first, second) = slide_equal_run(old, new, run, emit.new_cursor);
-    match second {
-        Some(second) => {
-            visit(first).map_err(LineDiffError::Visitor)?;
-            defer_or_visit(old, new, second, original_end, emit.pending, visit)
-        }
-        None => defer_or_visit(old, new, first, original_end, emit.pending, visit),
-    }
-}
-
-fn defer_or_visit<E>(
-    old: LineView<'_>,
-    new: LineView<'_>,
-    run: EqualRun,
-    original_end: usize,
-    pending: &mut Option<PendingEqual>,
-    visit: &mut impl FnMut(EqualRun) -> Result<(), E>,
-) -> Result<(), LineDiffError<E>> {
-    if trailing_insert_can_take_equal(old, new, run, original_end) {
-        *pending = Some(PendingEqual { run, original_end });
-        Ok(())
-    } else {
-        visit(run).map_err(LineDiffError::Visitor)
-    }
-}
-
-fn flush_pending<E>(
-    old: LineView<'_>,
-    new: LineView<'_>,
-    pending: Option<PendingEqual>,
-    gap_end: usize,
-    visit: &mut impl FnMut(EqualRun) -> Result<(), E>,
-) -> Result<(), LineDiffError<E>> {
-    let Some(pending) = pending else {
-        return Ok(());
-    };
-    let (head, tail) = slide_equal_run_right(old, new, pending.run, pending.original_end, gap_end);
-    if let Some(head) = head {
-        visit(head).map_err(LineDiffError::Visitor)?;
-    }
-    visit(tail).map_err(LineDiffError::Visitor)
 }
 
 fn equal_job(old_start: usize, new_start: usize, len: usize) -> ConquerJob {

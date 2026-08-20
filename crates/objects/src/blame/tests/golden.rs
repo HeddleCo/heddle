@@ -57,6 +57,22 @@ fn insert_delete_replace_keep_surviving_lines() {
 }
 
 #[test]
+fn a_vs_aa_credits_the_prefix_not_the_trailing_duplicate() {
+    let store = store();
+    let base = put_state_with_file(&store, "lib.rs", b"a\n", Vec::new(), "alice");
+    let edited = put_state_with_file(&store, "lib.rs", b"a\na\n", vec![base.id()], "bob");
+    let provenance = blame_file(
+        &store,
+        &edited,
+        Path::new("lib.rs"),
+        BlameSliceLimits::unlimited(),
+    )
+    .unwrap();
+    assert_eq!(principals_at(&provenance, 0), vec!["alice".to_string()]);
+    assert_eq!(principals_at(&provenance, 1), vec!["bob".to_string()]);
+}
+
+#[test]
 fn ba_vs_abb_credits_rightmost_new_match() {
     let store = store();
     let base = put_state_with_file(&store, "lib.rs", b"b\na\n", Vec::new(), "alice");

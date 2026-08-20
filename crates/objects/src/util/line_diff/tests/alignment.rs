@@ -114,6 +114,32 @@ fn partial_slide_does_not_move_the_unmatched_tail() {
 }
 
 #[test]
+fn a_vs_aa_keeps_the_common_prefix() {
+    let old = "a\n";
+    let new = "a\na\n";
+    let runs = collect_runs(old, new, LineDiffLimits::unlimited()).unwrap();
+    let pairs = expand_runs(&runs);
+    let old_lines = split_text_lines(old.as_bytes()).unwrap();
+    let new_lines = split_text_lines(new.as_bytes()).unwrap();
+    let similar = similar_pairs(&old_lines, &new_lines);
+    assert_eq!(pairs, similar, "ours={pairs:?} similar={similar:?}");
+    assert_eq!(pairs, vec![(0, 0)]);
+}
+
+#[test]
+fn xa_vs_xaa_keeps_the_leftover_prefix() {
+    let old = "x\na\n";
+    let new = "x\na\na\n";
+    let runs = collect_runs(old, new, LineDiffLimits::unlimited()).unwrap();
+    let pairs = expand_runs(&runs);
+    let old_lines = split_text_lines(old.as_bytes()).unwrap();
+    let new_lines = split_text_lines(new.as_bytes()).unwrap();
+    let similar = similar_pairs(&old_lines, &new_lines);
+    assert_eq!(pairs, similar, "ours={pairs:?} similar={similar:?}");
+    assert_eq!(pairs, vec![(0, 0), (1, 1)]);
+}
+
+#[test]
 fn ba_vs_abb_matches_similar_rightmost_new() {
     let old = "b\na\n";
     let new = "a\nb\nb\n";
