@@ -151,6 +151,10 @@ pub(crate) fn print_success(subject: &str) {
     println!("Authenticated as {subject}. Credentials saved.");
 }
 
+pub(crate) fn print_claim_link(claim_link: &str) {
+    println!("\nOpen this short-lived claim link:\n\n{claim_link}\n");
+}
+
 pub(crate) fn store_agent_root(
     server: &str,
     token: String,

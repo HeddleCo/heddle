@@ -1,5 +1,6 @@
 use std::{ffi::OsString, sync::MutexGuard};
 
+use api::heddle::api::v1alpha1::CreateAgentAccountResponse;
 use chrono::{Duration, Utc};
 use cli_shared::credentials::{self, ServerCredential};
 use crypto::{Ed25519Signer, Signer as _};
@@ -10,6 +11,7 @@ use super::{
     agent_node_identity,
     auth::headless_token_metadata,
     auth_login::{LoginInputs, LoginPath, login, login_path, store_agent_root},
+    auth_login_agent::{finish_invite_create_from_response, invite_created_claim_link},
     device_flow::restrict_agent_account_root,
     identity_state::{self, ClaimState},
     root_mint::mint_agent_root,
@@ -277,6 +279,37 @@ async fn login_with_invite_does_not_take_the_fail_closed_path() {
             .downcast_ref::<heddle_cli_contract::cli::commands::RecoveryAdvice>()
             .is_none_or(|advice| advice.kind != "auth_login_invite_required"),
         "invite must not fail closed: {message}"
+    );
+}
+
+#[test]
+fn login_invite_create_exposes_the_server_claim_token() {
+    let _home = IsolatedHome::new();
+    let token = "hcl1.node.one-time-claim";
+    let claim_link = finish_invite_create_from_response(
+        "api.claim-token.test",
+        CreateAgentAccountResponse {
+            account_id: "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28".into(),
+            pet_name: "quiet-otter".into(),
+            agent_capability: Vec::new(),
+            claim_token: token.into(),
+        },
+    )
+    .expect("invite create must expose the server claim token");
+    assert_eq!(claim_link, token);
+}
+
+#[test]
+fn login_invite_create_refuses_to_drop_an_empty_claim_token() {
+    let error = invite_created_claim_link("").expect_err("empty claim token must not be dropped");
+    assert!(
+        error.to_string().contains("claim token"),
+        "missing token must stay visible: {error}"
+    );
+    let error = invite_created_claim_link("   ").expect_err("whitespace is not a claim token");
+    assert!(
+        error.to_string().contains("claim token"),
+        "whitespace token must stay visible: {error}"
     );
 }
 

@@ -1,7 +1,7 @@
 //! Node-key remint and invite-create for `heddle auth login`.
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v1alpha1::CreateAgentAccountRequest;
+use api::heddle::api::v1alpha1::{CreateAgentAccountRequest, CreateAgentAccountResponse};
 use cli_shared::UserConfig;
 use crypto::{Ed25519Signer, Signer as _};
 use weft_client_shim::CliContext;
@@ -9,7 +9,7 @@ use weft_client_shim::CliContext;
 use super::{
     HostedAuthMode, HostedSession, agent_node_identity,
     auth::headless_token_metadata,
-    auth_login::{print_success, store_agent_root},
+    auth_login::{print_claim_link, print_success, store_agent_root},
     device_flow::restrict_agent_account_root,
     identity_state::{self, ClaimState},
     root_mint::{is_local_agent_root, mint_agent_root},
@@ -60,8 +60,28 @@ pub(crate) async fn create_with_invite(
         });
     client.close().await;
     let response = response?;
+    let subject = minted.subject.clone();
+    let claim_link = finish_invite_create(server, minted, response)?;
+    print_success(&subject);
+    print_claim_link(&claim_link);
+    Ok(())
+}
+
+pub(crate) fn invite_created_claim_link(claim_token: &str) -> Result<&str> {
+    match claim_token.trim() {
+        "" => bail!("CreateAgentAccount returned no claim token; the human has no claim link"),
+        token => Ok(token),
+    }
+}
+
+fn finish_invite_create(
+    server: &str,
+    minted: RestrictedAgentRoot,
+    response: CreateAgentAccountResponse,
+) -> Result<String> {
     let owner_id = uuid::Uuid::parse_str(&response.account_id)
         .context("server returned a non-UUID account identity")?;
+    let claim_link = invite_created_claim_link(&response.claim_token).map(str::to_string);
     store_agent_root(
         server,
         minted.token,
@@ -72,12 +92,19 @@ pub(crate) async fn create_with_invite(
     identity_state::store(&ClaimState::new(
         server.to_string(),
         owner_id,
-        minted.subject.clone(),
+        minted.subject,
         response.pet_name,
         hex::encode(minted.public_key),
     ))?;
-    print_success(&minted.subject);
-    Ok(())
+    claim_link
+}
+
+#[cfg(test)]
+pub(crate) fn finish_invite_create_from_response(
+    server: &str,
+    response: CreateAgentAccountResponse,
+) -> Result<String> {
+    finish_invite_create(server, mint_restricted_agent_root()?, response)
 }
 
 struct RestrictedAgentRoot {
