@@ -16,7 +16,9 @@ use super::{
 pub enum TreeStreamError {
     #[error("invalid tree entry: {0}")]
     Invalid(#[from] TreeError),
-    #[error("unsupported tree encoding version {found} (this binary writes {TREE_ENCODING_VERSION})")]
+    #[error(
+        "unsupported tree encoding version {found} (this binary writes {TREE_ENCODING_VERSION})"
+    )]
     UnsupportedVersion { found: u8 },
     #[error("tree resume cursor does not match this object: {0}")]
     CursorMismatch(String),
@@ -54,10 +56,7 @@ pub struct TreePageLimits {
 }
 
 impl TreePageLimits {
-    pub fn new(
-        max_entries: usize,
-        max_decoded_bytes: usize,
-    ) -> Result<Self, TreeStreamError> {
+    pub fn new(max_entries: usize, max_decoded_bytes: usize) -> Result<Self, TreeStreamError> {
         if max_entries == 0 || max_decoded_bytes == 0 {
             return Err(TreeStreamError::InvalidPageLimits);
         }
@@ -154,13 +153,15 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
                 extra: source.len() - expected_len,
             });
         }
-        let cursor = resume.cloned().unwrap_or_else(|| TreeResumeCursor::start(expected_id));
+        let cursor = resume
+            .cloned()
+            .unwrap_or_else(|| TreeResumeCursor::start(expected_id));
         validate_cursor(&header, &cursor)?;
         if cursor.ordinal > 0 && source.integrity() != TreeBodyIntegrity::VerifiedPlacement {
             return Err(TreeStreamError::UnverifiedRange);
         }
-        let hasher = (cursor.ordinal == 0)
-            .then(|| ContentHash::typed_hasher("tree", header.logical_len));
+        let hasher =
+            (cursor.ordinal == 0).then(|| ContentHash::typed_hasher("tree", header.logical_len));
         let mut reader = Self {
             source,
             header,
@@ -199,7 +200,8 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
                     max_decoded_bytes: limits.max_decoded_bytes,
                 });
             }
-            if !entries.is_empty() && decoded_bytes.saturating_add(size) > limits.max_decoded_bytes {
+            if !entries.is_empty() && decoded_bytes.saturating_add(size) > limits.max_decoded_bytes
+            {
                 self.pending = Some((entry, consumed));
                 break;
             }
@@ -289,11 +291,11 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
 }
 
 #[cfg(test)]
-#[path = "tree_stream_tests.rs"]
-mod tree_stream_tests;
-#[cfg(test)]
 #[path = "tree_stream_proptests.rs"]
 mod tree_stream_proptests;
+#[cfg(test)]
+#[path = "tree_stream_tests.rs"]
+mod tree_stream_tests;
 
 fn validate_cursor(header: &TreeHeader, cursor: &TreeResumeCursor) -> Result<(), TreeStreamError> {
     if cursor.encoding_version != TREE_ENCODING_VERSION {
