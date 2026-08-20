@@ -139,6 +139,76 @@ impl Repository {
         }
     }
 
+    /// Publish a clone checkout as one record-before-publish batch: the selected
+    /// thread tip and an attached HEAD. Does not move the worktree and does not
+    /// write detached HEAD. A missing HEAD file is created; a matching virtual
+    /// default is not treated as already published.
+    pub fn publish_clone_checkout(&self, name: &ThreadName, state: &StateId) -> Result<()> {
+        loop {
+            match self.publish_clone_checkout_once(name, state) {
+                Err(error) if is_conflict(&error) => continue,
+                result => return result,
+            }
+        }
+    }
+
+    fn publish_clone_checkout_once(&self, name: &ThreadName, state: &StateId) -> Result<()> {
+        let mut records = Vec::new();
+        let mut updates = Vec::new();
+
+        match self.refs.get_thread(name)? {
+            Some(current) if current == *state => {}
+            Some(old_state) => {
+                records.push(OpRecord::ThreadUpdate {
+                    name: name.to_string(),
+                    old_state,
+                    new_state: *state,
+                    manager_snapshots: None,
+                });
+                updates.push(RefUpdate::Thread {
+                    name: name.clone(),
+                    expected: RefExpectation::Value(old_state),
+                    new: Some(*state),
+                });
+            }
+            None => {
+                records.push(OpRecord::ThreadCreate {
+                    name: name.to_string(),
+                    state: *state,
+                    manager_snapshot: None,
+                });
+                updates.push(RefUpdate::Thread {
+                    name: name.clone(),
+                    expected: RefExpectation::Missing,
+                    new: Some(*state),
+                });
+            }
+        }
+
+        let new_head = Head::Attached {
+            thread: name.clone(),
+        };
+        let head_exists = self.heddle_dir().join("HEAD").is_file();
+        let previous_head = self.refs.read_head()?;
+        if !head_exists || previous_head != new_head {
+            let expected = if head_exists {
+                RefExpectation::Value(previous_head.clone())
+            } else {
+                RefExpectation::Missing
+            };
+            records.push(Self::head_update_record(&previous_head, &new_head));
+            updates.push(RefUpdate::Head {
+                expected,
+                new: new_head,
+            });
+        }
+
+        if updates.is_empty() {
+            return Ok(());
+        }
+        self.commit_and_publish(records, &updates)
+    }
+
     /// Create a marker only when absent, recording the same CAS condition.
     pub fn create_marker_recorded(&self, name: &MarkerName, state: &StateId) -> Result<()> {
         self.commit_and_publish(

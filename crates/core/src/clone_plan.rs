@@ -532,6 +532,81 @@ pub fn plan_clone(
     })
 }
 
+/// Why clone could not choose a thread to check out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloneThreadSelectError {
+    /// `--thread` named a ref the remote did not advertise.
+    RequestedNotAdvertised { requested: String },
+    /// Remote advertised no usable thread names.
+    NoAdvertisedThreads,
+}
+
+impl std::fmt::Display for CloneThreadSelectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RequestedNotAdvertised { requested } => {
+                write!(f, "thread '{requested}' is not advertised by the remote")
+            }
+            Self::NoAdvertisedThreads => {
+                write!(f, "remote advertised no threads to check out")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CloneThreadSelectError {}
+
+fn short_clone_thread_name(name: &str) -> &str {
+    name.strip_prefix("refs/heads/").unwrap_or(name)
+}
+
+/// Choose the thread a clone must check out.
+///
+/// Priority: explicit `--thread` (must be advertised), then the remote's
+/// advertised HEAD / current thread, then `main`, then the first remaining
+/// short name. `refs/`-prefixed companion names are ignored. Fails closed
+/// when the requested thread is missing or nothing usable was advertised.
+pub fn select_clone_checkout_thread<'a>(
+    requested: Option<&str>,
+    advertised_head: Option<&str>,
+    advertised_threads: impl IntoIterator<Item = &'a str>,
+) -> Result<String, CloneThreadSelectError> {
+    let mut threads = advertised_threads
+        .into_iter()
+        .filter(|thread| !thread.starts_with("refs/"))
+        .filter(|thread| !thread.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    threads.sort();
+    threads.dedup();
+
+    if let Some(requested) = requested {
+        let requested = short_clone_thread_name(requested);
+        if threads.iter().any(|thread| thread == requested) {
+            return Ok(requested.to_string());
+        }
+        return Err(CloneThreadSelectError::RequestedNotAdvertised {
+            requested: requested.to_string(),
+        });
+    }
+
+    if let Some(head) = advertised_head {
+        let head = short_clone_thread_name(head);
+        if threads.iter().any(|thread| thread == head) {
+            return Ok(head.to_string());
+        }
+    }
+
+    if threads.iter().any(|thread| thread == "main") {
+        return Ok("main".to_string());
+    }
+
+    threads
+        .into_iter()
+        .next()
+        .ok_or(CloneThreadSelectError::NoAdvertisedThreads)
+}
+
 /// Plan adopt path preflight from pure options.
 ///
 /// Does not open Git repositories or import history.
@@ -1564,6 +1639,44 @@ mod tests {
                 mode: "monorepo",
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn select_clone_checkout_thread_priority_and_fail_closed() {
+        assert_eq!(
+            select_clone_checkout_thread(Some("feature"), None, ["main", "feature"]).unwrap(),
+            "feature"
+        );
+        assert_eq!(
+            select_clone_checkout_thread(None, Some("trunk"), ["alpha", "main", "trunk"]).unwrap(),
+            "trunk"
+        );
+        assert_eq!(
+            select_clone_checkout_thread(None, None, ["master", "main"]).unwrap(),
+            "main"
+        );
+        assert_eq!(
+            select_clone_checkout_thread(None, None, ["refs/heads/trunk", "trunk"]).unwrap(),
+            "trunk"
+        );
+        assert_eq!(
+            select_clone_checkout_thread(
+                Some("refs/heads/feature"),
+                Some("main"),
+                ["feature", "main"]
+            )
+            .unwrap(),
+            "feature"
+        );
+        assert!(matches!(
+            select_clone_checkout_thread(Some("missing"), None, ["main"]),
+            Err(CloneThreadSelectError::RequestedNotAdvertised { requested })
+                if requested == "missing"
+        ));
+        assert!(matches!(
+            select_clone_checkout_thread(None, None, ["refs/heads/only"]),
+            Err(CloneThreadSelectError::NoAdvertisedThreads)
         ));
     }
 

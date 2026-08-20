@@ -20,6 +20,10 @@ pub struct CloneIntent {
     pub endpoint: String,
     pub repository: String,
     pub thread: Option<String>,
+    /// Remote advertised HEAD / default thread at clone start. Recover uses
+    /// this so a no-flag resume does not fall through to `main`.
+    #[serde(default)]
+    pub advertised_head: Option<String>,
     pub depth: Option<u32>,
     pub lazy: bool,
 }
@@ -87,6 +91,7 @@ mod tests {
             endpoint: "127.0.0.1:8443".to_string(),
             repository: "acme/demo".to_string(),
             thread: Some("main".to_string()),
+            advertised_head: None,
             depth: None,
             lazy: false,
         }
