@@ -13,12 +13,14 @@ use super::tree_stream::TreeStreamError;
 /// How a tree body may be trusted for content-address verification.
 ///
 /// Sequential reads from offset 0 can recompute the typed tree hash. Ranged
-/// resume skips the prefix, so it is allowed only when the store already bound
-/// these bytes to the tree id (hash-path placement, a verified pack index, or
-/// an equivalent documented invariant). Silent weaker validation is not allowed.
+/// resume skips the prefix, so it is allowed only for uncompressed loose HTR4
+/// files stored at the content-hash path. That hash-path placement is the
+/// documented verified-placement invariant: the filename is the tree id the
+/// bytes claim to be. Memory copies, pack extracts, and re-encoded bodies
+/// stay on [`Self::SequentialVerify`]. Silent weaker validation is not allowed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TreeBodyIntegrity {
-    /// Bytes are already bound to the tree content id by the object source.
+    /// Loose uncompressed HTR4 at the content-hash path.
     VerifiedPlacement,
     /// The reader must start at entry 0 and call `finish_and_verify`.
     SequentialVerify,

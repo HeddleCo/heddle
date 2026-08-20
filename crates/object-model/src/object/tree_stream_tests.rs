@@ -322,6 +322,47 @@ fn truncated_frame_and_trailing_bytes_are_errors() {
         Tree::decode_canonical(&trailing),
         Err(TreeStreamError::TrailingBytes { extra: 1 })
     ));
+    assert!(matches!(
+        Tree::decode_canonical_streamed(&trailing),
+        Err(TreeStreamError::TrailingBytes { extra: 1 })
+    ));
+}
+
+#[test]
+fn leftover_payload_after_declared_count_is_trailing_bytes() {
+    let tree = Tree::from_entries(vec![blob("a", b"1"), blob("b", b"2")]);
+    let bytes = tree.encode_canonical().expect("encode");
+    let first = frame_at(&bytes, 0);
+    let mut short_count = bytes.clone();
+    short_count[37..45].copy_from_slice(&1u64.to_le_bytes());
+    write_payload_len(&mut short_count, (first + frame_at(&bytes, first)) as u64);
+    let eager = Tree::decode_canonical(&short_count).expect_err("eager leftover");
+    let streamed = Tree::decode_canonical_streamed(&short_count).expect_err("stream leftover");
+    assert!(
+        matches!(eager, TreeStreamError::TrailingBytes { .. }),
+        "{eager}"
+    );
+    assert!(
+        matches!(streamed, TreeStreamError::TrailingBytes { .. }),
+        "{streamed}"
+    );
+}
+
+#[test]
+fn huge_frame_prefix_is_truncated_without_allocating() {
+    let tree = Tree::from_entries(vec![blob("a", b"1")]);
+    let mut bytes = tree.encode_canonical().expect("encode");
+    bytes[TREE_HEADER_LEN..TREE_HEADER_LEN + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    let eager = Tree::decode_canonical(&bytes).expect_err("eager huge");
+    let streamed = Tree::decode_canonical_streamed(&bytes).expect_err("stream huge");
+    assert!(
+        matches!(eager, TreeStreamError::TruncatedFrame { .. }),
+        "{eager}"
+    );
+    assert!(
+        matches!(streamed, TreeStreamError::TruncatedFrame { .. }),
+        "{streamed}"
+    );
 }
 
 #[test]
@@ -344,6 +385,13 @@ fn empty_tree_streams_and_verifies() {
             .is_none()
     );
     reader.finish_and_verify().expect("empty verify");
+}
+
+#[test]
+fn name_over_u16_is_rejected_at_the_model_boundary() {
+    let name = "n".repeat(u16::MAX as usize + 1);
+    let error = TreeEntry::file(name, ContentHash::compute(b"x"), false).expect_err("too long");
+    assert!(error.to_string().contains("u16"));
 }
 
 #[test]

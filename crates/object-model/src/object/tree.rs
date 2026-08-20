@@ -259,6 +259,11 @@ pub fn validate_name(name: &str) -> Result<(), TreeError> {
             "entry name contains control characters".into(),
         ));
     }
+    if name.len() > u16::MAX as usize {
+        return Err(TreeError::InvalidName(
+            "entry name exceeds the HTR4 u16 length bound".into(),
+        ));
+    }
     Ok(())
 }
 

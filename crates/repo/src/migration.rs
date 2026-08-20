@@ -711,10 +711,55 @@ mod tests {
             .unwrap()
             .expect("rewritten tree");
         assert!(objects::object::is_canonical_tree(&raw));
-        assert_eq!(
-            repo.store().get_tree(&tree_hash).unwrap().unwrap(),
-            tree
+        assert_eq!(repo.store().get_tree(&tree_hash).unwrap().unwrap(), tree);
+    }
+
+    #[test]
+    fn migration_0005_rewrites_packed_msgpack_trees_to_htr4() {
+        use objects::store::{
+            CompressionConfig,
+            pack::{ObjectType, PackBuilder},
+        };
+
+        let (_temp, repo) = fresh_repo();
+        remove_ledger(&repo);
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("packed.txt", ContentHash::compute(b"packed-body"), false).unwrap(),
+        ]);
+        let tree_hash = tree.hash();
+        let msgpack = rmp_serde::to_vec(&tree).unwrap();
+        assert!(!objects::object::is_canonical_tree(&msgpack));
+
+        let mut builder = PackBuilder::new(CompressionConfig::disabled());
+        builder.add(tree_hash, ObjectType::Tree, msgpack.clone());
+        let (pack, index, _) = builder.build().unwrap();
+        let packs = repo.heddle_dir().join("packs");
+        std::fs::create_dir_all(&packs).unwrap();
+        std::fs::write(packs.join("legacy-msgpack-tree.pack"), pack).unwrap();
+        std::fs::write(packs.join("legacy-msgpack-tree.idx"), index).unwrap();
+
+        assert!(
+            repo.store().get_tree(&tree_hash).is_err(),
+            "current runtime reader must reject packed msgpack before migration"
         );
+        assert_eq!(
+            repo.store()
+                .get_tree_serialized(&tree_hash)
+                .unwrap()
+                .expect("raw packed tree exists"),
+            msgpack,
+            "packed raw-read seam must return leftover msgpack without HTR4 validation"
+        );
+
+        apply_pending(&repo).unwrap();
+
+        let raw = repo
+            .store()
+            .get_tree_serialized(&tree_hash)
+            .unwrap()
+            .expect("rewritten tree");
+        assert!(objects::object::is_canonical_tree(&raw));
+        assert_eq!(repo.store().get_tree(&tree_hash).unwrap().unwrap(), tree);
     }
 
     #[test]

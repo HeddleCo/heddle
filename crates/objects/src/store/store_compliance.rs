@@ -90,7 +90,8 @@ fn tree_round_trip<S: ObjectStore>(store: &S) {
 }
 
 fn tree_streaming_round_trip<S: ObjectStore>(store: &S) {
-    use crate::object::{TREE_HEADER_LEN, TreeEntry, TreePageLimits};
+    use crate::error::HeddleError;
+    use crate::object::{TreeEntry, TreePageLimits, TreeStreamError};
 
     let blob = ContentHash::compute(b"compliance-stream");
     let tree = Tree::from_entries(vec![
@@ -98,11 +99,6 @@ fn tree_streaming_round_trip<S: ObjectStore>(store: &S) {
         TreeEntry::file("b.txt", blob, true).expect("b"),
     ]);
     let hash = store.put_tree(&tree).expect("put_tree failed");
-    let encoded_len = store
-        .get_tree_serialized(&hash)
-        .expect("serialized")
-        .expect("tree body")
-        .len() as u64;
     let mut reader = store
         .open_tree(&hash, None)
         .expect("open_tree")
@@ -113,28 +109,25 @@ fn tree_streaming_round_trip<S: ObjectStore>(store: &S) {
         .expect("first page");
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.entries[0].name(), "a.txt");
-    let prefix_end = page.resume_cursor.byte_offset();
-    let mut resumed = store
-        .open_tree(&hash, Some(&page.resume_cursor))
-        .expect("resume")
-        .expect("tree body");
-    let rest = resumed
+    let rest = reader
         .next_page(TreePageLimits::new(8, usize::MAX).expect("limits"))
         .expect("page")
         .expect("rest");
     assert_eq!(rest.entries[0].name(), "b.txt");
-    resumed.finish_and_verify().expect("verify");
-    let suffix = encoded_len.saturating_sub(prefix_end);
-    assert!(
-        resumed.bytes_read() <= TREE_HEADER_LEN as u64 + suffix,
-        "resume transferred {} bytes; header+suffix is {}",
-        resumed.bytes_read(),
-        TREE_HEADER_LEN as u64 + suffix
-    );
-    assert!(
-        resumed.bytes_read() < encoded_len,
-        "resume must not transfer the complete encoded tree"
-    );
+    reader.finish_and_verify().expect("verify");
+
+    match store.open_tree(&hash, Some(&page.resume_cursor)) {
+        Ok(Some(mut resumed)) => {
+            let rest = resumed
+                .next_page(TreePageLimits::new(8, usize::MAX).expect("limits"))
+                .expect("page")
+                .expect("rest");
+            assert_eq!(rest.entries[0].name(), "b.txt");
+            resumed.finish_and_verify().expect("verify");
+        }
+        Err(HeddleError::TreeStream(TreeStreamError::UnverifiedRange)) => {}
+        other => panic!("resume must succeed on verified placement or fail closed: {other:?}"),
+    }
 }
 
 fn tree_missing_returns_none<S: ObjectStore>(store: &S) {
