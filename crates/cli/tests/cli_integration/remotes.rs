@@ -1047,6 +1047,10 @@ fn test_cli_pull_local_dirty_refusal_leaves_thread_ref_unchanged() {
 /// heddle#646: the planned lazy/partial-clone flags stay `hide = true`
 /// (out of the human options list), and human help carries a one-line
 /// breadcrumb to the detailed topic.
+///
+/// heddle#1452: `clone --help` must name the native default **thread**
+/// (with `--thread` as the override) and must not describe native
+/// checkout as a Git default branch.
 #[test]
 fn test_cli_clone_help_keeps_planned_lazy_flag_to_breadcrumb() {
     let output = heddle_help(&["clone", "--help"]);
@@ -1057,6 +1061,62 @@ fn test_cli_clone_help_keeps_planned_lazy_flag_to_breadcrumb() {
     assert!(
         !output.contains("--lazy") && !output.contains("--filter"),
         "clone help should keep planned lazy/partial clone flags out of first-run help: {output}"
+    );
+    assert!(
+        output.contains("Native clones follow the remote default thread")
+            && output.contains("`--thread` overrides")
+            && output.contains("Git clones check out the selected default branch")
+            && !output.contains("and checks out the selected default branch"),
+        "clone --help should match `heddle help clone` (native default thread, Git default branch): {output}"
+    );
+}
+
+/// heddle#1452: when an isolated thread's recorded checkout cannot be
+/// opened, refresh advice names the **attached checkout**, not git-main.
+#[test]
+fn test_cli_thread_refresh_unavailable_advice_names_attached_checkout() {
+    let root = TempDir::new().unwrap();
+    let source = root.path().join("attached");
+    let checkout = root.path().join("feature-stale");
+    std::fs::create_dir_all(&source).unwrap();
+
+    heddle(&["init"], Some(&source)).unwrap();
+    std::fs::write(source.join("base.txt"), "from attached\n").unwrap();
+    heddle(&["capture", "-m", "Attached base"], Some(&source)).unwrap();
+
+    let checkout_arg = checkout.to_str().expect("checkout path utf8");
+    heddle(
+        &["start", "feature/stale", "--path", checkout_arg],
+        Some(&source),
+    )
+    .unwrap();
+
+    std::fs::write(source.join("advance.txt"), "advance attached\n").unwrap();
+    heddle(&["capture", "-m", "Advance attached"], Some(&source)).unwrap();
+
+    std::fs::remove_dir_all(&checkout).expect("remove isolated checkout so refresh cannot open it");
+
+    let output = heddle_output(
+        &["--output", "json", "thread", "refresh", "feature/stale"],
+        Some(&source),
+    )
+    .expect("thread refresh should emit typed advice");
+    assert!(
+        !output.status.success(),
+        "refresh against a missing isolated checkout must refuse; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: Value = serde_json::from_slice(&output.stderr)
+        .expect("refresh-unavailable refusal should emit JSON advice");
+    assert_eq!(envelope["kind"], "thread_refresh_checkout_unavailable");
+    assert_json_recovery_advice_fields(&envelope, "thread refresh checkout unavailable");
+    let hint = envelope["hint"]
+        .as_str()
+        .expect("refresh-unavailable advice should carry a hint");
+    assert!(
+        hint.contains("attached checkout") && !hint.contains("main checkout"),
+        "refresh-unavailable advice should name the attached checkout, not git-main: {envelope}"
     );
 }
 

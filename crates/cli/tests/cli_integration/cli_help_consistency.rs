@@ -65,10 +65,14 @@ fn clone_help_pins_behavior_stanza() {
     );
     // The one-screen summary still answers the headline questions —
     // where an unhinted clone lands per remote kind — and points at the
-    // topic page for the rest.
+    // topic page for the rest. Native checkout is a default thread, not
+    // a Git branch (heddle#1452); Git clones may still name a default branch.
     assert!(
-        summary.contains("selected default branch"),
-        "clone help summary should say where clones land: {summary}"
+        summary.contains("Native clones follow the remote default thread")
+            && summary.contains("`--thread` overrides")
+            && summary.contains("Git clones check out the selected default branch")
+            && !summary.contains("and checks out the selected default branch"),
+        "clone help summary should name the native default thread and keep Git default-branch language: {summary}"
     );
     assert!(
         summary.contains("--thread"),
