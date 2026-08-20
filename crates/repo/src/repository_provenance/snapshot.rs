@@ -10,9 +10,8 @@ use super::{
     Repository, Result,
     builder::ProvenanceBuilder,
     helpers::{
-        build_single_origin_provenance, expand_line_origin_sets_with_builder, lcs_line_matches,
-        load_lines_for_hash, lookup_tree_entry, split_text_lines,
-        synthesize_file_provenance_from_blob,
+        build_single_origin_provenance, expand_line_origin_sets_with_builder, load_lines_for_hash,
+        lookup_tree_entry, split_text_lines, synthesize_file_provenance_from_blob, visit_equal_runs,
     },
 };
 
@@ -263,12 +262,16 @@ impl Repository {
         let mut resolved_sets = vec![BTreeSet::<u32>::new(); final_lines.len()];
 
         for (lines, origin_sets) in source_lines.iter().zip(source_sets.iter()) {
-            let matches = lcs_line_matches(lines, final_lines)?;
-            for (old_index, new_index) in matches {
-                if let Some(set_index) = origin_sets.get(old_index) {
-                    resolved_sets[new_index].insert(*set_index);
+            let old_bytes = lines.join("\n");
+            let new_bytes = final_lines.join("\n");
+            visit_equal_runs(old_bytes.as_bytes(), new_bytes.as_bytes(), |run| {
+                for offset in 0..run.len {
+                    if let Some(set_index) = origin_sets.get(run.old_start + offset) {
+                        resolved_sets[run.new_start + offset].insert(*set_index);
+                    }
                 }
-            }
+                Ok(())
+            })?;
         }
 
         let mut line_sets = Vec::with_capacity(resolved_sets.len());

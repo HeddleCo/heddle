@@ -22,9 +22,43 @@ pub(super) struct ConquerJob {
 pub(super) const JOB_RANGE: u8 = 0;
 pub(super) const JOB_EQUAL: u8 = 1;
 
+pub fn max_scratch_align() -> usize {
+    align_of::<LineOff>()
+        .max(align_of::<usize>())
+        .max(align_of::<ConquerJob>())
+}
+
 pub fn scratch_bytes_for_line_counts(old_lines: usize, new_lines: usize) -> usize {
     let (needed, _) = layout_sizes(old_lines, new_lines);
+    needed.saturating_add(max_scratch_align().saturating_sub(1))
+}
+
+#[cfg(test)]
+pub(super) fn aligned_layout_bytes(old_lines: usize, new_lines: usize) -> usize {
+    let (needed, _) = layout_sizes(old_lines, new_lines);
     needed
+}
+
+/// Shift `scratch` so the returned suffix starts at [`max_scratch_align`].
+///
+/// The pad is computed from the actual pointer, not from a layout that
+/// assumed the slice was already aligned.
+pub(super) fn align_scratch(scratch: &mut [u8]) -> Result<(&mut [u8], usize), BudgetExceeded> {
+    let align = max_scratch_align();
+    let addr = scratch.as_mut_ptr() as usize;
+    let pad = if align <= 1 {
+        0
+    } else {
+        (align - (addr % align)) % align
+    };
+    if pad > scratch.len() {
+        return Err(BudgetExceeded {
+            kind: ResourceKind::ScratchBytes,
+            limit: scratch.len() as u64,
+            needed: (pad as u64).saturating_add(1),
+        });
+    }
+    Ok((&mut scratch[pad..], pad))
 }
 
 pub(super) struct ScratchLayout {

@@ -96,7 +96,7 @@ fn blame_by_single_state_slices(
     use crate::blame::{BlamePreparation, finalize_file_provenance, prepare_file_blame};
 
     let limits = BlameSliceLimits {
-        states: 4,
+        states: 1,
         decoded_bytes: 64 * 1024,
         lines: 64,
         diff_work: 1_024,
@@ -129,6 +129,8 @@ fn blame_by_single_state_slices(
                     } => {
                         assert!(usage.states <= limits.states);
                         assert!(usage.decoded_bytes <= limits.decoded_bytes);
+                        assert!(usage.lines > 0);
+                        assert!(usage.scratch_bytes > 0 || usage.work == 0);
                         finalized.extend(more);
                         frontier = next;
                     }

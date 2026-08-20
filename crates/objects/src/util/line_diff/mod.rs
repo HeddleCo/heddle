@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Scratch-budgeted equal-run LCS used by native blame and Git-overlay blame.
 
-mod matches;
 mod myers;
 mod myers_search;
 mod scan;
@@ -13,7 +12,6 @@ mod tests;
 
 use super::budget::{BudgetExceeded, ResourceUsage};
 
-pub use matches::lcs_line_matches;
 pub use scratch::scratch_bytes_for_line_counts;
 pub use visit::visit_lcs_equal_runs;
 
@@ -38,6 +36,16 @@ impl LineDiffLimits {
             max_lines: u64::MAX,
             max_work: u64::MAX,
         }
+    }
+
+    pub fn budget(self, scratch_len: usize) -> crate::util::ResourceBudget {
+        crate::util::ResourceBudget::new(crate::util::ResourceUsage {
+            scratch_bytes: self.scratch_bytes.min(scratch_len as u64),
+            lines: self.max_lines,
+            work: self.max_work,
+            states: u64::MAX,
+            decoded_bytes: u64::MAX,
+        })
     }
 }
 

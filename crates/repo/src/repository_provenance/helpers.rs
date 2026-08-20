@@ -13,12 +13,31 @@ use super::{HeddleError, Repository, Result, builder::ProvenanceBuilder};
 
 pub(super) use objects::util::split_text_lines;
 
-pub(super) fn lcs_line_matches(
-    old_lines: &[String],
-    new_lines: &[String],
-) -> Result<Vec<(usize, usize)>> {
-    objects::util::lcs_line_matches(old_lines, new_lines)
-        .map_err(|error| HeddleError::InvalidObject(error.to_string()))
+pub(super) fn visit_equal_runs(
+    old_bytes: &[u8],
+    new_bytes: &[u8],
+    visit: impl FnMut(objects::util::EqualRun) -> Result<()>,
+) -> Result<()> {
+    let old_lines = std::str::from_utf8(old_bytes)
+        .map_err(|error| HeddleError::InvalidObject(error.to_string()))?
+        .lines()
+        .count();
+    let new_lines = std::str::from_utf8(new_bytes)
+        .map_err(|error| HeddleError::InvalidObject(error.to_string()))?
+        .lines()
+        .count();
+    let needed = objects::util::scratch_bytes_for_line_counts(old_lines, new_lines);
+    let mut scratch = vec![0u8; needed.max(1)];
+    let mut budget = objects::util::LineDiffLimits::unlimited().budget(scratch.len());
+    objects::util::visit_lcs_equal_runs(
+        old_bytes,
+        new_bytes,
+        &mut scratch,
+        &mut budget,
+        visit,
+    )
+    .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+    Ok(())
 }
 
 pub(super) fn build_single_origin_provenance(

@@ -13,7 +13,7 @@ pub use git_tree_name::{
 };
 pub use gitlink::gitlink_placeholder_bytes;
 pub use line_diff::{
-    EqualRun, LineDiffError, LineDiffLimits, lcs_line_matches, scratch_bytes_for_line_counts,
-    split_text_lines, visit_lcs_equal_runs,
+    EqualRun, LineDiffError, LineDiffLimits, scratch_bytes_for_line_counts, split_text_lines,
+    visit_lcs_equal_runs,
 };
 pub use symlink::symlink_target_bytes;

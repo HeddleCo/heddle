@@ -80,7 +80,6 @@ pub fn advance_file_blame_slice<S: ObjectSource>(
     let mut next_parents = Vec::new();
 
     for parent_id in &entry_state.parents {
-        budget.consume(ResourceKind::States, 1)?;
         let Some(parent) = source.get_state(parent_id)? else {
             return Err(BlameSliceError::MissingObject {
                 kind: "state",
@@ -95,7 +94,6 @@ pub fn advance_file_blame_slice<S: ObjectSource>(
                 entry: &entry,
                 entry_bytes,
                 moved: &mut moved,
-                limits,
             },
             &mut budget,
         )? {

@@ -2,8 +2,9 @@
 //! Compact line maps and finalized origin ranges.
 
 use crate::object::Origin;
+use crate::util::EqualRun;
 
-use super::types::{BlameLineMap, OriginRange};
+use super::types::{BlameFrontierRecord, BlameLineMap, OriginRange};
 
 pub(super) fn identity_mapping(line_count: u32) -> Vec<BlameLineMap> {
     if line_count == 0 {
@@ -27,24 +28,111 @@ pub(super) fn target_at(maps: &[BlameLineMap], state_index: u32) -> Option<u32> 
     })
 }
 
-pub(super) fn compact_pairs(pairs: &[(u32, u32)]) -> Vec<BlameLineMap> {
-    let mut maps: Vec<BlameLineMap> = Vec::new();
-    for &(state_index, target_index) in pairs {
-        match maps.last_mut() {
-            Some(last)
-                if last.state_start + last.len == state_index
-                    && last.target_start + last.len == target_index =>
-            {
-                last.len += 1;
+pub(super) fn append_map_run(
+    maps: &mut Vec<BlameLineMap>,
+    state_start: u32,
+    target_start: u32,
+    len: u32,
+) {
+    if len == 0 {
+        return;
+    }
+    match maps.last_mut() {
+        Some(last)
+            if last.state_start + last.len == state_start
+                && last.target_start + last.len == target_start =>
+        {
+            last.len += len;
+        }
+        _ => maps.push(BlameLineMap {
+            state_start,
+            target_start,
+            len,
+        }),
+    }
+}
+
+pub(super) fn claim_same_blob_maps(
+    maps: &[BlameLineMap],
+    moved: &mut [bool],
+) -> Vec<BlameLineMap> {
+    let mut claimed = Vec::new();
+    for map in maps {
+        let mut offset = 0u32;
+        while offset < map.len {
+            let idx = (map.state_start + offset) as usize;
+            if moved.get(idx).copied().unwrap_or(true) {
+                offset += 1;
+                continue;
             }
-            _ => maps.push(BlameLineMap {
-                state_start: state_index,
-                target_start: target_index,
-                len: 1,
-            }),
+            let start = offset;
+            offset += 1;
+            while offset < map.len {
+                let next = (map.state_start + offset) as usize;
+                if moved.get(next).copied().unwrap_or(true) {
+                    break;
+                }
+                offset += 1;
+            }
+            let len = offset - start;
+            for step in 0..len {
+                moved[(map.state_start + start + step) as usize] = true;
+            }
+            append_map_run(
+                &mut claimed,
+                map.state_start + start,
+                map.target_start + start,
+                len,
+            );
         }
     }
-    maps
+    claimed
+}
+
+pub(super) fn claim_equal_run(
+    run: EqualRun,
+    entry: &BlameFrontierRecord,
+    moved: &mut [bool],
+    maps: &mut Vec<BlameLineMap>,
+) {
+    let mut offset = 0usize;
+    while offset < run.len {
+        let entry_index = (run.new_start + offset) as u32;
+        let parent_index = (run.old_start + offset) as u32;
+        let idx = entry_index as usize;
+        if moved.get(idx).copied().unwrap_or(true) {
+            offset += 1;
+            continue;
+        }
+        let Some(target) = target_at(&entry.mappings, entry_index) else {
+            offset += 1;
+            continue;
+        };
+        let start = offset;
+        offset += 1;
+        while offset < run.len {
+            let next_entry = (run.new_start + offset) as u32;
+            let next_parent = (run.old_start + offset) as u32;
+            let next_idx = next_entry as usize;
+            if moved.get(next_idx).copied().unwrap_or(true) {
+                break;
+            }
+            let Some(next_target) = target_at(&entry.mappings, next_entry) else {
+                break;
+            };
+            if next_parent != parent_index + (offset - start) as u32
+                || next_target != target + (offset - start) as u32
+            {
+                break;
+            }
+            offset += 1;
+        }
+        let len = (offset - start) as u32;
+        for step in 0..len {
+            moved[(entry_index + step) as usize] = true;
+        }
+        append_map_run(maps, parent_index, target, len);
+    }
 }
 
 pub(super) fn finalize_unmoved(

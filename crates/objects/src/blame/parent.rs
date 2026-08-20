@@ -5,18 +5,13 @@ use std::path::Path;
 
 use crate::{
     object::{ContentHash, ObjectSource, State},
-    util::{
-        LineDiffLimits, ResourceBudget, ResourceKind, scratch_bytes_for_line_counts,
-        visit_lcs_equal_runs,
-    },
+    util::{ResourceBudget, ResourceKind, scratch_bytes_for_line_counts, visit_lcs_equal_runs},
 };
 
 use super::{
     lookup::lookup_blob_at_path,
-    mapping::{compact_pairs, target_at},
-    types::{
-        BlameFrontierRecord, BlameLineMap, BlameSliceError, BlameSliceLimits, origin_from_state,
-    },
+    mapping::{claim_equal_run, claim_same_blob_maps},
+    types::{BlameFrontierRecord, BlameLineMap, BlameSliceError, origin_from_state},
 };
 
 pub(super) enum ParentClaim {
@@ -37,7 +32,6 @@ pub(super) struct ParentClaimInput<'a> {
     pub entry: &'a BlameFrontierRecord,
     pub entry_bytes: &'a [u8],
     pub moved: &'a mut [bool],
-    pub limits: BlameSliceLimits,
 }
 
 pub(super) fn claim_parent<S: ObjectSource>(
@@ -51,27 +45,14 @@ pub(super) fn claim_parent<S: ObjectSource>(
         entry,
         entry_bytes,
         moved,
-        limits,
     } = input;
     let Some(parent_blob_hash) = lookup_blob_at_path(source, &parent.tree, path)? else {
         return Ok(ParentClaim::MissingPath);
     };
 
     if parent_blob_hash == entry.blob_hash {
-        let mut pairs = Vec::new();
-        for map in &entry.mappings {
-            for offset in 0..map.len {
-                let state_index = map.state_start + offset;
-                let idx = state_index as usize;
-                if moved.get(idx).copied().unwrap_or(true) {
-                    continue;
-                }
-                pairs.push((state_index, map.target_start + offset));
-                moved[idx] = true;
-            }
-        }
         return Ok(ParentClaim::SameBlob {
-            maps: compact_pairs(&pairs),
+            maps: claim_same_blob_maps(&entry.mappings, moved),
         });
     }
 
@@ -92,46 +73,21 @@ pub(super) fn claim_parent<S: ObjectSource>(
     };
     budget.require(ResourceKind::Lines, parent_lines as u64)?;
 
-    let needed = scratch_bytes_for_line_counts(
-        parent_lines,
-        std::str::from_utf8(entry_bytes)
-            .map(|text| text.lines().count())
-            .unwrap_or(0),
-    );
+    let entry_lines = std::str::from_utf8(entry_bytes)
+        .map(|text| text.lines().count())
+        .unwrap_or(0);
+    let needed = scratch_bytes_for_line_counts(parent_lines, entry_lines);
     budget.require(ResourceKind::ScratchBytes, needed as u64)?;
-    let scratch_len = needed.min(limits.scratch_bytes as usize);
-    let mut scratch = vec![0u8; scratch_len];
-    let mut pairs = Vec::new();
-    visit_lcs_equal_runs(
-        parent_bytes,
-        entry_bytes,
-        &mut scratch,
-        LineDiffLimits {
-            scratch_bytes: scratch_len as u64,
-            max_lines: limits.lines,
-            max_work: limits.diff_work,
-        },
-        |run| {
-            for offset in 0..run.len {
-                let parent_index = (run.old_start + offset) as u32;
-                let entry_index = (run.new_start + offset) as u32;
-                let idx = entry_index as usize;
-                if moved.get(idx).copied().unwrap_or(true) {
-                    continue;
-                }
-                let Some(target) = target_at(&entry.mappings, entry_index) else {
-                    continue;
-                };
-                pairs.push((parent_index, target));
-                moved[idx] = true;
-            }
-            Ok::<(), std::convert::Infallible>(())
-        },
-    )?;
+    let mut scratch = vec![0u8; needed];
+    let mut maps = Vec::new();
+    visit_lcs_equal_runs(parent_bytes, entry_bytes, &mut scratch, budget, |run| {
+        claim_equal_run(run, entry, moved, &mut maps);
+        Ok::<(), std::convert::Infallible>(())
+    })?;
 
     let line_count = u32::try_from(parent_lines).map_err(|_| BlameSliceError::Unblamable)?;
     Ok(ParentClaim::Aligned {
-        maps: compact_pairs(&pairs),
+        maps,
         blob_hash: parent_blob_hash,
         line_count,
     })

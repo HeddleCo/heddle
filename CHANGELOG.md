@@ -20,10 +20,12 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   without owning every line or a match vector. `advance_file_blame_slice`
   walks one path-targeted frontier and returns persistence-friendly origin
   ranges; Heddle's own `blame` now loops those slices. Work exhaustion is
-  typed `BudgetExceeded`, never approximate blame. A missing parent state or
-  a tree-present / blob-missing parent is `MissingObject`, not a skipped
-  merge parent or `MissingPath`. Frontier `state_line_count` is charged
-  against the line budget before the moved bitmap (heddle#1454).
+  typed `BudgetExceeded`, never approximate blame. Work is actual Myers
+  comparisons, not an n×m admission ceiling. A missing parent state, tree,
+  or tree-present / blob-missing parent is `MissingObject`. Frontier
+  `state_line_count` is charged against the line budget before the moved
+  bitmap. Slice usage reports work, lines, and scratch on one live
+  `ResourceBudget` (heddle#1454).
 
 - **`heddle completions` prints tab-completion scripts.** The field-study
   verb emits install lines, or a bash/zsh/fish script. Same scripts as

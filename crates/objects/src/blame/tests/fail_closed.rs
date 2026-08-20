@@ -76,6 +76,36 @@ fn tree_present_blob_missing_parent_is_missing_object_not_missing_path() {
 }
 
 #[test]
+fn missing_parent_tree_is_missing_object_not_path_gone() {
+    let store = store();
+    let missing_tree = ContentHash::from_bytes([0x22; 32]);
+    let parent = State::new(
+        missing_tree,
+        Vec::new(),
+        Attribution::human(Principal::new("alice", "alice@example.com")),
+    );
+    store.put_state(&parent).unwrap();
+    let child = put_state_with_file(&store, "file.txt", b"child\n", vec![parent.id()], "bob");
+    let err = blame_file(
+        &store,
+        &child,
+        Path::new("file.txt"),
+        BlameSliceLimits::unlimited(),
+    )
+    .expect_err("missing parent tree");
+    match err {
+        BlameSliceError::MissingObject { kind, id } => {
+            assert_eq!(kind, "tree");
+            assert_eq!(id, missing_tree.to_string());
+        }
+        BlameSliceError::MissingPath => {
+            panic!("missing parent tree must not be MissingPath")
+        }
+        other => panic!("expected MissingObject, got {other}"),
+    }
+}
+
+#[test]
 fn frontier_state_line_count_above_line_limit_is_typed_without_huge_bitmap() {
     let store = store();
     let state = put_state_with_file(&store, "file.txt", b"x\n", Vec::new(), "alice");

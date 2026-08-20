@@ -1,50 +1,40 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Public visitor entry for scratch-budgeted equal-run LCS.
 
-use super::super::budget::{ResourceBudget, ResourceKind, ResourceUsage};
+use std::mem::align_of;
+
+use super::super::budget::{ResourceBudget, ResourceKind};
 use super::myers::{LineView, emit_equal_runs};
 use super::scan::{LineOff, count_text_lines, fill_line_offsets};
-use super::scratch::{ConquerJob, layout_sizes, require_scratch};
-use super::{EqualRun, LcsVisitResult, LineDiffError, LineDiffLimits};
+use super::scratch::{ConquerJob, align_scratch, layout_sizes, require_scratch};
+use super::{EqualRun, LcsVisitResult, LineDiffError};
 
 /// Visit equal index ranges in deterministic Myers order.
 ///
 /// Line scanning writes offsets into `scratch`. The algorithm never builds
-/// `Vec<String>` inputs or a `Vec<(usize, usize)>` match set. Work exhaustion
-/// is [`super::LineDiffError::BudgetExceeded`]. A visitor `Err` stops promptly.
+/// `Vec<String>` inputs or a `Vec<(usize, usize)>` match set. Work is the
+/// number of Myers line comparisons actually performed. A visitor `Err`
+/// stops promptly.
 pub fn visit_lcs_equal_runs<E>(
     old_bytes: &[u8],
     new_bytes: &[u8],
     scratch: &mut [u8],
-    limits: LineDiffLimits,
+    budget: &mut ResourceBudget,
     visit: impl FnMut(EqualRun) -> Result<(), E>,
 ) -> LcsVisitResult<E> {
     let old_lines = count_text_lines(old_bytes).map_err(|_| LineDiffError::InvalidUtf8)?;
     let new_lines = count_text_lines(new_bytes).map_err(|_| LineDiffError::InvalidUtf8)?;
-
-    let scratch_limit = (limits.scratch_bytes as usize).min(scratch.len());
-    let mut budget = ResourceBudget::new(ResourceUsage {
-        scratch_bytes: scratch_limit as u64,
-        lines: limits.max_lines,
-        work: limits.max_work,
-        states: u64::MAX,
-        decoded_bytes: u64::MAX,
-    });
-
     budget.require(ResourceKind::Lines, old_lines as u64)?;
     budget.require(ResourceKind::Lines, new_lines as u64)?;
-    budget.record(ResourceKind::Lines, old_lines.max(new_lines) as u64);
 
-    let pair_work = (old_lines as u64).saturating_mul(new_lines as u64);
-    budget.require(ResourceKind::Work, pair_work)?;
-
+    let (aligned, pad) = align_scratch(scratch)?;
     let (needed, layout) = layout_sizes(old_lines, new_lines);
-    require_scratch(scratch_limit, needed)?;
-    let scratch = &mut scratch[..scratch_limit];
-    scratch[..needed].fill(0);
-    budget.record(ResourceKind::ScratchBytes, needed as u64);
+    budget.require(ResourceKind::ScratchBytes, (pad + needed) as u64)?;
+    require_scratch(aligned.len(), needed)?;
+    let scratch = &mut aligned[..needed];
+    scratch.fill(0);
 
-    let parts = unsafe { partition(scratch, &layout) };
+    let parts = unsafe { partition(scratch, &layout)? };
     let filled_old =
         fill_line_offsets(old_bytes, parts.old_offs).map_err(|_| LineDiffError::InvalidUtf8)?;
     let filled_new =
@@ -65,7 +55,7 @@ pub fn visit_lcs_equal_runs<E>(
         parts.vf,
         parts.vb,
         parts.jobs,
-        &mut budget,
+        budget,
         visit,
     )?;
     Ok(budget.used())
@@ -81,29 +71,46 @@ struct ScratchParts<'a> {
 
 /// Split caller scratch into disjoint typed regions.
 ///
-/// Safety: `layout` offsets were produced by [`layout_sizes`] and do not overlap
-/// inside `scratch`.
+/// Safety: `scratch` starts at [`super::scratch::max_scratch_align`] (proven
+/// from the actual pointer by [`align_scratch`]). `layout` offsets were
+/// produced by [`layout_sizes`] relative to that aligned base, do not overlap,
+/// and each region start is checked against `align_of::<T>()` before the
+/// cast. A misaligned region is a typed [`super::LineDiffError::BudgetExceeded`],
+/// not UB.
 unsafe fn partition<'a>(
     scratch: &'a mut [u8],
     layout: &super::scratch::ScratchLayout,
-) -> ScratchParts<'a> {
+) -> Result<ScratchParts<'a>, super::super::budget::BudgetExceeded> {
     let base = scratch.as_mut_ptr();
     unsafe {
-        ScratchParts {
-            old_offs: raw_slice(base, layout.old_off, layout.old_off_bytes),
-            new_offs: raw_slice(base, layout.new_off, layout.new_off_bytes),
-            vf: raw_slice(base, layout.vf, layout.vf_bytes),
-            vb: raw_slice(base, layout.vb, layout.vb_bytes),
-            jobs: raw_slice(base, layout.jobs, layout.jobs_bytes),
-        }
+        Ok(ScratchParts {
+            old_offs: raw_slice(base, layout.old_off, layout.old_off_bytes)?,
+            new_offs: raw_slice(base, layout.new_off, layout.new_off_bytes)?,
+            vf: raw_slice(base, layout.vf, layout.vf_bytes)?,
+            vb: raw_slice(base, layout.vb, layout.vb_bytes)?,
+            jobs: raw_slice(base, layout.jobs, layout.jobs_bytes)?,
+        })
     }
 }
 
-unsafe fn raw_slice<'a, T>(base: *mut u8, start: usize, bytes: usize) -> &'a mut [T] {
+unsafe fn raw_slice<'a, T>(
+    base: *mut u8,
+    start: usize,
+    bytes: usize,
+) -> Result<&'a mut [T], super::super::budget::BudgetExceeded> {
+    let ptr = unsafe { base.add(start) };
+    let addr = ptr as usize;
+    if !addr.is_multiple_of(align_of::<T>()) {
+        return Err(super::super::budget::BudgetExceeded {
+            kind: ResourceKind::ScratchBytes,
+            limit: addr as u64,
+            needed: align_of::<T>() as u64,
+        });
+    }
     let count = if std::mem::size_of::<T>() == 0 {
         0
     } else {
         bytes / std::mem::size_of::<T>()
     };
-    unsafe { std::slice::from_raw_parts_mut(base.add(start).cast::<T>(), count) }
+    Ok(unsafe { std::slice::from_raw_parts_mut(ptr.cast::<T>(), count) })
 }

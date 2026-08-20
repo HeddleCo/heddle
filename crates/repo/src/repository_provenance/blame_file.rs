@@ -20,7 +20,8 @@ impl Repository {
     /// boundary and synthesize a [`FileProvenance`].
     ///
     /// Returns `Ok(None)` if `path` does not exist at `state` or the file is
-    /// binary. Otherwise produces the same shape
+    /// binary. Store misses are [`crate::HeddleError::MissingObject`], not
+    /// `Ok(None)`. Otherwise produces the same shape
     /// `get_file_provenance_for_state` used to return from the tree-oriented
     /// path.
     pub(crate) fn blame_file_via_path_walk(
@@ -32,7 +33,12 @@ impl Repository {
         match blame_file(&source, state, path, BlameSliceLimits::unlimited()) {
             Ok(provenance) => Ok(Some(provenance)),
             Err(BlameSliceError::MissingPath | BlameSliceError::Unblamable) => Ok(None),
-            Err(BlameSliceError::MissingObject { .. }) => Ok(None),
+            Err(BlameSliceError::MissingObject { kind, id }) => {
+                Err(super::HeddleError::MissingObject {
+                    object_type: kind.to_string(),
+                    id,
+                })
+            }
             Err(BlameSliceError::Store(error)) => Err(error),
             Err(error) => Err(super::HeddleError::InvalidObject(error.to_string())),
         }

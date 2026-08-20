@@ -9,7 +9,10 @@ use std::{
 use objects::{
     object::{Blob, ContentHash, State, StateId, Tree, TreeEntry},
     store::{InMemoryStore, ObjectStore},
-    util::{GitTreeNameClassification, classify_git_tree_name, lcs_line_matches, split_text_lines},
+    util::{
+        GitTreeNameClassification, LineDiffLimits, classify_git_tree_name, split_text_lines,
+        scratch_bytes_for_line_counts, visit_lcs_equal_runs,
+    },
 };
 
 use crate::{
@@ -250,20 +253,35 @@ fn blame_file_origins(
             };
             let mut parent_to_target = vec![None; parent_lines.len()];
             let mut any_moved = false;
-            for (parent_index, frontier_index) in
-                lcs_line_matches(&parent_lines, &frontier.commit_lines)
-                    .map_err(|error| IngestError::Other(error.to_string()))?
-            {
-                if moved[frontier_index] {
-                    continue;
-                }
-                if let Some(target_index) = frontier.commit_to_target[frontier_index] {
-                    origins[target_index] = parent_oid.clone();
-                    parent_to_target[parent_index] = Some(target_index);
-                    moved[frontier_index] = true;
-                    any_moved = true;
-                }
-            }
+            let needed = scratch_bytes_for_line_counts(
+                parent_lines.len(),
+                frontier.commit_lines.len(),
+            );
+            let mut scratch = vec![0u8; needed.max(1)];
+            let mut budget = LineDiffLimits::unlimited().budget(scratch.len());
+            visit_lcs_equal_runs(
+                &parent_bytes,
+                frontier.commit_lines.join("\n").as_bytes(),
+                &mut scratch,
+                &mut budget,
+                |run| {
+                    for offset in 0..run.len {
+                        let parent_index = run.old_start + offset;
+                        let frontier_index = run.new_start + offset;
+                        if moved[frontier_index] {
+                            continue;
+                        }
+                        if let Some(target_index) = frontier.commit_to_target[frontier_index] {
+                            origins[target_index] = parent_oid.clone();
+                            parent_to_target[parent_index] = Some(target_index);
+                            moved[frontier_index] = true;
+                            any_moved = true;
+                        }
+                    }
+                    Ok::<(), std::convert::Infallible>(())
+                },
+            )
+            .map_err(|error| IngestError::Other(error.to_string()))?;
             if any_moved {
                 worklist.push(GitBlameFrontier {
                     commit_oid: parent_oid.clone(),

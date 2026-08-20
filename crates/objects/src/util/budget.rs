@@ -107,7 +107,7 @@ impl ResourceBudget {
         self.used
     }
 
-    pub fn require(&self, kind: ResourceKind, needed: u64) -> Result<(), BudgetExceeded> {
+    pub fn require(&mut self, kind: ResourceKind, needed: u64) -> Result<(), BudgetExceeded> {
         let limit = self.limit(kind);
         if needed > limit {
             return Err(BudgetExceeded {
@@ -116,23 +116,23 @@ impl ResourceBudget {
                 needed,
             });
         }
+        if needed > self.used.get(kind) {
+            self.set_used(kind, needed);
+        }
         Ok(())
     }
 
     pub fn consume(&mut self, kind: ResourceKind, amount: u64) -> Result<(), BudgetExceeded> {
         let used = self.used.get(kind).saturating_add(amount);
         self.require(kind, used)?;
-        match kind {
-            ResourceKind::ScratchBytes => self.used.scratch_bytes = used,
-            ResourceKind::Lines => self.used.lines = used,
-            ResourceKind::Work => self.used.work = used,
-            ResourceKind::States => self.used.states = used,
-            ResourceKind::DecodedBytes => self.used.decoded_bytes = used,
-        }
         Ok(())
     }
 
     pub fn record(&mut self, kind: ResourceKind, used: u64) {
+        self.set_used(kind, used);
+    }
+
+    fn set_used(&mut self, kind: ResourceKind, used: u64) {
         match kind {
             ResourceKind::ScratchBytes => self.used.scratch_bytes = used,
             ResourceKind::Lines => self.used.lines = used,

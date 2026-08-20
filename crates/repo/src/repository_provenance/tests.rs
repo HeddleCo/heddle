@@ -10,14 +10,23 @@ use objects::{
 };
 use tempfile::TempDir;
 
-use super::helpers::{build_single_origin_provenance, lcs_line_matches, lookup_tree_entry};
+use super::helpers::{build_single_origin_provenance, lookup_tree_entry, visit_equal_runs};
 use crate::Repository;
 
 #[test]
 fn lcs_preserves_existing_line_matches() {
     let old_lines = vec!["a".to_string(), "b".to_string(), "c".to_string()];
     let new_lines = vec!["a".to_string(), "x".to_string(), "c".to_string()];
-    let matches = lcs_line_matches(&old_lines, &new_lines).expect("lcs should succeed");
+    let old_bytes = old_lines.join("\n");
+    let new_bytes = new_lines.join("\n");
+    let mut matches = Vec::new();
+    visit_equal_runs(old_bytes.as_bytes(), new_bytes.as_bytes(), |run| {
+        for offset in 0..run.len {
+            matches.push((run.old_start + offset, run.new_start + offset));
+        }
+        Ok(())
+    })
+    .expect("lcs should succeed");
     assert_eq!(matches, vec![(0, 0), (2, 2)]);
 }
 

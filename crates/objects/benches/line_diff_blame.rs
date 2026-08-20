@@ -33,11 +33,12 @@ fn minified_lcs(c: &mut Criterion) {
 
     c.bench_function("minified_equal_run_lcs", |b| {
         b.iter(|| {
+            let mut budget = LineDiffLimits::unlimited().budget(scratch.len());
             let usage = visit_lcs_equal_runs(
                 black_box(old.as_bytes()),
                 black_box(new.as_bytes()),
                 &mut scratch,
-                LineDiffLimits::unlimited(),
+                &mut budget,
                 |_| Ok::<(), std::convert::Infallible>(()),
             )
             .expect("lcs");
@@ -46,26 +47,41 @@ fn minified_lcs(c: &mut Criterion) {
     });
 
     let started = Instant::now();
+    let mut cancel_budget = LineDiffLimits::unlimited().budget(scratch.len());
     let _ = visit_lcs_equal_runs(
         old.as_bytes(),
         new.as_bytes(),
         &mut scratch,
-        LineDiffLimits::unlimited(),
+        &mut cancel_budget,
         |_| Err("cancel"),
     );
     let cancel_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let mut usage_budget = LineDiffLimits::unlimited().budget(scratch.len());
     let usage: ResourceUsage = visit_lcs_equal_runs(
         old.as_bytes(),
         new.as_bytes(),
         &mut scratch,
-        LineDiffLimits::unlimited(),
+        &mut usage_budget,
         |_| Ok::<(), std::convert::Infallible>(()),
     )
     .expect("usage");
     eprintln!(
-        "minified LCS scratch_bytes={} cancel_ms={cancel_ms:.3}",
-        usage.scratch_bytes
+        "minified LCS scratch_bytes={} work={} cancel_ms={cancel_ms:.3} rss_kb={}",
+        usage.scratch_bytes,
+        usage.work,
+        peak_rss_kb().unwrap_or(0)
     );
+}
+
+fn peak_rss_kb() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(value) = line.strip_prefix("VmHWM:") {
+            let kb = value.split_whitespace().next()?;
+            return kb.parse().ok();
+        }
+    }
+    None
 }
 
 fn deep_history_slices(c: &mut Criterion) {
@@ -112,6 +128,7 @@ fn deep_history_slices(c: &mut Criterion) {
                     BlameSliceAdvance::Progress { next, usage, .. } => {
                         assert!(usage.states <= limits.states);
                         assert!(usage.decoded_bytes <= limits.decoded_bytes);
+                        assert!(usage.lines > 0);
                         frontier = next;
                         slices += 1;
                     }
