@@ -86,9 +86,11 @@ fn clone_help_pins_behavior_stanza() {
         "clone topic should explain the Git-overlay transport and storage path: {help}"
     );
     assert!(
-        help.contains("Native clones target `main` directly")
-            && help.contains("if the remote has no `main` thread")
-            && help.contains("--thread <name>"),
+        help.contains("Native clones follow the remote default thread")
+            && help.contains("pass `--thread <name>`")
+            && help.contains("to override")
+            && !help.contains("Native clones target `main`")
+            && !help.contains("if the remote has no `main` thread"),
         "clone topic should explain native default-thread selection: {help}"
     );
     // Depth semantics: 0 means full history, N keeps the tip plus N ancestry levels.

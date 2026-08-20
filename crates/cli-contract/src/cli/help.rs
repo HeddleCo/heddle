@@ -628,8 +628,8 @@ Run `heddle clone --help` for the flag list.
 - A Git source is streamed by Sley directly into the destination `.git`, then
   initialized as Git Overlay. No Git executable or `.heddle/git` mirror is used.
 - A native source is cloned into Heddle-owned storage.
-- Native clones target `main` directly; if the remote has no `main` thread,
-  pass `--thread <name>` to select one.
+- Native clones follow the remote default thread; pass `--thread <name>`
+  to override.
 - Clone never prompts.
 
 # Shallow clones (--depth)

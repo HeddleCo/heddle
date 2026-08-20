@@ -412,7 +412,7 @@ pub(crate) fn thread_recovery_action_is_primary(
 
 pub(crate) fn thread_workspace_label(mode: &ThreadMode) -> &'static str {
     match mode {
-        ThreadMode::Materialized => "main checkout",
+        ThreadMode::Materialized => "attached checkout",
         ThreadMode::Virtualized => "virtual checkout",
         ThreadMode::Solid => "isolated checkout",
     }
@@ -2899,6 +2899,26 @@ pub(crate) fn find_active_thread_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thread_workspace_label_pairs_modes_without_main() {
+        assert_eq!(
+            thread_workspace_label(&ThreadMode::Materialized),
+            "attached checkout"
+        );
+        assert_eq!(
+            thread_workspace_label(&ThreadMode::Solid),
+            "isolated checkout"
+        );
+        assert_eq!(
+            thread_workspace_label(&ThreadMode::Virtualized),
+            "virtual checkout"
+        );
+        assert!(
+            !thread_workspace_label(&ThreadMode::Materialized).contains("main"),
+            "native materialized label must not hard-code main"
+        );
+    }
 
     #[test]
     fn empty_execution_paths_are_suppressed() {
