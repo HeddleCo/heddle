@@ -1605,13 +1605,8 @@ impl HostedClient {
             .await
             .map(|exchange| exchange.result)?;
         if options.publish_refs {
-            self.sync_synthetic_frontiers(
-                repo,
-                repo_path,
-                options.depth,
-                options.materialization,
-            )
-            .await?;
+            self.sync_synthetic_frontiers(repo, repo_path, options.depth, options.materialization)
+                .await?;
         }
         Ok(result)
     }
@@ -2375,7 +2370,7 @@ impl HostedClient {
                     self.fetch_synthetic_frontier_root(
                         repo,
                         repo_path,
-                        &entry.name,
+                        &name,
                         entry.state_id,
                         depth,
                         materialization,
@@ -2398,16 +2393,14 @@ impl HostedClient {
         materialization: PullMaterialization,
     ) -> Result<(), ProtocolError> {
         for entry in advertised {
-            if !matches!(
-                entry.to_wire_entry().advertised(),
-                Ok(AdvertisedRef::SyntheticFrontier(_))
-            ) {
+            let Ok(AdvertisedRef::SyntheticFrontier(name)) = entry.to_wire_entry().advertised()
+            else {
                 continue;
-            }
+            };
             self.fetch_synthetic_frontier_root(
                 repo,
                 repo_path,
-                &entry.name,
+                &name,
                 entry.state_id,
                 depth,
                 materialization,
@@ -2421,7 +2414,7 @@ impl HostedClient {
         &mut self,
         repo: &Repository,
         repo_path: &str,
-        remote_thread: &str,
+        name: &objects::object::SyntheticFrontierName,
         state_id: StateId,
         depth: Option<u32>,
         materialization: PullMaterialization,
@@ -2429,14 +2422,15 @@ impl HostedClient {
         if repo.store().has_state(&state_id)? {
             return Ok(());
         }
+        let address = synthetic_frontier_pull_address(name, state_id);
         self.pull_exchange(
             repo,
             repo_path,
-            remote_thread,
+            address.remote_thread.as_str(),
             PullOptions {
                 local_thread: None,
                 depth,
-                target_state: Some(state_id),
+                target_state: Some(address.target_state),
                 materialization,
                 publish_refs: false,
                 wanted_hashes: None,
@@ -2445,7 +2439,8 @@ impl HostedClient {
         .await?;
         if !repo.store().has_state(&state_id)? {
             return Err(ProtocolError::InvalidState(format!(
-                "synthetic frontier {remote_thread} advertised {} but the target state is still absent after pull",
+                "synthetic frontier {} advertised {} but the target state is still absent after pull",
+                name.as_name(),
                 state_id.to_string_full()
             )));
         }
@@ -2457,13 +2452,35 @@ impl HostedClient {
         repo: &Repository,
         repo_path: &str,
         checkpoint: &[u8],
+        depth: Option<u32>,
+        materialization: PullMaterialization,
     ) -> Result<(), ProtocolError> {
         if !apply_marker_snapshot(repo, checkpoint)? {
             self.sync_local_markers(repo, repo_path).await?;
         }
-        self.sync_synthetic_frontiers(repo, repo_path, None, PullMaterialization::Full)
+        self.sync_synthetic_frontiers(repo, repo_path, depth, materialization)
             .await?;
         Ok(())
+    }
+}
+
+struct SyntheticFrontierPullAddress {
+    remote_thread: ThreadName,
+    target_state: StateId,
+}
+
+/// Address a synthetic-root pull through the owning user thread.
+///
+/// Synthetic names are absent from ListThreads and have no thread identity.
+/// The exchange must use [`SyntheticFrontierName::owning_thread`]; the
+/// synthetic state stays the pull `target_state`.
+fn synthetic_frontier_pull_address(
+    name: &objects::object::SyntheticFrontierName,
+    target_state: StateId,
+) -> SyntheticFrontierPullAddress {
+    SyntheticFrontierPullAddress {
+        remote_thread: name.owning_thread(),
+        target_state,
     }
 }
 
@@ -3242,6 +3259,22 @@ mod pull_bootstrap_tests {
         assert_eq!(decoded.refs[1].name, "release");
         assert_eq!(decoded.refs[1].state_id, release);
         assert_eq!(decoded.refs[1].kind, RefKind::Marker);
+    }
+
+    #[test]
+    fn synthetic_frontier_pull_uses_owning_thread_and_keeps_synthetic_target() {
+        let change = objects::object::ChangeId::from_bytes([9; 16]);
+        let name = objects::object::SyntheticFrontierName::new("feature/auth", change)
+            .expect("fixture synthetic name");
+        let state = StateId::from_bytes([7; 32]);
+        let address = synthetic_frontier_pull_address(&name, state);
+        assert_eq!(address.remote_thread.as_str(), "feature/auth");
+        assert_eq!(
+            address.remote_thread.as_str(),
+            name.owning_thread().as_str()
+        );
+        assert_ne!(address.remote_thread.as_str(), name.as_name());
+        assert_eq!(address.target_state, state);
     }
 
     #[test]

@@ -2077,7 +2077,7 @@ pub fn delete_reference_if_present(repo: &SleyRepository, name: &str) -> GitProj
     delete_reference(repo, name, None, true)
 }
 
-fn delete_reference_matching(
+pub(crate) fn delete_reference_matching(
     repo: &SleyRepository,
     name: &str,
     expected_old: ObjectId,
@@ -2969,10 +2969,7 @@ fn creatable_ref_names(
                     .iter()
                     .filter(|update| {
                         (matches!(update.namespace, RefNamespace::Branch) && update.name == branch)
-                            || matches!(
-                                update.namespace,
-                                RefNamespace::Note | RefNamespace::Heddle
-                            )
+                            || matches!(update.namespace, RefNamespace::Note | RefNamespace::Heddle)
                     })
                     .map(full_ref_name)
                     .collect(),
@@ -3763,11 +3760,49 @@ pub fn copy_reachable_objects_excluding(
     Ok(())
 }
 
+/// Overlay-authoritative Git refs that a push may serve.
+///
+/// Branches and tags come from the checkout because `.git` is authoritative
+/// there. Heddle synthetic roots are publishable only when they are in the
+/// managed ownership record and the on-disk target still matches that record.
+fn collect_authoritative_git_ref_updates(
+    source: &SleyRepository,
+    managed_record: &HashMap<String, ObjectId>,
+    scope: GitPushScope,
+    current_branch: Option<&str>,
+) -> GitProjectionResult<Vec<RefUpdate>> {
+    Ok(collect_ref_updates(source)?
+        .into_iter()
+        .filter(|update| {
+            let publishable = match update.namespace {
+                RefNamespace::Heddle => {
+                    managed_record.get(&full_ref_name(update)) == Some(&update.target)
+                }
+                RefNamespace::Branch | RefNamespace::Tag => true,
+                RefNamespace::Note => update.name == "heddle",
+            };
+            if !publishable {
+                return false;
+            }
+            match scope {
+                GitPushScope::AllThreads => true,
+                GitPushScope::CurrentThread => {
+                    update.namespace == RefNamespace::Note
+                        || update.namespace == RefNamespace::Heddle
+                        || (update.namespace == RefNamespace::Branch
+                            && Some(update.name.as_str()) == current_branch)
+                }
+            }
+        })
+        .collect())
+}
+
 /// Push the authoritative checkout's Git refs directly through Sley.
 ///
 /// Local branches and tags are intentional inputs because `.git` is authoritative
-/// in an overlay checkout. The per-remote manifest separately prevents Heddle
-/// from claiming, rewinding, or deleting destination refs it did not publish.
+/// in an overlay checkout. Synthetic Heddle refs are served only from the managed
+/// ownership record. The per-remote manifest separately prevents Heddle from
+/// claiming, rewinding, or deleting destination refs it did not publish.
 pub struct AuthoritativeGitPushOptions<'a> {
     pub heddle_dir: &'a Path,
     pub remote: &'a str,
@@ -3792,24 +3827,9 @@ pub fn push_authoritative_git_refs(
     let remote_url = source.remote(remote).map_err(git_err)?.push_url();
     let manifest_path = network_exported_refs_path(heddle_dir, &remote_url);
     let previously_exported = read_exported_refs_at(&manifest_path)?;
-    let served_frontier = collect_ref_updates(source)?
-        .into_iter()
-        .filter(|update| {
-            matches!(
-                update.namespace,
-                RefNamespace::Branch | RefNamespace::Tag | RefNamespace::Heddle
-            ) || (update.namespace == RefNamespace::Note && update.name == "heddle")
-        })
-        .filter(|update| match scope {
-            GitPushScope::AllThreads => true,
-            GitPushScope::CurrentThread => {
-                update.namespace == RefNamespace::Note
-                    || update.namespace == RefNamespace::Heddle
-                    || (update.namespace == RefNamespace::Branch
-                        && Some(update.name.as_str()) == current_branch)
-            }
-        })
-        .collect::<Vec<_>>();
+    let managed_record = read_projection_managed_refs(heddle_dir)?;
+    let served_frontier =
+        collect_authoritative_git_ref_updates(source, &managed_record, scope, current_branch)?;
 
     let records = source
         .ls_remote_with_http_client(
@@ -4188,6 +4208,114 @@ mod tests {
         assert!(
             main.is_none(),
             "must not serve the on-disk foreign tip under refs/heads/main, got {main:?}"
+        );
+    }
+
+    #[test]
+    fn collect_authoritative_git_ref_updates_publishes_only_managed_synthetic_roots() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
+        let owned = seed_commit(&repo, "owned");
+        let forged = seed_commit(&repo, "forged");
+        let change = objects::object::ChangeId::from_bytes([9; 16]);
+        let managed_name = objects::object::SyntheticFrontierName::new("main", change)
+            .expect("managed synthetic")
+            .git_ref();
+        let forged_change = objects::object::ChangeId::from_bytes([7; 16]);
+        let forged_name = objects::object::SyntheticFrontierName::new("main", forged_change)
+            .expect("forged synthetic")
+            .git_ref();
+        set_reference(
+            &repo,
+            &managed_name,
+            owned,
+            RefPrecondition::MustNotExist,
+            "test: managed synthetic",
+        )
+        .expect("write managed synthetic");
+        set_reference(
+            &repo,
+            &forged_name,
+            forged,
+            RefPrecondition::MustNotExist,
+            "test: unmanaged forged synthetic",
+        )
+        .expect("write forged synthetic");
+        set_reference(
+            &repo,
+            "refs/heddle/internal",
+            forged,
+            RefPrecondition::MustNotExist,
+            "test: internal heddle ref",
+        )
+        .expect("write internal heddle ref");
+        set_reference(
+            &repo,
+            "refs/heads/main",
+            owned,
+            RefPrecondition::MustNotExist,
+            "test: main",
+        )
+        .expect("write main");
+
+        let mut record = HashMap::new();
+        record.insert(managed_name.clone(), owned);
+
+        let updates = collect_authoritative_git_ref_updates(
+            &repo,
+            &record,
+            GitPushScope::AllThreads,
+            Some("main"),
+        )
+        .expect("collect authoritative updates");
+        let mut names: Vec<String> = updates.iter().map(full_ref_name).collect();
+        names.sort();
+
+        assert_eq!(
+            names,
+            vec![managed_name, "refs/heads/main".to_string()],
+            "only the managed synthetic root and overlay-authoritative heads may publish"
+        );
+        assert!(
+            updates
+                .iter()
+                .all(|update| update.namespace != RefNamespace::Heddle
+                    || full_ref_name(update) != forged_name),
+            "unmanaged frontier-shaped refs must not enter the served set"
+        );
+    }
+
+    #[test]
+    fn count_exported_commits_excludes_heddle_synthetic_tips() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
+        let head = seed_commit(&repo, "head");
+        let frontier = seed_commit(&repo, "frontier");
+        let change = objects::object::ChangeId::from_bytes([9; 16]);
+        let synthetic = objects::object::SyntheticFrontierName::new("main", change)
+            .expect("synthetic")
+            .git_ref();
+        set_reference(
+            &repo,
+            "refs/heads/main",
+            head,
+            RefPrecondition::MustNotExist,
+            "test: main",
+        )
+        .expect("write main");
+        set_reference(
+            &repo,
+            &synthetic,
+            frontier,
+            RefPrecondition::MustNotExist,
+            "test: synthetic",
+        )
+        .expect("write synthetic");
+
+        let counts = count_exported_commits(&repo, &HashSet::new()).expect("count");
+        assert_eq!(
+            counts.total, 1,
+            "synthetic Heddle tips must not inflate the exported commit walk"
         );
     }
 

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Typed classification for fully-qualified Git ref names.
 
+use objects::object::SyntheticFrontierName;
+
 /// Sentinel remote name for refs owned by the local repository.
 ///
 /// Local branches, tags, and notes use this owner when represented in the
@@ -17,7 +19,7 @@ pub enum GitRefContentNamespace {
     Tag,
     /// `refs/notes/<name>`.
     Note,
-    /// `refs/heddle/<name>` — reserved synthetic frontier roots.
+    /// A managed synthetic frontier root (`refs/heddle/frontier/<thread>/<full-changeid>`).
     Heddle,
 }
 
@@ -255,6 +257,7 @@ impl<'a> GitRefName<'a> {
     }
 
     fn heddle_name(&self) -> Option<&'a str> {
+        SyntheticFrontierName::parse(self.full_name).ok()?;
         self.full_name
             .strip_prefix("refs/heddle/")
             .filter(|name| !name.is_empty())
@@ -344,9 +347,17 @@ mod tests {
                 false,
             ),
             (
+                "refs/heddle/internal",
+                GitRefNamespace::Other,
+                None,
+                GitRefKind::Other,
+                false,
+                true,
+            ),
+            (
                 "refs/heddle/frontier/main/hc-abc",
                 GitRefNamespace::Other,
-                Some(GitRefContentNamespace::Heddle),
+                None,
                 GitRefKind::Other,
                 false,
                 true,
@@ -417,6 +428,39 @@ mod tests {
             GitRefName::new("refs/remotes/git/main").git_projection_ref(),
             None
         );
+    }
+
+    #[test]
+    fn classifies_only_parseable_synthetic_frontier_as_heddle_namespace() {
+        let change = objects::object::ChangeId::from_bytes([9; 16]);
+        let name = objects::object::SyntheticFrontierName::new("main", change)
+            .expect("fixture synthetic name")
+            .git_ref();
+        let ref_name = GitRefName::new(&name);
+        assert_eq!(
+            ref_name.content_namespace(),
+            Some(GitRefContentNamespace::Heddle)
+        );
+        assert_eq!(
+            ref_name.short_name().expect("heddle short name"),
+            name.strip_prefix("refs/heddle/").expect("heddle prefix")
+        );
+    }
+
+    #[test]
+    fn rejects_internal_and_forged_heddle_refs_as_publishable_namespace() {
+        for name in [
+            "refs/heddle/internal",
+            "refs/heddle/frontier/main/hc-abc",
+            "refs/heddle",
+            "refs/heddle/",
+        ] {
+            assert_eq!(
+                GitRefName::new(name).content_namespace(),
+                None,
+                "{name} must not be a publishable Heddle content ref"
+            );
+        }
     }
 
     #[test]

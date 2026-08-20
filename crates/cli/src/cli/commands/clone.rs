@@ -1814,7 +1814,13 @@ async fn clone_network_connected(
         }
         persist_advertised_synthetic_refs(&local_repo, &remote_refs)?;
         client
-            .publish_clone_markers(&local_repo, repo_path, &result.checkpoint)
+            .publish_clone_markers(
+                &local_repo,
+                repo_path,
+                &result.checkpoint,
+                depth,
+                materialization,
+            )
             .await?;
         // Lazy clone: persist the hydrator metadata so future
         // `Repository::open` calls (in any process) can reconstruct
@@ -2033,7 +2039,13 @@ async fn recover_interrupted_clone_connected(
     }
     persist_advertised_synthetic_refs(&repo, &remote_refs)?;
     client
-        .publish_clone_markers(&repo, &intent.repository, &result.checkpoint)
+        .publish_clone_markers(
+            &repo,
+            &intent.repository,
+            &result.checkpoint,
+            intent.depth,
+            materialization,
+        )
         .await?;
     if intent.lazy {
         publish_attached_clone_thread(&repo, &track_name, &final_state)?;
@@ -2996,7 +3008,8 @@ mod tests {
                 None,
             ),
         ];
-        persist_advertised_synthetic_refs(&repo, &remote_refs).expect("persist after objects exist");
+        persist_advertised_synthetic_refs(&repo, &remote_refs)
+            .expect("persist after objects exist");
         assert!(
             repo.store()
                 .has_state(&snapshot.state_id)

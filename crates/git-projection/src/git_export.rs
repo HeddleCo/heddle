@@ -1054,12 +1054,14 @@ fn export_scoped(
         }
     }
 
-    crate::git_frontier::reconcile_synthetic_frontier_refs(
-        &repo,
-        bridge.heddle_repo,
-        &bridge.mapping,
-        &mut managed_record,
-    )?;
+    stats
+        .failed_refs
+        .extend(crate::git_frontier::reconcile_synthetic_frontier_refs(
+            &repo,
+            bridge.heddle_repo,
+            &bridge.mapping,
+            &mut managed_record,
+        )?);
 
     // Persist the updated ownership record so the next reconcile — and the push
     // frontier (`collect_managed_ref_updates`) — read heddle's managed set by
