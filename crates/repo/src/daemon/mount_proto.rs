@@ -185,6 +185,10 @@ pub const ERR_MOUNT_CONFLICT: &str = "mount_conflict";
 /// builds, or a Linux build without `--features mount`).
 pub const ERR_MOUNT_UNSUPPORTED: &str = "mount_unsupported";
 
+/// Standard error code when the caller has no same-uid proof.
+/// Localhost TCP is unauthenticated; the daemon fails closed.
+pub const ERR_UNAUTHORIZED: &str = "unauthorized";
+
 #[cfg(test)]
 mod tests {
     //! Wire-protocol round-trip tests. These verify that:

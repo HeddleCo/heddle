@@ -34,6 +34,7 @@
 //! consumer of this module.
 
 pub mod endpoint;
+pub mod mount_auth;
 pub mod mount_proto;
 pub mod protocol;
 pub mod server;
@@ -42,10 +43,11 @@ pub use endpoint::{
     EndpointState, default_state_dir, endpoint_path_for, load_endpoint, persist_endpoint,
     pid_alive, remove_endpoint, remove_endpoint_if_owned,
 };
+pub use mount_auth::{MountAuthDenied, MountClientAuth, authorize_mount_request, trusted_mount_path};
 pub use mount_proto::{
-    ERR_MOUNT_CONFLICT, ERR_MOUNT_UNSUPPORTED, ERR_VERSION_MISMATCH, MOUNT_PROTOCOL_VERSION,
-    MountDaemonRequest, MountDaemonResponse, MountRegistryFile, MountStatus, PersistedMount,
-    mount_daemon_endpoint_path, mount_daemon_registry_path,
+    ERR_MOUNT_CONFLICT, ERR_MOUNT_UNSUPPORTED, ERR_UNAUTHORIZED, ERR_VERSION_MISMATCH,
+    MOUNT_PROTOCOL_VERSION, MountDaemonRequest, MountDaemonResponse, MountRegistryFile, MountStatus,
+    PersistedMount, mount_daemon_endpoint_path, mount_daemon_registry_path,
 };
 pub use protocol::{HELPER_HOST, HELPER_IDLE_POLL_MS, HELPER_IDLE_TIMEOUT_SECS, send_json_request};
 pub use server::{IdleDecision, mount_idle_policy, run_server_loop};
