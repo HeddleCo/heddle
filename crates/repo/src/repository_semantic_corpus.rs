@@ -88,16 +88,25 @@ pub(crate) fn populate_new_function_corpus(
         let Some((functions, bytes)) =
             parse_tree_functions_sized(source, Some(new_tree), &path, cache)
         else {
-            continue;
+            warn!(
+                path,
+                "semantic corpus: index-listed function file failed to parse; fail-closed"
+            );
+            return Ok(false);
         };
+        if functions.is_empty() {
+            warn!(
+                path,
+                "semantic corpus: index-listed function file yielded no functions; fail-closed"
+            );
+            return Ok(false);
+        }
         extra_bytes = extra_bytes.saturating_add(bytes);
         if extra_bytes > CORPUS_BYTE_BUDGET {
             return Ok(false);
         }
         extra_files += 1;
-        if !functions.is_empty() {
-            new_functions.insert(rel, functions);
-        }
+        new_functions.insert(rel, functions);
     }
     Ok(true)
 }
@@ -168,80 +177,5 @@ fn join_semantic_path(prefix: &str, name: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn fdef(name: &str, content: &str) -> FunctionDef {
-        FunctionDef {
-            name: name.to_string(),
-            signature: format!("fn {name}()"),
-            start_line: 1,
-            end_line: 3,
-            content: content.to_string(),
-        }
-    }
-
-    #[test]
-    fn changed_symbols_ignore_untouched_siblings() {
-        let path = PathBuf::from("lib.rs");
-        let mut changed_paths = BTreeSet::new();
-        changed_paths.insert(path.clone());
-        let mut prior = BTreeMap::new();
-        prior.insert(
-            path.clone(),
-            vec![
-                fdef("keep", "fn keep() { 1 }"),
-                fdef("edit", "fn edit() { 1 }"),
-            ],
-        );
-        let mut new = BTreeMap::new();
-        new.insert(
-            path.clone(),
-            vec![
-                fdef("keep", "fn keep() { 1 }"),
-                fdef("edit", "fn edit() { 2 }"),
-            ],
-        );
-        let symbols = collect_changed_symbols(&changed_paths, &prior, &new);
-        assert_eq!(symbols, BTreeSet::from([(path, "edit".to_string())]));
-    }
-
-    #[test]
-    fn missing_index_is_incomplete() {
-        assert!(
-            !populate_new_function_corpus(
-                &FailingSource,
-                None,
-                &ContentHash::compute(b"tree"),
-                SemanticParseCache::shared(),
-                &mut BTreeMap::new(),
-            )
-            .unwrap()
-        );
-    }
-
-    struct FailingSource;
-
-    impl ObjectSource for FailingSource {
-        fn get_tree(
-            &self,
-            _hash: &ContentHash,
-        ) -> objects::error::Result<Option<objects::object::Tree>> {
-            Ok(None)
-        }
-
-        fn get_blob(
-            &self,
-            _hash: &ContentHash,
-        ) -> objects::error::Result<Option<objects::object::Blob>> {
-            Ok(None)
-        }
-
-        fn get_state(
-            &self,
-            _id: &objects::object::StateId,
-        ) -> objects::error::Result<Option<objects::object::State>> {
-            Ok(None)
-        }
-    }
-}
+#[path = "repository_semantic_corpus_tests.rs"]
+mod tests;

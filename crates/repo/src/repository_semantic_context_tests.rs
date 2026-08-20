@@ -168,6 +168,53 @@ fn delta() { if ready { launch(); } else { wait(); } abort(); }
     );
 }
 
+/// Merkle digest moves (new type / const / use) but no function body or
+/// name changes. Emit-scope is `changed_symbols`; empty means persist
+/// zero sibling tree-sitter signals.
+#[test]
+fn non_function_edit_persists_no_sibling_tree_sitter_signals() {
+    let temp = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp.path()).unwrap();
+    let seed = snapshot(&repo, temp.path(), "changed.rs", CORPUS);
+    let edited = snapshot(
+        &repo,
+        temp.path(),
+        "changed.rs",
+        "\
+use std::fmt;
+const MARKER: i32 = 0;
+struct Marker;
+fn alpha() { let total = first + second + third + fourth; }
+fn beta() { for widget in inventory { ship(widget); } }
+fn gamma() { match colour { Red => stop(), Green => go() } }
+fn delta() { while pending { dequeue().handle(); } flush(); }
+",
+    );
+
+    let index_hash = attachment_hash(&repo, &edited, StateAttachmentKind::SemanticIndex);
+    let ctx = build_semantic_context(&repo, Some(&seed), &edited, index_hash.as_ref(), None, None)
+        .unwrap();
+    assert!(
+        ctx.changed_paths.contains(&PathBuf::from("changed.rs")),
+        "non-function edit must remain in changed_paths: {ctx:?}"
+    );
+    assert!(
+        ctx.changed_symbols.is_empty(),
+        "function bodies unchanged so changed_symbols must be empty: {ctx:?}"
+    );
+    assert!(
+        load_risk_kinds(&repo, &edited)
+            .iter()
+            .all(|kind| !matches!(
+                kind,
+                RiskSignalKind::Novelty
+                    | RiskSignalKind::PatternDeviation
+                    | RiskSignalKind::TestReachability
+            )),
+        "non-function edit must persist zero sibling tree-sitter signals"
+    );
+}
+
 const TESTS: &str = "\
 fn test_one() { assert!(true); }
 fn test_two() { assert!(true); }

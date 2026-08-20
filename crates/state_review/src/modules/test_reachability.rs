@@ -280,6 +280,8 @@ mod tests {
             ],
         );
         ctx.changed_paths.insert(PathBuf::from("src/lib.rs"));
+        ctx.changed_symbols
+            .insert((PathBuf::from("src/lib.rs"), "orphan".to_string()));
 
         let signals = run(
             &empty_state(),
@@ -304,6 +306,10 @@ mod tests {
             ],
         );
         ctx.changed_paths.insert(PathBuf::from("src/lib.rs"));
+        ctx.changed_symbols
+            .insert((PathBuf::from("src/lib.rs"), "alpha".to_string()));
+        ctx.changed_symbols
+            .insert((PathBuf::from("src/lib.rs"), "beta".to_string()));
 
         let signals = run(
             &empty_state(),

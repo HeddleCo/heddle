@@ -166,6 +166,8 @@ mod tests {
             )],
         );
         ctx.changed_paths.insert(PathBuf::from("changed.rs"));
+        ctx.changed_symbols
+            .insert((PathBuf::from("changed.rs"), "delta".to_string()));
 
         let signals = run(&empty_state(), &empty_state(), &cfg, &ctx);
 
@@ -176,6 +178,28 @@ mod tests {
         );
         assert_eq!(signals[0].anchor.file, "changed.rs");
         assert_eq!(signals[0].anchor.symbol.as_deref(), Some("delta"));
+    }
+
+    #[test]
+    fn novelty_stays_quiet_when_changed_symbols_empty() {
+        let cfg = ReviewSignalsConfig::default();
+        let mut ctx = SemanticContext::new();
+        ctx.new_functions.insert(
+            PathBuf::from("changed.rs"),
+            vec![
+                fdef("alpha", "let total = first + second + third + fourth;"),
+                fdef("beta", "for widget in inventory { ship(widget); }"),
+                fdef("gamma", "match colour { Red => stop(), Green => go() }"),
+                fdef("delta", "while pending { dequeue().handle(); } flush();"),
+            ],
+        );
+        ctx.changed_paths.insert(PathBuf::from("changed.rs"));
+
+        let signals = run(&empty_state(), &empty_state(), &cfg, &ctx);
+        assert!(
+            signals.is_empty(),
+            "empty changed_symbols must not fall back to changed_paths: {signals:?}"
+        );
     }
 
     #[test]

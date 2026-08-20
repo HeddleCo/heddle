@@ -25,12 +25,13 @@ pub struct SemanticContext {
     pub prior_functions: BTreeMap<PathBuf, Vec<FunctionDef>>,
     pub new_functions: BTreeMap<PathBuf, Vec<FunctionDef>>,
     /// Repo-relative paths that actually changed in this review pass.
-    /// Emit-scope for modules that have no symbol-level delta. Empty
-    /// together with an empty `changed_symbols` emits nothing.
+    /// Used to build `changed_symbols` and to prune fmt-only churn.
+    /// Not an emit-scope: an empty `changed_symbols` emits nothing even
+    /// when this set is non-empty (non-function file-level edits).
     pub changed_paths: BTreeSet<PathBuf>,
     /// `(path, function name)` pairs that actually changed. Production
-    /// capture always fills this. Novelty / test_reachability /
-    /// pattern_deviation emit only for this set when it is non-empty.
+    /// emit-scope for novelty / test_reachability / pattern_deviation.
+    /// Empty means emit nothing — including when `changed_paths` is not.
     pub changed_symbols: BTreeSet<(PathBuf, String)>,
     /// Whether `new_functions` is a complete new-state corpus under the
     /// capture-time page/byte budgets. Novelty and test_reachability
@@ -56,17 +57,13 @@ impl SemanticContext {
         Self::default()
     }
 
-    /// Diff-scoped emit check. Production fills `changed_symbols`.
-    /// Empty `changed_symbols` falls back to `changed_paths`. Empty
-    /// both (fmt-sweep, or an unscoped context) emits nothing.
+    /// Production emit-scope is `changed_symbols` only. Empty means
+    /// emit nothing — a digest change with no function body/name delta
+    /// must not fire on untouched siblings.
     pub fn is_emit_target(&self, path: &Path, name: &str) -> bool {
-        if !self.changed_symbols.is_empty() {
-            return self
-                .changed_symbols
-                .iter()
-                .any(|(changed_path, changed_name)| changed_path == path && changed_name == name);
-        }
-        !self.changed_paths.is_empty() && self.changed_paths.contains(path)
+        self.changed_symbols
+            .iter()
+            .any(|(changed_path, changed_name)| changed_path == path && changed_name == name)
     }
 }
 
@@ -130,6 +127,20 @@ mod tests {
             end_line: 3,
             content: content.to_string(),
         }
+    }
+
+    #[test]
+    fn empty_changed_symbols_emits_nothing_even_when_paths_changed() {
+        let mut ctx = SemanticContext::new();
+        ctx.changed_paths.insert(PathBuf::from("lib.rs"));
+        assert!(
+            !ctx.is_emit_target(std::path::Path::new("lib.rs"), "sibling"),
+            "digest-only file change must not emit on untouched functions"
+        );
+        ctx.changed_symbols
+            .insert((PathBuf::from("lib.rs"), "edited".to_string()));
+        assert!(ctx.is_emit_target(std::path::Path::new("lib.rs"), "edited"));
+        assert!(!ctx.is_emit_target(std::path::Path::new("lib.rs"), "sibling"));
     }
 
     #[test]
