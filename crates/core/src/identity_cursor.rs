@@ -50,9 +50,11 @@ impl IdentityCursor {
 
     /// Merge an event patch: missing incoming fields keep the last cursor value.
     ///
-    /// `parent` is the exception: a later parent-session event (incoming
-    /// `session` equals the stored parent, and the patch omits `parent`)
-    /// clears the stale subagent parent instead of keeping it.
+    /// `parent` is the exception:
+    /// - incoming `parent` equal to incoming `session` is the main agent
+    ///   (Claude omits `agent_id`) and clears a stale subagent parent
+    /// - incoming `session` equal to the stored parent (Codex parent-session)
+    ///   also clears it
     pub fn merge_event(&self, patch: &IdentityCursor) -> Self {
         Self {
             provider: published_owned(patch.provider.clone()).or_else(|| self.provider.clone()),
@@ -91,10 +93,18 @@ fn published_owned(value: Option<String>) -> Option<String> {
 }
 
 fn merge_parent(current: &IdentityCursor, patch: &IdentityCursor) -> Option<String> {
-    if let Some(incoming) = published_owned(patch.parent.clone()) {
+    let incoming_parent = published_owned(patch.parent.clone());
+    let incoming_session = published_owned(patch.session.clone());
+    if incoming_parent
+        .as_ref()
+        .zip(incoming_session.as_ref())
+        .is_some_and(|(parent, session)| parent == session)
+    {
+        return None;
+    }
+    if let Some(incoming) = incoming_parent {
         return Some(incoming);
     }
-    let incoming_session = published_owned(patch.session.clone());
     if incoming_session
         .as_ref()
         .zip(current.parent.as_ref())
@@ -298,6 +308,27 @@ mod tests {
         });
         assert_eq!(still_subagent.parent.as_deref(), Some("parent-1"));
         assert_eq!(still_subagent.thought_level.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn claude_main_agent_event_clears_subagent_parent() {
+        let current = IdentityCursor {
+            provider: Some("anthropic".into()),
+            model: Some("opus".into()),
+            thought_level: None,
+            session: Some("sess-1".into()),
+            parent: Some("agent-sub".into()),
+        };
+        let back_on_main = current.merge_event(&IdentityCursor {
+            session: Some("sess-1".into()),
+            parent: Some("sess-1".into()),
+            ..IdentityCursor::default()
+        });
+        assert_eq!(back_on_main.session.as_deref(), Some("sess-1"));
+        assert!(
+            back_on_main.parent.is_none(),
+            "main-agent event (parent == session) must clear the subagent parent"
+        );
     }
 
     #[test]

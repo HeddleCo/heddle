@@ -44,15 +44,18 @@ pub fn cursor_patch_from_stdin(harness: &str, stdin: &str) -> IdentityCursor {
 ///
 /// Live model is StatusLine `model.id`. Hooks otherwise carry optional model
 /// on SessionStart only. Effort is `{level}` (not a string). Parent is
-/// `agent_id`. Do not invent a model.
+/// `agent_id`. A main-agent event omits `agent_id`, so parent is set to
+/// `session` and merge treats `parent == session` as a clear. Do not invent
+/// a model.
 pub fn claude_cursor_patch(payload: &Value) -> IdentityCursor {
+    let session = first_value_string(payload, &[&["session_id"], &["sessionId"]]);
     IdentityCursor {
         provider: Some("anthropic".to_string()),
         model: value_string_or_named(payload, &["model"], &["id"])
             .or_else(|| value_string(payload, &["model", "display_name"])),
         thought_level: thought_level_from_payload(payload),
-        session: first_value_string(payload, &[&["session_id"], &["sessionId"]]),
-        parent: value_string(payload, &["agent_id"]),
+        session: session.clone(),
+        parent: value_string(payload, &["agent_id"]).or_else(|| session.clone()),
     }
     .omit_unpublished()
 }
@@ -258,6 +261,32 @@ mod tests {
         assert_eq!(patch.thought_level.as_deref(), Some("max"));
         assert_eq!(patch.session.as_deref(), Some("sess-claude"));
         assert_eq!(patch.parent.as_deref(), Some("agent-9"));
+    }
+
+    #[test]
+    fn claude_main_agent_omits_agent_id_and_clears_parent() {
+        let subagent = claude_cursor_patch(&json!({
+            "session_id": "sess-claude",
+            "agent_id": "agent-9"
+        }));
+        let current = IdentityCursor::default().merge_event(&subagent);
+        assert_eq!(current.parent.as_deref(), Some("agent-9"));
+
+        let main = claude_cursor_patch(&json!({
+            "session_id": "sess-claude"
+        }));
+        assert_eq!(main.session.as_deref(), Some("sess-claude"));
+        assert_eq!(
+            main.parent.as_deref(),
+            Some("sess-claude"),
+            "main-agent Claude events signal clear by setting parent to session"
+        );
+        let next = current.merge_event(&main);
+        assert!(
+            next.parent.is_none(),
+            "later main-agent events must not keep the stale subagent parent"
+        );
+        assert_eq!(next.session.as_deref(), Some("sess-claude"));
     }
 
     #[test]

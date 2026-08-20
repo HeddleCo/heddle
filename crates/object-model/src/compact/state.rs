@@ -18,6 +18,10 @@ pub fn is_state_frame(bytes: &[u8]) -> bool {
 }
 
 /// Encode states as lossless columns, omitting only the derivable state id.
+///
+/// Format-4 agent states keep their accepted stored id through
+/// [`crate::object::State::accepts_stored_id`] after decode; the frame
+/// stays HCS2.
 pub fn encode_state_frame(states: &[State]) -> Result<Vec<u8>> {
     encode_state_frame_versioned(states, STATE_MAGIC)
 }

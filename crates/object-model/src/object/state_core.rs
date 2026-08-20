@@ -547,6 +547,20 @@ impl State {
         unpublished_cursor && self.pre_cursor_id() == *stored
     }
 
+    /// Content hash that produced `stored` when this state accepts that id.
+    ///
+    /// Format-4 agent states keep a pre-cursor id. Verification and re-signing
+    /// must use that hash, not the current format-5 [`Self::compute_hash`].
+    pub fn hash_for_stored_id(&self, stored: &StateId) -> ContentHash {
+        if self.id() == *stored {
+            self.compute_hash()
+        } else if self.accepts_stored_id(stored) {
+            self.compute_pre_cursor_hash()
+        } else {
+            self.compute_hash()
+        }
+    }
+
     pub fn is_root(&self) -> bool {
         self.parents.is_empty()
     }
@@ -1021,6 +1035,15 @@ mod tests {
             human.id(),
             human.pre_cursor_id(),
             "human states never hashed the agent cursor tags"
+        );
+        assert_eq!(
+            agent_state.hash_for_stored_id(&agent_state.pre_cursor_id()),
+            agent_state.compute_pre_cursor_hash(),
+            "accepted format-4 ids must verify against the preserved hash"
+        );
+        assert_eq!(
+            agent_state.hash_for_stored_id(&agent_state.id()),
+            agent_state.compute_hash()
         );
     }
 

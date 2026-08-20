@@ -63,6 +63,13 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Fixed
 
+- **Format-4 agent states keep their signatures and pack ids.** Verification
+  and re-signing use the hash for the accepted stored id. Compact HCS2
+  repack accepts that pre-cursor id. Claude SessionEnd relays
+  `close_session` and then expires the cursor. A later main-agent Claude
+  event (`parent == session`) clears a stale subagent parent. OpenCode
+  relays await so timeline before/after stay ordered.
+
 - **`whoami` reports the capture actor before hosted auth.** `init --principal-*`
   writes `user_config` and `status` already showed that principal. `whoami` now
   prints the same capture actor first and hosted authentication as a second
