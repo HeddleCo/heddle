@@ -98,7 +98,7 @@ fn write_hot_tree_pack(
     builder.add(
         tree.hash(),
         ObjectType::Tree,
-        rmp_serde::to_vec_named(tree).unwrap(),
+        tree.encode_canonical().unwrap(),
     );
     let (pack, index, _) = builder.build().unwrap();
     let pack_path = root.join(format!("{name}.pack"));
@@ -191,7 +191,7 @@ fn random_access_record_wins_over_solid_frame_for_concurrent_reads() {
     );
     let manager = Arc::new(manager);
 
-    let expected = Arc::new(rmp_serde::to_vec_named(&trees[0]).unwrap());
+    let expected = Arc::new(trees[0].encode_canonical().unwrap());
     let readers = (0..8)
         .map(|_| {
             let manager = Arc::clone(&manager);

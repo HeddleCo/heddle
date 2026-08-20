@@ -140,8 +140,8 @@ pub fn load_requested_object(store: &impl ObjectStore, req: &ObjectRequest) -> R
         ObjectId::Hash(hash) => {
             if let Some(blob) = store.get_blob(hash)? {
                 (ObjectType::Blob, blob.content().to_vec())
-            } else if let Some(tree) = store.get_tree(hash)? {
-                (ObjectType::Tree, rmp_serde::to_vec_named(&tree)?)
+            } else if let Some(data) = store.get_tree_serialized(hash)? {
+                (ObjectType::Tree, data)
             } else {
                 return Err(ProtocolError::ObjectNotFound(hash.to_hex()));
             }
@@ -182,12 +182,9 @@ pub fn load_object_data(
             .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?
             .content()
             .to_vec(),
-        (ObjectId::Hash(hash), ObjectType::Tree) => {
-            let tree = store
-                .get_tree(hash)?
-                .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?;
-            rmp_serde::to_vec_named(&tree)?
-        }
+        (ObjectId::Hash(hash), ObjectType::Tree) => store
+            .get_tree_serialized(hash)?
+            .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?,
         (ObjectId::Hash(hash), ObjectType::AnnotatedTag) => store
             .get_annotated_tag(hash)?
             .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?
@@ -240,7 +237,9 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
             store.put_blob_bytes_with_hash(&data.data, *hash)?;
         }
         (ObjectId::Hash(hash), ObjectType::Tree) => {
-            let tree: Tree = rmp_serde::from_slice(&data.data)?;
+            let tree = Tree::decode_canonical(&data.data).map_err(|error| {
+                ProtocolError::InvalidState(format!("invalid tree object: {error}"))
+            })?;
             tree.validate().map_err(|error| {
                 ProtocolError::InvalidState(format!("invalid tree object: {error}"))
             })?;
@@ -395,10 +394,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tree_data.obj_type, ObjectType::Tree);
-        assert_eq!(
-            rmp_serde::from_slice::<Tree>(&tree_data.data).unwrap(),
-            tree
-        );
+        assert_eq!(Tree::decode_canonical(&tree_data.data).unwrap(), tree);
         store_received_object(&dest, &tree_data).unwrap();
         assert_eq!(dest.get_tree(&tree_hash).unwrap().unwrap(), tree);
 
@@ -472,7 +468,7 @@ mod tests {
         let blob = Blob::from("tree leaf");
         let blob_hash = store.put_blob(&blob).unwrap();
         let tree = Tree::from_entries(vec![TreeEntry::file("leaf.txt", blob_hash, false).unwrap()]);
-        let tree_bytes = rmp_serde::to_vec_named(&tree).unwrap();
+        let tree_bytes = tree.encode_canonical().unwrap();
         let wrong_hash = ContentHash::from_bytes([4; 32]);
 
         let error = store_received_object(

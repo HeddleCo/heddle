@@ -829,7 +829,7 @@ fn object_info_from_event(
             }))
         }
         StateClosureEvent::Tree { hash, tree } => {
-            let tree_bytes = rmp_serde::to_vec_named(tree)?;
+            let tree_bytes = tree.encode_canonical().map_err(HeddleError::from)?;
             Ok(Some(ObjectInfo {
                 id: ObjectId::Hash(hash),
                 obj_type: ObjectType::Tree,
