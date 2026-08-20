@@ -4270,10 +4270,11 @@ mod tests {
         .expect("collect authoritative updates");
         let mut names: Vec<String> = updates.iter().map(full_ref_name).collect();
         names.sort();
+        let mut expected = vec![managed_name, "refs/heads/main".to_string()];
+        expected.sort();
 
         assert_eq!(
-            names,
-            vec![managed_name, "refs/heads/main".to_string()],
+            names, expected,
             "only the managed synthetic root and overlay-authoritative heads may publish"
         );
         assert!(
