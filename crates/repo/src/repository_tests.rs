@@ -366,7 +366,10 @@ fn open_existing_opens_an_already_present_store() {
         .expect("existing store must open")
         .expect("existing store must be present");
     assert_eq!(
-        opened.root().canonicalize().expect("canonicalize opened root"),
+        opened
+            .root()
+            .canonicalize()
+            .expect("canonicalize opened root"),
         root.canonicalize().expect("canonicalize fixture root")
     );
 }
