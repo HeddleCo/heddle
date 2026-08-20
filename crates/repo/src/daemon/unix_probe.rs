@@ -14,10 +14,6 @@ pub(crate) enum UnixSocketProbe {
     Inaccessible,
 }
 
-pub(crate) fn unix_socket_is_live(path: &Path) -> bool {
-    matches!(probe_unix_socket(path), UnixSocketProbe::Live)
-}
-
 pub(crate) fn probe_unix_socket(path: &Path) -> UnixSocketProbe {
     match UnixStream::connect(path) {
         Ok(_) => UnixSocketProbe::Live,
@@ -45,7 +41,7 @@ pub(crate) fn classify_unix_socket_connect(path: &Path, error: &std::io::Error) 
 mod tests {
     use std::{io::ErrorKind, path::Path};
 
-    use super::{classify_unix_socket_connect, UnixSocketProbe};
+    use super::{UnixSocketProbe, classify_unix_socket_connect};
 
     #[test]
     fn permission_denied_probe_is_not_dead() {

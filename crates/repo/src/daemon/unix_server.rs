@@ -17,11 +17,11 @@ use std::{
 use objects::error::HeddleError;
 
 use super::{
-    mount_proto::{MountDaemonResponse, ERR_UNAUTHORIZED, MOUNT_PROTOCOL_VERSION},
+    mount_proto::{ERR_UNAUTHORIZED, MOUNT_PROTOCOL_VERSION, MountDaemonResponse},
     peer::check_peer_uid_matches_self,
     protocol::HELPER_IDLE_POLL_MS,
-    server::{handle_json_rw, IdleDecision},
-    unix_probe::{probe_unix_socket, UnixSocketProbe},
+    server::{IdleDecision, handle_json_rw},
+    unix_probe::{UnixSocketProbe, probe_unix_socket},
 };
 
 /// Per-connection hook for a Unix-domain helper daemon.
@@ -165,9 +165,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{bind_unix_socket, handle_authenticated_unix_connection};
-    use crate::daemon::unix_probe::unix_socket_is_live;
+    use crate::daemon::unix_probe::{UnixSocketProbe, probe_unix_socket};
     use crate::daemon::{
-        MountDaemonRequest, MountDaemonResponse, ERR_UNAUTHORIZED, MOUNT_PROTOCOL_VERSION,
+        ERR_UNAUTHORIZED, MOUNT_PROTOCOL_VERSION, MountDaemonRequest, MountDaemonResponse,
     };
 
     #[test]
@@ -181,7 +181,7 @@ mod tests {
             "got {error}"
         );
         assert!(
-            unix_socket_is_live(&path),
+            matches!(probe_unix_socket(&path), UnixSocketProbe::Live),
             "original listener must still own the socket name"
         );
         drop(first);
@@ -214,7 +214,7 @@ mod tests {
         restore.set_mode(0o600);
         std::fs::set_permissions(&path, restore).unwrap();
         assert!(
-            unix_socket_is_live(&path),
+            matches!(probe_unix_socket(&path), UnixSocketProbe::Live),
             "original listener must still own the socket name"
         );
         drop(first);
@@ -228,7 +228,7 @@ mod tests {
         drop(first);
         let replacement = bind_unix_socket(&path).expect("stale leftover socket may be replaced");
         assert!(
-            unix_socket_is_live(&path),
+            matches!(probe_unix_socket(&path), UnixSocketProbe::Live),
             "replacement listener must be reachable"
         );
         drop(replacement);
