@@ -16,10 +16,10 @@
 //! Versioning: `MOUNT_PROTOCOL_VERSION` is bumped together with the
 //! daemon binary. The endpoint file under
 //! `.heddle/state/heddled.endpoint.json` records this number. A live
-//! older TCP daemon (v2) is retired with `Shutdown` before the CLI
-//! removes the file and respawns — otherwise two daemons own mounts.
-//! fsmonitor's protocol stays at v1 on a separate endpoint file
-//! (`monitor-helper.json`).
+//! older TCP daemon (v2) fails closed: v3 does not speak that
+//! protocol. The operator must stop or upgrade the leftover process
+//! before a replacement can spawn. fsmonitor's protocol stays at v1
+//! on a separate endpoint file (`monitor-helper.json`).
 //!
 //! Endpoint file path: `.heddle/state/heddled.endpoint.json`
 //! (resolved by [`mount_daemon_endpoint_path`]).
@@ -28,47 +28,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::endpoint::{EndpointState, default_state_dir};
+use super::endpoint::default_state_dir;
 
 /// Wire-protocol version for the mount daemon. Bump in lockstep with
-/// any breaking change to the request/response enums below. CLI
-/// clients that find a live older version retire that daemon before
-/// respawning at this version.
+/// any breaking change to the request/response enums below. A live
+/// older TCP endpoint fails closed; this CLI does not operate it.
 pub const MOUNT_PROTOCOL_VERSION: u32 = 3;
 
 /// Last protocol that spoke unauthenticated localhost TCP.
 pub const MOUNT_PROTOCOL_V2: u32 = 2;
-
-/// How a recorded endpoint relates to this CLI's protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MountEndpointDisposition {
-    /// Current version and an authenticated socket. Safe to use.
-    Current,
-    /// Older TCP daemon whose PID is still alive. Must `Shutdown`
-    /// before spawning a replacement.
-    LiveTcpPredecessor,
-    /// Missing socket, dead PID, or otherwise not a live predecessor.
-    Stale,
-}
-
-/// Classify an on-disk mount-daemon endpoint. `pid_is_alive` is
-/// supplied by the caller so tests can exercise the v2-upgrade
-/// branch without forking.
-pub fn mount_endpoint_disposition(
-    endpoint: &EndpointState,
-    pid_is_alive: bool,
-) -> MountEndpointDisposition {
-    if endpoint.version == MOUNT_PROTOCOL_VERSION && endpoint.socket_path.is_some() {
-        if endpoint.pid.is_some() && !pid_is_alive {
-            return MountEndpointDisposition::Stale;
-        }
-        return MountEndpointDisposition::Current;
-    }
-    if endpoint.version < MOUNT_PROTOCOL_VERSION && endpoint.socket_path.is_none() && pid_is_alive {
-        return MountEndpointDisposition::LiveTcpPredecessor;
-    }
-    MountEndpointDisposition::Stale
-}
 
 /// The endpoint file the mount daemon writes (and CLI clients read)
 /// to discover its UDS path + PID.
