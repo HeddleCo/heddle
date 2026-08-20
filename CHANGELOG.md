@@ -25,7 +25,7 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   or tree-present / blob-missing parent is `MissingObject`. Frontier maps
   and `state_line_count` are checked against the blob before any moved
   bitmap; a mismatch is `InvalidFrontier`. Myers keeps similar's Compact
-  tie-break (`b/a` vs `a/a` is `(1,0)`).
+  tie-break: a partial slide splits the run (`b/a` vs `a/a` is `(1,0)`).
   Origin sets are reused like `ProvenanceBuilder`. Overlay, snapshot, and
   merge visit original blob bytes. Slice usage reports work, lines, and
   scratch on one live `ResourceBudget` (heddle#1454).

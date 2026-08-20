@@ -98,6 +98,22 @@ fn ba_vs_aa_matches_similar_leftmost_new() {
 }
 
 #[test]
+fn partial_slide_does_not_move_the_unmatched_tail() {
+    let old = "x\ny\na\nb\n";
+    let new = "a\nz\na\nb\n";
+    let runs = collect_runs(old, new, LineDiffLimits::unlimited()).unwrap();
+    let pairs = expand_runs(&runs);
+    let old_lines = split_text_lines(old.as_bytes()).unwrap();
+    let new_lines = split_text_lines(new.as_bytes()).unwrap();
+    let similar = similar_pairs(&old_lines, &new_lines);
+    assert_eq!(pairs, similar, "ours={pairs:?} similar={similar:?}");
+    assert!(
+        !pairs.contains(&(3, 1)),
+        "partial slide must not claim b==z: {pairs:?}"
+    );
+}
+
+#[test]
 fn max_d_no_common_lines_does_not_panic() {
     let old = "a\nb\nc\nd\ne\nf\ng\nh\n";
     let new = "1\n2\n3\n4\n5\n6\n7\n8\n";

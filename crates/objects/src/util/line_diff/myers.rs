@@ -3,7 +3,7 @@
 //! search cannot finish inside the work budget it returns BudgetExceeded.
 
 use super::super::budget::{BudgetExceeded, ResourceBudget, ResourceKind};
-use super::compact::slide_equals_left;
+use super::compact::slide_equal_run;
 use super::myers_search::{common_prefix, common_suffix, find_middle_snake};
 use super::scan::LineOff;
 use super::scratch::{ConquerJob, JOB_EQUAL, JOB_RANGE};
@@ -43,7 +43,7 @@ pub(super) fn emit_equal_runs<E>(
         },
     )?;
 
-    let mut runs = Vec::new();
+    let mut new_cursor = 0usize;
     while top > 0 {
         top -= 1;
         let job = jobs[top];
@@ -51,11 +51,17 @@ pub(super) fn emit_equal_runs<E>(
             if job.eq_len == 0 {
                 continue;
             }
-            runs.push(EqualRun {
-                old_start: job.eq_old as usize,
-                new_start: job.eq_new as usize,
-                len: job.eq_len as usize,
-            });
+            emit_slid(
+                old,
+                new,
+                EqualRun {
+                    old_start: job.eq_old as usize,
+                    new_start: job.eq_new as usize,
+                    len: job.eq_len as usize,
+                },
+                &mut new_cursor,
+                &mut visit,
+            )?;
             continue;
         }
         conquer_range(
@@ -69,13 +75,9 @@ pub(super) fn emit_equal_runs<E>(
             },
             job,
             budget,
-            &mut runs,
+            &mut new_cursor,
+            &mut visit,
         )?;
-    }
-    runs.sort_by_key(|run| (run.new_start, run.old_start));
-    slide_equals_left(old, new, &mut runs);
-    for run in runs {
-        visit(run).map_err(LineDiffError::Visitor)?;
     }
     Ok(())
 }
@@ -93,7 +95,8 @@ fn conquer_range<E>(
     scratch: ScratchViews<'_>,
     job: ConquerJob,
     budget: &mut ResourceBudget,
-    runs: &mut Vec<EqualRun>,
+    new_cursor: &mut usize,
+    visit: &mut impl FnMut(EqualRun) -> Result<(), E>,
 ) -> Result<(), LineDiffError<E>> {
     let ScratchViews {
         vf: vf_storage,
@@ -108,11 +111,17 @@ fn conquer_range<E>(
 
     let prefix = common_prefix(old, old_lo, old_hi, new, new_lo, new_hi, budget)?;
     if prefix > 0 {
-        runs.push(EqualRun {
-            old_start: old_lo,
-            new_start: new_lo,
-            len: prefix,
-        });
+        emit_slid(
+            old,
+            new,
+            EqualRun {
+                old_start: old_lo,
+                new_start: new_lo,
+                len: prefix,
+            },
+            new_cursor,
+            visit,
+        )?;
         old_lo += prefix;
         new_lo += prefix;
     }
@@ -179,6 +188,21 @@ fn conquer_range<E>(
             eq_len: 0,
         },
     )?;
+    Ok(())
+}
+
+fn emit_slid<E>(
+    old: LineView<'_>,
+    new: LineView<'_>,
+    run: EqualRun,
+    new_cursor: &mut usize,
+    visit: &mut impl FnMut(EqualRun) -> Result<(), E>,
+) -> Result<(), LineDiffError<E>> {
+    let (first, second) = slide_equal_run(old, new, run, new_cursor);
+    visit(first).map_err(LineDiffError::Visitor)?;
+    if let Some(second) = second {
+        visit(second).map_err(LineDiffError::Visitor)?;
+    }
     Ok(())
 }
 

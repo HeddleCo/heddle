@@ -104,6 +104,7 @@ fn misaligned_scratch_is_not_ub() {
 fn visitor_cancel_stops_before_later_runs() {
     let old = "a\nb\nc\nd\n";
     let new = "a\nx\nc\nd\n";
+    let full = visit_usage(old, new, LineDiffLimits::unlimited()).expect("unlimited");
     let needed = scratch_bytes_for_line_counts(4, 4);
     let mut scratch = vec![0u8; needed];
     let mut budget = LineDiffLimits::unlimited().budget(scratch.len());
@@ -124,6 +125,10 @@ fn visitor_cancel_stops_before_later_runs() {
     );
     assert!(matches!(err, Err(LineDiffError::Visitor("stop"))));
     assert_eq!(seen, 1);
+    assert!(
+        budget.used().work < full.work,
+        "cancel must stop Myers, not drain the search then visit"
+    );
 }
 
 #[test]
