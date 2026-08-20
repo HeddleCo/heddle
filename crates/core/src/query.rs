@@ -76,21 +76,27 @@ const OPLOG_FALLBACK_SCAN_WINDOW: usize = 100_000;
 
 pub fn query(ctx: &ExecutionContext, req: QueryRequest) -> Result<QueryReport> {
     let repo = ctx.require_repo()?;
-    let q = build_query(&req)?;
-    let mut scan = q.clone();
-    scan.actor = None;
-    scan.limit = None;
-    let mut hits = query_combined(repo.heddle_dir(), &scan)?;
-    for hit in &mut hits {
-        fill_actor_email_from_state(repo, hit)?;
-    }
-    hits.retain(|hit| hit.matches(&q));
-    if let Some(limit) = q.limit {
-        hits.truncate(limit);
+    let mut q = build_query(&req)?;
+    let actor = q.actor.take();
+    let limit = q.limit.take();
+    let hits = query_combined(repo.heddle_dir(), &q)?;
+    q.actor = actor;
+    let mut selected = Vec::new();
+    for mut hit in hits {
+        fill_actor_email_from_state(repo, &mut hit)?;
+        if !hit.matches(&q) {
+            continue;
+        }
+        selected.push(hit);
+        if let Some(limit) = limit
+            && selected.len() >= limit
+        {
+            break;
+        }
     }
     Ok(QueryReport {
         output_kind: "query",
-        hits: hits.into_iter().map(hit_to_report).collect(),
+        hits: selected.into_iter().map(hit_to_report).collect(),
     })
 }
 
