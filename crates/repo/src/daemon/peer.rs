@@ -24,11 +24,16 @@ pub fn current_euid() -> u32 {
 
 /// Fail closed unless the Unix-socket peer is the same effective uid.
 pub fn check_peer_uid_matches_self(stream: &UnixStream) -> Result<(), HeddleError> {
+    check_peer_uid(stream, current_euid())
+}
+
+/// Same `SO_PEERCRED` / `getpeereid` read as
+/// [`check_peer_uid_matches_self`], compared to `expected_uid`.
+pub(crate) fn check_peer_uid(stream: &UnixStream, expected_uid: u32) -> Result<(), HeddleError> {
     let peer_uid = peer_uid(stream)?;
-    let self_uid = current_euid();
-    if !peer_uids_match(peer_uid, self_uid) {
+    if !peer_uids_match(peer_uid, expected_uid) {
         return Err(HeddleError::Config(format!(
-            "peer uid {peer_uid} does not match daemon uid {self_uid}"
+            "peer uid {peer_uid} does not match daemon uid {expected_uid}"
         )));
     }
     Ok(())
