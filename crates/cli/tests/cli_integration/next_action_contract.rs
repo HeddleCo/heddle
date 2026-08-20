@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use refs::Head;
 use repo::{Repository, ThreadIntegrationPolicy, ThreadManager, ThreadState};
 use serde_json::Value;
 use tempfile::TempDir;
@@ -398,13 +399,116 @@ fn sync_on_default_main_thread_succeeds() {
         "sync next_action must not unconditionally recommend land --thread: {sync}"
     );
     assert_no_banned_next_actions(&sync);
+}
 
-    let named = json(
+/// heddle#1461 / #1467: `--thread` must not bypass `load_thread`'s
+/// imported-ref advice just because the unmanaged ref is currently checked out.
+#[test]
+fn sync_named_unmanaged_ref_keeps_imported_ref_advice() {
+    let repo = setup_native_repo();
+    let output = heddle_output(
         &["--output", "json", "sync", "--thread", "main"],
+        Some(repo.path()),
+    )
+    .expect("sync --thread main should spawn");
+    assert!(
+        !output.status.success(),
+        "unmanaged main must not silently no-op: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let envelope: Value = serde_json::from_str(
+        stderr
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or(stderr.trim()),
+    )
+    .unwrap_or_else(|err| panic!("JSON envelope: {err}\n{stderr}"));
+    assert_eq!(envelope["kind"], "imported_git_ref_not_managed_thread");
+}
+
+/// heddle#1461 / #1467: a managed thread created from detached HEAD has
+/// `target_thread: None`. Sync must not treat that as already-current.
+#[test]
+fn sync_detached_head_managed_thread_without_target_is_not_noop() {
+    let repo = setup_native_repo();
+    let opened = Repository::open(repo.path()).unwrap();
+    let head = opened
+        .head()
+        .unwrap()
+        .expect("repo should have a current state before detaching");
+    opened
+        .write_head_recorded(&Head::Detached { state: head })
+        .unwrap();
+    drop(opened);
+
+    let checkout = TempDir::new().unwrap();
+    let checkout_arg = checkout.path().join("work");
+    let started = json(
+        &[
+            "--output",
+            "json",
+            "start",
+            "feature/no-target",
+            "--path",
+            checkout_arg.to_str().unwrap(),
+        ],
         repo.path(),
     );
-    assert_eq!(named["status"], "current", "{named}");
-    assert_eq!(named["thread"], "main", "{named}");
+    let _execution_path = started["execution_path"]
+        .as_str()
+        .expect("start should report execution_path");
+
+    let manager = ThreadManager::new(Repository::open(repo.path()).unwrap().heddle_dir());
+    let thread = manager
+        .load("feature/no-target")
+        .unwrap()
+        .expect("managed thread should have a record");
+    assert!(
+        thread.target_thread.is_none(),
+        "detached-HEAD start must persist no target, got {:?}",
+        thread.target_thread
+    );
+
+    let output = heddle_output(
+        &["--output", "json", "sync", "--thread", "feature/no-target"],
+        Some(repo.path()),
+    )
+    .expect("sync --thread feature/no-target should spawn");
+    assert!(
+        !output.status.success(),
+        "no-target managed thread must not report success as a no-op: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !combined.contains("already current") && !combined.contains("\"chosen_path\":\"no_op\""),
+        "no-target managed sync must not take the synthesized-checkout no-op: {combined}"
+    );
+    let envelope: Value = serde_json::from_str(
+        combined
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with('{'))
+            .unwrap_or(combined.trim()),
+    )
+    .unwrap_or_else(|err| panic!("JSON envelope: {err}\n{combined}"));
+    assert_eq!(envelope["kind"], "missing_target_thread", "{envelope}");
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("has no target thread")),
+        "missing-target advice must be actionable: {envelope}"
+    );
+
+    drop(checkout);
 }
 
 /// heddle#1461: default human output is prose, not the JSON envelope.

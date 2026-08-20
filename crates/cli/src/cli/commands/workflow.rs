@@ -234,7 +234,8 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
     let import_hint = repo.git_import_guidance()?;
-    let mut output = if sync_is_already_current(&thread) {
+    let synthesized_checkout = thread_manager(&repo).load(&thread.id)?.is_none();
+    let mut output = if sync_is_already_current(&thread, synthesized_checkout) {
         let recommended_action = sync_completed_next_action(
             operation.as_ref(),
             remote_tracking.as_ref(),
@@ -1441,23 +1442,13 @@ fn resolve_thread(
 
 /// Resolve the thread `sync` refreshes onto its target.
 ///
-/// The default checkout (including a thread named `main`) has a ref from
-/// `seed_default_thread` but often no ThreadManager record. `load_thread`
-/// would then say `Thread 'main' not found`. Sync accepts the current /
-/// default checkout thread as a first-class subject.
+/// Omit `--thread` to use the current checkout, including a synthesized
+/// default thread such as `main` (ref from `seed_default_thread`, no
+/// ThreadManager record). An explicit `--thread` always goes through
+/// `load_thread` so unmanaged imported refs keep their typed advice.
 fn resolve_sync_thread(repo: &Repository, thread: Option<&str>) -> Result<Thread> {
     match thread {
-        Some(name) => {
-            if let Some(loaded) = thread_manager(repo).load(name)? {
-                return Ok(loaded);
-            }
-            if let Some(current) = current_thread(repo)?
-                && (current.id == name || current.thread == name)
-            {
-                return Ok(current);
-            }
-            load_thread(repo, name)
-        }
+        Some(name) => load_thread(repo, name),
         None => current_thread(repo)?.ok_or_else(|| {
             anyhow!(RecoveryAdvice::no_current_thread(
                 "sync",
@@ -1468,10 +1459,10 @@ fn resolve_sync_thread(repo: &Repository, thread: Option<&str>) -> Result<Thread
     }
 }
 
-fn sync_is_already_current(thread: &Thread) -> bool {
+fn sync_is_already_current(thread: &Thread, synthesized_checkout: bool) -> bool {
     core_sync_is_already_current(
         thread.freshness == repo::ThreadFreshness::Current,
-        thread.target_thread.is_some(),
+        synthesized_checkout,
     )
 }
 
@@ -3751,20 +3742,24 @@ mod tests {
     // the in-thread case (paths equal) and a worktree-less thread (empty path)
     // do not.
     #[test]
-    fn sync_treats_default_thread_without_target_as_already_current() {
+    fn sync_treats_synthesized_checkout_as_already_current() {
         let mut thread = thread_with_execution_path(PathBuf::from("/tmp/main"));
         thread.id = "main".to_string();
         thread.thread = "main".to_string();
         thread.target_thread = None;
         thread.freshness = repo::ThreadFreshness::Unknown;
-        assert!(sync_is_already_current(&thread));
+        assert!(sync_is_already_current(&thread, true));
+        assert!(
+            !sync_is_already_current(&thread, false),
+            "a persisted managed thread with no target is not a no-op"
+        );
 
         thread.target_thread = Some("main".to_string());
         thread.freshness = repo::ThreadFreshness::Stale;
-        assert!(!sync_is_already_current(&thread));
+        assert!(!sync_is_already_current(&thread, false));
 
         thread.freshness = repo::ThreadFreshness::Current;
-        assert!(sync_is_already_current(&thread));
+        assert!(sync_is_already_current(&thread, false));
     }
 
     #[test]

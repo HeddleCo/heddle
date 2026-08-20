@@ -440,11 +440,15 @@ pub fn sync_completed_next_action(
     .map(str::to_string)
 }
 
-/// Whether sync has nothing left to refresh: the thread is already
-/// current, or it has no integration target (the default checkout,
-/// including a thread named `main`).
-pub fn sync_is_already_current(freshness_is_current: bool, has_target_thread: bool) -> bool {
-    freshness_is_current || !has_target_thread
+/// Whether sync has nothing left to refresh.
+///
+/// The no-op is freshness-current **or** the synthesized default
+/// checkout (a HEAD-attached ref with no ThreadManager record, often
+/// named `main`). A persisted managed thread with `target_thread: None`
+/// (created from detached HEAD) is **not** a no-op — it must reach
+/// `refresh_thread` and surface `missing_target_thread`.
+pub fn sync_is_already_current(freshness_is_current: bool, is_synthesized_checkout: bool) -> bool {
+    freshness_is_current || is_synthesized_checkout
 }
 
 /// Next action after a successful local land (push if trust says so, else cleanup).
@@ -819,9 +823,9 @@ mod tests {
             Some("heddle continue".to_string())
         );
 
-        assert!(sync_is_already_current(true, true));
-        assert!(sync_is_already_current(false, false));
-        assert!(!sync_is_already_current(false, true));
+        assert!(sync_is_already_current(true, false));
+        assert!(sync_is_already_current(false, true));
+        assert!(!sync_is_already_current(false, false));
     }
 
     #[test]
