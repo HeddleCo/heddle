@@ -525,7 +525,7 @@ pub trait ObjectStore: Send + Sync {
             ));
         }
         Ok(Some(TreeEntryReader::open(
-            OpenedTreeBody::Bytes(crate::object::BytesTreeSource::verified_placement(body)),
+            OpenedTreeBody::Bytes(crate::object::BytesTreeSource::sequential_verify(body)),
             *tree_id,
             cursor,
         )?))
@@ -566,13 +566,13 @@ pub trait ObjectStore: Send + Sync {
         self.put_blob_with_hash(&Blob::from_slice(data), hash)
     }
 
-    /// Return the raw canonical tree body for `hash`.
+    /// Return the stored tree body for `hash`, without requiring HTR4.
     ///
     /// This is a migration seam, not a runtime compatibility reader: callers
     /// that need current tree semantics should use [`ObjectStore::get_tree`].
-    /// Backends with direct raw storage override this so one-shot migrations can
-    /// canonicalize older tree encodings without reintroducing fallback decode
-    /// into the durable `Tree` type.
+    /// Loose and packed backends must return the raw stored bytes so one-shot
+    /// migrations can canonicalize older encodings without a current-decoder
+    /// gate. Default impls that only have `get_tree` re-encode current trees.
     fn get_tree_serialized(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
         self.get_tree(hash)?
             .map(|tree| tree.encode_canonical().map_err(HeddleError::from))

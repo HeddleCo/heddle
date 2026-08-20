@@ -49,10 +49,12 @@ pub enum TreeStreamError {
 }
 
 /// Caller-sized page budget. Zero limits fail closed.
+///
+/// Fields stay private so callers cannot bypass [`Self::new`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TreePageLimits {
-    pub max_entries: usize,
-    pub max_decoded_bytes: usize,
+    max_entries: usize,
+    max_decoded_bytes: usize,
 }
 
 impl TreePageLimits {
@@ -64,6 +66,14 @@ impl TreePageLimits {
             max_entries,
             max_decoded_bytes,
         })
+    }
+
+    pub fn max_entries(&self) -> usize {
+        self.max_entries
+    }
+
+    pub fn max_decoded_bytes(&self) -> usize {
+        self.max_decoded_bytes
     }
 }
 
@@ -186,21 +196,26 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
         &mut self,
         limits: TreePageLimits,
     ) -> Result<Option<TreePage>, TreeStreamError> {
+        if limits.max_entries() == 0 || limits.max_decoded_bytes() == 0 {
+            return Err(TreeStreamError::InvalidPageLimits);
+        }
         if self.cursor.ordinal == self.header.entry_count {
             return Ok(None);
         }
         let mut entries = Vec::new();
         let mut decoded_bytes = 0usize;
-        while entries.len() < limits.max_entries && self.cursor.ordinal < self.header.entry_count {
+        while entries.len() < limits.max_entries() && self.cursor.ordinal < self.header.entry_count
+        {
             let (entry, consumed) = self.take_next_entry()?;
             let size = entry.decoded_size();
-            if size > limits.max_decoded_bytes {
+            if size > limits.max_decoded_bytes() {
                 return Err(TreeStreamError::OversizedEntry {
                     decoded_bytes: size,
-                    max_decoded_bytes: limits.max_decoded_bytes,
+                    max_decoded_bytes: limits.max_decoded_bytes(),
                 });
             }
-            if !entries.is_empty() && decoded_bytes.saturating_add(size) > limits.max_decoded_bytes
+            if !entries.is_empty()
+                && decoded_bytes.saturating_add(size) > limits.max_decoded_bytes()
             {
                 self.pending = Some((entry, consumed));
                 break;
@@ -215,11 +230,27 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
         }))
     }
 
+    /// Yield one decoded entry. Used by full-object collect without a page ceiling.
+    pub fn next_entry(&mut self) -> Result<Option<TreeEntry>, TreeStreamError> {
+        if self.cursor.ordinal == self.header.entry_count {
+            return Ok(None);
+        }
+        let (entry, consumed) = self.take_next_entry()?;
+        self.commit_entry(&entry, consumed)?;
+        Ok(Some(entry))
+    }
+
     pub fn finish_and_verify(&mut self) -> Result<(), TreeStreamError> {
         if self.cursor.ordinal != self.header.entry_count {
             return Err(TreeStreamError::UnexpectedEof {
                 expected: self.header.entry_count,
                 decoded: self.cursor.ordinal,
+            });
+        }
+        let payload_end = TREE_HEADER_LEN as u64 + self.header.payload_len;
+        if self.cursor.byte_offset != payload_end {
+            return Err(TreeStreamError::TrailingBytes {
+                extra: payload_end.abs_diff(self.cursor.byte_offset),
             });
         }
         if let Some(hasher) = self.hasher.take() {
@@ -245,12 +276,23 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
     }
 
     fn read_entry_at(&mut self, offset: u64) -> Result<(TreeEntry, usize), TreeStreamError> {
+        let payload_end = TREE_HEADER_LEN as u64 + self.header.payload_len;
         let mut len_buf = [0u8; 4];
         self.source.read_exact_at(offset, &mut len_buf)?;
-        let frame_len = u32::from_le_bytes(len_buf) as usize;
+        let frame_len = u64::from(u32::from_le_bytes(len_buf));
+        let frame_start = offset
+            .checked_add(4)
+            .ok_or(TreeStreamError::TruncatedFrame { offset })?;
+        let frame_end = frame_start
+            .checked_add(frame_len)
+            .ok_or(TreeStreamError::TruncatedFrame { offset })?;
+        if frame_end > payload_end || frame_end > self.source.len() {
+            return Err(TreeStreamError::TruncatedFrame { offset });
+        }
+        let frame_len =
+            usize::try_from(frame_len).map_err(|_| TreeStreamError::TruncatedFrame { offset })?;
         let mut frame = vec![0u8; frame_len];
-        self.source
-            .read_exact_at(offset.saturating_add(4), &mut frame)?;
+        self.source.read_exact_at(frame_start, &mut frame)?;
         let entry = decode_entry_frame(&frame)?;
         Ok((entry, 4 + frame_len))
     }
@@ -351,9 +393,8 @@ impl Tree {
             None,
         )?;
         let mut entries = Vec::new();
-        let limits = TreePageLimits::new(usize::MAX, usize::MAX)?;
-        while let Some(page) = reader.next_page(limits)? {
-            entries.extend(page.entries);
+        while let Some(entry) = reader.next_entry()? {
+            entries.push(entry);
         }
         reader.finish_and_verify()?;
         Tree::try_from_decoded_entries(entries).map_err(TreeStreamError::from)

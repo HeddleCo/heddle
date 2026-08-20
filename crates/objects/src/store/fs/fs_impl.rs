@@ -596,7 +596,7 @@ impl FsStore {
             let body = codec::decode_tree_body(data.as_slice())?;
             if is_canonical_tree(&body) {
                 return Ok(Some(TreeEntryReader::open(
-                    OpenedTreeBody::Bytes(BytesTreeSource::verified_placement(body)),
+                    OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(body)),
                     *tree_id,
                     cursor,
                 )?));
@@ -608,7 +608,7 @@ impl FsStore {
             && is_canonical_tree(&data)
         {
             return Ok(Some(TreeEntryReader::open(
-                OpenedTreeBody::Bytes(BytesTreeSource::verified_placement(data)),
+                OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(data)),
                 *tree_id,
                 cursor,
             )?));
@@ -682,7 +682,6 @@ impl FsStore {
             && let Some((obj_type, data)) = manager.get_hashed_object(hash)?
             && obj_type == ObjectType::Tree
         {
-            validate_tree_serialized(&data, *hash)?;
             return Ok(Some(data));
         }
 
@@ -1214,7 +1213,7 @@ impl ObjectStore for FsStore {
             && is_canonical_tree(&data)
         {
             return Ok(Some(TreeEntryReader::open(
-                OpenedTreeBody::Bytes(BytesTreeSource::verified_placement(data)),
+                OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(data)),
                 *tree_id,
                 cursor,
             )?));

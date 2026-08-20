@@ -8,8 +8,9 @@ use std::{collections::HashMap, sync::RwLock};
 
 use crate::{
     object::{
-        Action, ActionId, AnnotatedTag, Blob, ContentHash, State, StateAttachment,
-        StateAttachmentId, StateId, Tree,
+        Action, ActionId, AnnotatedTag, Blob, BytesTreeSource, ContentHash, OpenedTreeBody, State,
+        StateAttachment, StateAttachmentId, StateId, Tree, TreeEntryReader, TreeResumeCursor,
+        is_canonical_tree,
     },
     store::{HeddleError, ObjectStore, Result},
     sync::RwLockExt,
@@ -119,6 +120,26 @@ impl ObjectStore for InMemoryStore {
             Some(bytes) => Ok(Some(Tree::decode_canonical(bytes)?)),
             None => Ok(None),
         }
+    }
+
+    fn open_tree(
+        &self,
+        tree_id: &ContentHash,
+        cursor: Option<&TreeResumeCursor>,
+    ) -> Result<Option<TreeEntryReader<OpenedTreeBody>>> {
+        let Some(body) = self.trees.read_or_poisoned().get(tree_id).cloned() else {
+            return Ok(None);
+        };
+        if !is_canonical_tree(&body) {
+            return Err(HeddleError::InvalidObject(
+                "tree body is not the streamable canonical encoding".to_string(),
+            ));
+        }
+        Ok(Some(TreeEntryReader::open(
+            OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(body)),
+            *tree_id,
+            cursor,
+        )?))
     }
 
     fn get_tree_serialized(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
