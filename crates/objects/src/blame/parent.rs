@@ -76,7 +76,10 @@ pub(super) fn claim_parent<S: ObjectSource>(
     }
 
     let Some(parent_blob) = source.get_blob(&parent_blob_hash)? else {
-        return Ok(ParentClaim::MissingPath);
+        return Err(BlameSliceError::MissingObject {
+            kind: "blob",
+            id: parent_blob_hash.to_string(),
+        });
     };
     budget.consume(
         ResourceKind::DecodedBytes,

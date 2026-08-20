@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+mod fail_closed;
 mod fixture;
 mod golden;
 mod prop;

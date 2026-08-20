@@ -38,6 +38,8 @@ pub fn advance_file_blame_slice<S: ObjectSource>(
             usage: budget.used(),
         });
     };
+    // Admit the frontier line count before any moved-bitmap allocation.
+    budget.consume(ResourceKind::Lines, u64::from(entry.state_line_count))?;
 
     let Some(entry_state) = source.get_state(&entry.state_id())? else {
         return Err(BlameSliceError::MissingObject {
@@ -80,7 +82,10 @@ pub fn advance_file_blame_slice<S: ObjectSource>(
     for parent_id in &entry_state.parents {
         budget.consume(ResourceKind::States, 1)?;
         let Some(parent) = source.get_state(parent_id)? else {
-            continue;
+            return Err(BlameSliceError::MissingObject {
+                kind: "state",
+                id: parent_id.to_string(),
+            });
         };
         match claim_parent(
             source,
