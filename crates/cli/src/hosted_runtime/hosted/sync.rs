@@ -26,7 +26,7 @@ use objects::{
     Progress,
     object::{
         AnnotationStatus, ContentHash, ContextBlob, ContextTarget, Discussion, DiscussionsBlob,
-        MarkerName, StateAttachmentBody, StateAttachmentKind, StateId, ThreadName,
+        MarkerName, StateAttachmentBody, StateAttachmentKind, StateId, ThreadName, TreeEntryTarget,
     },
     store::{AnyStore, ObjectStore, PackObjectId, SnapshotCommitDescriptor},
 };
@@ -2419,7 +2419,7 @@ impl HostedClient {
         depth: Option<u32>,
         materialization: PullMaterialization,
     ) -> Result<(), ProtocolError> {
-        if repo.store().has_state(&state_id)? {
+        if synthetic_frontier_root_locally_complete(repo, state_id, depth, materialization)? {
             return Ok(());
         }
         let address = synthetic_frontier_pull_address(name, state_id);
@@ -2437,9 +2437,9 @@ impl HostedClient {
             },
         )
         .await?;
-        if !repo.store().has_state(&state_id)? {
+        if !synthetic_frontier_root_locally_complete(repo, state_id, depth, materialization)? {
             return Err(ProtocolError::InvalidState(format!(
-                "synthetic frontier {} advertised {} but the target state is still absent after pull",
+                "synthetic frontier {} advertised {} but the requested object closure is still incomplete after pull",
                 name.as_name(),
                 state_id.to_string_full()
             )));
@@ -2482,6 +2482,95 @@ fn synthetic_frontier_pull_address(
         remote_thread: name.owning_thread(),
         target_state,
     }
+}
+
+/// True when the requested synthetic-root closure is already present locally.
+///
+/// `has_state` is not enough: a prior lazy or shallow pull can leave the State
+/// while blobs or ancestors are still absent. Full materialization uses the
+/// pull planner's [`wire::enumerate_state_closure_with_options`] walk; lazy
+/// requires the state/tree graph at `depth` and permits missing blobs.
+fn synthetic_frontier_root_locally_complete(
+    repo: &Repository,
+    state_id: StateId,
+    depth: Option<u32>,
+    materialization: PullMaterialization,
+) -> Result<bool, ProtocolError> {
+    if !repo.store().has_state(&state_id)? {
+        return Ok(false);
+    }
+    let options = wire::StateClosureOptions {
+        depth,
+        exclude_states: Vec::new(),
+    };
+    match wire::enumerate_state_closure_with_options(repo.store(), state_id, options) {
+        Ok(_) => Ok(true),
+        Err(ProtocolError::ObjectNotFound(_)) => {
+            if materialization.allows_partial_fetch() {
+                lazy_synthetic_frontier_graph_present(repo, state_id, depth)
+            } else {
+                Ok(false)
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn lazy_synthetic_frontier_graph_present(
+    repo: &Repository,
+    state_id: StateId,
+    depth: Option<u32>,
+) -> Result<bool, ProtocolError> {
+    let mut seen_states = HashSet::new();
+    let mut seen_trees = HashSet::new();
+    let mut pending = vec![(state_id, 0u32)];
+    while let Some((id, generation)) = pending.pop() {
+        if !seen_states.insert(id) {
+            continue;
+        }
+        let Some(state) = repo.store().get_state(&id)? else {
+            return Ok(false);
+        };
+        if !tree_closure_present(repo, state.tree, &mut seen_trees)? {
+            return Ok(false);
+        }
+        if let Some(provenance) = state.provenance
+            && !tree_closure_present(repo, provenance, &mut seen_trees)?
+        {
+            return Ok(false);
+        }
+        if depth.map(|max| generation < max).unwrap_or(true) {
+            pending.extend(
+                state
+                    .parents
+                    .iter()
+                    .copied()
+                    .map(|parent| (parent, generation + 1)),
+            );
+        }
+    }
+    Ok(true)
+}
+
+fn tree_closure_present(
+    repo: &Repository,
+    tree_hash: ContentHash,
+    seen: &mut HashSet<ContentHash>,
+) -> Result<bool, ProtocolError> {
+    if !seen.insert(tree_hash) {
+        return Ok(true);
+    }
+    let Some(tree) = repo.store().get_tree(&tree_hash)? else {
+        return Ok(false);
+    };
+    for entry in tree.entries() {
+        if let TreeEntryTarget::Tree { hash } = entry.target()
+            && !tree_closure_present(repo, *hash, seen)?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn persist_synthetic_frontier(
@@ -3156,9 +3245,13 @@ fn apply_marker_entry(
 #[cfg(test)]
 mod pull_bootstrap_tests {
     use chrono::Utc;
-    use objects::object::{
-        Annotation, AnnotationKind, AnnotationScope, Attribution, Blob, DiscussionResolution,
-        DiscussionTurn, Principal, StateAttachment, SymbolAnchor, VisibilityTier,
+    use objects::{
+        object::{
+            Annotation, AnnotationKind, AnnotationScope, Attribution, Blob, DiscussionResolution,
+            DiscussionTurn, Principal, State, StateAttachment, SymbolAnchor, Tree, TreeEntry,
+            VisibilityTier,
+        },
+        store::ObjectStore,
     };
     use tempfile::TempDir;
     use wire::{AdvertisedRef, RefKind};
@@ -3259,6 +3352,114 @@ mod pull_bootstrap_tests {
         assert_eq!(decoded.refs[1].name, "release");
         assert_eq!(decoded.refs[1].state_id, release);
         assert_eq!(decoded.refs[1].kind, RefKind::Marker);
+    }
+
+    #[test]
+    #[test]
+    fn synthetic_frontier_root_skips_only_when_requested_closure_is_complete() {
+        let temp = TempDir::new().expect("temp repo");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        let blob = Blob::from("frontier blob\n");
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("README", blob.hash(), false).unwrap(),
+        ]);
+        let tree_hash = repo.store().put_tree(&tree).unwrap();
+        let state = State::new(
+            tree_hash,
+            Vec::new(),
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        );
+        repo.store().put_state(&state).unwrap();
+        let state_id = state.id();
+
+        assert!(
+            repo.store().has_state(&state_id).unwrap(),
+            "has_state alone must not skip an incomplete eager pull"
+        );
+        assert!(
+            !synthetic_frontier_root_locally_complete(
+                &repo,
+                state_id,
+                None,
+                PullMaterialization::Full,
+            )
+            .unwrap(),
+            "missing blobs must force an eager upgrade"
+        );
+        assert!(
+            synthetic_frontier_root_locally_complete(
+                &repo,
+                state_id,
+                None,
+                PullMaterialization::Lazy,
+            )
+            .unwrap(),
+            "lazy materialization may leave blobs absent"
+        );
+
+        repo.store().put_blob(&blob).unwrap();
+        assert!(
+            synthetic_frontier_root_locally_complete(
+                &repo,
+                state_id,
+                None,
+                PullMaterialization::Full,
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn synthetic_frontier_root_upgrades_when_ancestors_are_missing() {
+        let temp = TempDir::new().expect("temp repo");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        let blob = Blob::from("child\n");
+        repo.store().put_blob(&blob).unwrap();
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("README", blob.hash(), false).unwrap(),
+        ]);
+        let tree_hash = repo.store().put_tree(&tree).unwrap();
+        let parent = State::new(
+            tree_hash,
+            Vec::new(),
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        );
+        let child = State::new(
+            tree_hash,
+            vec![parent.id()],
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        );
+        repo.store().put_state(&child).unwrap();
+
+        assert!(
+            synthetic_frontier_root_locally_complete(
+                &repo,
+                child.id(),
+                Some(0),
+                PullMaterialization::Full,
+            )
+            .unwrap(),
+            "depth 0 is the tip only"
+        );
+        assert!(
+            !synthetic_frontier_root_locally_complete(
+                &repo,
+                child.id(),
+                None,
+                PullMaterialization::Full,
+            )
+            .unwrap(),
+            "a deeper pull must see the missing parent"
+        );
+        assert!(
+            !synthetic_frontier_root_locally_complete(
+                &repo,
+                child.id(),
+                None,
+                PullMaterialization::Lazy,
+            )
+            .unwrap()
+        );
     }
 
     #[test]

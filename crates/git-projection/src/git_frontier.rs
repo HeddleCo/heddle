@@ -62,9 +62,10 @@ pub fn sync_synthetic_frontier_to_git(
 
 /// Materialize advertised synthetic frontier refs and drop stale managed ones.
 ///
-/// A formerly managed name is deleted only when the current Git target still
-/// matches the recorded managed OID. An out-of-band retarget is preserved and
-/// reported so CAS is an ownership check, not a tip-at-delete-time overwrite.
+/// A previously managed name — advertised or stale — is rewritten or deleted
+/// only when the current Git target still matches the recorded managed OID.
+/// An out-of-band retarget is preserved and reported so CAS is an ownership
+/// check, not a tip-at-sync-time overwrite.
 pub fn reconcile_synthetic_frontier_refs(
     repo: &SleyRepository,
     heddle_repo: &HeddleRepository,
@@ -73,12 +74,22 @@ pub fn reconcile_synthetic_frontier_refs(
 ) -> GitProjectionResult<Vec<(String, FailedRefExportReason)>> {
     let advertised = heddle_repo.refs().list_synthetic_frontiers()?;
     let mut desired: HashSet<String> = HashSet::new();
+    let mut diverged = Vec::new();
     for (name, state) in advertised {
         let git_ref = name.git_ref();
         let Some(git_oid) = mapping.get_git(&state) else {
             continue;
         };
         desired.insert(git_ref.clone());
+        if let Some(reason) = diverged_managed_synthetic_ref(
+            repo,
+            &git_ref,
+            managed_record.get(&git_ref).copied(),
+            git_oid,
+        )? {
+            diverged.push((git_ref, reason));
+            continue;
+        }
         sync_synthetic_frontier_to_git(repo, &name, git_oid)?;
         managed_record.insert(git_ref, git_oid);
     }
@@ -87,7 +98,6 @@ pub fn reconcile_synthetic_frontier_refs(
         .filter(|name| SyntheticFrontierName::parse(name).is_ok() && !desired.contains(*name))
         .cloned()
         .collect();
-    let mut diverged = Vec::new();
     for git_ref in stale {
         let Some(recorded) = managed_record.get(&git_ref).copied() else {
             continue;
@@ -122,6 +132,36 @@ pub fn reconcile_synthetic_frontier_refs(
         }
     }
     Ok(diverged)
+}
+
+/// Report a live advertised ref whose tip no longer matches the managed record.
+///
+/// First publication (no record) and a matching owned tip may sync. A
+/// retargeted Direct tip, or a symbolic ref, is left untouched.
+fn diverged_managed_synthetic_ref(
+    repo: &SleyRepository,
+    git_ref: &str,
+    recorded: Option<SleyObjectId>,
+    desired: SleyObjectId,
+) -> GitProjectionResult<Option<FailedRefExportReason>> {
+    let Some(recorded) = recorded else {
+        return Ok(None);
+    };
+    match repo.find_reference(git_ref).map_err(git_err)? {
+        None => Ok(None),
+        Some(reference) => match reference.target {
+            ReferenceTarget::Direct(current) if current == recorded => Ok(None),
+            ReferenceTarget::Direct(current) => {
+                Ok(Some(FailedRefExportReason::ModifiedConcurrentlyInGit {
+                    found: current,
+                    intended: desired,
+                }))
+            }
+            ReferenceTarget::Symbolic(_) => Ok(Some(FailedRefExportReason::FailedToDelete(
+                "synthetic frontier is symbolic; refuse to clobber".to_string(),
+            ))),
+        },
+    }
 }
 
 /// True when a Git ref name is in the reserved `refs/heddle/` namespace.
@@ -181,6 +221,32 @@ mod tests {
         let mut bytes = [0u8; 16];
         bytes[15] = 9;
         SyntheticFrontierName::new("main", ChangeId::from_bytes(bytes)).unwrap()
+    }
+
+    fn advertised_frontier(
+        desired_git: SleyObjectId,
+    ) -> (TempDir, HeddleRepository, SyncMapping, SyntheticFrontierName) {
+        let heddle_temp = TempDir::new().unwrap();
+        let heddle = HeddleRepository::init_default(heddle_temp.path()).unwrap();
+        std::fs::write(heddle_temp.path().join("README"), "frontier\n").unwrap();
+        let snapshot = heddle
+            .snapshot_with_attribution(
+                Some("seed".to_string()),
+                None,
+                objects::object::Attribution::human(objects::object::Principal::new(
+                    "Test",
+                    "test@example.com",
+                )),
+            )
+            .expect("snapshot");
+        let synthetic = frontier_name();
+        heddle
+            .refs()
+            .set_synthetic_frontier(&synthetic, &snapshot.state_id)
+            .unwrap();
+        let mut mapping = SyncMapping::new();
+        mapping.insert(snapshot.state_id, desired_git);
+        (heddle_temp, heddle, mapping, synthetic)
     }
 
     #[test]
@@ -314,6 +380,70 @@ mod tests {
                 }
             )]
         );
+    }
+
+    #[test]
+    fn reconcile_preserves_out_of_band_synthetic_ref_when_desired_is_present() {
+        let (_temp, repo, recorded) = bare_repo_with_commit();
+        let out_of_band = write_commit(&repo, "out-of-band");
+        let desired = write_commit(&repo, "desired");
+        let synthetic = frontier_name();
+        sync_synthetic_frontier_to_git(&repo, &synthetic, recorded).unwrap();
+        set_ref(
+            &repo,
+            &synthetic.git_ref(),
+            out_of_band,
+            RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(recorded)),
+            "test: out-of-band retarget",
+        )
+        .unwrap();
+        let mut managed = HashMap::new();
+        managed.insert(synthetic.git_ref(), recorded);
+        let (_heddle_temp, heddle, mapping, advertised) = advertised_frontier(desired);
+        assert_eq!(advertised.git_ref(), synthetic.git_ref());
+
+        let diverged =
+            reconcile_synthetic_frontier_refs(&repo, &heddle, &mapping, &mut managed).unwrap();
+
+        let preserved = repo
+            .find_reference(&synthetic.git_ref())
+            .unwrap()
+            .expect("out-of-band synthetic must be preserved");
+        assert_eq!(preserved.target, ReferenceTarget::Direct(out_of_band));
+        assert_eq!(managed.get(&synthetic.git_ref()), Some(&recorded));
+        assert_eq!(
+            diverged,
+            vec![(
+                synthetic.git_ref(),
+                FailedRefExportReason::ModifiedConcurrentlyInGit {
+                    found: out_of_band,
+                    intended: desired,
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn reconcile_updates_owned_desired_synthetic_ref() {
+        let (_temp, repo, recorded) = bare_repo_with_commit();
+        let desired = write_commit(&repo, "desired");
+        let synthetic = frontier_name();
+        sync_synthetic_frontier_to_git(&repo, &synthetic, recorded).unwrap();
+        let mut managed = HashMap::new();
+        managed.insert(synthetic.git_ref(), recorded);
+        let (_heddle_temp, heddle, mapping, advertised) = advertised_frontier(desired);
+        assert_eq!(advertised.git_ref(), synthetic.git_ref());
+
+        let diverged =
+            reconcile_synthetic_frontier_refs(&repo, &heddle, &mapping, &mut managed).unwrap();
+
+        assert!(diverged.is_empty());
+        let written = repo
+            .find_reference(&synthetic.git_ref())
+            .unwrap()
+            .expect("owned synthetic must advance");
+        assert_eq!(written.target, ReferenceTarget::Direct(desired));
+        assert_eq!(managed.get(&synthetic.git_ref()), Some(&desired));
     }
 
     #[test]
