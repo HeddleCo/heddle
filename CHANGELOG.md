@@ -15,6 +15,12 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Added
 
+- **Streamable HTR4 tree encoding.** Trees store uncompressed
+  length-prefixed frames so a reader can page entries and persist a
+  resume cursor without materializing the full directory. Object-store
+  backends hash on finish; ranged resume requires a hashed body, not a
+  hash-shaped path (heddle#1457).
+
 - **`heddle completions` prints tab-completion scripts.** The field-study
   verb emits install lines, or a bash/zsh/fish script. Same scripts as
   `heddle shell completion`. First-screen help names it so it is findable
@@ -41,6 +47,12 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 - **CI rejects unreachable Rust modules and blanket dead-code suppression.**
   Every `crates/*/src/**/*.rs` file must be reachable from a Cargo crate root,
   and workspace clippy lanes deny dead code explicitly.
+
+### Changed
+
+- **Durable trees are HTR4.** Loose, packed, ingest, and wire tree bodies
+  use the canonical encoding. Migration `0005_streamable_tree_encoding`
+  rewrites leftover msgpack trees on repo open (heddle#1457).
 
 ### Fixed
 
