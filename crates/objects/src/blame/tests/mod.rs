@@ -10,7 +10,8 @@ mod restart;
 use std::path::Path;
 
 use crate::blame::{
-    BlameSliceAdvance, BlameSliceError, BlameSliceLimits, advance_file_blame_slice, blame_file,
+    BlamePreparation, BlameSliceAdvance, BlameSliceError, BlameSliceLimits,
+    advance_file_blame_slice, blame_file, prepare_file_blame,
 };
 use crate::util::ResourceKind;
 
@@ -66,6 +67,44 @@ fn line_budget_is_not_missing_object() {
             assert_eq!(error.kind, ResourceKind::Lines);
         }
         other => panic!("expected lines budget, got {other}"),
+    }
+}
+
+#[test]
+fn no_overlap_parent_is_not_a_processed_frontier() {
+    let store = store();
+    let parent = put_state_with_file(&store, "fixture.txt", b"old line\n", Vec::new(), "alice");
+    let tip = put_state_with_file(
+        &store,
+        "fixture.txt",
+        b"new line\n",
+        vec![parent.id()],
+        "bob",
+    );
+    let path = Path::new("fixture.txt");
+    let limits = BlameSliceLimits::unlimited();
+    let before = heddle_perf_contract::snapshot();
+    let provenance = blame_file(&store, &tip, path, limits).unwrap();
+    let after = heddle_perf_contract::snapshot();
+    assert_eq!(principals_at(&provenance, 0), vec!["bob".to_string()]);
+    assert!(
+        after
+            .ancestors_visited
+            .saturating_sub(before.ancestors_visited)
+            <= 1,
+        "no-overlap parent must not count as a processed frontier"
+    );
+
+    let BlamePreparation::Active { frontier, .. } =
+        prepare_file_blame(&store, &tip, path, limits).unwrap()
+    else {
+        panic!("expected active blame");
+    };
+    match advance_file_blame_slice(&store, path, frontier, limits).unwrap() {
+        BlameSliceAdvance::Complete { .. } => {}
+        BlameSliceAdvance::Progress { .. } => {
+            panic!("no-overlap parent must not become a next frontier")
+        }
     }
 }
 

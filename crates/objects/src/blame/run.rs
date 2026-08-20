@@ -38,8 +38,10 @@ pub fn blame_file<S: ObjectSource>(
             line_count,
             mut frontier,
         } => {
+            frontier.require_target(file_blob, line_count)?;
             let mut finalized = Vec::new();
             loop {
+                frontier.require_target(file_blob, line_count)?;
                 match advance_file_blame_slice(source, path, frontier, limits)? {
                     BlameSliceAdvance::Progress {
                         next,

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::path::Path;
 
-use crate::blame::{blame_file, BlameSliceLimits};
+use crate::blame::{BlameSliceLimits, blame_file};
 
 use super::fixture::{principals_at, put_state_with_file, store};
 
@@ -70,6 +70,25 @@ fn a_vs_aa_credits_the_prefix_not_the_trailing_duplicate() {
     .unwrap();
     assert_eq!(principals_at(&provenance, 0), vec!["alice".to_string()]);
     assert_eq!(principals_at(&provenance, 1), vec!["bob".to_string()]);
+}
+
+#[test]
+fn ba_vs_abcbb_credits_first_adjacent_b() {
+    let store = store();
+    let base = put_state_with_file(&store, "lib.rs", b"b\na\n", Vec::new(), "alice");
+    let edited = put_state_with_file(&store, "lib.rs", b"a\nb\nc\nb\nb\n", vec![base.id()], "bob");
+    let provenance = blame_file(
+        &store,
+        &edited,
+        Path::new("lib.rs"),
+        BlameSliceLimits::unlimited(),
+    )
+    .unwrap();
+    assert_eq!(principals_at(&provenance, 0), vec!["bob".to_string()]);
+    assert_eq!(principals_at(&provenance, 1), vec!["alice".to_string()]);
+    assert_eq!(principals_at(&provenance, 2), vec!["bob".to_string()]);
+    assert_eq!(principals_at(&provenance, 3), vec!["bob".to_string()]);
+    assert_eq!(principals_at(&provenance, 4), vec!["bob".to_string()]);
 }
 
 #[test]

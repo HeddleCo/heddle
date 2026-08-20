@@ -33,10 +33,14 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   mappings are checked against the loaded state on both the state and
   target sides. After a first parent claims every mapped line, later
   parents are not fetched. Blobs are size-probed
-  before `get_blob`. Compact right-slides trailing repeats only when the
-  equal is not already a left-justified prefix (`b/a` vs `a/b/b` is
-  `(0,2)`; `a` vs `a/a` stays `(0,0)`). Slice usage reports work,
-  lines, and scratch on one live `ResourceBudget` (heddle#1454).
+  before `get_blob`. Compact right-slides only an adjacent trailing copy
+  of the equal (`b/a` vs `a/b/b` is `(0,2)`; `b/a` vs `a/b/c/b/b` stays
+  `(0,1)`; `a` vs `a/a` stays `(0,0)`). Inspected-but-unprocessed parents
+  are not counted as blame frontiers (`ancestors_visited` stays one visit
+  on a no-overlap parent). A persisted frontier is bound to its prepared
+  target blob and line count; mixing another job's target fails closed.
+  Slice usage reports work, lines, and scratch on one live
+  `ResourceBudget` (heddle#1454).
 
 - **`heddle completions` prints tab-completion scripts.** The field-study
   verb emits install lines, or a bash/zsh/fish script. Same scripts as

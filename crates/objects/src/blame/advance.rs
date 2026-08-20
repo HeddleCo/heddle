@@ -14,10 +14,10 @@ use super::{
         blob_line_count_matches_frontier, finalize_unmoved, mapped_lines_claimed,
         mappings_fit_state_lines,
     },
-    parent::{claim_parent, parent_record, ParentClaim},
+    parent::{ParentClaim, claim_parent, parent_record},
     types::{
-        origin_from_state, BlameFrontierGroup, BlameSliceAdvance, BlameSliceError,
-        BlameSliceLimits, OriginRange,
+        BlameFrontierGroup, BlameSliceAdvance, BlameSliceError, BlameSliceLimits, OriginRange,
+        origin_from_state,
     },
 };
 
@@ -37,13 +37,18 @@ pub fn advance_file_blame_slice<S: ObjectSource>(
         decoded_bytes: limits.decoded_bytes,
     });
 
+    frontier_group.require_consistent_target()?;
     let Some(entry) = frontier_group.pop() else {
         return Ok(BlameSliceAdvance::Complete {
             finalized: Vec::new(),
             usage: budget.used(),
         });
     };
-    mappings_fit_state_lines(&entry.mappings, entry.state_line_count)?;
+    mappings_fit_state_lines(
+        &entry.mappings,
+        entry.state_line_count,
+        frontier_group.target.line_count,
+    )?;
 
     budget.consume(ResourceKind::States, 1)?;
     let Some(entry_state) = source.get_state(&entry.state_id())? else {
@@ -91,7 +96,6 @@ pub fn advance_file_blame_slice<S: ObjectSource>(
                 id: parent_id.to_string(),
             });
         };
-        heddle_perf_contract::record_ancestors_visited(1);
         match claim_parent(
             source,
             super::parent::ParentClaimInput {
@@ -105,9 +109,13 @@ pub fn advance_file_blame_slice<S: ObjectSource>(
         )? {
             ParentClaim::MissingPath => {}
             ParentClaim::SameBlob { maps } => {
-                if let Some(record) =
-                    parent_record(&parent, entry.blob_hash, entry.state_line_count, maps)
-                {
+                if let Some(record) = parent_record(
+                    &parent,
+                    &entry,
+                    entry.blob_hash,
+                    entry.state_line_count,
+                    maps,
+                ) {
                     next_parents.push(record);
                 }
                 break;
@@ -117,7 +125,7 @@ pub fn advance_file_blame_slice<S: ObjectSource>(
                 blob_hash,
                 line_count,
             } => {
-                if let Some(record) = parent_record(&parent, blob_hash, line_count, maps) {
+                if let Some(record) = parent_record(&parent, &entry, blob_hash, line_count, maps) {
                     next_parents.push(record);
                 }
             }

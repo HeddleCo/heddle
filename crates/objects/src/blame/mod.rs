@@ -23,5 +23,5 @@ pub use prepare::prepare_file_blame;
 pub use run::blame_file;
 pub use types::{
     BlameFrontierGroup, BlameFrontierRecord, BlameLineMap, BlamePreparation, BlameSliceAdvance,
-    BlameSliceError, BlameSliceLimits, OriginRange, origin_from_state,
+    BlameSliceError, BlameSliceLimits, BlameTarget, OriginRange, origin_from_state,
 };

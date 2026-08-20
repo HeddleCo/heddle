@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::{collect_runs, expand_runs, similar_pairs};
-use crate::util::line_diff::{split_text_lines, EqualRun, LineDiffLimits};
+use crate::util::line_diff::{EqualRun, LineDiffLimits, split_text_lines};
 
 #[test]
 fn line_matches_preserve_simple_alignment() {
@@ -171,4 +171,17 @@ fn max_d_no_common_lines_does_not_panic() {
     let new = "1\n2\n3\n4\n5\n6\n7\n8\n";
     let runs = collect_runs(old, new, LineDiffLimits::unlimited()).unwrap();
     assert!(runs.is_empty());
+}
+
+#[test]
+fn ba_vs_abcbb_matches_similar_first_adjacent_b() {
+    let old = "b\na\n";
+    let new = "a\nb\nc\nb\nb\n";
+    let runs = collect_runs(old, new, LineDiffLimits::unlimited()).unwrap();
+    let pairs = expand_runs(&runs);
+    let old_lines = split_text_lines(old.as_bytes()).unwrap();
+    let new_lines = split_text_lines(new.as_bytes()).unwrap();
+    let similar = similar_pairs(&old_lines, &new_lines);
+    assert_eq!(pairs, similar, "ours={pairs:?} similar={similar:?}");
+    assert_eq!(pairs, vec![(0, 1)]);
 }

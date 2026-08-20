@@ -39,6 +39,13 @@ pub struct BlameLineMap {
     pub len: u32,
 }
 
+/// Prepared target file a persisted frontier may attribute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlameTarget {
+    pub blob: ContentHash,
+    pub line_count: u32,
+}
+
 /// One unfinalized hunk still walking toward older ancestors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlameFrontierRecord {
@@ -46,6 +53,7 @@ pub struct BlameFrontierRecord {
     pub blob_hash: ContentHash,
     pub state_line_count: u32,
     pub mappings: Vec<BlameLineMap>,
+    pub target: BlameTarget,
 }
 
 impl BlameFrontierRecord {
@@ -55,8 +63,12 @@ impl BlameFrontierRecord {
 }
 
 /// Canonical LIFO frontier group. Replay of the same group is deterministic.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `target` is the prepared file this group may attribute. A record bound to
+/// another job's target is `InvalidFrontier`, not a silent swap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlameFrontierGroup {
+    pub target: BlameTarget,
     pub records: Vec<BlameFrontierRecord>,
 }
 
@@ -71,6 +83,33 @@ impl BlameFrontierGroup {
 
     pub fn push(&mut self, record: BlameFrontierRecord) {
         self.records.push(record);
+    }
+
+    /// Fail closed when this group is replayed against a different prepare.
+    pub fn require_target(
+        &self,
+        blob: ContentHash,
+        line_count: u32,
+    ) -> Result<(), BlameSliceError> {
+        if self.target.blob != blob || self.target.line_count != line_count {
+            return Err(BlameSliceError::InvalidFrontier(
+                "frontier target does not match prepared target".into(),
+            ));
+        }
+        self.require_consistent_target()
+    }
+
+    pub fn require_consistent_target(&self) -> Result<(), BlameSliceError> {
+        if self
+            .records
+            .iter()
+            .any(|record| record.target != self.target)
+        {
+            return Err(BlameSliceError::InvalidFrontier(
+                "frontier record target does not match group".into(),
+            ));
+        }
+        Ok(())
     }
 }
 

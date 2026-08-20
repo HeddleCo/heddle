@@ -12,8 +12,8 @@ use super::{
     lookup::{load_blob_within_budget, lookup_blob_at_path},
     mapping::identity_mapping,
     types::{
-        origin_from_state, BlameFrontierGroup, BlameFrontierRecord, BlamePreparation,
-        BlameSliceError, BlameSliceLimits,
+        BlameFrontierGroup, BlameFrontierRecord, BlamePreparation, BlameSliceError,
+        BlameSliceLimits, BlameTarget, origin_from_state,
     },
 };
 
@@ -58,15 +58,21 @@ pub fn prepare_file_blame<S: ObjectSource>(
     }
 
     let line_count = u32::try_from(line_count).map_err(|_| BlameSliceError::Unblamable)?;
+    let target = BlameTarget {
+        blob: blob_hash,
+        line_count,
+    };
     Ok(BlamePreparation::Active {
         file_blob: blob_hash,
         line_count,
         frontier: BlameFrontierGroup {
+            target,
             records: vec![BlameFrontierRecord {
                 origin,
                 blob_hash,
                 state_line_count: line_count,
                 mappings: identity_mapping(line_count),
+                target,
             }],
         },
     })

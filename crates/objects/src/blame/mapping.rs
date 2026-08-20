@@ -154,6 +154,7 @@ pub(super) fn finalize_unmoved(
 pub(super) fn mappings_fit_state_lines(
     mappings: &[BlameLineMap],
     state_line_count: u32,
+    target_line_count: u32,
 ) -> Result<(), BlameSliceError> {
     if mappings.is_empty() {
         if state_line_count == 0 {
@@ -194,6 +195,11 @@ pub(super) fn mappings_fit_state_lines(
         if state_end > state_line_count {
             return Err(BlameSliceError::InvalidFrontier(format!(
                 "mapping end {state_end} exceeds state_line_count {state_line_count}"
+            )));
+        }
+        if target_end > target_line_count {
+            return Err(BlameSliceError::InvalidFrontier(format!(
+                "mapping target end {target_end} exceeds target_line_count {target_line_count}"
             )));
         }
         prev_state_end = state_end;

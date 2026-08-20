@@ -5,13 +5,13 @@ use std::path::Path;
 
 use crate::{
     object::{ContentHash, ObjectSource, State},
-    util::{scratch_bytes_for_line_counts, visit_lcs_equal_runs, ResourceBudget, ResourceKind},
+    util::{ResourceBudget, ResourceKind, scratch_bytes_for_line_counts, visit_lcs_equal_runs},
 };
 
 use super::{
     lookup::{load_blob_within_budget, lookup_blob_at_path},
     mapping::{claim_equal_run, claim_same_blob_maps},
-    types::{origin_from_state, BlameFrontierRecord, BlameLineMap, BlameSliceError},
+    types::{BlameFrontierRecord, BlameLineMap, BlameSliceError, origin_from_state},
 };
 
 pub(super) enum ParentClaim {
@@ -86,6 +86,7 @@ pub(super) fn claim_parent<S: ObjectSource>(
 
 pub(super) fn parent_record(
     parent: &State,
+    entry: &BlameFrontierRecord,
     blob_hash: ContentHash,
     line_count: u32,
     maps: Vec<BlameLineMap>,
@@ -98,5 +99,6 @@ pub(super) fn parent_record(
         blob_hash,
         state_line_count: line_count,
         mappings: maps,
+        target: entry.target,
     })
 }
