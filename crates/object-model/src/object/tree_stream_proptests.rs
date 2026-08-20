@@ -13,9 +13,10 @@ fn name_strategy() -> impl Strategy<Value = String> {
 }
 
 fn entry_strategy() -> impl Strategy<Value = TreeEntry> {
-    let blob = (name_strategy(), any::<[u8; 8]>(), any::<bool>()).prop_map(|(name, bytes, exec)| {
-        TreeEntry::file(name, ContentHash::compute(&bytes), exec).expect("blob")
-    });
+    let blob =
+        (name_strategy(), any::<[u8; 8]>(), any::<bool>()).prop_map(|(name, bytes, exec)| {
+            TreeEntry::file(name, ContentHash::compute(&bytes), exec).expect("blob")
+        });
     let dir = (name_strategy(), any::<[u8; 8]>()).prop_map(|(name, bytes)| {
         TreeEntry::directory(name, ContentHash::compute(&bytes)).expect("dir")
     });

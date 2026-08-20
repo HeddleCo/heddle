@@ -157,12 +157,6 @@ pub use tree_canonical::{
     TREE_CANONICAL_MAGIC, TREE_ENCODING_VERSION, TREE_HEADER_LEN, TreeHeader, decode_header,
     is_canonical_tree,
 };
-pub use tree_source::{
-    BytesTreeSource, FileTreeSource, OpenedTreeBody, TreeBodyIntegrity, TreeByteSource,
-};
-pub use tree_stream::{
-    TreeEntryReader, TreePage, TreePageLimits, TreeResumeCursor, TreeStreamError,
-};
 #[cfg(feature = "async-source")]
 pub use tree_diff::diff_trees_visit_async;
 pub use tree_diff::{diff_trees, diff_trees_visit};
@@ -170,6 +164,12 @@ pub use tree_diff::{diff_trees, diff_trees_visit};
 pub use tree_path::resolve_tree_path_async;
 pub use tree_path::{
     LeafPolicy, ResolvedTreeTarget, TreePathResolveError, resolve_tree_path, split_path,
+};
+pub use tree_source::{
+    BytesTreeSource, FileTreeSource, OpenedTreeBody, TreeBodyIntegrity, TreeByteSource,
+};
+pub use tree_stream::{
+    TreeEntryReader, TreePage, TreePageLimits, TreeResumeCursor, TreeStreamError,
 };
 pub use tree_walk::{TreeIntegrityEvent, walk_tree_integrity};
 pub use audience_tier::{AudienceParseError, AudienceTier, visible};

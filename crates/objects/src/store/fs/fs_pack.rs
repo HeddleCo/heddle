@@ -227,11 +227,7 @@ impl FsStore {
         if (commit_artifact.is_some() || !ObjectStore::has_tree_locally(self, &tree_hash)?)
             && seen_trees.insert(tree_hash)
         {
-            builder.add(
-                tree_hash,
-                PackObjectType::Tree,
-                tree.encode_canonical()?,
-            );
+            builder.add(tree_hash, PackObjectType::Tree, tree.encode_canonical()?);
             staged_trees.push((tree_hash, tree.clone()));
         }
 

@@ -731,10 +731,7 @@ pub trait ObjectStore: Send + Sync {
                     return Ok(Some((pack::ObjectType::Blob, blob.content().to_vec())));
                 }
                 if let Some(tree) = self.get_tree(hash)? {
-                    return Ok(Some((
-                        pack::ObjectType::Tree,
-                        tree.encode_canonical()?,
-                    )));
+                    return Ok(Some((pack::ObjectType::Tree, tree.encode_canonical()?)));
                 }
                 if let Some(action) = self.get_action(&ActionId::from_hash(*hash))? {
                     return Ok(Some((

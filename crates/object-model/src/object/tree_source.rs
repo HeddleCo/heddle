@@ -64,8 +64,8 @@ impl BytesTreeSource {
 
 impl TreeByteSource for BytesTreeSource {
     fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), TreeStreamError> {
-        let start = usize::try_from(offset)
-            .map_err(|_| TreeStreamError::TruncatedFrame { offset })?;
+        let start =
+            usize::try_from(offset).map_err(|_| TreeStreamError::TruncatedFrame { offset })?;
         let end = start
             .checked_add(buf.len())
             .ok_or(TreeStreamError::TruncatedFrame { offset })?;
