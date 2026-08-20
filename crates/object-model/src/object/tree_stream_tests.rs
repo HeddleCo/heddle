@@ -66,10 +66,7 @@ fn streaming_pages_respect_entry_and_byte_limits() {
     assert_eq!(first.resume_cursor.ordinal(), 2);
     let second = reader.next_page(limits).expect("page").expect("some");
     assert_eq!(second.entries.len(), 2);
-    reader
-        .next_page(limits)
-        .expect("page")
-        .expect("remaining");
+    reader.next_page(limits).expect("page").expect("remaining");
     assert!(reader.next_page(limits).expect("eof").is_none());
     reader.finish_and_verify().expect("verify");
 }
@@ -290,12 +287,18 @@ fn malformed_mode_and_oid_are_rejected() {
     assert!(Tree::decode_canonical_streamed(&bytes).is_err());
 
     let mut oid_bytes = tree.encode_canonical().expect("encode");
-    let name_end = frame + 1 + 1 + 2 + 1;
-    oid_bytes[name_end] ^= 0xff;
+    let frame_len = u32::from_le_bytes(
+        oid_bytes[TREE_HEADER_LEN..TREE_HEADER_LEN + 4]
+            .try_into()
+            .expect("len"),
+    );
+    oid_bytes[TREE_HEADER_LEN..TREE_HEADER_LEN + 4].copy_from_slice(&(frame_len - 1).to_le_bytes());
+    oid_bytes.pop();
+    write_payload_len(&mut oid_bytes, (oid_bytes.len() - TREE_HEADER_LEN) as u64);
     let eager = Tree::decode_canonical(&oid_bytes).expect_err("eager oid");
     let streamed = Tree::decode_canonical_streamed(&oid_bytes).expect_err("stream oid");
-    assert!(eager.to_string().contains("object id") || eager.to_string().contains("hash"));
-    assert!(streamed.to_string().contains("object id") || streamed.to_string().contains("hash"));
+    assert!(eager.to_string().contains("object id"), "{eager}");
+    assert!(streamed.to_string().contains("object id"), "{streamed}");
 }
 
 #[test]
@@ -305,7 +308,11 @@ fn truncated_frame_and_trailing_bytes_are_errors() {
     let truncated = &bytes[..bytes.len() - 3];
     assert!(matches!(
         Tree::decode_canonical(truncated),
-        Err(TreeStreamError::TruncatedFrame { .. } | TreeStreamError::TrailingBytes { .. })
+        Err(TreeStreamError::TruncatedFrame { .. })
+    ));
+    assert!(matches!(
+        Tree::decode_canonical_streamed(truncated),
+        Err(TreeStreamError::TruncatedFrame { .. })
     ));
 
     let mut trailing = bytes.clone();

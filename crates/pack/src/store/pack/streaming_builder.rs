@@ -1068,7 +1068,7 @@ mod tests {
                 (
                     *id,
                     ObjectType::Tree,
-                    rmp_serde::to_vec_named(tree).unwrap().len() as u64,
+                    tree.encode_canonical().unwrap().len() as u64,
                 )
             })
             .collect::<Vec<_>>();
@@ -1082,7 +1082,7 @@ mod tests {
         for (id, tree) in ids.iter().zip(&trees) {
             let (object_type, bytes) = reader.get_object(id).unwrap().unwrap();
             assert_eq!(object_type, ObjectType::Tree);
-            assert_eq!(bytes, rmp_serde::to_vec_named(tree).unwrap());
+            assert_eq!(bytes, tree.encode_canonical().unwrap());
         }
     }
 

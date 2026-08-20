@@ -10,9 +10,7 @@ use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::tree::{git_format_from_tag, git_format_to_tag};
 use super::tree_stream::TreeStreamError;
-use super::{
-    ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeEntry, TreeError,
-};
+use super::{ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeEntry, TreeError};
 
 /// Durable encoding version stored in every HTR4 header and resume cursor.
 pub const TREE_ENCODING_VERSION: u8 = 4;
@@ -49,10 +47,7 @@ impl Tree {
                 .ok_or_else(|| TreeStreamError::Malformed("logical length overflow".into()))?;
             let frame = encode_entry_frame(entry)?;
             let frame_len = u32::try_from(frame.len()).map_err(|_| {
-                TreeStreamError::Malformed(format!(
-                    "entry '{}' frame exceeds u32",
-                    entry.name()
-                ))
+                TreeStreamError::Malformed(format!("entry '{}' frame exceeds u32", entry.name()))
             })?;
             payload.extend_from_slice(&frame_len.to_le_bytes());
             payload.extend_from_slice(&frame);
@@ -72,9 +67,14 @@ impl Tree {
     pub fn decode_canonical(data: &[u8]) -> Result<Self, TreeStreamError> {
         let header = decode_header(data)?;
         let expected_len = TREE_HEADER_LEN as u64 + header.payload_len;
-        if data.len() as u64 != expected_len {
+        if (data.len() as u64) < expected_len {
+            return Err(TreeStreamError::TruncatedFrame {
+                offset: data.len() as u64,
+            });
+        }
+        if (data.len() as u64) > expected_len {
             return Err(TreeStreamError::TrailingBytes {
-                extra: (data.len() as u64).saturating_sub(expected_len),
+                extra: data.len() as u64 - expected_len,
             });
         }
         let mut entries = Vec::new();
@@ -127,18 +127,24 @@ pub fn decode_header(data: &[u8]) -> Result<TreeHeader, TreeStreamError> {
     if version != TREE_ENCODING_VERSION {
         return Err(TreeStreamError::UnsupportedVersion { found: version });
     }
-    let tree_id = ContentHash::from_bytes(data[5..37].try_into().map_err(|_| {
-        TreeStreamError::Malformed("tree id slice is not 32 bytes".into())
-    })?);
-    let entry_count = u64::from_le_bytes(data[37..45].try_into().map_err(|_| {
-        TreeStreamError::Malformed("entry count slice is not 8 bytes".into())
-    })?);
-    let payload_len = u64::from_le_bytes(data[45..53].try_into().map_err(|_| {
-        TreeStreamError::Malformed("payload length slice is not 8 bytes".into())
-    })?);
-    let logical_len = u64::from_le_bytes(data[53..61].try_into().map_err(|_| {
-        TreeStreamError::Malformed("logical length slice is not 8 bytes".into())
-    })?);
+    let tree_id = ContentHash::from_bytes(
+        data[5..37]
+            .try_into()
+            .map_err(|_| TreeStreamError::Malformed("tree id slice is not 32 bytes".into()))?,
+    );
+    let entry_count = u64::from_le_bytes(
+        data[37..45]
+            .try_into()
+            .map_err(|_| TreeStreamError::Malformed("entry count slice is not 8 bytes".into()))?,
+    );
+    let payload_len =
+        u64::from_le_bytes(data[45..53].try_into().map_err(|_| {
+            TreeStreamError::Malformed("payload length slice is not 8 bytes".into())
+        })?);
+    let logical_len =
+        u64::from_le_bytes(data[53..61].try_into().map_err(|_| {
+            TreeStreamError::Malformed("logical length slice is not 8 bytes".into())
+        })?);
     Ok(TreeHeader {
         version,
         tree_id,
@@ -172,15 +178,18 @@ pub(crate) fn decode_entry_at(
             offset: offset as u64,
         });
     }
-    let frame_len = u32::from_le_bytes(data[offset..offset + 4].try_into().map_err(|_| {
-        TreeStreamError::Malformed("frame length slice is not 4 bytes".into())
-    })?) as usize;
+    let frame_len = u32::from_le_bytes(
+        data[offset..offset + 4]
+            .try_into()
+            .map_err(|_| TreeStreamError::Malformed("frame length slice is not 4 bytes".into()))?,
+    ) as usize;
     let frame_start = offset + 4;
-    let frame_end = frame_start
-        .checked_add(frame_len)
-        .ok_or_else(|| TreeStreamError::TruncatedFrame {
-            offset: offset as u64,
-        })?;
+    let frame_end =
+        frame_start
+            .checked_add(frame_len)
+            .ok_or_else(|| TreeStreamError::TruncatedFrame {
+                offset: offset as u64,
+            })?;
     if frame_end > payload_end {
         return Err(TreeStreamError::TruncatedFrame {
             offset: offset as u64,
@@ -235,9 +244,8 @@ fn encode_target(frame: &mut Vec<u8>, entry: &TreeEntry) -> Result<(), TreeStrea
                 TreeStreamError::Malformed("spoollink entry is missing target".into())
             })?;
             let spool_bytes = spool.as_str().as_bytes();
-            let spool_len = u16::try_from(spool_bytes.len()).map_err(|_| {
-                TreeStreamError::Malformed("spool id exceeds u16".into())
-            })?;
+            let spool_len = u16::try_from(spool_bytes.len())
+                .map_err(|_| TreeStreamError::Malformed("spool id exceeds u16".into()))?;
             frame.extend_from_slice(&spool_len.to_le_bytes());
             frame.extend_from_slice(spool_bytes);
             frame.extend_from_slice(state.as_bytes());
@@ -267,9 +275,9 @@ fn decode_target(
 }
 
 fn take_hash(payload: &[u8]) -> Result<ContentHash, TreeStreamError> {
-    let bytes: [u8; 32] = payload.try_into().map_err(|_| {
-        TreeStreamError::Malformed("malformed tree entry object id".into())
-    })?;
+    let bytes: [u8; 32] = payload
+        .try_into()
+        .map_err(|_| TreeStreamError::Malformed("malformed tree entry object id".into()))?;
     Ok(ContentHash::from_bytes(bytes))
 }
 
@@ -311,8 +319,9 @@ fn decode_spoollink(name: String, payload: &[u8]) -> Result<TreeEntry, TreeStrea
         .map_err(|_| TreeStreamError::Malformed("spool id is not UTF-8".into()))?;
     let spool_id = SpoolId::parse(spool)
         .map_err(|err| TreeStreamError::Malformed(format!("invalid spool id: {err}")))?;
-    let state = StateId::from_bytes(payload[spool_end..state_end].try_into().map_err(|_| {
-        TreeStreamError::Malformed("spoollink state id is not 32 bytes".into())
-    })?);
+    let state =
+        StateId::from_bytes(payload[spool_end..state_end].try_into().map_err(|_| {
+            TreeStreamError::Malformed("spoollink state id is not 32 bytes".into())
+        })?);
     TreeEntry::spoollink(name, spool_id, state).map_err(TreeStreamError::from)
 }
