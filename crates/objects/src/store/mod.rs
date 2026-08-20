@@ -4,8 +4,8 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crate::object::{
-    Action, ActionId, AnnotatedTag, Blob, ContentHash, State, StateAttachment, StateAttachmentId,
-    StateId, Tree,
+    Action, ActionId, AnnotatedTag, Blob, ContentHash, OpenedTreeBody, State, StateAttachment,
+    StateAttachmentId, StateId, Tree, TreeEntryReader, TreeResumeCursor, is_canonical_tree,
 };
 
 pub mod codec;
@@ -151,6 +151,15 @@ impl ObjectStore for AnyStore {
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
         match self {
             AnyStore::Fs(inner) => ObjectStore::get_tree(inner, hash),
+        }
+    }
+    fn open_tree(
+        &self,
+        tree_id: &ContentHash,
+        cursor: Option<&TreeResumeCursor>,
+    ) -> Result<Option<TreeEntryReader<OpenedTreeBody>>> {
+        match self {
+            AnyStore::Fs(inner) => ObjectStore::open_tree(inner, tree_id, cursor),
         }
     }
     fn get_tree_serialized(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
@@ -598,6 +607,27 @@ pub trait ObjectStore: Send + Sync {
         self.has_blob(hash)
     }
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>>;
+    /// Open a streamable HTR4 tree body. Resume skips the encoded prefix when
+    /// the backend exposes verified placement or a ranged file handle.
+    fn open_tree(
+        &self,
+        tree_id: &ContentHash,
+        cursor: Option<&TreeResumeCursor>,
+    ) -> Result<Option<TreeEntryReader<OpenedTreeBody>>> {
+        let Some(body) = self.get_tree_serialized(tree_id)? else {
+            return Ok(None);
+        };
+        if !is_canonical_tree(&body) {
+            return Err(HeddleError::InvalidObject(
+                "tree body is not the streamable canonical encoding".to_string(),
+            ));
+        }
+        Ok(Some(TreeEntryReader::open(
+            OpenedTreeBody::Bytes(crate::object::BytesTreeSource::verified_placement(body)),
+            *tree_id,
+            cursor,
+        )?))
+    }
     fn put_tree(&self, tree: &Tree) -> Result<ContentHash>;
     fn has_tree(&self, hash: &ContentHash) -> Result<bool>;
     /// Return whether the tree is owned by this store, excluding any configured
@@ -634,7 +664,7 @@ pub trait ObjectStore: Send + Sync {
         self.put_blob_with_hash(&Blob::from_slice(data), hash)
     }
 
-    /// Return the raw rmp-encoded tree body for `hash`.
+    /// Return the raw canonical tree body for `hash`.
     ///
     /// This is a migration seam, not a runtime compatibility reader: callers
     /// that need current tree semantics should use [`ObjectStore::get_tree`].
@@ -642,15 +672,13 @@ pub trait ObjectStore: Send + Sync {
     /// canonicalize older tree encodings without reintroducing fallback decode
     /// into the durable `Tree` type.
     fn get_tree_serialized(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
-        Ok(self
-            .get_tree(hash)?
-            .map(|tree| rmp_serde::to_vec(&tree))
-            .transpose()?)
+        self.get_tree(hash)?
+            .map(|tree| tree.encode_canonical().map_err(HeddleError::from))
+            .transpose()
     }
 
     fn put_tree_serialized(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
-        let tree: Tree = rmp_serde::from_slice(data)?;
-        tree.validate()?;
+        let tree = Tree::decode_canonical(data)?;
         if tree.hash() != hash {
             return Err(HeddleError::Corruption {
                 expected: hash,
@@ -705,7 +733,7 @@ pub trait ObjectStore: Send + Sync {
                 if let Some(tree) = self.get_tree(hash)? {
                     return Ok(Some((
                         pack::ObjectType::Tree,
-                        rmp_serde::to_vec_named(&tree)?,
+                        tree.encode_canonical()?,
                     )));
                 }
                 if let Some(action) = self.get_action(&ActionId::from_hash(*hash))? {
@@ -974,7 +1002,7 @@ mod any_store_tests {
         assert!(store.has_tree(&tree_hash).unwrap());
         assert!(store.list_trees().unwrap().contains(&tree_hash));
         let tree2 = Tree::new();
-        let tree2_bytes = rmp_serde::to_vec_named(&tree2).unwrap();
+        let tree2_bytes = tree2.encode_canonical().unwrap();
         assert_eq!(
             store
                 .put_tree_serialized(&tree2_bytes, tree2.hash())

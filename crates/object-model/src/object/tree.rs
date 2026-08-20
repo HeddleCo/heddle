@@ -449,6 +449,11 @@ impl TreeEntry {
         1 + 1 + self.target.encoded_payload_len() + self.name.len() + 1
     }
 
+    /// Owned name-plus-target bytes used by streaming page budgets.
+    pub fn decoded_size(&self) -> usize {
+        self.name.len() + self.target.encoded_payload_len()
+    }
+
     pub(crate) fn update_hasher(&self, hasher: &mut blake3::Hasher) {
         self.target.update_hasher(hasher);
         hasher.update(self.name.as_bytes());
@@ -473,6 +478,17 @@ impl Tree {
     pub fn from_entries(mut entries: Vec<TreeEntry>) -> Self {
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         Self { entries }
+    }
+
+    /// Build a tree from entries that are already in canonical name order.
+    ///
+    /// Unlike [`Self::from_entries`], this does not sort. Decoders use it so
+    /// eager and streaming paths reject the same out-of-order or duplicate
+    /// encodings instead of silently canonicalizing them.
+    pub fn try_from_decoded_entries(entries: Vec<TreeEntry>) -> Result<Self, TreeError> {
+        let tree = Self { entries };
+        tree.validate()?;
+        Ok(tree)
     }
 
     pub fn validate(&self) -> Result<(), TreeError> {
@@ -691,9 +707,7 @@ impl TryFrom<EncodedTreeV2> for Tree {
         for entry in encoded.entries {
             entries.push(TreeEntry::try_from(entry)?);
         }
-        let tree = Tree::from_entries(entries);
-        tree.validate()?;
-        Ok(tree)
+        Tree::try_from_decoded_entries(entries)
     }
 }
 
@@ -760,14 +774,14 @@ fn required_git_format(format: Option<u8>, kind: u8) -> Result<u8, TreeError> {
     })
 }
 
-fn git_format_to_tag(format: GitObjectFormat) -> u8 {
+pub(crate) fn git_format_to_tag(format: GitObjectFormat) -> u8 {
     match format {
         GitObjectFormat::Sha1 => GIT_OBJECT_FORMAT_SHA1,
         GitObjectFormat::Sha256 => GIT_OBJECT_FORMAT_SHA256,
     }
 }
 
-fn git_format_from_tag(tag: u8) -> Result<GitObjectFormat, TreeError> {
+pub(crate) fn git_format_from_tag(tag: u8) -> Result<GitObjectFormat, TreeError> {
     match tag {
         GIT_OBJECT_FORMAT_SHA1 => Ok(GitObjectFormat::Sha1),
         GIT_OBJECT_FORMAT_SHA256 => Ok(GitObjectFormat::Sha256),

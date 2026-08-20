@@ -53,7 +53,7 @@ fn repack_preserves_every_typed_identity_byte_identically() {
         (
             PackObjectId::Hash(tree_hash),
             ObjectType::Tree,
-            rmp_serde::to_vec_named(&tree).unwrap(),
+            tree.encode_canonical().unwrap(),
         ),
         (
             PackObjectId::StateId(state_id),
@@ -63,7 +63,7 @@ fn repack_preserves_every_typed_identity_byte_identically() {
         (
             PackObjectId::Hash(tree_two_hash),
             ObjectType::Tree,
-            rmp_serde::to_vec_named(&tree_two).unwrap(),
+            tree_two.encode_canonical().unwrap(),
         ),
         (
             PackObjectId::StateId(state_two_id),
@@ -256,7 +256,7 @@ fn corrupted_compact_metadata_frame_is_rejected_before_cutover() {
     builder.add_id(
         PackObjectId::Hash(tree_hash),
         ObjectType::Tree,
-        rmp_serde::to_vec_named(&tree).unwrap(),
+        tree.encode_canonical().unwrap(),
     );
     builder.add_id(
         PackObjectId::StateId(state_id),

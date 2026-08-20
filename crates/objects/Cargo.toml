@@ -83,6 +83,11 @@ name = "line_diff_blame"
 harness = false
 required-features = ["bench", "memory-backend"]
 
+[[bench]]
+name = "tree_stream"
+harness = false
+required-features = ["bench"]
+
 [[example]]
 name = "train_tree_state_dictionary"
 required-features = ["zstd"]
