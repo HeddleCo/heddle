@@ -147,18 +147,35 @@ pub fn cursor_patch_from_child_env(env: &BTreeMap<String, String>) -> IdentityCu
 /// SessionEnd / session.deleted / session.closed expire the live cursor.
 pub fn cursor_event_expires(payload: &Value, event_hint: Option<&str>) -> bool {
     expire_event_name(event_hint)
-        || first_value_string(
-            payload,
-            &[
-                &["hook_event_name"],
-                &["hook_event"],
-                &["event", "type"],
-                &["type"],
-                &["event", "name"],
-                &["name"],
-            ],
-        )
-        .is_some_and(|name| expire_event_name(Some(&name)))
+        || event_name_from_payload(payload).is_some_and(|name| expire_event_name(Some(&name)))
+}
+
+/// Stamp-path expire: SessionEnd-class events, plus Codex `Stop`.
+///
+/// Codex has no SessionEnd. Claude `Stop` is turn-end and stays on relay.
+pub fn stamp_event_expires(harness: &str, payload: &Value, event_hint: Option<&str>) -> bool {
+    if cursor_event_expires(payload, event_hint) {
+        return true;
+    }
+    if stamp_harness_name(harness) != Some("codex") {
+        return false;
+    }
+    expire_codex_stop(event_hint)
+        || event_name_from_payload(payload).is_some_and(|name| expire_codex_stop(Some(&name)))
+}
+
+fn event_name_from_payload(payload: &Value) -> Option<String> {
+    first_value_string(
+        payload,
+        &[
+            &["hook_event_name"],
+            &["hook_event"],
+            &["event", "type"],
+            &["type"],
+            &["event", "name"],
+            &["name"],
+        ],
+    )
 }
 
 fn expire_event_name(name: Option<&str>) -> bool {
@@ -169,6 +186,10 @@ fn expire_event_name(name: Option<&str>) -> bool {
         name,
         "SessionEnd" | "session.end" | "session.deleted" | "session.closed" | "session.idle"
     ) || name.eq_ignore_ascii_case("sessionend")
+}
+
+fn expire_codex_stop(name: Option<&str>) -> bool {
+    published_field(name).is_some_and(|name| name == "Stop")
 }
 
 /// OpenCode plugin should key on `event.type`, not `event.name`.
@@ -202,6 +223,25 @@ mod tests {
         ));
         assert!(!cursor_event_expires(
             &json!({"event": {"type": "session.updated"}}),
+            None
+        ));
+        assert!(stamp_event_expires(
+            "codex",
+            &json!({"hook_event_name": "Stop", "session_id": "c1"}),
+            None
+        ));
+        assert!(stamp_event_expires("codex", &json!({}), Some("Stop")));
+        assert!(
+            !stamp_event_expires(
+                "claude-code",
+                &json!({"hook_event_name": "Stop", "session_id": "s1"}),
+                None
+            ),
+            "Claude Stop is turn-end; only SessionEnd expires the cursor"
+        );
+        assert!(!stamp_event_expires(
+            "codex",
+            &json!({"hook_event_name": "PreToolUse"}),
             None
         ));
     }

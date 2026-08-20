@@ -124,7 +124,7 @@ Notes:
 
 - `heddle init` can offer the same install step interactively, but it remains optional
 - repo-local install is preferred when the harness supports it
-- Codex uses user-scope `~/.codex/config.toml` `[hooks]` (`SessionStart`, `SubagentStart`, `PreToolUse`, `Stop`) that write a workspace `.heddle/identity` cursor
+- Codex uses user-scope `~/.codex/config.toml` `[hooks]` (`SessionStart`, `SubagentStart`, `PreToolUse`, `Stop`) that write a workspace `.heddle/identity` cursor. `Stop` (and uninstall) expire the cursor so a later human/Cursor capture cannot freeze the last Codex agent.
 - Claude Code uses hooks: `PreToolUse` and StatusLine stamp the cursor (StatusLine chains an existing command). Other events still relay
 - OpenCode uses a Heddle-managed plugin file plus a
   `heddle.timeline.json` capability manifest. The manifest advertises the

@@ -720,7 +720,7 @@ fn install_codex(
     let heddle = HeddleInvocation::resolve(path_mode)?;
     // Workspace sidecar: discover `.heddle` from cwd. Do not bake the
     // install-repo path — a second workspace would stamp the wrong tree.
-    let command = format!("{heddle} integration stamp codex");
+    let stamp = format!("{heddle} integration stamp codex");
     let table = value
         .as_table_mut()
         .ok_or_else(|| anyhow!("codex config root must be a TOML table"))?;
@@ -738,6 +738,11 @@ fn install_codex(
         .as_table_mut()
         .ok_or_else(|| anyhow!("codex hooks must be a table"))?;
     for event in ["SessionStart", "SubagentStart", "PreToolUse", "Stop"] {
+        let command = if event == "Stop" {
+            format!("{stamp} --expire")
+        } else {
+            stamp.clone()
+        };
         upsert_codex_hook_event(hooks_table, event, &command);
     }
     if table.get("notify").is_some_and(|notify| {
@@ -916,59 +921,17 @@ fn install_opencode(
 
 fn opencode_plugin_script(exe: &str, repo: &str) -> String {
     format!(
-        r#"const fs = require("fs");
-const identityDest = () => {{
-  const marker = {repo:?} + "/.heddle";
-  try {{
-    if (fs.statSync(marker).isFile()) return {repo:?} + "/.heddle.identity";
-  }} catch {{}}
-  return marker + "/identity";
-}};
-const published = (value) => {{
-  if (value == null) return undefined;
-  const text = String(value).trim();
-  if (!text || text.toLowerCase() === "unknown") return undefined;
-  return text;
-}};
-const mergeCursor = (patch) => {{
-  const dest = identityDest();
-  let current = {{}};
-  try {{ current = JSON.parse(fs.readFileSync(dest, "utf8")); }} catch {{}}
-  const next = {{}};
-  for (const key of ["provider", "model", "thought_level", "session", "parent"]) {{
-    const value = published(patch[key]) || published(current[key]);
-    if (value) next[key] = value;
-  }}
-  fs.mkdirSync(require("path").dirname(dest), {{ recursive: true }});
-  const tmp = dest + ".tmp." + process.pid + "." + Date.now();
-  fs.writeFileSync(tmp, JSON.stringify(next));
-  fs.renameSync(tmp, dest);
-}};
-const modelPatch = (model) => {{
-  if (!model || typeof model !== "object") return {{ model: published(model) }};
-  return {{
-    provider: published(model.providerID),
-    model: published(model.id),
-    thought_level: published(model.variant),
-  }};
-}};
-export default async function() {{
+        r#"export default async function() {{
   return {{
     event: async (input) => {{
       const eventObj = input?.event || input;
-      const properties = eventObj?.properties || input?.properties || {{}};
       const event = eventObj?.type || eventObj?.name || input?.type || input?.name || "event";
-      if (["session.deleted","session.closed","session.end","session.idle","SessionEnd"].includes(event)) {{
-        try {{ fs.unlinkSync(identityDest()); }} catch {{}}
-        return;
-      }}
-      const model = properties.model || input?.model;
-      const patch = {{
-        ...modelPatch(model),
-        session: published(properties.sessionID || properties.session_id || input?.sessionID || input?.session_id || input?.session?.id),
-        parent: published(properties.parentID || properties.parent_id || input?.parentID || input?.parent_id),
-      }};
-      mergeCursor(patch);
+      const expire = ["session.deleted","session.closed","session.end","session.idle","SessionEnd"].includes(event);
+      const stamp = ["--repo", {repo:?}, "integration", "stamp", "opencode"];
+      if (expire) stamp.push("--expire");
+      Bun.spawnSync([{exe:?}, ...stamp], {{
+        stdin: JSON.stringify(input),
+      }});
       const allowed = new Set(["session.created","session.updated","session.diff","file.edited","tool.execute.before","tool.execute.after","permission.asked","permission.replied"]);
       if (allowed.has(event)) {{
         Bun.spawn([{exe:?}, "--repo", {repo:?}, "integration", "relay", "opencode", event], {{
@@ -1525,29 +1488,23 @@ mod tests {
             "opencode plugin must read event.type, got: {plugin_contents}"
         );
         assert!(
-            plugin_contents.contains("eventObj?.properties")
-                || plugin_contents.contains("event.properties"),
-            "opencode plugin must read nested event.properties, got: {plugin_contents}"
+            plugin_contents.contains("\"integration\", \"stamp\", \"opencode\"")
+                && plugin_contents.contains("Bun.spawnSync"),
+            "opencode writes must go through locked integration stamp, got: {plugin_contents}"
         );
         assert!(
-            plugin_contents.contains("model.providerID"),
-            "opencode plugin must read object model fields, got: {plugin_contents}"
+            plugin_contents.contains("session.deleted") && plugin_contents.contains("--expire"),
+            "plugin must expire the cursor on session end through stamp --expire"
         );
         assert!(
-            plugin_contents.contains(".heddle.identity"),
-            "opencode plugin must use .heddle.identity when .heddle is a file"
-        );
-        assert!(
-            plugin_contents.contains(".heddle") && plugin_contents.contains("/identity"),
-            "opencode plugin must write the workspace identity cursor"
+            !plugin_contents.contains("mergeCursor")
+                && !plugin_contents.contains("unlinkSync")
+                && !plugin_contents.contains("writeFileSync"),
+            "plugin must not unlocked-RMW the identity sidecar, got: {plugin_contents}"
         );
         assert!(
             !plugin_contents.contains("session.get"),
             "plugin must not hunt session.get, got: {plugin_contents}"
-        );
-        assert!(
-            plugin_contents.contains("session.deleted") && plugin_contents.contains("unlinkSync"),
-            "plugin must expire the cursor on session end"
         );
         let timeline_manifest_path = repo
             .root()
@@ -1638,8 +1595,42 @@ mod tests {
             contents.contains("heddle integration stamp codex"),
             "expected PATH-relative `heddle` in codex hook command, got: {contents}"
         );
+        let parsed: toml::Value = contents.parse().unwrap();
+        let hook_command = |event: &str| {
+            parsed["hooks"][event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        };
+        assert_eq!(
+            hook_command("Stop"),
+            "heddle integration stamp codex --expire",
+            "Codex Stop must expire, same as Claude SessionEnd"
+        );
+        for event in ["SessionStart", "SubagentStart", "PreToolUse"] {
+            assert_eq!(
+                hook_command(event),
+                "heddle integration stamp codex",
+                "{event} must stamp without expiring"
+            );
+        }
         assert_eq!(manifest.integrations[0].harness, "codex");
         assert_eq!(manifest.integrations[0].path_mode, PathMode::Relative);
+
+        heddle_core::write_identity_cursor(
+            repo.root(),
+            &heddle_core::IdentityCursor {
+                provider: Some("openai".into()),
+                model: Some("gpt-5.4".into()),
+                ..heddle_core::IdentityCursor::default()
+            },
+        )
+        .unwrap();
+        uninstall_one(&repo, &mut manifest, "codex").unwrap();
+        assert!(
+            heddle_core::read_identity_cursor(repo.root()).is_empty(),
+            "codex uninstall must expire the identity cursor"
+        );
     }
 
     #[test]

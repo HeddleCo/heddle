@@ -167,7 +167,7 @@ pub use identity_cursor::{
 pub use identity_payload::{
     claude_cursor_patch, codex_cursor_patch, cursor_event_expires, cursor_patch_from_child_env,
     cursor_patch_from_stdin, opencode_cursor_patch, opencode_event_type, pi_cursor_patch,
-    stamp_harness_name,
+    stamp_event_expires, stamp_harness_name,
 };
 pub use init_plan::{
     InitPrincipalPlan, SET_PRINCIPAL_COMMAND, init_recommended_action, init_side_effects,
