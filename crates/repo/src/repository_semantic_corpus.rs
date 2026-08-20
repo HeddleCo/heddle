@@ -54,6 +54,10 @@ impl CorpusBudget {
     pub(crate) fn has_room(&self) -> bool {
         self.files < CORPUS_FILE_BUDGET && self.bytes <= CORPUS_BYTE_BUDGET
     }
+
+    pub(crate) fn remaining_files(&self) -> usize {
+        CORPUS_FILE_BUDGET.saturating_sub(self.files)
+    }
 }
 
 pub(crate) fn collect_changed_symbols(
@@ -106,8 +110,9 @@ pub(crate) fn populate_new_function_corpus(
     if !budget.has_room() {
         return Ok(false);
     }
+    let skip: BTreeSet<PathBuf> = new_functions.keys().cloned().collect();
     let mut files = Vec::new();
-    if !collect_function_file_paths(source, root, &mut files)? {
+    if !collect_function_file_paths(source, root, budget.remaining_files(), &skip, &mut files)? {
         return Ok(false);
     }
     for path in files {
@@ -142,13 +147,18 @@ pub(crate) fn populate_new_function_corpus(
     Ok(true)
 }
 
-fn collect_function_file_paths(
+pub(crate) fn collect_function_file_paths(
     source: &impl ObjectSource,
     root: &SemanticIndexRoot,
+    remaining: usize,
+    skip: &BTreeSet<PathBuf>,
     out: &mut Vec<String>,
 ) -> Result<bool> {
     let mut stack = vec![(String::new(), root.tree, 0usize)];
     while let Some((prefix, hash, depth)) = stack.pop() {
+        if out.len() >= remaining {
+            return Ok(false);
+        }
         if depth > MAX_SEMANTIC_TREE_DEPTH {
             return Ok(false);
         }
@@ -167,18 +177,26 @@ fn collect_function_file_paths(
             match entry.kind {
                 SemanticEntryKind::Dir => stack.push((path, entry.node, depth + 1)),
                 SemanticEntryKind::Opaque => {}
-                SemanticEntryKind::File => match load_semantic_file(source, &entry.node) {
-                    Ok(file) if file_has_function(&file) => out.push(path),
-                    Ok(_) => {}
-                    Err(err) => {
-                        warn!(
-                            error = %err,
-                            path,
-                            "semantic corpus: file node unreadable; fail-closed"
-                        );
+                SemanticEntryKind::File => {
+                    if skip.contains(&PathBuf::from(&path)) {
+                        continue;
+                    }
+                    if out.len() >= remaining {
                         return Ok(false);
                     }
-                },
+                    match load_semantic_file(source, &entry.node) {
+                        Ok(file) if file_has_function(&file) => out.push(path),
+                        Ok(_) => {}
+                        Err(err) => {
+                            warn!(
+                                error = %err,
+                                path,
+                                "semantic corpus: file node unreadable; fail-closed"
+                            );
+                            return Ok(false);
+                        }
+                    }
+                }
             }
         }
     }

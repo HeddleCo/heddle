@@ -41,16 +41,26 @@ pub fn run(
         .map(|dt| dt.timestamp())
         .unwrap_or_else(|| new.created_at.timestamp());
 
+    let catalog: Vec<CatalogEntry<'_>> = ctx
+        .new_functions
+        .iter()
+        .flat_map(|(path, fns)| {
+            fns.iter().map(|def| CatalogEntry {
+                path: path.as_path(),
+                identity: def.symbol_identity(),
+                def,
+            })
+        })
+        .collect();
+    let all_fns: HashMap<(&Path, &str), &FunctionDef> = catalog
+        .iter()
+        .map(|entry| ((entry.path, entry.identity.as_str()), entry.def))
+        .collect();
+
     let mut test_set: HashSet<(&Path, &str)> = HashSet::new();
-    let mut all_fns: HashMap<(&Path, &str), &FunctionDef> = HashMap::new();
-    for (path, fns) in &ctx.new_functions {
-        let lang = Language::from_path(path);
-        for fn_def in fns {
-            let key = (path.as_path(), fn_def.name.as_str());
-            all_fns.insert(key, fn_def);
-            if is_test_function(&fn_def.name, lang) {
-                test_set.insert(key);
-            }
+    for (&key, def) in &all_fns {
+        if is_test_function(&def.name, Language::from_path(key.0)) {
+            test_set.insert(key);
         }
     }
 
@@ -58,50 +68,53 @@ pub fn run(
         return Vec::new();
     }
 
-    let mut callers_of: HashMap<&str, Vec<(&Path, &str)>> = HashMap::new();
-    let names: Vec<&str> = all_fns.keys().map(|(_, n)| *n).collect();
-    for (&(caller_path, caller_name), caller_def) in &all_fns {
-        for &callee_name in &names {
-            if callee_name == caller_name {
+    let mut callers_of: HashMap<(&Path, &str), Vec<(&Path, &str)>> = HashMap::new();
+    for caller in &catalog {
+        for callee in &catalog {
+            if caller.path == callee.path && caller.identity == callee.identity {
                 continue;
             }
-            if body_mentions(&caller_def.content, callee_name) {
+            if mentions_callee(&caller.def.content, callee.def) {
                 callers_of
-                    .entry(callee_name)
+                    .entry((callee.path, callee.identity.as_str()))
                     .or_default()
-                    .push((caller_path, caller_name));
+                    .push((caller.path, caller.identity.as_str()));
             }
         }
     }
 
     let mut out = Vec::new();
-    for (path, fns) in &ctx.new_functions {
-        for fn_def in fns {
-            let key = (path.as_path(), fn_def.name.as_str());
-            if !ctx.is_emit_target(path, fn_def) {
-                continue;
-            }
-            if test_set.contains(&key) {
-                continue;
-            }
-            if !reaches_test(key, &callers_of, &test_set) {
-                out.push(RiskSignal {
-                    kind: RiskSignalKind::TestReachability,
-                    anchor: SignalAnchor::symbol(path.to_string_lossy(), &fn_def.name),
-                    reason: REASON_TEXT.to_string(),
-                    producer: ProducerId::new(MODULE_ID, VERSION),
-                    computed_at,
-                    computed_against: Some(new.state_id),
-                });
-            }
+    for entry in &catalog {
+        let key = (entry.path, entry.identity.as_str());
+        if !ctx.is_emit_target(entry.path, entry.def) {
+            continue;
+        }
+        if test_set.contains(&key) {
+            continue;
+        }
+        if !reaches_test(key, &callers_of, &test_set) {
+            out.push(RiskSignal {
+                kind: RiskSignalKind::TestReachability,
+                anchor: SignalAnchor::symbol(entry.path.to_string_lossy(), &entry.def.name),
+                reason: REASON_TEXT.to_string(),
+                producer: ProducerId::new(MODULE_ID, VERSION),
+                computed_at,
+                computed_against: Some(new.state_id),
+            });
         }
     }
     out
 }
 
+struct CatalogEntry<'a> {
+    path: &'a Path,
+    identity: String,
+    def: &'a FunctionDef,
+}
+
 fn reaches_test<'a>(
     start: (&'a Path, &'a str),
-    callers_of: &HashMap<&str, Vec<(&'a Path, &'a str)>>,
+    callers_of: &HashMap<(&'a Path, &'a str), Vec<(&'a Path, &'a str)>>,
     test_set: &HashSet<(&Path, &str)>,
 ) -> bool {
     let mut visited: HashSet<(&Path, &str)> = HashSet::new();
@@ -112,7 +125,7 @@ fn reaches_test<'a>(
         if test_set.contains(&node) {
             return true;
         }
-        if let Some(callers) = callers_of.get(node.1) {
+        if let Some(callers) = callers_of.get(&node) {
             for &caller in callers {
                 if visited.insert(caller) {
                     queue.push_back(caller);
@@ -136,6 +149,14 @@ fn is_test_function(name: &str, lang: Language) -> bool {
         Language::Zig => name.starts_with("test:"),
         _ => false,
     }
+}
+
+fn mentions_callee(body: &str, callee: &FunctionDef) -> bool {
+    if callee.container.is_empty() {
+        return body_mentions(body, &callee.name);
+    }
+    body_mentions(body, &callee.qualified_name())
+        || body_mentions(body, &format!("{}.{}", callee.container, callee.name))
 }
 
 fn body_mentions(body: &str, name: &str) -> bool {
@@ -166,9 +187,13 @@ mod tests {
     }
 
     fn fdef(name: &str, content: &str) -> FunctionDef {
+        fdef_in("", name, content)
+    }
+
+    fn fdef_in(container: &str, name: &str, content: &str) -> FunctionDef {
         FunctionDef {
             name: name.to_string(),
-            container: String::new(),
+            container: container.to_string(),
             signature: format!("fn {name}()"),
             start_line: 1,
             end_line: 3,
@@ -387,5 +412,39 @@ mod tests {
             .iter()
             .filter_map(|signal| signal.anchor.symbol.as_deref())
             .collect()
+    }
+
+    #[test]
+    fn qualified_call_does_not_cover_same_bare_name() {
+        let path = PathBuf::from("src/lib.rs");
+        let foo_run = fdef_in("Foo", "run", "fn run() { do_foo(); }");
+        let bar_run = fdef_in("Bar", "run", "fn run() { do_bar(); }");
+        let mut ctx = SemanticContext::new();
+        ctx.new_functions.insert(
+            path.clone(),
+            vec![
+                foo_run.clone(),
+                bar_run.clone(),
+                fdef("test_bar", "fn test_bar() { Bar::run(); }"),
+            ],
+        );
+        ctx.changed_symbols
+            .insert((path.clone(), foo_run.symbol_identity()));
+        ctx.changed_symbols
+            .insert((path, bar_run.symbol_identity()));
+
+        let signals = run(
+            &empty_state(),
+            &empty_state(),
+            &cfg_with_one_required_test(),
+            &ctx,
+        );
+
+        assert_eq!(
+            signals.len(),
+            1,
+            "Bar::run is tested; Foo::run must stay unreachable: {signals:?}"
+        );
+        assert_eq!(signal_symbols(&signals), BTreeSet::from(["run"]));
     }
 }

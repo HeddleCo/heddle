@@ -15,15 +15,20 @@ pub struct FunctionDef {
 }
 
 impl FunctionDef {
+    /// `container::name`, or the bare name when the parser saw no container.
+    pub fn qualified_name(&self) -> String {
+        if self.container.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{}::{}", self.container, self.name)
+        }
+    }
+
     /// Identity that distinguishes `Foo::run` from `Bar::run` and
     /// overloads that share a bare name. Used as the capture-time
     /// `changed_symbols` key.
     pub fn symbol_identity(&self) -> String {
-        let qualified = if self.container.is_empty() {
-            self.name.clone()
-        } else {
-            format!("{}::{}", self.container, self.name)
-        };
+        let qualified = self.qualified_name();
         if self.signature.is_empty() {
             qualified
         } else {
