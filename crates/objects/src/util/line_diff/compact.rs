@@ -65,11 +65,12 @@ pub(super) fn slide_equal_run(
 
 /// Slide a whole-run equal one adjacent Compact shift-up, or leave it.
 ///
-/// Compact compares the equal to the immediately following insert once. It
-/// does not walk every later copy, and it does not jump onto a later suffix
-/// after a different line. `b/a` vs `a/b/b` slides `(0,1)` → `(0,2)`;
-/// `a` vs `b/a/a/a/b` slides `(0,1)` → `(0,2)`; `b/a` vs `a/b/c/b/b`
-/// stays `(0,1)`.
+/// Compact compares the equal to the immediately following insert once, and
+/// only keeps that shift when the remaining insert's suffix also matches.
+/// It does not walk every later copy (`a` vs `b/a/a/a/b` stays `(0,2)`),
+/// and it does not jump onto a later suffix after a different line
+/// (`b/a` vs `a/b/c/b/b` stays `(0,1)`). `b/a` vs `a/b/b` slides
+/// `(0,1)` → `(0,2)`.
 ///
 /// `gap_start` is the exclusive end of the original (pre-left-slide) run so a
 /// left-slide is not undone. Only a whole-run slide is applied.
@@ -84,7 +85,10 @@ pub(super) fn slide_equal_run_right(
     if left_justified || run.len == 0 || gap_end <= gap_start {
         return (None, run);
     }
-    if gap_start + run.len <= gap_end && run_matches_at(old, new, run, gap_start) {
+    if gap_start + run.len <= gap_end
+        && run_matches_at(old, new, run, gap_start)
+        && run_matches_at(old, new, run, gap_end - run.len)
+    {
         (
             None,
             EqualRun {
@@ -98,12 +102,14 @@ pub(super) fn slide_equal_run_right(
     }
 }
 
-/// True when Compact would keep a right shift of this equal.
+/// True when Compact would keep one adjacent right shift of this equal.
 ///
 /// A run already sitting on the unconsumed new cursor is a common prefix of
 /// the remaining window. Compact shift-down would undo a right slide.
-/// A later file suffix that matches is not enough: the next insert must
-/// itself be a copy of the run.
+/// Shift-up also requires the remaining insert's suffix to match; an
+/// adjacent copy alone is not enough (`a` vs `b/a/a/a/b` stays `(0,2)`).
+/// A later suffix after a different line is not enough either
+/// (`b/a` vs `a/b/c/b/b` stays `(0,1)`).
 pub(super) fn compact_keeps_right_shift(
     old: LineView<'_>,
     new: LineView<'_>,
@@ -115,6 +121,7 @@ pub(super) fn compact_keeps_right_shift(
         return false;
     }
     run_matches_at(old, new, run, original_end)
+        && run_matches_at(old, new, run, new.offs.len() - run.len)
 }
 
 fn run_matches_at(old: LineView<'_>, new: LineView<'_>, run: EqualRun, new_start: usize) -> bool {

@@ -36,8 +36,8 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   before `get_blob`. Compact right-slides one adjacent trailing copy of
   the equal (`b/a` vs `a/b/b` is `(0,2)`; `a` vs `b/a/a/a/b` stays
   `(0,2)`; `b/a` vs `a/b/c/b/b` stays `(0,1)`; `a` vs `a/a` stays
-  `(0,0)`). A visitor cancel is delivered before searching an unrelated
-  tail after that first equal. Inspected-but-unprocessed parents
+  `(0,0)`). Equals are visited when found, so a visitor cancel does not
+  wait for a later flush. Inspected-but-unprocessed parents
   are not counted as blame frontiers (`ancestors_visited` stays one visit
   on a no-overlap parent). A persisted frontier is bound to its prepared
   target blob and line count; mixing another job's target fails closed.

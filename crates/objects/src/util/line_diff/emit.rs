@@ -56,7 +56,7 @@ fn visit_after_right_slide<E>(
             new,
             run,
             original_end,
-            original_end + run.len,
+            new.offs.len(),
             left_justified,
         )
         .1
