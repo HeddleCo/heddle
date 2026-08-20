@@ -7,8 +7,10 @@ on.
 
 ## Runtime introspection
 
-Schemas in this document are mirrored at runtime by
-`crates/cli-contract/src/cli/commands/schemas.rs`. Generate the canonical JSON
+Schemas in this document are registered at runtime by
+`crates/cli-contract/src/cli/commands/schemas.rs`. `init` registers the
+real `InitOutput` type (no hand-written `InitSchema` mirror); remaining
+verbs still use a hand-written mirror. Generate the canonical JSON
 Schema for any verb with:
 
     heddle schemas                    # list registered schema verbs
@@ -139,6 +141,10 @@ metadata only; it does not import Git history or write Git-tracked files.
   "heddle_initialized": true,
   "installed_heddleignore": false,
   "principal_configured": false,
+  "principal_status": "not_configured",
+  "principal_source": null,
+  "principal": null,
+  "principal_recommended_action": "heddle init --principal-name <name> --principal-email <email>",
   "side_effects": [
     "created Heddle sidecar for the existing Git repository",
     "updated .git/info/exclude for Heddle metadata",
@@ -159,6 +165,10 @@ metadata only; it does not import Git history or write Git-tracked files.
 | `repository_mode` | string | required | Repository capability after init, e.g. `git-overlay` or native Heddle storage. |
 | `git_detected`, `heddle_initialized` | bool | required | Whether init detected an existing Git repo, and whether Heddle metadata is now present. |
 | `installed_heddleignore`, `principal_configured` | bool | required | Side effects outside `.heddle`, if any. `installed_heddleignore` is currently false; init does not install ignore-policy files. Git-overlay init uses local Git excludes only for Heddle metadata. |
+| `principal_status` | string | required | `configured` or `not_configured`. |
+| `principal_source` | string \| null | always present | Where the principal was resolved from, or `null` when none is configured. |
+| `principal` | object \| null | always present | `{ name, email }` when configured; otherwise `null`. |
+| `principal_recommended_action` | string \| null | always present | Command to set a principal when none is configured. |
 | `side_effects` | array<string> | required | Human-readable, machine-preserved list of what init changed or intentionally left untouched. |
 | `message` | string | required | Human summary. |
 | `next_action`, `recommended_action` | string \| null | required | Primary verification-guided next command. Git Overlay init proceeds directly to the normal save loop. |
@@ -3133,6 +3143,9 @@ catalog-wide schema coverage.
 
 The command-contract coverage portion of this sample is generated from
 runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
+These counts describe the live parser catalog today. They are not the
+heddle#473 destination (~23 everyday verbs; umbrella nouns do not count
+as one; no `help advanced`).
 
 ```json
 {
@@ -3147,7 +3160,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact purge list",
       "visibility set"
     ],
-    "accepted_opaque_schema_verbs_total": 38,
+    "accepted_opaque_schema_verbs_total": 39,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
@@ -3159,14 +3172,14 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
       "redact purge list",
       "visibility set"
     ],
-    "advanced_scope_json_commands_total": 114,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 38,
+    "advanced_scope_json_commands_total": 115,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 39,
     "advanced_scope_mutating_commands_total": 65,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 21,
-    "catalog_commands_total": 190,
+    "catalog_commands_total": 192,
     "catalog_mutating_commands_total": 93,
-    "json_commands_total": 150,
-    "json_commands_with_accepted_opaque_schema": 38,
+    "json_commands_total": 151,
+    "json_commands_with_accepted_opaque_schema": 39,
     "json_commands_with_schema": 112,
     "json_commands_without_schema": 0,
     "json_mutating_commands_total": 88,
@@ -3176,9 +3189,9 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "mutating_commands_with_accepted_opaque_schema": 21,
     "mutating_commands_with_schema": 67,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 38,
+    "opaque_schema_verbs_total": 39,
     "status": "available",
-    "summary": "190 command(s), 150 JSON command(s), 93 mutating command(s), 88 mutating JSON command(s); verified everyday/agent machine surface has 36 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
+    "summary": "192 command(s), 151 JSON command(s), 93 mutating command(s), 88 mutating JSON command(s); verified everyday/agent machine surface has 36 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3216,7 +3229,7 @@ runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
     "try"
   ],
   "status": "available",
-  "summary": "190 command(s), 150 JSON command(s), 93 mutating command(s), 88 mutating JSON command(s); verified everyday/agent machine surface has 36 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
+  "summary": "192 command(s), 151 JSON command(s), 93 mutating command(s), 88 mutating JSON command(s); verified everyday/agent machine surface has 36 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true

@@ -1165,7 +1165,7 @@ export interface HookUninstallSchema {
 }
 
 export interface IdentityClaimLinkSchema {
-  /** Short-lived heddle.sh bearer URL, present only on deliberate mint/reissue. */
+  /** Short-lived claim URL on the selected server origin, present only on deliberate mint/reissue. */
   claim_url?: string | null;
   /** Stable lowercase-hex Iroh NodeId, present when a claim link is minted. */
   node_id?: string | null;
@@ -1177,7 +1177,7 @@ export interface IdentityClaimLinkSchema {
 }
 
 export interface IdentityEnsureSchema {
-  /** Short-lived heddle.sh bearer URL, present only on deliberate mint/reissue. */
+  /** Short-lived claim URL on the selected server origin, present only on deliberate mint/reissue. */
   claim_url?: string | null;
   idempotency_status?: string | null;
   /** Stable lowercase-hex Iroh NodeId, present when a claim link is minted. */
@@ -1213,32 +1213,50 @@ export interface ImportGitSchema {
   tags_synced: number;
 }
 
+/** Principal identity included in init JSON when one is configured. */
 export interface InitPrincipalSchema {
   email: string;
   name: string;
 }
 
+/** JSON payload for a successful `heddle init`. */
 export interface InitSchema {
+  /** Always `init` on success. */
   action: string;
+  /** Whether init detected an existing Git repository. */
   git_detected: boolean;
+  /** Whether Heddle metadata is now present. */
   heddle_initialized: boolean;
   idempotency_status?: string | null;
+  /** Whether init installed a Heddle ignore-policy file. Currently always false. */
   installed_heddleignore: boolean;
+  /** Human summary. */
   message: string;
+  /** Primary verification-guided next command. */
   next_action?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   output_kind: "init";
+  /** Path to the initialized `.heddle` metadata directory. */
   path: string;
+  /** Configured principal identity, when present. */
   principal?: InitPrincipalSchema | null;
+  /** Whether init wrote a default principal into user config. */
   principal_configured: boolean;
+  /** Suggested command to set a principal when none is configured. */
   principal_recommended_action?: string | null;
+  /** Where the principal was resolved from, when configured. */
   principal_source?: string | null;
+  /** Principal configuration status (`configured` or `not_configured`). */
   principal_status: string;
+  /** Same contract as `next_action` for callers that read the recommended field. */
   recommended_action?: string | null;
   replayed?: boolean | null;
+  /** Repository capability after init, e.g. `git-overlay` or native Heddle storage. */
   repository_mode: string;
+  /** Human-readable list of what init changed or intentionally left untouched. */
   side_effects: string[];
+  /** Always `initialized` on success. */
   status: string;
 }
 
@@ -2231,6 +2249,11 @@ export interface SemanticDiffSchema {
 }
 
 export type SemanticHotSchema = Record<string, unknown>;
+
+export interface SemanticRefsSchema {
+  output_kind: "semantic_refs";
+  [key: string]: unknown;
+}
 
 export interface SessionEntrySchema {
   active: boolean;
@@ -3503,6 +3526,7 @@ export interface HeddleVerbOutputs {
   schemas: SchemasListSchema;
   "semantic diff": SemanticDiffSchema;
   "semantic hot": SemanticHotSchema;
+  "semantic refs": SemanticRefsSchema;
   show: ShowSchema;
   start: StartSchema;
   status: StatusSchema;
@@ -3667,6 +3691,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "schemas",
   "semantic diff",
   "semantic hot",
+  "semantic refs",
   "show",
   "start",
   "status",

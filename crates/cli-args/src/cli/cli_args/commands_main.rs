@@ -12,10 +12,10 @@ use super::{
     IntegrationCommands, OplogCommands, PresenceCommands, QueryArgs, RedactCommands,
     RemoteCommands, ReviewCommands, ShellCommands, ThreadCommands, VisibilityCommands,
     commands_args::{
-        AdoptArgs, CloneArgs, CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, ExpandArgs, InitArgs,
-        LandArgs, LogArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs,
-        RunArgs, SnapshotArgs, SyncArgs, ThreadStartArgs, TimelineArgs, TryArgs, UndoArgs,
-        WatchArgs,
+        AdoptArgs, CloneArgs, CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, ExpandArgs,
+        INIT_VERB, InitArgs, LandArgs, LogArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs,
+        RetroArgs, RevertArgs, RunArgs, SnapshotArgs, SyncArgs, ThreadStartArgs, TimelineArgs,
+        TryArgs, UndoArgs, WatchArgs,
     },
 };
 #[cfg(feature = "client")]
@@ -76,6 +76,7 @@ pub struct FsckRepairGitArgs {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize Heddle in a directory or existing Git checkout.
+    #[command(name = INIT_VERB)]
     Init(InitArgs),
 
     /// Adopt Git history into Heddle-native source authority.

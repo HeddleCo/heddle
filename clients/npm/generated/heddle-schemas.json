@@ -14944,7 +14944,7 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "claim_url": {
-          "description": "Short-lived heddle.sh bearer URL, present only on deliberate mint/reissue.",
+          "description": "Short-lived claim URL on the selected server origin, present only on deliberate mint/reissue.",
           "type": [
             "string",
             "null"
@@ -14987,7 +14987,7 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "claim_url": {
-          "description": "Short-lived heddle.sh bearer URL, present only on deliberate mint/reissue.",
+          "description": "Short-lived claim URL on the selected server origin, present only on deliberate mint/reissue.",
           "type": [
             "string",
             "null"
@@ -15077,6 +15077,7 @@
     "init": {
       "$defs": {
         "InitPrincipalSchema": {
+          "description": "Principal identity included in init JSON when one is configured.",
           "properties": {
             "email": {
               "type": "string"
@@ -15093,14 +15094,18 @@
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "JSON payload for a successful `heddle init`.",
       "properties": {
         "action": {
+          "description": "Always `init` on success.",
           "type": "string"
         },
         "git_detected": {
+          "description": "Whether init detected an existing Git repository.",
           "type": "boolean"
         },
         "heddle_initialized": {
+          "description": "Whether Heddle metadata is now present.",
           "type": "boolean"
         },
         "idempotency_status": {
@@ -15110,12 +15115,15 @@
           ]
         },
         "installed_heddleignore": {
+          "description": "Whether init installed a Heddle ignore-policy file. Currently always false.",
           "type": "boolean"
         },
         "message": {
+          "description": "Human summary.",
           "type": "string"
         },
         "next_action": {
+          "description": "Primary verification-guided next command.",
           "type": [
             "string",
             "null"
@@ -15164,6 +15172,7 @@
           "type": "string"
         },
         "path": {
+          "description": "Path to the initialized `.heddle` metadata directory.",
           "type": "string"
         },
         "principal": {
@@ -15174,27 +15183,33 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Configured principal identity, when present."
         },
         "principal_configured": {
+          "description": "Whether init wrote a default principal into user config.",
           "type": "boolean"
         },
         "principal_recommended_action": {
+          "description": "Suggested command to set a principal when none is configured.",
           "type": [
             "string",
             "null"
           ]
         },
         "principal_source": {
+          "description": "Where the principal was resolved from, when configured.",
           "type": [
             "string",
             "null"
           ]
         },
         "principal_status": {
+          "description": "Principal configuration status (`configured` or `not_configured`).",
           "type": "string"
         },
         "recommended_action": {
+          "description": "Same contract as `next_action` for callers that read the recommended field.",
           "type": [
             "string",
             "null"
@@ -15207,15 +15222,18 @@
           ]
         },
         "repository_mode": {
+          "description": "Repository capability after init, e.g. `git-overlay` or native Heddle storage.",
           "type": "string"
         },
         "side_effects": {
+          "description": "Human-readable list of what init changed or intentionally left untouched.",
           "items": {
             "type": "string"
           },
           "type": "array"
         },
         "status": {
+          "description": "Always `initialized` on success.",
           "type": "string"
         }
       },
@@ -27281,6 +27299,23 @@
     "semantic hot": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": true,
+      "title": "GenericJsonObjectSchema",
+      "type": "object"
+    },
+    "semantic refs": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "output_kind": {
+          "enum": [
+            "semantic_refs"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind"
+      ],
       "title": "GenericJsonObjectSchema",
       "type": "object"
     },

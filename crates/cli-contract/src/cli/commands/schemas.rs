@@ -1,16 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `heddle schemas <verb>` — runtime introspection for CLI JSON output shapes.
 //!
-//! This module owns the JSON schema mirrors for `--output json`-emitting
-//! verbs. Schema registration metadata comes from the active command
-//! catalog; the schemas themselves are schemars-derived mirror structs
-//! rather than threading
-//! `JsonSchema` through every output struct in the workspace
-//! (`repo`, `objects`, etc.). The cost: when a real output struct
-//! changes, the mirror here must change too. The benefit:
-//! `heddle doctor schemas` validates the documented samples against
-//! these schemas, catching the mirror drift the same way it catches
-//! doc drift.
+//! This module owns the JSON Schema registry for `--output json`
+//! verbs. Schema *membership* comes from the active command catalog.
+//! `init` registers the real [`InitOutput`] type so the published
+//! schema cannot drift from the serializer. Remaining verbs still use
+//! schemars-derived mirror structs to avoid threading `JsonSchema`
+//! through every workspace output type. `heddle doctor schemas`
+//! validates documented samples against the registered schemas.
 //!
 //! See [`super::doctor_schemas`] for the drift checker.
 
@@ -22,8 +19,8 @@ use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{RecoveryAdvice, command_catalog};
-use crate::cli::{Cli, should_output_json};
+use super::{RecoveryAdvice, command_catalog, init_output::InitOutput};
+use crate::cli::{Cli, INIT_VERB, should_output_json};
 
 static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
 static DOCUMENTED_SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -70,7 +67,7 @@ fn report_contract_schema_verbs() -> &'static [&'static str] {
 
 schema_registry! {
     (&["maintenance fsck repair git"], FsckReport),
-    (&["init"], InitSchema),
+    (&[INIT_VERB], InitOutput),
     (&["adopt"], AdoptSchema),
     (&["capture"], CaptureSchema),
     (&["commit"], CommitSchema),
@@ -624,15 +621,11 @@ fn normalize_schema_verb_parts(parts: &[String]) -> Result<Vec<String>> {
 // Mirror types
 // ---------------------------------------------------------------------------
 //
-// Each mirror struct mirrors the JSON wire shape of a single
-// `--output json`-emitting verb. The struct's `serde` attributes match the
-// real serializer; the `schemars` derive produces a JSON Schema we
-// emit verbatim.
-//
-// When you add or rename a field on a real output struct, update the
-// matching mirror here and the entry in `docs/json-schemas.md`. CI
-// runs `heddle doctor schemas` which validates the doc samples
-// against these schemas.
+// Unmigrated verbs still use a mirror struct: serde attributes match
+// the real serializer, and `schemars` emits the JSON Schema. `init`
+// registers the real output type instead — do not add a mirror for it.
+// When a remaining mirror's real output struct changes, update the
+// mirror here and `docs/json-schemas.md`.
 
 // ---- shared sub-types ------------------------------------------------------
 //
@@ -1207,33 +1200,6 @@ pub struct DiscussionListSchema {
 }
 
 // ---- core loop write/read helpers -----------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct InitSchema {
-    pub output_kind: String,
-    pub status: String,
-    pub action: String,
-    pub path: String,
-    pub repository_mode: String,
-    pub git_detected: bool,
-    pub heddle_initialized: bool,
-    pub installed_heddleignore: bool,
-    pub principal_configured: bool,
-    pub principal_status: String,
-    pub principal_source: Option<String>,
-    pub principal: Option<InitPrincipalSchema>,
-    pub principal_recommended_action: Option<String>,
-    pub side_effects: Vec<String>,
-    pub message: String,
-    pub next_action: Option<String>,
-    pub recommended_action: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct InitPrincipalSchema {
-    pub name: String,
-    pub email: String,
-}
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CaptureSchema {

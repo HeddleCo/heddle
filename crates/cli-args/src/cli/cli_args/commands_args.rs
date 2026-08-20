@@ -4,6 +4,13 @@
 #[cfg(feature = "git-overlay")]
 use super::commands_git_projection::SyncCommands;
 
+/// Verb key for `heddle init`.
+///
+/// Shared lookup string for clap, the command catalog, and the schema
+/// registry. A second `"init"` literal can still compile; pairing is
+/// checked in tests, not by the type system.
+pub const INIT_VERB: &str = "init";
+
 /// Arguments for the `init` command.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
@@ -39,6 +46,11 @@ pub struct InitArgs {
     /// Overwrite Heddle-managed integration entries when needed.
     #[arg(long)]
     pub harness_install_force: bool,
+}
+
+impl InitArgs {
+    /// Same identifier as [`INIT_VERB`].
+    pub const VERB: &'static str = INIT_VERB;
 }
 
 /// Arguments for the `adopt` command.

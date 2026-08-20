@@ -4,6 +4,7 @@
 use std::{fs, path::PathBuf};
 
 use anyhow::{Result, bail};
+use heddle_cli_contract::cli::commands::{InitOutput, InitPrincipalOutput};
 use heddle_core::{
     InitPrincipalPlan, OnboardingFacts, OnboardingMode,
     init_side_effects as core_init_side_effects, plan_repository_onboarding, resolve_absolute_path,
@@ -11,7 +12,6 @@ use heddle_core::{
 };
 use objects::object::Principal;
 use repo::{Repository, RepositoryCapability, open_git_repository_at_root};
-use serde::Serialize;
 use tracing::{debug, info};
 
 use super::{
@@ -19,45 +19,12 @@ use super::{
     action_line::print_next,
     recover_incomplete_land_if_present,
     snapshot::{is_placeholder_principal, placeholder_principal_warning},
-    verification_health::{RepositoryVerificationState, build_repository_verification_state},
+    verification_health::build_repository_verification_state,
 };
 use crate::{
-    cli::{Cli, InitArgs, should_output_json, style},
+    cli::{Cli, INIT_VERB, InitArgs, should_output_json, style},
     config::UserConfig,
 };
-
-#[derive(Serialize)]
-struct InitOutput {
-    output_kind: &'static str,
-    status: String,
-    action: String,
-    path: PathBuf,
-    repository_mode: String,
-    git_detected: bool,
-    heddle_initialized: bool,
-    installed_heddleignore: bool,
-    principal_configured: bool,
-    principal_status: String,
-    principal_source: Option<String>,
-    principal: Option<InitPrincipalOutput>,
-    principal_recommended_action: Option<String>,
-    #[serde(skip)]
-    placeholder_principal_warning: Option<String>,
-    side_effects: Vec<String>,
-    message: String,
-    next_action: Option<String>,
-    recommended_action: Option<String>,
-    #[allow(dead_code)]
-    #[serde(skip_serializing)]
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize)]
-struct InitPrincipalOutput {
-    name: String,
-    email: String,
-}
 
 pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
     let destination_scoped = args.path.is_some();
@@ -213,9 +180,9 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
         .map(|principal| placeholder_principal_warning(&principal));
 
     let output = InitOutput {
-        output_kind: "init",
+        output_kind: INIT_VERB,
         status: "initialized".to_string(),
-        action: "init".to_string(),
+        action: INIT_VERB.to_string(),
         path: repo.heddle_dir().to_path_buf(),
         repository_mode: repo.capability_label().to_string(),
         git_detected,

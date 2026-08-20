@@ -5,6 +5,7 @@ pub mod advice;
 pub mod command_catalog;
 pub mod doctor_docs;
 pub mod doctor_schemas;
+pub mod init_output;
 pub mod schemas;
 pub mod surface_conformance;
 pub mod verification_health;
@@ -21,6 +22,7 @@ pub use command_catalog::{
 };
 pub use doctor_docs::cmd_doctor_docs;
 pub use doctor_schemas::{cmd_doctor_schemas, documented_samples_with_bound_verbs};
+pub use init_output::{InitOutput, InitPrincipalOutput};
 pub use schemas::{cmd_schemas, documented_schema_verbs, schema_for_verb, schema_verbs};
 pub use surface_conformance::{
     APPROVED_NON_EVERYDAY_ROOT_COMMANDS, APPROVED_ROOT_ALIASES, CANONICAL_ROOT_COMMANDS,

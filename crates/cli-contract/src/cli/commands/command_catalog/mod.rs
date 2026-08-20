@@ -18,9 +18,9 @@ use crate::cli::SemanticCommands;
 use crate::cli::cli_args::SyncCommands;
 use crate::cli::{
     AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands, HookCommands,
-    IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands, RedactCommands,
-    RemoteCommands, ShellCommands, ThreadCommands, ThreadMarkerCommands, TimelineCommands,
-    VisibilityCommands,
+    INIT_VERB, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
+    RedactCommands, RemoteCommands, ShellCommands, ThreadCommands, ThreadMarkerCommands,
+    TimelineCommands, VisibilityCommands,
     cli_args::{
         AgentFanoutCommands, AgentProvenanceCommands, AgentTaskCommands, DiscussCommands,
         PresenceCommands, ReviewCommands,
@@ -2090,12 +2090,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
         surface(opaque_schemas(READ_JSON, &["hook events"]), "automation"),
     ),
     entry(
-        &["init"],
+        &[INIT_VERB],
         exits(
             front_door(
                 json_discriminators(
-                    documented_schemas(INIT, &["init"]),
-                    &[json_discriminator(Some("init"), "output_kind", "init")],
+                    documented_schemas(INIT, &[INIT_VERB]),
+                    &[json_discriminator(
+                        Some(INIT_VERB),
+                        "output_kind",
+                        INIT_VERB,
+                    )],
                 ),
                 200,
             ),
@@ -4524,7 +4528,7 @@ where
 
 pub fn command_path(command: &Commands) -> Vec<&'static str> {
     match command {
-        Commands::Init(_) => vec!["init"],
+        Commands::Init(_) => vec![INIT_VERB],
         Commands::Adopt(_) => vec!["adopt"],
         Commands::Help { .. } => vec!["help"],
         Commands::Status { .. } => vec!["status"],
