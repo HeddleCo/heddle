@@ -53,7 +53,9 @@ fn state_frame_round_trips_every_fidelity_field_and_recomputes_id() {
     let committer = Principal::new("Committer", "committer@example.com");
     let agent = Agent::new("openai", "gpt-test")
         .with_session("session", "segment")
-        .with_policy("policy");
+        .with_policy("policy")
+        .with_thought_level("high")
+        .with_parent("agent-1");
     let mut custom = BTreeMap::new();
     custom.insert(
         "nested".to_string(),
@@ -113,6 +115,26 @@ fn state_frame_round_trips_every_fidelity_field_and_recomputes_id() {
             rmp_serde::to_vec_named(expected).unwrap()
         );
     }
+    assert_eq!(
+        decoded[0]
+            .attribution
+            .agent
+            .as_ref()
+            .unwrap()
+            .thought_level
+            .as_deref(),
+        Some("high")
+    );
+    assert_eq!(
+        decoded[0]
+            .attribution
+            .agent
+            .as_ref()
+            .unwrap()
+            .parent
+            .as_deref(),
+        Some("agent-1")
+    );
     assert_eq!(decoded[0].confidence.unwrap().to_bits(), 0x7fc0_0123);
     assert_eq!(
         decoded[0]
@@ -124,6 +146,43 @@ fn state_frame_round_trips_every_fidelity_field_and_recomputes_id() {
             .to_bits(),
         0xffc0_0456
     );
+}
+
+#[test]
+fn compact_and_hash_include_thought_level_and_parent() {
+    let principal = Principal::new("Author", "author@example.com");
+    let created_at = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    let tree = ContentHash::from_bytes([70; 32]);
+    let mut without = State::new(
+        tree,
+        Vec::new(),
+        Attribution::with_agent(principal.clone(), Agent::new("anthropic", "opus")),
+    );
+    without.created_at = created_at;
+    without.state_id = without.id();
+    let mut with = State::new(
+        tree,
+        Vec::new(),
+        Attribution::with_agent(
+            principal,
+            Agent::new("anthropic", "opus")
+                .with_thought_level("high")
+                .with_parent("agent-1"),
+        ),
+    );
+    with.created_at = created_at;
+    with.state_id = with.id();
+    assert_ne!(
+        without.id(),
+        with.id(),
+        "thought_level and parent must participate in the state hash"
+    );
+    let encoded = encode_state_frame(&[with.clone()]).unwrap();
+    let decoded = decode_state_frame(&encoded).unwrap();
+    let agent = decoded[0].attribution.agent.as_ref().unwrap();
+    assert_eq!(agent.thought_level.as_deref(), Some("high"));
+    assert_eq!(agent.parent.as_deref(), Some("agent-1"));
+    assert_eq!(decoded[0].id(), with.id());
 }
 
 #[test]

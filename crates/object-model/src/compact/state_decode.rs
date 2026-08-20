@@ -224,6 +224,8 @@ fn decode_dictionaries(input: &mut Reader<'_>) -> Result<(Vec<Principal>, Vec<Ag
                 session_id: input.get_optional_bytes()?,
                 segment_id: input.get_optional_bytes()?,
                 policy_id: input.get_optional_bytes()?,
+                thought_level: input.get_optional_bytes()?,
+                parent: input.get_optional_bytes()?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -245,8 +247,8 @@ fn agent_from_key(value: AgentKey) -> Result<Agent> {
         session_id: optional_string(value.session_id, "agent session id")?,
         segment_id: optional_string(value.segment_id, "agent segment id")?,
         policy_id: optional_string(value.policy_id, "agent policy id")?,
-        thought_level: None,
-        parent: None,
+        thought_level: optional_string(value.thought_level, "agent thought_level")?,
+        parent: optional_string(value.parent, "agent parent")?,
     })
 }
 

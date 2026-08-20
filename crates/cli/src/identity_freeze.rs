@@ -34,13 +34,12 @@ pub fn freeze_identity_for_capture(repo: &Repository) -> Result<FrozenIdentity> 
     }
     let mut manager = SessionManager::new(repo.root());
     let session = manager.get_current_session()?;
-    let (heddle_session, segment_id) =
-        apply_segment_policy(&mut manager, session.as_ref(), &cursor)?;
+    let segment_id = apply_segment_policy(&mut manager, session.as_ref(), &cursor)?;
     Ok(FrozenIdentity {
         provider: cursor.provider,
         model: cursor.model,
         thought_level: cursor.thought_level,
-        session: cursor.session.or(heddle_session),
+        session: cursor.session,
         parent: cursor.parent,
         segment_id,
     })
@@ -68,9 +67,9 @@ fn apply_segment_policy(
     manager: &mut SessionManager,
     session: Option<&Session>,
     cursor: &IdentityCursor,
-) -> Result<(Option<String>, Option<String>)> {
+) -> Result<Option<String>> {
     let Some(session) = session else {
-        return Ok((None, None));
+        return Ok(None);
     };
     let current = session.current_segment();
     let rotation = cursor_segment_rotation(
@@ -102,16 +101,34 @@ fn apply_segment_policy(
                 }
                 manager.save_session(&updated)?;
             }
-            return Ok((Some(session.id.clone()), Some(segment.id)));
+            return Ok(Some(segment.id));
         }
-    } else if let Some(thought_level) = cursor.thought_level.clone()
-        && current.and_then(|s| s.thought_level.as_deref()).is_none()
-        && let Some(mut updated) = manager.get_session(&session.id)?
-    {
-        updated.attach_thought_level(thought_level);
+    } else if let Some(mut updated) = manager.get_session(&session.id)? {
+        attach_unpublished_segment_fields(&mut updated, cursor);
         manager.save_session(&updated)?;
     }
-    Ok((Some(session.id.clone()), session.current_segment_id.clone()))
+    Ok(session.current_segment_id.clone())
+}
+
+fn attach_unpublished_segment_fields(session: &mut Session, cursor: &IdentityCursor) {
+    let Some(segment) = session.current_segment_mut() else {
+        return;
+    };
+    if published_field(Some(&segment.provider)).is_none()
+        && let Some(provider) = cursor.provider.clone()
+    {
+        segment.provider = provider;
+    }
+    if published_field(Some(&segment.model)).is_none()
+        && let Some(model) = cursor.model.clone()
+    {
+        segment.model = model;
+    }
+    if segment.thought_level.is_none()
+        && let Some(thought_level) = cursor.thought_level.clone()
+    {
+        segment.thought_level = Some(thought_level);
+    }
 }
 
 #[cfg(test)]
@@ -194,5 +211,41 @@ mod tests {
             Some("max")
         );
         assert_eq!(frozen.thought_level.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn empty_provider_model_to_set_attaches_without_rotate() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let mut manager = SessionManager::new(repo.root());
+        manager
+            .start_session(principal(), "unknown".into(), "unknown".into(), None)
+            .unwrap();
+        write_identity_cursor(
+            repo.root(),
+            &IdentityCursor {
+                provider: Some("anthropic".into()),
+                model: Some("opus".into()),
+                thought_level: Some("high".into()),
+                ..IdentityCursor::default()
+            },
+        )
+        .unwrap();
+        let frozen = freeze_identity_for_capture(&repo).unwrap();
+        let session = SessionManager::new(repo.root())
+            .get_current_session()
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.segments.len(), 1);
+        assert_eq!(session.current_segment().unwrap().provider, "anthropic");
+        assert_eq!(session.current_segment().unwrap().model, "opus");
+        assert_eq!(
+            session.current_segment().unwrap().thought_level.as_deref(),
+            Some("high")
+        );
+        assert!(
+            frozen.session.is_none(),
+            "harness session stays unset; do not pair Heddle Session.id"
+        );
     }
 }

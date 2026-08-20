@@ -580,6 +580,16 @@ impl State {
             if let Some(policy_id) = &agent.policy_id {
                 len += policy_id.len() as u64 + 1;
             }
+
+            len += 1;
+            if let Some(thought_level) = &agent.thought_level {
+                len += thought_level.len() as u64 + 1;
+            }
+
+            len += 1;
+            if let Some(parent) = &agent.parent {
+                len += parent.len() as u64 + 1;
+            }
         }
 
         len += 1;
@@ -683,6 +693,8 @@ impl State {
             write_optional_string(hasher, &agent.session_id);
             write_optional_string(hasher, &agent.segment_id);
             write_optional_string(hasher, &agent.policy_id);
+            write_optional_string(hasher, &agent.thought_level);
+            write_optional_string(hasher, &agent.parent);
         } else {
             hasher.update(&[0]);
         }

@@ -14,6 +14,8 @@ pub(super) struct AgentKey {
     pub(super) session_id: Option<Vec<u8>>,
     pub(super) segment_id: Option<Vec<u8>>,
     pub(super) policy_id: Option<Vec<u8>>,
+    pub(super) thought_level: Option<Vec<u8>>,
+    pub(super) parent: Option<Vec<u8>>,
 }
 
 pub(super) struct StateDictionaries {
@@ -90,5 +92,10 @@ fn agent_key(value: &Agent) -> AgentKey {
             .policy_id
             .as_ref()
             .map(|value| value.as_bytes().to_vec()),
+        thought_level: value
+            .thought_level
+            .as_ref()
+            .map(|value| value.as_bytes().to_vec()),
+        parent: value.parent.as_ref().map(|value| value.as_bytes().to_vec()),
     }
 }

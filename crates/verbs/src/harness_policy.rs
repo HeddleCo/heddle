@@ -138,24 +138,6 @@ pub fn fingerprint_harness_from_hints(
         policy: None,
     };
 
-    // HEDDLE_AGENT_PROVIDER fills only when no harness default was set
-    // (historical `or_else` order in the CLI fingerprint).
-    fingerprint.provider = fingerprint.provider.or_else(|| {
-        env_hints
-            .get("HEDDLE_AGENT_PROVIDER")
-            .cloned()
-            .and_then(clean_attribution_value)
-    });
-    fingerprint.model = env_hints
-        .get("HEDDLE_AGENT_MODEL")
-        .cloned()
-        .and_then(clean_attribution_value)
-        .or_else(|| env_hints.get("CODEX_MODEL").cloned())
-        .or_else(|| env_hints.get("CLAUDE_MODEL").cloned())
-        .or_else(|| env_hints.get("OPENAI_MODEL").cloned())
-        .or_else(|| env_hints.get("OPENCODE_MODEL").cloned())
-        .or_else(|| env_hints.get("AIDER_MODEL").cloned())
-        .or_else(|| env_hints.get("MODEL").cloned());
     fingerprint.thinking_level = env_hints
         .get("THINKING_LEVEL")
         .cloned()
@@ -684,23 +666,28 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_reads_model_and_thinking_env() {
+    fn fingerprint_does_not_invent_model_from_hoped_for_env() {
         let fp = fingerprint_harness_from_hints(
             None,
             &env(&[
                 ("CODEX_THREAD_ID", "t1"),
                 ("CODEX_MODEL", "gpt-5.5"),
+                ("HEDDLE_AGENT_MODEL", "claude-opus-4-7"),
+                ("MODEL", "fallback-model"),
                 ("CODEX_REASONING_EFFORT", "xhigh"),
             ]),
         );
         assert_eq!(fp.kind, HarnessKind::Codex);
-        assert_eq!(fp.model.as_deref(), Some("gpt-5.5"));
+        assert!(
+            fp.model.is_none(),
+            "kind-only fingerprint must not hunt a model"
+        );
         assert_eq!(fp.thinking_level.as_deref(), Some("xhigh"));
         assert_eq!(fp.provider.as_deref(), Some("openai"));
     }
 
     #[test]
-    fn fingerprint_strips_blank_heddle_agent_env() {
+    fn fingerprint_strips_blank_heddle_agent_policy() {
         let fp = fingerprint_harness_from_hints(
             None,
             &env(&[
@@ -710,8 +697,8 @@ mod tests {
                 ("MODEL", "fallback-model"),
             ]),
         );
-        assert_eq!(fp.provider.as_deref(), Some("custom"));
-        assert_eq!(fp.model.as_deref(), Some("fallback-model"));
+        assert!(fp.provider.is_none());
+        assert!(fp.model.is_none());
         assert_eq!(fp.policy, None);
     }
 

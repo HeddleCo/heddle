@@ -234,7 +234,10 @@ mod tests {
 
         assert_eq!(result.harness.as_deref(), Some("codex"));
         assert_eq!(result.provider.as_deref(), Some("openai"));
-        assert_eq!(result.model.as_deref(), Some("gpt-5.5"));
+        assert!(
+            result.model.is_none(),
+            "do not invent model from CODEX_MODEL"
+        );
         assert_eq!(result.thinking_level.as_deref(), Some("xhigh"));
         assert_eq!(
             result.native_actor_key.as_deref(),
@@ -258,7 +261,10 @@ mod tests {
 
         assert_eq!(result.harness.as_deref(), Some("codex"));
         assert_eq!(result.provider.as_deref(), Some("openai-compatible"));
-        assert_eq!(result.model.as_deref(), Some("gpt-5.3-codex"));
+        assert!(
+            result.model.is_none(),
+            "do not invent model from OPENAI_MODEL"
+        );
     }
 
     #[test]
@@ -275,8 +281,11 @@ mod tests {
         .expect("probe should succeed");
 
         assert_eq!(result.harness, None);
-        assert_eq!(result.provider.as_deref(), Some("custom-ai"));
-        assert_eq!(result.model.as_deref(), Some("custom-model"));
+        assert!(result.provider.is_none());
+        assert!(
+            result.model.is_none(),
+            "do not invent model from HEDDLE_AGENT_MODEL"
+        );
     }
 
     #[test]
@@ -299,7 +308,11 @@ mod tests {
 
         assert_eq!(result.harness.as_deref(), Some("claude-code"));
         assert_eq!(result.provider.as_deref(), Some("openai"));
-        assert_eq!(result.model.as_deref(), Some("gpt-5-codex"));
+        assert_eq!(
+            result.model.as_deref(),
+            Some("claude-opus-4-8[1m]"),
+            "hook payload model wins; env must not invent a different model"
+        );
     }
 
     #[test]
@@ -380,7 +393,10 @@ mod tests {
 
         assert_eq!(result.harness.as_deref(), Some("claude-code"));
         assert_eq!(result.provider.as_deref(), Some("anthropic"));
-        assert_eq!(result.model.as_deref(), Some("claude-opus-4-7"));
+        assert!(
+            result.model.is_none(),
+            "parent-walk / argv --model must not invent a model"
+        );
     }
 
     #[test]
@@ -443,7 +459,10 @@ mod tests {
 
         assert_eq!(result.harness.as_deref(), Some("claude-code"));
         assert_eq!(result.provider.as_deref(), Some("anthropic"));
-        assert_eq!(result.model.as_deref(), Some("claude-opus-4-7"));
+        assert!(
+            result.model.is_none(),
+            "do not invent model from HEDDLE_AGENT_MODEL"
+        );
         assert_eq!(result.thinking_level.as_deref(), Some("xhigh"));
     }
 
@@ -466,6 +485,9 @@ mod tests {
 
         assert_eq!(result.harness.as_deref(), Some("opencode"));
         assert_eq!(result.provider.as_deref(), Some("anthropic"));
-        assert_eq!(result.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert!(
+            result.model.is_none(),
+            "do not invent model from OPENCODE_MODEL"
+        );
     }
 }
