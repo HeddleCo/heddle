@@ -204,3 +204,51 @@ fn unknown_state_id_yields_state_not_found() {
         "expected `State not found` message, got: {err}"
     );
 }
+
+/// `heddle show` used to print `State: hs-… (3a6c582f)` where the
+/// parenthetical was `content_hash`. Feeding that hex to `heddle show`
+/// produced `State not found`. The printed paren must either be a
+/// resolvable spec, or carry a label that makes it obvious it is not.
+#[test]
+fn show_parenthetical_is_resolvable_spec_or_labeled_not_a_spec() {
+    let temp = setup_repo();
+    let text = heddle(&["--output", "text", "show"], Some(temp.path())).expect("heddle show");
+    let paren = show_state_parenthetical(&text);
+
+    if let Some(hex) = paren.strip_prefix("content_hash ") {
+        let labeled_err = heddle(&["show", paren], Some(temp.path())).expect_err(
+            "labeled content_hash parenthetical is not a resolvable spec",
+        );
+        assert!(
+            labeled_err.contains("State not found"),
+            "show <printed-paren> should fail once the paren is labeled; got: {labeled_err}"
+        );
+        let hex_err = heddle(&["show", hex], Some(temp.path()))
+            .expect_err("content_hash hex is not a state spec");
+        assert!(
+            hex_err.contains("State not found"),
+            "show <content_hash hex> must stay unresolved; got: {hex_err}"
+        );
+    } else {
+        heddle(&["show", paren], Some(temp.path())).unwrap_or_else(|err| {
+            panic!(
+                "unlabeled parenthetical {paren:?} must be a resolvable spec; show failed: {err}"
+            )
+        });
+    }
+}
+
+fn show_state_parenthetical(text: &str) -> &str {
+    let line = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("State:"))
+        .expect("show should print a State line");
+    let start = line
+        .rfind('(')
+        .expect("State line should include a parenthetical");
+    let end = line[start..]
+        .find(')')
+        .map(|offset| start + offset)
+        .expect("State line parenthetical should close");
+    line[start + 1..end].trim()
+}
