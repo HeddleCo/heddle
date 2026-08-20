@@ -19,14 +19,42 @@ use super::repository_semantic_context::{
     PARSE_BUDGET_BYTES, load_semantic_tree, parse_tree_functions_sized,
 };
 
-/// Additional files parsed beyond the emit-scope `changed_paths`. Hitting
-/// this bound fail-closes (`corpus_complete = false`) so novelty /
-/// test_reachability stay quiet on a partial repo. Tens of files — well
-/// under the shared [`SemanticParseCache`] page cap (256).
-const CORPUS_FILE_BUDGET: usize = 32;
-/// Extra bytes parsed for the corpus walk (on top of changed-file parses).
+/// Shared new-state parse budget for changed-path parsing and the
+/// remaining index walk. Hitting either bound fail-closes
+/// (`corpus_complete = false`) so novelty / test_reachability stay
+/// quiet rather than scoring a partial or unbounded repo. Tens of
+/// files — well under the shared [`SemanticParseCache`] page cap (256).
+pub(crate) const CORPUS_FILE_BUDGET: usize = 32;
+/// Aggregate bytes parsed for the new-state function corpus.
 /// Two times the per-file semantic-index opaque threshold.
-const CORPUS_BYTE_BUDGET: usize = PARSE_BUDGET_BYTES.saturating_mul(2);
+pub(crate) const CORPUS_BYTE_BUDGET: usize = PARSE_BUDGET_BYTES.saturating_mul(2);
+
+/// Running file/byte totals for the new-state corpus. Shared by the
+/// changed-path parse and [`populate_new_function_corpus`].
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CorpusBudget {
+    files: usize,
+    bytes: usize,
+}
+
+impl CorpusBudget {
+    pub(crate) fn try_add(&mut self, bytes: usize) -> bool {
+        if self.files >= CORPUS_FILE_BUDGET {
+            return false;
+        }
+        let next = self.bytes.saturating_add(bytes);
+        if next > CORPUS_BYTE_BUDGET {
+            return false;
+        }
+        self.files += 1;
+        self.bytes = next;
+        true
+    }
+
+    pub(crate) fn has_room(&self) -> bool {
+        self.files < CORPUS_FILE_BUDGET && self.bytes <= CORPUS_BYTE_BUDGET
+    }
+}
 
 pub(crate) fn collect_changed_symbols(
     changed_paths: &BTreeSet<PathBuf>,
@@ -41,7 +69,7 @@ pub(crate) fn collect_changed_symbols(
         let prior_fns = prior_functions.get(path);
         for fn_def in new_fns {
             if function_changed(prior_fns.map(Vec::as_slice), fn_def) {
-                changed.insert((path.clone(), fn_def.name.clone()));
+                changed.insert((path.clone(), fn_def.symbol_identity()));
             }
         }
     }
@@ -52,7 +80,10 @@ fn function_changed(prior_fns: Option<&[FunctionDef]>, new_fn: &FunctionDef) -> 
     let Some(prior_fns) = prior_fns else {
         return true;
     };
-    match prior_fns.iter().find(|prior| prior.name == new_fn.name) {
+    match prior_fns
+        .iter()
+        .find(|prior| prior.symbol_identity() == new_fn.symbol_identity())
+    {
         None => true,
         Some(prior) => prior.content != new_fn.content,
     }
@@ -66,23 +97,25 @@ pub(crate) fn populate_new_function_corpus(
     new_root: Option<&SemanticIndexRoot>,
     new_tree: &ContentHash,
     cache: &SemanticParseCache,
+    budget: &mut CorpusBudget,
     new_functions: &mut BTreeMap<PathBuf, Vec<FunctionDef>>,
 ) -> Result<bool> {
     let Some(root) = new_root else {
         return Ok(false);
     };
+    if !budget.has_room() {
+        return Ok(false);
+    }
     let mut files = Vec::new();
     if !collect_function_file_paths(source, root, &mut files)? {
         return Ok(false);
     }
-    let mut extra_files = 0usize;
-    let mut extra_bytes = 0usize;
     for path in files {
         let rel = PathBuf::from(&path);
         if new_functions.contains_key(&rel) {
             continue;
         }
-        if extra_files >= CORPUS_FILE_BUDGET {
+        if !budget.has_room() {
             return Ok(false);
         }
         let Some((functions, bytes)) =
@@ -101,11 +134,9 @@ pub(crate) fn populate_new_function_corpus(
             );
             return Ok(false);
         }
-        extra_bytes = extra_bytes.saturating_add(bytes);
-        if extra_bytes > CORPUS_BYTE_BUDGET {
+        if !budget.try_add(bytes) {
             return Ok(false);
         }
-        extra_files += 1;
         new_functions.insert(rel, functions);
     }
     Ok(true)

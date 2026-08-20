@@ -152,9 +152,13 @@ fn delta() { if ready { launch(); } else { wait(); } abort(); }
     let ctx = build_semantic_context(&repo, Some(&seed), &edited, index_hash.as_ref(), None, None)
         .unwrap();
     assert!(ctx.corpus_complete);
-    assert_eq!(
-        ctx.changed_symbols,
-        BTreeSet::from([(PathBuf::from("changed.rs"), "delta".to_string())])
+    assert_eq!(ctx.changed_symbols.len(), 1);
+    assert!(
+        changed_identities(&ctx, "changed.rs")
+            .iter()
+            .any(|id| id.contains("delta")),
+        "only delta should change: {:?}",
+        ctx.changed_symbols
     );
 
     let novelty_symbols: BTreeSet<String> = load_risk_signals(&repo, &edited)
@@ -203,14 +207,12 @@ fn delta() { while pending { dequeue().handle(); } flush(); }
         "function bodies unchanged so changed_symbols must be empty: {ctx:?}"
     );
     assert!(
-        load_risk_kinds(&repo, &edited)
-            .iter()
-            .all(|kind| !matches!(
-                kind,
-                RiskSignalKind::Novelty
-                    | RiskSignalKind::PatternDeviation
-                    | RiskSignalKind::TestReachability
-            )),
+        load_risk_kinds(&repo, &edited).iter().all(|kind| !matches!(
+            kind,
+            RiskSignalKind::Novelty
+                | RiskSignalKind::PatternDeviation
+                | RiskSignalKind::TestReachability
+        )),
         "non-function edit must persist zero sibling tree-sitter signals"
     );
 }
@@ -250,14 +252,102 @@ fn unchanged_tests_join_corpus_and_fire_reachability() {
         "unchanged tests must join the new-state corpus: {:?}",
         ctx.new_functions.keys().collect::<Vec<_>>()
     );
-    assert_eq!(
-        ctx.changed_symbols,
-        BTreeSet::from([(PathBuf::from("lib.rs"), "orphan".to_string())])
+    assert_eq!(ctx.changed_symbols.len(), 1);
+    assert!(
+        changed_identities(&ctx, "lib.rs")
+            .iter()
+            .any(|id| id.contains("orphan")),
+        "only orphan should change: {:?}",
+        ctx.changed_symbols
     );
     assert!(
         load_risk_kinds(&repo, &edited).contains(&RiskSignalKind::TestReachability),
         "corpus must see unchanged tests so reachability can fire"
     );
+}
+
+#[test]
+fn wide_changed_path_parse_marks_corpus_incomplete_when_file_budget_exceeded() {
+    use crate::repository_semantic_corpus::CORPUS_FILE_BUDGET;
+
+    let temp = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp.path()).unwrap();
+    for index in 0..=CORPUS_FILE_BUDGET {
+        std::fs::write(
+            temp.path().join(format!("f{index}.rs")),
+            format!("fn f{index}() {{ {index} }}\n"),
+        )
+        .unwrap();
+    }
+    let state = repo
+        .snapshot_with_attribution(Some("wide".to_string()), None, author())
+        .unwrap();
+    let index_hash = attachment_hash(&repo, &state, StateAttachmentKind::SemanticIndex);
+    let ctx = build_semantic_context(&repo, None, &state, index_hash.as_ref(), None, None).unwrap();
+    assert!(
+        !ctx.corpus_complete,
+        "parsing more than {CORPUS_FILE_BUDGET} changed files must mark the corpus incomplete"
+    );
+    assert!(
+        ctx.new_functions.len() <= CORPUS_FILE_BUDGET,
+        "budget must cap the new-state corpus: {}",
+        ctx.new_functions.len()
+    );
+}
+
+#[test]
+fn duplicate_name_edit_marks_only_the_qualified_identity() {
+    let seed_src = "\
+impl Foo {
+    fn run() { let total = first + second + third + fourth; }
+}
+impl Bar {
+    fn run() { for widget in inventory { ship(widget); } }
+}
+fn gamma() { match colour { Red => stop(), Green => go() } }
+fn delta() { while pending { dequeue().handle(); } flush(); }
+";
+    let edited_src = "\
+impl Foo {
+    fn run() { if ready { launch(); } else { wait(); } abort(); }
+}
+impl Bar {
+    fn run() { for widget in inventory { ship(widget); } }
+}
+fn gamma() { match colour { Red => stop(), Green => go() } }
+fn delta() { while pending { dequeue().handle(); } flush(); }
+";
+    let temp = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp.path()).unwrap();
+    let seed = snapshot(&repo, temp.path(), "dup.rs", seed_src);
+    let edited = snapshot(&repo, temp.path(), "dup.rs", edited_src);
+    let index_hash = attachment_hash(&repo, &edited, StateAttachmentKind::SemanticIndex);
+    let ctx = build_semantic_context(&repo, Some(&seed), &edited, index_hash.as_ref(), None, None)
+        .unwrap();
+    let identities = changed_identities(&ctx, "dup.rs");
+    assert_eq!(
+        identities.len(),
+        1,
+        "expected one changed symbol: {identities:?}"
+    );
+    assert!(
+        identities
+            .iter()
+            .any(|id| id.contains("Foo") && id.contains("run")),
+        "edited Foo::run must be the emit target: {identities:?}"
+    );
+    assert!(
+        identities.iter().all(|id| !id.contains("Bar")),
+        "untouched Bar::run must not be an emit target: {identities:?}"
+    );
+}
+
+fn changed_identities(ctx: &state_review::SemanticContext, path: &str) -> BTreeSet<String> {
+    ctx.changed_symbols
+        .iter()
+        .filter(|(changed_path, _)| changed_path == &PathBuf::from(path))
+        .map(|(_, identity)| identity.clone())
+        .collect()
 }
 
 fn load_risk_signals(repo: &Repository, state: &State) -> Vec<objects::object::RiskSignal> {

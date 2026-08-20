@@ -37,10 +37,13 @@ pub fn run(
     for (path, new_fns) in &ctx.new_functions {
         let prior_fns: Option<&Vec<FunctionDef>> = ctx.prior_functions.get(path);
         for fn_def in new_fns {
-            if !ctx.is_emit_target(path, &fn_def.name) {
+            if !ctx.is_emit_target(path, fn_def) {
                 continue;
             }
-            let prior_same = prior_fns.and_then(|fns| fns.iter().find(|f| f.name == fn_def.name));
+            let prior_same = prior_fns.and_then(|fns| {
+                fns.iter()
+                    .find(|f| f.symbol_identity() == fn_def.symbol_identity())
+            });
             // 1. Compare against the prior version of this same symbol.
             if let Some(prior_fn) = prior_same {
                 let similarity = compute_similarity(
@@ -66,8 +69,10 @@ pub fn run(
                 // 2. New symbol — compare against siblings (other functions
                 // in the same file). If max similarity to any sibling is
                 // below 1 - threshold, it diverges from the local style.
-                let siblings: Vec<&FunctionDef> =
-                    new_fns.iter().filter(|f| f.name != fn_def.name).collect();
+                let siblings: Vec<&FunctionDef> = new_fns
+                    .iter()
+                    .filter(|f| f.symbol_identity() != fn_def.symbol_identity())
+                    .collect();
                 if siblings.is_empty() {
                     continue;
                 }
@@ -139,6 +144,7 @@ mod tests {
     fn fdef(name: &str, content: &str) -> FunctionDef {
         FunctionDef {
             name: name.to_string(),
+            container: String::new(),
             signature: format!("fn {name}()"),
             start_line: 1,
             end_line: 3,
@@ -183,7 +189,8 @@ mod tests {
                 "fn score(socket: &mut Socket) -> usize { while socket.poll() { rotate_key(); } 0 }",
             )],
         );
-        ctx.changed_symbols.insert((path, "score".to_string()));
+        ctx.changed_symbols
+            .insert((path, fdef("score", "").symbol_identity()));
         let new = state_with_change_id(9);
 
         let signals = run(&empty_state(), &new, &cfg, &ctx);
@@ -224,7 +231,7 @@ mod tests {
             ],
         );
         ctx.changed_symbols
-            .insert((path, "decode_wire".to_string()));
+            .insert((path, fdef("decode_wire", "").symbol_identity()));
 
         let signals = run(&empty_state(), &state_with_change_id(10), &cfg, &ctx);
 
@@ -262,7 +269,8 @@ mod tests {
                 ),
             ],
         );
-        ctx.changed_symbols.insert((path, "load_user".to_string()));
+        ctx.changed_symbols
+            .insert((path, fdef("load_user", "").symbol_identity()));
 
         let signals = run(&empty_state(), &state_with_change_id(10), &cfg, &ctx);
         assert!(

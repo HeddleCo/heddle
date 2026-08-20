@@ -126,23 +126,34 @@ pub(crate) fn build_semantic_context(
     let prior_tree = prior.map(|state| state.tree);
     let mut prior_functions = BTreeMap::new();
     let mut new_functions = BTreeMap::new();
+    let mut budget = crate::repository_semantic_corpus::CorpusBudget::default();
+    let mut corpus_complete = true;
     for path in &changed_paths {
         let path_str = path.to_string_lossy();
         if let Some(fns) = parse_tree_functions(&overlay, prior_tree.as_ref(), &path_str, cache) {
             prior_functions.insert(path.clone(), fns);
         }
-        if let Some(fns) = parse_tree_functions(&overlay, Some(&new.tree), &path_str, cache) {
+        if let Some((fns, bytes)) =
+            parse_tree_functions_sized(&overlay, Some(&new.tree), &path_str, cache)
+        {
+            if !budget.try_add(bytes) {
+                corpus_complete = false;
+                break;
+            }
             new_functions.insert(path.clone(), fns);
         }
     }
 
-    let corpus_complete = crate::repository_semantic_corpus::populate_new_function_corpus(
-        &overlay,
-        new_root.as_ref(),
-        &new.tree,
-        cache,
-        &mut new_functions,
-    )?;
+    if corpus_complete {
+        corpus_complete = crate::repository_semantic_corpus::populate_new_function_corpus(
+            &overlay,
+            new_root.as_ref(),
+            &new.tree,
+            cache,
+            &mut budget,
+            &mut new_functions,
+        )?;
+    }
     let changed_symbols = crate::repository_semantic_corpus::collect_changed_symbols(
         &changed_paths,
         &prior_functions,

@@ -250,6 +250,72 @@ fn test_extract_functions_handles_deeply_nested_modules() {
     assert_eq!(functions[0].name, "deeply_nested");
 }
 
+#[test]
+fn extract_functions_qualifies_impl_methods_by_container() {
+    let source = r#"
+impl Foo {
+    fn run() { 1 }
+}
+impl Bar {
+    fn run() { 2 }
+}
+"#;
+    let parsed = ParsedFile::parse(source, Language::Rust).expect("Should parse");
+    let functions = parsed.extract_functions();
+    let identities: Vec<String> = functions.iter().map(|f| f.symbol_identity()).collect();
+    assert!(
+        identities
+            .iter()
+            .any(|id| id.contains("Foo") && id.contains("run")),
+        "Foo::run must be qualified: {identities:?}"
+    );
+    assert!(
+        identities
+            .iter()
+            .any(|id| id.contains("Bar") && id.contains("run")),
+        "Bar::run must be qualified: {identities:?}"
+    );
+    assert_ne!(
+        functions[0].symbol_identity(),
+        functions[1].symbol_identity()
+    );
+}
+
+#[test]
+fn extract_functions_qualifies_nested_mod_impl_methods() {
+    let source = r#"
+mod a {
+    impl Foo {
+        fn run() { 1 }
+    }
+}
+mod b {
+    impl Foo {
+        fn run() { 2 }
+    }
+}
+"#;
+    let parsed = ParsedFile::parse(source, Language::Rust).expect("Should parse");
+    let functions = parsed.extract_functions();
+    let identities: Vec<String> = functions.iter().map(|f| f.symbol_identity()).collect();
+    assert!(
+        identities
+            .iter()
+            .any(|id| id.contains("a") && id.contains("Foo") && id.contains("run")),
+        "a::Foo::run must be qualified: {identities:?}"
+    );
+    assert!(
+        identities
+            .iter()
+            .any(|id| id.contains("b") && id.contains("Foo") && id.contains("run")),
+        "b::Foo::run must be qualified: {identities:?}"
+    );
+    assert_ne!(
+        functions[0].symbol_identity(),
+        functions[1].symbol_identity()
+    );
+}
+
 #[cfg(feature = "lang-cpp")]
 #[test]
 fn test_cpp_templated_qualified_function_names() {

@@ -78,7 +78,7 @@ pub fn run(
     for (path, fns) in &ctx.new_functions {
         for fn_def in fns {
             let key = (path.as_path(), fn_def.name.as_str());
-            if !ctx.is_emit_target(path, &fn_def.name) {
+            if !ctx.is_emit_target(path, fn_def) {
                 continue;
             }
             if test_set.contains(&key) {
@@ -168,6 +168,7 @@ mod tests {
     fn fdef(name: &str, content: &str) -> FunctionDef {
         FunctionDef {
             name: name.to_string(),
+            container: String::new(),
             signature: format!("fn {name}()"),
             start_line: 1,
             end_line: 3,
@@ -280,8 +281,10 @@ mod tests {
             ],
         );
         ctx.changed_paths.insert(PathBuf::from("src/lib.rs"));
-        ctx.changed_symbols
-            .insert((PathBuf::from("src/lib.rs"), "orphan".to_string()));
+        ctx.changed_symbols.insert((
+            PathBuf::from("src/lib.rs"),
+            fdef("orphan", "").symbol_identity(),
+        ));
 
         let signals = run(
             &empty_state(),
@@ -306,10 +309,14 @@ mod tests {
             ],
         );
         ctx.changed_paths.insert(PathBuf::from("src/lib.rs"));
-        ctx.changed_symbols
-            .insert((PathBuf::from("src/lib.rs"), "alpha".to_string()));
-        ctx.changed_symbols
-            .insert((PathBuf::from("src/lib.rs"), "beta".to_string()));
+        ctx.changed_symbols.insert((
+            PathBuf::from("src/lib.rs"),
+            fdef("alpha", "").symbol_identity(),
+        ));
+        ctx.changed_symbols.insert((
+            PathBuf::from("src/lib.rs"),
+            fdef("beta", "").symbol_identity(),
+        ));
 
         let signals = run(
             &empty_state(),
@@ -332,8 +339,10 @@ mod tests {
                 fdef("test_irrelevant", "fn test_irrelevant() { assert!(true); }"),
             ],
         );
-        ctx.changed_symbols
-            .insert((PathBuf::from("src/lib.rs"), "orphan".to_string()));
+        ctx.changed_symbols.insert((
+            PathBuf::from("src/lib.rs"),
+            fdef("orphan", "").symbol_identity(),
+        ));
 
         let signals = run(
             &empty_state(),
@@ -356,8 +365,10 @@ mod tests {
                 fdef("test_irrelevant", "fn test_irrelevant() { assert!(true); }"),
             ],
         );
-        ctx.changed_symbols
-            .insert((PathBuf::from("src/lib.rs"), "orphan".to_string()));
+        ctx.changed_symbols.insert((
+            PathBuf::from("src/lib.rs"),
+            fdef("orphan", "").symbol_identity(),
+        ));
 
         let signals = run(
             &empty_state(),

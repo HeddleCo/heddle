@@ -61,11 +61,11 @@ pub fn run(
     let mut out = Vec::new();
     for (path, fn_def) in corpus
         .iter()
-        .filter(|(path, fn_def)| ctx.is_emit_target(path, &fn_def.name))
+        .filter(|(path, fn_def)| ctx.is_emit_target(path, fn_def))
     {
         let max_sim = corpus
             .iter()
-            .filter(|(p, f)| !(p == path && f.name == fn_def.name))
+            .filter(|(p, f)| !(p == path && f.symbol_identity() == fn_def.symbol_identity()))
             .map(|(_, other)| {
                 compute_similarity(&other.content, &fn_def.content, SimilarityMethod::Tokens) as f32
             })
@@ -125,6 +125,7 @@ mod tests {
     fn fdef(name: &str, body: &str) -> FunctionDef {
         FunctionDef {
             name: name.to_string(),
+            container: String::new(),
             signature: format!("fn {name}()"),
             start_line: 1,
             end_line: 3,
@@ -166,8 +167,10 @@ mod tests {
             )],
         );
         ctx.changed_paths.insert(PathBuf::from("changed.rs"));
-        ctx.changed_symbols
-            .insert((PathBuf::from("changed.rs"), "delta".to_string()));
+        ctx.changed_symbols.insert((
+            PathBuf::from("changed.rs"),
+            fdef("delta", "").symbol_identity(),
+        ));
 
         let signals = run(&empty_state(), &empty_state(), &cfg, &ctx);
 
@@ -216,8 +219,10 @@ mod tests {
             ],
         );
         ctx.changed_paths.insert(PathBuf::from("changed.rs"));
-        ctx.changed_symbols
-            .insert((PathBuf::from("changed.rs"), "delta".to_string()));
+        ctx.changed_symbols.insert((
+            PathBuf::from("changed.rs"),
+            fdef("delta", "").symbol_identity(),
+        ));
 
         let signals = run(&empty_state(), &empty_state(), &cfg, &ctx);
         assert_eq!(
@@ -243,8 +248,10 @@ mod tests {
             ],
         );
         ctx.changed_paths.insert(PathBuf::from("changed.rs"));
-        ctx.changed_symbols
-            .insert((PathBuf::from("changed.rs"), "delta".to_string()));
+        ctx.changed_symbols.insert((
+            PathBuf::from("changed.rs"),
+            fdef("delta", "").symbol_identity(),
+        ));
 
         let signals = run(&empty_state(), &empty_state(), &cfg, &ctx);
         assert!(

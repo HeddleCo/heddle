@@ -10,11 +10,15 @@ use objects::object::{
 };
 use semantic::{SemanticParseCache, parser::FunctionDef};
 
-use super::{collect_changed_symbols, populate_new_function_corpus};
+use super::{
+    CORPUS_BYTE_BUDGET, CORPUS_FILE_BUDGET, CorpusBudget, collect_changed_symbols,
+    populate_new_function_corpus,
+};
 
 fn fdef(name: &str, content: &str) -> FunctionDef {
     FunctionDef {
         name: name.to_string(),
+        container: String::new(),
         signature: format!("fn {name}()"),
         start_line: 1,
         end_line: 3,
@@ -44,7 +48,62 @@ fn changed_symbols_ignore_untouched_siblings() {
         ],
     );
     let symbols = collect_changed_symbols(&changed_paths, &prior, &new);
-    assert_eq!(symbols, BTreeSet::from([(path, "edit".to_string())]));
+    assert_eq!(
+        symbols,
+        BTreeSet::from([(path, fdef("edit", "fn edit() { 2 }").symbol_identity())])
+    );
+}
+
+#[test]
+fn changed_symbols_distinguish_duplicate_names_by_container() {
+    let path = PathBuf::from("lib.rs");
+    let mut changed_paths = BTreeSet::new();
+    changed_paths.insert(path.clone());
+    let foo_run = FunctionDef {
+        name: "run".to_string(),
+        container: "Foo".to_string(),
+        signature: "run()".to_string(),
+        start_line: 1,
+        end_line: 3,
+        content: "fn run() { 1 }".to_string(),
+    };
+    let bar_run = FunctionDef {
+        name: "run".to_string(),
+        container: "Bar".to_string(),
+        signature: "run()".to_string(),
+        start_line: 5,
+        end_line: 7,
+        content: "fn run() { 1 }".to_string(),
+    };
+    let mut foo_edited = foo_run.clone();
+    foo_edited.content = "fn run() { 2 }".to_string();
+    let mut prior = BTreeMap::new();
+    prior.insert(path.clone(), vec![foo_run, bar_run.clone()]);
+    let mut new = BTreeMap::new();
+    new.insert(path.clone(), vec![foo_edited.clone(), bar_run.clone()]);
+    let symbols = collect_changed_symbols(&changed_paths, &prior, &new);
+    assert_eq!(
+        symbols,
+        BTreeSet::from([(path, foo_edited.symbol_identity())])
+    );
+    assert!(
+        !symbols
+            .iter()
+            .any(|(_, id)| id == &bar_run.symbol_identity()),
+        "editing Foo::run must not mark Bar::run: {symbols:?}"
+    );
+}
+
+#[test]
+fn corpus_budget_rejects_file_and_byte_overflow() {
+    let mut budget = CorpusBudget::default();
+    for _ in 0..CORPUS_FILE_BUDGET {
+        assert!(budget.try_add(1));
+    }
+    assert!(!budget.try_add(1), "file ceiling must fail-close");
+    let mut bytes = CorpusBudget::default();
+    assert!(bytes.try_add(CORPUS_BYTE_BUDGET));
+    assert!(!bytes.try_add(1), "byte ceiling must fail-close");
 }
 
 #[test]
@@ -55,6 +114,7 @@ fn missing_index_is_incomplete() {
             None,
             &ContentHash::compute(b"tree"),
             SemanticParseCache::shared(),
+            &mut CorpusBudget::default(),
             &mut BTreeMap::new(),
         )
         .unwrap()
@@ -103,6 +163,7 @@ fn index_listed_parse_miss_is_incomplete() {
             Some(&root),
             &ContentHash::compute(b"missing-source-tree"),
             SemanticParseCache::shared(),
+            &mut CorpusBudget::default(),
             &mut BTreeMap::new(),
         )
         .unwrap(),

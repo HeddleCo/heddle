@@ -42,6 +42,7 @@ pub struct ImportRef<'a> {
 #[derive(Debug)]
 struct IndexedFunction {
     name: String,
+    container: String,
     signature: String,
     start_line: usize,
     end_line: usize,
@@ -72,6 +73,7 @@ impl SyntaxIndex {
             {
                 index.functions.push(IndexedFunction {
                     name: name.to_string(),
+                    container: function_container(&node, source),
                     signature: function_signature(&node, source),
                     start_line: node.start_position().row,
                     end_line: node.end_position().row,
@@ -171,6 +173,10 @@ impl FunctionRef<'_> {
         &self.inner.name
     }
 
+    pub fn container(&self) -> &str {
+        &self.inner.container
+    }
+
     pub fn signature(&self) -> &str {
         &self.inner.signature
     }
@@ -190,6 +196,7 @@ impl FunctionRef<'_> {
     pub fn to_owned(self) -> FunctionDef {
         FunctionDef {
             name: self.name().to_string(),
+            container: self.container().to_string(),
             signature: self.signature().to_string(),
             start_line: self.start_line(),
             end_line: self.end_line(),
@@ -1038,6 +1045,107 @@ fn first_identifier_in_subtree<'a>(node: Node<'_>, source: &'a str) -> Option<&'
         push_children_reverse(current, &mut stack);
     }
     None
+}
+
+fn function_container(node: &Node<'_>, source: &str) -> String {
+    if node.kind() == "method_declaration"
+        && let Some(receiver) = go_receiver_type(node, source)
+    {
+        return receiver;
+    }
+    let mut parts = Vec::new();
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        match parent.kind() {
+            "impl_item" => {
+                if let Some(name) = rust_impl_type_name(&parent, source) {
+                    parts.push(name);
+                }
+            }
+            "mod_item"
+            | "trait_item"
+            | "class_definition"
+            | "class_declaration"
+            | "class_specifier"
+            | "struct_specifier"
+            | "interface_declaration" => {
+                if let Some(name) = parent.child_by_field_name("name") {
+                    let text = source[name.byte_range()].trim();
+                    if !text.is_empty() {
+                        parts.push(text.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+        current = parent.parent();
+    }
+    parts.reverse();
+    parts.join("::")
+}
+
+fn rust_impl_type_name(node: &Node<'_>, source: &str) -> Option<String> {
+    if let Some(type_node) = node.child_by_field_name("type") {
+        let name = first_type_identifier(&type_node, source);
+        if !name.trim().is_empty() {
+            return Some(name);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if matches!(
+            child.kind(),
+            "type_parameters" | "where_clause" | "declaration_list"
+        ) {
+            continue;
+        }
+        if matches!(
+            child.kind(),
+            "type_identifier" | "generic_type" | "scoped_type_identifier"
+        ) {
+            let name = first_type_identifier(&child, source);
+            if !name.trim().is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+fn go_receiver_type(node: &Node<'_>, source: &str) -> Option<String> {
+    let params = node.child_by_field_name("receiver")?;
+    let mut cursor = params.walk();
+    for child in params.children(&mut cursor) {
+        if child.kind() == "parameter_declaration"
+            && let Some(type_node) = child.child_by_field_name("type")
+        {
+            let text = source[type_node.byte_range()].trim_start_matches('*');
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn first_type_identifier(node: &Node<'_>, source: &str) -> String {
+    match node.kind() {
+        "type_identifier" | "identifier" => source[node.byte_range()].to_string(),
+        "generic_type" | "scoped_type_identifier" => {
+            let mut cursor = node.walk();
+            let mut last = None;
+            for child in node.children(&mut cursor) {
+                if matches!(child.kind(), "type_identifier" | "identifier") {
+                    last = Some(source[child.byte_range()].to_string());
+                }
+            }
+            match last {
+                Some(name) => name,
+                None => source[node.byte_range()].to_string(),
+            }
+        }
+        _ => source[node.byte_range()].to_string(),
+    }
 }
 
 fn function_signature(node: &Node<'_>, source: &str) -> String {

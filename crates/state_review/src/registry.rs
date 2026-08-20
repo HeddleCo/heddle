@@ -29,9 +29,10 @@ pub struct SemanticContext {
     /// Not an emit-scope: an empty `changed_symbols` emits nothing even
     /// when this set is non-empty (non-function file-level edits).
     pub changed_paths: BTreeSet<PathBuf>,
-    /// `(path, function name)` pairs that actually changed. Production
-    /// emit-scope for novelty / test_reachability / pattern_deviation.
-    /// Empty means emit nothing — including when `changed_paths` is not.
+    /// `(path, FunctionDef::symbol_identity())` pairs that actually
+    /// changed. Production emit-scope for novelty / test_reachability /
+    /// pattern_deviation. Empty means emit nothing — including when
+    /// `changed_paths` is not.
     pub changed_symbols: BTreeSet<(PathBuf, String)>,
     /// Whether `new_functions` is a complete new-state corpus under the
     /// capture-time page/byte budgets. Novelty and test_reachability
@@ -59,11 +60,13 @@ impl SemanticContext {
 
     /// Production emit-scope is `changed_symbols` only. Empty means
     /// emit nothing — a digest change with no function body/name delta
-    /// must not fire on untouched siblings.
-    pub fn is_emit_target(&self, path: &Path, name: &str) -> bool {
+    /// must not fire on untouched siblings. Identity is
+    /// [`FunctionDef::symbol_identity`], not the bare name.
+    pub fn is_emit_target(&self, path: &Path, fn_def: &FunctionDef) -> bool {
+        let identity = fn_def.symbol_identity();
         self.changed_symbols
             .iter()
-            .any(|(changed_path, changed_name)| changed_path == path && changed_name == name)
+            .any(|(changed_path, changed_id)| changed_path == path && changed_id == &identity)
     }
 }
 
@@ -122,6 +125,7 @@ mod tests {
     fn fdef(name: &str, content: &str) -> FunctionDef {
         FunctionDef {
             name: name.to_string(),
+            container: String::new(),
             signature: format!("fn {name}()"),
             start_line: 1,
             end_line: 3,
@@ -133,14 +137,16 @@ mod tests {
     fn empty_changed_symbols_emits_nothing_even_when_paths_changed() {
         let mut ctx = SemanticContext::new();
         ctx.changed_paths.insert(PathBuf::from("lib.rs"));
+        let sibling = fdef("sibling", "");
+        let edited = fdef("edited", "");
         assert!(
-            !ctx.is_emit_target(std::path::Path::new("lib.rs"), "sibling"),
+            !ctx.is_emit_target(std::path::Path::new("lib.rs"), &sibling),
             "digest-only file change must not emit on untouched functions"
         );
         ctx.changed_symbols
-            .insert((PathBuf::from("lib.rs"), "edited".to_string()));
-        assert!(ctx.is_emit_target(std::path::Path::new("lib.rs"), "edited"));
-        assert!(!ctx.is_emit_target(std::path::Path::new("lib.rs"), "sibling"));
+            .insert((PathBuf::from("lib.rs"), edited.symbol_identity()));
+        assert!(ctx.is_emit_target(std::path::Path::new("lib.rs"), &edited));
+        assert!(!ctx.is_emit_target(std::path::Path::new("lib.rs"), &sibling));
     }
 
     #[test]
@@ -184,8 +190,10 @@ mod tests {
                 "fn score(socket: &mut Socket) -> usize { while socket.poll() { rotate_key(); } 0 }",
             )],
         );
-        ctx.changed_symbols
-            .insert((PathBuf::from("src/scoring.rs"), "score".to_string()));
+        ctx.changed_symbols.insert((
+            PathBuf::from("src/scoring.rs"),
+            fdef("score", "").symbol_identity(),
+        ));
 
         let signals = run_all(&prior, &new, &cfg, &ctx);
         let ordering: Vec<(String, String)> = signals

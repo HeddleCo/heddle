@@ -5,10 +5,31 @@
 #[derive(Clone, Debug, PartialEq)]
 pub struct FunctionDef {
     pub name: String,
+    /// Enclosing impl / type / module / receiver, when the parser can
+    /// see one. Empty for a file-scope function.
+    pub container: String,
     pub signature: String,
     pub start_line: usize,
     pub end_line: usize,
     pub content: String,
+}
+
+impl FunctionDef {
+    /// Identity that distinguishes `Foo::run` from `Bar::run` and
+    /// overloads that share a bare name. Used as the capture-time
+    /// `changed_symbols` key.
+    pub fn symbol_identity(&self) -> String {
+        let qualified = if self.container.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{}::{}", self.container, self.name)
+        };
+        if self.signature.is_empty() {
+            qualified
+        } else {
+            format!("{qualified}|{}", self.signature)
+        }
+    }
 }
 
 /// An import statement.
