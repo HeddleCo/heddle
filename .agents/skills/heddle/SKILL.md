@@ -43,10 +43,12 @@ heddle ready                      # prepare the thread; shows the semantic integ
 heddle land                       # land a ready thread
 heddle undo                       # thread-local rewind of the last operation
 heddle query                      # ask a question across history
-heddle review / discuss / context # review payload, discussions, annotations
+heddle review
+heddle discuss
+heddle context
 heddle whoami                     # capture actor, then hosted auth
-heddle daemon                     # live mount / session plane
-heddle doctor                     # proof and maintenance surface
+heddle daemon
+heddle doctor
 ```
 
 **Core nouns.**
