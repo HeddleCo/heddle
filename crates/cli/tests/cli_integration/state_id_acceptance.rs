@@ -216,9 +216,8 @@ fn show_parenthetical_is_resolvable_spec_or_labeled_not_a_spec() {
     let paren = show_state_parenthetical(&text);
 
     if let Some(hex) = paren.strip_prefix("content_hash ") {
-        let labeled_err = heddle(&["show", paren], Some(temp.path())).expect_err(
-            "labeled content_hash parenthetical is not a resolvable spec",
-        );
+        let labeled_err = heddle(&["show", paren], Some(temp.path()))
+            .expect_err("labeled content_hash parenthetical is not a resolvable spec");
         assert!(
             labeled_err.contains("State not found"),
             "show <printed-paren> should fail once the paren is labeled; got: {labeled_err}"
