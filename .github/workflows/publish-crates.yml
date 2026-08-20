@@ -88,6 +88,7 @@ env:
     heddle-refs
     heddle-merge
     heddle-semantic
+    heddle-semantic-recovery
     heddle-state-review
     heddle-wire
     heddle-repo
@@ -98,6 +99,8 @@ env:
     heddle-core
     heddle-daemon
     heddle-mount
+    heddle-ci-config
+    heddle-ci-engine
     heddle-cli-args
     heddle-cli-render
     heddle-cli-contract
