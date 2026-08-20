@@ -3,7 +3,8 @@
 //! The capture actor is who the next capture is attributed to
 //! (`user_config`, `init --principal-*`, environment). Hosted auth is
 //! whether this machine has a server credential. These are different
-//! objects. `identity ensure` does not set the local actor.
+//! objects. `heddle auth login` does not set the local actor. `whoami`
+//! only reads; it never attaches a credential.
 
 use anyhow::{Context, Result};
 use api::heddle::api::v1alpha1::HostedRole;

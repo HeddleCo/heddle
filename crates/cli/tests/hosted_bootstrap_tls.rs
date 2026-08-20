@@ -149,7 +149,7 @@ impl LoginFixture {
 
     fn login(&self, ca: CaSource) -> Output {
         let mut command = heddle_command(&self.temp, &self.repo);
-        command.args(["auth", "login", "--server", &self.server]);
+        command.args(["auth", "login", "--open-browser", "--server", &self.server]);
         match ca {
             CaSource::None => {}
             CaSource::Env => {

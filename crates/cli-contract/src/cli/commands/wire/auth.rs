@@ -144,23 +144,3 @@ pub struct WhoamiRole {
     pub resource_kind: String,
     pub role: String,
 }
-
-// ---- identity --------------------------------------------------------------
-
-/// JSON payload for `identity ensure` / `identity claim-link`.
-#[derive(Serialize, JsonSchema)]
-#[schemars(rename = "IdentityOutputSchema")]
-pub struct IdentityOutput {
-    pub output_kind: String,
-    /// `reused`, `derived`, `created_on_behalf`, or `claim_link_reissued`.
-    pub outcome: String,
-    pub server: String,
-    pub subject: String,
-    /// Stable lowercase-hex Iroh NodeId, present when a claim link is minted.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<String>,
-    /// Short-lived claim URL on the selected server origin, present only on
-    /// deliberate mint/reissue.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub claim_url: Option<String>,
-}

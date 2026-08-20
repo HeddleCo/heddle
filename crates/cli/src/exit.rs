@@ -101,7 +101,8 @@ impl HeddleExitCode {
             "remote_not_configured"
             | "remote_not_found"
             | "repository_not_found"
-            | "hosted_tls_trust" => Some(Self::Config),
+            | "hosted_tls_trust"
+            | "auth_login_invite_required" => Some(Self::Config),
             "clone_invalid_remote_url" => Some(Self::DataErr),
             // A Heddle global option after `try --` is a malformed
             // invocation, not a child-command argument.
@@ -343,6 +344,22 @@ mod tests {
         let err = anyhow::anyhow!(crate::cli::commands::RecoveryAdvice::remote_not_configured(
             "push"
         ));
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
+    }
+
+    #[test]
+    fn auth_login_invite_required_advice_is_config() {
+        let advice = crate::cli::commands::RecoveryAdvice::safety_refusal(
+            "auth_login_invite_required",
+            "Not authenticated",
+            "hint",
+            "unsafe",
+            "would change",
+            "preserved",
+            "heddle auth login --invite <code>",
+            vec!["heddle auth login --invite <code>".to_string()],
+        );
+        let err = anyhow::anyhow!(advice);
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
     }
 

@@ -1940,36 +1940,6 @@ the verdict schema is still settling.
 
 ---
 
-## `heddle identity ensure --output json`
-
-```json
-{
-  "output_kind": "identity_ensure",
-  "outcome": "created_on_behalf",
-  "server": "api.heddle.sh",
-  "subject": "account-01K2N",
-  "node_id": "b1a1cb0e0644173d6dc75f787fd203fdfd8f5ec116a0f70a854f12f54a67c121",
-  "claim_url": "https://heddle.sh/claim/hcl1.b1a1cb0e0644173d6dc75f787fd203fdfd8f5ec116a0f70a854f12f54a67c121.c2hvcnQtbGl2ZWQtY2xhaW0tc2VjcmV0"
-}
-```
-
----
-
-## `heddle identity claim-link --output json`
-
-```json
-{
-  "output_kind": "identity_claim_link",
-  "outcome": "claim_link_reissued",
-  "server": "api.heddle.sh",
-  "subject": "account-01K2N",
-  "node_id": "b1a1cb0e0644173d6dc75f787fd203fdfd8f5ec116a0f70a854f12f54a67c121",
-  "claim_url": "https://heddle.sh/claim/hcl1.b1a1cb0e0644173d6dc75f787fd203fdfd8f5ec116a0f70a854f12f54a67c121.bmV3LXNob3J0LWxpdmVkLWNsYWltLXNlY3JldA"
-}
-```
-
----
-
 ## `heddle whoami --output json`
 
 ```json

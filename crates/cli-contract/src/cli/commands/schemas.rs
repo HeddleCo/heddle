@@ -33,8 +33,7 @@ use super::wire::agent::{
     AgentTaskListOutput, SegmentEnvelope, SessionEnvelope, SessionListOutput,
 };
 use super::wire::auth::{
-    AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, IdentityOutput, ServiceTokenOutput,
-    WhoamiOutput,
+    AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, ServiceTokenOutput, WhoamiOutput,
 };
 use super::wire::thread::{
     ApprovalOutput, ApprovalRevokeOutput, EligibilityOutput, ThreadAbsorbOutput,
@@ -173,7 +172,6 @@ schema_registry! {
     (&["auth trust show", "auth trust replace"], AuthTrustOutput),
     (&["whoami"], WhoamiOutput),
     (&["auth create-service-token"], ServiceTokenOutput),
-    (&["identity ensure", "identity claim-link"], IdentityOutput),
     (&["agent provenance begin", "agent provenance end", "agent provenance show"], SessionEnvelope),
     (&["agent provenance segment"], SegmentEnvelope),
     (&["agent provenance list"], SessionListOutput),

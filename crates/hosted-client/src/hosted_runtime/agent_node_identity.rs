@@ -43,6 +43,10 @@ pub(crate) fn identity_path() -> PathBuf {
     repo::identity::heddle_home_dir().join(IDENTITY_FILE)
 }
 
+pub(crate) fn load() -> Result<Option<AgentNodeIdentity>> {
+    load_at(&identity_path())
+}
+
 /// Load the agent node identity, minting it exactly once when absent.
 ///
 /// The write lock serializes first use by concurrent CLI processes. A corrupt

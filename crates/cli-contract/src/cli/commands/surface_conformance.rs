@@ -67,7 +67,6 @@ pub const APPROVED_NON_EVERYDAY_ROOT_COMMANDS: &[&str] = &[
     "completions",
     "daemon",
     "hook",
-    "identity",
     "revert",
     "semantic",
     "visibility",
