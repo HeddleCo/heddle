@@ -94,11 +94,6 @@ struct ScratchViews<'a> {
     top: &'a mut usize,
 }
 
-struct EqualEmit<'a> {
-    new_cursor: &'a mut usize,
-    pending: &'a mut Option<PendingEqual>,
-}
-
 fn conquer_range<E>(
     old: LineView<'_>,
     new: LineView<'_>,
