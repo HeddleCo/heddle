@@ -273,6 +273,15 @@ fn render_plain_git_show(
     Ok(())
 }
 
+/// Short content-hash prefix labeled so it is not offered as a state spec.
+fn labeled_content_hash_prefix(content_hash: &str) -> String {
+    let prefix = match content_hash.get(..8) {
+        Some(prefix) => prefix,
+        None => content_hash,
+    };
+    format!("content_hash {prefix}")
+}
+
 fn render_state(output: &ShowOutput, verbose: bool) {
     // Mode preamble is read-path noise (heddle#275); show it only under
     // `-v`. `heddle status` covers it for the common case.
@@ -304,11 +313,12 @@ fn render_state(output: &ShowOutput, verbose: bool) {
         println!();
     }
     // Identifiers are dimmed: structurally important but not the
-    // editorial focus.
+    // editorial focus. The parenthetical is content_hash, not a
+    // state spec — label it so `heddle show <paren>` is not offered.
     println!(
         "State: {} ({})",
         style::state_id(&output.state_id),
-        style::dim(&output.content_hash[..8])
+        style::dim(&labeled_content_hash_prefix(&output.content_hash))
     );
     println!("Full ID: {}", style::dim(&output.state_id_full));
     println!("Tree: {}", style::dim(&output.tree));
