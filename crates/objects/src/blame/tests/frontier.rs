@@ -3,8 +3,8 @@ use std::cell::Cell;
 use std::path::Path;
 
 use crate::blame::{
-    advance_file_blame_slice, prepare_file_blame, BlameLineMap, BlamePreparation, BlameSliceError,
-    BlameSliceLimits,
+    advance_file_blame_slice, prepare_file_blame, BlameLineMap, BlamePreparation,
+    BlameSliceAdvance, BlameSliceError, BlameSliceLimits,
 };
 use crate::object::{
     Attribution, Blob, ContentHash, ObjectSource, Principal, State, StateId, Tree,
@@ -125,6 +125,73 @@ fn frontier_blob_must_belong_to_loaded_state() {
         matches!(err, BlameSliceError::InvalidFrontier(_)),
         "expected InvalidFrontier, got {err}"
     );
+}
+
+#[test]
+fn reversed_target_mappings_are_invalid_frontier() {
+    let store = store();
+    let parent = put_state_with_file(&store, "file.txt", b"a\n", Vec::new(), "alice");
+    let child = put_state_with_file(&store, "file.txt", b"a\nb\n", vec![parent.id()], "bob");
+    let path = Path::new("file.txt");
+    let BlamePreparation::Active { mut frontier, .. } =
+        prepare_file_blame(&store, &child, path, BlameSliceLimits::unlimited()).unwrap()
+    else {
+        panic!("expected active frontier");
+    };
+    frontier.records[0].mappings = vec![
+        BlameLineMap {
+            state_start: 0,
+            target_start: 1,
+            len: 1,
+        },
+        BlameLineMap {
+            state_start: 1,
+            target_start: 0,
+            len: 1,
+        },
+    ];
+    let err = advance_file_blame_slice(&store, path, frontier, BlameSliceLimits::unlimited())
+        .expect_err("reversed target maps");
+    assert!(
+        matches!(err, BlameSliceError::InvalidFrontier(_)),
+        "expected InvalidFrontier, got {err}"
+    );
+}
+
+#[test]
+fn first_parent_that_covers_mapped_lines_skips_later_parents() {
+    let store = store();
+    let first = put_state_with_file(&store, "file.txt", b"a\nextra\n", Vec::new(), "alice");
+    let second = put_state_with_file(&store, "file.txt", b"z\n", Vec::new(), "carol");
+    let merge = put_state_with_file(
+        &store,
+        "file.txt",
+        b"a\n",
+        vec![first.id(), second.id()],
+        "bob",
+    );
+    let path = Path::new("file.txt");
+    let BlamePreparation::Active { frontier, .. } =
+        prepare_file_blame(&store, &merge, path, BlameSliceLimits::unlimited()).unwrap()
+    else {
+        panic!("expected active frontier");
+    };
+
+    let two = BlameSliceLimits {
+        states: 2,
+        ..BlameSliceLimits::unlimited()
+    };
+    match advance_file_blame_slice(&store, path, frontier.clone(), two).unwrap() {
+        BlameSliceAdvance::Progress { usage, .. } | BlameSliceAdvance::Complete { usage, .. } => {
+            assert_eq!(usage.states, 2);
+        }
+    }
+
+    match advance_file_blame_slice(&store, path, frontier, BlameSliceLimits::unlimited()).unwrap() {
+        BlameSliceAdvance::Progress { usage, .. } | BlameSliceAdvance::Complete { usage, .. } => {
+            assert_eq!(usage.states, 2);
+        }
+    }
 }
 
 #[test]

@@ -30,7 +30,9 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   merge visit original blob bytes. Each parent state is charged against
   the slice `states` cap before it is fetched. Each parent file's lines
   are consumed before its diff. Frontier origin, blob hash, and state-side
-  mappings are checked against the loaded state. Blobs are size-probed
+  mappings are checked against the loaded state on both the state and
+  target sides. After a first parent claims every mapped line, later
+  parents are not fetched. Blobs are size-probed
   before `get_blob`. Compact right-slides trailing repeats only when the
   equal is not already a left-justified prefix (`b/a` vs `a/b/b` is
   `(0,2)`; `a` vs `a/a` stays `(0,0)`). Slice usage reports work,

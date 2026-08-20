@@ -10,7 +10,10 @@ use crate::{
 
 use super::{
     lookup::{load_blob_within_budget, lookup_blob_at_path},
-    mapping::{blob_line_count_matches_frontier, finalize_unmoved, mappings_fit_state_lines},
+    mapping::{
+        blob_line_count_matches_frontier, finalize_unmoved, mapped_lines_claimed,
+        mappings_fit_state_lines,
+    },
     parent::{claim_parent, parent_record, ParentClaim},
     types::{
         origin_from_state, BlameFrontierGroup, BlameSliceAdvance, BlameSliceError,
@@ -118,6 +121,9 @@ pub fn advance_file_blame_slice<S: ObjectSource>(
                     next_parents.push(record);
                 }
             }
+        }
+        if mapped_lines_claimed(&entry.mappings, &moved) {
+            break;
         }
     }
 

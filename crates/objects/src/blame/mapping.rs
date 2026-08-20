@@ -163,7 +163,8 @@ pub(super) fn mappings_fit_state_lines(
             "nonempty state has no mappings".into(),
         ));
     }
-    let mut prev_end = 0u32;
+    let mut prev_state_end = 0u32;
+    let mut prev_target_end = 0u32;
     for mapping in mappings {
         if mapping.len == 0 {
             return Err(BlameSliceError::InvalidFrontier(
@@ -174,15 +175,20 @@ pub(super) fn mappings_fit_state_lines(
             .state_start
             .checked_add(mapping.len)
             .ok_or_else(|| BlameSliceError::InvalidFrontier("mapping state end overflow".into()))?;
-        let _target_end = mapping
+        let target_end = mapping
             .target_start
             .checked_add(mapping.len)
             .ok_or_else(|| {
                 BlameSliceError::InvalidFrontier("mapping target end overflow".into())
             })?;
-        if mapping.state_start < prev_end {
+        if mapping.state_start < prev_state_end {
             return Err(BlameSliceError::InvalidFrontier(
                 "overlapping or unordered state mapping".into(),
+            ));
+        }
+        if mapping.target_start < prev_target_end {
+            return Err(BlameSliceError::InvalidFrontier(
+                "overlapping or unordered target mapping".into(),
             ));
         }
         if state_end > state_line_count {
@@ -190,9 +196,22 @@ pub(super) fn mappings_fit_state_lines(
                 "mapping end {state_end} exceeds state_line_count {state_line_count}"
             )));
         }
-        prev_end = state_end;
+        prev_state_end = state_end;
+        prev_target_end = target_end;
     }
     Ok(())
+}
+
+/// True when every state line covered by `maps` is already claimed.
+pub(super) fn mapped_lines_claimed(maps: &[BlameLineMap], moved: &[bool]) -> bool {
+    maps.iter().all(|map| {
+        (0..map.len).all(|offset| {
+            moved
+                .get((map.state_start + offset) as usize)
+                .copied()
+                .unwrap_or(true)
+        })
+    })
 }
 
 pub(super) fn blob_line_count_matches_frontier(
