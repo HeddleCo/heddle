@@ -211,6 +211,84 @@ fn ready_from_isolated_checkout_recommends_bare_land() {
 }
 
 #[test]
+fn ready_via_repo_flag_from_another_cwd_keeps_repo_on_land() {
+    let (main, checkout_owner, execution_path) = setup_managed_thread("feature/repo-ready");
+    let checkout = std::path::Path::new(&execution_path);
+    std::fs::write(checkout.join("feature.txt"), "feature\n").unwrap();
+    heddle(&["capture", "-m", "feature"], Some(checkout)).unwrap();
+
+    let expected_current = format!("heddle --repo {execution_path} land");
+    let ready = json(
+        &[
+            "--repo",
+            &execution_path,
+            "--output",
+            "json",
+            "ready",
+        ],
+        main.path(),
+    );
+    assert_eq!(ready["next_action"], expected_current, "{ready}");
+    assert_eq!(ready["recommended_action"], expected_current, "{ready}");
+    assert_eq!(
+        ready["report"]["recommended_action"], expected_current,
+        "{ready}"
+    );
+    let next = ready["next_action"]
+        .as_str()
+        .expect("ready next_action should be a string");
+    assert!(
+        next.contains("--repo") && !next.contains("--thread"),
+        "explicit --repo ready of that checkout's current thread must keep --repo and omit --thread: {ready}"
+    );
+    assert_no_banned_next_actions(&ready);
+
+    let same_cwd = json(
+        &[
+            "--repo",
+            &execution_path,
+            "--output",
+            "json",
+            "ready",
+        ],
+        checkout,
+    );
+    assert_eq!(same_cwd["next_action"], "heddle land", "{same_cwd}");
+    assert!(
+        !same_cwd["next_action"]
+            .as_str()
+            .expect("same-cwd next_action")
+            .contains("--repo"),
+        "--repo pointing at the process cwd must stay an invisible default: {same_cwd}"
+    );
+
+    let expected_named = format!("heddle --repo {} land --thread feature/repo-ready", main.path().display());
+    let named = json(
+        &[
+            "--repo",
+            main.path().to_str().expect("main path utf8"),
+            "--output",
+            "json",
+            "ready",
+            "--thread",
+            "feature/repo-ready",
+        ],
+        checkout,
+    );
+    assert_eq!(named["next_action"], expected_named, "{named}");
+    assert!(
+        named["next_action"]
+            .as_str()
+            .expect("named next_action")
+            .contains("--thread"),
+        "explicit --repo ready of a non-current thread must keep --thread: {named}"
+    );
+    assert_no_banned_next_actions(&named);
+
+    drop(checkout_owner);
+}
+
+#[test]
 fn presence_show_multi_match_next_is_not_help_catalog() {
     use chrono::Utc;
     use objects::store::{
