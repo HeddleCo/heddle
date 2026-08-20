@@ -400,7 +400,8 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
         && decision.integration_clear
     {
         report.thread_health = "ready".to_string();
-        report.recommended_action = land_action_for_ready(&repo, &thread.id);
+        report.recommended_action =
+            land_action_for_ready(&repo, &thread.id, cli.repo.as_deref(), &cwd);
         report.refresh_recommended_action_metadata();
     }
 

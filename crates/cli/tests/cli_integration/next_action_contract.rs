@@ -219,13 +219,7 @@ fn ready_via_repo_flag_from_another_cwd_keeps_repo_on_land() {
 
     let expected_current = format!("heddle --repo {execution_path} land");
     let ready = json(
-        &[
-            "--repo",
-            &execution_path,
-            "--output",
-            "json",
-            "ready",
-        ],
+        &["--repo", &execution_path, "--output", "json", "ready"],
         main.path(),
     );
     assert_eq!(ready["next_action"], expected_current, "{ready}");
@@ -244,13 +238,7 @@ fn ready_via_repo_flag_from_another_cwd_keeps_repo_on_land() {
     assert_no_banned_next_actions(&ready);
 
     let same_cwd = json(
-        &[
-            "--repo",
-            &execution_path,
-            "--output",
-            "json",
-            "ready",
-        ],
+        &["--repo", &execution_path, "--output", "json", "ready"],
         checkout,
     );
     assert_eq!(same_cwd["next_action"], "heddle land", "{same_cwd}");
@@ -262,7 +250,10 @@ fn ready_via_repo_flag_from_another_cwd_keeps_repo_on_land() {
         "--repo pointing at the process cwd must stay an invisible default: {same_cwd}"
     );
 
-    let expected_named = format!("heddle --repo {} land --thread feature/repo-ready", main.path().display());
+    let expected_named = format!(
+        "heddle --repo {} land --thread feature/repo-ready",
+        main.path().display()
+    );
     let named = json(
         &[
             "--repo",
