@@ -18,6 +18,12 @@ pub fn finalize_file_provenance(
     ranges.sort_by_key(|range| range.target_start);
 
     if line_count == 0 {
+        if ranges
+            .iter()
+            .any(|range| range.target_start != 0 || range.len != 0)
+        {
+            return Err(BlameSliceError::InvalidCoverage);
+        }
         let origins = ranges
             .first()
             .map(|range| vec![range.origin.clone()])
@@ -47,10 +53,7 @@ pub fn finalize_file_provenance(
             return Err(BlameSliceError::InvalidCoverage);
         }
         let origin_index = origin_index(&mut origins, range.origin);
-        let origin_set_index = origin_sets.len() as u32;
-        origin_sets.push(OriginSet {
-            origin_indexes: vec![origin_index],
-        });
+        let origin_set_index = origin_set_index(&mut origin_sets, origin_index);
         spans.push(crate::object::LineSpan {
             start_line: range.target_start,
             line_len: range.len,
@@ -95,5 +98,21 @@ fn origin_index(origins: &mut Vec<Origin>, origin: Origin) -> u32 {
     }
     let next = origins.len() as u32;
     origins.push(origin);
+    next
+}
+
+fn origin_set_index(origin_sets: &mut Vec<OriginSet>, origin_index: u32) -> u32 {
+    let indexes = vec![origin_index];
+    if let Some((index, _)) = origin_sets
+        .iter()
+        .enumerate()
+        .find(|(_, set)| set.origin_indexes == indexes)
+    {
+        return index as u32;
+    }
+    let next = origin_sets.len() as u32;
+    origin_sets.push(OriginSet {
+        origin_indexes: indexes,
+    });
     next
 }

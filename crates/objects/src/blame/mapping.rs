@@ -4,7 +4,7 @@
 use crate::object::Origin;
 use crate::util::EqualRun;
 
-use super::types::{BlameFrontierRecord, BlameLineMap, OriginRange};
+use super::types::{BlameFrontierRecord, BlameLineMap, BlameSliceError, OriginRange};
 
 pub(super) fn identity_mapping(line_count: u32) -> Vec<BlameLineMap> {
     if line_count == 0 {
@@ -52,10 +52,7 @@ pub(super) fn append_map_run(
     }
 }
 
-pub(super) fn claim_same_blob_maps(
-    maps: &[BlameLineMap],
-    moved: &mut [bool],
-) -> Vec<BlameLineMap> {
+pub(super) fn claim_same_blob_maps(maps: &[BlameLineMap], moved: &mut [bool]) -> Vec<BlameLineMap> {
     let mut claimed = Vec::new();
     for map in maps {
         let mut offset = 0u32;
@@ -152,6 +149,40 @@ pub(super) fn finalize_unmoved(
     }
     targets.sort_unstable();
     coalesce_targets(&targets, origin)
+}
+
+pub(super) fn mappings_fit_state_lines(
+    mappings: &[BlameLineMap],
+    state_line_count: u32,
+) -> Result<(), BlameSliceError> {
+    for mapping in mappings {
+        let end = mapping
+            .state_start
+            .checked_add(mapping.len)
+            .ok_or_else(|| BlameSliceError::InvalidFrontier("mapping end overflow".into()))?;
+        if end > state_line_count {
+            return Err(BlameSliceError::InvalidFrontier(format!(
+                "mapping end {end} exceeds state_line_count {state_line_count}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn blob_line_count_matches_frontier(
+    blob_bytes: &[u8],
+    state_line_count: u32,
+) -> Result<usize, BlameSliceError> {
+    let blob_line_count = std::str::from_utf8(blob_bytes)
+        .map_err(|_| BlameSliceError::Unblamable)?
+        .lines()
+        .count();
+    if blob_line_count != state_line_count as usize {
+        return Err(BlameSliceError::InvalidFrontier(format!(
+            "state_line_count {state_line_count} != blob lines {blob_line_count}"
+        )));
+    }
+    Ok(blob_line_count)
 }
 
 fn coalesce_targets(targets: &[u32], origin: &Origin) -> Vec<OriginRange> {

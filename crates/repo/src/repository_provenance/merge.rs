@@ -10,8 +10,8 @@ use super::{
     Repository, Result,
     builder::ProvenanceBuilder,
     helpers::{
-        expand_line_origin_sets_with_builder, load_lines_for_hash, lookup_tree_entry,
-        split_text_lines, synthesize_file_provenance_from_blob, visit_equal_runs,
+        expand_line_origin_sets_with_builder, load_blob_bytes, lookup_tree_entry, split_text_lines,
+        synthesize_file_provenance_from_blob, visit_equal_runs,
     },
 };
 
@@ -260,7 +260,7 @@ impl Repository {
             }
             let combined = self.combine_equal_file_provenance(
                 final_hash,
-                &final_lines,
+                final_lines.len(),
                 &[ours_prov, theirs_prov],
             )?;
             return Ok(Some(self.put_file_provenance(&combined)?));
@@ -278,7 +278,7 @@ impl Repository {
         let final_origin = self.state_origin(final_state);
         let merged = self.merge_file_provenance(
             final_hash,
-            &final_lines,
+            final_blob.content(),
             [ours_prov.as_ref(), theirs_prov.as_ref(), base_prov.as_ref()],
             final_origin,
         )?;
@@ -288,16 +288,19 @@ impl Repository {
     fn merge_file_provenance(
         &self,
         file_blob: ContentHash,
-        final_lines: &[String],
+        final_bytes: &[u8],
         sources: [Option<&FileProvenance>; 3],
         final_origin: objects::object::Origin,
     ) -> Result<FileProvenance> {
+        let line_count = std::str::from_utf8(final_bytes)
+            .map_err(|error| super::HeddleError::InvalidObject(error.to_string()))?
+            .lines()
+            .count();
+        let sources: Vec<_> = sources.into_iter().flatten().collect();
         let mut builder = ProvenanceBuilder::default();
-        let mut source_lines = Vec::new();
         let mut source_sets = Vec::new();
 
-        for provenance in sources.into_iter().flatten() {
-            source_lines.push(load_lines_for_hash(self, provenance.file_blob)?);
+        for provenance in &sources {
             source_sets.push(expand_line_origin_sets_with_builder(
                 provenance,
                 &mut builder,
@@ -305,12 +308,11 @@ impl Repository {
         }
 
         let final_origin_set = builder.origin_set_from_origins([final_origin]);
-        let mut resolved_sets = vec![std::collections::BTreeSet::<u32>::new(); final_lines.len()];
+        let mut resolved_sets = vec![std::collections::BTreeSet::<u32>::new(); line_count];
 
-        for (lines, origin_sets) in source_lines.iter().zip(source_sets.iter()) {
-            let old_bytes = lines.join("\n");
-            let new_bytes = final_lines.join("\n");
-            visit_equal_runs(old_bytes.as_bytes(), new_bytes.as_bytes(), |run| {
+        for (provenance, origin_sets) in sources.iter().zip(source_sets.iter()) {
+            let old_bytes = load_blob_bytes(self, provenance.file_blob)?;
+            visit_equal_runs(&old_bytes, final_bytes, |run| {
                 for offset in 0..run.len {
                     resolved_sets[run.new_start + offset]
                         .insert(origin_sets[run.old_start + offset]);
@@ -328,13 +330,13 @@ impl Repository {
             });
         }
 
-        Ok(builder.into_file_provenance(file_blob, final_lines.len(), line_sets))
+        Ok(builder.into_file_provenance(file_blob, line_count, line_sets))
     }
 
     fn combine_equal_file_provenance(
         &self,
         file_blob: ContentHash,
-        final_lines: &[String],
+        line_count: usize,
         sources: &[&FileProvenance],
     ) -> Result<FileProvenance> {
         let mut builder = ProvenanceBuilder::default();
@@ -346,8 +348,8 @@ impl Repository {
             )?);
         }
 
-        let mut line_sets = Vec::with_capacity(final_lines.len());
-        for line_index in 0..final_lines.len() {
+        let mut line_sets = Vec::with_capacity(line_count);
+        for line_index in 0..line_count {
             let mut set = std::collections::BTreeSet::new();
             for source in &per_source_sets {
                 if let Some(index) = source.get(line_index) {
@@ -357,6 +359,6 @@ impl Repository {
             line_sets.push(builder.origin_set_from_set_indexes(set)?);
         }
 
-        Ok(builder.into_file_provenance(file_blob, final_lines.len(), line_sets))
+        Ok(builder.into_file_provenance(file_blob, line_count, line_sets))
     }
 }

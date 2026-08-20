@@ -9,7 +9,7 @@ use crate::{
 };
 
 use super::{
-    mapping::finalize_unmoved,
+    mapping::{blob_line_count_matches_frontier, finalize_unmoved, mappings_fit_state_lines},
     parent::{ParentClaim, claim_parent, parent_record},
     types::{
         BlameFrontierGroup, BlameSliceAdvance, BlameSliceError, BlameSliceLimits, OriginRange,
@@ -38,8 +38,7 @@ pub fn advance_file_blame_slice<S: ObjectSource>(
             usage: budget.used(),
         });
     };
-    // Admit the frontier line count before any moved-bitmap allocation.
-    budget.consume(ResourceKind::Lines, u64::from(entry.state_line_count))?;
+    mappings_fit_state_lines(&entry.mappings, entry.state_line_count)?;
 
     let Some(entry_state) = source.get_state(&entry.state_id())? else {
         return Err(BlameSliceError::MissingObject {
@@ -49,15 +48,6 @@ pub fn advance_file_blame_slice<S: ObjectSource>(
     };
     budget.consume(ResourceKind::States, 1)?;
     heddle_perf_contract::record_ancestors_visited(1);
-
-    if entry_state.parents.is_empty() {
-        let finalized = finalize_unmoved(
-            &entry.mappings,
-            &vec![false; entry.state_line_count as usize],
-            &entry.origin,
-        );
-        return finish(frontier_group, finalized, budget.used());
-    }
 
     let Some(entry_blob) = source.get_blob(&entry.blob_hash)? else {
         return Err(BlameSliceError::MissingObject {
@@ -70,15 +60,16 @@ pub fn advance_file_blame_slice<S: ObjectSource>(
         entry_blob.content().len() as u64,
     )?;
     let entry_bytes = entry_blob.content();
-    let line_count = std::str::from_utf8(entry_bytes)
-        .map_err(|_| BlameSliceError::Unblamable)?
-        .lines()
-        .count();
-    budget.require(ResourceKind::Lines, line_count as u64)?;
+    let line_count = blob_line_count_matches_frontier(entry_bytes, entry.state_line_count)?;
+    budget.consume(ResourceKind::Lines, line_count as u64)?;
 
-    let mut moved = vec![false; entry.state_line_count as usize];
+    let mut moved = vec![false; line_count];
+    if entry_state.parents.is_empty() {
+        let finalized = finalize_unmoved(&entry.mappings, &moved, &entry.origin);
+        return finish(frontier_group, finalized, budget.used());
+    }
+
     let mut next_parents = Vec::new();
-
     for parent_id in &entry_state.parents {
         let Some(parent) = source.get_state(parent_id)? else {
             return Err(BlameSliceError::MissingObject {

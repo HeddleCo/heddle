@@ -8,7 +8,6 @@ use crate::blame::{
 };
 use crate::object::{Attribution, ContentHash, Principal, State, StateId, Tree, TreeEntry};
 use crate::store::ObjectStore;
-use crate::util::ResourceKind;
 
 use super::fixture::{put_state_with_file, store};
 
@@ -128,12 +127,50 @@ fn frontier_state_line_count_above_line_limit_is_typed_without_huge_bitmap() {
         "huge bitmap must not be allocated"
     );
     match err {
-        BlameSliceError::BudgetExceeded(error) => {
-            assert_eq!(error.kind, ResourceKind::Lines);
-            assert_eq!(error.limit, 16);
-            assert_eq!(error.needed, u64::from(u32::MAX));
-        }
         BlameSliceError::InvalidFrontier(_) => {}
-        other => panic!("expected BudgetExceeded or InvalidFrontier, got {other}"),
+        other => panic!("expected InvalidFrontier, got {other}"),
     }
+}
+
+#[test]
+fn unlimited_frontier_line_count_must_match_blob_before_bitmap() {
+    let store = store();
+    let state = put_state_with_file(&store, "file.txt", b"x\n", Vec::new(), "alice");
+    let path = Path::new("file.txt");
+    let BlamePreparation::Active { mut frontier, .. } =
+        prepare_file_blame(&store, &state, path, BlameSliceLimits::unlimited()).unwrap()
+    else {
+        panic!("expected active frontier");
+    };
+    frontier.records[0].state_line_count = u32::MAX;
+    let started = Instant::now();
+    let err = advance_file_blame_slice(&store, path, frontier, BlameSliceLimits::unlimited())
+        .expect_err("mismatched frontier line count");
+    assert!(
+        started.elapsed().as_millis() < 1_000,
+        "huge bitmap must not be allocated"
+    );
+    assert!(
+        matches!(err, BlameSliceError::InvalidFrontier(_)),
+        "expected InvalidFrontier, got {err}"
+    );
+}
+
+#[test]
+fn mapping_past_state_line_count_is_invalid_frontier() {
+    let store = store();
+    let state = put_state_with_file(&store, "file.txt", b"x\n", Vec::new(), "alice");
+    let path = Path::new("file.txt");
+    let BlamePreparation::Active { mut frontier, .. } =
+        prepare_file_blame(&store, &state, path, BlameSliceLimits::unlimited()).unwrap()
+    else {
+        panic!("expected active frontier");
+    };
+    frontier.records[0].mappings[0].len = 2;
+    let err = advance_file_blame_slice(&store, path, frontier, BlameSliceLimits::unlimited())
+        .expect_err("mapping past blob");
+    assert!(
+        matches!(err, BlameSliceError::InvalidFrontier(_)),
+        "expected InvalidFrontier, got {err}"
+    );
 }

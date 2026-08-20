@@ -13,14 +13,7 @@ pub(super) struct ConquerJob {
     pub old_hi: u32,
     pub new_lo: u32,
     pub new_hi: u32,
-    pub kind: u8,
-    pub eq_old: u32,
-    pub eq_new: u32,
-    pub eq_len: u32,
 }
-
-pub(super) const JOB_RANGE: u8 = 0;
-pub(super) const JOB_EQUAL: u8 = 1;
 
 pub fn max_scratch_align() -> usize {
     align_of::<LineOff>()
@@ -76,7 +69,7 @@ pub(super) struct ScratchLayout {
 
 pub(super) fn layout_sizes(old_lines: usize, new_lines: usize) -> (usize, ScratchLayout) {
     let max_d = max_d(old_lines, new_lines);
-    let v_len = 2 * max_d;
+    let v_len = 2 * max_d + 1;
     let job_cap = old_lines.saturating_add(new_lines).saturating_add(8);
 
     let mut cursor = 0usize;

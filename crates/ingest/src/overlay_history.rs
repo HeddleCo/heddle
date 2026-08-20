@@ -210,13 +210,17 @@ fn blame_file_origins(
     let mut worklist = vec![GitBlameFrontier {
         commit_oid: tip_oid.to_string(),
         blob_oid: target_blob,
-        commit_lines: target_lines.clone(),
+        commit_bytes: target_bytes,
         commit_to_target: (0..target_lines.len()).map(Some).collect(),
     }];
 
     while let Some(frontier) = worklist.pop() {
         let commit = read_commit_cached(git, commits, &frontier.commit_oid)?;
-        let mut moved = vec![false; frontier.commit_lines.len()];
+        let frontier_line_count = std::str::from_utf8(&frontier.commit_bytes)
+            .map_err(|error| IngestError::Other(error.to_string()))?
+            .lines()
+            .count();
+        let mut moved = vec![false; frontier_line_count];
         for parent_oid in &commit.parents {
             let parent = read_commit_cached(git, commits, parent_oid)?;
             let Some((parent_blob, parent_bytes)) = blob_at_path(git, &parent.tree_sha, path)?
@@ -224,7 +228,7 @@ fn blame_file_origins(
                 continue;
             };
             if parent_blob == frontier.blob_oid {
-                let mut parent_to_target = vec![None; frontier.commit_lines.len()];
+                let mut parent_to_target = vec![None; frontier_line_count];
                 let mut any_moved = false;
                 for (index, target_index) in frontier.commit_to_target.iter().enumerate() {
                     if moved[index] {
@@ -241,27 +245,27 @@ fn blame_file_origins(
                     worklist.push(GitBlameFrontier {
                         commit_oid: parent_oid.clone(),
                         blob_oid: parent_blob,
-                        commit_lines: frontier.commit_lines.clone(),
+                        commit_bytes: frontier.commit_bytes.clone(),
                         commit_to_target: parent_to_target,
                     });
                 }
                 break;
             }
 
-            let Some(parent_lines) = split_text_lines(&parent_bytes) else {
+            let Some(parent_line_count) = std::str::from_utf8(&parent_bytes)
+                .ok()
+                .map(|content| content.lines().count())
+            else {
                 continue;
             };
-            let mut parent_to_target = vec![None; parent_lines.len()];
+            let mut parent_to_target = vec![None; parent_line_count];
             let mut any_moved = false;
-            let needed = scratch_bytes_for_line_counts(
-                parent_lines.len(),
-                frontier.commit_lines.len(),
-            );
+            let needed = scratch_bytes_for_line_counts(parent_line_count, frontier_line_count);
             let mut scratch = vec![0u8; needed.max(1)];
             let mut budget = LineDiffLimits::unlimited().budget(scratch.len());
             visit_lcs_equal_runs(
                 &parent_bytes,
-                frontier.commit_lines.join("\n").as_bytes(),
+                &frontier.commit_bytes,
                 &mut scratch,
                 &mut budget,
                 |run| {
@@ -286,7 +290,7 @@ fn blame_file_origins(
                 worklist.push(GitBlameFrontier {
                     commit_oid: parent_oid.clone(),
                     blob_oid: parent_blob,
-                    commit_lines: parent_lines,
+                    commit_bytes: parent_bytes,
                     commit_to_target: parent_to_target,
                 });
             }
@@ -445,7 +449,7 @@ fn tree_entry_at_path(
 struct GitBlameFrontier {
     commit_oid: String,
     blob_oid: String,
-    commit_lines: Vec<String>,
+    commit_bytes: Vec<u8>,
     commit_to_target: Vec<Option<usize>>,
 }
 

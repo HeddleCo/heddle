@@ -3,9 +3,9 @@
 //! search cannot finish inside the work budget it returns BudgetExceeded.
 
 use super::super::budget::{BudgetExceeded, ResourceBudget, ResourceKind};
-use super::myers_search::{common_prefix, common_suffix, find_middle_snake};
+use super::myers_search::{common_prefix, find_middle_snake};
 use super::scan::LineOff;
-use super::scratch::{ConquerJob, JOB_EQUAL, JOB_RANGE};
+use super::scratch::ConquerJob;
 use super::{EqualRun, LineDiffError};
 
 #[derive(Clone, Copy)]
@@ -35,28 +35,12 @@ pub(super) fn emit_equal_runs<E>(
             old_hi: old.offs.len() as u32,
             new_lo: 0,
             new_hi: new.offs.len() as u32,
-            kind: JOB_RANGE,
-            eq_old: 0,
-            eq_new: 0,
-            eq_len: 0,
         },
     )?;
 
     while top > 0 {
         top -= 1;
         let job = jobs[top];
-        if job.kind == JOB_EQUAL {
-            if job.eq_len == 0 {
-                continue;
-            }
-            visit(EqualRun {
-                old_start: job.eq_old as usize,
-                new_start: job.eq_new as usize,
-                len: job.eq_len as usize,
-            })
-            .map_err(LineDiffError::Visitor)?;
-            continue;
-        }
         conquer_range(
             old,
             new,
@@ -112,22 +96,7 @@ fn conquer_range<E>(
         new_lo += prefix;
     }
 
-    let suffix = common_suffix(old, old_lo, old_hi, new, new_lo, new_hi, budget)?;
-    let suffix_old = old_hi - suffix;
-    let suffix_new = new_hi - suffix;
-    old_hi -= suffix;
-    new_hi -= suffix;
-
-    if old_lo >= old_hi && new_lo >= new_hi {
-        if suffix > 0 {
-            push_job(jobs, top, equal_job(suffix_old, suffix_new, suffix))?;
-        }
-        return Ok(());
-    }
     if old_lo >= old_hi || new_lo >= new_hi {
-        if suffix > 0 {
-            push_job(jobs, top, equal_job(suffix_old, suffix_new, suffix))?;
-        }
         return Ok(());
     }
 
@@ -148,9 +117,6 @@ fn conquer_range<E>(
         }));
     };
 
-    if suffix > 0 {
-        push_job(jobs, top, equal_job(suffix_old, suffix_new, suffix))?;
-    }
     push_job(
         jobs,
         top,
@@ -159,10 +125,6 @@ fn conquer_range<E>(
             old_hi: old_hi as u32,
             new_lo: split_new as u32,
             new_hi: new_hi as u32,
-            kind: JOB_RANGE,
-            eq_old: 0,
-            eq_new: 0,
-            eq_len: 0,
         },
     )?;
     push_job(
@@ -173,26 +135,9 @@ fn conquer_range<E>(
             old_hi: split_old as u32,
             new_lo: new_lo as u32,
             new_hi: split_new as u32,
-            kind: JOB_RANGE,
-            eq_old: 0,
-            eq_new: 0,
-            eq_len: 0,
         },
     )?;
     Ok(())
-}
-
-fn equal_job(old_start: usize, new_start: usize, len: usize) -> ConquerJob {
-    ConquerJob {
-        old_lo: 0,
-        old_hi: 0,
-        new_lo: 0,
-        new_hi: 0,
-        kind: JOB_EQUAL,
-        eq_old: old_start as u32,
-        eq_new: new_start as u32,
-        eq_len: len as u32,
-    }
 }
 
 fn push_job<E>(

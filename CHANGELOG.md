@@ -22,10 +22,13 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   ranges; Heddle's own `blame` now loops those slices. Work exhaustion is
   typed `BudgetExceeded`, never approximate blame. Work is actual Myers
   comparisons, not an n×m admission ceiling. A missing parent state, tree,
-  or tree-present / blob-missing parent is `MissingObject`. Frontier
-  `state_line_count` is charged against the line budget before the moved
-  bitmap. Slice usage reports work, lines, and scratch on one live
-  `ResourceBudget` (heddle#1454).
+  or tree-present / blob-missing parent is `MissingObject`. Frontier maps
+  and `state_line_count` are checked against the blob before any moved
+  bitmap; a mismatch is `InvalidFrontier`. Myers keeps similar's leftmost
+  new-side tie-break (no eager common-suffix before the middle snake).
+  Origin sets are reused like `ProvenanceBuilder`. Overlay, snapshot, and
+  merge visit original blob bytes. Slice usage reports work, lines, and
+  scratch on one live `ResourceBudget` (heddle#1454).
 
 - **`heddle completions` prints tab-completion scripts.** The field-study
   verb emits install lines, or a bash/zsh/fish script. Same scripts as
