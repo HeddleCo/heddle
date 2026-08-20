@@ -127,7 +127,7 @@ fn ba_vs_abb_matches_similar_rightmost_new() {
 }
 
 #[test]
-fn ab_vs_abb_slides_repeated_suffix_right() {
+fn ab_vs_abb_keeps_the_contiguous_prefix() {
     let old = "a\nb\n";
     let new = "a\nb\nb\n";
     let runs = collect_runs(old, new, LineDiffLimits::unlimited()).unwrap();
@@ -136,7 +136,7 @@ fn ab_vs_abb_slides_repeated_suffix_right() {
     let new_lines = split_text_lines(new.as_bytes()).unwrap();
     let similar = similar_pairs(&old_lines, &new_lines);
     assert_eq!(pairs, similar, "ours={pairs:?} similar={similar:?}");
-    assert_eq!(pairs, vec![(0, 0), (1, 2)]);
+    assert_eq!(pairs, vec![(0, 0), (1, 1)]);
 }
 
 #[test]

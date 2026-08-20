@@ -62,7 +62,8 @@ pub(super) fn slide_equal_run(
 /// Compact insert shift-up. `b\na` vs `a\nb\nb` becomes `(0, 2)`, not `(0, 1)`.
 ///
 /// `gap_start` is the exclusive end of the original (pre-left-slide) run so a
-/// left-slide is not undone. A partial suffix slide splits the run.
+/// left-slide is not undone. Only a whole-run slide is applied; a partial
+/// suffix match would split a contiguous prefix (`a/b` vs `a/b/b`).
 pub(super) fn slide_equal_run_right(
     old: LineView<'_>,
     new: LineView<'_>,
@@ -81,9 +82,7 @@ pub(super) fn slide_equal_run_right(
     {
         slide += 1;
     }
-    if slide == 0 {
-        (None, run)
-    } else if slide == run.len {
+    if slide == run.len {
         (
             None,
             EqualRun {
@@ -93,30 +92,26 @@ pub(super) fn slide_equal_run_right(
             },
         )
     } else {
-        (
-            Some(EqualRun {
-                old_start: run.old_start,
-                new_start: run.new_start,
-                len: run.len - slide,
-            }),
-            EqualRun {
-                old_start: run.old_start + run.len - slide,
-                new_start: gap_end - slide,
-                len: slide,
-            },
-        )
+        (None, run)
     }
 }
 
-/// True when a later new-side insert can absorb the last line of `run`.
+/// True when the whole run can move onto the trailing new-side insert.
 pub(super) fn trailing_insert_can_take_equal(
     old: LineView<'_>,
     new: LineView<'_>,
     run: EqualRun,
     original_end: usize,
 ) -> bool {
-    run.len > 0
-        && original_end < new.offs.len()
-        && line_bytes(old.bytes, old.offs[run.old_start + run.len - 1])
-            == line_bytes(new.bytes, new.offs[original_end])
+    if run.len == 0 || original_end >= new.offs.len() {
+        return false;
+    }
+    let gap = new.offs.len() - original_end;
+    if run.len > gap {
+        return false;
+    }
+    (0..run.len).all(|offset| {
+        line_bytes(old.bytes, old.offs[run.old_start + offset])
+            == line_bytes(new.bytes, new.offs[new.offs.len() - run.len + offset])
+    })
 }

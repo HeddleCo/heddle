@@ -45,6 +45,10 @@ pub(super) fn emit_equal_runs<E>(
 
     let mut new_cursor = 0usize;
     let mut pending = None;
+    let mut emit = EqualEmit {
+        new_cursor: &mut new_cursor,
+        pending: &mut pending,
+    };
     while top > 0 {
         top -= 1;
         let job = jobs[top];
@@ -60,8 +64,7 @@ pub(super) fn emit_equal_runs<E>(
                     new_start: job.eq_new as usize,
                     len: job.eq_len as usize,
                 },
-                &mut new_cursor,
-                &mut pending,
+                &mut emit,
                 &mut visit,
             )?;
             continue;
@@ -77,12 +80,11 @@ pub(super) fn emit_equal_runs<E>(
             },
             job,
             budget,
-            &mut new_cursor,
-            &mut pending,
+            &mut emit,
             &mut visit,
         )?;
     }
-    flush_pending(old, new, pending.take(), new.offs.len(), &mut visit)
+    flush_pending(old, new, emit.pending.take(), new.offs.len(), &mut visit)
 }
 
 struct ScratchViews<'a> {
@@ -92,14 +94,18 @@ struct ScratchViews<'a> {
     top: &'a mut usize,
 }
 
+struct EqualEmit<'a> {
+    new_cursor: &'a mut usize,
+    pending: &'a mut Option<PendingEqual>,
+}
+
 fn conquer_range<E>(
     old: LineView<'_>,
     new: LineView<'_>,
     scratch: ScratchViews<'_>,
     job: ConquerJob,
     budget: &mut ResourceBudget,
-    new_cursor: &mut usize,
-    pending: &mut Option<PendingEqual>,
+    emit: &mut EqualEmit<'_>,
     visit: &mut impl FnMut(EqualRun) -> Result<(), E>,
 ) -> Result<(), LineDiffError<E>> {
     let ScratchViews {
@@ -123,8 +129,7 @@ fn conquer_range<E>(
                 new_start: new_lo,
                 len: prefix,
             },
-            new_cursor,
-            pending,
+            emit,
             visit,
         )?;
         old_lo += prefix;
@@ -205,21 +210,20 @@ fn emit_slid<E>(
     old: LineView<'_>,
     new: LineView<'_>,
     run: EqualRun,
-    new_cursor: &mut usize,
-    pending: &mut Option<PendingEqual>,
+    emit: &mut EqualEmit<'_>,
     visit: &mut impl FnMut(EqualRun) -> Result<(), E>,
 ) -> Result<(), LineDiffError<E>> {
-    if let Some(prev) = pending.take() {
+    if let Some(prev) = emit.pending.take() {
         visit(prev.run).map_err(LineDiffError::Visitor)?;
     }
     let original_end = run.new_start + run.len;
-    let (first, second) = slide_equal_run(old, new, run, new_cursor);
+    let (first, second) = slide_equal_run(old, new, run, emit.new_cursor);
     match second {
         Some(second) => {
             visit(first).map_err(LineDiffError::Visitor)?;
-            defer_or_visit(old, new, second, original_end, pending, visit)
+            defer_or_visit(old, new, second, original_end, emit.pending, visit)
         }
-        None => defer_or_visit(old, new, first, original_end, pending, visit),
+        None => defer_or_visit(old, new, first, original_end, emit.pending, visit),
     }
 }
 
