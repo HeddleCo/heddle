@@ -342,6 +342,69 @@ fn delta() { while pending { dequeue().handle(); } flush(); }
     );
 }
 
+#[test]
+fn mass_delete_skips_prior_parse_and_does_not_blow_the_budget() {
+    use crate::repository_semantic_corpus::CORPUS_FILE_BUDGET;
+
+    let temp = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp.path()).unwrap();
+    for index in 0..=CORPUS_FILE_BUDGET {
+        std::fs::write(
+            temp.path().join(format!("gone{index}.rs")),
+            format!("fn gone{index}() {{ {index} }}\n"),
+        )
+        .unwrap();
+    }
+    std::fs::write(temp.path().join("keep.rs"), "fn keep() { 0 }\n").unwrap();
+    let seed = repo
+        .snapshot_with_attribution(Some("seed".to_string()), None, author())
+        .unwrap();
+    for index in 0..=CORPUS_FILE_BUDGET {
+        std::fs::remove_file(temp.path().join(format!("gone{index}.rs"))).unwrap();
+    }
+    let edited = repo
+        .snapshot_with_attribution(Some("delete".to_string()), None, author())
+        .unwrap();
+    let index_hash = attachment_hash(&repo, &edited, StateAttachmentKind::SemanticIndex);
+    let ctx = build_semantic_context(&repo, Some(&seed), &edited, index_hash.as_ref(), None, None)
+        .unwrap();
+    assert!(
+        ctx.prior_functions
+            .keys()
+            .all(|path| path == &PathBuf::from("keep.rs")),
+        "deleted paths must not be prior-parsed: {:?}",
+        ctx.prior_functions.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        ctx.corpus_complete,
+        "deletes must not exhaust the new-state corpus budget"
+    );
+}
+
+#[test]
+fn content_preserving_rename_marks_no_changed_symbols() {
+    let temp = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp.path()).unwrap();
+    let seed = snapshot(&repo, temp.path(), "old.rs", CORPUS);
+    std::fs::write(temp.path().join("new.rs"), CORPUS).unwrap();
+    std::fs::remove_file(temp.path().join("old.rs")).unwrap();
+    let edited = repo
+        .snapshot_with_attribution(Some("rename".to_string()), None, author())
+        .unwrap();
+    let index_hash = attachment_hash(&repo, &edited, StateAttachmentKind::SemanticIndex);
+    let ctx = build_semantic_context(&repo, Some(&seed), &edited, index_hash.as_ref(), None, None)
+        .unwrap();
+    assert!(
+        ctx.changed_paths.contains(&PathBuf::from("new.rs")),
+        "rename destination stays in changed_paths: {ctx:?}"
+    );
+    assert!(
+        changed_identities(&ctx, "new.rs").is_empty(),
+        "exact blob rename must not mark destination functions changed: {:?}",
+        ctx.changed_symbols
+    );
+}
+
 fn changed_identities(ctx: &state_review::SemanticContext, path: &str) -> BTreeSet<String> {
     ctx.changed_symbols
         .iter()

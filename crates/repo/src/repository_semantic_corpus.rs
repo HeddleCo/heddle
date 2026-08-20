@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use objects::object::{
-    ContentHash, ObjectSource, SemanticEntryKind, SemanticFileNode, SemanticIndexRoot,
-    SymbolKindTag,
+    ContentHash, LeafPolicy, ObjectSource, SemanticEntryKind, SemanticFileNode, SemanticIndexRoot,
+    SymbolKindTag, resolve_tree_path,
 };
 use semantic::{SemanticParseCache, parser::FunctionDef};
 use tracing::warn;
@@ -155,6 +155,7 @@ pub(crate) fn collect_function_file_paths(
     out: &mut Vec<String>,
 ) -> Result<bool> {
     let mut stack = vec![(String::new(), root.tree, 0usize)];
+    let mut inspected = 0usize;
     while let Some((prefix, hash, depth)) = stack.pop() {
         if out.len() >= remaining {
             return Ok(false);
@@ -181,9 +182,10 @@ pub(crate) fn collect_function_file_paths(
                     if skip.contains(&PathBuf::from(&path)) {
                         continue;
                     }
-                    if out.len() >= remaining {
+                    if out.len() >= remaining || inspected >= remaining {
                         return Ok(false);
                     }
+                    inspected += 1;
                     match load_semantic_file(source, &entry.node) {
                         Ok(file) if file_has_function(&file) => out.push(path),
                         Ok(_) => {}
@@ -215,6 +217,50 @@ fn file_has_function(file: &SemanticFileNode) -> bool {
     file.symbols
         .iter()
         .any(|symbol| symbol.kind == SymbolKindTag::Function)
+}
+
+/// Pair added paths with deleted paths that share an exact blob hash.
+/// Destination → source. Each hash is used at most once.
+pub(crate) fn pair_exact_blob_renames(
+    source: &impl ObjectSource,
+    prior_tree: Option<&ContentHash>,
+    new_tree: &ContentHash,
+    added: &[PathBuf],
+    deleted: &[PathBuf],
+) -> Result<BTreeMap<PathBuf, PathBuf>> {
+    let Some(prior_tree) = prior_tree else {
+        return Ok(BTreeMap::new());
+    };
+    let mut unused_deleted: BTreeMap<ContentHash, PathBuf> = BTreeMap::new();
+    for path in deleted {
+        if let Some(hash) = blob_hash_at_path(source, prior_tree, &path.to_string_lossy())? {
+            unused_deleted.entry(hash).or_insert_with(|| path.clone());
+        }
+    }
+    let mut renames = BTreeMap::new();
+    for path in added {
+        let Some(hash) = blob_hash_at_path(source, new_tree, &path.to_string_lossy())? else {
+            continue;
+        };
+        if let Some(old_path) = unused_deleted.remove(&hash) {
+            renames.insert(path.clone(), old_path);
+        }
+    }
+    Ok(renames)
+}
+
+fn blob_hash_at_path(
+    source: &impl ObjectSource,
+    tree: &ContentHash,
+    path: &str,
+) -> Result<Option<ContentHash>> {
+    let resolved = resolve_tree_path(
+        source,
+        tree,
+        std::path::Path::new(path),
+        LeafPolicy::BlobOnly,
+    )?;
+    Ok(resolved.and_then(|target| target.content_hash))
 }
 
 fn join_semantic_path(prefix: &str, name: &str) -> String {

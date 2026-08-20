@@ -168,6 +168,85 @@ fn index_with_function_files(count: usize) -> (SemanticIndexRoot, CountingSource
     )
 }
 
+#[test]
+fn index_walk_stops_when_non_function_files_exhaust_inspect_budget() {
+    let type_only = CORPUS_FILE_BUDGET + 20;
+    let (root, source) = index_with_type_only_files(type_only);
+    let mut files = Vec::new();
+    assert!(
+        !collect_function_file_paths(
+            &source,
+            &root,
+            CORPUS_FILE_BUDGET,
+            &BTreeSet::new(),
+            &mut files,
+        )
+        .unwrap(),
+        "inspecting more than the remaining budget must fail-close"
+    );
+    assert!(
+        files.is_empty(),
+        "type-only index must collect no functions"
+    );
+    assert!(
+        source.file_loads.get() <= CORPUS_FILE_BUDGET,
+        "must not decode every non-function file: loaded {}",
+        source.file_loads.get()
+    );
+}
+
+fn index_with_type_only_files(count: usize) -> (SemanticIndexRoot, CountingSource) {
+    let mut blobs = HashMap::new();
+    let mut file_hashes = BTreeSet::new();
+    let mut entries = Vec::new();
+    for index in 0..count {
+        let file = type_index_file(&format!("t{index}"));
+        let file_bytes = file.encode().unwrap();
+        let file_hash = ContentHash::compute(&file_bytes);
+        file_hashes.insert(file_hash);
+        blobs.insert(file_hash, file_bytes);
+        entries.push(SemanticTreeEntry {
+            name: format!("t{index}.rs"),
+            kind: SemanticEntryKind::File,
+            node: file_hash,
+            semantic_digest: file.semantic_digest,
+        });
+    }
+    let (tree_node, _) = SemanticTreeNode::new(entries);
+    let tree_bytes = tree_node.encode().unwrap();
+    let tree_hash = ContentHash::compute(&tree_bytes);
+    blobs.insert(tree_hash, tree_bytes);
+    let root = SemanticIndexRoot::new(1, BTreeMap::new(), tree_hash, tree_node.semantic_digest());
+    (
+        root,
+        CountingSource {
+            blobs,
+            file_hashes,
+            file_loads: Cell::new(0),
+        },
+    )
+}
+
+fn type_index_file(name: &str) -> SemanticFileNode {
+    SemanticFileNode::new(
+        "rust",
+        "0",
+        1,
+        ContentHash::compute(name.as_bytes()),
+        ContentHash::compute(name.as_bytes()),
+        SemanticFileFacts {
+            symbols: vec![SymbolEntry {
+                name: name.to_string(),
+                kind: SymbolKindTag::Type,
+                container_path: Vec::new(),
+                semantic_hash: ContentHash::compute(name.as_bytes()),
+                span: (1, 2),
+            }],
+            ..SemanticFileFacts::default()
+        },
+    )
+}
+
 fn function_index_file(name: &str) -> SemanticFileNode {
     SemanticFileNode::new(
         "rust",

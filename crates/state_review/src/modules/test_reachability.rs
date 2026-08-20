@@ -18,7 +18,10 @@ use std::{
 };
 
 use objects::object::{ProducerId, RiskSignal, RiskSignalKind, SignalAnchor, State};
-use semantic::{Language, parser::FunctionDef};
+use semantic::{
+    Language, SemanticParseCache,
+    parser::{CallSite, FunctionDef},
+};
 
 use crate::{config::ReviewSignalsConfig, registry::SemanticContext};
 
@@ -68,17 +71,34 @@ pub fn run(
         return Vec::new();
     }
 
+    let containers: HashSet<&str> = catalog
+        .iter()
+        .map(|entry| entry.def.container.as_str())
+        .filter(|container| !container.is_empty())
+        .collect();
+    let cache = SemanticParseCache::shared();
     let mut callers_of: HashMap<(&Path, &str), Vec<(&Path, &str)>> = HashMap::new();
+    let mut silenced_methods: HashSet<String> = HashSet::new();
     for caller in &catalog {
-        for callee in &catalog {
-            if caller.path == callee.path && caller.identity == callee.identity {
-                continue;
-            }
-            if mentions_callee(&caller.def.content, callee.def) {
-                callers_of
-                    .entry((callee.path, callee.identity.as_str()))
-                    .or_default()
-                    .push((caller.path, caller.identity.as_str()));
+        let caller_key = (caller.path, caller.identity.as_str());
+        let calls = calls_in(caller.def, caller.path, cache);
+        for call in calls {
+            match resolve_call(&call, &catalog, &containers) {
+                CallResolve::Hits(callees) => {
+                    for callee in callees {
+                        if caller.path == callee.path && caller.identity == callee.identity {
+                            continue;
+                        }
+                        callers_of
+                            .entry((callee.path, callee.identity.as_str()))
+                            .or_default()
+                            .push(caller_key);
+                    }
+                }
+                CallResolve::Ambiguous if test_set.contains(&caller_key) => {
+                    silenced_methods.insert(call.name.clone());
+                }
+                CallResolve::Ambiguous | CallResolve::None => {}
             }
         }
     }
@@ -90,6 +110,9 @@ pub fn run(
             continue;
         }
         if test_set.contains(&key) {
+            continue;
+        }
+        if !entry.def.container.is_empty() && silenced_methods.contains(&entry.def.name) {
             continue;
         }
         if !reaches_test(key, &callers_of, &test_set) {
@@ -110,6 +133,74 @@ struct CatalogEntry<'a> {
     path: &'a Path,
     identity: String,
     def: &'a FunctionDef,
+}
+
+enum CallResolve<'a> {
+    Hits(Vec<&'a CatalogEntry<'a>>),
+    Ambiguous,
+    None,
+}
+
+fn calls_in(def: &FunctionDef, path: &Path, cache: &SemanticParseCache) -> Vec<CallSite> {
+    let language = Language::from_path(path);
+    if matches!(language, Language::Unknown) {
+        return Vec::new();
+    }
+    cache
+        .parse(&def.content, language)
+        .map(|parsed| parsed.extract_calls())
+        .unwrap_or_default()
+}
+
+fn resolve_call<'a>(
+    call: &CallSite,
+    catalog: &'a [CatalogEntry<'a>],
+    containers: &HashSet<&str>,
+) -> CallResolve<'a> {
+    let named: Vec<&CatalogEntry<'_>> = catalog
+        .iter()
+        .filter(|entry| entry.def.name == call.name)
+        .collect();
+    if named.is_empty() {
+        return CallResolve::None;
+    }
+    if call.qualifier.is_empty() {
+        return CallResolve::Hits(
+            named
+                .into_iter()
+                .filter(|entry| entry.def.container.is_empty())
+                .collect(),
+        );
+    }
+    let joined = call.qualifier.join("::");
+    let exact: Vec<&CatalogEntry<'_>> = named
+        .iter()
+        .copied()
+        .filter(|entry| qualifier_matches_container(&entry.def.container, &call.qualifier, &joined))
+        .collect();
+    if !exact.is_empty() {
+        return CallResolve::Hits(exact);
+    }
+    if known_container(
+        &joined,
+        call.qualifier.last().map(String::as_str),
+        containers,
+    ) {
+        return CallResolve::None;
+    }
+    if named.len() == 1 {
+        return CallResolve::Hits(named);
+    }
+    CallResolve::Ambiguous
+}
+
+fn qualifier_matches_container(container: &str, qualifier: &[String], joined: &str) -> bool {
+    !container.is_empty()
+        && (container == joined || qualifier.last().is_some_and(|segment| segment == container))
+}
+
+fn known_container(joined: &str, last: Option<&str>, containers: &HashSet<&str>) -> bool {
+    containers.contains(joined) || last.is_some_and(|segment| containers.contains(segment))
 }
 
 fn reaches_test<'a>(
@@ -144,307 +235,11 @@ fn is_test_function(name: &str, lang: Language) -> bool {
             name.starts_with("test") || name.starts_with("it") || name.starts_with("describe")
         }
         Language::Go => name.starts_with("Test"),
-        // Zig `test "…"` / `test Name` blocks are extracted as functions named
-        // `test:"…"` / `test:Name` by the symbol resolver.
         Language::Zig => name.starts_with("test:"),
         _ => false,
     }
 }
 
-fn mentions_callee(body: &str, callee: &FunctionDef) -> bool {
-    if callee.container.is_empty() {
-        return body_mentions(body, &callee.name);
-    }
-    body_mentions(body, &callee.qualified_name())
-        || body_mentions(body, &format!("{}.{}", callee.container, callee.name))
-}
-
-fn body_mentions(body: &str, name: &str) -> bool {
-    let needle = format!("{name}(");
-    body.contains(&needle)
-}
-
 #[cfg(test)]
-mod tests {
-    use std::{collections::BTreeSet, path::PathBuf};
-
-    use objects::object::{Attribution, ContentHash, Principal, RiskSignalKind};
-
-    use super::*;
-
-    fn empty_state() -> State {
-        State::new_snapshot(
-            ContentHash::compute(b"tree"),
-            vec![],
-            Attribution::human(Principal::new("Alice", "alice@example.com")),
-        )
-    }
-
-    fn cfg_with_one_required_test() -> ReviewSignalsConfig {
-        let mut cfg = ReviewSignalsConfig::default();
-        cfg.test_reachability.min_test_functions_in_repo = 1;
-        cfg
-    }
-
-    fn fdef(name: &str, content: &str) -> FunctionDef {
-        fdef_in("", name, content)
-    }
-
-    fn fdef_in(container: &str, name: &str, content: &str) -> FunctionDef {
-        FunctionDef {
-            name: name.to_string(),
-            container: container.to_string(),
-            signature: format!("fn {name}()"),
-            start_line: 1,
-            end_line: 3,
-            content: content.to_string(),
-        }
-    }
-
-    #[test]
-    fn quiet_when_disabled() {
-        let mut cfg = ReviewSignalsConfig::default();
-        cfg.test_reachability.enabled = false;
-        let ctx = SemanticContext::new();
-        let signals = run(&empty_state(), &empty_state(), &cfg, &ctx);
-        assert!(signals.is_empty());
-    }
-
-    #[test]
-    fn quiet_with_no_tests_in_corpus() {
-        let cfg = ReviewSignalsConfig::default();
-        let ctx = SemanticContext::new();
-        let signals = run(&empty_state(), &empty_state(), &cfg, &ctx);
-        assert!(signals.is_empty());
-    }
-
-    #[test]
-    fn reason_text_marks_static_reachability() {
-        assert!(REASON_TEXT.contains("static reachability"));
-        assert!(REASON_TEXT.contains("not runtime coverage"));
-    }
-
-    #[test]
-    fn rust_test_naming_heuristic_recognises_underscore_prefixes() {
-        assert!(is_test_function("test_main_branch", Language::Rust));
-        assert!(is_test_function("login_test", Language::Rust));
-        assert!(!is_test_function("login", Language::Rust));
-    }
-
-    #[test]
-    fn python_test_naming_heuristic() {
-        assert!(is_test_function("test_endpoint", Language::Python));
-        assert!(is_test_function("setUp", Language::Python));
-        assert!(!is_test_function("endpoint", Language::Python));
-    }
-
-    #[test]
-    fn go_test_naming_heuristic() {
-        assert!(is_test_function("TestRouter", Language::Go));
-        assert!(!is_test_function("Router", Language::Go));
-    }
-
-    #[test]
-    fn direct_test_reachability_stays_quiet() {
-        let mut ctx = SemanticContext::new();
-        ctx.new_functions.insert(
-            PathBuf::from("src/lib.rs"),
-            vec![
-                fdef("covered", "fn covered() { do_work(); }"),
-                fdef("test_covered", "fn test_covered() { covered(); }"),
-            ],
-        );
-        ctx.changed_paths.insert(PathBuf::from("src/lib.rs"));
-
-        let signals = run(
-            &empty_state(),
-            &empty_state(),
-            &cfg_with_one_required_test(),
-            &ctx,
-        );
-
-        assert!(
-            signals.is_empty(),
-            "direct test caller should cover: {signals:?}"
-        );
-    }
-
-    #[test]
-    fn transitive_test_reachability_stays_quiet() {
-        let mut ctx = SemanticContext::new();
-        ctx.new_functions.insert(
-            PathBuf::from("src/lib.rs"),
-            vec![
-                fdef("covered", "fn covered() { do_work(); }"),
-                fdef("helper", "fn helper() { covered(); }"),
-                fdef("test_covered", "fn test_covered() { helper(); }"),
-            ],
-        );
-        ctx.changed_paths.insert(PathBuf::from("src/lib.rs"));
-
-        let signals = run(
-            &empty_state(),
-            &empty_state(),
-            &cfg_with_one_required_test(),
-            &ctx,
-        );
-
-        assert!(
-            signals.is_empty(),
-            "transitive test caller should cover all callees: {signals:?}"
-        );
-    }
-
-    #[test]
-    fn unreachable_symbol_fires() {
-        let mut ctx = SemanticContext::new();
-        ctx.new_functions.insert(
-            PathBuf::from("src/lib.rs"),
-            vec![
-                fdef("orphan", "fn orphan() { do_work(); }"),
-                fdef("test_irrelevant", "fn test_irrelevant() { assert!(true); }"),
-            ],
-        );
-        ctx.changed_paths.insert(PathBuf::from("src/lib.rs"));
-        ctx.changed_symbols.insert((
-            PathBuf::from("src/lib.rs"),
-            fdef("orphan", "").symbol_identity(),
-        ));
-
-        let signals = run(
-            &empty_state(),
-            &empty_state(),
-            &cfg_with_one_required_test(),
-            &ctx,
-        );
-
-        assert_eq!(signal_symbols(&signals), BTreeSet::from(["orphan"]));
-        assert_eq!(signals[0].kind, RiskSignalKind::TestReachability);
-    }
-
-    #[test]
-    fn unreachable_cycle_fires_once_per_cycled_symbol() {
-        let mut ctx = SemanticContext::new();
-        ctx.new_functions.insert(
-            PathBuf::from("src/lib.rs"),
-            vec![
-                fdef("alpha", "fn alpha() { beta(); }"),
-                fdef("beta", "fn beta() { alpha(); }"),
-                fdef("test_irrelevant", "fn test_irrelevant() { assert!(true); }"),
-            ],
-        );
-        ctx.changed_paths.insert(PathBuf::from("src/lib.rs"));
-        ctx.changed_symbols.insert((
-            PathBuf::from("src/lib.rs"),
-            fdef("alpha", "").symbol_identity(),
-        ));
-        ctx.changed_symbols.insert((
-            PathBuf::from("src/lib.rs"),
-            fdef("beta", "").symbol_identity(),
-        ));
-
-        let signals = run(
-            &empty_state(),
-            &empty_state(),
-            &cfg_with_one_required_test(),
-            &ctx,
-        );
-
-        assert_eq!(signal_symbols(&signals), BTreeSet::from(["alpha", "beta"]));
-    }
-
-    #[test]
-    fn unreachable_scoped_to_changed_symbols() {
-        let mut ctx = SemanticContext::new();
-        ctx.new_functions.insert(
-            PathBuf::from("src/lib.rs"),
-            vec![
-                fdef("orphan", "fn orphan() { do_work(); }"),
-                fdef("sibling", "fn sibling() { do_other(); }"),
-                fdef("test_irrelevant", "fn test_irrelevant() { assert!(true); }"),
-            ],
-        );
-        ctx.changed_symbols.insert((
-            PathBuf::from("src/lib.rs"),
-            fdef("orphan", "").symbol_identity(),
-        ));
-
-        let signals = run(
-            &empty_state(),
-            &empty_state(),
-            &cfg_with_one_required_test(),
-            &ctx,
-        );
-
-        assert_eq!(signal_symbols(&signals), BTreeSet::from(["orphan"]));
-    }
-
-    #[test]
-    fn unreachable_stays_quiet_when_corpus_incomplete() {
-        let mut ctx = SemanticContext::new();
-        ctx.corpus_complete = false;
-        ctx.new_functions.insert(
-            PathBuf::from("src/lib.rs"),
-            vec![
-                fdef("orphan", "fn orphan() { do_work(); }"),
-                fdef("test_irrelevant", "fn test_irrelevant() { assert!(true); }"),
-            ],
-        );
-        ctx.changed_symbols.insert((
-            PathBuf::from("src/lib.rs"),
-            fdef("orphan", "").symbol_identity(),
-        ));
-
-        let signals = run(
-            &empty_state(),
-            &empty_state(),
-            &cfg_with_one_required_test(),
-            &ctx,
-        );
-        assert!(
-            signals.is_empty(),
-            "incomplete corpus must fail-closed: {signals:?}"
-        );
-    }
-
-    fn signal_symbols(signals: &[RiskSignal]) -> BTreeSet<&str> {
-        signals
-            .iter()
-            .filter_map(|signal| signal.anchor.symbol.as_deref())
-            .collect()
-    }
-
-    #[test]
-    fn qualified_call_does_not_cover_same_bare_name() {
-        let path = PathBuf::from("src/lib.rs");
-        let foo_run = fdef_in("Foo", "run", "fn run() { do_foo(); }");
-        let bar_run = fdef_in("Bar", "run", "fn run() { do_bar(); }");
-        let mut ctx = SemanticContext::new();
-        ctx.new_functions.insert(
-            path.clone(),
-            vec![
-                foo_run.clone(),
-                bar_run.clone(),
-                fdef("test_bar", "fn test_bar() { Bar::run(); }"),
-            ],
-        );
-        ctx.changed_symbols
-            .insert((path.clone(), foo_run.symbol_identity()));
-        ctx.changed_symbols
-            .insert((path, bar_run.symbol_identity()));
-
-        let signals = run(
-            &empty_state(),
-            &empty_state(),
-            &cfg_with_one_required_test(),
-            &ctx,
-        );
-
-        assert_eq!(
-            signals.len(),
-            1,
-            "Bar::run is tested; Foo::run must stay unreachable: {signals:?}"
-        );
-        assert_eq!(signal_symbols(&signals), BTreeSet::from(["run"]));
-    }
-}
+#[path = "test_reachability_tests.rs"]
+mod tests;

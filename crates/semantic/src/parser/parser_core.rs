@@ -3,13 +3,13 @@
 
 use std::sync::{Arc, OnceLock};
 
-use objects::object::ContentHash;
+use objects::object::{ContentHash, OccurrenceRole};
 use tree_sitter::{Node, Tree as TSTree};
 
 use super::{
     parser_language::Language,
     parser_pool::parse_fresh,
-    parser_types::{FunctionDef, Import},
+    parser_types::{CallSite, FunctionDef, Import},
     syntax_index::{FunctionRef, ImportRef, SyntaxIndex},
 };
 
@@ -91,6 +91,20 @@ impl ParsedFile {
     /// Extract function definitions from the file.
     pub fn extract_functions(&self) -> Vec<FunctionDef> {
         self.functions().map(FunctionRef::to_owned).collect()
+    }
+
+    /// Call expressions from the syntax index. Comments and string
+    /// literals are not call nodes, so they do not appear here.
+    pub fn extract_calls(&self) -> Vec<CallSite> {
+        self.syntax_index()
+            .occurrences()
+            .iter()
+            .filter(|occurrence| occurrence.role == OccurrenceRole::Call)
+            .map(|occurrence| CallSite {
+                name: occurrence.name.clone(),
+                qualifier: occurrence.qualifier.clone(),
+            })
+            .collect()
     }
 
     /// Extract imports from the file.

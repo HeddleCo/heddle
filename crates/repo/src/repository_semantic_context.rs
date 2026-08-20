@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Capture-time [`SemanticContext`] for the risk-signal registry.
-//!
-//! `changed_paths` come from the snapshot tree diff, then formatting-only
-//! churn is pruned by the merkle index (`digest_at_path`, the same
-//! comparison [`Repository::semantic_changed`] uses). Emit-scope functions
-//! are parsed for that pruned set via the shared [`SemanticParseCache`].
-//! The new-state comparison corpus is then filled from the semantic index
-//! under fail-closed page/byte budgets.
+//! Capture-time [`SemanticContext`]: tree-diff paths, fmt-prune, bounded parse.
 
 #![cfg(feature = "tree-sitter-symbols")]
 
@@ -18,8 +11,8 @@ use std::{
 use objects::{
     error::HeddleError,
     object::{
-        Blob, ContentHash, LeafPolicy, ObjectSource, SemanticEntryKind, SemanticIndexRoot,
-        SemanticTreeNode, State, StateId, Tree, diff_trees, resolve_tree_path,
+        Blob, ContentHash, DiffKind, LeafPolicy, ObjectSource, SemanticEntryKind,
+        SemanticIndexRoot, SemanticTreeNode, State, StateId, Tree, diff_trees, resolve_tree_path,
     },
     store::ObjectStore,
 };
@@ -32,10 +25,8 @@ use tracing::warn;
 
 use crate::{Repository, Result};
 
-/// Skip generated/vendored blobs the semantic index also treats as opaque.
 pub(crate) const PARSE_BUDGET_BYTES: usize = 1 << 20;
 
-/// In-memory objects from a packed worktree snapshot, then the durable store.
 struct OverlaySource<'a, S: ObjectStore> {
     store: &'a S,
     blobs: Option<&'a HashMap<ContentHash, &'a [u8]>>,
@@ -73,12 +64,6 @@ impl<S: ObjectStore> ObjectSource for OverlaySource<'_, S> {
 }
 
 /// Build the capture-time context for `run_all`.
-///
-/// `new_index` is the just-computed merkle root hash (not yet attached).
-/// Packed snapshots pass in-memory blobs/trees so parse does not wait for
-/// the commit pack. When both that root and the prior attached index are
-/// readable, paths whose digests match are dropped so a fmt-sweep parses
-/// nothing.
 pub(crate) fn build_semantic_context(
     repo: &Repository,
     prior: Option<&State>,
@@ -107,6 +92,8 @@ pub(crate) fn build_semantic_context(
         .flatten();
 
     let mut changed_paths = BTreeSet::new();
+    let mut added = Vec::new();
+    let mut deleted = Vec::new();
     for change in changes.iter() {
         if !change.kind.is_change() {
             continue;
@@ -119,28 +106,48 @@ pub(crate) fn build_semantic_context(
         )? {
             continue;
         }
-        changed_paths.insert(PathBuf::from(&change.path));
+        let path = PathBuf::from(&change.path);
+        match change.kind {
+            DiffKind::Added => added.push(path.clone()),
+            DiffKind::Deleted => deleted.push(path.clone()),
+            DiffKind::Modified | DiffKind::Unchanged => {}
+        }
+        changed_paths.insert(path);
     }
 
     let cache = SemanticParseCache::shared();
     let prior_tree = prior.map(|state| state.tree);
+    let renames = crate::repository_semantic_corpus::pair_exact_blob_renames(
+        &overlay,
+        prior_tree.as_ref(),
+        &new.tree,
+        &added,
+        &deleted,
+    )?;
     let mut prior_functions = BTreeMap::new();
     let mut new_functions = BTreeMap::new();
     let mut budget = crate::repository_semantic_corpus::CorpusBudget::default();
     let mut corpus_complete = true;
     for path in &changed_paths {
         let path_str = path.to_string_lossy();
-        if let Some(fns) = parse_tree_functions(&overlay, prior_tree.as_ref(), &path_str, cache) {
-            prior_functions.insert(path.clone(), fns);
-        }
-        if let Some((fns, bytes)) =
+        let Some((fns, bytes)) =
             parse_tree_functions_sized(&overlay, Some(&new.tree), &path_str, cache)
-        {
-            if !budget.try_add(bytes) {
-                corpus_complete = false;
-                break;
-            }
-            new_functions.insert(path.clone(), fns);
+        else {
+            continue;
+        };
+        if !budget.try_add(bytes) {
+            corpus_complete = false;
+            break;
+        }
+        new_functions.insert(path.clone(), fns);
+        let prior_path = renames.get(path).unwrap_or(path);
+        if let Some(fns) = parse_tree_functions(
+            &overlay,
+            prior_tree.as_ref(),
+            &prior_path.to_string_lossy(),
+            cache,
+        ) {
+            prior_functions.insert(path.clone(), fns);
         }
     }
 
@@ -184,17 +191,12 @@ fn load_new_index_root(
     match repo.load_index_root(hash) {
         Ok(root) => Ok(Some(root)),
         Err(err) => {
-            warn!(
-                error = %err,
-                "semantic context: new index root unavailable; parse tree-diff paths"
-            );
+            warn!(error = %err, "semantic context: new index root unavailable");
             Ok(None)
         }
     }
 }
 
-/// Same digest comparison as `semantic_changed`, but only prunes when both
-/// indexes exist. Missing indexes keep the tree-diff path (fail toward parse).
 fn path_semantically_changed(
     source: &impl ObjectSource,
     prior_root: Option<&SemanticIndexRoot>,

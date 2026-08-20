@@ -37,6 +37,15 @@ impl FunctionDef {
     }
 }
 
+/// A call expression extracted from the parsed tree, not source text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallSite {
+    pub name: String,
+    /// Path or receiver segments ahead of the callee (`Bar` in `Bar::run`,
+    /// `foo` in `foo.run()`). Empty for a bare `run()`.
+    pub qualifier: Vec<String>,
+}
+
 /// An import statement.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Import {

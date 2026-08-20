@@ -316,6 +316,43 @@ mod b {
     );
 }
 
+#[test]
+fn extract_calls_uses_tree_not_comment_or_string_substrings() {
+    let source = r#"
+fn test_it() {
+    Bar::run();
+    foo.run();
+    covered();
+    // TODO: call orphan()
+    let _ = "orphan()";
+}
+"#;
+    let parsed = ParsedFile::parse(source, Language::Rust).expect("Should parse");
+    let calls = parsed.extract_calls();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.name == "run" && call.qualifier == ["Bar"]),
+        "path call Bar::run: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.name == "run" && call.qualifier == ["foo"]),
+        "receiver call foo.run: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.name == "covered" && call.qualifier.is_empty()),
+        "bare call covered: {calls:?}"
+    );
+    assert!(
+        calls.iter().all(|call| call.name != "orphan"),
+        "comment/string must not create call edges: {calls:?}"
+    );
+}
+
 #[cfg(feature = "lang-cpp")]
 #[test]
 fn test_cpp_templated_qualified_function_names() {
