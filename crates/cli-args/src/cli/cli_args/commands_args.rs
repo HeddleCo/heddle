@@ -6,8 +6,9 @@ use super::commands_git_projection::SyncCommands;
 
 /// Verb key for `heddle init`.
 ///
-/// One literal. [`InitArgs`], the init JSON output, the command catalog,
-/// and `schema_registry!` import this identifier so they cannot disagree.
+/// Shared lookup string for clap, the command catalog, and the schema
+/// registry. A second `"init"` literal can still compile; pairing is
+/// checked in tests, not by the type system.
 pub const INIT_VERB: &str = "init";
 
 /// Arguments for the `init` command.

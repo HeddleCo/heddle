@@ -79,16 +79,35 @@ pub struct InitPrincipalOutput {
 
 #[cfg(test)]
 mod tests {
+    use clap::CommandFactory;
     use schemars::schema_for;
     use serde_json::Value;
 
+    use super::super::{command_catalog, schemas};
     use super::*;
+    use crate::cli::Cli;
 
     fn property_keys(schema: &Value) -> Vec<String> {
         let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
             return Vec::new();
         };
         properties.keys().cloned().collect()
+    }
+
+    #[test]
+    fn init_verb_resolves_across_clap_catalog_and_schema() {
+        assert!(
+            Cli::command().find_subcommand(INIT_VERB).is_some(),
+            "clap must resolve INIT_VERB"
+        );
+        assert!(
+            command_catalog::schema_verbs().contains(&INIT_VERB),
+            "catalog schema_verbs must include INIT_VERB"
+        );
+        assert!(
+            schemas::schema_for_verb(INIT_VERB).is_some(),
+            "schema_for_verb must resolve INIT_VERB"
+        );
     }
 
     #[test]
