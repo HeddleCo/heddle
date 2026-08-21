@@ -550,6 +550,8 @@ mod tests {
             Ok(HttpResponse {
                 status,
                 content_type: None,
+                content_length: None,
+                content_range: None,
                 body: Box::new(std::io::Cursor::new(Vec::new())),
             })
         })

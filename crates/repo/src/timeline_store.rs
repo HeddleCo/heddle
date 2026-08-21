@@ -607,7 +607,9 @@ fn read_operation_index_journal_records_unlocked(
         ));
     }
     bytes
-        .chunks_exact(OPERATION_INDEX_JOURNAL_RECORD_SIZE as usize)
+        .as_chunks::<{ OPERATION_INDEX_JOURNAL_RECORD_SIZE as usize }>()
+        .0
+        .iter()
         .map(|record| {
             let id = TimelineOperationId::try_from_slice(&record[1..])
                 .map_err(|err| HeddleError::InvalidObject(err.to_string()))?;

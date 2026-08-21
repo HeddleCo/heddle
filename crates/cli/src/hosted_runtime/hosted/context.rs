@@ -413,7 +413,6 @@ fn deadline(timeout: Duration) -> Result<Timestamp> {
 #[cfg(test)]
 mod tests {
     use api::UNARY_SIGNING_V1_FIXTURE_JSON;
-    use crypto::Signer as _;
     #[cfg(feature = "telemetry")]
     use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
     #[cfg(feature = "telemetry")]

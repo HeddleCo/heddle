@@ -367,29 +367,28 @@ mod tests {
     fn actor_filter_returns_backfilled_capture() {
         let temp = tempfile::tempdir().unwrap();
         let repo = repo::Repository::init_default(temp.path()).unwrap();
-        std::fs::write(temp.path().join("note.txt"), "probe\n").unwrap();
-        repo.snapshot_with_attribution(
-            Some("probe history".into()),
-            None,
+        let tree = repo
+            .store()
+            .put_tree(&objects::object::Tree::new())
+            .unwrap();
+        let state = objects::object::State::new_snapshot(
+            tree,
+            Vec::new(),
             objects::object::Attribution::human(objects::object::Principal::new(
                 "Heddle Test",
                 "heddle@example.com",
             )),
-        )
-        .unwrap();
+        );
+        repo.store().put_state(&state).unwrap();
 
-        let stored = indexed_from_oplog_entry(
-            &oplog::OpLog::new_unattributed(repo.heddle_dir())
-                .recent(100)
-                .unwrap()
-                .into_iter()
-                .find(|entry| entry.operation.verb() == "snapshot")
-                .expect("snapshot oplog entry"),
-        );
-        assert!(
-            stored.actor_email.is_empty(),
-            "fixture must store an empty oplog actor so the filter exercises backfill"
-        );
+        let stored_seq = oplog::OpLog::new_unattributed(repo.heddle_dir())
+            .record_batch(vec![oplog::OpRecord::Snapshot {
+                new_state: state.id(),
+                prev_head: None,
+                head: Some(state.id()),
+                thread: None,
+            }])
+            .unwrap()[0];
 
         let ctx = ExecutionContext::builder().repo(repo).build();
         let report = query(
@@ -402,10 +401,9 @@ mod tests {
         )
         .unwrap();
         assert!(
-            report
-                .hits
-                .iter()
-                .any(|hit| hit.verb == "snapshot" && hit.actor_email == "heddle@example.com"),
+            report.hits.iter().any(|hit| hit.seq == stored_seq
+                && hit.verb == "snapshot"
+                && hit.actor_email == "heddle@example.com"),
             "actor filter must match the backfilled capture: {report:?}"
         );
     }
