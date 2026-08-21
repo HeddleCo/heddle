@@ -826,24 +826,16 @@
       "rpc": "heddle.api.v1alpha1.IdentityService/MintBiscuit",
       "layers": {
         "client": {
-          "status": "shipped",
-          "evidence": [
-            {
-              "path": "crates/cli/src/hosted_runtime/auth.rs",
-              "contains": "mint_biscuit"
-            }
-          ],
-          "follow_up": null
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "Clients mint every biscuit root locally. Weft only registers the public key."
         },
         "cli": {
-          "status": "shipped",
-          "evidence": [
-            {
-              "path": "crates/cli/src/hosted_runtime/auth.rs",
-              "contains": ".mint_biscuit("
-            }
-          ],
-          "follow_up": null
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "Clients mint every biscuit root locally. Weft only registers the public key."
         }
       }
     },

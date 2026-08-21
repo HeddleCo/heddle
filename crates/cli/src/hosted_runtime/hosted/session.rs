@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use biscuit_auth::builder::BlockBuilder;
 use cli_shared::{ClientConfig, UserConfig};
 use crypto::{Ed25519Signer, Signer as _};
-use wire::ProtocolError;
+use wire::{AuthToken, ProtocolError};
 
 use super::{
     HostedClient, RenewableAuthorityCredential, credential::server_keys_match,
@@ -18,6 +18,12 @@ pub enum HostedAuthMode {
     ProofOnly {
         proof_key_pem: String,
         signing_identity: String,
+    },
+    /// Present a client-minted independent root as the request bearer.
+    PresentedRoot {
+        token: String,
+        proof_key_pem: String,
+        subject: String,
     },
     CredentialFallback,
 }
@@ -44,6 +50,16 @@ impl HostedSession {
                 proof_key_pem,
                 signing_identity,
             } => (None, Some(proof_key_pem), None, Some(signing_identity)),
+            HostedAuthMode::PresentedRoot {
+                token,
+                proof_key_pem,
+                subject,
+            } => (
+                Some(AuthToken::new(token, "independent-root")),
+                Some(proof_key_pem),
+                None,
+                Some(subject),
+            ),
             HostedAuthMode::CredentialFallback => {
                 let resolved = resolve_hosted_credential(server_key.as_deref())?;
                 (

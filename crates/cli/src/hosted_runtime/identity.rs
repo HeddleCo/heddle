@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha1::CreateAgentAccountRequest;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use chrono::Utc;
 use cli_shared::{UserConfig, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer as _};
 use serde::Serialize;
@@ -10,10 +11,12 @@ use weft_client_shim::CliContext;
 
 use super::{
     HostedAuthMode, HostedSession, agent_node_identity,
-    auth::{cmd_auth_derive_agent, headless_token_metadata, resolve_server},
+    auth::{HeadlessTokenMetadata, cmd_auth_derive_agent, headless_token_metadata, resolve_server},
+    device_flow::restrict_agent_account_root,
     hosted::{canonical_server_authority, resolve_hosted_credential},
     identity_server,
     identity_state::{self, ClaimState},
+    root_mint::{is_local_agent_root, local_agent_credential_needs_refresh, mint_agent_root},
 };
 use crate::cli::IdentityCommands;
 
@@ -66,10 +69,14 @@ async fn ensure(
     match ensure_action(
         metadata.as_ref().map(|value| value.is_derived),
         invite.is_some(),
+        metadata
+            .as_ref()
+            .is_some_and(|value| is_local_agent_root(&value.subject, &value.proof_public_key_hex)),
     ) {
         EnsureAction::Reuse => {
             let metadata = metadata
                 .ok_or_else(|| anyhow::anyhow!("identity decision lost credential metadata"))?;
+            let metadata = refresh_expired_local_agent(&server, &metadata)?;
             print_identity(
                 ctx,
                 "identity_ensure",
@@ -116,13 +123,67 @@ async fn ensure(
     }
 }
 
-pub(crate) fn ensure_action(derived: Option<bool>, has_invite: bool) -> EnsureAction {
+pub(crate) fn ensure_action(
+    derived: Option<bool>,
+    has_invite: bool,
+    local_agent_root: bool,
+) -> EnsureAction {
     match derived {
         Some(true) => EnsureAction::Reuse,
+        Some(false) if local_agent_root => EnsureAction::Reuse,
         Some(false) => EnsureAction::Derive,
         None if has_invite => EnsureAction::Provision,
         None => EnsureAction::RequireInvite,
     }
+}
+
+fn refresh_expired_local_agent(
+    server: &str,
+    metadata: &HeadlessTokenMetadata,
+) -> Result<HeadlessTokenMetadata> {
+    if !is_local_agent_root(&metadata.subject, &metadata.proof_public_key_hex) {
+        return Ok(metadata.clone());
+    }
+    if !local_agent_credential_needs_refresh(metadata.expires_at.as_deref(), Utc::now()) {
+        return Ok(metadata.clone());
+    }
+    let identity = agent_node_identity::load_or_create()?;
+    let seed = identity.secret_key().to_bytes();
+    let signer = Ed25519Signer::from_seed(&seed)
+        .context("deriving the agent credential key from the persisted node identity")?;
+    let node_id = identity.node_id().to_string();
+    if hex::encode(signer.public_key()) != node_id
+        || !metadata.proof_public_key_hex.eq_ignore_ascii_case(&node_id)
+    {
+        bail!("expired local agent root is not bound to this node's Iroh seed");
+    }
+    let root = mint_agent_root(&seed).context("reminting the expired local agent root")?;
+    if root.public_key_hex() != node_id {
+        bail!("reminted agent independent root is not bound to this node key");
+    }
+    let restricted = restrict_agent_account_root(&root.token, &signer, root.expires_at)
+        .context("reapplying the local agent deny floor after remint")?;
+    let refreshed =
+        headless_token_metadata(&restricted).context("validating the reminted agent capability")?;
+    if !refreshed
+        .proof_public_key_hex
+        .eq_ignore_ascii_case(&node_id)
+        || refreshed.subject != root.subject
+    {
+        bail!("reminted agent capability is not bound to this node key");
+    }
+    cli_shared::credentials::store_server_credential(
+        server,
+        ServerCredential {
+            token: restricted,
+            subject: refreshed.subject.clone(),
+            device_id: None,
+            credential_id: None,
+            private_key_pem: Some(root.private_key_pem),
+            expires_at: Some(root.expires_at.to_rfc3339()),
+        },
+    )?;
+    Ok(refreshed)
 }
 
 async fn create_on_behalf(
@@ -131,20 +192,25 @@ async fn create_on_behalf(
     invite: String,
 ) -> Result<()> {
     let identity = agent_node_identity::load_or_create()?;
-    let signer = Ed25519Signer::from_seed(&identity.secret_key().to_bytes())
+    let seed = identity.secret_key().to_bytes();
+    let signer = Ed25519Signer::from_seed(&seed)
         .context("deriving the agent credential key from the persisted node identity")?;
     let node_id = identity.node_id().to_string();
     if hex::encode(signer.public_key()) != node_id {
         bail!("persisted Iroh node key does not map to the agent credential key");
     }
-    let proof_pem = signer.to_pem().context("exporting agent proof key")?;
+    let root = mint_agent_root(&seed).context("minting the agent independent root locally")?;
+    if root.public_key_hex() != node_id {
+        bail!("agent independent root is not bound to this node key");
+    }
     let user_config = UserConfig::load_default()?;
     let session = HostedSession::build(
         &user_config,
         Some(server.clone()),
-        HostedAuthMode::ProofOnly {
-            proof_key_pem: proof_pem.clone(),
-            signing_identity: format!("principal:agent-key:{node_id}"),
+        HostedAuthMode::PresentedRoot {
+            token: root.token.clone(),
+            proof_key_pem: root.private_key_pem.clone(),
+            subject: root.subject.clone(),
         },
     )?;
     let mut client = session.connect(([127, 0, 0, 1], 0).into()).await?;
@@ -155,7 +221,7 @@ async fn create_on_behalf(
     let response = client
         .create_agent_account(CreateAgentAccountRequest {
             invite_code: invite,
-            agent_public_key: signer.public_key().to_vec(),
+            agent_public_key: root.public_key.to_vec(),
             client_operation_id: operation_id,
         })
         .await
@@ -164,22 +230,24 @@ async fn create_on_behalf(
         });
     client.close().await;
     let response = response?;
-    let token = String::from_utf8(response.agent_capability)
-        .context("server returned a non-text agent capability")?;
-    let metadata =
-        headless_token_metadata(&token).context("validating the returned agent capability")?;
-    if !metadata.is_derived || !metadata.proof_public_key_hex.eq_ignore_ascii_case(&node_id) {
-        bail!("server returned an agent capability not derived for this node key");
+    let restricted = restrict_agent_account_root(&root.token, &signer, root.expires_at)
+        .context("applying the local agent deny floor and safe operation ceiling")?;
+    let metadata = headless_token_metadata(&restricted)
+        .context("validating the restricted client-minted agent capability")?;
+    if !metadata.proof_public_key_hex.eq_ignore_ascii_case(&node_id)
+        || metadata.subject != root.subject
+    {
+        bail!("client-minted agent capability is not bound to this node key");
     }
     cli_shared::credentials::store_server_credential(
         &server,
         ServerCredential {
-            token,
+            token: restricted,
             subject: metadata.subject.clone(),
             device_id: None,
             credential_id: None,
-            private_key_pem: Some(proof_pem),
-            expires_at: metadata.expires_at,
+            private_key_pem: Some(root.private_key_pem),
+            expires_at: Some(root.expires_at.to_rfc3339()),
         },
     )?;
     let owner_id = uuid::Uuid::parse_str(&response.account_id)

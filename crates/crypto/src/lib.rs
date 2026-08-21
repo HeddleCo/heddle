@@ -140,6 +140,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ed25519_seed_round_trips_through_pem() {
+        let signer = Ed25519Signer::generate().expect("generate key");
+        let seed = signer.to_seed();
+        let from_seed = Ed25519Signer::from_seed(&seed).expect("reload seed");
+        let from_pem =
+            Ed25519Signer::from_pem(&signer.to_pem().expect("export pem")).expect("reload pem");
+        assert_eq!(from_seed.to_seed(), seed);
+        assert_eq!(from_pem.to_seed(), seed);
+        assert_eq!(from_seed.public_key(), signer.public_key());
+    }
+
+    #[test]
     fn test_ed25519_sign_verify_roundtrip() {
         let signer = Ed25519Signer::generate().expect("generate key");
         let data = b"test data for signing";

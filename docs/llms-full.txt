@@ -1674,8 +1674,8 @@ Source: docs/SELF_SOVEREIGN_AUTH.md
 > trust anchor it has been configured with.
 
 This walkthrough covers the local-only flow. For the hosted flow
-(where the server is the trust anchor and the CLI receives a Biscuit
-via `MintBiscuit` then attenuates it for sub-agents), see
+(where the client mints the root and Weft registers the public key,
+then the CLI attenuates offline for sub-agents), see
 [`.agents/agent-attenuation.md`](../.agents/agent-attenuation.md).
 
 ## When this applies
@@ -1691,8 +1691,9 @@ The self-sovereign path is the right shape when:
   identity layer (e.g. a workspace tool, a daemon) and that system
   is the trust anchor — not Heddle's hosted server.
 
-If you have a hosted Biscuit (issued via `MintBiscuit` or a device
-flow), you should attenuate *that* token instead. See `.agents/agent-attenuation.md`.
+If you already have a hosted Biscuit (client-minted at signup, claim,
+passkey finish, device login, or anon), you should attenuate *that*
+token instead. See `.agents/agent-attenuation.md`. Weft never remints.
 
 ## Concept
 
@@ -1826,10 +1827,10 @@ out of band: the system that consumes these tokens (your own
 service, a test harness, a non-hosted Heddle deployment) must be
 configured with `root.public()` from step 1.
 
-The hosted Heddle server is configured with its own root key and
-will reject Biscuits minted by a different root. If you need tokens
-that the hosted server will accept, use `MintBiscuit` or the device
-flow — see `.agents/agent-attenuation.md`.
+Weft verifies a hosted Biscuit against the public key it registered
+for that account. The client is the authority-block signer. Existing
+accounts attenuate offline; Weft never remints. See
+`.agents/agent-attenuation.md`.
 
 ## What you can't do
 
@@ -7610,6 +7611,14 @@ for its two state arguments without parsing source:
 
 ```json
 {"output_kind": "semantic_diff", "from_state": "hs-0000000000000000000000000000000000000000000000000000", "to_state": "hs-1111111111111111111111111111111111111111111111111111", "deltas": [{"change": "modified", "anchor": {"file": "src/lib.rs", "symbol": "calculate"}, "kind": "function", "old_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "new_hash": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}]}
+```
+
+`heddle semantic refs --output json` emits persisted refs-of, callers-of, or
+importers-of at one state without parsing source. This envelope is the
+weft#451 Tier-2 body (`SemanticGraphQueryResponse`); hosted RPCs remain residual.
+
+```json
+{"output_kind": "semantic_refs", "state_id": "hs-0000000000000000000000000000000000000000000000000000", "kind": "refs_of", "anchor": {"file": "src/api.rs", "symbol": "greet"}, "path": null, "index_present": true, "refs": [{"source_path": "src/client.rs", "source_occurrence": 1, "name": "greet", "role": "call", "kind": "calls", "span": {"start": 40, "end": 45}, "target": {"file": "src/api.rs", "symbol": "greet"}, "target_definition": 0}], "importers": []}
 ```
 
 ## Other verbs

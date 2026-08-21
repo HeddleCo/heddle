@@ -20,6 +20,9 @@ mod identity_server;
 mod identity_state;
 #[cfg(test)]
 mod identity_tests;
+pub(crate) mod root_mint;
+#[cfg(test)]
+mod root_mint_tests;
 pub(crate) mod websocket;
 pub(crate) mod whoami;
 
