@@ -1519,7 +1519,7 @@ mod tests {
     }
 
     fn append_git_oid(tree: &mut Vec<u8>, sha: &str) {
-        for pair in sha.as_bytes().chunks_exact(2) {
+        for pair in sha.as_bytes().as_chunks::<2>().0 {
             let hex = std::str::from_utf8(pair).expect("Git object id is ASCII");
             tree.push(u8::from_str_radix(hex, 16).expect("Git object id is hexadecimal"));
         }

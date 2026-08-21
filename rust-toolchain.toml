@@ -4,5 +4,5 @@
 # clippy lints and reddened `-D warnings` on unrelated PRs. Bump this
 # channel deliberately (and fix any new lints) rather than drifting.
 [toolchain]
-channel = "1.97.0"
+channel = "1.98.0"
 components = ["clippy", "rustfmt"]
