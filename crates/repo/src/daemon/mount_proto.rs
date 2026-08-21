@@ -9,17 +9,17 @@
 //! CLI client side and tests can decode it without pulling the
 //! mount stack in.
 //!
-//! Wire posture: localhost TCP, no auth — same threat model as
-//! fsmonitor. Single-user dev workstation.
+//! Wire posture: Unix-domain socket, mode 0600, same-uid
+//! `SO_PEERCRED`. Localhost TCP is not an authz boundary and is
+//! refused (heddle#901).
 //!
 //! Versioning: `MOUNT_PROTOCOL_VERSION` is bumped together with the
 //! daemon binary. The endpoint file under
-//! `.heddle/state/heddled.endpoint.json` records this number; CLI
-//! clients that read a version they don't recognize remove the
-//! file and respawn. fsmonitor's protocol stays at v1 on a
-//! separate endpoint file (`monitor-helper.json`) — bumping there
-//! is reserved for future breaking changes to the change-monitor
-//! verbs.
+//! `.heddle/state/heddled.endpoint.json` records this number. A live
+//! older TCP daemon (v2) fails closed: v3 does not speak that
+//! protocol. The operator must stop or upgrade the leftover process
+//! before a replacement can spawn. fsmonitor's protocol stays at v1
+//! on a separate endpoint file (`monitor-helper.json`).
 //!
 //! Endpoint file path: `.heddle/state/heddled.endpoint.json`
 //! (resolved by [`mount_daemon_endpoint_path`]).
@@ -31,15 +31,23 @@ use serde::{Deserialize, Serialize};
 use super::endpoint::default_state_dir;
 
 /// Wire-protocol version for the mount daemon. Bump in lockstep with
-/// any breaking change to the request/response enums below. CLI
-/// clients that find a different version on the endpoint file
-/// remove the file and respawn the daemon at their version.
-pub const MOUNT_PROTOCOL_VERSION: u32 = 2;
+/// any breaking change to the request/response enums below. A live
+/// older TCP endpoint fails closed; this CLI does not operate it.
+pub const MOUNT_PROTOCOL_VERSION: u32 = 3;
+
+/// Last protocol that spoke unauthenticated localhost TCP.
+pub const MOUNT_PROTOCOL_V2: u32 = 2;
 
 /// The endpoint file the mount daemon writes (and CLI clients read)
-/// to discover its TCP port + PID.
+/// to discover its UDS path + PID.
 pub fn mount_daemon_endpoint_path(repo_root: &Path) -> PathBuf {
     default_state_dir(repo_root).join("heddled.endpoint.json")
+}
+
+/// Unix-domain socket the mount daemon binds. Mode 0600 + same-uid
+/// `SO_PEERCRED`. Not the historical localhost TCP port.
+pub fn mount_daemon_socket_path(repo_root: &Path) -> PathBuf {
+    default_state_dir(repo_root).join("heddled.sock")
 }
 
 /// File where the daemon persists the list of currently-active
@@ -70,7 +78,7 @@ pub struct MountRegistryFile {
     pub mounts: Vec<PersistedMount>,
 }
 
-/// Mount-daemon request envelope. Single-line JSON over TCP. Adding
+/// Mount-daemon request envelope. Single-line JSON over UDS. Adding
 /// a new verb is additive; every existing client can ignore unknown
 /// verbs and the daemon sees the version mismatch first anyway.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,6 +193,10 @@ pub const ERR_MOUNT_CONFLICT: &str = "mount_conflict";
 /// builds, or a Linux build without `--features mount`).
 pub const ERR_MOUNT_UNSUPPORTED: &str = "mount_unsupported";
 
+/// Standard error code when the caller has no same-uid proof.
+/// Localhost TCP is unauthenticated; the daemon fails closed.
+pub const ERR_UNAUTHORIZED: &str = "unauthorized";
+
 #[cfg(test)]
 mod tests {
     //! Wire-protocol round-trip tests. These verify that:
@@ -271,6 +283,8 @@ mod tests {
         let registry = mount_daemon_registry_path(tmp.path());
         assert!(endpoint.ends_with(".heddle/state/heddled.endpoint.json"));
         assert!(registry.ends_with(".heddle/state/mounts.json"));
+        let socket = mount_daemon_socket_path(tmp.path());
+        assert!(socket.ends_with(".heddle/state/heddled.sock"));
     }
 
     #[test]

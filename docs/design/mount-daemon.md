@@ -36,13 +36,15 @@ that the daemon process is gone and both `heddled.endpoint.json` and
 
 State lives under `.heddle/state/`:
 
-- `heddled.endpoint.json` — host, port, PID, protocol version.
+- `heddled.endpoint.json` — socket path, PID, protocol version.
 - `mounts.json` — atomic mirror of the live mount registry. Used by
   the stale-endpoint sweep in CLI clients to recover from a daemon
   crash.
 
-Threat model: localhost TCP, no auth — same posture as the existing
-fsmonitor helper. Single-user dev workstation.
+Threat model: Unix-domain socket at `.heddle/state/heddled.sock`,
+mode 0600, same-uid `SO_PEERCRED`. Localhost TCP is not an authz
+boundary; the daemon does not bind it and refuses a client-supplied
+`mount_path` without that uid proof (heddle#901).
 
 ## Problem
 
@@ -110,12 +112,13 @@ or returns the same "thread is set, mount is gone" message it returns today.
 We don't need a launchd/systemd unit for v1; we need a clean re-attach flow.
 
 **Discovery.** Endpoint file at `.heddle/state/heddled.endpoint.json`
-(host/port, plus a PID we can `kill -0` to detect crashed daemons). Same
-shape as `HelperEndpointState` today.
+(UDS path plus a PID we can `kill -0` to detect crashed daemons). Same
+shape as `HelperEndpointState` today, with `socket_path` required for
+the mount daemon.
 
 ## Protocol sketch
 
-JSON-over-TCP, line-delimited, identical framing to `MonitorHelperRequest`/
+JSON-over-UDS, line-delimited, identical framing to `MonitorHelperRequest`/
 `Response`. New commands, additive:
 
 ```text
@@ -129,10 +132,9 @@ health      {}                                      -> { ok, version, uptime_s, 
 `HELPER_PROTOCOL_VERSION` from 1 to 2 lets old CLIs fall back to spawning a
 new helper rather than mis-parsing.
 
-JSON over TCP is good enough. A Unix domain socket would be cleaner on
-posix and avoid persisting a dynamic port, but the existing helper has
-shipped on TCP; switching transport here adds platform branching for no
-measurable user benefit.
+JSON over a mode-0600 Unix socket with same-uid `SO_PEERCRED`. The
+historical localhost TCP listener is gone: any local user could read
+`endpoint.json` and drive mount/unmount (heddle#901).
 
 ## Failure modes
 

@@ -53,6 +53,15 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   `discover_heddle_root` path other inspect commands use) and never
   bootstraps a `.heddle` sidecar or rewrites Git excludes (heddle#1487).
 
+- **Mount daemon rejects unauthenticated localhost TCP.** `heddled`
+  binds a mode-0600 Unix socket and checks same-uid `SO_PEERCRED`
+  before honoring a client-supplied `mount_path`. Loopback is not an
+  authz boundary; a TCP-only `endpoint.json` is treated as stale
+  (heddle#901). A live socket is not unlinked, including when connect
+  returns permission denied on a shared state dir, and a leftover v2
+  TCP daemon is shut down before a replacement is spawned. The client
+  checks same-uid `SO_PEERCRED` before trusting a UDS reply.
+
 - **`whoami` reports the capture actor before hosted auth.** `init --principal-*`
   writes `user_config` and `status` already showed that principal. `whoami` now
   prints the same capture actor first and hosted authentication as a second

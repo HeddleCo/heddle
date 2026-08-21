@@ -114,9 +114,35 @@ pub fn mount_idle_policy(
     default_idle_policy(idle_for)
 }
 
+/// Read a newline-terminated JSON request from `reader`, hand it to
+/// `respond`, and write the JSON response to `writer`.
+pub fn handle_json_rw<R, W, Req, Resp, Respond>(
+    reader: R,
+    writer: &mut W,
+    respond: Respond,
+) -> Result<(), HeddleError>
+where
+    R: std::io::Read,
+    W: Write,
+    Req: serde::de::DeserializeOwned,
+    Resp: serde::Serialize,
+    Respond: FnOnce(Req) -> Resp,
+{
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let request: Req = serde_json::from_str(&line)
+        .map_err(|error| HeddleError::Config(format!("decode helper request: {error}")))?;
+    let response = respond(request);
+    serde_json::to_writer(&mut *writer, &response)
+        .map_err(|error| HeddleError::Config(format!("encode helper response: {error}")))?;
+    writer.write_all(b"\n")?;
+    Ok(())
+}
+
 /// Read a newline-terminated JSON request from `stream`, hand it to
-/// `respond`, and write the JSON response back. Used by both the
-/// fsmonitor and mount handler dispatchers.
+/// `respond`, and write the JSON response back. Used by the
+/// fsmonitor TCP helper.
 pub fn handle_json_connection<Req, Resp, Respond>(
     mut stream: TcpStream,
     respond: Respond,
@@ -126,16 +152,8 @@ where
     Resp: serde::Serialize,
     Respond: FnOnce(Req) -> Resp,
 {
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    let request: Req = serde_json::from_str(&line)
-        .map_err(|error| HeddleError::Config(format!("decode helper request: {error}")))?;
-    let response = respond(request);
-    serde_json::to_writer(&mut stream, &response)
-        .map_err(|error| HeddleError::Config(format!("encode helper response: {error}")))?;
-    stream.write_all(b"\n")?;
-    Ok(())
+    let reader = stream.try_clone()?;
+    handle_json_rw(reader, &mut stream, respond)
 }
 
 #[cfg(test)]
