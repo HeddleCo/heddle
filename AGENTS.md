@@ -1,142 +1,67 @@
-# AGENTS.md — Heddle agent guidelines
+# Heddle
 
-Project context, doc map, and operational guidance for agents working in this repo.
+Heddle is an AI-native VCS. This repo is the public CLI. The hosted store is weft. The web is tapestry. The Git engine is sley. Shared wire types live in heddle-api.
 
-## Behavioral contract
+The job is the fastest VCS a human or an agent can actually use. If a change makes the first screen, the help, or a verb slower or weirder, it is not done.
 
-The twelve behavioral rules below are the authoritative behavioral spec for this worktree. If a future checkout includes a root `CLAUDE.md`, read it as additional guidance, but do not block on it when it is absent.
+## What we do not trade away
 
-If something goes wrong, the first triage step is which rule was violated:
+1. **Everyday verbs.** The product is ~23 verbs: init, clone, status, diff, capture, start, ready, land, undo, pull, push, resolve, continue, log, show, query, review, discuss, context, whoami, daemon, doctor, help. Help is the first screen.
+2. **The human is the audience.** Agents drive the CLI. A person reads the output. Quiet chrome. Help is the product.
+3. **Fail closed, page don't ceiling.** Admission is a page. Depth is the client's problem.
+4. **Simple Rust that will still read next year.** Prefer reuse over a new helper. `impl` over `dyn`. No `unwrap`/`expect` in production paths. Tests may `expect`. Zero-copy where it actually matters.
 
-| Mistake | Rule | Often shows up as |
-|---|---|---|
-| Silent wrong assumption | 1 (Think before coding) | Working from a guess about an API/browser behavior without verifying |
-| Over-engineered solution | 2 (Simplicity first) | A 6-cell counter grid when one summary line was asked for |
-| Touched code outside scope | 3 (Surgical changes) | "While I was in there" cleanup that breaks an adjacent feature |
-| Drifted from success criteria | 4 (Goal-driven) | Loop terminated on a partial pass instead of the full criterion |
-| Used the model where code would do | 5 (Judgment only) | Asked the model to decide a retry policy that a status code already answers |
-| Overran budget silently | 6 (Token budgets) | 90-minute debug session with no summarization |
-| Averaged contradictory patterns | 7 (Surface conflicts) | Two error-handling styles mixed in one function |
-| Wrote without reading | 8 (Read before write) | Marketing CLI snippet with a flag that doesn't exist in `cli_args/` |
-| Test covered shape, not intent | 9 (Tests verify intent) | Hardcoded return value that passes the assertion |
-| No checkpoint mid-task | 10 (Checkpoint) | Step 4 of a 6-step refactor broken; steps 5+6 piled on top |
-| Forked the convention | 11 (Match conventions) | Introduced `ease` into a codebase that uses `cubic-bezier(...)` |
-| Claimed "done" without verifying | 12 (Fail loud) | "Mobile verified" without running Phase 4.5 at 375×812 |
+## A note from Luke
 
-## Confidence
+I like ambitious ideas, simple systems, and software that feels obvious. Do not preserve complexity just because it already exists. Do not introduce machinery because it looks architecturally impressive. Understand the real constraint, then fight for the smallest model that makes the correct behavior unsurprising.
 
-When you `heddle capture`, set `--confidence` to your honest estimate (0.0–1.0) of how likely your change is correct end-to-end given what you tested: ≥0.9 only when build + tests + manual verification all passed cleanly, 0.75–0.89 when most signals passed but coverage is partial, below 0.75 when you're shipping a draft or have unresolved warnings.
+These are good defaults. My preferences in the thread override them.
 
-## Compatibility
+## A small glossary
 
-Heddle is still moving quickly. Prefer the current model over preserving legacy behavior.
+- **you** — the agent changing this repo
+- **we** — Luke and the people building Heddle
+- **user** — the person (or agent) running `heddle`
+- **thread** — isolated work with a hidden checkout
+- **context** — annotations that live with the code
+- **discuss** — a scoped conversation
+- **query** — ask history; `log` walks it
 
-- Do not add backwards-compatibility shims unless the user explicitly asks for them.
-- When a model or API changes, it is acceptable to update callers, tests, and docs to the new behavior instead of keeping legacy support.
-- Do not use long explanatory comments, compatibility shims, fallback paths, or transitional adapters to compensate for a shallow or unclear module interface. Redesign the seam, complete the migration, or stop and ask for alignment.
-- Apply the same rule when touching existing code: remove obsolete shims and explanation-heavy workarounds when the owning module can make the invariant explicit instead.
+## The ways to hurt this repo
 
-## Project Overview
+1. **A second view RPC.** heddle and tapestry read the same proto. Add a field on the existing message.
+2. **Minting authority on the server.** This CLI mints client roots. Weft only verifies.
+3. **Proof that didn't run.** Compile-only is not proof. Run the cargo tests for the files you changed, and paste the output.
 
-Heddle is an AI-native version control system written in Rust. It combines content-addressed storage, immutable history with stable change identifiers, explicit human and agent attribution, hosted namespace/repository control-plane primitives, and an emerging web product for repository intelligence and operations.
+## Hit every surface
 
-**Key files:**
-- `README.md` - Top-level product and capability overview
-- `Cargo.toml` - Workspace configuration
-- `crates/` - Primary Rust implementation
-- `docs/` - Architecture, hosted model, roadmap, and future-state plans
-- `specs/quint/` - Formal specifications and model-checking assets
-- `web/` - Hosted web product
+The usual defect is a change that works on the path you tested and is missing everywhere else. Before calling CLI work done, say which of these applied:
 
-**Current Status:**
-- All core VCS commands implemented
-- 600+ tests passing (including formal spec and hosted integration coverage)
-- Wire protocol for remote sync complete
-- Git Projection import/export/sync implemented
-- Packed refs, packfiles, shallow clone, hooks, and crypto signing implemented
-- Multi-agent parallel materialized threads and lease-backed agent workflows implemented (`start --path`, `thread list/show/drop`, `agent reserve/heartbeat/capture/ready/release`)
-- Hosted namespaces, repositories, grants, and content inspection APIs implemented in foundation form
-- Web product in progress: marketing site (shipped), hosted inspection and admin surfaces (foundation), request-access funnel (shipped)
-- GitHub App integration (`heddlebot`): PR semantic review summaries, webhook handling, OAuth login (foundation)
-- Public review surface at `/review/:owner/:repo/pr/:number` with SSE streaming analysis (foundation)
-- Compare/review UX on hosted provenance and hosted builds/workflows remain future-state
+- **The verb.** Help text, clap args, and the rust path must agree. If you added a flag, the first screen has to know what to do next.
+- **Human and agent.** Default output is for a person. `--json` / agent mode is additive.
+- **Git interop.** Import, export, and projection go through sley.
+- **The wire.** If the change crosses weft, the field lives in heddle-api first.
+- **Reverse states.** If you added a way in, add the way out and the way to see it.
 
-## Documentation Truth Rules
+## Verify
 
-When editing docs, specs, or web copy, classify capabilities explicitly:
+Smallest proof the change works. Targeted `cargo test` for the crate and behavior you touched. CI owns the full suite.
 
-- **Shipped** - implemented and safe to describe as current behavior
-- **Foundation in place** - partially implemented or structurally supported, but not yet a complete user-facing product surface
-- **Planned** - clearly intended future-state documented in `docs/` or `web/PRODUCT_SPEC.md`
+A test that hardcodes the return value you wanted is not a test of intent.
 
-Do not describe a capability as live if it is only mock-backed in the web app or only planned in docs. Future-state positioning is encouraged when it is grounded in the codebase and roadmap, but it must be labeled accurately.
+## Where code lives
 
-## Agent skills
+- `crates/cli` — verbs, help, output
+- `crates/cli-args` — clap surface; if it's not here, the user can't type it
+- `crates/core`, `crates/objects`, `crates/ingest` — the store and history
+- `crates/repo` — working tree / checkout
+- sley — Git engine (separate repo)
+- heddle-api — proto (separate repo)
+- weft, tapestry — other repos
 
-### Issue tracker
+## Taste
 
-Issues and PRDs are tracked in GitHub Issues for `HeddleCo/heddle`. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Use the canonical triage labels, with `question` retained as an additional GitHub issue label for general questions. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context repo: use root `CONTEXT.md` and `docs/adr/` for domain language and ADRs, and read `AGENTS.md` plus relevant `.agents/*.md` files for operating guidance. See `docs/agents/domain.md`.
-
-## Guidelines
-
-| Topic | Description |
-|-------|-------------|
-| [[.agents/rust-guidelines\|Rust Guidelines]] | Code style, error handling, naming, documentation, dependencies |
-| [[.agents/architecture\|Architecture]] | Directory structure, design patterns |
-| [[.agents/common-tasks\|Common Tasks]] | Adding commands, object types, modifying spec |
-| [[.agents/testing\|Testing]] | Running tests, test categories, checklist |
-| [[.agents/formal-specs\|Formal Specs]] | Quint specifications, property tests, regression traces |
-| [[.agents/commands\|Commands]] | Build, test, lint, run commands |
-| [[.agents/code-review\|Code Review]] | Focus areas, review methodology, 7-step checklist |
-| [[.agents/review-pitfalls\|Review Pitfalls]] | 10 concrete anti-patterns with examples; false-positive traps; severity calibration table |
-| [[.agents/web-copy\|Web Copy]] | Copy principles, elite-status voice, rewrite patterns, key files, scoring rubric |
-| [[.agents/hosted-operations\|Hosted Operations]] | Namespaces, grants, control plane, Biscuit, deployment |
-| [[.agents/agent-workflows\|Agent Workflows]] | CLI output modes, attribution, multi-agent isolation |
-| [[.agents/delta-compression\|Delta Compression]] | Pack format, sliding window, feature flags, known gaps |
-
-## Environment Variables
-
-```bash
-# Agent attribution
-export HEDDLE_AGENT_PROVIDER="anthropic"
-export HEDDLE_AGENT_MODEL="claude-opus-4-7"
-
-# Principal attribution
-export HEDDLE_PRINCIPAL_NAME="Your Name"
-export HEDDLE_PRINCIPAL_EMAIL="you@example.com"
-
-# Development
-export RUST_BACKTRACE=1
-export RUST_LOG=heddle=debug
-```
-
-Note: `HEDDLE_SESSION_ID` and `HEDDLE_SESSION_SEGMENT` are **not implemented**. Do not set them.
-
-## Known Limitations (v0.1)
-
-- Reftable format not implemented (packed-refs works but degrades above ~10k refs)
-- Git Projection may have edge cases with complex histories
-- Semantic diff is available but may be conservative
-- Partial clone (lazy object fetch) not yet supported
-- Provenance-backed local blame and hosted provenance inspection are implemented; richer compare/review UX on top of provenance is still planned
-- Hosted builds / workflows / artifact surfaces are planned, not implemented
-- `heddle undo` is scoped to the current checkout lane; it only rewinds operations recorded from that checkout's HEAD path
-- Agent presence records describe attribution and work context; only a token-authenticated writer lease grants exclusive write authority
-- Use `heddle start <name> --path <dir>` for filesystem isolation, then `heddle agent reserve --thread <name>` for the writer hot loop
-
-## Quick Reference
-
-- **Architecture**: `docs/ARCHITECTURE.md` - System design
-- **Formal Specs**: `specs/quint/` - Quint models and spec notes
-- **Hosted Model**: `docs/HOSTED_NAMESPACES.md` and `docs/HOSTED_ADMIN.md`
-- **Roadmap**: `docs/ENTERPRISE_BACKEND_ROADMAP.md`, `docs/RUNNERS_AND_BUILDS.md`, `docs/LINE_PROVENANCE_PLAN.md`
-- **Web Product**: `web/PRODUCT_SPEC.md`
-- **Examples**: Test cases in `tests/` directory
+- Complexity belongs at the Git/weft boundary. The verb path stays boring.
+- Comments say how a thing is used, and move when the code moves.
+- Prefer the current model over a compatibility shim. Redesign the seam or finish the migration.
+- If a default here fights the task, say so and get a human before breaking it.
