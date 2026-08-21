@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-heddle-object-model = { path = "../object-model", version = "0.13" }
+heddle-object-model = { path = "../object-model", version = "0.14" }
 regex.workspace = true
 serde.workspace = true
 thiserror.workspace = true
