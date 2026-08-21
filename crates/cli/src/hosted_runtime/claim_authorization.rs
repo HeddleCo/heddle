@@ -126,12 +126,14 @@ struct AgentAccountSummary {
     agent_label: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentConsent {
     pub(crate) account_id: String,
     pub(crate) node_id: String,
     pub(crate) signature: String,
+    pub(crate) authorization_hash: String,
+    pub(crate) expires_at: i64,
 }
 
 pub(crate) fn resolved_reply(state: &ClaimState, body: &[u8]) -> Result<Vec<u8>, CallFailure> {
@@ -215,11 +217,7 @@ pub(crate) fn signed_pre_consent(
     refuse_stale_consent(state)?;
     let statement = pre_consent_message(state, handle, nonce)?;
     let signature = URL_SAFE_NO_PAD.encode(signer.sign(&statement).map_err(internal_failure)?);
-    Ok(AgentConsent {
-        account_id: state.owner_id.to_string(),
-        node_id: state.node_id.clone(),
-        signature,
-    })
+    Ok(bound_consent(state, signature))
 }
 
 pub(crate) fn signed_promote_consent(
@@ -231,11 +229,7 @@ pub(crate) fn signed_promote_consent(
     refuse_stale_consent(state)?;
     let statement = promote_consent_message(state, handle, credential_id)?;
     let signature = URL_SAFE_NO_PAD.encode(signer.sign(&statement).map_err(internal_failure)?);
-    Ok(AgentConsent {
-        account_id: state.owner_id.to_string(),
-        node_id: state.node_id.clone(),
-        signature,
-    })
+    Ok(bound_consent(state, signature))
 }
 
 pub(crate) fn pre_consent_message(
@@ -243,13 +237,14 @@ pub(crate) fn pre_consent_message(
     handle: &str,
     nonce: &[u8],
 ) -> Result<Vec<u8>, CallFailure> {
-    encode_counted(&[
-        PRE_CONSENT_DOMAIN,
-        state.owner_id.to_string().as_bytes(),
-        handle.as_bytes(),
-        state.node_id.as_bytes(),
+    encode_pre_consent(
+        &state.owner_id.to_string(),
+        handle,
+        &state.node_id,
         nonce,
-    ])
+        state.authorization_hash(),
+        state.expires_at_millis,
+    )
 }
 
 pub(crate) fn promote_consent_message(
@@ -257,15 +252,70 @@ pub(crate) fn promote_consent_message(
     handle: &str,
     credential_id: &str,
 ) -> Result<Vec<u8>, CallFailure> {
-    encode_counted(&[
-        PROMOTE_CONSENT_DOMAIN,
-        state.owner_id.to_string().as_bytes(),
-        handle.as_bytes(),
-        credential_id.as_bytes(),
-    ])
+    encode_promote_consent(
+        &state.owner_id.to_string(),
+        handle,
+        credential_id,
+        state.authorization_hash(),
+        state.expires_at_millis,
+    )
+}
+
+/// Verifies a pre/promote pair from the consent payload, not local claim TTL.
+///
+/// Rejects when the bound `expiresAt` has elapsed, the pair is not the same
+/// issuance, or either signature fails over the counted statement that includes
+/// the claim-state id and expiry. This is the weft-matching check; the CLI
+/// only issues consents.
+#[cfg(test)]
+pub(crate) fn verify_promotion_consents(
+    agent_public_key: &[u8],
+    handle: &str,
+    nonce: &[u8],
+    credential_id: &str,
+    pre: &AgentConsent,
+    promote: &AgentConsent,
+    now_millis: i64,
+) -> Result<(), CallFailure> {
+    if pre.account_id != promote.account_id
+        || pre.node_id != promote.node_id
+        || pre.authorization_hash != promote.authorization_hash
+        || pre.expires_at != promote.expires_at
+    {
+        return Err(failure(
+            CallFailureCode::PermissionDenied,
+            "claim consents are not a matching pair",
+        ));
+    }
+    consent_binding_parts(&pre.authorization_hash, pre.expires_at)?;
+    if now_millis >= pre.expires_at {
+        return Err(failure(
+            CallFailureCode::Unauthenticated,
+            "claim consent has expired",
+        ));
+    }
+    let pre_statement = encode_pre_consent(
+        &pre.account_id,
+        handle,
+        &pre.node_id,
+        nonce,
+        &pre.authorization_hash,
+        pre.expires_at,
+    )?;
+    let promote_statement = encode_promote_consent(
+        &promote.account_id,
+        handle,
+        credential_id,
+        &promote.authorization_hash,
+        promote.expires_at,
+    )?;
+    verify_consent_signature(&pre_statement, agent_public_key, &pre.signature)?;
+    verify_consent_signature(&promote_statement, agent_public_key, &promote.signature)?;
+    Ok(())
 }
 
 fn refuse_stale_consent(state: &ClaimState) -> Result<(), CallFailure> {
+    consent_binding_parts(state.authorization_hash(), state.expires_at_millis)?;
     if state.consent_unexpired(chrono::Utc::now().timestamp_millis()) {
         return Ok(());
     }
@@ -273,6 +323,92 @@ fn refuse_stale_consent(state: &ClaimState) -> Result<(), CallFailure> {
         CallFailureCode::Unauthenticated,
         "claim consent has expired",
     ))
+}
+
+fn bound_consent(state: &ClaimState, signature: String) -> AgentConsent {
+    AgentConsent {
+        account_id: state.owner_id.to_string(),
+        node_id: state.node_id.clone(),
+        signature,
+        authorization_hash: state.authorization_hash().to_string(),
+        expires_at: state.expires_at_millis,
+    }
+}
+
+fn encode_pre_consent(
+    account_id: &str,
+    handle: &str,
+    node_id: &str,
+    nonce: &[u8],
+    authorization_hash: &str,
+    expires_at_millis: i64,
+) -> Result<Vec<u8>, CallFailure> {
+    let binding = consent_binding_parts(authorization_hash, expires_at_millis)?;
+    encode_counted(&[
+        PRE_CONSENT_DOMAIN,
+        account_id.as_bytes(),
+        handle.as_bytes(),
+        node_id.as_bytes(),
+        nonce,
+        binding.authorization_hash.as_bytes(),
+        &binding.expires_at,
+    ])
+}
+
+fn encode_promote_consent(
+    account_id: &str,
+    handle: &str,
+    credential_id: &str,
+    authorization_hash: &str,
+    expires_at_millis: i64,
+) -> Result<Vec<u8>, CallFailure> {
+    let binding = consent_binding_parts(authorization_hash, expires_at_millis)?;
+    encode_counted(&[
+        PROMOTE_CONSENT_DOMAIN,
+        account_id.as_bytes(),
+        handle.as_bytes(),
+        credential_id.as_bytes(),
+        binding.authorization_hash.as_bytes(),
+        &binding.expires_at,
+    ])
+}
+
+fn consent_binding_parts(
+    authorization_hash: &str,
+    expires_at_millis: i64,
+) -> Result<ConsentBinding<'_>, CallFailure> {
+    if authorization_hash.is_empty() || expires_at_millis <= 0 {
+        return Err(failure(
+            CallFailureCode::FailedPrecondition,
+            "claim consent is not bound to an issuance",
+        ));
+    }
+    Ok(ConsentBinding {
+        authorization_hash,
+        expires_at: expires_at_millis.to_be_bytes(),
+    })
+}
+
+struct ConsentBinding<'a> {
+    authorization_hash: &'a str,
+    expires_at: [u8; 8],
+}
+
+#[cfg(test)]
+fn verify_consent_signature(
+    statement: &[u8],
+    agent_public_key: &[u8],
+    signature: &str,
+) -> Result<(), CallFailure> {
+    let signature = URL_SAFE_NO_PAD
+        .decode(signature)
+        .map_err(|_| invalid_failure("invalid claim consent signature"))?;
+    Ed25519Signer::verify_with_public_key(statement, agent_public_key, &signature).map_err(|_| {
+        failure(
+            CallFailureCode::Unauthenticated,
+            "claim consent signature is invalid",
+        )
+    })
 }
 
 fn encode_counted(parts: &[&[u8]]) -> Result<Vec<u8>, CallFailure> {

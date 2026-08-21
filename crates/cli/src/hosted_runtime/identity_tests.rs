@@ -64,6 +64,11 @@ fn claim_url_uses_selected_server_origin() {
         claim_link_url("api.heddle.sh", "aa", "c2VjcmV0").expect("default hosted origin"),
         "https://heddle.sh/claim/hcl1.aa.c2VjcmV0"
     );
+    assert_eq!(
+        claim_link_url("https://api.heddle.sh", "aa", "c2VjcmV0")
+            .expect("canonical hosted API origin"),
+        "https://heddle.sh/claim/hcl1.aa.c2VjcmV0"
+    );
 }
 
 #[test]
