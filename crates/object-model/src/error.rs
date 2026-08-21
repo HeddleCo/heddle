@@ -3,7 +3,7 @@
 
 use std::{error::Error, fmt, io, path::Path};
 
-use crate::object::{ContentHash, StateId, TreeError};
+use crate::object::{ContentHash, StateId, TreeError, TreeStreamError};
 
 /// Structured recovery details that can cross the embeddable facade boundary.
 #[derive(Debug, Clone, PartialEq)]
@@ -258,6 +258,17 @@ pub enum HeddleError {
     MissingObject { object_type: String, id: String },
     #[error("invalid tree entry: {0}")]
     InvalidTreeEntry(#[from] TreeError),
+    #[error("tree stream error: {0}")]
+    TreeStream(TreeStreamError),
+}
+
+impl From<TreeStreamError> for HeddleError {
+    fn from(error: TreeStreamError) -> Self {
+        match error {
+            TreeStreamError::Invalid(error) => Self::InvalidTreeEntry(error),
+            other => Self::TreeStream(other),
+        }
+    }
 }
 
 impl HeddleError {

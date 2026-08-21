@@ -88,7 +88,7 @@ fn build_fixture() -> EnumerationFixture {
         builder.add(
             tree.hash(),
             ObjectType::Tree,
-            rmp_serde::to_vec(&tree).unwrap(),
+            tree.encode_canonical().unwrap(),
         );
 
         let action = fixture_action(index);

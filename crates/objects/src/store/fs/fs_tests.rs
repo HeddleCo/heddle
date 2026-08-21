@@ -581,7 +581,7 @@ fn install_pack_accepts_valid_mixed_native_pack() {
     builder.add(
         tree_hash,
         PackObjectType::Tree,
-        rmp_serde::to_vec_named(&tree).unwrap(),
+        tree.encode_canonical().unwrap(),
     );
     builder.add_id(
         PackObjectId::StateId(state.id()),
@@ -853,7 +853,7 @@ fn gc_preserves_and_repacks_loose_v2_tree_shadow_over_packed_v1_body() {
     let tree = Tree::from_entries(vec![TreeEntry::file("file.txt", blob_hash, false).unwrap()]);
     let tree_hash = tree.hash();
     let legacy_bytes = legacy_tree_v1_bytes_for_test("file.txt", blob_hash);
-    let current_bytes = rmp_serde::to_vec(&tree).unwrap();
+    let current_bytes = tree.encode_canonical().unwrap();
 
     let mut builder = PackBuilder::new(CompressionConfig::default());
     builder.add(tree_hash, PackObjectType::Tree, legacy_bytes);
@@ -1029,6 +1029,39 @@ fn test_tree_roundtrip() {
         retrieved.get("foo.txt").unwrap().blob_hash(),
         Some(blob_hash)
     );
+}
+
+#[test]
+fn loose_htr4_open_is_sequential_and_hashes() {
+    use crate::object::{TreePageLimits, TreeStreamError};
+
+    let (_temp, store) = create_test_store();
+    let blob = ContentHash::compute(b"resume-leaf");
+    let tree = Tree::from_entries(vec![
+        TreeEntry::file("a.txt", blob, false).unwrap(),
+        TreeEntry::file("b.txt", blob, true).unwrap(),
+    ]);
+    let hash = store.put_tree(&tree).unwrap();
+    let mut reader = store.open_tree(&hash, None).unwrap().unwrap();
+    let first = reader
+        .next_page(TreePageLimits::new(1, usize::MAX).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.entries[0].name(), "a.txt");
+    let rest = reader
+        .next_page(TreePageLimits::new(8, usize::MAX).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(rest.entries[0].name(), "b.txt");
+    reader.finish_and_verify().unwrap();
+
+    let error = store
+        .open_tree(&hash, Some(&first.resume_cursor))
+        .expect_err("hash-path is not a content-address proof");
+    assert!(matches!(
+        error,
+        HeddleError::TreeStream(TreeStreamError::UnverifiedRange)
+    ));
 }
 
 #[test]
@@ -1297,40 +1330,14 @@ fn test_get_action_rejects_wrong_object_swap() {
 
 #[test]
 fn test_get_tree_rejects_invalid_deserialized_entry_name() {
-    #[derive(serde::Serialize)]
-    struct EncodedTree {
-        version: u8,
-        entries: Vec<EncodedTreeEntry>,
-    }
-
-    #[derive(serde::Serialize)]
-    struct EncodedTreeEntry {
-        name: String,
-        kind: u8,
-        hash: Option<ContentHash>,
-        executable: Option<bool>,
-        git_format: Option<u8>,
-        git_oid: Option<Vec<u8>>,
-        spool_id: Option<crate::object::SpoolId>,
-        spool_state_id: Option<StateId>,
-    }
-
     let (_temp, store) = create_test_store();
-
-    let invalid_tree = EncodedTree {
-        version: 3,
-        entries: vec![EncodedTreeEntry {
-            name: "bad/name".to_string(),
-            kind: 0,
-            hash: Some(ContentHash::compute(b"blob")),
-            executable: Some(false),
-            git_format: None,
-            git_oid: None,
-            spool_id: None,
-            spool_state_id: None,
-        }],
-    };
-    let tree_hash = ContentHash::compute(b"invalid tree fixture");
+    let tree = Tree::from_entries(vec![
+        TreeEntry::file("ab", ContentHash::compute(b"blob"), false).unwrap(),
+    ]);
+    let tree_hash = tree.hash();
+    let mut bytes = tree.encode_canonical().unwrap();
+    let name_at = crate::object::TREE_HEADER_LEN + 4 + 1 + 1 + 2;
+    bytes[name_at + 1] = b'/';
     let tree_path = store
         .root
         .join("objects/trees")
@@ -1338,7 +1345,7 @@ fn test_get_tree_rejects_invalid_deserialized_entry_name() {
         .join(&tree_hash.to_hex()[2..]);
     let parent = tree_path.parent().unwrap();
     std::fs::create_dir_all(parent).unwrap();
-    std::fs::write(&tree_path, rmp_serde::to_vec(&invalid_tree).unwrap()).unwrap();
+    std::fs::write(&tree_path, bytes).unwrap();
 
     let error = store
         .get_tree(&tree_hash)

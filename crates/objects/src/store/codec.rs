@@ -7,7 +7,7 @@ use heddle_format::compression::{
 };
 
 use crate::{
-    object::{Action, ActionId, ContentHash, State, Tree, TreeDecodeError},
+    object::{Action, ActionId, ContentHash, State, Tree},
     store::{HeddleError, Result},
 };
 
@@ -23,12 +23,10 @@ pub fn decode_blob_content(data: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
-pub fn encode_tree(tree: &Tree, config: &CompressionConfig) -> Result<(ContentHash, Vec<u8>)> {
-    let hash = tree.hash();
-    let serialized = rmp_serde::to_vec(tree)?;
-    let data = compress_with_dictionary(&serialized, config, CompressionDictionary::TreeStateV1)?
-        .unwrap_or(serialized);
-    Ok((hash, data))
+pub fn encode_tree(tree: &Tree, _config: &CompressionConfig) -> Result<(ContentHash, Vec<u8>)> {
+    // Canonical trees stay uncompressed so a resume cursor can seek to an
+    // entry frame without decompressing the prefix.
+    Ok((tree.hash(), tree.encode_canonical()?))
 }
 
 pub fn decode_tree(data: &[u8]) -> Result<Tree> {
@@ -37,10 +35,7 @@ pub fn decode_tree(data: &[u8]) -> Result<Tree> {
 }
 
 pub fn decode_tree_serialized(data: &[u8]) -> Result<Tree> {
-    Tree::decode_current_msgpack(data).map_err(|error| match error {
-        TreeDecodeError::Decode(error) => HeddleError::from(error),
-        TreeDecodeError::Invalid(error) => HeddleError::InvalidTreeEntry(error),
-    })
+    Tree::decode_canonical(data).map_err(HeddleError::from)
 }
 
 /// Return the serialized tree body stored in a loose object, decompressing
@@ -140,7 +135,10 @@ mod tests {
         let (_, encoded_tree) = encode_tree(&tree, &CompressionConfig::default()).unwrap();
         let encoded_state = encode_state(&state, &CompressionConfig::default()).unwrap();
 
-        assert_eq!(&encoded_tree[9..13], &1_u32.to_be_bytes());
+        assert!(
+            crate::object::is_canonical_tree(&encoded_tree),
+            "trees stay uncompressed HTR4 so resume can seek"
+        );
         assert_eq!(&encoded_state[9..13], &1_u32.to_be_bytes());
     }
 
@@ -164,7 +162,7 @@ mod tests {
                     })
                     .collect(),
             );
-            let serialized_tree = rmp_serde::to_vec(&tree).unwrap();
+            let serialized_tree = tree.encode_canonical().unwrap();
             let (_, encoded_tree) = encode_tree(&tree, &config).unwrap();
             assert_eq!(decode_tree_body(&encoded_tree).unwrap(), serialized_tree);
 
