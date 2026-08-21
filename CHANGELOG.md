@@ -13,6 +13,12 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+## 0.14.0 - 2026-08-21
+
+- Rebuilt the workspace on `heddle-api` 0.12 and
+  `heddleco-capability-verifier` 0.4 so published Heddle crates share one
+  hosted API contract and BLAKE3 1.8.7 resolution.
+
 ## 0.13.0 - 2026-08-21
 
 - sley 0.7.0 (parallel-inflate) adoption + Rust 1.98.

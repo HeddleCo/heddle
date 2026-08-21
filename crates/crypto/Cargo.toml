@@ -15,7 +15,7 @@ chrono.workspace = true
 ed25519-dalek.workspace = true
 getrandom.workspace = true
 hex.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.13" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.14" }
 p256.workspace = true
 pkcs8.workspace = true
 sec1.workspace = true

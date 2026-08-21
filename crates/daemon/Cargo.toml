@@ -11,15 +11,15 @@ categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
-crypto = { path = "../crypto", package = "heddle-crypto", version = "0.13" }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.14" }
 hex.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.13" }
-repo = { path = "../repo", package = "heddle-repo", version = "0.13", default-features = false, features = ["git-overlay", "native"] }
+objects = { path = "../objects", package = "heddle-objects", version = "0.14" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.14", default-features = false, features = ["git-overlay", "native"] }
 serde.workspace = true
 serde_json.workspace = true
-state_review = { path = "../state_review", package = "heddle-state-review", version = "0.13" }
+state_review = { path = "../state_review", package = "heddle-state-review", version = "0.14" }
 
-semantic = { path = "../semantic", package = "heddle-semantic", version = "0.13", optional = true }
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.14", optional = true }
 
 [dev-dependencies]
 objects = { path = "../objects", package = "heddle-objects", features = ["memory-backend"] }

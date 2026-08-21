@@ -93,6 +93,12 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
     ),
     ("LinkOAuthIdentity", AgentAuthOperationDisposition::Denied),
     ("StoreProviderToken", AgentAuthOperationDisposition::Denied),
+    // Registering a verified GitHub installation binds external account
+    // authority to the caller and must remain a parent-principal operation.
+    (
+        "RegisterGitHubInstallation",
+        AgentAuthOperationDisposition::Denied,
+    ),
     (
         "VerifySignupEmail",
         AgentAuthOperationDisposition::ReviewedSafe,
@@ -101,6 +107,9 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
         "BindSignupInviteEmail",
         AgentAuthOperationDisposition::Denied,
     ),
+    // Creating an invite spends the authenticated member's allowance, so a
+    // derived agent must not issue invitations on the parent's behalf.
+    ("CreateSignupInvite", AgentAuthOperationDisposition::Denied),
     // Invite claim registers a client-minted signup root; derived agents
     // must not consume invite codes on behalf of a parent principal.
     ("ClaimSignupInvite", AgentAuthOperationDisposition::Denied),

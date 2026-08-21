@@ -16,7 +16,7 @@ blake3.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 hex.workspace = true
-heddle-format = { path = "../format", version = "0.13" }
+heddle-format = { path = "../format", version = "0.14" }
 rand.workspace = true
 rmp-serde.workspace = true
 serde.workspace = true
