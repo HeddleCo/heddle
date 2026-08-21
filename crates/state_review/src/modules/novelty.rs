@@ -13,11 +13,11 @@ use std::path::PathBuf;
 
 use objects::object::{ProducerId, RiskSignal, RiskSignalKind, SignalAnchor, State};
 use semantic::{
-    analysis::{SimilarityMethod, compute_similarity},
-    parser::FunctionDef,
+    analysis::try_compute_ast_similarity_for_languages,
+    parser::{FunctionDef, Language},
 };
 
-use crate::{config::ReviewSignalsConfig, registry::SemanticContext};
+use crate::{config::ReviewSignalsConfig, registry::SemanticContext, truncate_reason};
 
 const VERSION: u32 = 1;
 const MODULE_ID: &str = "novelty.tree_sitter";
@@ -29,7 +29,7 @@ pub fn run(
     cfg: &ReviewSignalsConfig,
     ctx: &SemanticContext,
 ) -> Vec<RiskSignal> {
-    if !cfg.novelty.enabled {
+    if !cfg.novelty.enabled || !ctx.corpus_complete {
         return Vec::new();
     }
     let tolerance = cfg.novelty.tolerance.clamp(0.0, 1.0);
@@ -61,15 +61,11 @@ pub fn run(
     let mut out = Vec::new();
     for (path, fn_def) in corpus
         .iter()
-        .filter(|(path, _)| ctx.changed_paths.contains(path))
+        .filter(|(path, fn_def)| ctx.is_emit_target(path, fn_def))
     {
-        let max_sim = corpus
-            .iter()
-            .filter(|(p, f)| !(p == path && f.name == fn_def.name))
-            .map(|(_, other)| {
-                compute_similarity(&other.content, &fn_def.content, SimilarityMethod::Tokens) as f32
-            })
-            .fold(0.0_f32, f32::max);
+        let Some(max_sim) = max_structural_similarity(path, fn_def, &corpus) else {
+            continue;
+        };
         if max_sim < novelty_threshold {
             let reason = format!(
                 "function shape unique in repo (max sibling similarity {:.0}%)",
@@ -88,93 +84,32 @@ pub fn run(
     out
 }
 
-use crate::truncate_reason;
+fn max_structural_similarity(
+    path: &std::path::Path,
+    fn_def: &FunctionDef,
+    corpus: &[(PathBuf, FunctionDef)],
+) -> Option<f32> {
+    let language = Language::from_path(path);
+    if language == Language::Unknown {
+        return None;
+    }
+    let mut best: Option<f32> = None;
+    for (other_path, other) in corpus {
+        if other_path == path && other.symbol_identity() == fn_def.symbol_identity() {
+            continue;
+        }
+        let other_language = Language::from_path(other_path);
+        let score = try_compute_ast_similarity_for_languages(
+            &other.content,
+            other_language,
+            &fn_def.content,
+            language,
+        )?;
+        best = Some(best.map_or(score as f32, |current| current.max(score as f32)));
+    }
+    best
+}
 
 #[cfg(test)]
-mod tests {
-    use objects::object::{Attribution, ContentHash, Principal};
-
-    use super::*;
-
-    fn empty_state() -> State {
-        State::new_snapshot(
-            ContentHash::compute(b"tree"),
-            vec![],
-            Attribution::human(Principal::new("Alice", "alice@example.com")),
-        )
-    }
-
-    #[test]
-    fn quiet_with_small_corpus() {
-        // Empty SemanticContext = corpus of zero. Stays quiet.
-        let cfg = ReviewSignalsConfig::default();
-        let ctx = SemanticContext::new();
-        let signals = run(&empty_state(), &empty_state(), &cfg, &ctx);
-        assert!(signals.is_empty());
-    }
-
-    #[test]
-    fn quiet_when_disabled() {
-        let mut cfg = ReviewSignalsConfig::default();
-        cfg.novelty.enabled = false;
-        let ctx = SemanticContext::new();
-        let signals = run(&empty_state(), &empty_state(), &cfg, &ctx);
-        assert!(signals.is_empty());
-    }
-
-    fn fdef(name: &str, body: &str) -> FunctionDef {
-        FunctionDef {
-            name: name.to_string(),
-            signature: format!("fn {name}()"),
-            start_line: 1,
-            end_line: 3,
-            content: body.to_string(),
-        }
-    }
-
-    #[test]
-    fn novelty_scoped_to_changed_files() {
-        // Corpus of four files, each with a structurally distinct function, so
-        // every function is "novel" against the rest of the repo. Only
-        // `changed.rs` is in the changed set, so novelty must report exactly
-        // one signal — for that file's function — not one per corpus function.
-        let cfg = ReviewSignalsConfig::default();
-        let mut ctx = SemanticContext::new();
-        ctx.new_functions.insert(
-            PathBuf::from("a.rs"),
-            vec![fdef(
-                "alpha",
-                "let total = first + second + third + fourth;",
-            )],
-        );
-        ctx.new_functions.insert(
-            PathBuf::from("b.rs"),
-            vec![fdef("beta", "for widget in inventory { ship(widget); }")],
-        );
-        ctx.new_functions.insert(
-            PathBuf::from("c.rs"),
-            vec![fdef(
-                "gamma",
-                "match colour { Red => stop(), Green => go() }",
-            )],
-        );
-        ctx.new_functions.insert(
-            PathBuf::from("changed.rs"),
-            vec![fdef(
-                "delta",
-                "while pending { dequeue().handle(); } flush();",
-            )],
-        );
-        ctx.changed_paths.insert(PathBuf::from("changed.rs"));
-
-        let signals = run(&empty_state(), &empty_state(), &cfg, &ctx);
-
-        assert_eq!(
-            signals.len(),
-            1,
-            "novelty should fire only for the changed file, got: {signals:?}"
-        );
-        assert_eq!(signals[0].anchor.file, "changed.rs");
-        assert_eq!(signals[0].anchor.symbol.as_deref(), Some("delta"));
-    }
-}
+#[path = "novelty_tests.rs"]
+mod tests;

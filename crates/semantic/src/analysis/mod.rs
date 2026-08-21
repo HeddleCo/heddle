@@ -22,7 +22,10 @@ pub(crate) use analysis_functions::detect_function_changes_with_parsed;
 pub(crate) use analysis_imports::detect_import_changes_with_parsed;
 pub use analysis_imports::{detect_import_changes, detect_import_changes_with_manifest};
 pub use analysis_renames::detect_file_renames;
-pub use analysis_similarity::{SimilarityMethod, compute_similarity};
+pub use analysis_similarity::{
+    SimilarityMethod, compute_similarity, try_compute_ast_similarity,
+    try_compute_ast_similarity_for_languages,
+};
 pub use hot_spots::{
     HotEventKind, HotSpot, HotSpotKey, HotSpotKeyValue, HotSpotParams, HotSpotsReport,
     analyze_actor_histogram, analyze_hot_spots,

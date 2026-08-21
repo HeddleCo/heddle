@@ -42,7 +42,9 @@ pub struct SemanticParseCache {
 }
 
 impl SemanticParseCache {
-    const DEFAULT_MAX_ENTRIES: usize = 256;
+    /// Shared parse-cache page. Capture-time corpus file budget uses this
+    /// same cap so a real repo is not fail-closed by a smaller universe.
+    pub const DEFAULT_MAX_ENTRIES: usize = 256;
 
     /// Create a bounded parse cache.
     pub fn new(max_entries: usize) -> Self {

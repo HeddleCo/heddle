@@ -37,7 +37,13 @@ pub fn run(
     for (path, new_fns) in &ctx.new_functions {
         let prior_fns: Option<&Vec<FunctionDef>> = ctx.prior_functions.get(path);
         for fn_def in new_fns {
-            let prior_same = prior_fns.and_then(|fns| fns.iter().find(|f| f.name == fn_def.name));
+            if !ctx.is_emit_target(path, fn_def) {
+                continue;
+            }
+            let prior_same = prior_fns.and_then(|fns| {
+                fns.iter()
+                    .find(|f| f.symbol_identity() == fn_def.symbol_identity())
+            });
             // 1. Compare against the prior version of this same symbol.
             if let Some(prior_fn) = prior_same {
                 let similarity = compute_similarity(
@@ -63,8 +69,10 @@ pub fn run(
                 // 2. New symbol — compare against siblings (other functions
                 // in the same file). If max similarity to any sibling is
                 // below 1 - threshold, it diverges from the local style.
-                let siblings: Vec<&FunctionDef> =
-                    new_fns.iter().filter(|f| f.name != fn_def.name).collect();
+                let siblings: Vec<&FunctionDef> = new_fns
+                    .iter()
+                    .filter(|f| f.symbol_identity() != fn_def.symbol_identity())
+                    .collect();
                 if siblings.is_empty() {
                     continue;
                 }
@@ -136,6 +144,7 @@ mod tests {
     fn fdef(name: &str, content: &str) -> FunctionDef {
         FunctionDef {
             name: name.to_string(),
+            container: String::new(),
             signature: format!("fn {name}()"),
             start_line: 1,
             end_line: 3,
@@ -174,12 +183,14 @@ mod tests {
             )],
         );
         ctx.new_functions.insert(
-            path,
+            path.clone(),
             vec![fdef(
                 "score",
                 "fn score(socket: &mut Socket) -> usize { while socket.poll() { rotate_key(); } 0 }",
             )],
         );
+        ctx.changed_symbols
+            .insert((path, fdef("score", "").symbol_identity()));
         let new = state_with_change_id(9);
 
         let signals = run(&empty_state(), &new, &cfg, &ctx);
@@ -203,7 +214,7 @@ mod tests {
         cfg.pattern_deviation.threshold = 0.5;
         let mut ctx = SemanticContext::new();
         ctx.new_functions.insert(
-            path,
+            path.clone(),
             vec![
                 fdef(
                     "load_user",
@@ -219,6 +230,8 @@ mod tests {
                 ),
             ],
         );
+        ctx.changed_symbols
+            .insert((path, fdef("decode_wire", "").symbol_identity()));
 
         let signals = run(&empty_state(), &state_with_change_id(10), &cfg, &ctx);
 
@@ -230,6 +243,39 @@ mod tests {
                     && signal.reason.contains("sibling exemplars")
             }),
             "expected sibling pattern deviation for decode_wire, got: {signals:?}"
+        );
+    }
+
+    #[test]
+    fn pattern_deviation_scoped_to_changed_symbols() {
+        let path = PathBuf::from("src/workers.rs");
+        let mut cfg = ReviewSignalsConfig::default();
+        cfg.pattern_deviation.threshold = 0.5;
+        let mut ctx = SemanticContext::new();
+        ctx.new_functions.insert(
+            path.clone(),
+            vec![
+                fdef(
+                    "load_user",
+                    "fn load_user() { let record = fetch_user(); validate(record); save(record); }",
+                ),
+                fdef(
+                    "load_order",
+                    "fn load_order() { let record = fetch_order(); validate(record); save(record); }",
+                ),
+                fdef(
+                    "decode_wire",
+                    "fn decode_wire() { while socket.poll() { rotate_key(); decode_frame(); } }",
+                ),
+            ],
+        );
+        ctx.changed_symbols
+            .insert((path, fdef("load_user", "").symbol_identity()));
+
+        let signals = run(&empty_state(), &state_with_change_id(10), &cfg, &ctx);
+        assert!(
+            signals.is_empty(),
+            "untouched sibling decode_wire must not fire: {signals:?}"
         );
     }
 }

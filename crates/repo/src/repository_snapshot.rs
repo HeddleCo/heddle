@@ -463,19 +463,8 @@ impl SnapshotMutation<'_> {
                 Some(id) => self.repo.store.get_state(&id).ok().flatten(),
                 None => None,
             };
-            match self
-                .repo
-                .compute_and_persist_signals(prior_state.as_ref(), &state)
-            {
-                Ok(Some(hash)) => risk_signals = Some(hash),
-                Ok(None) => {}
-                Err(err) => {
-                    tracing::warn!(error = %err, "risk signal computation failed; continuing without signals");
-                }
-            }
-
-            // Eager semantic index: parse only changed blobs, reusing the
-            // parent index for unchanged subtrees. Never fails the capture.
+            // Eager semantic index first so risk-signal prune can use merkle
+            // digests (`semantic_changed`) instead of an empty SemanticContext.
             let semantic_result = if let Some((blobs, trees)) = supplied_blobs.as_ref() {
                 let source_blobs = blobs
                     .iter()
@@ -511,6 +500,31 @@ impl SnapshotMutation<'_> {
                 Ok((None, _)) => {}
                 Err(err) => {
                     tracing::warn!(error = %err, "semantic index computation failed; continuing without index");
+                }
+            }
+
+            // Worktree trees live in PreparedSnapshotArtifact until
+            // stage_snapshot_objects returns. Always overlay the in-memory
+            // root (and any packed blobs) so build_semantic_context can
+            // resolve new.tree without a store read.
+            let mut source_blobs = std::collections::HashMap::new();
+            let mut source_trees = std::collections::HashMap::new();
+            if let Some((blobs, trees)) = supplied_blobs.as_ref() {
+                source_blobs.extend(blobs.iter().map(|(hash, bytes)| (*hash, bytes.as_slice())));
+                source_trees.extend(trees.iter().map(|pending| (pending.hash(), pending)));
+            }
+            source_trees.insert(tree.hash(), &tree);
+            match self.repo.compute_and_persist_signals(
+                prior_state.as_ref(),
+                &state,
+                semantic_index.as_ref(),
+                Some(&source_blobs),
+                Some(&source_trees),
+            ) {
+                Ok(Some(hash)) => risk_signals = Some(hash),
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(error = %err, "risk signal computation failed; continuing without signals");
                 }
             }
 

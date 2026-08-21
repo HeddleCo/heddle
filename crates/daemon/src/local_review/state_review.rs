@@ -165,24 +165,15 @@ impl LocalStateReview {
             None
         };
 
-        // Surface fired risk signals if requested. The signal registry will
-        // Trimmed budget split: every signal is visible. The former ranked
-        // `state_review::budget` helper was unused and removed (HEDDLE-DR-10);
-        // reintroduce a ranked partition here if tick budgeting ships.
-        let mut all_signals = Vec::new();
-        if include_all_signals
-            && let Some(hash) =
-                attachment_hash(repo, &state.state_id, StateAttachmentKind::RiskSignals)?
-            && let Some(blob) = repo.store().get_blob(&hash).map_err(map_repository_error)?
-        {
-            let decoded = RiskSignalBlob::decode(blob.content())
-                .map_err(|err| LocalReviewError::internal(format!("decode risk signals: {err}")))?;
-            all_signals = decoded
-                .signals
-                .into_iter()
-                .map(|signal| review_signal(signal, ReviewSignalVisibility::Visible))
-                .collect();
-        }
+        // Persist-time risk signals are always in-budget. `--all-signals`
+        // also copies them onto `all_signals` (no hidden partition yet;
+        // HEDDLE-DR-10 removed the unused ranked budgeter).
+        let risk_signals = load_persisted_risk_signals(repo, &state.state_id)?;
+        let all_signals = if include_all_signals {
+            risk_signals.clone()
+        } else {
+            Vec::new()
+        };
 
         // Synthesize a structured `diff_summary` signal so the
         // `in_budget_signals` array is non-empty even before the real
@@ -246,6 +237,7 @@ impl LocalStateReview {
                 });
             }
         }
+        in_budget_signals.extend(risk_signals);
 
         // Build the reading-order partition from the same domain symbols
         // used at the hosted boundary: tree-sitter when the
@@ -531,6 +523,25 @@ fn append_review_signature(
 /// single state. (A future schema bump may add an explicit id.)
 fn synthetic_signature_id(index: usize) -> String {
     format!("rs-{index}")
+}
+
+fn load_persisted_risk_signals(
+    repo: &Repository,
+    state_id: &StateId,
+) -> Result<Vec<ReviewSignal>, LocalReviewError> {
+    let Some(hash) = attachment_hash(repo, state_id, StateAttachmentKind::RiskSignals)? else {
+        return Ok(Vec::new());
+    };
+    let Some(blob) = repo.store().get_blob(&hash).map_err(map_repository_error)? else {
+        return Ok(Vec::new());
+    };
+    let decoded = RiskSignalBlob::decode(blob.content())
+        .map_err(|err| LocalReviewError::internal(format!("decode risk signals: {err}")))?;
+    Ok(decoded
+        .signals
+        .into_iter()
+        .map(|signal| review_signal(signal, ReviewSignalVisibility::Visible))
+        .collect())
 }
 
 fn attachment_hash(
@@ -1239,6 +1250,60 @@ mod tests {
         assert_eq!(
             payload.in_budget_signals[0].producer.module,
             "review_show.diff_summary"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(process_global)]
+    fn local_payload_surfaces_persisted_risk_signals_without_all_signals_flag() {
+        let (review, repo, _temp) = fresh_review();
+        let state_id = capture_state(&repo, b"hello\n");
+        let signal = objects::object::RiskSignal {
+            kind: objects::object::RiskSignalKind::Novelty,
+            anchor: objects::object::SignalAnchor::symbol("changed.rs", "delta"),
+            reason: "function shape unique in repo".to_string(),
+            producer: objects::object::ProducerId::new("novelty.tree_sitter", 1),
+            computed_at: 1,
+            computed_against: Some(state_id),
+        };
+        let bytes = objects::object::RiskSignalBlob::new(vec![signal])
+            .encode()
+            .expect("encode risk signals");
+        let hash = repo
+            .store()
+            .put_blob(&objects::object::Blob::new(bytes))
+            .expect("put risk blob");
+        repo.put_state_attachment(&objects::object::StateAttachment {
+            state_id,
+            body: objects::object::StateAttachmentBody::RiskSignals(hash),
+            attribution: repo.get_attribution().expect("attribution"),
+            created_at: chrono::Utc::now(),
+            supersedes: None,
+        })
+        .expect("attach risk signals");
+
+        let payload = review.get_review_payload(state_id, false).expect("payload");
+        assert!(
+            payload.in_budget_signals.iter().any(|signal| {
+                signal.kind == ReviewSignalKind::Risk(objects::object::RiskSignalKind::Novelty)
+                    && signal.producer.module == "novelty.tree_sitter"
+            }),
+            "review show must emit persisted risk signals, got {:?}",
+            payload.in_budget_signals
+        );
+        assert!(
+            payload.all_signals.is_empty(),
+            "all_signals stays empty unless --all-signals"
+        );
+
+        let health = crate::local_review::get_repo_signal_health(&repo, 10).expect("health");
+        assert!(
+            health
+                .entries
+                .iter()
+                .any(|entry| entry.module_id == "novelty.tree_sitter"),
+            "review health must see persisted signals: {:?}",
+            health.entries
         );
     }
 

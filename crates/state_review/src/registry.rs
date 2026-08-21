@@ -3,7 +3,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use objects::object::{RiskSignal, State};
@@ -20,21 +20,53 @@ use crate::config::ReviewSignalsConfig;
 /// We hold extracted [`FunctionDef`]s rather than the parser's `ParsedFile`
 /// because `ParsedFile` owns a `TSTree` which isn't `Clone`/`Send`-friendly
 /// for sharing across modules.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct SemanticContext {
     pub prior_functions: BTreeMap<PathBuf, Vec<FunctionDef>>,
     pub new_functions: BTreeMap<PathBuf, Vec<FunctionDef>>,
-    /// Repo-relative paths that actually changed in this review pass. Modules
-    /// that should only report on the diff (e.g. novelty) scope their emitted
-    /// signals to this set while still comparing against the full
-    /// `new_functions` corpus. Empty means "no changed files known" — such a
-    /// module stays quiet rather than scanning the whole repo.
+    /// Repo-relative paths that actually changed in this review pass.
+    /// Used to build `changed_symbols` and to prune fmt-only churn.
+    /// Not an emit-scope: an empty `changed_symbols` emits nothing even
+    /// when this set is non-empty (non-function file-level edits).
     pub changed_paths: BTreeSet<PathBuf>,
+    /// `(path, FunctionDef::symbol_identity())` pairs that actually
+    /// changed. Production emit-scope for novelty / test_reachability /
+    /// pattern_deviation. Empty means emit nothing — including when
+    /// `changed_paths` is not.
+    pub changed_symbols: BTreeSet<(PathBuf, String)>,
+    /// Whether `new_functions` is a complete new-state corpus under the
+    /// capture-time page/byte budgets. Novelty and test_reachability
+    /// stay quiet when this is false rather than scoring a partial repo.
+    /// `Default` is `true` so hand-built unit-test contexts keep firing.
+    pub corpus_complete: bool,
+}
+
+impl Default for SemanticContext {
+    fn default() -> Self {
+        Self {
+            prior_functions: BTreeMap::new(),
+            new_functions: BTreeMap::new(),
+            changed_paths: BTreeSet::new(),
+            changed_symbols: BTreeSet::new(),
+            corpus_complete: true,
+        }
+    }
 }
 
 impl SemanticContext {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Production emit-scope is `changed_symbols` only. Empty means
+    /// emit nothing — a digest change with no function body/name delta
+    /// must not fire on untouched siblings. Identity is
+    /// [`FunctionDef::symbol_identity`], not the bare name.
+    pub fn is_emit_target(&self, path: &Path, fn_def: &FunctionDef) -> bool {
+        let identity = fn_def.symbol_identity();
+        self.changed_symbols
+            .iter()
+            .any(|(changed_path, changed_id)| changed_path == path && changed_id == &identity)
     }
 }
 
@@ -93,11 +125,28 @@ mod tests {
     fn fdef(name: &str, content: &str) -> FunctionDef {
         FunctionDef {
             name: name.to_string(),
+            container: String::new(),
             signature: format!("fn {name}()"),
             start_line: 1,
             end_line: 3,
             content: content.to_string(),
         }
+    }
+
+    #[test]
+    fn empty_changed_symbols_emits_nothing_even_when_paths_changed() {
+        let mut ctx = SemanticContext::new();
+        ctx.changed_paths.insert(PathBuf::from("lib.rs"));
+        let sibling = fdef("sibling", "");
+        let edited = fdef("edited", "");
+        assert!(
+            !ctx.is_emit_target(std::path::Path::new("lib.rs"), &sibling),
+            "digest-only file change must not emit on untouched functions"
+        );
+        ctx.changed_symbols
+            .insert((PathBuf::from("lib.rs"), edited.symbol_identity()));
+        assert!(ctx.is_emit_target(std::path::Path::new("lib.rs"), &edited));
+        assert!(!ctx.is_emit_target(std::path::Path::new("lib.rs"), &sibling));
     }
 
     #[test]
@@ -141,6 +190,10 @@ mod tests {
                 "fn score(socket: &mut Socket) -> usize { while socket.poll() { rotate_key(); } 0 }",
             )],
         );
+        ctx.changed_symbols.insert((
+            PathBuf::from("src/scoring.rs"),
+            fdef("score", "").symbol_identity(),
+        ));
 
         let signals = run_all(&prior, &new, &cfg, &ctx);
         let ordering: Vec<(String, String)> = signals

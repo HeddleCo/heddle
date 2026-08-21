@@ -250,6 +250,192 @@ fn test_extract_functions_handles_deeply_nested_modules() {
     assert_eq!(functions[0].name, "deeply_nested");
 }
 
+#[test]
+fn extract_functions_qualifies_impl_methods_by_container() {
+    let source = r#"
+impl Foo {
+    fn run() { 1 }
+}
+impl Bar {
+    fn run() { 2 }
+}
+"#;
+    let parsed = ParsedFile::parse(source, Language::Rust).expect("Should parse");
+    let functions = parsed.extract_functions();
+    let identities: Vec<String> = functions.iter().map(|f| f.symbol_identity()).collect();
+    assert!(
+        identities
+            .iter()
+            .any(|id| id.contains("Foo") && id.contains("run")),
+        "Foo::run must be qualified: {identities:?}"
+    );
+    assert!(
+        identities
+            .iter()
+            .any(|id| id.contains("Bar") && id.contains("run")),
+        "Bar::run must be qualified: {identities:?}"
+    );
+    assert_ne!(
+        functions[0].symbol_identity(),
+        functions[1].symbol_identity()
+    );
+}
+
+#[test]
+fn extract_functions_qualifies_nested_mod_impl_methods() {
+    let source = r#"
+mod a {
+    impl Foo {
+        fn run() { 1 }
+    }
+}
+mod b {
+    impl Foo {
+        fn run() { 2 }
+    }
+}
+"#;
+    let parsed = ParsedFile::parse(source, Language::Rust).expect("Should parse");
+    let functions = parsed.extract_functions();
+    let identities: Vec<String> = functions.iter().map(|f| f.symbol_identity()).collect();
+    assert!(
+        identities
+            .iter()
+            .any(|id| id.contains("a") && id.contains("Foo") && id.contains("run")),
+        "a::Foo::run must be qualified: {identities:?}"
+    );
+    assert!(
+        identities
+            .iter()
+            .any(|id| id.contains("b") && id.contains("Foo") && id.contains("run")),
+        "b::Foo::run must be qualified: {identities:?}"
+    );
+    assert_ne!(
+        functions[0].symbol_identity(),
+        functions[1].symbol_identity()
+    );
+}
+
+#[test]
+fn extract_functions_includes_javascript_object_literal_methods() {
+    let source = r#"
+export const handlers = {
+    save: async () => {
+        await persist();
+    },
+    load: function () {
+        return fetchItem();
+    },
+};
+"#;
+    let parsed = ParsedFile::parse(source, Language::JavaScript).expect("Should parse");
+    let functions = parsed.extract_functions();
+    let names: Vec<&str> = functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"save"),
+        "object-literal arrow method must extract: {names:?}"
+    );
+    assert!(
+        names.contains(&"load"),
+        "object-literal function method must extract: {names:?}"
+    );
+}
+
+#[test]
+fn extract_calls_includes_python_call_nodes() {
+    let source = r#"
+def target():
+    return 1
+
+def test_target():
+    target()
+"#;
+    let parsed = ParsedFile::parse(source, Language::Python).expect("Should parse");
+    let calls = parsed.extract_calls();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.name == "target" && call.qualifier.is_empty()),
+        "python call nodes must be extracted: {calls:?}"
+    );
+}
+
+#[test]
+fn extract_own_calls_excludes_nested_function_and_closure() {
+    let rust = r#"
+fn test_x() {
+    fn unused() {
+        target();
+    }
+    let unused_closure = || {
+        other();
+    };
+}
+"#;
+    let parsed = ParsedFile::parse(rust, Language::Rust).expect("Should parse");
+    let own = parsed.extract_own_calls();
+    assert!(
+        own.iter()
+            .all(|call| call.name != "target" && call.name != "other"),
+        "nested rust calls must not leak to the outer function: {own:?}"
+    );
+
+    let js = r#"
+function test_x() {
+    function unused() {
+        target();
+    }
+    const unused_arrow = () => {
+        other();
+    };
+}
+"#;
+    let parsed = ParsedFile::parse(js, Language::JavaScript).expect("Should parse");
+    let own = parsed.extract_own_calls();
+    assert!(
+        own.iter()
+            .all(|call| call.name != "target" && call.name != "other"),
+        "nested js calls must not leak to the outer function: {own:?}"
+    );
+}
+
+#[test]
+fn extract_calls_uses_tree_not_comment_or_string_substrings() {
+    let source = r#"
+fn test_it() {
+    Bar::run();
+    foo.run();
+    covered();
+    // TODO: call orphan()
+    let _ = "orphan()";
+}
+"#;
+    let parsed = ParsedFile::parse(source, Language::Rust).expect("Should parse");
+    let calls = parsed.extract_calls();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.name == "run" && call.qualifier == ["Bar"]),
+        "path call Bar::run: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.name == "run" && call.qualifier == ["foo"]),
+        "receiver call foo.run: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.name == "covered" && call.qualifier.is_empty()),
+        "bare call covered: {calls:?}"
+    );
+    assert!(
+        calls.iter().all(|call| call.name != "orphan"),
+        "comment/string must not create call edges: {calls:?}"
+    );
+}
+
 #[cfg(feature = "lang-cpp")]
 #[test]
 fn test_cpp_templated_qualified_function_names() {
