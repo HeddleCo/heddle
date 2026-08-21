@@ -2151,6 +2151,24 @@ fn command_contract_table_drives_help_tiers() {
         (
             "capture", "everyday", "native", "everyday", None, None, false,
         ),
+        ("query", "everyday", "native", "everyday", None, None, false),
+        (
+            "review", "everyday", "native", "everyday", None, None, false,
+        ),
+        (
+            "discuss", "everyday", "native", "everyday", None, None, false,
+        ),
+        (
+            "context", "everyday", "native", "everyday", None, None, false,
+        ),
+        ("daemon", "everyday", "admin", "everyday", None, None, false),
+        (
+            "continue", "everyday", "native", "everyday", None, None, false,
+        ),
+        (
+            "whoami", "everyday", "native", "everyday", None, None, false,
+        ),
+        ("help", "everyday", "native", "everyday", None, None, false),
         (
             "thread create",
             "advanced",

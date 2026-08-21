@@ -30,19 +30,25 @@ every verb) is in **[commands.md](commands.md)** — regenerate it from
 
 ## Command mental model
 
-Source of truth: `heddle help model`, `heddle help advanced`.
+Source of truth: `heddle help model`. Help topics stay; they are not verbs.
 
 **The everyday loop.**
 
 ```
 heddle status                     # what needs attention + the next safe action
 heddle diff                       # what changed in the worktree
-heddle commit -m "..."            # save one change (+ a Git checkpoint in Git-overlay repos)
+heddle capture -m "..."           # the save
 heddle start <name> --path ../<name>   # isolated thread with its own checkout
 heddle ready                      # prepare the thread; shows the semantic integration summary
-heddle land --thread <name>       # land a ready thread, optionally publish
+heddle land                       # land a ready thread
 heddle undo                       # thread-local rewind of the last operation
-heddle verify                     # prove Heddle / Git / worktree / remotes agree
+heddle query                      # ask a question across history
+heddle review
+heddle discuss
+heddle context
+heddle whoami                     # capture actor, then hosted auth
+heddle daemon
+heddle doctor
 ```
 
 **Core nouns.**
@@ -51,17 +57,14 @@ heddle verify                     # prove Heddle / Git / worktree / remotes agre
   provenance. `log`, `show`, `diff`, `undo`, `query` reason over states.
 - **Thread** — a named line of work with its own checkout and history. Use it
   for risky edits, agent work, or parallel experiments (no stash juggling).
-- **Capture** — a cheap recoverable save point on the current thread (`capture`).
-- **Commit** — the normal save path; Git-overlay repos also write the Git
-  checkpoint.
-- **Checkpoint** — the advanced Git-overlay boundary for already-captured work.
-- **Verify** — the proof surface; nonzero until every check is clean.
+- **Capture** — the save. Provenance, undo, and review start here.
+- **Annotation** — durable context that lives with the code (`context`).
+- **Discussion** — scoped chats that open, get turns, and resolve (`discuss`).
 
 **Three verb families you will use most:**
 
-- **Save & publish:** `capture` → `commit` → `push` (and `checkpoint` for the
-  Git-overlay boundary). `capture` is the low-level recoverable step; `commit`
-  is the everyday save.
+- **Save & publish:** `capture` is the save. The everyday loop does not run
+  `capture` then `commit`.
 - **Thread lifecycle:** `start` → `ready` → `land` (managed threads). Prefer
   `land` over the raw `merge`/`rebase` primitives.
 - **Collaboration & review:** `discuss` (open/append/resolve discussions

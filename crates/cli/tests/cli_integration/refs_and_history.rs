@@ -505,7 +505,7 @@ fn test_cli_help_verb_falls_through_to_clap() {
     let help_garbage = heddle(&["help", "definitely-not-a-thing"], Some(temp.path())).unwrap();
     assert!(
         help_garbage.contains("no topic or command 'definitely-not-a-thing'")
-            && help_garbage.contains("heddle help advanced")
+            && help_garbage.contains("heddle help model")
             && help_garbage.contains("heddle help"),
         "unknown name should print the missing-topic recovery message: {help_garbage}"
     );
