@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Ref-name validation rules.
 
+use objects::{error::HeddleError, object::is_reserved_heddle_namespace};
+
 /// Ref-name validation error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("invalid ref name: {name}")]
@@ -33,7 +35,22 @@ pub fn validate_ref_name(name: &str) -> Result<(), RefNameError> {
     {
         return Err(invalid(name));
     }
+    if is_reserved_heddle_namespace(name) {
+        return Err(invalid(name));
+    }
     Ok(())
+}
+
+/// Shared reservation chokepoint for every [`crate::refs::CoreRefBackend`].
+///
+/// Filesystem paths already call [`validate_ref_name`]. Hosted Postgres
+/// mutations (and the in-memory test backend) must go through this helper
+/// so a `ThreadName`/`MarkerName` minted via `new`/`From` cannot persist a
+/// user ref in the reserved `heddle/` namespace.
+///
+/// Serve-side `ListRefs`/`Pull` gating of synthetic roots remains weft#1728.
+pub fn require_user_ref_name(name: impl AsRef<str>) -> objects::error::Result<()> {
+    validate_ref_name(name.as_ref()).map_err(|error| HeddleError::InvalidRefName(error.name))
 }
 
 fn invalid(name: &str) -> RefNameError {
@@ -44,7 +61,9 @@ fn invalid(name: &str) -> RefNameError {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_ref_name;
+    use objects::error::HeddleError;
+
+    use super::{require_user_ref_name, validate_ref_name};
 
     #[test]
     fn rejects_ref_ending_in_lock() {
@@ -70,5 +89,25 @@ mod tests {
     #[test]
     fn allows_plain_ref() {
         assert!(validate_ref_name("refs/heads/main").is_ok());
+    }
+
+    #[test]
+    fn reserves_heddle_rooted_names() {
+        assert!(validate_ref_name("heddle/frontier/main/hc-abc").is_err());
+        assert!(validate_ref_name("Heddle/x").is_err());
+        assert!(validate_ref_name("heddle").is_ok());
+        assert!(validate_ref_name("heddlefoo").is_ok());
+        assert!(validate_ref_name("my/heddle").is_ok());
+        assert!(validate_ref_name("main@review").is_ok());
+        assert!(validate_ref_name("main@hd-abc").is_ok());
+    }
+
+    #[test]
+    fn require_user_ref_name_rejects_reserved_namespace() {
+        let error = require_user_ref_name("heddle/frontier/main/hc-abc").unwrap_err();
+        assert!(
+            matches!(error, HeddleError::InvalidRefName(name) if name == "heddle/frontier/main/hc-abc")
+        );
+        assert!(require_user_ref_name("main").is_ok());
     }
 }

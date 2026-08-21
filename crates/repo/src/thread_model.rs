@@ -104,7 +104,8 @@ pub fn validate_thread_id(value: &str) -> Result<(), ThreadIdError> {
         // A leading '-' is in the safe set (for `my-thread`) but makes the id
         // look like a CLI flag: `heddle land --thread -foo` parses `-foo` as an
         // option, and argv-template construction panics. Reject it at the source.
-        && !value.starts_with('-');
+        && !value.starts_with('-')
+        && !objects::object::is_reserved_heddle_namespace(value);
     if ok {
         Ok(())
     } else {
@@ -119,6 +120,11 @@ pub fn validate_thread_id(value: &str) -> Result<(), ThreadIdError> {
 /// `-`, collapse runs, drop `..`, and trim. Always returns a non-empty,
 /// [`validate_thread_id`]-valid string.
 fn suggest_thread_id(value: &str) -> String {
+    let value = if objects::object::is_reserved_heddle_namespace(value) {
+        value.split_once('/').map(|(_, rest)| rest).unwrap_or(value)
+    } else {
+        value
+    };
     let mut slug = String::with_capacity(value.len());
     for ch in value.chars() {
         if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
@@ -511,6 +517,21 @@ mod thread_id_tests {
                 "expected '{ok}' to be a valid thread id"
             );
         }
+    }
+
+    #[test]
+    fn rejects_reserved_heddle_namespace() {
+        for bad in ["heddle/frontier/main/hc-abc", "Heddle/x", "heddle/notes"] {
+            assert!(
+                ThreadId::new(bad).is_err(),
+                "expected '{bad}' to be rejected as a reserved heddle/ name"
+            );
+        }
+        assert!(
+            ThreadId::new("heddle").is_ok(),
+            "a bare 'heddle' thread remains a user name"
+        );
+        assert!(ThreadId::new("main@hd-abc").is_ok());
     }
 
     #[test]

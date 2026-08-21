@@ -114,7 +114,7 @@ mod tests {
     };
 
     use super::CoreRefBackend;
-    use crate::refs::{Head, RefBackend, RefExpectation, RefUpdate};
+    use crate::refs::{Head, RefBackend, RefExpectation, RefUpdate, require_user_ref_name};
 
     /// In-memory backend that does **not** override `resolve`, so the
     /// trait's default `resolve` (the only non-Pg, non-`RefManager`
@@ -136,6 +136,9 @@ mod tests {
                 .ok_or_else(|| HeddleError::Config("no head".to_string()))
         }
         fn write_head(&self, head: &Head) -> Result<(), HeddleError> {
+            if let Head::Attached { thread } = head {
+                require_user_ref_name(thread.as_str())?;
+            }
             *self.head.lock_or_poisoned() = Some(head.clone());
             Ok(())
         }
@@ -150,6 +153,7 @@ mod tests {
             Ok(self.threads.lock_or_poisoned().get(name.as_str()).copied())
         }
         fn set_thread(&self, name: &ThreadName, state: &StateId) -> Result<(), HeddleError> {
+            require_user_ref_name(name.as_str())?;
             self.threads
                 .lock_or_poisoned()
                 .insert(name.as_str().to_string(), *state);
@@ -189,6 +193,7 @@ mod tests {
             name: &MarkerName,
             state: &StateId,
         ) -> Result<(), HeddleError> {
+            require_user_ref_name(name.as_str())?;
             self.markers
                 .lock_or_poisoned()
                 .insert(name.as_str().to_string(), *state);
@@ -200,6 +205,7 @@ mod tests {
             _expected: RefExpectation<StateId>,
             state: &StateId,
         ) -> Result<(), HeddleError> {
+            require_user_ref_name(name.as_str())?;
             self.markers
                 .lock_or_poisoned()
                 .insert(name.as_str().to_string(), *state);
@@ -223,7 +229,24 @@ mod tests {
                 .map(|k| MarkerName::new(k.as_str()))
                 .collect())
         }
-        fn update_refs(&self, _updates: &[RefUpdate]) -> Result<(), HeddleError> {
+        fn update_refs(&self, updates: &[RefUpdate]) -> Result<(), HeddleError> {
+            for update in updates {
+                match update {
+                    RefUpdate::Thread { name, new: Some(_), .. } => {
+                        require_user_ref_name(name.as_str())?;
+                    }
+                    RefUpdate::Marker { name, new: Some(_), .. } => {
+                        require_user_ref_name(name.as_str())?;
+                    }
+                    RefUpdate::Head {
+                        new: Head::Attached { thread },
+                        ..
+                    } => {
+                        require_user_ref_name(thread.as_str())?;
+                    }
+                    _ => {}
+                }
+            }
             Ok(())
         }
         // `resolve` deliberately left unimplemented — exercises the default.
@@ -400,5 +423,22 @@ mod tests {
                 new: Some(thread_id),
             }])
             .unwrap();
+    }
+
+    #[test]
+    fn mem_backend_rejects_reserved_heddle_thread_name() {
+        let backend = MemRefBackend::default();
+        let state = crate::refs::fresh_state_id();
+        let reserved = ThreadName::new("heddle/frontier/main/hc-abc");
+        let error = backend.set_thread(&reserved, &state).unwrap_err();
+        assert!(matches!(
+            error,
+            HeddleError::InvalidRefName(name) if name == "heddle/frontier/main/hc-abc"
+        ));
+        assert!(
+            pollster::block_on(backend.get_thread(&reserved))
+                .unwrap()
+                .is_none()
+        );
     }
 }

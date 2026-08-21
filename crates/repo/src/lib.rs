@@ -31,6 +31,7 @@ mod ephemeral_thread;
 mod fsmonitor;
 mod git_ref_name;
 pub mod git_worktree_status;
+mod grant_audience;
 mod hooks;
 pub mod identity;
 pub mod lazy_hydrator;
@@ -142,6 +143,7 @@ pub use git_ref_name::{
     GitRefContentNamespace, GitRefKind, GitRefName, GitRefNamespace, ParsedGitRef,
     REMOTE_NAME_FOR_LOCAL_GIT_REPO, is_reserved_git_remote_name,
 };
+pub use grant_audience::{GrantRole, audience_tier_for_grant};
 pub use hooks::{Hook, HookContext, HookManager, HookResponse};
 pub use merge_state::{MergeState, MergeStateManager};
 pub use objects::{

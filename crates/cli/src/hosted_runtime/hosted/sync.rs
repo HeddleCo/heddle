@@ -26,7 +26,7 @@ use objects::{
     Progress,
     object::{
         AnnotationStatus, ContentHash, ContextBlob, ContextTarget, Discussion, DiscussionsBlob,
-        MarkerName, StateAttachmentBody, StateAttachmentKind, StateId, ThreadName,
+        MarkerName, StateAttachmentBody, StateAttachmentKind, StateId, ThreadName, TreeEntryTarget,
     },
     store::{AnyStore, ObjectStore, PackObjectId, SnapshotCommitDescriptor},
 };
@@ -40,9 +40,9 @@ use sley::{
 use tempfile::NamedTempFile;
 use tokio::sync::mpsc;
 use wire::{
-    GitLaneTransferIntent, ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, ProtocolError,
-    PullComplete, PushComplete, RefEntry, RefUpdated, RepositoryTransferPlan,
-    admit_declared_received_len,
+    AdvertisedRef, GitLaneTransferIntent, ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject,
+    ProtocolError, PullComplete, PushComplete, RefEntry, RefKind, RefUpdated,
+    RepositoryTransferPlan, admit_declared_received_len,
 };
 
 use super::{
@@ -190,13 +190,13 @@ pub(crate) fn decode_pull_refs(
         .into_iter()
         .map(|(name, state_id, is_thread, revision_address)| {
             let state_id = decode_bootstrap_state_id(state_id, "ref state")?;
-            Ok(HostedRefEntry {
+            Ok(HostedRefEntry::from_advertised(
                 name,
                 state_id,
                 is_thread,
                 revision_address,
-                thread_id: None,
-            })
+                None,
+            ))
         })
         .collect::<Result<Vec<_>, ProtocolError>>()?;
     let _ = head_state;
@@ -382,9 +382,49 @@ pub struct PullObjectMix {
 pub struct HostedRefEntry {
     pub name: String,
     pub state_id: StateId,
-    pub is_thread: bool,
+    pub kind: RefKind,
     pub revision_address: String,
     pub thread_id: Option<String>,
+}
+
+impl HostedRefEntry {
+    pub fn from_advertised(
+        name: String,
+        state_id: StateId,
+        advertised_as_thread: bool,
+        revision_address: String,
+        thread_id: Option<String>,
+    ) -> Self {
+        let kind = RefKind::from_advertised_name(&name, advertised_as_thread);
+        let thread_id = if kind.is_user_thread() {
+            thread_id
+        } else {
+            None
+        };
+        Self {
+            name,
+            state_id,
+            kind,
+            revision_address,
+            thread_id,
+        }
+    }
+
+    pub fn is_user_thread(&self) -> bool {
+        self.kind.is_user_thread()
+    }
+
+    pub fn is_marker(&self) -> bool {
+        self.kind.is_marker()
+    }
+
+    pub fn to_wire_entry(&self) -> RefEntry {
+        RefEntry {
+            name: self.name.clone(),
+            state_id: self.state_id,
+            kind: self.kind,
+        }
+    }
 }
 
 impl PullObjectMix {
@@ -491,11 +531,7 @@ impl HostedClient {
             .list_refs_with_revision_addresses(repo_path)
             .await?
             .into_iter()
-            .map(|entry| RefEntry {
-                name: entry.name,
-                state_id: entry.state_id,
-                is_thread: entry.is_thread,
-            })
+            .map(|entry| entry.to_wire_entry())
             .collect())
     }
 
@@ -520,7 +556,8 @@ impl HostedClient {
             while let Some(response) = stream.next().await.map_err(hosted_to_protocol_error)? {
                 match response.frame {
                     Some(list_refs_response::Frame::Item(entry)) => {
-                        let thread_id = if entry.is_thread {
+                        let kind = RefKind::from_advertised_name(&entry.name, entry.is_thread);
+                        let thread_id = if kind.is_user_thread() {
                             if entry.thread_id.is_empty() {
                                 return Err(ProtocolError::InvalidState(format!(
                                     "hosted thread ref '{}' is missing its stable identity",
@@ -539,7 +576,7 @@ impl HostedClient {
                                         "ref is missing its state ID".to_string(),
                                     )
                                 })?,
-                            is_thread: entry.is_thread,
+                            kind,
                             revision_address: entry.revision_address,
                             thread_id,
                         });
@@ -643,7 +680,7 @@ impl HostedClient {
                 .as_deref()
                 .unwrap_or_default()
                 .iter()
-                .find(|entry| entry.is_thread && entry.name == name)
+                .find(|entry| entry.is_user_thread() && entry.name == name)
                 .and_then(|entry| entry.thread_id.clone())
                 .unwrap_or_default()
         } else {
@@ -926,7 +963,7 @@ impl HostedClient {
         let remote_refs = self.list_refs_with_revision_addresses(repo_path).await?;
         let remote_target = remote_refs
             .iter()
-            .find(|entry| entry.is_thread && entry.name == target_thread);
+            .find(|entry| entry.is_user_thread() && entry.name == target_thread);
         let target_thread_id = remote_target
             .and_then(|entry| entry.thread_id.clone())
             .unwrap_or_default();
@@ -1277,21 +1314,24 @@ impl HostedClient {
         remote_thread: &str,
         local_thread: Option<&str>,
     ) -> Result<(PullComplete, PullProfile), ProtocolError> {
-        self.pull_exchange(
-            repo,
-            repo_path,
-            remote_thread,
-            PullOptions {
-                local_thread,
-                depth: None,
-                target_state: None,
-                materialization: PullMaterialization::Full,
-                publish_refs: true,
-                wanted_hashes: None,
-            },
-        )
-        .await
-        .map(|exchange| (exchange.result, exchange.profile))
+        let exchange = self
+            .pull_exchange(
+                repo,
+                repo_path,
+                remote_thread,
+                PullOptions {
+                    local_thread,
+                    depth: None,
+                    target_state: None,
+                    materialization: PullMaterialization::Full,
+                    publish_refs: true,
+                    wanted_hashes: None,
+                },
+            )
+            .await?;
+        self.sync_synthetic_frontiers(repo, repo_path, None, PullMaterialization::Full)
+            .await?;
+        Ok((exchange.result, exchange.profile))
     }
 
     pub async fn pull_with_depth_and_materialization(
@@ -1560,9 +1600,15 @@ impl HostedClient {
         remote_thread: &str,
         options: PullOptions<'_>,
     ) -> Result<PullComplete, ProtocolError> {
-        self.pull_exchange(repo, repo_path, remote_thread, options)
+        let result = self
+            .pull_exchange(repo, repo_path, remote_thread, options)
             .await
-            .map(|exchange| exchange.result)
+            .map(|exchange| exchange.result)?;
+        if options.publish_refs {
+            self.sync_synthetic_frontiers(repo, repo_path, options.depth, options.materialization)
+                .await?;
+        }
+        Ok(result)
     }
 
     async fn pull_exchange(
@@ -2242,7 +2288,7 @@ impl HostedClient {
             .list_refs(repo_path)
             .await?
             .into_iter()
-            .filter(|entry| !entry.is_thread)
+            .filter(|entry| entry.is_marker())
             .map(|entry| (entry.name, entry.state_id))
             .collect::<HashMap<_, _>>();
         for marker in local_markers {
@@ -2288,20 +2334,115 @@ impl HostedClient {
         repo_path: &str,
     ) -> Result<(), ProtocolError> {
         let remote_markers = self.list_refs(repo_path).await?;
-        for marker in remote_markers.into_iter().filter(|entry| !entry.is_thread) {
-            if !repo.store().has_state(&marker.state_id)? {
+        for entry in remote_markers {
+            if !repo.store().has_state(&entry.state_id)? {
                 continue;
             }
-            let marker_name = MarkerName::from(marker.name.as_str());
-            match repo.refs().get_marker(&marker_name)? {
-                Some(existing) if existing == marker.state_id => {}
-                Some(existing) => repo.set_marker_recorded_cas(
-                    &marker_name,
-                    refs::RefExpectation::Value(existing),
-                    &marker.state_id,
-                )?,
-                None => repo.create_marker_recorded(&marker_name, &marker.state_id)?,
+            match entry.advertised() {
+                Ok(AdvertisedRef::Marker(marker_name)) => {
+                    match repo.refs().get_marker(&marker_name)? {
+                        Some(existing) if existing == entry.state_id => {}
+                        Some(existing) => repo.set_marker_recorded_cas(
+                            &marker_name,
+                            refs::RefExpectation::Value(existing),
+                            &entry.state_id,
+                        )?,
+                        None => repo.create_marker_recorded(&marker_name, &entry.state_id)?,
+                    }
+                }
+                Ok(AdvertisedRef::SyntheticFrontier(_) | AdvertisedRef::Thread(_)) | Err(_) => {}
             }
+        }
+        Ok(())
+    }
+
+    async fn sync_synthetic_frontiers(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        depth: Option<u32>,
+        materialization: PullMaterialization,
+    ) -> Result<(), ProtocolError> {
+        let remote_refs = self.list_refs(repo_path).await?;
+        for entry in remote_refs {
+            match entry.advertised() {
+                Ok(AdvertisedRef::SyntheticFrontier(name)) => {
+                    self.fetch_synthetic_frontier_root(
+                        repo,
+                        repo_path,
+                        &name,
+                        entry.state_id,
+                        depth,
+                        materialization,
+                    )
+                    .await?;
+                    persist_synthetic_frontier(repo, &name, entry.state_id)?;
+                }
+                Ok(AdvertisedRef::Marker(_) | AdvertisedRef::Thread(_)) | Err(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn fetch_advertised_synthetic_frontier_objects(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        advertised: &[HostedRefEntry],
+        depth: Option<u32>,
+        materialization: PullMaterialization,
+    ) -> Result<(), ProtocolError> {
+        for entry in advertised {
+            let Ok(AdvertisedRef::SyntheticFrontier(name)) = entry.to_wire_entry().advertised()
+            else {
+                continue;
+            };
+            self.fetch_synthetic_frontier_root(
+                repo,
+                repo_path,
+                &name,
+                entry.state_id,
+                depth,
+                materialization,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn fetch_synthetic_frontier_root(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        name: &objects::object::SyntheticFrontierName,
+        state_id: StateId,
+        depth: Option<u32>,
+        materialization: PullMaterialization,
+    ) -> Result<(), ProtocolError> {
+        if synthetic_frontier_root_locally_complete(repo, state_id, depth, materialization)? {
+            return Ok(());
+        }
+        let address = synthetic_frontier_pull_address(name, state_id);
+        self.pull_exchange(
+            repo,
+            repo_path,
+            address.remote_thread.as_str(),
+            PullOptions {
+                local_thread: None,
+                depth,
+                target_state: Some(address.target_state),
+                materialization,
+                publish_refs: false,
+                wanted_hashes: None,
+            },
+        )
+        .await?;
+        if !synthetic_frontier_root_locally_complete(repo, state_id, depth, materialization)? {
+            return Err(ProtocolError::InvalidState(format!(
+                "synthetic frontier {} advertised {} but the requested object closure is still incomplete after pull",
+                name.as_name(),
+                state_id.to_string_full()
+            )));
         }
         Ok(())
     }
@@ -2311,12 +2452,141 @@ impl HostedClient {
         repo: &Repository,
         repo_path: &str,
         checkpoint: &[u8],
+        depth: Option<u32>,
+        materialization: PullMaterialization,
     ) -> Result<(), ProtocolError> {
         if !apply_marker_snapshot(repo, checkpoint)? {
             self.sync_local_markers(repo, repo_path).await?;
         }
+        self.sync_synthetic_frontiers(repo, repo_path, depth, materialization)
+            .await?;
         Ok(())
     }
+}
+
+struct SyntheticFrontierPullAddress {
+    remote_thread: ThreadName,
+    target_state: StateId,
+}
+
+/// Address a synthetic-root pull through the owning user thread.
+///
+/// Synthetic names are absent from ListThreads and have no thread identity.
+/// The exchange must use [`SyntheticFrontierName::owning_thread`]; the
+/// synthetic state stays the pull `target_state`.
+fn synthetic_frontier_pull_address(
+    name: &objects::object::SyntheticFrontierName,
+    target_state: StateId,
+) -> SyntheticFrontierPullAddress {
+    SyntheticFrontierPullAddress {
+        remote_thread: name.owning_thread(),
+        target_state,
+    }
+}
+
+/// True when the requested synthetic-root closure is already present locally.
+///
+/// `has_state` is not enough: a prior lazy or shallow pull can leave the State
+/// while blobs or ancestors are still absent. Full materialization uses the
+/// pull planner's [`wire::enumerate_state_closure_with_options`] walk; lazy
+/// requires the state/tree graph at `depth` and permits missing blobs.
+fn synthetic_frontier_root_locally_complete(
+    repo: &Repository,
+    state_id: StateId,
+    depth: Option<u32>,
+    materialization: PullMaterialization,
+) -> Result<bool, ProtocolError> {
+    if !repo.store().has_state(&state_id)? {
+        return Ok(false);
+    }
+    let options = wire::StateClosureOptions {
+        depth,
+        exclude_states: Vec::new(),
+    };
+    match wire::enumerate_state_closure_with_options(repo.store(), state_id, options) {
+        Ok(_) => Ok(true),
+        Err(ProtocolError::ObjectNotFound(_)) => {
+            if materialization.allows_partial_fetch() {
+                lazy_synthetic_frontier_graph_present(repo, state_id, depth)
+            } else {
+                Ok(false)
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn lazy_synthetic_frontier_graph_present(
+    repo: &Repository,
+    state_id: StateId,
+    depth: Option<u32>,
+) -> Result<bool, ProtocolError> {
+    let mut seen_states = HashSet::new();
+    let mut seen_trees = HashSet::new();
+    let mut pending = vec![(state_id, 0u32)];
+    while let Some((id, generation)) = pending.pop() {
+        if !seen_states.insert(id) {
+            continue;
+        }
+        let Some(state) = repo.store().get_state(&id)? else {
+            return Ok(false);
+        };
+        if !tree_closure_present(repo, state.tree, &mut seen_trees)? {
+            return Ok(false);
+        }
+        if let Some(provenance) = state.provenance
+            && !tree_closure_present(repo, provenance, &mut seen_trees)?
+        {
+            return Ok(false);
+        }
+        if depth.map(|max| generation < max).unwrap_or(true) {
+            pending.extend(
+                state
+                    .parents
+                    .iter()
+                    .copied()
+                    .map(|parent| (parent, generation + 1)),
+            );
+        }
+    }
+    Ok(true)
+}
+
+fn tree_closure_present(
+    repo: &Repository,
+    tree_hash: ContentHash,
+    seen: &mut HashSet<ContentHash>,
+) -> Result<bool, ProtocolError> {
+    if !seen.insert(tree_hash) {
+        return Ok(true);
+    }
+    let Some(tree) = repo.store().get_tree(&tree_hash)? else {
+        return Ok(false);
+    };
+    for entry in tree.entries() {
+        if let TreeEntryTarget::Tree { hash } = entry.target()
+            && !tree_closure_present(repo, *hash, seen)?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn persist_synthetic_frontier(
+    repo: &Repository,
+    name: &objects::object::SyntheticFrontierName,
+    state_id: StateId,
+) -> Result<(), ProtocolError> {
+    if !repo.store().has_state(&state_id)? {
+        return Err(ProtocolError::InvalidState(format!(
+            "synthetic frontier {} advertised {} but the target state is absent",
+            name.as_name(),
+            state_id.to_string_full()
+        )));
+    }
+    repo.refs().set_synthetic_frontier(name, &state_id)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2340,7 +2610,7 @@ fn expected_remote_head_from_refs(
 ) -> ExpectedRemoteHead {
     remote_refs
         .iter()
-        .find(|entry| entry.is_thread && entry.name == target_thread)
+        .find(|entry| entry.kind.is_user_thread() && entry.name == target_thread)
         .map(|entry| entry.state_id)
         .map_or(ExpectedRemoteHead::Missing, ExpectedRemoteHead::State)
 }
@@ -2975,11 +3245,16 @@ fn apply_marker_entry(
 #[cfg(test)]
 mod pull_bootstrap_tests {
     use chrono::Utc;
-    use objects::object::{
-        Annotation, AnnotationKind, AnnotationScope, Attribution, Blob, DiscussionResolution,
-        DiscussionTurn, Principal, StateAttachment, SymbolAnchor, VisibilityTier,
+    use objects::{
+        object::{
+            Annotation, AnnotationKind, AnnotationScope, Attribution, Blob, DiscussionResolution,
+            DiscussionTurn, Principal, State, StateAttachment, SymbolAnchor, Tree, TreeEntry,
+            VisibilityTier,
+        },
+        store::ObjectStore,
     };
     use tempfile::TempDir;
+    use wire::{AdvertisedRef, RefKind};
 
     use super::*;
 
@@ -3072,11 +3347,203 @@ mod pull_bootstrap_tests {
         assert_eq!(decoded.refs.len(), 2);
         assert_eq!(decoded.refs[0].name, "main");
         assert_eq!(decoded.refs[0].state_id, main);
-        assert!(decoded.refs[0].is_thread);
+        assert_eq!(decoded.refs[0].kind, RefKind::Thread);
         assert_eq!(decoded.refs[0].revision_address, "git:0123456789abcdef");
         assert_eq!(decoded.refs[1].name, "release");
         assert_eq!(decoded.refs[1].state_id, release);
-        assert!(!decoded.refs[1].is_thread);
+        assert_eq!(decoded.refs[1].kind, RefKind::Marker);
+    }
+
+    #[test]
+    fn synthetic_frontier_root_skips_only_when_requested_closure_is_complete() {
+        let temp = TempDir::new().expect("temp repo");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        let blob = Blob::from("frontier blob\n");
+        let tree = Tree::from_entries(vec![TreeEntry::file("README", blob.hash(), false).unwrap()]);
+        let tree_hash = repo.store().put_tree(&tree).unwrap();
+        let state = State::new(
+            tree_hash,
+            Vec::new(),
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        );
+        repo.store().put_state(&state).unwrap();
+        let state_id = state.id();
+
+        assert!(
+            repo.store().has_state(&state_id).unwrap(),
+            "has_state alone must not skip an incomplete eager pull"
+        );
+        assert!(
+            !synthetic_frontier_root_locally_complete(
+                &repo,
+                state_id,
+                None,
+                PullMaterialization::Full,
+            )
+            .unwrap(),
+            "missing blobs must force an eager upgrade"
+        );
+        assert!(
+            synthetic_frontier_root_locally_complete(
+                &repo,
+                state_id,
+                None,
+                PullMaterialization::Lazy,
+            )
+            .unwrap(),
+            "lazy materialization may leave blobs absent"
+        );
+
+        repo.store().put_blob(&blob).unwrap();
+        assert!(
+            synthetic_frontier_root_locally_complete(
+                &repo,
+                state_id,
+                None,
+                PullMaterialization::Full,
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn synthetic_frontier_root_upgrades_when_ancestors_are_missing() {
+        let temp = TempDir::new().expect("temp repo");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        let blob = Blob::from("child\n");
+        repo.store().put_blob(&blob).unwrap();
+        let tree = Tree::from_entries(vec![TreeEntry::file("README", blob.hash(), false).unwrap()]);
+        let tree_hash = repo.store().put_tree(&tree).unwrap();
+        let parent = State::new(
+            tree_hash,
+            Vec::new(),
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        );
+        let child = State::new(
+            tree_hash,
+            vec![parent.id()],
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        );
+        repo.store().put_state(&child).unwrap();
+
+        assert!(
+            synthetic_frontier_root_locally_complete(
+                &repo,
+                child.id(),
+                Some(0),
+                PullMaterialization::Full,
+            )
+            .unwrap(),
+            "depth 0 is the tip only"
+        );
+        assert!(
+            !synthetic_frontier_root_locally_complete(
+                &repo,
+                child.id(),
+                None,
+                PullMaterialization::Full,
+            )
+            .unwrap(),
+            "a deeper pull must see the missing parent"
+        );
+        assert!(
+            !synthetic_frontier_root_locally_complete(
+                &repo,
+                child.id(),
+                None,
+                PullMaterialization::Lazy,
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn synthetic_frontier_pull_uses_owning_thread_and_keeps_synthetic_target() {
+        let change = objects::object::ChangeId::from_bytes([9; 16]);
+        let name = objects::object::SyntheticFrontierName::new("feature/auth", change)
+            .expect("fixture synthetic name");
+        let state = StateId::from_bytes([7; 32]);
+        let address = synthetic_frontier_pull_address(&name, state);
+        assert_eq!(address.remote_thread.as_str(), "feature/auth");
+        assert_eq!(
+            address.remote_thread.as_str(),
+            name.owning_thread().as_str()
+        );
+        assert_ne!(address.remote_thread.as_str(), name.as_name());
+        assert_eq!(address.target_state, state);
+    }
+
+    #[test]
+    fn folded_synthetic_frontier_is_not_a_thread_or_marker() {
+        let change = objects::object::ChangeId::from_bytes([9; 16]);
+        let frontier = objects::object::SyntheticFrontierName::new("main", change)
+            .unwrap()
+            .as_name();
+        let state = StateId::from_bytes([7; 32]);
+        let payload: PullRefsPayload = (
+            "main".to_string(),
+            Some(state.as_bytes().to_vec()),
+            vec![(
+                frontier.clone(),
+                state.as_bytes().to_vec(),
+                true,
+                String::new(),
+            )],
+        );
+        let checkpoint = format!(
+            "{PULL_REFS_LINE_PREFIX}{}\t{}\n",
+            hex::encode(rmp_serde::to_vec_named(&payload).expect("encode refs fixture")),
+            StateId::from_bytes([0; 32]).to_string_full(),
+        );
+        let decoded = decode_pull_refs(checkpoint.as_bytes())
+            .expect("decode")
+            .expect("refs");
+        assert_eq!(decoded.refs[0].kind, RefKind::SyntheticFrontierRoot);
+        assert!(!decoded.refs[0].is_user_thread());
+        assert!(!decoded.refs[0].is_marker());
+        match decoded.refs[0].to_wire_entry().advertised() {
+            Ok(AdvertisedRef::SyntheticFrontier(name)) => assert_eq!(name.as_name(), frontier),
+            other => panic!("synthetic must stay synthetic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn folded_synthetic_frontier_survives_marker_snapshot() {
+        let temp = TempDir::new().expect("temp repo");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        std::fs::write(temp.path().join("README.md"), "frontier\n").expect("write fixture");
+        let snapshot = repo
+            .snapshot(Some("seed".to_string()), None)
+            .expect("snapshot");
+        let checkpoint = format!(
+            "heddle-markers-v1\nrelease\t{}\n",
+            snapshot.state_id.to_string_full()
+        );
+        assert!(
+            apply_marker_snapshot(&repo, checkpoint.as_bytes()).expect("apply snapshot"),
+            "a folded marker snapshot must still leave room for synthetic sync"
+        );
+        let change = objects::object::ChangeId::from_bytes([9; 16]);
+        let frontier = objects::object::SyntheticFrontierName::new("main", change).unwrap();
+        persist_synthetic_frontier(&repo, &frontier, snapshot.state_id)
+            .expect("synthetic persist is independent of the marker snapshot");
+        assert!(
+            repo.store()
+                .has_state(&snapshot.state_id)
+                .expect("has_state")
+        );
+        assert_eq!(
+            repo.refs()
+                .get_marker(&MarkerName::from("release"))
+                .expect("read marker"),
+            Some(snapshot.state_id)
+        );
+        assert_eq!(
+            repo.refs()
+                .get_synthetic_frontier(&frontier)
+                .expect("read synthetic"),
+            Some(snapshot.state_id)
+        );
     }
 
     #[test]
@@ -3175,7 +3642,7 @@ fn hosted_thread_id(
 ) -> Result<String, ProtocolError> {
     remote_refs
         .iter()
-        .find(|entry| entry.is_thread && entry.name == thread_name)
+        .find(|entry| entry.is_user_thread() && entry.name == thread_name)
         .and_then(|entry| entry.thread_id.clone())
         .ok_or_else(|| ProtocolError::ObjectNotFound(format!("hosted thread '{thread_name}'")))
 }
@@ -3755,7 +4222,8 @@ mod transfer_id_tests {
     use repo::Repository;
     use tempfile::TempDir;
     use wire::{
-        GitLaneTransferIntent, ObjectId, ObjectInfo, ObjectType, RefEntry, RepositoryTransferPlan,
+        GitLaneTransferIntent, ObjectId, ObjectInfo, ObjectType, RefEntry, RefKind,
+        RepositoryTransferPlan,
     };
 
     use super::{
@@ -3995,7 +4463,7 @@ mod transfer_id_tests {
         let remote = [RefEntry {
             name: "main".to_string(),
             state_id: base.state_id,
-            is_thread: true,
+            kind: RefKind::Thread,
         }];
 
         assert_eq!(

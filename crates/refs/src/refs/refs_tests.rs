@@ -328,6 +328,26 @@ fn test_invalid_marker_name_path_traversal() {
     let result = refs.create_marker(&MarkerName::new("../../../root"), &id);
     assert!(matches!(result, Err(HeddleError::InvalidRefName(_))));
 }
+
+#[test]
+fn reserved_heddle_namespace_is_rejected_at_the_store_chokepoint() {
+    let (_temp, refs) = create_ref_manager();
+    let id = crate::refs::fresh_state_id();
+    assert!(matches!(
+        refs.set_thread(&ThreadName::new("heddle/frontier/main/hc-abc"), &id),
+        Err(HeddleError::InvalidRefName(_))
+    ));
+    assert!(matches!(
+        refs.create_marker(&MarkerName::new("heddle/notes"), &id),
+        Err(HeddleError::InvalidRefName(_))
+    ));
+    assert!(refs.set_thread(&ThreadName::new("heddle"), &id).is_ok());
+    assert!(
+        refs.set_thread(&ThreadName::new("main@hd-abc"), &id)
+            .is_ok()
+    );
+}
+
 #[test]
 fn test_set_remote_thread_waits_for_refs_lock() {
     let (_temp, refs) = create_ref_manager();
@@ -1372,6 +1392,7 @@ mod write_read_conformance {
 
     const MANAGER_SRC: &str = include_str!("refs_manager.rs");
     const TXNS_SRC: &str = include_str!("refs_transactions.rs");
+    const SYNTHETIC_SRC: &str = include_str!("refs_synthetic.rs");
 
     /// Everything before the in-file `#[cfg(test)]` module — the invariant is
     /// enforced on production code only, never on the tests' own scaffolding.
@@ -1530,6 +1551,10 @@ mod write_read_conformance {
                 "write bypass: `{writer}` must route through `write_chokepoint`"
             );
         }
+        assert!(
+            first_body(&[SYNTHETIC_SRC], "set_synthetic_frontier").contains("write_chokepoint("),
+            "write bypass: `set_synthetic_frontier` must route through `write_chokepoint`"
+        );
     }
 
     /// Every public ref READER funnels through `reconciled_load` and never calls

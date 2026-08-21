@@ -31,7 +31,9 @@ pub use message_hosted::{
 };
 pub use message_objects::{ObjectData, ObjectRequest};
 pub use message_pushpull::{PullComplete, PushComplete};
-pub use message_refs::{HeadInfo, RefEntry, RefFilter, RefUpdated, RefsList};
+pub use message_refs::{
+    AdvertisedRef, AdvertisedRefError, HeadInfo, RefEntry, RefFilter, RefKind, RefUpdated, RefsList,
+};
 pub use message_status::{
     Error, ErrorCode, RemoteCursorFailure, RemoteCursorReason, RemoteDuration, RemoteFailureCode,
     RemoteFailureDetail, RemoteTimestamp,

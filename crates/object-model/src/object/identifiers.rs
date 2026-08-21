@@ -106,6 +106,59 @@ string_newtype!(
     MarkerName
 );
 
+/// First path segment reserved for Heddle-internal refs.
+///
+/// A user may still name a thread `heddle`, `heddlefoo`, or `my/heddle`.
+/// Only a `heddle/`-rooted name is reserved (Invariant C).
+pub const RESERVED_REF_SEGMENT: &str = "heddle";
+
+/// True when `name` occupies the reserved `heddle/` namespace.
+///
+/// The check is case-insensitive on the first segment so a raw-Git branch
+/// `Heddle/frontier/...` cannot slip past the reservation.
+pub fn is_reserved_heddle_namespace(name: &str) -> bool {
+    let mut parts = name.split('/');
+    match (parts.next(), parts.next()) {
+        (Some(first), Some(_)) => first.eq_ignore_ascii_case(RESERVED_REF_SEGMENT),
+        _ => false,
+    }
+}
+
+/// Rejection when a user thread or marker name occupies `heddle/`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "ref name '{name}' is reserved: the heddle/ namespace is internal and cannot be a user thread or marker"
+)]
+pub struct ReservedRefNameError {
+    pub name: String,
+}
+
+impl ThreadName {
+    /// Fallible constructor for user or imported names. Rejects the reserved
+    /// `heddle/` namespace. Trusted reconstruction of already-stored names
+    /// still uses [`ThreadName::new`].
+    pub fn try_new(s: impl Into<String>) -> Result<Self, ReservedRefNameError> {
+        let name = s.into();
+        if is_reserved_heddle_namespace(&name) {
+            return Err(ReservedRefNameError { name });
+        }
+        Ok(Self(name))
+    }
+}
+
+impl MarkerName {
+    /// Fallible constructor for user or imported names. Rejects the reserved
+    /// `heddle/` namespace. Trusted reconstruction of already-stored names
+    /// still uses [`MarkerName::new`].
+    pub fn try_new(s: impl Into<String>) -> Result<Self, ReservedRefNameError> {
+        let name = s.into();
+        if is_reserved_heddle_namespace(&name) {
+            return Err(ReservedRefNameError { name });
+        }
+        Ok(Self(name))
+    }
+}
+
 string_newtype!(
     /// Checkout/lane scope identifier for scoped operations.
     Scope
@@ -154,5 +207,26 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(ThreadName::new("main"), 1);
         assert_eq!(map.get("main"), Some(&1));
+    }
+
+    #[test]
+    fn reserved_namespace_is_heddle_rooted_only() {
+        assert!(!is_reserved_heddle_namespace("heddle"));
+        assert!(!is_reserved_heddle_namespace("heddlefoo"));
+        assert!(!is_reserved_heddle_namespace("my/heddle"));
+        assert!(!is_reserved_heddle_namespace("main@review"));
+        assert!(is_reserved_heddle_namespace("heddle/frontier/main/hc-abc"));
+        assert!(is_reserved_heddle_namespace("Heddle/x"));
+    }
+
+    #[test]
+    fn try_new_rejects_reserved_thread_and_marker_names() {
+        assert!(ThreadName::try_new("heddle/frontier/main/hc-1").is_err());
+        assert!(MarkerName::try_new("heddle/notes").is_err());
+        assert_eq!(ThreadName::try_new("heddle").unwrap().as_str(), "heddle");
+        assert_eq!(
+            ThreadName::try_new("main@hd-abc").unwrap().as_str(),
+            "main@hd-abc"
+        );
     }
 }

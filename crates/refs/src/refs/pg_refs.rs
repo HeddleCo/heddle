@@ -16,7 +16,31 @@ use runtime_bridge::RuntimeBridge;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use super::{CoreRefBackend, Head, RefBackend, RefExpectation, RefUpdate};
+use super::{
+    CoreRefBackend, Head, RefBackend, RefExpectation, RefUpdate, require_user_ref_name,
+};
+
+/// Reject reserved `heddle/` names before any SQL. Serve-side ListRefs/Pull
+/// gating of synthetic roots remains weft#1728; this chokepoint only stops a
+/// hosted caller persisting a *user* thread/marker in that namespace.
+fn require_user_ref_update(update: &RefUpdate) -> Result<()> {
+    match update {
+        RefUpdate::Thread { name, new: Some(_), .. } => require_user_ref_name(name.as_str()),
+        RefUpdate::Marker { name, new: Some(_), .. } => require_user_ref_name(name.as_str()),
+        RefUpdate::Head {
+            new: Head::Attached { thread },
+            ..
+        } => require_user_ref_name(thread.as_str()),
+        _ => Ok(()),
+    }
+}
+
+fn require_user_head(head: &Head) -> Result<()> {
+    match head {
+        Head::Attached { thread } => require_user_ref_name(thread.as_str()),
+        Head::Detached { .. } => Ok(()),
+    }
+}
 
 fn sqlx_err(e: sqlx::Error) -> HeddleError {
     HeddleError::Io(std::io::Error::other(e.to_string()))
@@ -175,6 +199,7 @@ impl CoreRefBackend for PgRefBackend {
     }
 
     fn write_head(&self, head: &Head) -> Result<()> {
+        require_user_head(head)?;
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         let (thread, state_id): (Option<String>, Option<Vec<u8>>) = match head {
@@ -223,6 +248,7 @@ impl CoreRefBackend for PgRefBackend {
         Self::get_ref_async(self.pool.as_ref(), self.repo_id, name.as_str(), true).await
     }
     fn set_thread(&self, name: &ThreadName, state: &StateId) -> Result<()> {
+        require_user_ref_name(name.as_str())?;
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         let name = name.to_string();
@@ -235,6 +261,7 @@ impl CoreRefBackend for PgRefBackend {
         expected: RefExpectation<StateId>,
         state: &StateId,
     ) -> Result<()> {
+        require_user_ref_name(name.as_str())?;
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         let name = name.to_string();
@@ -275,6 +302,7 @@ impl CoreRefBackend for PgRefBackend {
         Self::get_ref_async(self.pool.as_ref(), self.repo_id, name.as_str(), false).await
     }
     async fn create_marker(&self, name: &MarkerName, state: &StateId) -> Result<()> {
+        require_user_ref_name(name.as_str())?;
         let bytes = Self::id_to_bytes(state);
         let n = sqlx::query("INSERT INTO refs (repo_id, name, is_thread, state_id, updated_at) VALUES ($1, $2, false, $3, NOW()) ON CONFLICT DO NOTHING")
             .bind(self.repo_id)
@@ -298,6 +326,7 @@ impl CoreRefBackend for PgRefBackend {
         expected: RefExpectation<StateId>,
         state: &StateId,
     ) -> Result<()> {
+        require_user_ref_name(name.as_str())?;
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         let name = name.to_string();
@@ -335,6 +364,9 @@ impl CoreRefBackend for PgRefBackend {
         })
     }
     fn update_refs(&self, updates: &[RefUpdate]) -> Result<()> {
+        for update in updates {
+            require_user_ref_update(update)?;
+        }
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         let updates = updates.to_vec();

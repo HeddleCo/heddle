@@ -238,7 +238,10 @@ impl RefManager {
     /// check (`write_read_conformance` in the refs tests) fails CI if any other
     /// path calls a raw writer, so a path-by-path allowlist cannot silently
     /// re-open the class.
-    fn write_chokepoint<T>(&self, body: impl FnOnce(&RefsLock) -> Result<T>) -> Result<T> {
+    pub(super) fn write_chokepoint<T>(
+        &self,
+        body: impl FnOnce(&RefsLock) -> Result<T>,
+    ) -> Result<T> {
         let lock = self.lock_refs()?;
         self.materialize_committed_tail(&lock)?;
         body(&lock)

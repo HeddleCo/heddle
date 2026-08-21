@@ -13,6 +13,7 @@ mod ref_summary_index;
 mod refs_head;
 mod refs_manager;
 mod refs_storage;
+mod refs_synthetic;
 mod refs_transactions;
 mod refs_types;
 mod resolve;
@@ -32,7 +33,7 @@ pub use backend::CoreRefBackend;
 pub use facet::SpoolFacet;
 pub use head::{Head, HeadParseError};
 pub use heddle_schema::refs::PackedRefsModel;
-pub use name::{RefNameError, validate_ref_name};
+pub use name::{RefNameError, require_user_ref_name, validate_ref_name};
 pub use operation_index::{IndexedOperation, OperationLogIndex, OperationLogQuery};
 #[cfg(feature = "postgres")]
 pub use pg_refs::PgRefBackend;

@@ -450,6 +450,16 @@ mod tests {
         assert!(validate_thread_name("feature/auth").is_ok());
         assert!(validate_thread_name("v1.2").is_ok());
         assert!(validate_thread_name("team@scope").is_ok());
+        assert!(validate_thread_name("heddle").is_ok());
+        assert!(validate_thread_name("main@hd-abc").is_ok());
+    }
+
+    #[test]
+    fn validate_thread_name_rejects_reserved_heddle_namespace() {
+        assert!(matches!(
+            validate_thread_name("heddle/frontier/main/hc-abc"),
+            Err(ThreadPlanError::InvalidName(_))
+        ));
     }
 
     #[test]

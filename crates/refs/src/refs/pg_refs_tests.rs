@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
-use objects::object::{MarkerName, StateId, ThreadName};
+use objects::{error::HeddleError, object::{MarkerName, StateId, ThreadName}};
+use uuid::Uuid;
 use sqlx::{AssertSqlSafe, Executor, PgPool, postgres::PgPoolOptions};
 
 use super::*;
@@ -92,6 +93,23 @@ fn state_id_codec_requires_32_bytes() {
     let error = PgRefBackend::bytes_to_id(vec![0; 16]).unwrap_err();
     assert!(matches!(error, HeddleError::InvalidObject(_)));
     assert!(error.to_string().contains("expected 32 bytes, found 16"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pg_set_thread_rejects_reserved_name_before_sql() {
+    let pool = PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(200))
+        .connect_lazy(&test_database_url())
+        .expect("connect_lazy accepts the URL");
+    let backend = PgRefBackend::new(Arc::new(pool), Uuid::new_v4());
+    let reserved = ThreadName::new("heddle/frontier/main/hc-abc");
+    let error = backend
+        .set_thread(&reserved, &full_width_state(1))
+        .expect_err("reserved names must fail before SQL");
+    assert!(matches!(
+        error,
+        HeddleError::InvalidRefName(name) if name == "heddle/frontier/main/hc-abc"
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]

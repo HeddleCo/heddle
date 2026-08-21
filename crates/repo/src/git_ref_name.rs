@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Typed classification for fully-qualified Git ref names.
 
+use objects::object::SyntheticFrontierName;
+
 /// Sentinel remote name for refs owned by the local repository.
 ///
 /// Local branches, tags, and notes use this owner when represented in the
@@ -17,6 +19,8 @@ pub enum GitRefContentNamespace {
     Tag,
     /// `refs/notes/<name>`.
     Note,
+    /// A managed synthetic frontier root (`refs/heddle/frontier/<thread>/<full-changeid>`).
+    Heddle,
 }
 
 /// The wire-level kind used for hosted Git ref updates.
@@ -127,6 +131,9 @@ impl<'a> GitRefName<'a> {
     /// Return the named content namespace Heddle surfaces in local Git projection
     /// operations.
     pub fn content_namespace(&self) -> Option<GitRefContentNamespace> {
+        if self.heddle_name().is_some() {
+            return Some(GitRefContentNamespace::Heddle);
+        }
         match self.namespace() {
             GitRefNamespace::Branch => Some(GitRefContentNamespace::Branch),
             GitRefNamespace::Tag => Some(GitRefContentNamespace::Tag),
@@ -160,6 +167,7 @@ impl<'a> GitRefName<'a> {
             .or_else(|| self.remote_branch_parts().map(|(_, name)| name))
             .or_else(|| self.tag_name())
             .or_else(|| self.note_name())
+            .or_else(|| self.heddle_name())
     }
 
     /// Parse a Git-projection-visible ref. Notes are content refs in Heddle and are
@@ -232,6 +240,7 @@ impl<'a> GitRefName<'a> {
             GitRefContentNamespace::Branch => Self::branch_full_name(name),
             GitRefContentNamespace::Tag => Self::tag_full_name(name),
             GitRefContentNamespace::Note => Self::note_full_name(name),
+            GitRefContentNamespace::Heddle => format!("refs/heddle/{name}"),
         }
     }
 
@@ -245,6 +254,13 @@ impl<'a> GitRefName<'a> {
 
     fn note_name(&self) -> Option<&'a str> {
         self.full_name.strip_prefix("refs/notes/")
+    }
+
+    fn heddle_name(&self) -> Option<&'a str> {
+        SyntheticFrontierName::parse(self.full_name).ok()?;
+        self.full_name
+            .strip_prefix("refs/heddle/")
+            .filter(|name| !name.is_empty())
     }
 
     fn remote_branch_parts(&self) -> Option<(&'a str, &'a str)> {
@@ -338,6 +354,14 @@ mod tests {
                 false,
                 true,
             ),
+            (
+                "refs/heddle/frontier/main/hc-abc",
+                GitRefNamespace::Other,
+                None,
+                GitRefKind::Other,
+                false,
+                true,
+            ),
         ];
 
         for (name, namespace, content_namespace, wire_kind, local_only, mirror_content) in cases {
@@ -407,6 +431,39 @@ mod tests {
     }
 
     #[test]
+    fn classifies_only_parseable_synthetic_frontier_as_heddle_namespace() {
+        let change = objects::object::ChangeId::from_bytes([9; 16]);
+        let name = objects::object::SyntheticFrontierName::new("main", change)
+            .expect("fixture synthetic name")
+            .git_ref();
+        let ref_name = GitRefName::new(&name);
+        assert_eq!(
+            ref_name.content_namespace(),
+            Some(GitRefContentNamespace::Heddle)
+        );
+        assert_eq!(
+            ref_name.short_name().expect("heddle short name"),
+            name.strip_prefix("refs/heddle/").expect("heddle prefix")
+        );
+    }
+
+    #[test]
+    fn rejects_internal_and_forged_heddle_refs_as_publishable_namespace() {
+        for name in [
+            "refs/heddle/internal",
+            "refs/heddle/frontier/main/hc-abc",
+            "refs/heddle",
+            "refs/heddle/",
+        ] {
+            assert_eq!(
+                GitRefName::new(name).content_namespace(),
+                None,
+                "{name} must not be a publishable Heddle content ref"
+            );
+        }
+    }
+
+    #[test]
     fn formats_full_ref_names() {
         assert_eq!(GitRefName::branch_full_name("main"), "refs/heads/main");
         assert_eq!(
@@ -423,5 +480,9 @@ mod tests {
         );
         assert_eq!(GitRefName::tag_full_name("v1.0"), "refs/tags/v1.0");
         assert_eq!(GitRefName::note_full_name("heddle"), "refs/notes/heddle");
+        assert_eq!(
+            GitRefName::content_full_name(GitRefContentNamespace::Heddle, "frontier/main/hc-abc"),
+            "refs/heddle/frontier/main/hc-abc"
+        );
     }
 }

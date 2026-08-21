@@ -8,8 +8,8 @@ use sley::ObjectId;
 
 use super::{
     git_core::{
-        GitProjection, GitProjectionError, GitProjectionResult, RefNamespace,
-        collect_import_source_ref_updates, open_repo,
+        collect_import_source_ref_updates, open_repo, GitProjection, GitProjectionError,
+        GitProjectionResult, RefNamespace,
     },
     git_export::commit_requires_residual,
     git_residual::ResidualStore,
@@ -79,7 +79,7 @@ fn capture_import_residuals(
         match update.namespace {
             // The ingest pack writes annotated tags directly into the native
             // object store. No bridge-only residual/sidecar path is needed.
-            RefNamespace::Tag => {}
+            RefNamespace::Tag | RefNamespace::Heddle => {}
             RefNamespace::Note => {
                 residuals.capture_object_closure_from_git_repo(&source_repo, &update.target)?;
                 residuals.record_note_ref(&update.name, update.target)?;
