@@ -13,6 +13,10 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+## 0.13.0 - 2026-08-21
+
+- sley 0.7.0 (parallel-inflate) adoption + Rust 1.98.
+
 ### Added
 
 - **`heddle completions` prints tab-completion scripts.** The field-study
