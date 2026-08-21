@@ -143,7 +143,6 @@ schema_registry! {
     (&["auth trust show", "auth trust replace"], AuthTrustSchema),
     (&["whoami"], WhoamiSchema),
     (&["auth create-service-token"], AuthCreateServiceTokenSchema),
-    (&["identity ensure", "identity claim-link"], IdentityOutputSchema),
     (&["agent provenance begin", "agent provenance end", "agent provenance show"], AgentProvenanceEnvelopeSchema),
     (&["agent provenance segment"], AgentProvenanceSegmentEnvelopeSchema),
     (&["agent provenance list"], AgentProvenanceListSchema),
@@ -798,19 +797,6 @@ pub struct AuthCreateServiceTokenSchema {
     /// and proof key live inside this file and never appear in the contract.
     pub credential_path: String,
     pub expires_in_days: u32,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct IdentityOutputSchema {
-    pub output_kind: String,
-    /// `reused`, `derived`, `created_on_behalf`, or `claim_link_reissued`.
-    pub outcome: String,
-    pub server: String,
-    pub subject: String,
-    /// Stable lowercase-hex Iroh NodeId, present when a claim link is minted.
-    pub node_id: Option<String>,
-    /// Short-lived claim URL on the selected server origin, present only on deliberate mint/reissue.
-    pub claim_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

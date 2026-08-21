@@ -5,6 +5,8 @@ pub enum AuthCommand {
     Login {
         server: Option<String>,
         open_browser: bool,
+        /// Invite consumed only when this machine has no hosted account yet.
+        invite: Option<String>,
         /// Install a verified `.hcred` credential file without a browser.
         /// The server comes from the file. Mutually exclusive with the
         /// browser flags.

@@ -17,9 +17,7 @@ use async_trait::async_trait;
 use weft_client_shim::{CliContext, WeftExtensions};
 
 use crate::{
-    cli::{
-        AgentTemplateArg, AuthCommands, AuthTrustCommands, IdentityCommands, commands::cmd_auth,
-    },
+    cli::{AgentTemplateArg, AuthCommands, AuthTrustCommands, commands::cmd_auth},
     hosted_runtime::{
         auth_requests::{AuthCommand, AuthTrustCommand},
         device_flow::AgentTemplate,
@@ -42,15 +40,6 @@ impl WeftExtensions for EnabledWeftExtensions {
     async fn whoami(&self, ctx: &(dyn CliContext + 'static), server: Option<String>) -> Result<()> {
         crate::hosted_runtime::whoami::cmd_whoami(ctx, server).await
     }
-
-    async fn identity(
-        &self,
-        ctx: &(dyn CliContext + 'static),
-        command: &(dyn Any + Send + Sync),
-    ) -> Result<()> {
-        let command = downcast::<IdentityCommands>(command, "IdentityCommands")?;
-        crate::hosted_runtime::identity::cmd_identity(ctx, command.clone()).await
-    }
 }
 
 fn auth_command(command: AuthCommands) -> AuthCommand {
@@ -58,10 +47,12 @@ fn auth_command(command: AuthCommands) -> AuthCommand {
         AuthCommands::Login {
             server,
             open_browser,
+            invite,
             credential,
         } => AuthCommand::Login {
             server,
             open_browser,
+            invite,
             credential,
         },
         AuthCommands::Logout { server } => AuthCommand::Logout { server },

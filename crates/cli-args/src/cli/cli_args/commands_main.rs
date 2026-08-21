@@ -3,6 +3,8 @@
 
 use clap::{Args, Subcommand};
 
+#[cfg(feature = "client")]
+use super::AuthCommands;
 #[cfg(feature = "git-overlay")]
 use super::BridgeCommands;
 #[cfg(feature = "semantic")]
@@ -18,8 +20,6 @@ use super::{
         TryArgs, UndoArgs, WatchArgs,
     },
 };
-#[cfg(feature = "client")]
-use super::{AuthCommands, IdentityCommands};
 
 #[derive(Clone, Debug, Args)]
 pub struct FsckArgs {
@@ -449,27 +449,20 @@ Examples:
         command: AuthCommands,
     },
 
-    /// Ensure and claim this machine's hosted agent identity.
-    #[cfg(feature = "client")]
-    Identity {
-        #[command(subcommand)]
-        command: IdentityCommands,
-    },
-
     /// Report the capture actor, then hosted auth.
     ///
     /// The capture actor is who the next capture is attributed to
     /// (`user_config`, `init --principal-*`, or `HEDDLE_PRINCIPAL_*`).
     /// Hosted auth is whether this machine has a server credential.
-    /// These are different objects. `identity ensure` does not set the
-    /// local actor.
+    /// These are different objects. `heddle auth login` does not set the
+    /// local actor. `whoami` only reads; it never attaches a credential.
     #[cfg(feature = "client")]
     #[command(after_help = "\
 The capture actor and hosted auth are different objects:
   capture actor  who the next capture is attributed to
                  (user_config, init --principal-*, or HEDDLE_PRINCIPAL_*)
   hosted auth    whether this machine has a credential for the server
-                 (heddle auth login). identity ensure does not set the actor.
+                 (heddle auth login). whoami never attaches a credential.
 
 Examples:
   heddle whoami                       # capture actor first, then hosted auth

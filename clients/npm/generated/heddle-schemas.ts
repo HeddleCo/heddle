@@ -1164,34 +1164,6 @@ export interface HookUninstallSchema {
   [key: string]: unknown;
 }
 
-export interface IdentityClaimLinkSchema {
-  /** Short-lived claim URL on the selected server origin, present only on deliberate mint/reissue. */
-  claim_url?: string | null;
-  /** Stable lowercase-hex Iroh NodeId, present when a claim link is minted. */
-  node_id?: string | null;
-  /** `reused`, `derived`, `created_on_behalf`, or `claim_link_reissued`. */
-  outcome: string;
-  output_kind: "identity_claim_link";
-  server: string;
-  subject: string;
-}
-
-export interface IdentityEnsureSchema {
-  /** Short-lived claim URL on the selected server origin, present only on deliberate mint/reissue. */
-  claim_url?: string | null;
-  idempotency_status?: string | null;
-  /** Stable lowercase-hex Iroh NodeId, present when a claim link is minted. */
-  node_id?: string | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  /** `reused`, `derived`, `created_on_behalf`, or `claim_link_reissued`. */
-  outcome: string;
-  output_kind: "identity_ensure";
-  replayed?: boolean | null;
-  server: string;
-  subject: string;
-}
-
 export interface ImportGitSchema {
   action?: string | null;
   already_in_sync: boolean;
@@ -3476,8 +3448,6 @@ export interface HeddleVerbOutputs {
   "hook install": HookInstallSchema;
   "hook list": HookListSchema;
   "hook uninstall": HookUninstallSchema;
-  "identity claim-link": IdentityClaimLinkSchema;
-  "identity ensure": IdentityEnsureSchema;
   init: InitSchema;
   "integration doctor": IntegrationDoctorSchema;
   "integration install": IntegrationInstallSchema;
@@ -3641,8 +3611,6 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "hook install",
   "hook list",
   "hook uninstall",
-  "identity claim-link",
-  "identity ensure",
   "init",
   "integration doctor",
   "integration install",

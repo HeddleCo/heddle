@@ -31,10 +31,14 @@ pub enum AgentTemplateArg {
 
 #[derive(Subcommand, Clone, Debug)]
 pub enum AuthCommands {
-    /// Authenticate with a Heddle server
+    /// Authenticate with a Heddle server.
+    ///
+    /// Reuses a valid stored credential, remints a registered node-key
+    /// account, consumes `--invite` to create one, or opens the browser
+    /// on a TTY. Non-interactive sessions without an account fail closed.
     Login {
-        /// Heddle server address (browser flow). Omit to use the configured
-        /// default server.
+        /// Heddle server address. Omit to use the configured default
+        /// (`api.heddle.sh` when none is stored).
         #[arg(long)]
         server: Option<String>,
 
@@ -42,9 +46,13 @@ pub enum AuthCommands {
         #[arg(long)]
         open_browser: bool,
 
+        /// Invite consumed only when this machine has no hosted account yet.
+        #[arg(long, conflicts_with = "credential")]
+        invite: Option<String>,
+
         /// Install a verified `.hcred` credential file without a browser.
         /// The server is taken from the file.
-        #[arg(long, value_name = "HCRED_PATH", conflicts_with_all = ["server", "open_browser"])]
+        #[arg(long, value_name = "HCRED_PATH", conflicts_with_all = ["server", "open_browser", "invite"])]
         credential: Option<std::path::PathBuf>,
     },
 
@@ -68,7 +76,8 @@ pub enum AuthCommands {
         command: AuthTrustCommands,
     },
 
-    /// Derive a scoped, short-lived agent token offline
+    /// Derive a scoped, short-lived agent token offline.
+    /// Advanced: not a first-screen noun.
     DeriveAgent {
         /// Server whose stored credential is the parent.
         #[arg(long)]
@@ -103,7 +112,8 @@ pub enum AuthCommands {
         out: Option<std::path::PathBuf>,
     },
 
-    /// Create a service token for CI/scripts, scoped to a namespace
+    /// Create a service token for CI/scripts, scoped to a namespace.
+    /// Advanced: not a first-screen noun.
     CreateServiceToken {
         /// Display name for the service account (e.g. "github-ci-main")
         name: String,
@@ -117,38 +127,6 @@ pub enum AuthCommands {
         /// (default: ~/.heddle/service-accounts/<name>.hcred)
         #[arg(long, value_name = "HCRED_PATH")]
         out: Option<std::path::PathBuf>,
-    },
-}
-
-#[derive(Subcommand, Clone, Debug)]
-pub enum IdentityCommands {
-    /// Ensure this machine has an agent identity, reusing an account first
-    Ensure {
-        /// Heddle server address (defaults to the configured server).
-        #[arg(long)]
-        server: Option<String>,
-
-        /// Human invite consumed only when no account credential exists.
-        #[arg(long)]
-        invite: Option<String>,
-    },
-
-    /// Reissue the short-lived browser claim link for an unclaimed identity
-    ClaimLink {
-        /// Heddle server address (defaults to the account's server).
-        #[arg(long)]
-        server: Option<String>,
-
-        /// Link lifetime in seconds.
-        #[arg(long = "ttl", default_value_t = 900)]
-        ttl_secs: u64,
-    },
-
-    /// Keep the Iroh claim endpoint online for an outstanding link.
-    #[command(hide = true)]
-    Serve {
-        #[arg(long)]
-        server: String,
     },
 }
 
@@ -187,7 +165,7 @@ pub struct AuthTrustReplaceArgs {
 mod tests {
     use clap::Parser;
 
-    use crate::cli::{AuthCommands, AuthTrustCommands, Cli, Commands, IdentityCommands};
+    use crate::cli::{AuthCommands, AuthTrustCommands, Cli, Commands};
 
     #[test]
     fn trust_replace_parses_compare_and_swap_inputs() {
@@ -241,6 +219,7 @@ mod tests {
                     server,
                     credential,
                     open_browser,
+                    invite,
                 },
         } = cli.command
         else {
@@ -252,6 +231,7 @@ mod tests {
             Some(std::path::Path::new("/run/secrets/agent.hcred"))
         );
         assert!(!open_browser);
+        assert_eq!(invite, None);
     }
 
     #[test]
@@ -264,6 +244,12 @@ mod tests {
                 "api.heddle.sh",
             ],
             vec!["--credential", "/run/secrets/agent.hcred", "--open-browser"],
+            vec![
+                "--credential",
+                "/run/secrets/agent.hcred",
+                "--invite",
+                "code",
+            ],
         ] {
             let mut args = vec!["heddle", "auth", "login"];
             args.extend(conflicting);
@@ -281,25 +267,33 @@ mod tests {
     }
 
     #[test]
-    fn identity_ensure_accepts_an_optional_fallback_invite() {
+    fn login_parses_an_optional_invite() {
         let cli = Cli::try_parse_from([
             "heddle",
-            "identity",
-            "ensure",
+            "auth",
+            "login",
             "--server",
             "api.heddle.test",
             "--invite",
             "invite-secret",
         ])
-        .expect("identity ensure parses");
-        let Commands::Identity {
-            command: IdentityCommands::Ensure { server, invite },
+        .expect("auth login --invite parses");
+        let Commands::Auth {
+            command:
+                AuthCommands::Login {
+                    server,
+                    invite,
+                    credential,
+                    open_browser,
+                },
         } = cli.command
         else {
-            panic!("expected identity ensure");
+            panic!("expected auth login");
         };
         assert_eq!(server.as_deref(), Some("api.heddle.test"));
         assert_eq!(invite.as_deref(), Some("invite-secret"));
+        assert_eq!(credential, None);
+        assert!(!open_browser);
     }
 
     #[test]

@@ -93,6 +93,7 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
         AuthCommand::Login {
             server,
             open_browser,
+            invite,
             credential,
         } => match credential {
             Some(credential) => {
@@ -102,7 +103,14 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
             }
             None => {
                 let server = resolve_server(server.as_deref())?;
-                cmd_auth_login(&server, open_browser).await
+                crate::hosted_runtime::auth_login::login(
+                    ctx,
+                    &server,
+                    open_browser,
+                    invite,
+                    crate::cli::is_interactive_tty(),
+                )
+                .await
             }
         },
         AuthCommand::Logout { server } => cmd_auth_logout(ctx, server.as_deref()),
@@ -657,7 +665,7 @@ pub(crate) fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetada
 }
 
 /// Authenticate via device authorization flow.
-async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
+pub(crate) async fn cmd_auth_login_browser(server: &str, open_browser: bool) -> Result<()> {
     // 1. Generate Ed25519 keypair for device binding.
     let signer = Ed25519Signer::generate()
         .map_err(|e| anyhow::anyhow!("failed to generate keypair: {e}"))?;
@@ -2172,6 +2180,7 @@ mod tests {
             AuthCommand::Login {
                 server: None,
                 open_browser: false,
+                invite: None,
                 credential: Some(std::path::PathBuf::from("/definitely/not/here.hcred")),
             },
         )

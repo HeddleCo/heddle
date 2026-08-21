@@ -8,6 +8,10 @@
 
 mod agent_node_identity;
 pub(crate) mod auth;
+mod auth_login;
+mod auth_login_agent;
+#[cfg(test)]
+mod auth_login_tests;
 pub(crate) mod auth_requests;
 mod claim_authorization;
 #[cfg(test)]
@@ -15,11 +19,10 @@ mod claim_authorization_tests;
 pub(crate) mod credential_file;
 pub(crate) mod device_flow;
 pub(crate) mod hosted;
-pub(crate) mod identity;
-mod identity_server;
 mod identity_state;
+mod root_mint;
 #[cfg(test)]
-mod identity_tests;
+mod root_mint_tests;
 pub(crate) mod websocket;
 pub(crate) mod whoami;
 
