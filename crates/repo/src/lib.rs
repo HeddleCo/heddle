@@ -146,6 +146,11 @@ pub use git_ref_name::{
 pub use grant_audience::{GrantRole, audience_tier_for_grant};
 pub use hooks::{Hook, HookContext, HookManager, HookResponse};
 pub use merge_state::{MergeState, MergeStateManager};
+pub use objects::blame::{
+    BlameFrontierGroup, BlameFrontierRecord, BlameLineMap, BlamePreparation, BlameSliceAdvance,
+    BlameSliceError, BlameSliceLimits, OriginRange, advance_file_blame_slice, blame_file,
+    finalize_file_provenance, origin_from_state, prepare_file_blame,
+};
 pub use objects::{
     error::{HeddleError as StoreError, HeddleError, Result},
     object::{

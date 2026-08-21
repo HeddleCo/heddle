@@ -1,16 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::{collections::HashMap, path::Path};
 
-pub(super) use objects::util::{lcs_line_matches, split_text_lines};
 use objects::{
     object::{
-        Blob, ContentHash, FileProvenance, LeafPolicy, LineSpan, Origin, ProvenanceError, State,
-        Tree, TreeEntry, resolve_tree_path,
+        resolve_tree_path, Blob, ContentHash, FileProvenance, LeafPolicy, LineSpan, Origin,
+        ProvenanceError, State, Tree, TreeEntry,
     },
     store::ObjectStore,
 };
 
-use super::{HeddleError, Repository, Result, builder::ProvenanceBuilder};
+use super::{builder::ProvenanceBuilder, HeddleError, Repository, Result};
+
+pub(super) use objects::util::split_text_lines;
+
+pub(super) fn visit_equal_runs(
+    old_bytes: &[u8],
+    new_bytes: &[u8],
+    visit: impl FnMut(objects::util::EqualRun) -> Result<()>,
+) -> Result<()> {
+    let old_lines = std::str::from_utf8(old_bytes)
+        .map_err(|error| HeddleError::InvalidObject(error.to_string()))?
+        .lines()
+        .count();
+    let new_lines = std::str::from_utf8(new_bytes)
+        .map_err(|error| HeddleError::InvalidObject(error.to_string()))?
+        .lines()
+        .count();
+    let needed = objects::util::scratch_bytes_for_line_counts(old_lines, new_lines);
+    let mut scratch = vec![0u8; needed.max(1)];
+    let mut budget = objects::util::LineDiffLimits::unlimited().budget(scratch.len());
+    objects::util::visit_lcs_equal_runs(old_bytes, new_bytes, &mut scratch, &mut budget, visit)
+        .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+    Ok(())
+}
 
 pub(super) fn build_single_origin_provenance(
     file_blob: ContentHash,
@@ -40,13 +62,17 @@ pub(super) fn synthesize_file_provenance_from_blob(
     ))
 }
 
-pub(super) fn load_lines_for_hash(repo: &Repository, hash: ContentHash) -> Result<Vec<String>> {
+pub(super) fn load_blob_bytes(repo: &Repository, hash: ContentHash) -> Result<Vec<u8>> {
     let blob = repo
         .store()
         .get_blob(&hash)?
         .ok_or_else(|| HeddleError::NotFound(format!("blob {}", hash)))?;
-    split_text_lines(blob.content())
-        .ok_or_else(|| HeddleError::InvalidObject("provenance references binary data".to_string()))
+    if std::str::from_utf8(blob.content()).is_err() {
+        return Err(HeddleError::InvalidObject(
+            "provenance references binary data".to_string(),
+        ));
+    }
+    Ok(blob.content().to_vec())
 }
 
 pub(super) fn expand_line_origin_sets_with_builder(

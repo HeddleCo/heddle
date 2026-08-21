@@ -77,6 +77,11 @@ name = "tree_diff"
 harness = false
 required-features = ["bench"]
 
+[[bench]]
+name = "line_diff_blame"
+harness = false
+required-features = ["bench", "memory-backend"]
+
 [[example]]
 name = "train_tree_state_dictionary"
 required-features = ["zstd"]

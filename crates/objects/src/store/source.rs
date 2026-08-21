@@ -29,6 +29,11 @@ macro_rules! impl_object_source {
             }
 
             #[inline]
+            fn decoded_blob_len(&self, hash: &ContentHash) -> Result<Option<u64>> {
+                ObjectStore::blob_size(self, hash)
+            }
+
+            #[inline]
             fn get_blob_bytes(&self, hash: &ContentHash) -> Result<Option<bytes::Bytes>> {
                 ObjectStore::get_blob_bytes(self, hash)
             }

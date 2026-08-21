@@ -11,6 +11,15 @@ pub trait ObjectSource {
     fn get_state(&self, id: &StateId) -> Result<Option<State>>;
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>>;
 
+    /// Uncompressed byte length without requiring content.
+    ///
+    /// The default falls back to [`Self::get_blob`]. Stores that can answer
+    /// from a header or index should override this so blame can reject an
+    /// oversized blob before materializing it.
+    fn decoded_blob_len(&self, hash: &ContentHash) -> Result<Option<u64>> {
+        Ok(self.get_blob(hash)?.map(|blob| blob.content().len() as u64))
+    }
+
     /// Zero-copy variant of `get_blob`.
     fn get_blob_bytes(&self, hash: &ContentHash) -> Result<Option<bytes::Bytes>> {
         Ok(self

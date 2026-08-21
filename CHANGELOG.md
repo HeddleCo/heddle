@@ -19,6 +19,36 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Added
 
+- **Scratch-budgeted equal-run LCS and storage-neutral blame slices.**
+  `visit_lcs_equal_runs` emits Myers equal ranges from caller scratch
+  without owning every line or a match vector. `advance_file_blame_slice`
+  walks one path-targeted frontier and returns persistence-friendly origin
+  ranges; Heddle's own `blame` now loops those slices. Work exhaustion is
+  typed `BudgetExceeded`, never approximate blame. Work is actual Myers
+  comparisons, not an n×m admission ceiling. A missing parent state, tree,
+  or tree-present / blob-missing parent is `MissingObject`. Frontier maps
+  and `state_line_count` are checked against the blob before any moved
+  bitmap; a mismatch is `InvalidFrontier`. Myers keeps similar's Compact
+  tie-break: a partial slide splits the run (`b/a` vs `a/a` is `(1,0)`).
+  Origin sets are reused like `ProvenanceBuilder`. Overlay, snapshot, and
+  merge visit original blob bytes. Each parent state is charged against
+  the slice `states` cap before it is fetched. Each parent file's lines
+  are consumed before its diff. Frontier origin, blob hash, and state-side
+  mappings are checked against the loaded state on both the state and
+  target sides. After a first parent claims every mapped line, later
+  parents are not fetched. Blobs are size-probed
+  before `get_blob`. Compact right-slides one adjacent trailing copy of
+  the equal (`b/a` vs `a/b/b` is `(0,2)`; `a` vs `b/a/a/a/b` stays
+  `(0,2)`; `b/a` vs `a/b/c/b/b` stays `(0,1)`; `a` vs `a/a` stays
+  `(0,0)`). Equals are visited when found, so a visitor cancel does not
+  wait for a later flush. Inspected-but-unprocessed parents
+  are not counted as blame frontiers (`ancestors_visited` stays one visit
+  on a no-overlap parent). A persisted frontier is bound to its prepared
+  target state, normalized path, blob, and line count; mixing another
+  job's target fails closed even when the blobs match.
+  Slice usage reports work, lines, and scratch on one live
+  `ResourceBudget` (heddle#1454).
+
 - **`heddle completions` prints tab-completion scripts.** The field-study
   verb emits install lines, or a bash/zsh/fish script. Same scripts as
   `heddle shell completion`. First-screen help names it so it is findable

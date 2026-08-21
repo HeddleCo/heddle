@@ -10,14 +10,19 @@ use objects::{
 };
 use tempfile::TempDir;
 
-use super::helpers::{build_single_origin_provenance, lcs_line_matches, lookup_tree_entry};
+use super::helpers::{build_single_origin_provenance, lookup_tree_entry, visit_equal_runs};
 use crate::Repository;
 
 #[test]
 fn lcs_preserves_existing_line_matches() {
-    let old_lines = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-    let new_lines = vec!["a".to_string(), "x".to_string(), "c".to_string()];
-    let matches = lcs_line_matches(&old_lines, &new_lines);
+    let mut matches = Vec::new();
+    visit_equal_runs(b"a\nb\nc\n", b"a\nx\nc\n", |run| {
+        for offset in 0..run.len {
+            matches.push((run.old_start + offset, run.new_start + offset));
+        }
+        Ok(())
+    })
+    .expect("lcs should succeed");
     assert_eq!(matches, vec![(0, 0), (2, 2)]);
 }
 
@@ -33,9 +38,12 @@ fn put_state_with_file(
 ) -> State {
     let blob_hash = store.put_blob(&Blob::from_slice(content)).unwrap();
     let tree_hash = store
-        .put_tree(&Tree::from_entries(vec![
-            TreeEntry::file(file.to_string(), blob_hash, false).unwrap(),
-        ]))
+        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
+            file.to_string(),
+            blob_hash,
+            false,
+        )
+        .unwrap()]))
         .unwrap();
     let state = State::new(
         tree_hash,
@@ -247,6 +255,38 @@ fn linear_commit_provenance_unchanged_under_n_parent_path() {
 }
 
 #[test]
+fn trailing_empty_line_is_not_collapsed_by_join() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let store = repo.store();
+    let parent = put_state_with_file(store, "lib.rs", b"a\n\n", Vec::new(), "alice");
+    let child = put_state_with_file(store, "lib.rs", b"a\n\nb\n", vec![parent.id()], "bob");
+    let provenance = repo
+        .get_file_provenance_for_state(&child, Path::new("lib.rs"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(provenance.line_count, 3);
+    let line_origins = provenance.line_origin_set_indexes().unwrap();
+    let principals_at = |line_idx: usize| -> Vec<String> {
+        let set_idx = line_origins[line_idx];
+        provenance.origin_sets[set_idx as usize]
+            .origin_indexes
+            .iter()
+            .map(|i| {
+                provenance.origins[*i as usize]
+                    .attribution
+                    .principal
+                    .name_lossy()
+                    .into_owned()
+            })
+            .collect()
+    };
+    assert!(principals_at(0).contains(&"alice".to_string()));
+    assert!(principals_at(1).contains(&"alice".to_string()));
+    assert!(principals_at(2).contains(&"bob".to_string()));
+}
+
+#[test]
 fn diamond_merge_provenance_walks_each_ancestor_once() {
     // Memoization regression: a "diamond" topology where two parents
     // both descend from the same grandparent is the canonical case
@@ -349,9 +389,12 @@ fn provenance_merge_unions_origin_sets_not_set_indexes() {
 
     let parent_blob_hash = store.put_blob(&Blob::from("kept\n")).unwrap();
     let parent_tree_hash = store
-        .put_tree(&Tree::from_entries(vec![
-            TreeEntry::file("lib.rs", parent_blob_hash, false).unwrap(),
-        ]))
+        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
+            "lib.rs",
+            parent_blob_hash,
+            false,
+        )
+        .unwrap()]))
         .unwrap();
     let parent_origin = Origin {
         state_id: crate::test_state_id(),
@@ -383,9 +426,12 @@ fn provenance_merge_unions_origin_sets_not_set_indexes() {
         ))
         .unwrap();
     let parent_provenance_root = store
-        .put_tree(&Tree::from_entries(vec![
-            TreeEntry::file("lib.rs", parent_provenance_blob, false).unwrap(),
-        ]))
+        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
+            "lib.rs",
+            parent_provenance_blob,
+            false,
+        )
+        .unwrap()]))
         .unwrap();
     let parent = State::new(
         parent_tree_hash,
@@ -397,9 +443,12 @@ fn provenance_merge_unions_origin_sets_not_set_indexes() {
 
     let child_blob_hash = store.put_blob(&Blob::from("kept\nadded\n")).unwrap();
     let child_tree_hash = store
-        .put_tree(&Tree::from_entries(vec![
-            TreeEntry::file("lib.rs", child_blob_hash, false).unwrap(),
-        ]))
+        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
+            "lib.rs",
+            child_blob_hash,
+            false,
+        )
+        .unwrap()]))
         .unwrap();
     let child = State::new(
         child_tree_hash,
@@ -434,14 +483,19 @@ fn lookup_tree_entry_characterizes_entry_policy_paths() {
     let missing_subtree_hash = ContentHash::compute(b"not-in-store");
 
     let nested_tree = store
-        .put_tree(&Tree::from_entries(vec![
-            TreeEntry::file("inner.txt", nested_blob_hash, false).unwrap(),
-        ]))
+        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
+            "inner.txt",
+            nested_blob_hash,
+            false,
+        )
+        .unwrap()]))
         .unwrap();
     let missing_parent = store
-        .put_tree(&Tree::from_entries(vec![
-            TreeEntry::directory("ghost".to_string(), missing_subtree_hash).unwrap(),
-        ]))
+        .put_tree(&Tree::from_entries(vec![TreeEntry::directory(
+            "ghost".to_string(),
+            missing_subtree_hash,
+        )
+        .unwrap()]))
         .unwrap();
     let root_hash = store
         .put_tree(&Tree::from_entries(vec![

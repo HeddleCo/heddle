@@ -7,13 +7,13 @@ use objects::{
 };
 
 use super::{
-    Repository, Result,
     builder::ProvenanceBuilder,
     helpers::{
-        build_single_origin_provenance, expand_line_origin_sets_with_builder, lcs_line_matches,
-        load_lines_for_hash, lookup_tree_entry, split_text_lines,
-        synthesize_file_provenance_from_blob,
+        build_single_origin_provenance, expand_line_origin_sets_with_builder, load_blob_bytes,
+        lookup_tree_entry, split_text_lines, synthesize_file_provenance_from_blob,
+        visit_equal_runs,
     },
+    Repository, Result,
 };
 
 /// Bundle of everything we need from one parent state when synthesizing
@@ -227,7 +227,7 @@ impl Repository {
         // standard snapshot diff) and the 2+-parent case (union).
         let merged = self.merge_line_provenance_n_parents(
             current_hash,
-            &current_lines,
+            current_blob.content(),
             &parent_provenances,
             self.state_origin(current_state),
         )?;
@@ -243,16 +243,18 @@ impl Repository {
     fn merge_line_provenance_n_parents(
         &self,
         file_blob: ContentHash,
-        final_lines: &[String],
+        final_bytes: &[u8],
         sources: &[FileProvenance],
         final_origin: objects::object::Origin,
     ) -> Result<FileProvenance> {
+        let line_count = std::str::from_utf8(final_bytes)
+            .map_err(|error| super::HeddleError::InvalidObject(error.to_string()))?
+            .lines()
+            .count();
         let mut builder = ProvenanceBuilder::default();
-        let mut source_lines: Vec<Vec<String>> = Vec::with_capacity(sources.len());
         let mut source_sets: Vec<Vec<u32>> = Vec::with_capacity(sources.len());
 
         for provenance in sources {
-            source_lines.push(load_lines_for_hash(self, provenance.file_blob)?);
             source_sets.push(expand_line_origin_sets_with_builder(
                 provenance,
                 &mut builder,
@@ -260,15 +262,18 @@ impl Repository {
         }
 
         let final_origin_set = builder.origin_set_from_origins([final_origin]);
-        let mut resolved_sets = vec![BTreeSet::<u32>::new(); final_lines.len()];
+        let mut resolved_sets = vec![BTreeSet::<u32>::new(); line_count];
 
-        for (lines, origin_sets) in source_lines.iter().zip(source_sets.iter()) {
-            let matches = lcs_line_matches(lines, final_lines);
-            for (old_index, new_index) in matches {
-                if let Some(set_index) = origin_sets.get(old_index) {
-                    resolved_sets[new_index].insert(*set_index);
+        for (provenance, origin_sets) in sources.iter().zip(source_sets.iter()) {
+            let old_bytes = load_blob_bytes(self, provenance.file_blob)?;
+            visit_equal_runs(&old_bytes, final_bytes, |run| {
+                for offset in 0..run.len {
+                    if let Some(set_index) = origin_sets.get(run.old_start + offset) {
+                        resolved_sets[run.new_start + offset].insert(*set_index);
+                    }
                 }
-            }
+                Ok(())
+            })?;
         }
 
         let mut line_sets = Vec::with_capacity(resolved_sets.len());
@@ -280,6 +285,6 @@ impl Repository {
             });
         }
 
-        Ok(builder.into_file_provenance(file_blob, final_lines.len(), line_sets))
+        Ok(builder.into_file_provenance(file_blob, line_count, line_sets))
     }
 }

@@ -18,6 +18,7 @@ Heddle is an agent-native version control system built around three core ideas:
 - threads, markers, refs, oplog, and working tree management
 - remote sync and Git projection
 - provenance-backed local blame and rewrite preservation
+- scratch-budgeted equal-run LCS and storage-neutral resumable blame slices
 - semantic diff support
 - multi-agent worktrees and agent registry
 - Heddle-native actor tracking for supported coding harnesses
