@@ -10,13 +10,13 @@
 //! thread-ref minting, harness probing, recovery advice, and human/JSON render.
 
 use anyhow::{Result, anyhow};
+use repo::{ActorPresence, ActorPresenceStore};
+use repo::Repository;
+use serde::Serialize;
 use verbs::{
     ActorEntryReport, ActorListReport, list_actors, mark_actor_done, plan_actor_done,
     show_actor_from_entry,
 };
-use objects::store::{ActorPresence, ActorPresenceStore};
-use repo::Repository;
-use serde::Serialize;
 
 use super::{
     action_line::print_next,

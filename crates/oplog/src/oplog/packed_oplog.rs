@@ -20,7 +20,7 @@ use std::{
 };
 
 use chrono::{TimeZone, Utc};
-use heddle_schema::op_record::{
+use heddle_object_model::op_record::{
     CURRENT_OP_RECORD_SCHEMA_VERSION, decode_current_record, encode_current_record,
     validate_op_record_schema_version,
 };
@@ -1300,10 +1300,11 @@ fn plan_truncated_latest_recovery(
     }
 
     let mut entries = Vec::new();
+    let mut actor_cache = None;
     let mut damaged_byte_start = cursor.offset;
     for _ in 0..header.entry_count {
         let entry_start = cursor.offset;
-        match parse_current_entry(&mut cursor) {
+        match parse_current_entry_with_cache(&mut cursor, &mut actor_cache) {
             Ok(entry) => {
                 damaged_byte_start = cursor.offset;
                 entries.push(entry);
@@ -1391,8 +1392,9 @@ fn try_footer_guided_at(
     // exactly `entry_count` records parse and consume up to `entry_data_end`.
     let mut cursor = Cursor::new(&bytes[entries_start..entry_data_end]);
     let mut entries = Vec::with_capacity(header.entry_count as usize);
+    let mut actor_cache = None;
     for _ in 0..header.entry_count {
-        match parse_current_entry(&mut cursor) {
+        match parse_current_entry_with_cache(&mut cursor, &mut actor_cache) {
             Ok(entry) => entries.push(entry),
             Err(_) => return None,
         }
@@ -1947,13 +1949,25 @@ fn read_header(path: &Path) -> Result<PackedHeader> {
 
 fn parse_current_entries(cursor: &mut Cursor<'_>, entry_count: usize) -> Result<Vec<OpEntry>> {
     let mut entries = Vec::with_capacity(entry_count);
+    let mut actor_cache = None;
     for _ in 0..entry_count {
-        entries.push(parse_current_entry(cursor)?);
+        entries.push(parse_current_entry_with_cache(cursor, &mut actor_cache)?);
     }
     Ok(entries)
 }
 
+/// Consecutive entries are almost always attributed to the same actor, so the
+/// `Arc<Principal>` is shared across a run instead of re-allocated per entry.
+type ActorCache = Option<(Vec<u8>, Vec<u8>, std::sync::Arc<objects::object::Principal>)>;
+
 fn parse_current_entry(cursor: &mut Cursor<'_>) -> Result<OpEntry> {
+    parse_current_entry_with_cache(cursor, &mut None)
+}
+
+fn parse_current_entry_with_cache(
+    cursor: &mut Cursor<'_>,
+    actor_cache: &mut ActorCache,
+) -> Result<OpEntry> {
     let id = cursor.read_u64()?;
     let batch_id = cursor.read_u64()?;
     let batch_index = cursor.read_u32()?;
@@ -1973,17 +1987,23 @@ fn parse_current_entry(cursor: &mut Cursor<'_>) -> Result<OpEntry> {
     };
 
     let op_data_len = cursor.read_u32()? as usize;
-    let op_data = cursor.read_bytes(op_data_len)?;
-    let operation = decode_current_record(&op_data)?;
+    let operation = decode_current_record(cursor.read_slice(op_data_len)?)?;
 
     let actor_name_len = cursor.read_u16()? as usize;
     let actor_name = cursor.read_bytes(actor_name_len)?;
     let actor_email_len = cursor.read_u16()? as usize;
     let actor_email = cursor.read_bytes(actor_email_len)?;
-    let actor = std::sync::Arc::new(objects::object::Principal {
-        name: actor_name,
-        email: actor_email,
-    });
+    let actor = match actor_cache {
+        Some((name, email, arc)) if *name == actor_name && *email == actor_email => arc.clone(),
+        _ => {
+            let arc = std::sync::Arc::new(objects::object::Principal {
+                name: actor_name.clone(),
+                email: actor_email.clone(),
+            });
+            *actor_cache = Some((actor_name, actor_email, arc.clone()));
+            arc
+        }
+    };
     let operation_id_tag = cursor.read_u8()?;
     let operation_id = match operation_id_tag {
         0 => None,
@@ -2248,6 +2268,19 @@ impl<'a> Cursor<'a> {
         }
         let mut out = [0u8; N];
         out.copy_from_slice(&self.bytes[self.offset..end]);
+        self.offset = end;
+        Ok(out)
+    }
+
+    fn read_slice(&mut self, n: usize) -> Result<&'a [u8]> {
+        let end = self
+            .offset
+            .checked_add(n)
+            .ok_or_else(|| HeddleError::InvalidObject("oplog cursor overflow".to_string()))?;
+        if end > self.bytes.len() {
+            return Err(HeddleError::InvalidObject("oplog truncated".to_string()));
+        }
+        let out = &self.bytes[self.offset..end];
         self.offset = end;
         Ok(out)
     }

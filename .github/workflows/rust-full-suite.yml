@@ -69,7 +69,7 @@ jobs:
   # Outputs:
   #   docs_only — every changed path is doc-only (see below); skip all Rust.
   #   release_only — every changed path is release/publish workflow plumbing.
-  #   rust      — !docs_only && !release_only; gates quality / compile contracts / postgres / CLI fault-injection.
+  #   rust      — !docs_only && !release_only; gates quality / compile contracts / CLI fault-injection.
   #   coverage  — weekly/full-ci/manual/merge-group instrumented coverage gate.
   #   mount     — a mount-relevant path changed; gates fuse/projfs/fskit checks.
   #   cargo_package_args — selected Cargo package arguments for the main Rust lane.
@@ -91,7 +91,6 @@ jobs:
       skip_cargo: ${{ steps.affected.outputs.skip_cargo }}
       package_names_csv: ${{ steps.affected.outputs.package_names_csv }}
       cargo_package_args: ${{ steps.affected.outputs.cargo_package_args }}
-      postgres: ${{ steps.affected_scopes.outputs.postgres }}
       cli_checks: ${{ steps.affected_scopes.outputs.cli_checks }}
       cli_fault: ${{ steps.affected_scopes.outputs.cli_fault }}
       repo_fault: ${{ steps.affected_scopes.outputs.repo_fault }}
@@ -199,13 +198,12 @@ jobs:
           echo "coverage=true" >> "$GITHUB_OUTPUT"
 
           # mount: use the transitive mount-relevant path set (mount → repo →
-          # {crypto, fs-prims, oplog, wire, objects, refs} → optional
-          # runtime-bridge,
+          # {crypto, fs-prims, oplog, wire, objects, refs},
           # plus the compare script, the workflow, and shared workspace
           # inputs) so mount adapters and their read-path dependencies trigger
           # the kernel adapter checks.
           if printf '%s\n' "$diff_output" | grep -E \
-              '^(crates/(mount|fs-prims|object-model|objects|pack|repo|refs|oplog|crypto|wire|runtime-bridge)/|\.github/workflows/rust-(tests|full-suite)\.yml|Cargo\.lock$|Cargo\.toml$)' \
+              '^(crates/(mount|fs-prims|object-model|objects|pack|repo|refs|oplog|crypto|wire)/|\.github/workflows/rust-(tests|full-suite)\.yml|Cargo\.lock$|Cargo\.toml$)' \
               > /dev/null; then
             echo "mount=true" >> "$GITHUB_OUTPUT"
           else
@@ -245,12 +243,10 @@ jobs:
             fi
           }
 
-          postgres_needed() { has_package heddle-refs || has_package heddle-oplog; }
           cli_needed() { has_package heddle-cli; }
           repo_needed() { has_package heddle-repo; }
           fault_needed() { cli_needed || repo_needed; }
 
-          write_bool postgres postgres_needed
           write_bool cli_checks cli_needed
           write_bool cli_fault cli_needed
           write_bool repo_fault repo_needed
@@ -391,106 +387,12 @@ jobs:
       - name: sccache stats
         run: sccache --show-stats
 
-  # Postgres integration tests. The `postgres` feature is the server /
-  # weft code path (`PgRefBackend`, `PgOpLogBackend`); its `#[ignore]`-gated
-  # tests (`crates/refs/.../pg_refs.rs`, `crates/oplog/.../pg_oplog.rs`) need
-  # a reachable database. A `postgres:18` service container provides one and
-  # `DATABASE_URL` points the test setup at it — without that env var the
-  # tests fall back to an unreachable placeholder (port 1), so a plain
-  # `cargo test` stays hermetic and DB-free. This job owns both the live
-  # round-trip and the postgres-feature clippy gate so the backend is compiled
-  # once, outside the default quality lane.
-  postgres-tests:
-    name: Postgres integration tests
-    needs: changes
-    if: needs.changes.outputs.postgres == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
-    timeout-minutes: 30
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_USER: heddle_test
-          POSTGRES_PASSWORD: heddle_test
-          POSTGRES_DB: heddle_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - uses: mozilla-actions/sccache-action@v0.0.9
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: postgres-tests-${{ runner.os }}
-          cache-on-failure: true
-
-      # Scope to the two crates that own the postgres backends: a
-      # workspace-wide `--ignored` run would also pull in unrelated
-      # `#[ignore]`-gated suites (FUSE/NFS smoke, perf, real-git) that need
-      # environments this runner doesn't have. `-p heddle-refs -p
-      # heddle-oplog` compiles only the pg backends, and `--ignored` then
-      # selects exactly their two integration tests (they're `#[ignore]`-gated
-      # so a default `cargo test --features postgres` skips them).
-      # `--test-threads=1` keeps the shared service DB deterministic;
-      # `--nocapture` surfaces the live round-trip in the log so it's clear
-      # the tests actually ran against the container and were not no-op'd by
-      # the unreachable-placeholder fallback.
-      - name: Postgres integration tests
-        env:
-          DATABASE_URL: postgres://heddle_test:heddle_test@localhost:5432/heddle_test
-          AFFECTED_PACKAGES: ${{ needs.changes.outputs.package_names_csv }}
-          ALL_PACKAGES: ${{ needs.changes.outputs.all_packages }}
-        run: |
-          set -euo pipefail
-          selected=",$AFFECTED_PACKAGES,"
-          packages=()
-          features=()
-
-          if [ "$ALL_PACKAGES" = "true" ] || [[ "$selected" == *,heddle-refs,* ]]; then
-            packages+=(-p heddle-refs)
-            features+=(heddle-refs/postgres)
-          fi
-          if [ "$ALL_PACKAGES" = "true" ] || [[ "$selected" == *,heddle-oplog,* ]]; then
-            packages+=(-p heddle-oplog)
-            features+=(heddle-oplog/postgres)
-          fi
-
-          if [ "${#packages[@]}" -eq 0 ]; then
-            echo "Skipping postgres integration tests; refs/oplog not affected."
-            exit 0
-          fi
-
-          feature_arg=$(IFS=,; echo "${features[*]}")
-          cargo test --locked "${packages[@]}" --features "$feature_arg" \
-            -- --ignored --test-threads=1 --nocapture
-
-          echo "::group::cargo clippy postgres storage backends"
-          cargo clippy --locked "${packages[@]}" --lib \
-            --features "$feature_arg" -- -D warnings
-          echo "::endgroup::"
-
-      - name: sccache stats
-        run: sccache --show-stats
-
-  # Preserve the repository ruleset's required `Check & test` context while
-  # allowing its independent prerequisites to execute in parallel.
   check-and-test:
     name: Check & test
     needs:
       - changes
       - quality
       - feature-contracts
-      - postgres-tests
     if: >-
       always() &&
       (github.event_name != 'pull_request' ||
@@ -505,8 +407,6 @@ jobs:
           CLI_REQUIRED: ${{ needs.changes.outputs.cli_checks }}
           QUALITY_RESULT: ${{ needs.quality.result }}
           FEATURE_CONTRACTS_RESULT: ${{ needs.feature-contracts.result }}
-          POSTGRES_REQUIRED: ${{ needs.changes.outputs.postgres }}
-          POSTGRES_RESULT: ${{ needs.postgres-tests.result }}
         run: |
           set -euo pipefail
           require_success() {
@@ -539,19 +439,10 @@ jobs:
                   exit 1
                   ;;
               esac
-              case "$POSTGRES_REQUIRED" in
-                true) require_success "Postgres integration tests" "$POSTGRES_RESULT" ;;
-                false) allow_success_or_skipped "Postgres integration tests" "$POSTGRES_RESULT" ;;
-                *)
-                  echo "ERROR: Detect changed paths produced unknown Postgres selection '$POSTGRES_REQUIRED'" >&2
-                  exit 1
-                  ;;
-              esac
               ;;
             false)
               allow_success_or_skipped "Quality" "$QUALITY_RESULT"
               allow_success_or_skipped "Feature contracts" "$FEATURE_CONTRACTS_RESULT"
-              allow_success_or_skipped "Postgres integration tests" "$POSTGRES_RESULT"
               ;;
             *)
               echo "ERROR: Detect changed paths produced unknown rust selection '$RUST_REQUIRED'" >&2

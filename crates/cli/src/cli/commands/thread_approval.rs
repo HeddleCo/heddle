@@ -16,6 +16,9 @@
 
 use anyhow::{Context, Result, anyhow};
 use api::heddle::api::v1alpha1::{RepositoryRef, StateId as ApiStateId, repository_ref::Reference};
+use objects::object::ThreadName;
+use repo::Repository;
+use serde::Serialize;
 use verbs::approval_plan::{
     EligibilitySummary, approval_recorded_message, approval_revoked_message,
     approvals_empty_message, approvals_header, eligibility_allowed_message,
@@ -23,9 +26,6 @@ use verbs::approval_plan::{
     format_unix_secs_label, plan_eligibility_summary, short_state_id, state_id_bytes_to_string,
     timestamp_secs_u64, unmet_requirement_line,
 };
-use objects::object::ThreadName;
-use repo::Repository;
-use serde::Serialize;
 use weft_client_shim::CliContext as _;
 
 use super::RecoveryAdvice;

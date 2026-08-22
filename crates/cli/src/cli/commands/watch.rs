@@ -44,11 +44,6 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, SecondsFormat, Utc};
-use verbs::watch_plan::{
-    DEFAULT_POLL_INTERVAL_MS, MAX_TAIL_WINDOW, WatchFilterPlanError, WatchNotifyClass,
-    WatchSincePlanError, is_relevant_watch_event, plan_watch_filter, plan_watch_since_cutoff,
-    watch_passes_filter,
-};
 use notify::{
     Config as NotifyConfig, Error as NotifyError, ErrorKind as NotifyErrorKind, Event, EventKind,
     PollWatcher, RecommendedWatcher, RecursiveMode, Watcher,
@@ -57,6 +52,11 @@ use objects::{object::StateId, store::ObjectStore};
 use oplog::{OpEntry, OpLog, OpLogBackend, OpRecord, RecordedHead};
 use repo::Repository;
 use serde::Serialize;
+use verbs::watch_plan::{
+    DEFAULT_POLL_INTERVAL_MS, MAX_TAIL_WINDOW, WatchFilterPlanError, WatchNotifyClass,
+    WatchSincePlanError, is_relevant_watch_event, plan_watch_filter, plan_watch_since_cutoff,
+    watch_passes_filter,
+};
 
 use super::{advice::RecoveryAdvice, command_runtime_contract};
 use crate::cli::{

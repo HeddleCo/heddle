@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    fs_atomic::write_file_atomic,
-    lock::RepoLock,
-    store::{HeddleError, Result},
+use objects::{
+    error::{HeddleError, Result},
+    fs_atomic::{create_dir_all_durable, write_file_atomic},
+    lock::{RepoLock, WriteLockGuard},
 };
 
 /// Current agent task TOML schema version.
@@ -135,14 +135,14 @@ impl AgentTaskStore {
         self.tasks_dir.join(".lock")
     }
 
-    fn write_lock(&self) -> Result<crate::lock::WriteLockGuard> {
+    fn write_lock(&self) -> Result<WriteLockGuard> {
         RepoLock::at(self.lock_path())
             .write()
             .map_err(|err| HeddleError::Config(format!("failed to acquire agent task lock: {err}")))
     }
 
     fn write_record_file(&self, record: &AgentTaskRecord) -> Result<()> {
-        crate::fs_atomic::create_dir_all_durable(&self.tasks_dir)?;
+        create_dir_all_durable(&self.tasks_dir)?;
         let path = self.task_path(&record.task_id)?;
         let content =
             toml::to_string_pretty(record).map_err(|err| HeddleError::Config(err.to_string()))?;
@@ -173,7 +173,7 @@ impl AgentTaskStore {
     /// Create and persist a task, generating a task id when absent.
     pub fn create(&self, mut record: AgentTaskRecord) -> Result<AgentTaskRecord> {
         let _lock = self.write_lock()?;
-        crate::fs_atomic::create_dir_all_durable(&self.tasks_dir)?;
+        create_dir_all_durable(&self.tasks_dir)?;
         if record.task_id.is_empty() {
             record.task_id = generate_agent_task_id();
         }

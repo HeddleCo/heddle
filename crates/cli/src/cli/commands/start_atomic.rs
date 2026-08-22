@@ -50,16 +50,6 @@ use std::{
     rc::Rc,
 };
 
-use verbs::{
-    CheckoutRewindPlan, CreateDirAttempt, SelfCreatedDirRewindPlan, StartEffectKind,
-    StartEffectPreconditionError, StartEffectStagingFacts, TargetDirClaimKind,
-    TargetDirCreateIntent, TargetLeafRefusal, TargetLeafShape, append_safe_relative_components,
-    claim_kind_after_empty_dir_adoption, claim_kind_for_create_attempt, classify_materialize_error,
-    classify_target_leaf_shape, path_components_are_safe, plan_checkout_rewind,
-    plan_self_created_dir_rewind, plan_start_cleanup, plan_start_transaction,
-    plan_target_dir_create_intent, require_established_claim, validate_empty_dir_adoption,
-    validate_start_effect_preconditions, validate_threads_root_path_safety,
-};
 use objects::{
     error::{HeddleError, Result as HeddleResult},
     object::{StateId, ThreadName},
@@ -69,6 +59,16 @@ use refs::RefExpectation;
 use repo::{
     CheckoutMaterialization, Thread, ThreadManager, ThreadMode,
     atomic::{AtomicMutation, StagedCommit, Tx},
+};
+use verbs::{
+    CheckoutRewindPlan, CreateDirAttempt, SelfCreatedDirRewindPlan, StartEffectKind,
+    StartEffectPreconditionError, StartEffectStagingFacts, TargetDirClaimKind,
+    TargetDirCreateIntent, TargetLeafRefusal, TargetLeafShape, append_safe_relative_components,
+    claim_kind_after_empty_dir_adoption, claim_kind_for_create_attempt, classify_materialize_error,
+    classify_target_leaf_shape, path_components_are_safe, plan_checkout_rewind,
+    plan_self_created_dir_rewind, plan_start_cleanup, plan_start_transaction,
+    plan_target_dir_create_intent, require_established_claim, validate_empty_dir_adoption,
+    validate_start_effect_preconditions, validate_threads_root_path_safety,
 };
 
 use super::{
@@ -1965,7 +1965,7 @@ mod tests {
         let entry = find_active_thread_entry(&repo, "iso")
             .unwrap()
             .expect("the first start created a reservation");
-        objects::store::ActorPresenceStore::new(repo.heddle_dir())
+        repo::ActorPresenceStore::new(repo.heddle_dir())
             .delete(&entry.session_id)
             .unwrap();
         assert!(

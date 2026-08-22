@@ -223,23 +223,18 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
             stats.markers_written += 1;
         }
 
-        let encoded_records = if self.refs.can_commit_records() {
-            records
-                .iter()
-                .map(|record| {
-                    rmp_serde::to_vec(record).map_err(|error| IngestError::Other(error.to_string()))
-                })
-                .collect::<crate::Result<Vec<_>>>()?
+        // Mechanical/recordless import is an explicit supported mode.
+        // It still enters through commit_and_publish for the atomic ref
+        // batch, but cannot claim an oplog invariant its backend does not
+        // provide. Configured repository backends advertise the committer
+        // and receive the exact records above.
+        let staged_records: &[OpRecord] = if self.refs.can_commit_records() {
+            &records
         } else {
-            // Mechanical/recordless import is an explicit supported mode.
-            // It still enters through commit_and_publish for the atomic ref
-            // batch, but cannot claim an oplog invariant its backend does not
-            // provide. Configured repository backends advertise the committer
-            // and receive the exact records above.
-            Vec::new()
+            &[]
         };
         self.refs
-            .commit_and_publish(&encoded_records, &updates, None)
+            .commit_and_publish(staged_records, &updates, None)
             .map_err(IngestError::from)?;
 
         Ok(stats)
@@ -320,11 +315,7 @@ mod tests {
     struct TestCommitter;
 
     impl RefCommitter for TestCommitter {
-        fn commit_records(
-            &self,
-            _encoded_records: &[Vec<u8>],
-            _scope: Option<&str>,
-        ) -> HeddleResult<()> {
+        fn commit_records(&self, _records: &[OpRecord], _scope: Option<&str>) -> HeddleResult<()> {
             Ok(())
         }
     }

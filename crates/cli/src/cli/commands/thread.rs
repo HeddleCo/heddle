@@ -8,6 +8,18 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
+use objects::{
+    object::{State, StateId, ThreadName, Tree},
+    store::{ObjectStore, WriterLeaseStatus, WriterLeaseStore},
+    worktree::WorktreeStatus,
+};
+use oplog::OpRecord;
+use refs::{Head, RefExpectation, RefUpdate};
+use repo::{
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, Repository, Thread, ThreadCaptureOutcome, ThreadFreshness, ThreadId,
+    ThreadIdError, ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState,
+};
+use serde::Serialize;
 use verbs::{
     AutoWorkspaceDefault, AvailableGitRef, ThreadBaseError, ThreadBaseSelection,
     ThreadCreateOptions, ThreadListOptions, ThreadPathIsolationError, ThreadPlanError,
@@ -26,21 +38,6 @@ pub use verbs::{
     CoordinationStatus, ThreadActorInfo, ThreadSummary, collect_thread_summaries,
     find_thread_summary, thread_is_available_git_ref, thread_is_imported_git_ref,
 };
-use objects::{
-    object::{State, StateId, ThreadName, Tree},
-    store::{
-        ActorPresence, ActorPresenceStatus, ActorPresenceStore, ObjectStore, WriterLeaseStatus,
-        WriterLeaseStore,
-    },
-    worktree::WorktreeStatus,
-};
-use oplog::OpRecord;
-use refs::{Head, RefExpectation, RefUpdate};
-use repo::{
-    AgentUsageSummary, Repository, Thread, ThreadCaptureOutcome, ThreadFreshness, ThreadId,
-    ThreadIdError, ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState,
-};
-use serde::Serialize;
 
 use super::{
     action_line::{print_nested_next_step, print_nested_optional, print_next_step, print_optional},
@@ -395,12 +392,7 @@ pub(crate) fn contextual_thread_action(
     target_thread: Option<&str>,
     action: &str,
 ) -> String {
-    verbs::status::next_action::contextual_thread_action(
-        repo,
-        thread_id,
-        target_thread,
-        action,
-    )
+    verbs::status::next_action::contextual_thread_action(repo, thread_id, target_thread, action)
 }
 
 pub(crate) fn thread_recovery_action_is_primary(
@@ -1129,9 +1121,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     let shared_target_decision =
         plan_shared_target_redirect(wants_shared_target, &thread_mode, is_rust_workspace);
     let shared_target_dir_path: Option<PathBuf> = match shared_target_decision {
-        verbs::SharedTargetRedirectDecision::Apply => {
-            Some(shared_target::shared_target_dir(repo)?)
-        }
+        verbs::SharedTargetRedirectDecision::Apply => Some(shared_target::shared_target_dir(repo)?),
         verbs::SharedTargetRedirectDecision::SkipNonRustWorkspace => {
             tracing::debug!(
                 repo = %repo.root().display(),

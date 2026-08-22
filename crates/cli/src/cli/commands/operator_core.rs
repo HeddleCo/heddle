@@ -3,12 +3,6 @@ use std::{collections::BTreeSet, path::Path};
 
 use anyhow::Result;
 use chrono::Utc;
-use verbs::{
-    VerificationClaimPolicyFacts,
-    raw_git_preservation_command as core_raw_git_preservation_command,
-    repository_verification_allows_success_claim as core_repository_verification_allows_success_claim,
-    status::next_action::{NextActionInput, effective_next_action, non_empty_action},
-};
 use objects::{object::ThreadName, store::ObjectStore};
 use repo::{
     GitImportGuidance, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
@@ -17,6 +11,12 @@ use repo::{
 };
 use serde::{Serialize, Serializer, ser::SerializeStruct};
 use sley::{IndexStage, Repository as SleyRepository};
+use verbs::{
+    VerificationClaimPolicyFacts,
+    raw_git_preservation_command as core_raw_git_preservation_command,
+    repository_verification_allows_success_claim as core_repository_verification_allows_success_claim,
+    status::next_action::{NextActionInput, effective_next_action, non_empty_action},
+};
 
 use super::{
     rebase::{

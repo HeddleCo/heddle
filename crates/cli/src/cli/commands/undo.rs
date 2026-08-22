@@ -5,6 +5,11 @@
 //! acquisition, apply, text/json render, and mutation-side RecoveryAdvice.
 
 use anyhow::{Result, anyhow};
+use objects::store::ObjectStore;
+use oplog::{OpBatch, OpRecord};
+use refs::UNDO_RECOVERY_HANDLE;
+use repo::{Repository, ThreadManager};
+use serde::Serialize;
 use verbs::{
     LiveThreadWorktree, UndoApplyPreflightError, UndoBatchSummary, UndoHistoryAction,
     UndoListReport, check_redaction_redo_supported, check_redaction_undo_safe,
@@ -15,11 +20,6 @@ use verbs::{
     list_undo_history, live_materialized_path_blocks_undo, plan_redo_batches, plan_undo_apply,
     plan_undo_batches, summarize_batch, validate_undo_list_preview_modes,
 };
-use objects::store::ObjectStore;
-use oplog::{OpBatch, OpRecord};
-use refs::UNDO_RECOVERY_HANDLE;
-use repo::{Repository, ThreadManager};
-use serde::Serialize;
 
 use super::{
     action_line::print_next,

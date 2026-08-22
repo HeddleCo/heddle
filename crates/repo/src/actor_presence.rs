@@ -9,10 +9,10 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    fs_atomic::write_file_atomic,
-    lock::RepoLock,
-    store::{HeddleError, Result},
+use objects::{
+    error::{HeddleError, Result},
+    fs_atomic::{create_dir_all_durable, write_file_atomic},
+    lock::{RepoLock, WriteLockGuard},
 };
 
 const STALE_AGENT_TTL_DAYS: i64 = 7;
@@ -223,14 +223,14 @@ impl ActorPresenceStore {
         self.presence_dir.join(".lock")
     }
 
-    fn write_lock(&self) -> Result<crate::lock::WriteLockGuard> {
+    fn write_lock(&self) -> Result<WriteLockGuard> {
         RepoLock::at(self.lock_path()).write().map_err(|err| {
             HeddleError::Config(format!("failed to acquire agent registry lock: {err}"))
         })
     }
 
     fn write_entry_file(&self, entry: &ActorPresence) -> Result<()> {
-        crate::fs_atomic::create_dir_all_durable(&self.presence_dir)?;
+        create_dir_all_durable(&self.presence_dir)?;
         let path = self.entry_path(&entry.session_id)?;
         let content =
             toml::to_string_pretty(entry).map_err(|e| HeddleError::Config(e.to_string()))?;
@@ -453,7 +453,7 @@ impl ActorPresenceStore {
         FBuild: FnMut(&str) -> Result<ActorPresence>,
     {
         let _lock = self.write_lock()?;
-        crate::fs_atomic::create_dir_all_durable(&self.presence_dir)?;
+        create_dir_all_durable(&self.presence_dir)?;
 
         for dir_entry in std::fs::read_dir(&self.presence_dir)? {
             let dir_entry = dir_entry?;

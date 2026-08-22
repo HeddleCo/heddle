@@ -7,13 +7,13 @@ use objects::{
 };
 
 use super::{
+    Repository, Result,
     builder::ProvenanceBuilder,
     helpers::{
         build_single_origin_provenance, expand_line_origin_sets_with_builder, load_blob_bytes,
         lookup_tree_entry, split_text_lines, synthesize_file_provenance_from_blob,
         visit_equal_runs,
     },
-    Repository, Result,
 };
 
 /// Bundle of everything we need from one parent state when synthesizing

@@ -9,6 +9,7 @@
 //! layer via [`RefManager::with_reconciler`](super::RefManager::with_reconciler)
 //! — the same dependency-inversion the write side uses.
 
+use heddle_object_model::op_record::OpRecord;
 use objects::{
     error::Result,
     object::{MarkerName, StateId, ThreadName},
@@ -89,14 +90,13 @@ pub struct ReconcileOutcome {
 /// The write-side dual of [`RefReconciler`] (heddle#330 §2.2 "The write
 /// chokepoint"): commits the caller's ref-carrying oplog record batch (phase 4)
 /// before the canonical publish (phase 5), so no ref is published without a
-/// preceding replayable record. The records cross the seam as opaque
-/// rmp-serde-encoded bytes, so `refs` names no `oplog` type; the impl (in
-/// `repo`) decodes and appends them. Injected via
+/// preceding replayable record. The records are typed (`OpRecord` lives in
+/// object-model, which `refs` already names). Injected via
 /// [`RefManager::with_committer`](super::RefManager::with_committer).
 pub trait RefCommitter: Send + Sync {
-    /// Append the (opaque-encoded) ref-carrying `OpRecord` batch under the
-    /// oplog write lock — phase 4, the commit point.
-    fn commit_records(&self, encoded_records: &[Vec<u8>], scope: Option<&str>) -> Result<()>;
+    /// Append the ref-carrying `OpRecord` batch under the oplog write lock —
+    /// phase 4, the commit point.
+    fn commit_records(&self, records: &[OpRecord], scope: Option<&str>) -> Result<()>;
 }
 
 /// The oplog-backed fold, injected into `RefManager` from the `repo`/`oplog`

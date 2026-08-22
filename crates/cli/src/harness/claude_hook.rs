@@ -28,10 +28,13 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use objects::{
     object::{AnnotationKind, AnnotationScope, AnnotationStatus, ContextTarget},
-    store::{ActorPresenceStatus, ActorPresenceStore, ObjectStore},
+    store::ObjectStore,
 };
 use refs::Head;
-use repo::{Repository, RepositorySnapshot, SessionManager, StackNextAction, StateAttachmentKind};
+use repo::{
+    ActorPresenceStatus, ActorPresenceStore, Repository, RepositorySnapshot, SessionManager,
+    StackNextAction, StateAttachmentKind,
+};
 use serde_json::{Value, json};
 use tracing::debug;
 

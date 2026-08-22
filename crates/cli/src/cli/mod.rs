@@ -38,7 +38,10 @@ pub fn execution_context_from_cli(cli: &Cli) -> anyhow::Result<verbs::ExecutionC
     } else {
         verbs::Verbosity::Normal
     };
-    let fsmonitor_mode = config.worktree_status_options(Some(repo.config())).fsmonitor.mode;
+    let fsmonitor_mode = config
+        .worktree_status_options(Some(repo.config()))
+        .fsmonitor
+        .mode;
     let mut builder = verbs::ExecutionContext::builder()
         .repo(repo)
         .start_path(start)

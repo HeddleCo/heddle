@@ -24,6 +24,7 @@ use api::heddle::api::v1alpha1::{
 };
 use objects::{
     Progress,
+    error::HeddleError,
     object::{
         AnnotationStatus, ContentHash, ContextBlob, ContextTarget, Discussion, DiscussionsBlob,
         MarkerName, StateAttachmentBody, StateAttachmentKind, StateId, ThreadName, TreeEntryTarget,
@@ -2505,14 +2506,14 @@ fn synthetic_frontier_root_locally_complete(
     };
     match wire::enumerate_state_closure_with_options(repo.store(), state_id, options) {
         Ok(_) => Ok(true),
-        Err(ProtocolError::ObjectNotFound(_)) => {
+        Err(HeddleError::MissingObject { .. }) | Err(HeddleError::NotFound(_)) => {
             if materialization.allows_partial_fetch() {
                 lazy_synthetic_frontier_graph_present(repo, state_id, depth)
             } else {
                 Ok(false)
             }
         }
-        Err(err) => Err(err),
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -3152,8 +3153,8 @@ fn locally_complete_thread_head(
     // makes advertising this head safe.
     match wire::enumerate_state_closure(repo.store(), head) {
         Ok(_) => Ok(Some(head)),
-        Err(ProtocolError::ObjectNotFound(_)) => Ok(None),
-        Err(err) => Err(err),
+        Err(HeddleError::MissingObject { .. }) | Err(HeddleError::NotFound(_)) => Ok(None),
+        Err(err) => Err(err.into()),
     }
 }
 

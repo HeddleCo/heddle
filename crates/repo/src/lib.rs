@@ -17,6 +17,8 @@ pub(crate) fn test_state_id() -> objects::object::StateId {
     objects::object::StateId::from_bytes(bytes)
 }
 
+pub mod actor_presence;
+pub mod agent_task;
 pub mod atomic;
 mod ci_runner_trust;
 pub mod clone_intent;
@@ -73,6 +75,7 @@ mod repository_symbol_graph_frontier;
 mod repository_symbol_graph_load;
 mod repository_symbol_graph_query;
 pub use repository_symbol_graph_query::ResolvedSemanticEdgeSet;
+pub mod remote;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_semantic_context;
 #[cfg(feature = "tree-sitter-symbols")]
@@ -81,7 +84,6 @@ mod repository_semantic_corpus;
 mod repository_semantic_graph_e2e_tests;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_signals;
-pub mod remote;
 mod repository_state_visibility;
 #[cfg(all(test, feature = "tree-sitter-symbols"))]
 mod repository_symbol_graph_tests;
@@ -165,15 +167,18 @@ pub use objects::{
         TimelineOperationIdParseError, TimelineOperationKind, TimelineStepId,
         TimelineToolCallStatus, TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
     },
-    store::{
-        AgentUsageSummary, FsStore, ObjectStore, ShallowInfo,
-        actor_presence::{
-            ActorPresence, ActorPresenceStatus, ActorPresenceStore, generate_actor_session_id,
-        },
-    },
+    store::{FsStore, ObjectStore, ShallowInfo},
 };
 #[cfg(feature = "async-source")]
 pub use repository::query_history_async;
+pub use actor_presence::{
+    ActorChainNode, ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
+    ContextQueryEntry, generate_actor_session_id,
+};
+pub use agent_task::{
+    AGENT_TASK_SCHEMA_VERSION, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
+    generate_agent_task_id, validate_task_id,
+};
 pub use repository::{
     BlobHydrator, ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters,
     CheckoutMaterialization, CommitGraphIndex, CommitGraphInspection, ContextSuggestion,

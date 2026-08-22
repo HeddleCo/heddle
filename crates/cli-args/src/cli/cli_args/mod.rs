@@ -28,7 +28,6 @@ mod commands_visibility;
 mod output_mode;
 
 pub use cli_base::{Cli, should_output_json};
-pub use config::OutputMode;
 pub use command_suggestions::{format_unrecognized_suggestion, suggested_command};
 pub use commands_agent::{
     AgentCommands, AgentFanoutCommands, AgentProvenanceCommands, AgentTaskCommands,
@@ -91,4 +90,5 @@ pub use commands_visibility::{
     VisibilityCommands, VisibilityListArgs, VisibilityPromoteArgs, VisibilitySetArgs,
     VisibilityShowArgs, VisibilityTierArg,
 };
+pub use config::OutputMode;
 pub use output_mode::CliOutputMode;

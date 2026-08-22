@@ -20,13 +20,13 @@
 //! representation (e.g. when handing it to a hosted service call).
 
 use anyhow::{Result, anyhow};
-use verbs::status::next_action::canonical_git_import_ref_command;
 use objects::{
     error::HeddleError,
     object::{State, StateId},
     store::ObjectStore,
 };
 use repo::{Repository, ResolvePolicy, StateResolveFailure, resolve_state_for_command};
+use verbs::status::next_action::canonical_git_import_ref_command;
 
 use super::advice::RecoveryAdvice;
 

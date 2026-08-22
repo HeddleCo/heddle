@@ -5,14 +5,14 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{Result, bail};
 use heddle_cli_contract::cli::commands::{InitOutput, InitPrincipalOutput};
+use objects::object::Principal;
+use repo::{Repository, RepositoryCapability, open_git_repository_at_root};
+use tracing::{debug, info};
 use verbs::{
     InitPrincipalPlan, OnboardingFacts, OnboardingMode,
     init_side_effects as core_init_side_effects, plan_repository_onboarding, resolve_absolute_path,
     select_init_principal,
 };
-use objects::object::Principal;
-use repo::{Repository, RepositoryCapability, open_git_repository_at_root};
-use tracing::{debug, info};
 
 use super::{
     RecoveryAdvice,

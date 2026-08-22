@@ -4,13 +4,13 @@
 use std::sync::OnceLock;
 
 use clap::{ArgAction, CommandFactory};
+use schemars::JsonSchema;
+use serde::Serialize;
 pub use verbs::ActionTemplate;
 use verbs::{
     DiffReport, FsckReport, MachineOutputKind, QueryReport, ReportContract as CoreReportContract,
     ResolveReport, StatusReport, VerifyReport,
 };
-use schemars::JsonSchema;
-use serde::Serialize;
 
 #[cfg(feature = "semantic")]
 use crate::cli::SemanticCommands;

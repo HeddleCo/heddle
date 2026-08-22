@@ -139,9 +139,7 @@ pub fn should_output_json(cli: &Cli, repo_config: Option<&Config>) -> bool {
 
     if let Some(output) = cli.output_mode() {
         format = match output {
-            config::OutputMode::Json | config::OutputMode::JsonCompact => {
-                OutputFormat::Json
-            }
+            config::OutputMode::Json | config::OutputMode::JsonCompact => OutputFormat::Json,
             config::OutputMode::Text => OutputFormat::Text,
         };
     }

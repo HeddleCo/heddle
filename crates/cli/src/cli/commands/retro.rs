@@ -21,6 +21,18 @@ use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use objects::{
+    object::{State, StateId},
+    store::{
+        ObjectStore,
+    },
+};
+use oplog::OpRecord;
+use repo::{
+    ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStore, Repository,
+    TimelineStore, TimelineView,
+};
+use serde::Serialize;
 use verbs::retro_plan::{
     DEFAULT_FALLBACK_WINDOW_HOURS, MAX_OPLOG_BATCHES, agent_task_window_overlaps,
     agent_window_overlaps, choose_default_since_ts, context_annotation_in_window,
@@ -28,15 +40,6 @@ use verbs::retro_plan::{
     is_verify_fail_marker, is_verify_pass_signal, retro_header_line, short_state_id,
     timeline_step_in_window,
 };
-use objects::{
-    object::{State, StateId},
-    store::{
-        ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStore, ObjectStore,
-    },
-};
-use oplog::OpRecord;
-use repo::{Repository, TimelineStore, TimelineView};
-use serde::Serialize;
 
 use super::history_target::resolve_state_id;
 use crate::cli::{Cli, should_output_json};
@@ -430,7 +433,7 @@ fn collect_agents(
         // within (since, now]. An agent that started before `since`
         // but is still Active counts; one that completed before
         // `since` does not.
-        let active_now = matches!(entry.status, objects::store::ActorPresenceStatus::Active);
+        let active_now = matches!(entry.status, repo::ActorPresenceStatus::Active);
         let last_activity = entry
             .completed_at
             .or(entry.last_progress_at)

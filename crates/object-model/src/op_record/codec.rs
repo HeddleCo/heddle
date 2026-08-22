@@ -7,7 +7,7 @@
 //! refuses record schema versions 1 through 3 without rewriting their bytes.
 //! Future incompatible record changes must allocate a new schema version.
 
-use objects::{
+use crate::{
     error::{HeddleError, Result},
     object::{Attribution, ContentHash, StateId, VisibilityTier},
 };
@@ -390,7 +390,7 @@ impl StrictCurrentOpRecord {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{Agent, Principal};
+    use crate::object::{Agent, Principal};
 
     use super::*;
 

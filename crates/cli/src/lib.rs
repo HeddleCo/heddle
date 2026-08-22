@@ -34,12 +34,12 @@ pub use ::config::{
     is_enabled, log_operation, log_repo_event, logging,
 };
 // Remote aliases and `.heddle/remotes.toml` parsing live with the repo layer.
-pub use repo::remote;
 pub use objects::{
     error::{HeddleError, HeddleError as StoreError},
     store::ObjectStore,
 };
 pub use repo::Repository;
+pub use repo::remote;
 pub type StoreResult<T> = objects::error::Result<T>;
 
 /// Register factories needed to reopen CLI-owned lazy hosted repositories.

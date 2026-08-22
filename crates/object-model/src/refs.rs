@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use objects::object::StateId;
+use crate::object::StateId;
 
 const THREADS_PREFIX: &str = "refs/threads/";
 const MARKERS_PREFIX: &str = "refs/markers/";

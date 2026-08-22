@@ -16,12 +16,11 @@ use objects::{
     HeddleError,
     error::Result,
     object::{Principal, State, ThreadName, Tree},
-    store::{ActorPresence, ActorPresenceStatus, ActorPresenceStore},
     worktree::{WorktreeStatus, build_worktree_ignore},
 };
 use refs::Head;
 use repo::{
-    AgentUsageSummary, CommitGraphIndex, GitImportGuidance, GitOverlayBranchTip,
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, CommitGraphIndex, GitImportGuidance, GitOverlayBranchTip,
     GitOverlayOutOfBandCommits, GitRemoteTrackingStatus, RepoConfig, Repository,
     RepositoryCapability, RepositoryOperationStatus, Thread, ThreadFreshness, ThreadImpactCategory,
     ThreadManager, ThreadMode, ThreadState, WorktreeCompareProfile,

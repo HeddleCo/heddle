@@ -27,11 +27,11 @@ use merge::{
 };
 use objects::{
     object::{Attribution, Blob, ContentHash, StateId, ThreadName, Tree},
-    store::{ActorPresenceStatus, ActorPresenceStore, ObjectStore},
+    store::ObjectStore,
 };
 use oplog::{OpBatch, OpLogBackend, OpLogRecorder, OpRecord};
 use refs::Head;
-use repo::{
+use repo::{ActorPresenceStatus, ActorPresenceStore, 
     CommitGraphIndex, Repository, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
     ThreadState, describe_thread_advice, find_merge_base, refresh_thread_freshness,
 };

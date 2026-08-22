@@ -4,10 +4,6 @@
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
-use verbs::{
-    GitScope, MachineContractInput, SavePlan, SaveVerb, execute_save, large_capture_requires_force,
-    principal_lacks_accountable_identity,
-};
 use heddle_git_projection::GitProjection;
 use objects::{
     lock::RepositoryLockExt,
@@ -17,6 +13,10 @@ use objects::{
 };
 use refs::Head;
 use repo::{Repository, RepositoryCapability, SessionManager, SnapshotProfile, format_confidence};
+use verbs::{
+    GitScope, MachineContractInput, SavePlan, SaveVerb, execute_save, large_capture_requires_force,
+    principal_lacks_accountable_identity,
+};
 // Re-export the helper derivations so existing CLI call sites
 // (`thread.rs`, `harness/mod.rs`) keep `super::snapshot::summarize_*`
 // imports working without churn. The implementations live in
@@ -1445,13 +1445,13 @@ mod tests {
         repo: &Repository,
         provider: &str,
         model: &str,
-    ) -> objects::store::ActorPresence {
+    ) -> repo::ActorPresence {
         let thread = current_thread(repo)
             .unwrap()
             .expect("initialized repository has a current thread");
-        let registry = objects::store::ActorPresenceStore::new(repo.heddle_dir());
-        let entry = objects::store::ActorPresence {
-            session_id: objects::store::generate_actor_session_id(),
+        let registry = repo::ActorPresenceStore::new(repo.heddle_dir());
+        let entry = repo::ActorPresence {
+            session_id: repo::generate_actor_session_id(),
             client_instance_id: None,
             native_actor_key: Some("claude-code:session:session-457".to_string()),
             native_parent_actor_key: None,
@@ -1468,7 +1468,7 @@ mod tests {
             model: Some(model.to_string()),
             harness: Some("claude-code".to_string()),
             thinking_level: None,
-            usage_summary: objects::store::AgentUsageSummary::default(),
+            usage_summary: repo::AgentUsageSummary::default(),
             last_progress_at: None,
             report_flush_state: Some("pending-local".to_string()),
             attach_reason: Some("test detected harness actor".to_string()),
@@ -1477,7 +1477,7 @@ mod tests {
             winning_attach_rule: Some("test".to_string()),
             probe_source: Some("hook_payload".to_string()),
             probe_confidence: Some(0.99),
-            status: objects::store::ActorPresenceStatus::Active,
+            status: repo::ActorPresenceStatus::Active,
             completed_at: None,
             context_queries: Vec::new(),
         };

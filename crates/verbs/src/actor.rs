@@ -14,10 +14,10 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use objects::store::{
+use repo::{
     ActorChainNode, ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
+    Repository,
 };
-use repo::Repository;
 use serde::Serialize;
 
 /// Machine JSON for `heddle presence list` domain fields (stable field names).
@@ -295,7 +295,7 @@ pub fn mark_actor_done(registry: &ActorPresenceStore, session_id: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use objects::store::{ActorPresence, ActorPresenceStatus, AgentUsageSummary};
+    use repo::{ActorPresence, ActorPresenceStatus, AgentUsageSummary};
     use tempfile::TempDir;
 
     use super::*;

@@ -3,10 +3,10 @@
 
 use std::{error::Error, fmt};
 
+use serde_json::{Map, Value};
 use verbs::status::next_action::{
     canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
 };
-use serde_json::{Map, Value};
 
 pub const DIRTY_WORKTREE_CAPTURE_COMMAND: &str = "heddle capture -m \"...\"";
 pub(crate) const GIT_OVERLAY_CHECKPOINT_COMMAND: &str = "heddle commit -m \"...\"";

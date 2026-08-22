@@ -9,6 +9,12 @@
 
 use std::{collections::BTreeSet, path::Path, sync::OnceLock};
 
+use objects::{object::ThreadName, worktree::WorktreeStatus};
+use refs::Head;
+use repo::{
+    CommitGraphIndex, GitOverlayBranchTip, GitRemoteTrackingStatus, OperationKind, OperationScope,
+    Repository,
+};
 use verbs::status::next_action::{
     canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
     heddle_action as core_heddle_action, import_guidance_includes_active_branch,
@@ -20,12 +26,6 @@ pub(crate) use verbs::{
 pub use verbs::{
     RepositoryVerificationCheck, RepositoryVerificationHealth, RepositoryVerificationState,
     VerificationCheck, repository_setup_guidance, verify::serialize_empty_action_as_null,
-};
-use objects::{object::ThreadName, worktree::WorktreeStatus};
-use refs::Head;
-use repo::{
-    CommitGraphIndex, GitOverlayBranchTip, GitRemoteTrackingStatus, OperationKind, OperationScope,
-    Repository,
 };
 
 use super::{
@@ -169,10 +169,7 @@ pub fn build_repository_verification_state_with_worktree_status(
 /// Core-owned health proof (CLI may inspect recovery commands for doctor text).
 pub fn build_verification_health(repo: &Repository) -> RepositoryVerificationHealth {
     let worktree_status = worktree_status_for_verification(repo);
-    verbs::status::build_repository_verification_health_with_worktree_status(
-        repo,
-        &worktree_status,
-    )
+    verbs::status::build_repository_verification_health_with_worktree_status(repo, &worktree_status)
 }
 
 /// Health proof reusing a caller's worktree-status `Result`.
@@ -184,10 +181,7 @@ pub(crate) fn build_verification_health_with_worktree_status(
     repo: &Repository,
     worktree_status: &repo::Result<Option<WorktreeStatus>>,
 ) -> RepositoryVerificationHealth {
-    verbs::status::build_repository_verification_health_with_worktree_status(
-        repo,
-        worktree_status,
-    )
+    verbs::status::build_repository_verification_health_with_worktree_status(repo, worktree_status)
 }
 
 fn worktree_status_for_verification(repo: &Repository) -> repo::Result<Option<WorktreeStatus>> {

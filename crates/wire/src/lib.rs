@@ -12,12 +12,9 @@ mod message_pushpull;
 mod message_refs;
 mod message_status;
 mod native_pack;
-mod object_availability;
-mod object_graph;
 mod object_transfer;
 mod provider_pack;
 mod semantic_graph;
-mod transfer_plan;
 
 pub use auth_token::AuthToken;
 pub use key_binding::{
@@ -42,17 +39,9 @@ pub use native_pack::{
     GitPackChunkState, GrowingPackChunkReader, MAX_RECEIVED_GIT_PACK_SIZE,
     MAX_RECEIVED_PACK_INDEX_SIZE, MAX_RECEIVED_PACK_SIZE, NativePackBundle, NativePackFileBundle,
     NativePackStreamingWriter, PackChunkSpool, PackChunkState, PackFileChunkReader,
-    build_native_pack, install_received_pack,
-    is_native_packable_object_type, native_pack_excluded_object_types, next_pack_chunk,
-    receive_pack_chunk, reuse_native_pack_encoded_subset_in,
-};
-pub use object_availability::{ObjectAvailabilityPlan, has_object, plan_object_availability};
-pub use object_graph::{
-    ObjectId, ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, StateClosureOptions,
-    enumerate_state_closure, enumerate_state_closure_plan,
-    enumerate_state_closure_plan_with_options, enumerate_state_closure_transfer_from_boundaries,
-    enumerate_state_closure_transfer_with_options, enumerate_state_closure_with_options,
-    is_ancestor, missing_blobs_in_tree,
+    build_native_pack, install_received_pack, is_native_packable_object_type,
+    native_pack_excluded_object_types, next_pack_chunk, receive_pack_chunk,
+    reuse_native_pack_encoded_subset_in,
 };
 pub use object_transfer::{
     MAX_PULL_FRAME_MESSAGE_SIZE, MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
@@ -60,15 +49,20 @@ pub use object_transfer::{
     check_received_transfer_blob_size, chunk_bounds, chunk_count, chunk_offset, load_object_data,
     load_requested_object, store_received_object,
 };
+pub use objects::transfer::{
+    GitLaneTransferIntent, ObjectAvailabilityPlan, ObjectId, ObjectInfo, ObjectType,
+    ObjectTypeBucket, PlannedObject, RepositoryTransferPlan, StateClosureOptions,
+    TransferPartitions, TransferPlanStats, enumerate_state_closure, enumerate_state_closure_plan,
+    enumerate_state_closure_plan_with_options, enumerate_state_closure_transfer_from_boundaries,
+    enumerate_state_closure_transfer_with_options, enumerate_state_closure_with_options,
+    has_object, is_ancestor, missing_blobs_in_tree, plan_object_availability,
+};
 pub use provider_pack::{
     CompletedProviderPack, ProviderPackBundle, ProviderPackExtent, ProviderPackIndexEntry,
     ProviderPackManifest, ProviderPackSpool, ProviderPackWriter, assemble_provider_pack,
 };
 pub use semantic_graph::{
     SemanticGraphQueryKind, SemanticGraphQueryRequest, SemanticGraphQueryResponse, SemanticGraphRef,
-};
-pub use transfer_plan::{
-    GitLaneTransferIntent, RepositoryTransferPlan, TransferPartitions, TransferPlanStats,
 };
 
 /// Default port for Heddle protocol.

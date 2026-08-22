@@ -4,19 +4,19 @@
 use std::{collections::BTreeMap, path::Path};
 
 use anyhow::Result;
-use verbs::{
-    annotation_status_label, audit_duplicate_count, audit_staleness_key, audit_target_key,
-    filter_annotations, suggestion_tier_human_label, suggestion_tier_token,
-};
 use objects::{
     object::{AnnotationStatus, ContextTarget},
-    store::{ActorPresenceStore, ContextQueryEntry},
+
 };
-use repo::{
+use repo::{ ActorPresenceStore, ContextQueryEntry,
     Repository, ThreadManager,
     staleness::{self, StalenessStatus},
 };
 use serde::Serialize;
+use verbs::{
+    annotation_status_label, audit_duplicate_count, audit_staleness_key, audit_target_key,
+    filter_annotations, suggestion_tier_human_label, suggestion_tier_token,
+};
 
 use super::{
     AnnotationHistoryOutput, AnnotationOutput, ContextListRow, RevisionOutput,
@@ -533,7 +533,7 @@ fn log_context_query_if_agent_session(
                 .ok()
                 .flatten()?;
             registry.list().ok()?.into_iter().find(|entry| {
-                entry.status == objects::store::ActorPresenceStatus::Active
+                entry.status == repo::ActorPresenceStatus::Active
                     && entry.thread_id.as_deref() == Some(thread.id.as_str())
             })
         });

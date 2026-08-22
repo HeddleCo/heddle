@@ -6,11 +6,14 @@
 //! Heddle object lane: content-addressed objects that can ride the native pack,
 //! and signed sidecars that must use the out-of-pack verification paths.
 
-use objects::{object::StateId, store::ObjectStore};
-
 use crate::{
-    ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, Result, StateClosureOptions,
-    enumerate_state_closure_plan_with_options,
+    error::Result,
+    object::StateId,
+    store::ObjectStore,
+    transfer::graph::{
+        ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, StateClosureOptions,
+        enumerate_state_closure_plan_with_options,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -61,7 +64,7 @@ pub struct TransferPlanStats {
 
 impl RepositoryTransferPlan<PlannedObject> {
     pub fn from_state_closure_plan(
-        store: &impl ObjectStore,
+        store: &(impl ObjectStore + crate::store::SidecarStore),
         root: StateId,
         options: StateClosureOptions,
         git_lane: GitLaneTransferIntent,
@@ -184,10 +187,12 @@ fn object_info_type(object: &ObjectInfo) -> ObjectType {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{ContentHash, StateId};
+    use crate::{
+        object::{ContentHash, StateId},
+        transfer::graph::ObjectId,
+    };
 
     use super::*;
-    use crate::ObjectId;
 
     fn hash(byte: u8) -> ContentHash {
         ContentHash::from_bytes([byte; 32])

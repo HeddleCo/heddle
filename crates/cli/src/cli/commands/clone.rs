@@ -17,19 +17,6 @@ use std::{
 #[cfg(feature = "client")]
 use anyhow::Context;
 use anyhow::{Result, anyhow};
-use verbs::{
-    CloneMode, ClonePlanError, ClonePlanFacts, ClonePlanOptions, CloneRemoteSource,
-    CloneThreadSelectError, UnsupportedCloneFlag, plan_clone, select_clone_checkout_thread,
-    status::next_action::canonical_git_import_ref_command,
-};
-#[cfg(feature = "client")]
-use verbs::{
-    MonorepoCloneResultSummary, MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoNodeExecution,
-    MonorepoNodeExecutionStep, MonorepoNodeFacts, MonorepoNodeStepOptions,
-    assemble_monorepo_clone_json_report, assemble_monorepo_clone_result_summary,
-    monorepo_execution_progress, monorepo_rel_display, plan_monorepo_clone,
-    plan_monorepo_execution, validate_monorepo_clone_options, validate_monorepo_execution,
-};
 use heddle_git_projection::git_core::{
     clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference, write_head_symref,
 };
@@ -54,6 +41,19 @@ use sley::{
     IndexWriteOptions, ObjectId, RefPrecondition, RemoteConfigSet, Repository as SleyRepository,
     plumbing::sley_core::redact_url_for_display,
     remote::{ProgressSink as SleyProgressSink, TransferProgress},
+};
+use verbs::{
+    CloneMode, ClonePlanError, ClonePlanFacts, ClonePlanOptions, CloneRemoteSource,
+    CloneThreadSelectError, UnsupportedCloneFlag, plan_clone, select_clone_checkout_thread,
+    status::next_action::canonical_git_import_ref_command,
+};
+#[cfg(feature = "client")]
+use verbs::{
+    MonorepoCloneResultSummary, MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoNodeExecution,
+    MonorepoNodeExecutionStep, MonorepoNodeFacts, MonorepoNodeStepOptions,
+    assemble_monorepo_clone_json_report, assemble_monorepo_clone_result_summary,
+    monorepo_execution_progress, monorepo_rel_display, plan_monorepo_clone,
+    plan_monorepo_execution, validate_monorepo_clone_options, validate_monorepo_execution,
 };
 
 use super::{

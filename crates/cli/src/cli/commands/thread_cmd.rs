@@ -8,25 +8,25 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
+use objects::{
+    fs_ops::remove_path_recursively,
+    object::{Blob, StateId, ThreadName},
+    store::{ObjectStore, WriterLeaseStatus, WriterLeaseStore},
+};
+use oplog::{OpLogRecorder, OpRecord, ThreadUpdateSnapshots};
+use refs::{Head, RefExpectation, RefUpdate};
+use repo::{ActorPresenceStore, 
+    Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,
+    describe_thread_advice,
+};
+use serde::Serialize;
+use tokio::time::{Duration, sleep};
 use verbs::{
     CleanWorktreeGuard, ThreadDropDisposition, ThreadDropOptions, ThreadPromoteOptions,
     ThreadRefreshOptions, ThreadRefreshPlan, format_refresh_conflict_markers,
     plan_cleanup_thread_drop, plan_thread_drop, plan_thread_promote, plan_thread_refresh,
     promote_confirm_in_place_removal, should_materialize_refresh_conflict_markers,
 };
-use objects::{
-    fs_ops::remove_path_recursively,
-    object::{Blob, StateId, ThreadName},
-    store::{ActorPresenceStore, ObjectStore, WriterLeaseStatus, WriterLeaseStore},
-};
-use oplog::{OpLogRecorder, OpRecord, ThreadUpdateSnapshots};
-use refs::{Head, RefExpectation, RefUpdate};
-use repo::{
-    Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,
-    describe_thread_advice,
-};
-use serde::Serialize;
-use tokio::time::{Duration, sleep};
 
 use super::{
     action_line::print_next,

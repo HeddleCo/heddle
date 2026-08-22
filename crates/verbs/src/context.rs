@@ -210,10 +210,7 @@ mod tests {
             ctx.start_path(),
             Some(std::path::Path::new("/tmp/heddle-verbs-context-test"))
         );
-        assert_eq!(
-            ctx.principal_fallback(),
-            Some(("Luke", "luke@example.com"))
-        );
+        assert_eq!(ctx.principal_fallback(), Some(("Luke", "luke@example.com")));
         assert_eq!(
             ctx.worktree_status_options().fsmonitor.mode,
             FsMonitorMode::Watchman

@@ -9,14 +9,6 @@ use std::{
 use anyhow::{Result, anyhow};
 use base64::Engine as _;
 use chrono::Utc;
-use verbs::{
-    ExplicitAgentBind, SessionAttachFacts, SessionLookupFact, SessionPolicy, TokenSidFact,
-    WorktreeSessionFact, decide_session_attach, first_value_string, map_from_pairs,
-    merge_string_vec, opencode_tool_name, opencode_tool_status,
-    parse_relay_payload as core_parse_relay_payload,
-    should_rotate_segment as pure_should_rotate_segment, value_array_join, value_cost_micros,
-    value_cost_micros_u64, value_string, value_string_array, value_u64, value_u64_string,
-};
 use objects::{
     fs_atomic::write_file_atomic,
     object::{
@@ -25,17 +17,24 @@ use objects::{
         TimelineToolCallStatus, TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
         Tree,
     },
-    store::{
-        ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, ObjectStore,
-    },
+    store::ObjectStore,
 };
 use refs::Head;
 use repo::{
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
     Repository, SessionManager, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
     ThreadMode, ThreadState, TimelineStore, TimelineView,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use verbs::{
+    ExplicitAgentBind, SessionAttachFacts, SessionLookupFact, SessionPolicy, TokenSidFact,
+    WorktreeSessionFact, decide_session_attach, first_value_string, map_from_pairs,
+    merge_string_vec, opencode_tool_name, opencode_tool_status,
+    parse_relay_payload as core_parse_relay_payload,
+    should_rotate_segment as pure_should_rotate_segment, value_array_join, value_cost_micros,
+    value_cost_micros_u64, value_string, value_string_array, value_u64, value_u64_string,
+};
 use wire::{
     HarnessIdentity, ProgressCheckpoint, SessionDiffSummary, SessionReportEnvelope,
     TranscriptAttachmentRef, UsageTotals, WorktreeChangeBaseline,

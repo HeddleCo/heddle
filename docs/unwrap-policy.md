@@ -33,7 +33,6 @@ Counts below are unique primary clippy diagnostics from `cargo clippy --workspac
 | heddle-repo | 1993 | 430 | 22 |
 | heddle-review | 57 | 15 | 1 |
 | heddle-runtime-bridge | 0 | 18 | 1 |
-| heddle-schema | 37 | 0 | 2 |
 | heddle-semantic | 189 | 58 | 89 |
 | heddle-state-review | 2 | 0 | 0 |
 | heddle-verbs | 2 | 9 | 0 |

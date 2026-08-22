@@ -4,13 +4,13 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
+use objects::object::ThreadName;
+use repo::{GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
+use serde::Serialize;
 use verbs::{
     CaptureSplitOptions, ThreadMoveOptions, ThreadShapingError, capture_split,
     is_manual_review_blocker, thread_move,
 };
-use objects::object::ThreadName;
-use repo::{GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
-use serde::Serialize;
 
 use super::{
     action_line::print_next,

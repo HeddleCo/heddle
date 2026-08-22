@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Result, anyhow};
 use objects::{
     object::{ActionId, ContentHash, StateAttachment, StateId},
-    store::ObjectStore,
+    store::{ObjectStore, SidecarStore},
 };
 use refs::RefExpectation;
 use repo::{CollaborationStore, CollaborationWriteDisposition, Repository};

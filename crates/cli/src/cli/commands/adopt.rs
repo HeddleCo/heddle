@@ -4,11 +4,11 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
-use verbs::{AdoptPlanError, AdoptPlanOptions, plan_adopt};
 use objects::lock::RepositoryLockExt;
 use repo::{Repository, RepositoryCapability, RepositorySourceAuthority};
 use serde::Serialize;
 use sley::Repository as SleyRepository;
+use verbs::{AdoptPlanError, AdoptPlanOptions, plan_adopt};
 
 use super::{
     action_line::print_next,
