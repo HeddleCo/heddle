@@ -64,6 +64,18 @@ use crate::{
     },
 };
 
+/// Provider/model hint from the wrapping harness, in the shape the hosted
+/// client's attribution resolver consumes (installed at startup).
+pub fn current_process_harness_hint(
+    repo: &Repository,
+) -> (Option<String>, Option<String>) {
+    let probe = probe_current_process_harness(repo, None, None, None).ok();
+    (
+        probe.as_ref().and_then(|probe| probe.provider.clone()),
+        probe.as_ref().and_then(|probe| probe.model.clone()),
+    )
+}
+
 pub(crate) fn probe_current_process_harness(
     repo: &Repository,
     current_provider: Option<String>,
@@ -2247,7 +2259,7 @@ fn decode_token_claims(token: &str) -> Option<TokenClaims> {
 fn active_token_claims() -> Option<TokenClaims> {
     #[cfg(feature = "client")]
     {
-        crate::client::resolve_active_bearer()
+        hosted_client::client::resolve_active_bearer()
             .ok()
             .flatten()
             .and_then(|token| decode_token_claims(&token.id))

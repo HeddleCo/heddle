@@ -26,9 +26,10 @@ use verbs::approval_plan::{
 use objects::object::ThreadName;
 use repo::Repository;
 use serde::Serialize;
-use weft_client_shim::CliContext as _;
+use heddle_cli_args::CliContext as _;
 
 use super::RecoveryAdvice;
+use hosted_client::client::{HostedAuthMode, HostedClient};
 use crate::{
     cli::{
         Cli,
@@ -37,7 +38,6 @@ use crate::{
         },
         should_output_json,
     },
-    client::{HostedAuthMode, HostedClient},
     config::UserConfig,
     remote::{RemoteTarget, resolve_remote_with_key},
 };
@@ -134,7 +134,7 @@ async fn open_hosted_session(
         HostedAuthMode::CredentialFallback,
     )
     .await?
-    .with_human_signature_callback(crate::client::cli_human_signature_callback());
+    .with_human_signature_callback(hosted_client::client::cli_human_signature_callback());
     Ok((client, repo_path))
 }
 

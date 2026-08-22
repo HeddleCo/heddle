@@ -408,13 +408,13 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
         repo,
         std::env::var("HEDDLE_AGENT_PROVIDER")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
         std::env::var("HEDDLE_AGENT_MODEL")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
         std::env::var("HEDDLE_AGENT_POLICY")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
     )?;
     let env_signals = actor_identity_env_signals();
     let current_lane = repo.current_lane()?;

@@ -273,7 +273,7 @@ pub async fn push_discussions(
             Err(error) => {
                 eprintln!(
                     "{} hosted discussion {}: {error:#}",
-                    crate::cli::style::warn_marker(),
+                    heddle_cli_render::cli::style::warn_marker(),
                     discussion_id
                 );
             }
@@ -347,7 +347,7 @@ async fn push_one(
         // of silently producing an empty candidate set.
         eprintln!(
             "{} hosted discussion {local_id}: {skipped_foreign} unlinked turn(s) not attributed to the local principal were left unpublished",
-            crate::cli::style::warn_marker(),
+            heddle_cli_render::cli::style::warn_marker(),
         );
     }
     if candidates.is_empty() {
@@ -496,7 +496,7 @@ pub async fn pull_discussions(
             Err(error) => {
                 eprintln!(
                     "{} hosted discussion {}: {error:#}",
-                    crate::cli::style::warn_marker(),
+                    heddle_cli_render::cli::style::warn_marker(),
                     discussion.id
                 );
             }

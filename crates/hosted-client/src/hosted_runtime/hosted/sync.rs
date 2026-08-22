@@ -86,27 +86,27 @@ type PullRepositoryInitializer<'a> =
     Box<dyn FnOnce(&PullReady) -> Result<Repository, ProtocolError> + 'a>;
 
 #[derive(Debug, Clone)]
-pub(crate) struct PullBootstrapMetadata {
-    discussions_from_pack: bool,
+pub struct PullBootstrapMetadata {
+    pub discussions_from_pack: bool,
     pub discussions: Vec<Discussion>,
-    context_from_pack: bool,
+    pub context_from_pack: bool,
     pub context: Vec<(ContextTarget, ContextBlob)>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ResolvedPullBootstrapMetadata {
+pub struct ResolvedPullBootstrapMetadata {
     pub discussions: Vec<Discussion>,
     pub context: Vec<(ContextTarget, ContextBlob)>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PullBootstrapRefs {
+pub struct PullBootstrapRefs {
     pub head_thread: Option<String>,
     pub refs: Vec<HostedRefEntry>,
 }
 
 impl PullBootstrapMetadata {
-    pub(crate) fn resolve(
+    pub fn resolve(
         &self,
         repo: &Repository,
         state_id: Option<StateId>,
@@ -131,7 +131,7 @@ impl PullBootstrapMetadata {
     }
 }
 
-pub(crate) fn decode_pull_bootstrap(
+pub fn decode_pull_bootstrap(
     checkpoint: &[u8],
 ) -> Result<Option<PullBootstrapMetadata>, ProtocolError> {
     let checkpoint = std::str::from_utf8(checkpoint)
@@ -162,7 +162,7 @@ pub(crate) fn decode_pull_bootstrap(
     }))
 }
 
-pub(crate) fn decode_pull_refs(
+pub fn decode_pull_refs(
     checkpoint: &[u8],
 ) -> Result<Option<PullBootstrapRefs>, ProtocolError> {
     let checkpoint = std::str::from_utf8(checkpoint)
@@ -221,7 +221,7 @@ fn decode_bootstrap_state_id(value: Vec<u8>, field: &str) -> Result<StateId, Pro
     Ok(StateId::from_bytes(value))
 }
 
-fn discussions_from_pull_pack(
+pub(crate) fn discussions_from_pull_pack(
     repo: &Repository,
     state_id: StateId,
 ) -> Result<Vec<Discussion>, ProtocolError> {
@@ -248,7 +248,7 @@ fn discussions_from_pull_pack(
         .map_err(|error| ProtocolError::InvalidState(error.to_string()))
 }
 
-fn context_from_pull_pack(
+pub(crate) fn context_from_pull_pack(
     repo: &Repository,
     state_id: StateId,
 ) -> Result<Vec<(ContextTarget, ContextBlob)>, ProtocolError> {
@@ -1359,7 +1359,7 @@ impl HostedClient {
         .await
     }
 
-    pub(crate) async fn repair_clone_with_depth_and_materialization(
+    pub async fn repair_clone_with_depth_and_materialization(
         &mut self,
         repo: &Repository,
         repo_path: &str,
@@ -2384,7 +2384,7 @@ impl HostedClient {
         Ok(())
     }
 
-    pub(crate) async fn fetch_advertised_synthetic_frontier_objects(
+    pub async fn fetch_advertised_synthetic_frontier_objects(
         &mut self,
         repo: &Repository,
         repo_path: &str,
@@ -2447,7 +2447,7 @@ impl HostedClient {
         Ok(())
     }
 
-    pub(crate) async fn publish_clone_markers(
+    pub async fn publish_clone_markers(
         &mut self,
         repo: &Repository,
         repo_path: &str,

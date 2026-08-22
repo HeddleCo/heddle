@@ -40,7 +40,7 @@ use sley::{
     remote::{PackGenerationProgress, ProgressSink as SleyProgressSink},
 };
 #[cfg(feature = "client")]
-use weft_client_shim::CliContext as _;
+use heddle_cli_args::CliContext as _;
 #[cfg(feature = "client")]
 use wire::ProtocolError;
 
@@ -57,18 +57,18 @@ use super::{
 #[cfg(feature = "client")]
 use crate::cli::progress_render::clear_line;
 #[cfg(feature = "client")]
-use crate::client::HostedClient;
+use hosted_client::client::HostedClient;
 #[cfg(feature = "client")]
-use crate::client::{HostedAuthMode, HostedSession};
+use hosted_client::client::{HostedAuthMode, HostedSession};
 #[cfg(feature = "client")]
 use crate::remote::Remote;
+use hosted_client::client::LocalSync;
 use crate::{
     cli::{
         Cli,
         progress_render::{finish_line, progress_for},
         should_output_json, style,
     },
-    client::LocalSync,
     config::UserConfig,
     remote::{RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
@@ -940,7 +940,7 @@ async fn discover_native_https_remote(spec: &str, action: &str) -> Result<()> {
     )?;
     match session.discover_endpoint(addr).await {
         Ok(_) => Ok(()),
-        Err(crate::hosted_runtime::hosted::HostedError::EndpointDescriptorUnavailable) => {
+        Err(hosted_client::hosted_runtime::hosted::HostedError::EndpointDescriptorUnavailable) => {
             Err(RecoveryAdvice::native_https_iroh_endpoint_missing(action, spec).into())
         }
         Err(error) => Err(error.into()),
@@ -1384,7 +1384,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         .session
         .connect(options.addr)
         .await?
-        .with_human_signature_callback(crate::client::cli_human_signature_callback());
+        .with_human_signature_callback(hosted_client::client::cli_human_signature_callback());
     let result = push_network_connected(repo, &mut client, options).await;
     client.close().await;
     result
@@ -1453,7 +1453,7 @@ async fn push_network_connected(
     // the object push already succeeded, so a discussion-sync hiccup warns
     // rather than failing the push (the next push resumes from the mirror map).
     if result.success {
-        match crate::client::discussion_sync::push_discussions(repo, client, &repo_path).await {
+        match hosted_client::client::discussion_sync::push_discussions(repo, client, &repo_path).await {
             Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                 println!(
                     "{} synced {count} discussion(s) to {}",
@@ -1475,7 +1475,7 @@ async fn push_network_connected(
         // rejects these attachments in the pack, so they only reach the server
         // over the caller-authenticated RPCs. Best-effort: the object push
         // already landed, so a sync hiccup warns rather than failing the push.
-        match crate::client::context_sync::push_context(repo, client, &repo_path).await {
+        match hosted_client::client::context_sync::push_context(repo, client, &repo_path).await {
             Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                 println!(
                     "{} synced {count} annotation(s) to {}",
@@ -1488,7 +1488,7 @@ async fn push_network_connected(
                 eprintln!("{} context sync skipped: {error:#}", style::warn_marker());
             }
         }
-        match crate::client::review_sync::push_review_signatures(repo, client, &repo_path).await {
+        match hosted_client::client::review_sync::push_review_signatures(repo, client, &repo_path).await {
             Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                 println!(
                     "{} synced {count} review signature(s) to {}",

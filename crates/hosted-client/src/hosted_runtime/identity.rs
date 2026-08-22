@@ -7,7 +7,7 @@ use chrono::Utc;
 use config::{UserConfig, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer as _};
 use serde::Serialize;
-use weft_client_shim::CliContext;
+use heddle_cli_args::CliContext;
 
 use super::{
     HostedAuthMode, HostedSession, agent_node_identity,
@@ -18,7 +18,7 @@ use super::{
     identity_state::{self, ClaimState},
     root_mint::{is_local_agent_root, local_agent_credential_needs_refresh, mint_agent_root},
 };
-use crate::cli::IdentityCommands;
+use heddle_cli_args::IdentityCommands;
 
 const DEFAULT_AGENT_TTL_SECS: u64 = 60 * 60;
 const MAX_CLAIM_TTL_SECS: u64 = 60 * 60;

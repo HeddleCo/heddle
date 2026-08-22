@@ -45,6 +45,7 @@ use cli::{
     },
     config::UserConfig,
     exit::HeddleExitCode,
+    harness::current_process_harness_hint,
     logging::{CommandTrace, LoggingConfig, LoggingGuard, init_logging},
     operation_id::{resolve_operation_id, run_local_idempotency_if_requested},
     perf::{ProfileField, emit_command_profile, profile_enabled},
@@ -97,13 +98,18 @@ async fn async_main() -> Result<()> {
     // registrations, the second-and-subsequent CLI invocation against a
     // `--lazy` clone would see `MissingObject` on every blob read.
     cli::cli::commands::register_git_overlay_factory();
+    // Install the harness probe the hosted client's attribution resolver
+    // consults for ambient agent detection. Unconditional: local-only builds
+    // resolve attribution through it too.
+    hosted_client::attribution::install_harness_probe(current_process_harness_hint);
+
     #[cfg(feature = "client")]
     cli::register_hosted_factory();
 
-    // Pick the hosted authentication implementation at startup.
+    // Hosted command dispatch (auth / identity / whoami).
     #[cfg(feature = "client")]
-    let hosted: Box<dyn weft_client_shim::WeftExtensions> =
-        Box::new(cli::extensions::EnabledWeftExtensions);
+    let hosted: Box<dyn hosted_client::extensions::HostedExtensions> =
+        Box::new(hosted_client::extensions::EnabledHostedExtensions);
     // OSS builds dispatch no hosted commands (those `Commands` variants
     // are gated behind `client`), so no trait object is needed.
 
@@ -660,13 +666,13 @@ async fn async_main() -> Result<()> {
         #[cfg(feature = "client")]
         Commands::Auth { command } => {
             let cmd = command.clone();
-            hosted.auth(&cli, &cmd).await
+            hosted.auth(&cli, cmd).await
         }
 
         #[cfg(feature = "client")]
         Commands::Identity { command } => {
             let cmd = command.clone();
-            hosted.identity(&cli, &cmd).await
+            hosted.identity(&cli, cmd).await
         }
 
         #[cfg(feature = "client")]

@@ -16,7 +16,7 @@ use verbs::{
 };
 use repo::Repository;
 use serde::Serialize;
-use weft_client_shim::CliContext;
+use heddle_cli_args::CliContext;
 
 use super::{
     auth::{headless_token_metadata, resolve_server},

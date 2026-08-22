@@ -181,5 +181,3 @@ pub use visibility::cmd_visibility;
 pub use watch::cmd_watch;
 pub use workflow::{cmd_land, cmd_sync, recover_incomplete_land_if_present};
 
-#[cfg(feature = "client")]
-pub(crate) use crate::hosted_runtime::cmd_auth;

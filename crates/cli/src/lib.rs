@@ -10,15 +10,10 @@ compile_error!(
      The OSS CLI ships as git-overlay-only, native-only, or both."
 );
 
-pub(crate) mod attribution;
 pub mod cli;
-pub mod client;
 pub mod exit;
-pub mod extensions;
 pub mod harness;
 mod hosted_failure;
-#[cfg(feature = "client")]
-mod hosted_runtime;
 pub mod operation_id;
 pub mod perf;
 #[cfg(feature = "semantic")]
@@ -43,9 +38,10 @@ pub use repo::Repository;
 pub type StoreResult<T> = objects::error::Result<T>;
 
 /// Register factories needed to reopen CLI-owned lazy hosted repositories.
+/// The hosted client stack itself lives in `hosted-client`.
 #[cfg(feature = "client")]
 pub fn register_hosted_factory() {
-    hosted_runtime::hosted::register_hosted_factory();
+    hosted_client::register_hosted_factory();
 }
 
 #[cfg(test)]

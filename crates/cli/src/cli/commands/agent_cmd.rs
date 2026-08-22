@@ -400,13 +400,13 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
         &repo,
         std::env::var("HEDDLE_AGENT_PROVIDER")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
         std::env::var("HEDDLE_AGENT_MODEL")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
         std::env::var("HEDDLE_AGENT_POLICY")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
     )?;
     let presence_store = ActorPresenceStore::new(repo.heddle_dir());
     let task_assignment_id = task_record.as_ref().map(|task| task.task_id.clone());

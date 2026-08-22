@@ -10,6 +10,7 @@ members = [
     "crates/verbs",
     "crates/crypto",
     "crates/devtools",
+    "crates/hosted-client",
     "crates/ingest",
     "crates/merge",
     "crates/mount",
@@ -29,7 +30,6 @@ members = [
     "crates/semantic",
     "crates/semantic-recovery",
     "crates/state-review",
-    "crates/weft-client-shim",
 ]
 default-members = ["crates/cli"]
 resolver = "2"

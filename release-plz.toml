@@ -128,5 +128,5 @@ name = "heddle-state-review"
 release = true
 
 [[package]]
-name = "weft-client-shim"
+name = "heddle-hosted-client"
 release = true

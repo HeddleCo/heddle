@@ -21,9 +21,7 @@ exclude = [
 anyhow.workspace = true
 base64.workspace = true
 getrandom.workspace = true
-biscuit-auth = { workspace = true, optional = true }
 blake3.workspace = true
-bytes = { workspace = true, optional = true }
 chrono.workspace = true
 ci-config = { path = "../ci-config", package = "heddle-ci-config", version = "0.13" }
 ci-engine = { path = "../ci-engine", package = "heddle-ci-engine", version = "0.13" }
@@ -32,11 +30,7 @@ clap_complete.workspace = true
 futures.workspace = true
 hex.workspace = true
 ignore.workspace = true
-iroh = { workspace = true, optional = true }
-iroh-base = { workspace = true, optional = true }
 libc.workspace = true
-n0-watcher = { workspace = true, optional = true }
-noq-udp = { workspace = true, optional = true }
 objects = { path = "../objects", package = "heddle-objects", version = "0.13" }
 crypto = { path = "../crypto", package = "heddle-crypto", version = "0.13" }
 # `heddle-merge` is the native hunk-level text merge engine extracted from
@@ -46,12 +40,12 @@ crypto = { path = "../crypto", package = "heddle-crypto", version = "0.13" }
 merge = { path = "../merge", package = "heddle-merge", version = "0.13" }
 api = { package = "heddle-api", version = "0.10" }
 config = { path = "../config", package = "heddle-config", version = "0.13" }
+hosted-client = { path = "../hosted-client", package = "heddle-hosted-client", version = "0.13", default-features = false }
 heddle-cli-args = { path = "../cli-args", version = "0.13", default-features = false }
 heddle-cli-contract = { path = "../cli-contract", version = "0.13", default-features = false }
 heddle-cli-render = { path = "../cli-render", version = "0.13", default-features = false }
 verbs = { path = "../verbs", package = "heddle-verbs", version = "0.13", default-features = false }
 heddle-format = { path = "../format", version = "0.13" }
-weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.13" }
 async-trait.workspace = true
 # `default-features = false` here matches the pattern used for
 # repo below: this crate's `zstd` feature controls the cascade
@@ -71,8 +65,6 @@ opentelemetry-otlp = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 prost.workspace = true
 prost-types.workspace = true
-rand = { workspace = true, optional = true }
-reqwest = { workspace = true, optional = true }
 rmp-serde.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -83,7 +75,6 @@ sley.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-stream = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 toml.workspace = true
 # `uuid::Uuid::new_v4().simple()` suffixes rebase transaction ids
@@ -97,7 +88,6 @@ tracing.workspace = true
 tracing-opentelemetry = { workspace = true, optional = true }
 tracing-subscriber.workspace = true
 walkdir.workspace = true
-webpki-roots = { workspace = true, optional = true }
 
 # Mount is platform-agnostic in source, but each adapter only
 # compiles for one OS — FUSE on Linux (`fuse`), FSKit on macOS
@@ -168,19 +158,14 @@ git-overlay = [
     "heddle-cli-contract/git-overlay",
 ]
 native = ["repo/native"]
+# `client` is now a marker: the hosted stack itself (Iroh transport,
+# credentials, biscuits, websockets, hosted sync) compiles inside
+# `hosted-client`; enabling this just turns that crate's `client` feature on
+# alongside the CLI-side client-gated surfaces.
 client = [
     "api/reflection",
-    "dep:biscuit-auth",
-    "dep:bytes",
-    "dep:iroh",
-    "dep:iroh-base",
-    "dep:n0-watcher",
-    "dep:noq-udp",
-    "dep:rand",
-    "dep:reqwest",
-    "dep:tokio-stream",
     "dep:tokio-tungstenite",
-    "dep:webpki-roots",
+    "hosted-client/client",
     "heddle-cli-args/client",
     "heddle-cli-contract/client",
     "heddle-cli-render/client",
@@ -207,6 +192,7 @@ telemetry = [
     "dep:opentelemetry-otlp",
     "dep:opentelemetry_sdk",
     "dep:tracing-opentelemetry",
+    "hosted-client/telemetry",
 ]
 # Forward zstd compression to every layer that touches the pack
 # format. The `?` syntax on optional deps activates the feature only

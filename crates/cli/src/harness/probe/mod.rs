@@ -5,7 +5,7 @@ use anyhow::Result;
 use verbs::{HarnessKind, decide_harness_probe, detect_harness_kind};
 use wire::{TranscriptAttachmentRef, UsageTotals};
 
-use crate::attribution::clean_attribution_value;
+use hosted_client::attribution::clean_attribution_value;
 
 mod claude_code;
 mod codex;

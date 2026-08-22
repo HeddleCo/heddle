@@ -2208,9 +2208,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
- "biscuit-auth",
  "blake3",
- "bytes",
  "chrono",
  "clap",
  "clap_complete",
@@ -2227,6 +2225,7 @@ dependencies = [
  "heddle-crypto",
  "heddle-format",
  "heddle-git-projection",
+ "heddle-hosted-client",
  "heddle-ingest",
  "heddle-merge",
  "heddle-mount",
@@ -2238,15 +2237,11 @@ dependencies = [
  "heddle-semantic",
  "heddle-verbs",
  "heddle-wire",
- "heddleco-iroh",
  "hex",
  "hyper-util",
  "ignore",
- "iroh-base",
  "iroh-relay",
  "libc",
- "n0-watcher",
- "noq-udp",
  "notify",
  "ntest",
  "opentelemetry",
@@ -2256,9 +2251,7 @@ dependencies = [
  "prost 0.14.1",
  "prost-reflect",
  "prost-types 0.14.1",
- "rand 0.10.2",
  "rcgen",
- "reqwest",
  "rmp-serde",
  "rustls",
  "schemars",
@@ -2270,7 +2263,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-stream",
  "tokio-tungstenite",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
@@ -2278,8 +2270,6 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "walkdir",
- "webpki-roots 1.0.9",
- "weft-client-shim",
 ]
 
 [[package]]
@@ -2292,7 +2282,6 @@ dependencies = [
  "heddle-config",
  "heddle-objects",
  "heddle-repo",
- "weft-client-shim",
 ]
 
 [[package]]
@@ -2429,6 +2418,62 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "heddle-hosted-client"
+version = "0.13.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "biscuit-auth",
+ "blake3",
+ "bytes",
+ "chrono",
+ "futures",
+ "getrandom 0.4.3",
+ "heddle-api",
+ "heddle-cli-args",
+ "heddle-cli-contract",
+ "heddle-cli-render",
+ "heddle-config",
+ "heddle-crypto",
+ "heddle-objects",
+ "heddle-perf-contract",
+ "heddle-refs",
+ "heddle-repo",
+ "heddle-verbs",
+ "heddle-wire",
+ "heddleco-iroh",
+ "hex",
+ "iroh-base",
+ "libc",
+ "n0-watcher",
+ "noq-udp",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "prost 0.14.1",
+ "prost-types 0.14.1",
+ "rand 0.10.2",
+ "rcgen",
+ "reqwest",
+ "rmp-serde",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sley",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "toml 1.1.4+spec-1.1.0",
+ "tracing",
+ "tracing-opentelemetry",
+ "uuid",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -8032,15 +8077,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
 dependencies = [
  "rustls-pki-types",
-]
-
-[[package]]
-name = "weft-client-shim"
-version = "0.13.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "heddle-repo",
 ]
 
 [[package]]
