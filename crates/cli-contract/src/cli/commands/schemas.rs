@@ -24,7 +24,7 @@ use verbs::{
 
 use super::command_catalog;
 use super::init_output::InitOutput;
-use super::wire::{CommitOutput, SnapshotOutput, UndoRedoOutput};
+use super::wire::{CommitOutput, OperatorCommandOutput, ReadyOutput, SnapshotOutput, UndoRedoOutput};
 use crate::cli::INIT_VERB;
 
 static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -78,11 +78,11 @@ schema_registry! {
     (&["commit"], CommitOutput),
     (&["undo", "undo --redo", "undo --recover"], UndoRedoOutput),
     (&["undo --list"], UndoListReport),
-    (&["ready"], ReadySchema),
+    (&["ready"], ReadyOutput),
     (&["land"], LandSchema),
     (&["land --threads"], LandBatchSchema),
     (&["sync"], SyncSchema),
-    (&["continue", "abort"], OperatorCommandSchema),
+    (&["continue", "abort"], OperatorCommandOutput),
     (&["start"], ThreadStartSchema),
     (&["thread create", "thread switch", "thread rename"], ThreadStartSchema),
     (&["thread current"], ThreadCurrentSchema),
@@ -136,7 +136,7 @@ schema_registry! {
     (&["agent presence explain"], AgentPresenceExplainSchema),
     (&["agent reserve", "agent heartbeat", "agent release"], AgentReservationEnvelopeSchema),
     (&["agent capture"], SnapshotOutput),
-    (&["agent ready"], ReadySchema),
+    (&["agent ready"], ReadyOutput),
     (&["agent list"], AgentReservationListSchema),
     (&["agent task create", "agent task show", "agent task update"], AgentTaskEnvelopeSchema),
     (&["agent task list"], AgentTaskListSchema),
@@ -857,73 +857,11 @@ pub struct DiscussionListSchema {
 
 // ---- core loop write/read helpers -----------------------------------------
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct OperatorCommandSchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: String,
-    pub message: String,
-    pub blockers: Vec<String>,
-    pub warnings: Vec<String>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ReadySchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: String,
-    pub message: String,
-    pub blockers: Vec<String>,
-    pub warnings: Vec<String>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub captured: bool,
-    pub captured_state: Option<String>,
-    pub capture_status: String,
-    pub capture_reason: String,
-    pub thread_state: Option<String>,
-    pub readiness: ReadyReadinessSchema,
-    pub report: Value,
-    #[serde(rename = "verification")]
-    pub verification: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ReadyReadinessSchema {
-    pub status: String,
-    pub captured: bool,
-    pub captured_state: Option<String>,
-    pub capture_status: String,
-    pub capture_reason: String,
-    pub checks: ReadyChecksSchema,
-    pub integration: String,
-    pub freshness: String,
-    pub merge_type: String,
-    pub changed_path_count: usize,
-    pub changed_paths: Vec<String>,
-    pub conflict_count: usize,
-    pub conflicts: Vec<String>,
-    pub impact: String,
-    pub impact_categories: Vec<String>,
-    pub blockers: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ReadyChecksSchema {
-    pub status: String,
-    pub reason: String,
-}
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SyncSchema {
     #[serde(flatten)]
-    pub operator: OperatorCommandSchema,
+    pub operator: OperatorCommandOutput,
     pub thread: Option<String>,
     pub current_state: Option<String>,
     pub chosen_path: Option<String>,
@@ -1125,7 +1063,7 @@ pub struct ThreadAbsorbSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ThreadResolveSchema {
     #[serde(flatten)]
-    pub operator: OperatorCommandSchema,
+    pub operator: OperatorCommandOutput,
     pub thread: String,
 }
 
@@ -1173,7 +1111,7 @@ pub struct ThreadMergeRequirementSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ThreadCleanupSchema {
     #[serde(flatten)]
-    pub operator: OperatorCommandSchema,
+    pub operator: OperatorCommandOutput,
     pub dry_run: bool,
     pub merged: Vec<ThreadDroppedSchema>,
     pub auto: Vec<ThreadDroppedSchema>,

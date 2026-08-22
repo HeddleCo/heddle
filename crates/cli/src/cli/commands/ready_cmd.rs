@@ -5,19 +5,11 @@ use anyhow::Result;
 use chrono::Utc;
 use objects::object::Tree;
 use repo::{Repository, ThreadFreshness, ThreadState};
-use serde::{
-    Serialize, Serializer,
-    ser::{Error as SerError, SerializeStruct},
-};
 use verbs::{
     ReadyDecisionInput, classify_ready_decision, has_integration_target,
-    ready_freshness_summary as core_ready_freshness_summary,
-    ready_integration_summary as core_ready_integration_summary,
-    ready_merge_type_summary as core_ready_merge_type_summary,
     ready_report_recommended_action as core_ready_report_recommended_action,
     ready_scoped_next_action as core_ready_scoped_next_action,
-    ready_status_summary as core_ready_status_summary, ready_verification_preflight_blocks,
-    status::next_action::non_empty_action,
+    ready_verification_preflight_blocks, status::next_action::non_empty_action,
 };
 
 use super::{
@@ -48,138 +40,12 @@ use crate::{
     config::UserConfig,
 };
 
-struct ReadyOutput {
-    operator: OperatorCommandOutput,
-    captured: bool,
-    captured_state: Option<String>,
-    thread_state: String,
-    trust: RepositoryVerificationState,
-    report: ThreadPreviewReport,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ReadyReadinessSummary {
-    status: String,
-    captured: bool,
-    captured_state: Option<String>,
-    capture_status: String,
-    capture_reason: String,
-    checks: ReadyChecksSummary,
-    integration: String,
-    freshness: String,
-    merge_type: String,
-    changed_path_count: usize,
-    changed_paths: Vec<String>,
-    conflict_count: usize,
-    conflicts: Vec<String>,
-    impact: String,
-    impact_categories: Vec<String>,
-    blockers: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ReadyChecksSummary {
-    status: String,
-    reason: String,
-}
-
-impl ReadyOutput {
-    fn capture_status(&self) -> (&'static str, &'static str) {
-        if self.captured {
-            (
-                "captured",
-                "worktree changes were captured during this ready invocation",
-            )
-        } else if ready_blocked_by_missing_intent(self) {
-            (
-                "required",
-                "the worktree has uncaptured changes and capture intent is missing",
-            )
-        } else if !self.trust.verified && self.report.merge_relation == "blocked" {
-            (
-                "not_checked",
-                "repository verification blocked capture evaluation",
-            )
-        } else {
-            (
-                "not_needed",
-                "the worktree already matches the current Heddle state",
-            )
-        }
-    }
-
-    fn readiness_summary(&self) -> ReadyReadinessSummary {
-        let (capture_status, capture_reason) = self.capture_status();
-        let checks = ready_checks_summary(self);
-        let integration = ready_integration_summary(&self.report);
-        let freshness = ready_freshness_summary(&self.report);
-        let merge_type = ready_merge_type_summary(&self.report);
-        let impact = if self.report.impact_categories.is_empty() {
-            "none".to_string()
-        } else {
-            self.report.impact_categories.join(", ")
-        };
-        ReadyReadinessSummary {
-            status: ready_status_summary(&self.report),
-            captured: self.captured,
-            captured_state: self.captured_state.clone(),
-            capture_status: capture_status.to_string(),
-            capture_reason: capture_reason.to_string(),
-            checks,
-            integration,
-            freshness,
-            merge_type,
-            changed_path_count: self.report.changed_path_count,
-            changed_paths: self.report.changed_paths.clone(),
-            conflict_count: self.report.conflict_count,
-            conflicts: self.report.conflicts.clone(),
-            impact,
-            impact_categories: self.report.impact_categories.clone(),
-            blockers: self.report.blockers.clone(),
-        }
-    }
-}
-
-impl Serialize for ReadyOutput {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let next_action = normalized_action(self.operator.next_action.clone().unwrap_or_default());
-        let recommended_action =
-            normalized_action(self.operator.recommended_action.clone().unwrap_or_default());
-        let next_action_template = next_action
-            .as_deref()
-            .and_then(super::verification_health::action_template);
-        let recommended_action_template = recommended_action
-            .as_deref()
-            .and_then(super::verification_health::action_template);
-        let verification = serde_json::to_value(&self.trust).map_err(S::Error::custom)?;
-        let readiness = self.readiness_summary();
-
-        let (capture_status, capture_reason) = self.capture_status();
-        let mut state = serializer.serialize_struct("ReadyOutput", 20)?;
-        state.serialize_field("output_kind", "ready")?;
-        state.serialize_field("status", &self.operator.status)?;
-        state.serialize_field("action", &self.operator.action)?;
-        state.serialize_field("message", &self.operator.message)?;
-        state.serialize_field("blockers", &self.operator.blockers)?;
-        state.serialize_field("warnings", &self.operator.warnings)?;
-        state.serialize_field("next_action", &next_action)?;
-        state.serialize_field("next_action_template", &next_action_template)?;
-        state.serialize_field("recommended_action", &recommended_action)?;
-        state.serialize_field("recommended_action_template", &recommended_action_template)?;
-        state.serialize_field("captured", &self.captured)?;
-        state.serialize_field("captured_state", &self.captured_state)?;
-        state.serialize_field("capture_status", capture_status)?;
-        state.serialize_field("capture_reason", capture_reason)?;
-        state.serialize_field("thread_state", &self.thread_state)?;
-        state.serialize_field("readiness", &readiness)?;
-        state.serialize_field("report", &self.report)?;
-        state.serialize_field("verification", &verification)?;
-        state.end()
-    }
-}
+// The ready wire payload lives in cli-contract so the schema registry
+// registers the real serialization type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::{
+    ReadyChecksSummary, ReadyOutput, ReadyReadinessSummary,
+};
+pub(crate) use heddle_cli_contract::cli::commands::wire::ready_blocked_by_missing_intent;
 
 pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     let cwd = std::env::current_dir()?;
@@ -662,19 +528,6 @@ fn write_ready_output_inner(
     fail_if_blocked_operator_status(&output.operator.status)
 }
 
-fn ready_blocked_by_missing_intent(output: &ReadyOutput) -> bool {
-    output.report.merge_relation == "not_checked"
-        && output
-            .report
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("-m/--message/--intent"))
-        && output
-            .operator
-            .recommended_action
-            .as_deref()
-            .is_some_and(|action| action == "heddle capture -m \"...\"")
-}
 
 fn write_trust_blocked_setup(recommended_action: Option<&str>) {
     println!();
@@ -900,49 +753,10 @@ fn write_preview_report(output: &ReadyOutput, recommended_action: Option<&str>) 
     }
 }
 
-fn ready_status_summary(report: &ThreadPreviewReport) -> String {
-    core_ready_status_summary(
-        &report.merge_relation,
-        report.blockers.is_empty(),
-        &report.thread_health,
-    )
-}
 
-fn ready_checks_summary(output: &ReadyOutput) -> ReadyChecksSummary {
-    if ready_blocked_by_missing_intent(output) {
-        ReadyChecksSummary {
-            status: "not_run".to_string(),
-            reason: "commit intent is required before readiness checks can run".to_string(),
-        }
-    } else if !output.trust.verified {
-        ReadyChecksSummary {
-            status: "not_run".to_string(),
-            reason: "repository verification is blocked".to_string(),
-        }
-    } else if output.report.merge_relation == "not_checked" {
-        ReadyChecksSummary {
-            status: "not_run".to_string(),
-            reason: "readiness preview was not reached".to_string(),
-        }
-    } else {
-        ReadyChecksSummary {
-            status: "completed".to_string(),
-            reason: "readiness preview ran".to_string(),
-        }
-    }
-}
 
-fn ready_integration_summary(report: &ThreadPreviewReport) -> String {
-    core_ready_integration_summary(&report.merge_relation)
-}
 
-fn ready_freshness_summary(report: &ThreadPreviewReport) -> String {
-    core_ready_freshness_summary(&report.merge_relation, &report.freshness)
-}
 
-fn ready_merge_type_summary(report: &ThreadPreviewReport) -> String {
-    core_ready_merge_type_summary(&report.merge_relation)
-}
 
 fn ready_capture_label(summary: &ReadyReadinessSummary) -> String {
     match (

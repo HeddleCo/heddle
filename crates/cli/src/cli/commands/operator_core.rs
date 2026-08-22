@@ -9,12 +9,9 @@ use repo::{
     RepositoryOperationStatus, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
     ThreadState, shell_quote, update_thread_state_from_state,
 };
-use serde::{Serialize, Serializer, ser::SerializeStruct};
 use sley::{IndexStage, Repository as SleyRepository};
 use verbs::{
-    VerificationClaimPolicyFacts,
     raw_git_preservation_command as core_raw_git_preservation_command,
-    repository_verification_allows_success_claim as core_repository_verification_allows_success_claim,
     status::next_action::{NextActionInput, effective_next_action, non_empty_action},
 };
 
@@ -25,32 +22,13 @@ use super::{
     },
     resolve::abort_merge_state,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
-    verification_health::{
-        RepositoryVerificationState, action_template, repository_verification_blockers,
-        repository_verification_primary_command,
-    },
+    verification_health::action_template,
 };
 use crate::config::UserConfig;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OperatorAction {
-    Abort,
-    Bisect,
-    CherryPick,
-    #[default]
-    Continue,
-    Land,
-    Merge,
-    Ready,
-    Rebase,
-    Revert,
-    Sync,
-    ThreadCleanup,
-    ThreadDrop,
-    ThreadPromote,
-    ThreadRefresh,
-    ThreadResolve,
-}
+pub(crate) use heddle_cli_contract::cli::commands::wire::{
+    OperatorAction, OperatorCommandEnvelope, OperatorCommandOutput, VerificationClaimPolicy,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct OperatorEmission {
@@ -91,154 +69,6 @@ pub fn operator_emission_output_kinds() -> Vec<(String, String)> {
         .collect()
 }
 
-impl OperatorAction {
-    const fn wire_value(self) -> &'static str {
-        match self {
-            Self::Abort => "abort",
-            Self::Bisect => "bisect",
-            Self::CherryPick => "cherry-pick",
-            Self::Continue => "continue",
-            Self::Land => "land",
-            Self::Merge => "merge",
-            Self::Ready => "ready",
-            Self::Rebase => "rebase",
-            Self::Revert => "revert",
-            Self::Sync => "sync",
-            Self::ThreadCleanup => "thread_cleanup",
-            Self::ThreadDrop => "thread_drop",
-            Self::ThreadPromote => "thread_promote",
-            Self::ThreadRefresh => "thread_refresh",
-            Self::ThreadResolve => "thread_resolve",
-        }
-    }
-}
-
-impl Serialize for OperatorAction {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.wire_value())
-    }
-}
-
-impl From<&OperationKind> for OperatorAction {
-    fn from(kind: &OperationKind) -> Self {
-        match kind {
-            OperationKind::Merge => Self::Merge,
-            OperationKind::Rebase => Self::Rebase,
-            OperationKind::CherryPick => Self::CherryPick,
-            OperationKind::Revert => Self::Revert,
-            OperationKind::Bisect => Self::Bisect,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct OperatorCommandOutput {
-    pub status: String,
-    pub action: OperatorAction,
-    pub message: String,
-    /// Reasons the operation could not advance state. Only populated
-    /// when `status == "blocked"` or `status == "failed"`. When the
-    /// operation succeeded with caveats, use `warnings` instead.
-    pub blockers: Vec<String>,
-    /// Non-blocking nudges surfaced when the operation actually
-    /// advanced state but the caller may still want a follow-up
-    /// (e.g. a heavy-impact change worth reviewing for broader impact).
-    /// Always omitted when empty.
-    pub warnings: Vec<String>,
-    pub next_action: Option<String>,
-    pub recommended_action: Option<String>,
-}
-
-impl OperatorCommandOutput {
-    pub(crate) fn blocked_by_repository_verification(
-        action: OperatorAction,
-        message: impl Into<String>,
-        trust: &RepositoryVerificationState,
-    ) -> Self {
-        let recommended_action = repository_verification_primary_command(trust);
-        Self {
-            status: "blocked".to_string(),
-            action,
-            message: message.into(),
-            blockers: repository_verification_blockers(trust),
-            warnings: Vec::new(),
-            next_action: Some(recommended_action.clone()),
-            recommended_action: Some(recommended_action),
-        }
-    }
-
-    pub(crate) fn block_success_claim_if_verification_blocked(
-        &mut self,
-        trust: &RepositoryVerificationState,
-        local_context: impl Into<String>,
-        policy: VerificationClaimPolicy,
-    ) {
-        if repository_verification_allows_success_claim(self, trust, policy) {
-            return;
-        }
-        *self = Self::blocked_by_repository_verification(
-            self.action,
-            format!(
-                "{} reached local checks, but repository verification is blocked: {}",
-                local_context.into(),
-                trust.summary
-            ),
-            trust,
-        );
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct VerificationClaimPolicy {
-    allow_land_publish_followup: bool,
-    allow_matching_workflow_action: bool,
-}
-
-impl VerificationClaimPolicy {
-    pub(crate) fn strict() -> Self {
-        Self::default()
-    }
-
-    pub(crate) fn allow_land_publish_followup(mut self) -> Self {
-        self.allow_land_publish_followup = true;
-        self
-    }
-
-    pub(crate) fn allow_matching_workflow_action(mut self) -> Self {
-        self.allow_matching_workflow_action = true;
-        self
-    }
-}
-
-fn repository_verification_allows_success_claim(
-    output: &OperatorCommandOutput,
-    trust: &RepositoryVerificationState,
-    policy: VerificationClaimPolicy,
-) -> bool {
-    use verbs::VerificationClaimTrustFacts;
-    core_repository_verification_allows_success_claim(
-        &output.status,
-        VerificationClaimTrustFacts {
-            verified: trust.verified,
-            recommended_action: &trust.recommended_action,
-            remote_drift: &trust.remote_drift,
-            workflow_status: &trust.workflow_status,
-        },
-        output.action == OperatorAction::Land && output.status == "landed",
-        output
-            .recommended_action
-            .as_deref()
-            .is_some_and(|action| action == trust.recommended_action),
-        VerificationClaimPolicyFacts {
-            allow_land_publish_followup: policy.allow_land_publish_followup,
-            allow_matching_workflow_action: policy.allow_matching_workflow_action,
-        },
-    )
-}
-
 /// True when an operator envelope's `status` is a non-success terminal
 /// outcome that scripts must observe as a non-zero process exit.
 pub(crate) fn is_blocked_operator_status(status: &str) -> bool {
@@ -256,85 +86,6 @@ pub(crate) fn fail_if_blocked_operator_status(status: &str) -> Result<()> {
     Ok(())
 }
 
-impl Serialize for OperatorCommandOutput {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.serialize_with_output_kind(serializer, self.action)
-    }
-}
-
-impl OperatorCommandOutput {
-    pub(crate) fn envelope_for_command(
-        &self,
-        output_kind: OperatorAction,
-    ) -> OperatorCommandEnvelope<'_> {
-        OperatorCommandEnvelope {
-            output: self,
-            output_kind,
-        }
-    }
-
-    fn serialize_with_output_kind<S>(
-        &self,
-        serializer: S,
-        output_kind: OperatorAction,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let next_action = normalized_action(self.next_action.as_deref());
-        let recommended_action = normalized_action(self.recommended_action.as_deref());
-        let next_action_template = next_action.and_then(action_template);
-        let recommended_action_template = recommended_action.and_then(action_template);
-
-        let mut len = 8;
-        if !self.blockers.is_empty() {
-            len += 1;
-        }
-        if !self.warnings.is_empty() {
-            len += 1;
-        }
-
-        let mut state = serializer.serialize_struct("OperatorCommandOutput", len)?;
-        state.serialize_field("output_kind", &output_kind.wire_value())?;
-        state.serialize_field("status", &self.status)?;
-        state.serialize_field("action", &self.action)?;
-        state.serialize_field("message", &self.message)?;
-        if !self.blockers.is_empty() {
-            state.serialize_field("blockers", &self.blockers)?;
-        }
-        if !self.warnings.is_empty() {
-            state.serialize_field("warnings", &self.warnings)?;
-        }
-        state.serialize_field("next_action", &next_action)?;
-        state.serialize_field("next_action_template", &next_action_template)?;
-        state.serialize_field("recommended_action", &recommended_action)?;
-        state.serialize_field("recommended_action_template", &recommended_action_template)?;
-        state.end()
-    }
-}
-
-pub(crate) struct OperatorCommandEnvelope<'a> {
-    output: &'a OperatorCommandOutput,
-    output_kind: OperatorAction,
-}
-
-impl Serialize for OperatorCommandEnvelope<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.output
-            .serialize_with_output_kind(serializer, self.output_kind)
-    }
-}
-
-fn normalized_action(action: Option<&str>) -> Option<&str> {
-    non_empty_action(action)
-}
-
 impl super::compact::CompactProjection for OperatorCommandOutput {
     /// The shared compact core for the whole operator family. `merge`,
     /// `ready`, `continue`, `abort`, `sync`, and `land` all build their
@@ -343,32 +94,30 @@ impl super::compact::CompactProjection for OperatorCommandOutput {
     /// also carry changed-path / conflict axes layer those on top of the
     /// returned value.
     fn compact(&self) -> super::compact::CompactOutput {
-        self.compact_with_output_kind(self.action)
+        operator_compact_with_output_kind(self, self.action)
     }
 }
 
-impl OperatorCommandOutput {
-    fn compact_with_output_kind(
-        &self,
-        output_kind: OperatorAction,
-    ) -> super::compact::CompactOutput {
-        // Prefer the validated `recommended_action`; fall back to
-        // `next_action`. Both are the same canonical breadcrumb in the
-        // full envelope — compact emits exactly one, as `next_action`.
-        let action = normalized_action(self.recommended_action.as_deref())
-            .or_else(|| normalized_action(self.next_action.as_deref()));
-        let mut compact = super::compact::CompactOutput::new(output_kind.wire_value());
-        compact.status = Some(self.status.clone());
-        compact.blockers = self.blockers.clone();
-        compact.next_action = action.map(str::to_string);
-        compact.next_action_template = action.and_then(action_template);
-        compact
-    }
+fn operator_compact_with_output_kind(
+    output: &OperatorCommandOutput,
+    output_kind: OperatorAction,
+) -> super::compact::CompactOutput {
+    // Prefer the validated `recommended_action`; fall back to
+    // `next_action`. Both are the same canonical breadcrumb in the
+    // full envelope — compact emits exactly one, as `next_action`.
+    let action = non_empty_action(output.recommended_action.as_deref())
+        .or_else(|| non_empty_action(output.next_action.as_deref()));
+    let mut compact = super::compact::CompactOutput::new(output_kind.wire_value());
+    compact.status = Some(output.status.clone());
+    compact.blockers = output.blockers.clone();
+    compact.next_action = action.map(str::to_string);
+    compact.next_action_template = action.and_then(action_template);
+    compact
 }
 
 impl super::compact::CompactProjection for OperatorCommandEnvelope<'_> {
     fn compact(&self) -> super::compact::CompactOutput {
-        self.output.compact_with_output_kind(self.output_kind)
+        operator_compact_with_output_kind(self.output, self.output_kind)
     }
 }
 
