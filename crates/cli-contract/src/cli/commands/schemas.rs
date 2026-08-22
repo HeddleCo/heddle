@@ -22,7 +22,9 @@ use verbs::{
     ThreadMoveOutput, UndoListReport, VerifyReport, remote::RemoteInfo,
 };
 
-use super::{command_catalog, init_output::InitOutput};
+use super::command_catalog;
+use super::init_output::InitOutput;
+use super::wire::{CommitOutput, SnapshotOutput, UndoRedoOutput};
 use crate::cli::INIT_VERB;
 
 static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -72,9 +74,9 @@ schema_registry! {
     (&["maintenance fsck repair git"], FsckReport),
     (&[INIT_VERB], InitOutput),
     (&["adopt"], AdoptSchema),
-    (&["capture"], CaptureSchema),
-    (&["commit"], CommitSchema),
-    (&["undo", "undo --redo", "undo --recover"], UndoSchema),
+    (&["capture"], SnapshotOutput),
+    (&["commit"], CommitOutput),
+    (&["undo", "undo --redo", "undo --recover"], UndoRedoOutput),
     (&["undo --list"], UndoListReport),
     (&["ready"], ReadySchema),
     (&["land"], LandSchema),
@@ -133,7 +135,7 @@ schema_registry! {
     (&["agent presence complete"], AgentPresenceCompleteSchema),
     (&["agent presence explain"], AgentPresenceExplainSchema),
     (&["agent reserve", "agent heartbeat", "agent release"], AgentReservationEnvelopeSchema),
-    (&["agent capture"], CaptureSchema),
+    (&["agent capture"], SnapshotOutput),
     (&["agent ready"], ReadySchema),
     (&["agent list"], AgentReservationListSchema),
     (&["agent task create", "agent task show", "agent task update"], AgentTaskEnvelopeSchema),
@@ -856,62 +858,6 @@ pub struct DiscussionListSchema {
 // ---- core loop write/read helpers -----------------------------------------
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct CaptureSchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: String,
-    pub state_id: String,
-    pub content_hash: String,
-    pub intent: Option<String>,
-    pub confidence: Option<f32>,
-    pub task_assignment_id: Option<String>,
-    pub principal: CommitPrincipalSchema,
-    pub principal_source: String,
-    pub agent: Option<CommitAgentSchema>,
-    pub promotion_suggested: bool,
-    pub heavy_impact_paths: Vec<String>,
-    pub captured_path_count: usize,
-    pub warnings: Vec<String>,
-    pub signed: bool,
-    pub message: String,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CommitPrincipalSchema {
-    pub name: String,
-    pub email: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CommitAgentSchema {
-    pub provider: String,
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub segment_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy_id: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CommitSchema {
-    pub output_kind: String,
-    pub action: String,
-    pub status: String,
-    pub state_id: String,
-    pub git_commit: String,
-    pub summary: String,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub verification: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct OperatorCommandSchema {
     pub output_kind: Option<String>,
     pub status: String,
@@ -924,26 +870,6 @@ pub struct OperatorCommandSchema {
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
 }
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct UndoSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub action: String,
-    pub message: String,
-    pub batches: Vec<Value>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    /// The checkout-local state preserved for recovery, and its internal
-    /// handle. Present on completed undo and recovery operations.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_marker: Option<String>,
-}
-
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReadySchema {
