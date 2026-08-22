@@ -108,7 +108,10 @@ fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result
     };
 
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["redact", "purge"]),
+        )?;
     } else {
         println!("{}", output.message);
         if let Some(hint) = &output.ignore_hint {

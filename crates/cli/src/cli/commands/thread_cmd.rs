@@ -16,9 +16,8 @@ use objects::{
 use oplog::{OpLogRecorder, OpRecord, ThreadUpdateSnapshots};
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
-    ActorPresenceStore,
-    Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,
-    describe_thread_advice,
+    ActorPresenceStore, Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode,
+    ThreadState, describe_thread_advice,
 };
 use serde::Serialize;
 use tokio::time::{Duration, sleep};
@@ -34,7 +33,7 @@ use super::{
     advice::RecoveryAdvice,
     marker::cmd_thread_marker,
     mount_lifecycle,
-    next_action::normalized_action,
+    next_action::{NextActionValidationContext, normalized_action, write_full_command_json},
     operator_core::{OperatorAction, OperatorCommandOutput},
     operator_loop::primary_next_action,
     thread::{
@@ -2072,7 +2071,10 @@ fn cmd_thread_cleanup(cli: &Cli, repo: &Repository, args: ThreadCleanupArgs) -> 
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "cleanup"]),
+        )?;
     } else {
         println!("{}", summary_message);
         if total_dropped == 0 {

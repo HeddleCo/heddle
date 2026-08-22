@@ -239,7 +239,10 @@ pub async fn cmd_context_history(
     };
 
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["context", "history"]),
+        )?;
     } else {
         println!("{} {}", output.target_kind, output.target);
         println!("annotation: {}", output.annotation_id);
