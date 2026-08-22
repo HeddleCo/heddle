@@ -17,7 +17,7 @@ use objects::{
         PurgeEvidence, Redaction, State, StateAttachment, StateAttachmentBody, StateId,
         StateSignature, StateVisibility, SymbolAnchor, Tree, TreeEntry, VisibilityTier,
     },
-    store::{AnyStore, ObjectStore, Result as StoreResult},
+    store::{ObjectStore, Result as StoreResult, SidecarStore},
     transfer::{
         ObjectId, ObjectInfo, ObjectType, PlannedObject, StateClosureOptions,
         enumerate_state_closure_plan_with_options,
@@ -96,6 +96,8 @@ impl<'a, S> CountingStore<'a, S> {
         self.state_reads.load(Ordering::SeqCst)
     }
 }
+
+impl<S: SidecarStore> SidecarStore for CountingStore<'_, S> {}
 
 impl<S: ObjectStore> ObjectStore for CountingStore<'_, S> {
     fn get_blob(&self, hash: &ContentHash) -> StoreResult<Option<Blob>> {
@@ -869,7 +871,7 @@ fn missing_merely_redacted_blob_still_fails_closure_planning() {
         supersedes: None,
     })
     .unwrap();
-    let AnyStore::Fs(store) = repo.store();
+    let store = repo.store();
     store.remove_blob_everywhere(&blob_hash).unwrap();
 
     let error = enumerate_state_closure_plan_with_options(
@@ -921,7 +923,7 @@ fn purged_blob_closure_carries_sidecar_without_deleted_bytes() {
         supersedes: None,
     })
     .unwrap();
-    let AnyStore::Fs(store) = repo.store();
+    let store = repo.store();
     store.remove_blob_everywhere(&blob_hash).unwrap();
 
     let plan = enumerate_state_closure_plan_with_options(

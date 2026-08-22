@@ -27,7 +27,7 @@ use crate::{
         StateAttachmentId, StateId, Tree,
     },
     store::{
-        HeddleError, ObjectStore, Result, SnapshotCommitDescriptor, codec,
+        HeddleError, ObjectStore, Result, SidecarStore, SnapshotCommitDescriptor, codec,
         pack::{ObjectType, PackManager, PackObjectId},
     },
 };
@@ -1638,6 +1638,9 @@ impl ObjectStore for FsStore {
         self.abort_snapshot_write_batch_impl();
     }
 
+}
+
+impl SidecarStore for FsStore {
     fn has_redactions_for_blob(&self, blob: &ContentHash) -> Result<bool> {
         Ok(redaction_path(&self.root, blob).exists())
     }

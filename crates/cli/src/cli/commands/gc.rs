@@ -15,7 +15,7 @@ use anyhow::Result;
 #[cfg(feature = "git-overlay")]
 use heddle_git_projection::GitProjection;
 use objects::store::{
-    AnyStore, ObjectStore, PackInstallMetricsSnapshot, pack_install_metrics_snapshot,
+    ObjectStore, PackInstallMetricsSnapshot, pack_install_metrics_snapshot,
     recover_pack_install_intents,
 };
 use repo::TimelineStore;
@@ -204,9 +204,7 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
                 pack_install_recover_line(recover.completed, recover.aborted)
             );
         }
-        let (unpaired_removed, unpaired_bytes) = match repo.store() {
-            AnyStore::Fs(fs) => fs.prune_unpaired_packs()?,
-        };
+        let (unpaired_removed, unpaired_bytes) = repo.store().prune_unpaired_packs()?;
         summary.unpaired_packs_pruned = unpaired_removed;
         if !json {
             println!(

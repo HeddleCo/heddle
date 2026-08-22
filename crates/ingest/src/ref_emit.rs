@@ -315,11 +315,7 @@ mod tests {
     struct TestCommitter;
 
     impl RefCommitter for TestCommitter {
-        fn commit_records(
-            &self,
-            _encoded_records: &[Vec<u8>],
-            _scope: Option<&str>,
-        ) -> HeddleResult<()> {
+        fn commit_records(&self, _records: &[OpRecord], _scope: Option<&str>) -> HeddleResult<()> {
             Ok(())
         }
     }

@@ -11,7 +11,7 @@ use crate::{
         Action, ActionId, AnnotatedTag, Blob, ContentHash, State, StateAttachment,
         StateAttachmentId, StateId, Tree,
     },
-    store::{HeddleError, ObjectStore, Result},
+    store::{HeddleError, ObjectStore, Result, SidecarStore},
     sync::RwLockExt,
 };
 
@@ -234,7 +234,9 @@ impl ObjectStore for InMemoryStore {
     fn list_actions(&self) -> Result<Vec<ActionId>> {
         Ok(self.actions.read_or_poisoned().keys().copied().collect())
     }
+}
 
+impl SidecarStore for InMemoryStore {
     fn has_redactions_for_blob(&self, blob: &ContentHash) -> Result<bool> {
         Ok(self.redactions.read_or_poisoned().contains_key(blob))
     }
