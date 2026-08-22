@@ -42,11 +42,11 @@ use super::{
     },
 };
 use crate::{
-    attribution::clean_attribution_value,
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
     perf::{ProfileField, emit_profile, instrumentation_enabled},
 };
+use hosted_client::attribution::clean_attribution_value;
 
 #[derive(Serialize)]
 pub(crate) struct SnapshotOutput {
@@ -1313,77 +1313,9 @@ fn build_attribution_with_env(
     }
 }
 
-/// Resolve the human + agent attribution for a non-capture command (context,
-/// fork, collapse, etc.). Mirrors the principal precedence chain that snapshot
-/// uses (env > repo > user > Unknown) and attaches the ambient agent from the
-/// same env/repo lookup `Repository::resolve_agent` performs.
-///
-/// Differs from the snapshot path in two ways — both intentional: it does not
-/// honor explicit `--agent-*` flag overrides (other commands don't expose
-/// those), and it does not consult the active `heddle agent provenance` chain. Use the
-/// snapshot path's full `resolve_*` for capture flows.
-pub(crate) fn resolve_attribution(
-    repo: &Repository,
-    user_config: &UserConfig,
-) -> Result<Attribution> {
-    let principal = resolve_principal(repo, user_config)?;
-    let harness_probe = crate::harness::probe_current_process_harness(repo, None, None, None).ok();
-    let harness_provider = harness_probe
-        .as_ref()
-        .and_then(|probe| probe.provider.clone())
-        .and_then(clean_attribution_value);
-    let harness_model = harness_probe
-        .as_ref()
-        .and_then(|probe| probe.model.clone())
-        .and_then(clean_attribution_value);
-    let agent_provider = std::env::var("HEDDLE_AGENT_PROVIDER")
-        .ok()
-        .and_then(clean_attribution_value)
-        .or(harness_provider)
-        .or_else(|| {
-            user_config
-                .agent
-                .provider
-                .clone()
-                .and_then(clean_attribution_value)
-        })
-        .or_else(|| {
-            repo.config()
-                .agent
-                .provider
-                .clone()
-                .and_then(clean_attribution_value)
-        });
-    let agent_model = std::env::var("HEDDLE_AGENT_MODEL")
-        .ok()
-        .and_then(clean_attribution_value)
-        .or(harness_model)
-        .or_else(|| {
-            user_config
-                .agent
-                .model
-                .clone()
-                .and_then(clean_attribution_value)
-        })
-        .or_else(|| {
-            repo.config()
-                .agent
-                .model
-                .clone()
-                .and_then(clean_attribution_value)
-        });
-    match (agent_provider, agent_model) {
-        (Some(provider), Some(model)) => {
-            let agent = objects::object::Agent::new(provider, model);
-            Ok(Attribution::with_agent(principal, agent))
-        }
-        _ => Ok(Attribution::human(principal)),
-    }
-}
-
-pub(crate) fn resolve_principal(repo: &Repository, user_config: &UserConfig) -> Result<Principal> {
-    Ok(verbs::resolve_principal(repo, user_config.principal_pair())?.principal)
-}
+// Attribution resolution lives in `hosted-client` so the hosted context sync
+// and the CLI verbs share one implementation.
+pub(crate) use hosted_client::attribution::{resolve_attribution, resolve_principal};
 
 pub(crate) fn is_placeholder_principal(principal: &Principal) -> bool {
     let name = principal.name_lossy();

@@ -1546,7 +1546,7 @@ impl HostedPresenceWatch {
             return None;
         }
 
-        let token = crate::client::resolve_hosted_credential(Some(upstream))
+        let token = hosted_client::client::resolve_hosted_credential(Some(upstream))
             .ok()?
             .token?;
         let mut request = normalize_presence_ws_url(upstream)
@@ -1559,7 +1559,7 @@ impl HostedPresenceWatch {
             .insert(AUTHORIZATION, auth.parse().ok()?);
         let user_config = config::UserConfig::load_default().ok()?;
         let client_config = user_config.hosted_runtime_config(None).ok()?;
-        let (mut stream, _) = crate::client::connect_websocket(request, &client_config)
+        let (mut stream, _) = hosted_client::client::connect_websocket(request, &client_config)
             .await
             .ok()?;
         let hello = serde_json::to_string(&PresenceClientFrame::Hello {

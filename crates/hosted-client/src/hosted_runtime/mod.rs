@@ -14,7 +14,7 @@ mod claim_authorization;
 mod claim_authorization_tests;
 pub(crate) mod credential_file;
 pub(crate) mod device_flow;
-pub(crate) mod hosted;
+pub mod hosted;
 pub(crate) mod identity;
 mod identity_server;
 mod identity_state;
@@ -23,12 +23,11 @@ mod identity_tests;
 pub(crate) mod root_mint;
 #[cfg(test)]
 mod root_mint_tests;
-pub(crate) mod websocket;
+pub mod websocket;
 pub(crate) mod whoami;
 
-pub(crate) use auth::cmd_auth;
-pub(crate) use hosted::{
+pub use hosted::{
     HostedAuthMode, HostedClient, HostedSession, ServerStream, resolve_active_bearer,
     resolve_hosted_credential,
 };
-pub(crate) use websocket::connect_websocket;
+pub use websocket::connect_websocket;

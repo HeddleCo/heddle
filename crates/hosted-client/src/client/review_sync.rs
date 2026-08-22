@@ -189,7 +189,7 @@ pub async fn push_review_signatures(
             eprintln!(
                 "{} review sync skipped: could not resolve the local principal ({error}); \
                  set one with `heddle init --principal-name <name> --principal-email <email>`",
-                crate::cli::style::warn_marker(),
+                heddle_cli_render::cli::style::warn_marker(),
             );
             return Ok(0);
         }
@@ -221,7 +221,7 @@ pub async fn push_review_signatures(
             Err(error) => {
                 eprintln!(
                     "{} hosted review {}: {error:#}",
-                    crate::cli::style::warn_marker(),
+                    heddle_cli_render::cli::style::warn_marker(),
                     state.state_id.short()
                 );
                 continue;
@@ -257,14 +257,14 @@ pub async fn push_review_signatures(
                     save_mirror(&heddle_dir, &mirror)?;
                     eprintln!(
                         "{} hosted review {}: permanently rejected, will not retry: {message}",
-                        crate::cli::style::warn_marker(),
+                        heddle_cli_render::cli::style::warn_marker(),
                         state.state_id.short()
                     );
                 }
                 ForwardOutcome::Transient(message) => {
                     eprintln!(
                         "{} hosted review {}: {message} (will retry on next push)",
-                        crate::cli::style::warn_marker(),
+                        heddle_cli_render::cli::style::warn_marker(),
                         state.state_id.short()
                     );
                 }

@@ -27,7 +27,7 @@
 //! preserving obsolete spellings. Add a short alias only when the letter is
 //! already reserved for that semantic in the current table above.
 
-use std::sync::OnceLock;
+use std::{path::Path, sync::OnceLock};
 
 use clap::Parser;
 use repo::{Config, OutputFormat};
@@ -116,7 +116,34 @@ impl Cli {
     }
 }
 
-impl weft_client_shim::CliContext for Cli {
+/// Small projection of [`Cli`] that hosted commands rely on.
+/// Defining the surface here lets the hosted-client implementation compile
+/// against the parsed CLI state without depending on `cli`.
+///
+/// Keep this trait deliberately small. Every new method is a permanent
+/// contract with the hosted side; before adding one, ask whether the hosted
+/// command should really need that context at all, or whether the caller can
+/// compute it and pass a primitive value.
+pub trait CliContext: Send + Sync {
+    /// `--repo` override; `None` means "use the process's current
+    /// directory."
+    fn repo_path(&self) -> Option<&Path>;
+
+    /// `--op-id` override for idempotent hosted calls. Empty string
+    /// means the caller did not supply one and the server should not
+    /// dedupe.
+    fn operation_id_wire(&self) -> String;
+
+    /// Resolves whether output should be JSON, encapsulating the
+    /// precedence between the `--json` / `--output` cli flags, the
+    /// user's global config, and (when supplied) the repo's
+    /// `output.format` config. Hosted commands typically pass
+    /// `Some(repo.config())` after opening the repo and `None`
+    /// otherwise.
+    fn should_output_json(&self, repo_config: Option<&Config>) -> bool;
+}
+
+impl CliContext for Cli {
     fn repo_path(&self) -> Option<&std::path::Path> {
         self.repo.as_deref()
     }

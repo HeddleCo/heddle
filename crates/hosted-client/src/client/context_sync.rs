@@ -91,7 +91,7 @@ use repo::Repository;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    cli::commands::context::{context_root_for_state, put_context_attachment},
+    attachments::{context_root_for_state, put_context_attachment},
     client::HostedClient,
 };
 
@@ -373,8 +373,8 @@ pub async fn push_context(
         return Ok(0);
     }
 
-    let user_config = crate::config::UserConfig::load_default().unwrap_or_default();
-    let self_local_attr = crate::cli::commands::snapshot::resolve_attribution(repo, &user_config)
+    let user_config = config::UserConfig::load_default().unwrap_or_default();
+    let self_local_attr = crate::attribution::resolve_attribution(repo, &user_config)
         .ok()
         .map(|attribution| attribution.to_string());
     let username = client.authenticated_username();
@@ -409,7 +409,7 @@ pub async fn push_context(
                 Err(error) => {
                     eprintln!(
                         "{} hosted context {}: {error:#}",
-                        crate::cli::style::warn_marker(),
+                        heddle_cli_render::cli::style::warn_marker(),
                         annotation.annotation_id
                     );
                 }
@@ -452,7 +452,7 @@ async fn push_one(
         if !is_self {
             eprintln!(
                 "{} hosted context {}: not attributed to the local principal; left unpublished",
-                crate::cli::style::warn_marker(),
+                heddle_cli_render::cli::style::warn_marker(),
                 annotation.annotation_id
             );
             return Ok(false);
@@ -657,7 +657,7 @@ async fn sync_revisions_push(
         if self_local_attr != Some(revision.attribution.as_str()) {
             eprintln!(
                 "{} hosted context {}: unlinked revision not attributed to the local principal; left unpublished",
-                crate::cli::style::warn_marker(),
+                heddle_cli_render::cli::style::warn_marker(),
                 annotation.annotation_id
             );
             continue;
@@ -699,7 +699,7 @@ async fn sync_revisions_push(
             None => {
                 eprintln!(
                     "{} hosted context {}: could not recover the minted revision id",
-                    crate::cli::style::warn_marker(),
+                    heddle_cli_render::cli::style::warn_marker(),
                     annotation.annotation_id
                 );
             }
@@ -745,8 +745,8 @@ pub async fn pull_context(
         return Ok(0);
     };
 
-    let user_config = crate::config::UserConfig::load_default().unwrap_or_default();
-    let self_local_attr = crate::cli::commands::snapshot::resolve_attribution(repo, &user_config)
+    let user_config = config::UserConfig::load_default().unwrap_or_default();
+    let self_local_attr = crate::attribution::resolve_attribution(repo, &user_config)
         .ok()
         .map(|attribution| attribution.to_string());
     let username = client.authenticated_username();
@@ -777,7 +777,7 @@ pub async fn pull_context(
                     Err(error) => {
                         eprintln!(
                             "{} hosted context {}: {error:#}",
-                            crate::cli::style::warn_marker(),
+                            heddle_cli_render::cli::style::warn_marker(),
                             annotation.annotation_id
                         );
                     }
@@ -808,7 +808,7 @@ pub async fn pull_context(
             Err(error) => {
                 eprintln!(
                     "{} hosted context {}: {error:#}",
-                    crate::cli::style::warn_marker(),
+                    heddle_cli_render::cli::style::warn_marker(),
                     annotation.id
                 );
             }
@@ -1419,9 +1419,9 @@ mod tests {
             .id();
         let head_state = repo.store().get_state(&state).unwrap().unwrap();
         let target = ContextTarget::file("lib.rs").unwrap();
-        let user_config = crate::config::UserConfig::load_default().unwrap_or_default();
+        let user_config = config::UserConfig::load_default().unwrap_or_default();
         let self_attribution =
-            crate::cli::commands::snapshot::resolve_attribution(&repo, &user_config)
+            crate::attribution::resolve_attribution(&repo, &user_config)
                 .unwrap()
                 .to_string();
         let annotation = Annotation::new(

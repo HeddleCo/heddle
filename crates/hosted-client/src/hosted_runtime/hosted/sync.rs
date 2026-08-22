@@ -87,27 +87,27 @@ type PullRepositoryInitializer<'a> =
     Box<dyn FnOnce(&PullReady) -> Result<Repository, ProtocolError> + 'a>;
 
 #[derive(Debug, Clone)]
-pub(crate) struct PullBootstrapMetadata {
-    discussions_from_pack: bool,
+pub struct PullBootstrapMetadata {
+    pub discussions_from_pack: bool,
     pub discussions: Vec<Discussion>,
-    context_from_pack: bool,
+    pub context_from_pack: bool,
     pub context: Vec<(ContextTarget, ContextBlob)>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ResolvedPullBootstrapMetadata {
+pub struct ResolvedPullBootstrapMetadata {
     pub discussions: Vec<Discussion>,
     pub context: Vec<(ContextTarget, ContextBlob)>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PullBootstrapRefs {
+pub struct PullBootstrapRefs {
     pub head_thread: Option<String>,
     pub refs: Vec<HostedRefEntry>,
 }
 
 impl PullBootstrapMetadata {
-    pub(crate) fn resolve(
+    pub fn resolve(
         &self,
         repo: &Repository,
         state_id: Option<StateId>,
@@ -132,7 +132,7 @@ impl PullBootstrapMetadata {
     }
 }
 
-pub(crate) fn decode_pull_bootstrap(
+pub fn decode_pull_bootstrap(
     checkpoint: &[u8],
 ) -> Result<Option<PullBootstrapMetadata>, ProtocolError> {
     let checkpoint = std::str::from_utf8(checkpoint)
@@ -163,7 +163,7 @@ pub(crate) fn decode_pull_bootstrap(
     }))
 }
 
-pub(crate) fn decode_pull_refs(
+pub fn decode_pull_refs(
     checkpoint: &[u8],
 ) -> Result<Option<PullBootstrapRefs>, ProtocolError> {
     let checkpoint = std::str::from_utf8(checkpoint)
@@ -222,7 +222,7 @@ fn decode_bootstrap_state_id(value: Vec<u8>, field: &str) -> Result<StateId, Pro
     Ok(StateId::from_bytes(value))
 }
 
-fn discussions_from_pull_pack(
+pub(crate) fn discussions_from_pull_pack(
     repo: &Repository,
     state_id: StateId,
 ) -> Result<Vec<Discussion>, ProtocolError> {
@@ -249,7 +249,7 @@ fn discussions_from_pull_pack(
         .map_err(|error| ProtocolError::InvalidState(error.to_string()))
 }
 
-fn context_from_pull_pack(
+pub(crate) fn context_from_pull_pack(
     repo: &Repository,
     state_id: StateId,
 ) -> Result<Vec<(ContextTarget, ContextBlob)>, ProtocolError> {
@@ -732,27 +732,6 @@ impl HostedClient {
         })
     }
 
-    pub async fn push(
-        &mut self,
-        repo: &Repository,
-        repo_path: &str,
-        local_state: StateId,
-        target_thread: &str,
-        force: bool,
-        client_operation_id: String,
-    ) -> Result<PushComplete, ProtocolError> {
-        self.push_profiled(
-            repo,
-            repo_path,
-            local_state,
-            target_thread,
-            force,
-            client_operation_id,
-        )
-        .await
-        .map(|(complete, _)| complete)
-    }
-
     pub async fn push_profiled(
         &mut self,
         repo: &Repository,
@@ -779,30 +758,6 @@ impl HostedClient {
             &Progress::null(),
         )
         .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn push_with_expected_head(
-        &mut self,
-        repo: &Repository,
-        repo_path: &str,
-        local_state: StateId,
-        target_thread: &str,
-        force: bool,
-        expected_remote_head: ExpectedRemoteHead,
-        client_operation_id: String,
-    ) -> Result<PushComplete, ProtocolError> {
-        self.push_with_expected_head_profiled(
-            repo,
-            repo_path,
-            local_state,
-            target_thread,
-            force,
-            expected_remote_head,
-            client_operation_id,
-        )
-        .await
-        .map(|(complete, _)| complete)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -872,7 +827,7 @@ impl HostedClient {
             &remote_ref_expectations,
         )?;
         let local_revision_address = git_lane.local_revision_address.clone();
-        self.push_with_revision(
+        self.push_with_revision_profiled(
             repo,
             repo_path,
             local_state,
@@ -885,6 +840,7 @@ impl HostedClient {
             progress,
         )
         .await
+        .map(|(complete, _)| complete)
     }
 
     /// Fetch the server's current ref → git-revision-address map so the
@@ -901,36 +857,6 @@ impl HostedClient {
             expectations.insert(entry.name, expectation);
         }
         Ok(expectations)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn push_with_revision(
-        &mut self,
-        repo: &Repository,
-        repo_path: &str,
-        local_state: StateId,
-        target_thread: &str,
-        force: bool,
-        operation_id: ClientOperationId,
-        local_revision_address: String,
-        git_lane: Option<GitLanePushPlan>,
-        expected_remote_head: Option<ExpectedRemoteHead>,
-        progress: &Progress,
-    ) -> Result<PushComplete, ProtocolError> {
-        self.push_with_revision_profiled(
-            repo,
-            repo_path,
-            local_state,
-            target_thread,
-            force,
-            operation_id,
-            local_revision_address,
-            git_lane,
-            expected_remote_head,
-            progress,
-        )
-        .await
-        .map(|(complete, _)| complete)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1285,29 +1211,6 @@ impl HostedClient {
         Ok((result, profile))
     }
 
-    pub async fn pull(
-        &mut self,
-        repo: &Repository,
-        repo_path: &str,
-        remote_thread: &str,
-        local_thread: Option<&str>,
-    ) -> Result<PullComplete, ProtocolError> {
-        self.pull_with_options(
-            repo,
-            repo_path,
-            remote_thread,
-            PullOptions {
-                local_thread,
-                depth: None,
-                target_state: None,
-                materialization: PullMaterialization::Full,
-                publish_refs: true,
-                wanted_hashes: None,
-            },
-        )
-        .await
-    }
-
     pub async fn pull_profiled(
         &mut self,
         repo: &Repository,
@@ -1360,7 +1263,7 @@ impl HostedClient {
         .await
     }
 
-    pub(crate) async fn repair_clone_with_depth_and_materialization(
+    pub async fn repair_clone_with_depth_and_materialization(
         &mut self,
         repo: &Repository,
         repo_path: &str,
@@ -2385,7 +2288,7 @@ impl HostedClient {
         Ok(())
     }
 
-    pub(crate) async fn fetch_advertised_synthetic_frontier_objects(
+    pub async fn fetch_advertised_synthetic_frontier_objects(
         &mut self,
         repo: &Repository,
         repo_path: &str,
@@ -2448,7 +2351,7 @@ impl HostedClient {
         Ok(())
     }
 
-    pub(crate) async fn publish_clone_markers(
+    pub async fn publish_clone_markers(
         &mut self,
         repo: &Repository,
         repo_path: &str,
@@ -3851,7 +3754,7 @@ mod native_exchange_tests {
 
         assert!(client.list_refs("acme/widgets").await.unwrap().is_empty());
         let pushed = client
-            .push_with_expected_head(
+            .push_with_expected_head_profiled(
                 &repo,
                 "acme/widgets",
                 state,
@@ -3861,7 +3764,8 @@ mod native_exchange_tests {
                 "push-test-op".to_string(),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         assert!(!pushed.success);
         assert_eq!(pushed.error.as_deref(), Some("test rejection"));
 
@@ -3918,9 +3822,10 @@ mod native_exchange_tests {
 
         assert!(
             client
-                .pull(&repo, "acme/widgets", bootstrap, None)
+                .pull_profiled(&repo, "acme/widgets", bootstrap, None)
                 .await
                 .unwrap()
+                .0
                 .success
         );
         let (profiled, profile) = client

@@ -16,7 +16,6 @@ clap.workspace = true
 config = { path = "../config", package = "heddle-config", version = "0.13" }
 objects = { path = "../objects", package = "heddle-objects", version = "0.13" }
 repo = { path = "../repo", package = "heddle-repo", version = "0.13", default-features = false, features = ["git-overlay", "native"] }
-weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.13" }
 
 [features]
 default = []

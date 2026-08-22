@@ -15,7 +15,7 @@ use serde::Serialize;
 use verbs::{
     ResolvedPrincipal, principal_source_display, resolve_principal, resolve_principal_without_repo,
 };
-use weft_client_shim::CliContext;
+use heddle_cli_args::CliContext;
 
 use super::{
     auth::{headless_token_metadata, resolve_server},

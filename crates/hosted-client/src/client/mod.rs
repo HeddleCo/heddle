@@ -22,7 +22,7 @@ pub use human_signature::cli_human_signature_callback;
 pub use local_sync::LocalSync;
 
 #[cfg(feature = "client")]
-pub(crate) use crate::hosted_runtime::{
+pub use crate::hosted_runtime::{
     HostedAuthMode, HostedClient, HostedSession, connect_websocket, resolve_active_bearer,
     resolve_hosted_credential,
 };

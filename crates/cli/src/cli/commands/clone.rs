@@ -62,16 +62,16 @@ use super::{
     verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 #[cfg(feature = "client")]
-use crate::hosted_runtime::hosted::{HostedClient, HostedRefEntry, PullMaterialization};
+use hosted_client::hosted_runtime::hosted::{HostedClient, HostedRefEntry, PullMaterialization};
 #[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;
+use hosted_client::client::LocalSync;
 use crate::{
     cli::{
         Cli,
         progress_render::{TerminalSink, finish_line, format_transfer_bytes},
         should_output_json, style,
     },
-    client::LocalSync,
     perf::{ProfileField, emit_profile},
     remote::{Remote, RemoteConfig, RemoteTarget},
 };
@@ -1564,10 +1564,8 @@ async fn clone_network(
     server_key: Option<String>,
     endpoint_spec: String,
 ) -> Result<()> {
-    use crate::{
-        client::{HostedAuthMode, HostedSession},
-        config::UserConfig,
-    };
+    use hosted_client::client::{HostedAuthMode, HostedSession};
+    use crate::config::UserConfig;
 
     let user_config = UserConfig::load_default()?;
     // On every network-connecting command, TLS/auth config validation
@@ -1652,7 +1650,7 @@ async fn clone_network_connected(
                     .as_ref()
                     .map(|transfer| transfer.checkpoint.as_slice())
                     .unwrap_or_default();
-                let refs = crate::hosted_runtime::hosted::decode_pull_refs(checkpoint)?
+                let refs = hosted_client::hosted_runtime::hosted::decode_pull_refs(checkpoint)?
                     .ok_or_else(|| {
                         wire::ProtocolError::InvalidState(
                             "server does not advertise folded clone refs".to_string(),
@@ -1738,7 +1736,7 @@ async fn clone_network_connected(
             )
             .await?;
 
-        let bootstrap = crate::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
+        let bootstrap = hosted_client::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
             .context("decode hosted clone bootstrap")?
             .ok_or_else(|| {
                 anyhow!(RecoveryAdvice::network_clone_failed(
@@ -1766,7 +1764,7 @@ async fn clone_network_connected(
         // hosted CollaborationService discussions for the cloned head into the
         // local op-log so `discuss list` / `discuss show` see them. Best-effort:
         // a fetch hiccup warns rather than failing an otherwise-good clone.
-        match crate::client::discussion_sync::pull_discussions(
+        match hosted_client::client::discussion_sync::pull_discussions(
             &local_repo,
             client,
             repo_path,
@@ -1785,7 +1783,7 @@ async fn clone_network_connected(
         // Read path for hosted context annotations (heddle context): materialize
         // the hosted head's annotations into the local Context attachment so
         // `context list` sees them. Best-effort, mirroring discussions.
-        match crate::client::context_sync::pull_context(
+        match hosted_client::client::context_sync::pull_context(
             &local_repo,
             client,
             repo_path,
@@ -1881,10 +1879,8 @@ async fn clone_network_connected(
 
 #[cfg(feature = "client")]
 pub async fn recover_interrupted_clone(cli: &Cli, start: &Path) -> Result<bool> {
-    use crate::{
-        client::{HostedAuthMode, HostedSession},
-        config::UserConfig,
-    };
+    use hosted_client::client::{HostedAuthMode, HostedSession};
+    use crate::config::UserConfig;
 
     let Some(root) = repo::clone_intent::find_clone_intent_root(start) else {
         return Ok(false);
@@ -1996,7 +1992,7 @@ async fn recover_interrupted_clone_connected(
         .save(repo.heddle_dir())?;
     }
     configure_hosted_clone_origin(&repo, &intent.endpoint, &intent.repository)?;
-    let bootstrap = crate::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)?
+    let bootstrap = hosted_client::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)?
         .ok_or_else(|| {
             anyhow!(RecoveryAdvice::network_clone_failed(
                 "hosted response is missing required folded metadata",
@@ -2004,7 +2000,7 @@ async fn recover_interrupted_clone_connected(
             ))
         })?
         .resolve(&repo, Some(final_state))?;
-    if let Err(error) = crate::client::discussion_sync::pull_discussions(
+    if let Err(error) = hosted_client::client::discussion_sync::pull_discussions(
         &repo,
         client,
         &intent.repository,
@@ -2017,7 +2013,7 @@ async fn recover_interrupted_clone_connected(
             style::warn_marker()
         );
     }
-    if let Err(error) = crate::client::context_sync::pull_context(
+    if let Err(error) = hosted_client::client::context_sync::pull_context(
         &repo,
         client,
         &intent.repository,
@@ -2112,10 +2108,8 @@ async fn clone_monorepo(
     server_key: Option<String>,
     endpoint_spec: String,
 ) -> Result<()> {
-    use crate::{
-        client::{HostedAuthMode, HostedSession},
-        config::UserConfig,
-    };
+    use hosted_client::client::{HostedAuthMode, HostedSession};
+    use crate::config::UserConfig;
 
     // Monorepo clone materializes each node at a resolved state; the shallow /
     // lazy / partial knobs don't compose with the multi-spool walk in this

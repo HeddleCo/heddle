@@ -47,16 +47,16 @@ use super::super::{
     worktree_safety::ensure_worktree_clean,
 };
 #[cfg(feature = "client")]
-use crate::client::HostedClient;
+use hosted_client::client::HostedClient;
 #[cfg(feature = "client")]
-use crate::hosted_runtime::hosted::{HostedAuthMode, PullMaterialization};
+use hosted_client::hosted_runtime::hosted::{HostedAuthMode, PullMaterialization};
+use hosted_client::client::LocalSync;
 use crate::{
     cli::{
         Cli, RemoteCommands,
         progress_render::{finish_line, format_transfer_bytes, progress_for},
         should_output_json, style,
     },
-    client::LocalSync,
     config::UserConfig,
     remote::{Remote, RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
@@ -1101,7 +1101,7 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
         options.insecure,
     )
     .await?
-    .with_human_signature_callback(crate::client::cli_human_signature_callback());
+    .with_human_signature_callback(hosted_client::client::cli_human_signature_callback());
     let result = pull_network_connected(repo, &mut client, repo_path, options).await;
     client.close().await;
     result
@@ -1137,7 +1137,7 @@ async fn pull_network_connected(
             },
         )
         .await?;
-    let bootstrap = crate::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
+    let bootstrap = hosted_client::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
         .context("decode hosted pull bootstrap")?;
     let bootstrap = if result.success {
         bootstrap
@@ -1224,7 +1224,7 @@ async fn pull_network_connected(
             // new hosted CollaborationService discussions/turns for the pulled
             // head into the local op-log. Best-effort — a fetch hiccup warns
             // rather than failing the pull.
-            match crate::client::discussion_sync::pull_discussions(
+            match hosted_client::client::discussion_sync::pull_discussions(
                 repo,
                 client,
                 repo_path,
@@ -1250,7 +1250,7 @@ async fn pull_network_connected(
                 }
             }
             // Read path for hosted context annotations — same seam as discussions.
-            match crate::client::context_sync::pull_context(
+            match hosted_client::client::context_sync::pull_context(
                 repo,
                 client,
                 repo_path,

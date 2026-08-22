@@ -1,55 +1,63 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Local glue between cli's dispatch and the `WeftExtensions`
-//! trait surface.
+//! Hosted command dispatch.
 //!
-//! With `client` enabled, this module provides [`EnabledWeftExtensions`],
-//! which downcasts the trait's opaque
-//! arguments back to `cli::cli::AuthCommands` and delegates to the
-//! CLI-owned hosted runtime. Closed builds can continue replacing the shim
-//! package through `[patch.crates-io]` without owning Heddle's transport.
+//! The CLI's `auth`, `identity`, and `whoami` verbs delegate through the
+//! [`HostedExtensions`] surface; [`EnabledHostedExtensions`] is the in-repo
+//! implementation backed by this crate's hosted runtime. Arguments are the
+//! concrete clap types from `heddle-cli-args` — no downcasts.
 
 #![cfg(feature = "client")]
 
-use std::any::Any;
-
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use async_trait::async_trait;
-use weft_client_shim::{CliContext, WeftExtensions};
-
-use crate::{
-    cli::{
-        AgentTemplateArg, AuthCommands, AuthTrustCommands, IdentityCommands, commands::cmd_auth,
-    },
-    hosted_runtime::{
-        auth_requests::{AuthCommand, AuthTrustCommand},
-        device_flow::AgentTemplate,
-    },
+use heddle_cli_args::{
+    AgentTemplateArg, AuthCommands, AuthTrustCommands, CliContext, IdentityCommands,
 };
 
-pub struct EnabledWeftExtensions;
+use crate::hosted_runtime::{
+    auth_requests::{AuthCommand, AuthTrustCommand},
+    device_flow::AgentTemplate,
+    identity::cmd_identity,
+    whoami::cmd_whoami,
+};
 
 #[async_trait]
-impl WeftExtensions for EnabledWeftExtensions {
-    async fn auth(
+pub trait HostedExtensions: Send + Sync {
+    /// `heddle auth <subcommand>` — login, logout, device authorization,
+    /// service account issuance.
+    async fn auth(&self, ctx: &(dyn CliContext + 'static), command: AuthCommands) -> Result<()>;
+
+    /// `heddle identity <subcommand>` — reuse-first machine identity and the
+    /// data-only browser claim endpoint.
+    async fn identity(
         &self,
         ctx: &(dyn CliContext + 'static),
-        command: &(dyn Any + Send + Sync),
-    ) -> Result<()> {
-        let command = downcast::<AuthCommands>(command, "AuthCommands")?;
-        cmd_auth(ctx, auth_command(command.clone())).await
+        command: IdentityCommands,
+    ) -> Result<()>;
+
+    /// `heddle whoami` — resolve and report the acting identity.
+    async fn whoami(&self, ctx: &(dyn CliContext + 'static), server: Option<String>) -> Result<()>;
+}
+
+pub struct EnabledHostedExtensions;
+
+#[async_trait]
+impl HostedExtensions for EnabledHostedExtensions {
+    async fn auth(&self, ctx: &(dyn CliContext + 'static), command: AuthCommands) -> Result<()> {
+        let command = auth_command(command);
+        crate::hosted_runtime::auth::cmd_auth(ctx, command).await
     }
 
     async fn whoami(&self, ctx: &(dyn CliContext + 'static), server: Option<String>) -> Result<()> {
-        crate::hosted_runtime::whoami::cmd_whoami(ctx, server).await
+        cmd_whoami(ctx, server).await
     }
 
     async fn identity(
         &self,
         ctx: &(dyn CliContext + 'static),
-        command: &(dyn Any + Send + Sync),
+        command: IdentityCommands,
     ) -> Result<()> {
-        let command = downcast::<IdentityCommands>(command, "IdentityCommands")?;
-        crate::hosted_runtime::identity::cmd_identity(ctx, command.clone()).await
+        cmd_identity(ctx, command).await
     }
 }
 
@@ -116,13 +124,4 @@ fn agent_template(template: AgentTemplateArg) -> AgentTemplate {
         AgentTemplateArg::Contributor => AgentTemplate::Contributor,
         AgentTemplateArg::CiLanding => AgentTemplate::CiLanding,
     }
-}
-
-fn downcast<'a, T: 'static>(
-    value: &'a (dyn Any + Send + Sync),
-    name: &'static str,
-) -> Result<&'a T> {
-    value
-        .downcast_ref::<T>()
-        .ok_or_else(|| anyhow!("WeftExtensions trait dispatch: failed to downcast to {name}"))
 }
