@@ -11,11 +11,11 @@ use chrono::Utc;
 use objects::{
     fs_ops::remove_path_recursively,
     object::{Blob, StateId, ThreadName},
-    store::{ActorPresenceStore, ObjectStore, WriterLeaseStatus, WriterLeaseStore},
+    store::{ObjectStore, WriterLeaseStatus, WriterLeaseStore},
 };
 use oplog::{OpLogRecorder, OpRecord, ThreadUpdateSnapshots};
 use refs::{Head, RefExpectation, RefUpdate};
-use repo::{
+use repo::{ActorPresenceStore, 
     Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,
     describe_thread_advice,
 };

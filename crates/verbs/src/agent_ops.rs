@@ -11,7 +11,8 @@
 //! Registry I/O, recovery advice, harness probing, and human/JSON render stay
 //! CLI-owned.
 
-use objects::store::{ActorPresence, WriterLease, WriterLeaseStatus};
+use objects::store::{WriterLease, WriterLeaseStatus};
+use repo::ActorPresence;
 use serde::Serialize;
 
 // ---------------------------------------------------------------------------

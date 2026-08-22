@@ -24,11 +24,14 @@ use chrono::{DateTime, Utc};
 use objects::{
     object::{State, StateId},
     store::{
-        ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStore, ObjectStore,
+        ObjectStore,
     },
 };
 use oplog::OpRecord;
-use repo::{Repository, TimelineStore, TimelineView};
+use repo::{
+    ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStore, Repository,
+    TimelineStore, TimelineView,
+};
 use serde::Serialize;
 use verbs::retro_plan::{
     DEFAULT_FALLBACK_WINDOW_HOURS, MAX_OPLOG_BATCHES, agent_task_window_overlaps,
@@ -430,7 +433,7 @@ fn collect_agents(
         // within (since, now]. An agent that started before `since`
         // but is still Active counts; one that completed before
         // `since` does not.
-        let active_now = matches!(entry.status, objects::store::ActorPresenceStatus::Active);
+        let active_now = matches!(entry.status, repo::ActorPresenceStatus::Active);
         let last_activity = entry
             .completed_at
             .or(entry.last_progress_at)

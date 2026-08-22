@@ -11,6 +11,7 @@ categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base32.workspace = true
 api = { package = "heddle-api", version = "0.10" }
 blake3.workspace = true
 chrono.workspace = true
@@ -26,8 +27,10 @@ prost.workspace = true
 wire = { path = "../wire", package = "heddle-wire", version = "0.13", default-features = false }
 refs = { path = "../refs", package = "heddle-refs", version = "0.13" }
 notify.workspace = true
+rand.workspace = true
 rmp-serde.workspace = true
 rusqlite.workspace = true
+uuid.workspace = true
 semantic = { path = "../semantic", package = "heddle-semantic", version = "0.13", optional = true }
 semantic-recovery = { path = "../semantic-recovery", package = "heddle-semantic-recovery", version = "0.13", optional = true }
 state_review = { path = "../state-review", package = "heddle-state-review", version = "0.13", optional = true }

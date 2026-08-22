@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::{ActorPresenceStore, WriterLeaseStore};
+use objects::store::WriterLeaseStore;
+use repo::ActorPresenceStore;
 
 use super::*;
 

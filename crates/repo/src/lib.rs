@@ -17,6 +17,8 @@ pub(crate) fn test_state_id() -> objects::object::StateId {
     objects::object::StateId::from_bytes(bytes)
 }
 
+pub mod actor_presence;
+pub mod agent_task;
 pub mod atomic;
 mod ci_runner_trust;
 pub mod clone_intent;
@@ -165,15 +167,18 @@ pub use objects::{
         TimelineOperationIdParseError, TimelineOperationKind, TimelineStepId,
         TimelineToolCallStatus, TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
     },
-    store::{
-        AgentUsageSummary, FsStore, ObjectStore, ShallowInfo,
-        actor_presence::{
-            ActorPresence, ActorPresenceStatus, ActorPresenceStore, generate_actor_session_id,
-        },
-    },
+    store::{FsStore, ObjectStore, ShallowInfo},
 };
 #[cfg(feature = "async-source")]
 pub use repository::query_history_async;
+pub use actor_presence::{
+    ActorChainNode, ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
+    ContextQueryEntry, generate_actor_session_id,
+};
+pub use agent_task::{
+    AGENT_TASK_SCHEMA_VERSION, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
+    generate_agent_task_id, validate_task_id,
+};
 pub use repository::{
     BlobHydrator, ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters,
     CheckoutMaterialization, CommitGraphIndex, CommitGraphInspection, ContextSuggestion,

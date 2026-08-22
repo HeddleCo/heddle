@@ -1965,7 +1965,7 @@ mod tests {
         let entry = find_active_thread_entry(&repo, "iso")
             .unwrap()
             .expect("the first start created a reservation");
-        objects::store::ActorPresenceStore::new(repo.heddle_dir())
+        repo::ActorPresenceStore::new(repo.heddle_dir())
             .delete(&entry.session_id)
             .unwrap();
         assert!(

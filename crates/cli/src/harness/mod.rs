@@ -17,12 +17,11 @@ use objects::{
         TimelineToolCallStatus, TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
         Tree,
     },
-    store::{
-        ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, ObjectStore,
-    },
+    store::ObjectStore,
 };
 use refs::Head;
 use repo::{
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
     Repository, SessionManager, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
     ThreadMode, ThreadState, TimelineStore, TimelineView,
 };

@@ -8,8 +8,6 @@ use crate::object::{
     StateId, Tree,
 };
 
-pub mod actor_presence;
-pub mod agent_task;
 pub mod codec;
 pub mod fs;
 pub mod liveness;
@@ -22,14 +20,6 @@ pub mod source;
 pub mod store_compliance;
 pub mod writer_lease;
 
-pub use actor_presence::{
-    ActorChainNode, ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
-    ContextQueryEntry, generate_actor_session_id,
-};
-pub use agent_task::{
-    AGENT_TASK_SCHEMA_VERSION, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
-    generate_agent_task_id, validate_task_id,
-};
 pub use fs::{
     DEFAULT_PACK_INSTALL_INTENT_TTL_SECS, FsRepackOperation, FsStore, PackInstallIntent,
     PackInstallMetricsSnapshot, PackInstallPhase, PackInstallRecoverReport,

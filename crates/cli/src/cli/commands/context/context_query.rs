@@ -6,9 +6,9 @@ use std::{collections::BTreeMap, path::Path};
 use anyhow::Result;
 use objects::{
     object::{AnnotationStatus, ContextTarget},
-    store::{ActorPresenceStore, ContextQueryEntry},
+
 };
-use repo::{
+use repo::{ ActorPresenceStore, ContextQueryEntry,
     Repository, ThreadManager,
     staleness::{self, StalenessStatus},
 };
@@ -533,7 +533,7 @@ fn log_context_query_if_agent_session(
                 .ok()
                 .flatten()?;
             registry.list().ok()?.into_iter().find(|entry| {
-                entry.status == objects::store::ActorPresenceStatus::Active
+                entry.status == repo::ActorPresenceStatus::Active
                     && entry.thread_id.as_deref() == Some(thread.id.as_str())
             })
         });

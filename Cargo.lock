@@ -2622,6 +2622,7 @@ name = "heddle-repo"
 version = "0.13.0"
 dependencies = [
  "anyhow",
+ "base32",
  "blake3",
  "chrono",
  "heddle-api",
@@ -2641,6 +2642,7 @@ dependencies = [
  "notify",
  "proptest",
  "prost 0.14.1",
+ "rand 0.10.2",
  "rmp-serde",
  "rusqlite",
  "serde",
@@ -2651,6 +2653,7 @@ dependencies = [
  "thiserror 2.0.18",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
+ "uuid",
  "windows-sys 0.61.2",
 ]
 

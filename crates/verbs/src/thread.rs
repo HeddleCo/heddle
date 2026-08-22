@@ -19,12 +19,10 @@ use anyhow::Result;
 use chrono::Utc;
 use objects::{
     object::Tree,
-    store::{
-        ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStore,
-    },
     worktree::WorktreeStatus,
 };
 use repo::{
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStore,
     AgentUsageSummary, GitOverlayBranchTip, GitRemoteTrackingStatus, Repository,
     RepositoryOperationStatus, Thread, ThreadConfidenceSummary, ThreadFreshness,
     ThreadImpactCategory, ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadRuntimeOverlay,

@@ -10,16 +10,13 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use objects::{
     object::{State, StateId, ThreadName, Tree},
-    store::{
-        ActorPresence, ActorPresenceStatus, ActorPresenceStore, ObjectStore, WriterLeaseStatus,
-        WriterLeaseStore,
-    },
+    store::{ObjectStore, WriterLeaseStatus, WriterLeaseStore},
     worktree::WorktreeStatus,
 };
 use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
-    AgentUsageSummary, Repository, Thread, ThreadCaptureOutcome, ThreadFreshness, ThreadId,
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, Repository, Thread, ThreadCaptureOutcome, ThreadFreshness, ThreadId,
     ThreadIdError, ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState,
 };
 use serde::Serialize;

@@ -10,7 +10,7 @@
 //! thread-ref minting, harness probing, recovery advice, and human/JSON render.
 
 use anyhow::{Result, anyhow};
-use objects::store::{ActorPresence, ActorPresenceStore};
+use repo::{ActorPresence, ActorPresenceStore};
 use repo::Repository;
 use serde::Serialize;
 use verbs::{
