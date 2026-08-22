@@ -15,6 +15,7 @@ use super::{
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
     import_progress::ImportProgress,
+    next_action::{NextActionValidationContext, write_full_command_json},
     verification_health::{
         RepositoryVerificationState, build_repository_verification_state,
         build_repository_verification_state_profiled,
@@ -323,7 +324,10 @@ fn git_worktree_root(start: &Path) -> Result<PathBuf> {
 
 fn render_adopt(output: &AdoptOutput, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(output)?);
+        write_full_command_json(
+            output,
+            NextActionValidationContext::without_repo(&["adopt"]),
+        )?;
         return Ok(());
     }
 

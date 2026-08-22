@@ -29,7 +29,8 @@ use verbs::{
     maintenance_plan::{pack_install_recover_line, unpaired_packs_pruned_line},
 };
 
-use crate::cli::{Cli, render::write_json_stdout, should_output_json};
+use super::next_action::{NextActionValidationContext, write_full_command_json};
+use crate::cli::{Cli, should_output_json};
 
 #[derive(Serialize, Default)]
 struct GcOutput {
@@ -253,7 +254,10 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
     }
 
     if json {
-        write_json_stdout(&summary)?;
+        write_full_command_json(
+            &summary,
+            NextActionValidationContext::without_repo(&["maintenance", "gc"]),
+        )?;
     }
     Ok(())
 }

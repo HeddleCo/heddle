@@ -9,6 +9,7 @@ use verbs::status::next_action::canonical_git_import_ref_command;
 use super::{
     action_line::{print_next_step, print_next_step_dim},
     history_target::{require_resolved_state, resolve_state_id},
+    next_action::{NextActionValidationContext, normalized_action, write_full_command_json},
     snapshot::ensure_current_state,
     verification_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
 };
@@ -158,7 +159,10 @@ fn cmd_show_with_output_kind(
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["show"]),
+        )?;
     } else {
         render_state(&output, cli.verbose > 0);
     }
@@ -223,7 +227,10 @@ fn render_unbound_overlay_show(
         git_checkpoint: Some(git_oid),
     };
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["show"]),
+        )?;
     } else {
         render_state(&output, cli.verbose > 0);
     }
@@ -237,19 +244,20 @@ fn render_plain_git_show(
     output_kind: &'static str,
 ) -> Result<()> {
     if should_output_json(cli, None) {
-        println!(
-            "{}",
-            serde_json::to_string(&serde_json::json!({
-                "repository_capability": "plain-git",
-                "output_kind": output_kind,
-                "storage_model": "git",
-                "requested": state_spec,
-                "state": null,
-                "verification": &probe.trust,
-                "recommended_action": &probe.trust.recommended_action,
-                "recovery_commands": &probe.trust.recovery_commands,
-            }))?
-        );
+        let payload = serde_json::json!({
+            "repository_capability": "plain-git",
+            "output_kind": output_kind,
+            "storage_model": "git",
+            "requested": state_spec,
+            "state": null,
+            "verification": &probe.trust,
+            "recommended_action": normalized_action(&probe.trust.recommended_action),
+            "recovery_commands": &probe.trust.recovery_commands,
+        });
+        write_full_command_json(
+            &payload,
+            NextActionValidationContext::without_repo(&["show"]),
+        )?;
     } else {
         println!("Git repo, Heddle not initialized");
         if let Some(branch) = &probe.git_branch {

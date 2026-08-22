@@ -508,7 +508,7 @@ fn emit_ready_dry_run(cli: &Cli, repo: &Repository, args: &ReadyArgs) -> Result<
         dry.blockers
             .push("no current thread; pass --thread <name>".to_string());
         push_verification_verdict(&mut dry, &trust);
-        return dry.emit(cli, Some(repo.config()));
+        return dry.emit(cli, Some(repo.config()), &["ready"]);
     };
 
     let status_options = worktree_status_options(Some(repo.config()));
@@ -591,7 +591,7 @@ fn emit_ready_dry_run(cli: &Cli, repo: &Repository, args: &ReadyArgs) -> Result<
     push_verification_verdict(&mut dry, &trust);
 
     dry.blockers.extend(report.blockers.clone());
-    dry.emit(cli, Some(repo.config()))
+    dry.emit(cli, Some(repo.config()), &["ready"])
 }
 
 fn push_verification_verdict(dry: &mut DryRunPlan, trust: &RepositoryVerificationState) {

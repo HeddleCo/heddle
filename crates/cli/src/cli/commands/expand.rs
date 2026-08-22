@@ -12,6 +12,7 @@ use serde::Serialize;
 use super::{
     advice::RecoveryAdvice,
     history_target::{require_resolved_state, resolve_state_id},
+    next_action::{NextActionValidationContext, write_full_command_json},
 };
 use crate::cli::{Cli, should_output_json, style};
 
@@ -90,7 +91,10 @@ pub fn cmd_expand(cli: &Cli, reference: String) -> Result<()> {
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "expand"]),
+        )?;
     } else {
         print_human(&output);
     }

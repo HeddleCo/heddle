@@ -20,6 +20,7 @@ use verbs::{
 };
 
 use super::advice::RecoveryAdvice;
+use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::cli::{
     Cli, TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs,
     TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs,
@@ -421,7 +422,10 @@ fn cmd_timeline_recover(
 
 fn print_timeline_action(cli: &Cli, repo: &Repository, output: TimelineActionOutput) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "timeline"]),
+        )?;
         return Ok(());
     }
 
@@ -477,7 +481,10 @@ fn print_timeline_action(cli: &Cli, repo: &Repository, output: TimelineActionOut
 
 fn print_timeline_status(cli: &Cli, repo: &Repository, output: TimelineStatusOutput) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "timeline"]),
+        )?;
         return Ok(());
     }
 
@@ -510,7 +517,10 @@ fn print_timeline_recording(
     output: TimelineRecordingOutput,
 ) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "timeline"]),
+        )?;
         return Ok(());
     }
 

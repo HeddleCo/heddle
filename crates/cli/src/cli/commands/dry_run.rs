@@ -13,7 +13,8 @@
 use serde::Serialize;
 
 use super::command_catalog::{CommandSideEffectFlags, command_side_effect_flags};
-use crate::cli::{Cli, render::write_json_stdout, should_output_json, style};
+use super::next_action::{NextActionValidationContext, write_full_command_json};
+use crate::cli::{Cli, should_output_json, style};
 
 /// Stable `output_kind` discriminator for every dry-run plan.
 pub const DRY_RUN_PLAN_OUTPUT_KIND: &str = "dry_run_plan";
@@ -124,9 +125,19 @@ impl DryRunPlan {
 
     /// Emit the plan as text or JSON depending on the CLI output mode.
     /// `config` is the repo config when available (drives JSON default).
-    pub fn emit(&self, cli: &Cli, config: Option<&repo::Config>) -> anyhow::Result<()> {
+    /// `emitting_command` is the dry-running verb, for next-action
+    /// validation of the emitted plan.
+    pub fn emit(
+        &self,
+        cli: &Cli,
+        config: Option<&repo::Config>,
+        emitting_command: &[&str],
+    ) -> anyhow::Result<()> {
         if should_output_json(cli, config) {
-            write_json_stdout(self)?;
+            write_full_command_json(
+                self,
+                NextActionValidationContext::without_repo(emitting_command),
+            )?;
         } else {
             self.render_text();
         }

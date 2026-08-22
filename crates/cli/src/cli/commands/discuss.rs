@@ -23,7 +23,9 @@ use super::{
         AnnotationStore, AnnotationSurface, emit_locality_notice_once, open_annotation_store,
         report_absent_store,
     },
-    next_action::write_projected_command_json,
+    next_action::{
+        NextActionValidationContext, write_full_command_json, write_projected_command_json,
+    },
     snapshot::ensure_current_state,
 };
 use crate::{
@@ -340,7 +342,10 @@ fn run_list(
         discussions,
     };
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["discuss", "list"]),
+        )?;
     } else if output.discussions.is_empty() {
         println!("(no discussions)");
     } else {
@@ -405,7 +410,10 @@ fn emit_write(
 
 fn emit_show(cli: &Cli, output: &DiscussionShowOutput) -> Result<()> {
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(output)?);
+        write_full_command_json(
+            output,
+            NextActionValidationContext::without_repo(&["discuss", "show"]),
+        )?;
         return Ok(());
     }
     let discussion = &output.discussion;

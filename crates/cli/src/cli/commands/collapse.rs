@@ -13,6 +13,7 @@ use verbs::{CollapsePlan, plan_collapse};
 use super::{
     advice::RecoveryAdvice,
     history_target::{require_resolved_state, resolve_state_id},
+    next_action::{NextActionValidationContext, write_full_command_json},
 };
 use crate::{
     cli::{Cli, commands::snapshot::resolve_attribution, should_output_json},
@@ -100,7 +101,10 @@ pub fn cmd_collapse(
     };
 
     if json {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "collapse"]),
+        )?;
     } else {
         println!(
             "{} in {:.1}s",

@@ -6,6 +6,8 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
+#[cfg(feature = "client")]
+use heddle_cli_args::CliContext as _;
 use heddle_git_projection::{
     credential::EmbeddingSafeCredentialProvider,
     git_core::{
@@ -40,8 +42,6 @@ use verbs::{
     parse_hosted_push_result, redact_internal_hosted_paths, remote_push_failure,
 };
 #[cfg(feature = "client")]
-use heddle_cli_args::CliContext as _;
-#[cfg(feature = "client")]
 use wire::ProtocolError;
 
 #[cfg(feature = "client")]
@@ -51,18 +51,14 @@ use super::{
     auto_capture::{AutoCaptureTrigger, auto_capture_command_boundary},
     command_catalog::{ActionFields, ActionTemplate},
     dry_run::{DryRunPlan, RefUpdatePreview},
+    next_action::{NextActionValidationContext, write_full_command_json},
     snapshot::ensure_current_state,
     verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 #[cfg(feature = "client")]
 use crate::cli::progress_render::clear_line;
 #[cfg(feature = "client")]
-use hosted_client::client::HostedClient;
-#[cfg(feature = "client")]
-use hosted_client::client::{HostedAuthMode, HostedSession};
-#[cfg(feature = "client")]
 use crate::remote::Remote;
-use hosted_client::client::LocalSync;
 use crate::{
     cli::{
         Cli,
@@ -72,6 +68,11 @@ use crate::{
     config::UserConfig,
     remote::{RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
+#[cfg(feature = "client")]
+use hosted_client::client::HostedClient;
+use hosted_client::client::LocalSync;
+#[cfg(feature = "client")]
+use hosted_client::client::{HostedAuthMode, HostedSession};
 
 mod remote_ops;
 
@@ -346,7 +347,10 @@ pub async fn cmd_push(
                 trust,
             );
             if should_output_json(cli, Some(repo.config())) {
-                crate::cli::render::write_json_stdout(&output)?;
+                write_full_command_json(
+                    &output,
+                    NextActionValidationContext::without_repo(&["push"]),
+                )?;
             } else {
                 let text = format_push_outcome_text(&output.outcome, None);
                 println!("{} {}", style::ok_marker(), text.headline);
@@ -506,7 +510,7 @@ fn emit_push_dry_run(
          no server round-trip was made",
     );
 
-    dry.emit(cli, Some(repo.config()))
+    dry.emit(cli, Some(repo.config()), &["push"])
 }
 
 fn git_overlay_push_state_advice() -> anyhow::Error {
@@ -1216,7 +1220,10 @@ async fn push_local(
             objects: Some(objects_copied),
         };
         let output = heddle_push_output_from_local(plan, &summary, trust);
-        crate::cli::render::write_json_stdout(&output)?;
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["push"]),
+        )?;
     } else {
         // Domain owns unstyled text; CLI styles the primary line + detail lines.
         let trust = build_repository_verification_state(repo);
@@ -1369,7 +1376,10 @@ async fn push_local_all_threads(
     if json {
         let trust = build_repository_verification_state(repo);
         let output = heddle_all_threads_push_output(plan, pushed, &failures, total_objects, trust);
-        crate::cli::render::write_json_stdout(&output)?;
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["push"]),
+        )?;
     }
 
     if let Some(failure) = first_multi_thread_push_failure(&failures) {
@@ -1453,7 +1463,9 @@ async fn push_network_connected(
     // the object push already succeeded, so a discussion-sync hiccup warns
     // rather than failing the push (the next push resumes from the mirror map).
     if result.success {
-        match hosted_client::client::discussion_sync::push_discussions(repo, client, &repo_path).await {
+        match hosted_client::client::discussion_sync::push_discussions(repo, client, &repo_path)
+            .await
+        {
             Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                 println!(
                     "{} synced {count} discussion(s) to {}",
@@ -1488,7 +1500,9 @@ async fn push_network_connected(
                 eprintln!("{} context sync skipped: {error:#}", style::warn_marker());
             }
         }
-        match hosted_client::client::review_sync::push_review_signatures(repo, client, &repo_path).await {
+        match hosted_client::client::review_sync::push_review_signatures(repo, client, &repo_path)
+            .await
+        {
             Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                 println!(
                     "{} synced {count} review signature(s) to {}",
@@ -1515,7 +1529,10 @@ async fn push_network_connected(
             if should_output_json(options.cli, Some(repo.config())) {
                 let trust = build_repository_verification_state(repo);
                 let output = heddle_push_output(options.plan, state, None, trust);
-                crate::cli::render::write_json_stdout(&output)?;
+                write_full_command_json(
+                    &output,
+                    NextActionValidationContext::without_repo(&["push"]),
+                )?;
             } else {
                 let trust = build_repository_verification_state(repo);
                 let output = heddle_push_output(options.plan, state.clone(), None, trust);
@@ -1712,7 +1729,10 @@ async fn push_network_all_threads(
     if json {
         let trust = build_repository_verification_state(repo);
         let output = heddle_all_threads_push_output(options.plan, pushed, &failures, 0, trust);
-        crate::cli::render::write_json_stdout(&output)?;
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["push"]),
+        )?;
     }
 
     if let Some(failure) = first_multi_thread_push_failure(&failures) {

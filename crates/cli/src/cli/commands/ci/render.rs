@@ -6,15 +6,15 @@ use std::fmt::Write as _;
 use anyhow::Result;
 use crypto::{CheckClass, Conclusion, SignedVerdict};
 
-use crate::cli::{
-    Cli,
-    render::{write_json_stdout, write_stdout},
-    should_output_json,
-};
+use super::super::next_action::{NextActionValidationContext, write_full_command_json};
+use crate::cli::{Cli, render::write_stdout, should_output_json};
 
 pub(crate) fn render(cli: &Cli, verdicts: &[SignedVerdict]) -> Result<()> {
     if should_output_json(cli, None) {
-        write_json_stdout(&verdicts)
+        write_full_command_json(
+            &verdicts,
+            NextActionValidationContext::without_repo(&["ci", "run"]),
+        )
     } else {
         write_stdout(&render_table(verdicts))
     }

@@ -16,6 +16,7 @@ use verbs::{
 use super::{
     advice::RecoveryAdvice,
     history_target::{require_resolved_state, resolve_state_id},
+    next_action::{NextActionValidationContext, write_full_command_json},
     worktree_safety::ensure_worktree_clean,
 };
 use crate::cli::{Cli, should_output_json};
@@ -97,16 +98,16 @@ pub fn cmd_revert(
             },
         );
         if json {
-            println!(
-                "{}",
-                serde_json::to_string(&RevertOutput {
+            write_full_command_json(
+                &RevertOutput {
                     output_kind: "revert",
                     state_id: None,
                     reverted_state: target_short,
                     files_affected,
                     message: success_message,
-                })?
-            );
+                },
+                NextActionValidationContext::without_repo(&["revert"]),
+            )?;
         } else {
             println!("{success_message}");
             for file in &files_affected {
@@ -145,16 +146,16 @@ pub fn cmd_revert(
     );
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&RevertOutput {
+        write_full_command_json(
+            &RevertOutput {
                 output_kind: "revert",
                 state_id: Some(new_short),
                 reverted_state: target_short,
                 files_affected,
                 message: success_message,
-            })?
-        );
+            },
+            NextActionValidationContext::without_repo(&["revert"]),
+        )?;
     } else {
         println!("{success_message}");
         for file in &files_affected {

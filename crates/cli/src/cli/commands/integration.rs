@@ -26,6 +26,7 @@ use verbs::integration_plan::{
 };
 
 use super::advice::RecoveryAdvice;
+use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::{
     cli::{
         Cli, IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs,
@@ -260,7 +261,10 @@ fn list_integrations(cli: &Cli, repo: &Repository) -> Result<()> {
         .map(|entry| integration_status(repo, &entry))
         .collect::<Result<Vec<_>>>()?;
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&statuses)?);
+        write_full_command_json(
+            &statuses,
+            NextActionValidationContext::without_repo(&["integration", "list"]),
+        )?;
     } else if statuses.is_empty() {
         println!("{}", empty_integrations_message());
     } else {
@@ -334,7 +338,10 @@ fn doctor_integrations(cli: &Cli, repo: &Repository) -> Result<()> {
         .map(|entry| integration_status(repo, entry))
         .collect::<Result<Vec<_>>>()?;
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&statuses)?);
+        write_full_command_json(
+            &statuses,
+            NextActionValidationContext::without_repo(&["integration", "list"]),
+        )?;
     } else if statuses.is_empty() {
         println!("{}", empty_integrations_message());
     } else {

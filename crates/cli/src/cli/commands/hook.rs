@@ -6,8 +6,33 @@ use std::io::{self, IsTerminal, Read};
 use anyhow::{Context, Result, anyhow};
 use repo::{Hook, HookManager};
 
+use serde::Serialize;
+
 use super::advice::RecoveryAdvice;
+use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::cli::{Cli, HookCommands, HookInstallSource, should_output_json};
+
+#[derive(Serialize)]
+struct HookInstallOutput<'a> {
+    installed: &'a str,
+}
+
+#[derive(Serialize)]
+struct HookUninstallOutput<'a> {
+    uninstalled: bool,
+    name: &'a str,
+}
+
+#[derive(Serialize)]
+struct HookEventsOutput<'a> {
+    events: Vec<HookEventEntry<'a>>,
+}
+
+#[derive(Serialize)]
+struct HookEventEntry<'a> {
+    name: &'a str,
+    description: &'a str,
+}
 
 pub fn cmd_hook(cli: &Cli, command: HookCommands) -> Result<()> {
     let repo = cli.open_repo()?;
@@ -18,7 +43,10 @@ pub fn cmd_hook(cli: &Cli, command: HookCommands) -> Result<()> {
             let hooks = manager.list_hooks()?;
 
             if should_output_json(cli, Some(repo.config())) {
-                println!("{}", serde_json::to_string(&hooks)?);
+                write_full_command_json(
+                    &hooks,
+                    NextActionValidationContext::without_repo(&["hook", "list"]),
+                )?;
             } else if hooks.is_empty() {
                 println!("No hooks installed");
             } else {
@@ -35,7 +63,10 @@ pub fn cmd_hook(cli: &Cli, command: HookCommands) -> Result<()> {
             manager.install(hook, &content)?;
 
             if should_output_json(cli, Some(repo.config())) {
-                println!("{{\"installed\": \"{}\"}}", name);
+                write_full_command_json(
+                    &HookInstallOutput { installed: &name },
+                    NextActionValidationContext::without_repo(&["hook", "install"]),
+                )?;
             } else {
                 println!("Installed hook: {}", name);
             }
@@ -47,7 +78,13 @@ pub fn cmd_hook(cli: &Cli, command: HookCommands) -> Result<()> {
             let removed = manager.uninstall(hook)?;
 
             if should_output_json(cli, Some(repo.config())) {
-                println!("{{\"uninstalled\": {}, \"name\": \"{}\"}}", removed, name);
+                write_full_command_json(
+                    &HookUninstallOutput {
+                        uninstalled: removed,
+                        name: &name,
+                    },
+                    NextActionValidationContext::without_repo(&["hook", "uninstall"]),
+                )?;
             } else if removed {
                 println!("Uninstalled hook: {}", name);
             } else {
@@ -81,9 +118,15 @@ pub fn cmd_hook(cli: &Cli, command: HookCommands) -> Result<()> {
             if should_output_json(cli, Some(repo.config())) {
                 let entries: Vec<_> = filtered
                     .iter()
-                    .map(|(name, desc)| serde_json::json!({"name": name, "description": desc}))
+                    .map(|(name, desc)| HookEventEntry {
+                        name,
+                        description: desc,
+                    })
                     .collect();
-                println!("{}", serde_json::json!({"events": entries}));
+                write_full_command_json(
+                    &HookEventsOutput { events: entries },
+                    NextActionValidationContext::without_repo(&["hook", "events"]),
+                )?;
             } else if filtered.is_empty() {
                 println!("(no matching events)");
             } else {

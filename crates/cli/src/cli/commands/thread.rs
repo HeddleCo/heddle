@@ -16,9 +16,9 @@ use objects::{
 use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
-    AgentUsageSummary, ActorPresence, ActorPresenceStatus, ActorPresenceStore, Repository, Thread,
-    ThreadCaptureOutcome, ThreadFreshness, ThreadId,
-    ThreadIdError, ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState,
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, Repository, Thread,
+    ThreadCaptureOutcome, ThreadFreshness, ThreadId, ThreadIdError, ThreadIntegrationPolicy,
+    ThreadManager, ThreadMode, ThreadState,
 };
 use serde::Serialize;
 use verbs::{
@@ -46,9 +46,7 @@ use super::{
     command_catalog::{ActionTemplate, recommended_action_template},
     compact::{CompactOutput, CompactProjection},
     mount_lifecycle,
-    next_action::{
-        NextActionValidationContext, write_full_command_json, write_projected_command_json,
-    },
+    next_action::{NextActionValidationContext, write_command_json, write_full_command_json},
     operator_loop::primary_next_action_with_verification,
     snapshot::{ensure_current_state, summarize_confidence, summarize_verification},
     start_atomic,
@@ -243,7 +241,10 @@ pub(crate) fn cmd_thread_captures(
 ) -> Result<()> {
     let captures = collect_thread_captures(repo, thread, limit)?;
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&captures)?);
+        write_full_command_json(
+            &captures,
+            NextActionValidationContext::without_repo(&["thread", "captures"]),
+        )?;
         return Ok(());
     }
 
@@ -1850,10 +1851,10 @@ pub(crate) fn cmd_thread_current(cli: &Cli, repo: &Repository) -> Result<()> {
         struct CurrentOutput<'a> {
             thread: &'a str,
         }
-        println!(
-            "{}",
-            serde_json::to_string(&CurrentOutput { thread: &name })?
-        );
+        write_full_command_json(
+            &CurrentOutput { thread: &name },
+            NextActionValidationContext::without_repo(&["thread", "current"]),
+        )?;
     } else {
         println!("{name}");
     }
@@ -2652,15 +2653,15 @@ pub(crate) fn cmd_thread_rename(
 
 fn render_thread_op(cli: &Cli, output: ThreadOpOutput) -> Result<()> {
     if should_output_json(cli, None) {
-        if output_is_compact(cli) {
-            let emitting = match output.output_kind {
-                "thread_start" => &["start"][..],
-                _ => &["thread"][..],
-            };
-            write_projected_command_json(cli, &output, emitting)?;
-        } else {
-            println!("{}", serde_json::to_string(&output)?);
-        }
+        let emitting: &[&str] = match output.output_kind {
+            "thread_start" => &["start"],
+            _ => &["thread"],
+        };
+        write_command_json(
+            &output,
+            output_is_compact(cli),
+            NextActionValidationContext::without_repo(emitting),
+        )?;
     } else {
         println!("{}", style::accent(&output.message));
         if let Some(thread) = &output.thread {

@@ -13,7 +13,7 @@ use verbs::{
 
 use super::{
     super::{
-        next_action::write_projected_command_json,
+        next_action::{NextActionValidationContext, write_command_json},
         verification_health::{
             build_plain_git_verification_probe, build_repository_verification_state,
             plain_git_setup_advice, trust_visible_worktree_status,
@@ -217,11 +217,11 @@ fn render_diff_report(
     patch: bool,
 ) -> Result<()> {
     if should_output_json(cli, config) {
-        if output_is_compact(cli) {
-            write_projected_command_json(cli, report, &["diff"])?;
-        } else {
-            println!("{}", serde_json::to_string(report)?);
-        }
+        write_command_json(
+            report,
+            output_is_compact(cli),
+            NextActionValidationContext::without_repo(&["diff"]),
+        )?;
     } else if name_only {
         for change in &report.changes {
             println!("{}", change.path);

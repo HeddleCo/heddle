@@ -9,6 +9,7 @@ use verbs::session_list_status;
 
 use super::{
     advice::RecoveryAdvice,
+    next_action::{NextActionValidationContext, write_full_command_json},
     verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 use crate::cli::{Cli, should_output_json};
@@ -102,7 +103,10 @@ pub async fn begin(
             session: SessionOutput::from(&session),
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "provenance", "begin"]),
+        )?;
     } else {
         println!("Session: {}", session.id);
         let segment = session.current_segment().unwrap();
@@ -136,7 +140,10 @@ pub async fn segment(
             segment: SegmentOutput::from(&segment),
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "provenance", "end"]),
+        )?;
     } else {
         println!("Segment: {}", segment.id);
     }
@@ -155,7 +162,10 @@ pub async fn end(cli: &Cli, session_id: Option<String>) -> Result<()> {
             session: SessionOutput::from(&session),
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "provenance", "segment"]),
+        )?;
     } else {
         println!("Session ended: {}", session.id);
     }
@@ -187,7 +197,10 @@ pub async fn show(cli: &Cli, session_id: Option<String>) -> Result<()> {
             session: SessionOutput::from(&session),
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "provenance", "show"]),
+        )?;
     } else {
         println!("Session: {}", session.id);
         println!("Principal: {}", session.principal);
@@ -231,7 +244,10 @@ pub async fn list(cli: &Cli, active_only: bool) -> Result<()> {
             active_only,
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "provenance", "list"]),
+        )?;
     } else {
         if sessions.is_empty() {
             println!("No sessions found.");

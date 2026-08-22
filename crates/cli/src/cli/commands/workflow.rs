@@ -3154,7 +3154,7 @@ fn emit_land_dry_run(cli: &Cli, args: &LandArgs) -> Result<()> {
     });
     dry.note("integration merges are previewed locally; no capture, sync, or merge was performed");
 
-    dry.emit(cli, Some(repo.config()))
+    dry.emit(cli, Some(repo.config()), &["land"])
 }
 
 async fn cmd_land_many(cli: &Cli, args: LandArgs) -> Result<()> {

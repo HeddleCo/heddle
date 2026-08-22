@@ -33,6 +33,7 @@ use serde::Serialize;
 use verbs::redaction_signature_status;
 
 use super::advice::RecoveryAdvice;
+use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::{
     cli::{
         Cli, RedactApplyArgs, RedactCommands, RedactListArgs, RedactShowArgs, should_output_json,
@@ -340,7 +341,10 @@ fn cmd_redact_list(cli: &Cli, repo: &Repository, _args: RedactListArgs) -> Resul
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&payload)?);
+        write_full_command_json(
+            &payload,
+            NextActionValidationContext::without_repo(&["redact", "list"]),
+        )?;
     } else if count == 0 {
         println!("no redactions in repo");
     } else {
@@ -418,7 +422,10 @@ fn cmd_redact_show(cli: &Cli, repo: &Repository, args: RedactShowArgs) -> Result
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["redact", "show"]),
+        )?;
     } else {
         println!("redaction {}", output.redaction_id);
         println!("  blob:        {}", output.blob);
@@ -455,7 +462,10 @@ fn emit_apply(cli: &Cli, output: &RedactApplyOutput) -> Result<()> {
     // helper takes `Option<&Config>`; passing `None` matches the
     // ad-hoc emitters elsewhere in the CLI (e.g., `cmd_marker`).
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(output)?);
+        write_full_command_json(
+            output,
+            NextActionValidationContext::without_repo(&["redact"]),
+        )?;
     } else {
         println!(
             "redacted {} ({}) in {} (redaction {})",

@@ -9,6 +9,7 @@ use objects::store::{
 use serde::Serialize;
 use verbs::maintenance_plan::{MaintenanceInspectView, MaintenanceRefreshView};
 
+use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::cli::{
     Cli, FsckCommands, FsckRepairCommands, MaintenanceCommands,
     commands::{cmd_fsck, cmd_fsck_repair_git, cmd_gc, cmd_oplog},
@@ -33,7 +34,10 @@ struct RepackOutput {
 
 fn render_repack(output: &RepackOutput, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(output)?);
+        write_full_command_json(
+            output,
+            NextActionValidationContext::without_repo(&["maintenance", "repack"]),
+        )?;
     } else {
         println!(
             "Repacked {} objects ({} bytes) in {} ms; reclaimed {} bytes",
@@ -71,13 +75,13 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
         MaintenanceCommands::Inspect => {
             let report = repo.inspect_performance_with_options(&options)?;
             if should_output_json(cli, Some(repo.config())) {
-                println!(
-                    "{}",
-                    serde_json::to_string(&MaintenanceOutput {
+                write_full_command_json(
+                    &MaintenanceOutput {
                         output_kind: "maintenance_inspect",
                         report: &report,
-                    })?
-                );
+                    },
+                    NextActionValidationContext::without_repo(&["maintenance", "inspect"]),
+                )?;
             } else {
                 let view = MaintenanceInspectView {
                     commit_graph_present: report.commit_graph.present,
@@ -118,13 +122,13 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
         MaintenanceCommands::Refresh => {
             let run = repo.run_maintenance_with_options(&options)?;
             if should_output_json(cli, Some(repo.config())) {
-                println!(
-                    "{}",
-                    serde_json::to_string(&MaintenanceOutput {
+                write_full_command_json(
+                    &MaintenanceOutput {
                         output_kind: "maintenance_refresh",
                         report: &run,
-                    })?
-                );
+                    },
+                    NextActionValidationContext::without_repo(&["maintenance", "refresh"]),
+                )?;
             } else {
                 let view = MaintenanceRefreshView {
                     rebuilt_commit_graph: run.rebuilt_commit_graph,

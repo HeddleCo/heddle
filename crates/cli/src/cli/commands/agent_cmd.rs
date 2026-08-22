@@ -10,11 +10,11 @@ use objects::{
         WriterLeaseReserveOutcome, WriterLeaseStatus, WriterLeaseStore, current_boot_id,
     },
 };
+use refs::{Head, RefExpectation};
 use repo::{
     ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStatus,
     AgentTaskStore, AgentUsageSummary, validate_task_id,
 };
-use refs::{Head, RefExpectation};
 use repo::{
     Repository, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadId,
     ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState, ThreadVerificationSummary,
@@ -32,6 +32,7 @@ use verbs::{
 
 use super::{
     advice::RecoveryAdvice,
+    next_action::{NextActionValidationContext, write_full_command_json},
     thread::thread_name_invalid_advice,
     verification_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
@@ -1092,7 +1093,10 @@ fn build_fanout_start_output(
 
 fn render_agent_fanout_output(output: AgentFanoutOutput, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "fanout"]),
+        )?;
         return Ok(());
     }
     println!(
@@ -1131,7 +1135,10 @@ fn render_agent_fanout_output(output: AgentFanoutOutput, json: bool) -> Result<(
 
 fn render_agent_list(output: AgentReservationListOutput, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "list"]),
+        )?;
         return Ok(());
     }
     let entries = output.reservations;
@@ -1176,7 +1183,10 @@ fn render_agent_task_envelope(
         trust: build_repository_verification_state(repo),
     };
     if json {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "task"]),
+        )?;
         return Ok(());
     }
     println!(
@@ -1200,7 +1210,10 @@ fn render_agent_task_envelope(
 
 fn render_agent_task_list(output: AgentTaskListOutput, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "task"]),
+        )?;
         return Ok(());
     }
     if output.tasks.is_empty() {
@@ -1237,11 +1250,10 @@ fn render_agent_reservation_envelope(
     lease: &WriterLease,
     token: Option<String>,
 ) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string(&reservation_envelope(repo, lease, token))?
-    );
-    Ok(())
+    write_full_command_json(
+        &reservation_envelope(repo, lease, token),
+        NextActionValidationContext::without_repo(&["agent"]),
+    )
 }
 
 fn writer_lease_advice(kind: &'static str, lease_id: &str, error: String) -> RecoveryAdvice {

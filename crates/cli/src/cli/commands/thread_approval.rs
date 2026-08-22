@@ -16,6 +16,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use api::heddle::api::v1alpha1::{RepositoryRef, StateId as ApiStateId, repository_ref::Reference};
+use heddle_cli_args::CliContext as _;
 use objects::object::ThreadName;
 use repo::Repository;
 use serde::Serialize;
@@ -26,10 +27,9 @@ use verbs::approval_plan::{
     format_unix_secs_label, plan_eligibility_summary, short_state_id, state_id_bytes_to_string,
     timestamp_secs_u64, unmet_requirement_line,
 };
-use heddle_cli_args::CliContext as _;
 
 use super::RecoveryAdvice;
-use hosted_client::client::{HostedAuthMode, HostedClient};
+use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::{
     cli::{
         Cli,
@@ -41,6 +41,7 @@ use crate::{
     config::UserConfig,
     remote::{RemoteTarget, resolve_remote_with_key},
 };
+use hosted_client::client::{HostedAuthMode, HostedClient};
 
 #[derive(Serialize)]
 struct ApprovalOutput {
@@ -177,7 +178,10 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
             approved_at: ts_secs(&approval.approved_at),
             expires_at: ts_secs(&approval.expires_at),
         };
-        println!("{}", serde_json::to_string(&out)?);
+        write_full_command_json(
+            &out,
+            NextActionValidationContext::without_repo(&["thread", "approve"]),
+        )?;
     } else {
         println!(
             "{}",
@@ -219,7 +223,10 @@ pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Resul
                 expires_at: ts_secs(&a.expires_at),
             })
             .collect();
-        println!("{}", serde_json::to_string(&out)?);
+        write_full_command_json(
+            &out,
+            NextActionValidationContext::without_repo(&["thread", "approvals"]),
+        )?;
     } else if approvals.is_empty() {
         println!("{}", approvals_empty_message(&args.source, &args.target));
     } else {
@@ -264,7 +271,10 @@ pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArg
             id: args.id,
             deleted: true,
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "revoke-approval"]),
+        )?;
     } else {
         println!("{}", approval_revoked_message(&args.id));
     }
@@ -331,7 +341,10 @@ pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Re
             unmet,
             valid_approvals,
         };
-        println!("{}", serde_json::to_string(&out)?);
+        write_full_command_json(
+            &out,
+            NextActionValidationContext::without_repo(&["thread", "check-merge"]),
+        )?;
     } else {
         match plan_eligibility_summary(allowed, valid_approvals.len(), unmet.len()) {
             EligibilitySummary::Allowed { approval_count } => {

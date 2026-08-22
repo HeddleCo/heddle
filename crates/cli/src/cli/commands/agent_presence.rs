@@ -10,8 +10,8 @@
 //! thread-ref minting, harness probing, recovery advice, and human/JSON render.
 
 use anyhow::{Result, anyhow};
-use repo::{ActorPresence, ActorPresenceStore};
 use repo::Repository;
+use repo::{ActorPresence, ActorPresenceStore};
 use serde::Serialize;
 use verbs::{
     ActorEntryReport, ActorListReport, list_actors, mark_actor_done, plan_actor_done,
@@ -22,6 +22,7 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
+    next_action::{NextActionValidationContext, write_full_command_json},
     thread::find_thread_summary,
     verification_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
@@ -159,7 +160,10 @@ pub async fn list(cli: &Cli, active_only: bool) -> Result<()> {
             active_only: report.active_only,
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "presence", "list"]),
+        )?;
     } else {
         render_actor_list(&report);
     }
@@ -184,7 +188,10 @@ pub async fn show(cli: &Cli, session_id: Option<String>) -> Result<()> {
             presence: show.actor,
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "presence", "show"]),
+        )?;
     } else {
         render_actor_show(&show.actor);
     }
@@ -304,7 +311,10 @@ pub async fn complete(cli: &Cli, session_id: Option<String>) -> Result<()> {
             recommended_action_template,
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "presence", "complete"]),
+        )?;
     } else {
         println!("Agent presence '{}' marked as complete.", plan.session_id);
         if let Some(thread) = summary {
@@ -363,7 +373,10 @@ pub async fn explain(cli: &Cli, session_id: Option<String>) -> Result<()> {
             winning_rule: entry.winning_attach_rule,
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "presence", "explain"]),
+        )?;
     } else {
         println!("Agent presence: {}", entry.session_id);
         println!("Thread: {}", entry.thread);
@@ -454,7 +467,10 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
             recommended_action_template: next_action_template,
             trust: build_repository_verification_state(repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "presence", "show"]),
+        )?;
     } else {
         println!("Agent presence: none attached");
         println!("Repository: {}", repo.root().display());

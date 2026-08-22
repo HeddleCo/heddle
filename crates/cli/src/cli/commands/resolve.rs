@@ -15,7 +15,12 @@ use verbs::{
     contains_line_start_conflict_markers, path_is_active_conflict, unresolved_conflict_paths,
 };
 
-use super::{action_line::print_next_step, advice::RecoveryAdvice, snapshot::resolve_attribution};
+use super::{
+    action_line::print_next_step,
+    advice::RecoveryAdvice,
+    next_action::{NextActionValidationContext, write_full_command_json},
+    snapshot::resolve_attribution,
+};
 use crate::{
     cli::{Cli, should_output_json},
     config::UserConfig,
@@ -152,7 +157,10 @@ fn cmd_resolve_all(
     );
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["resolve"]),
+        )?;
     } else {
         println!("{}", output.message.as_deref().unwrap_or_default());
         for path in &unresolved {
@@ -205,7 +213,10 @@ fn cmd_resolve_file(
     );
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["resolve"]),
+        )?;
     } else {
         println!("{}", output.message.as_deref().unwrap_or_default());
         if !remaining.is_empty() {

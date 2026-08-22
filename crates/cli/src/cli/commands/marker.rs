@@ -11,7 +11,11 @@ use verbs::{
     marker_prefix_is_valid, plan_marker_delete_selector,
 };
 
-use super::{advice::RecoveryAdvice, snapshot::ensure_current_state};
+use super::{
+    advice::RecoveryAdvice,
+    next_action::{NextActionValidationContext, write_full_command_json},
+    snapshot::ensure_current_state,
+};
 use crate::{
     cli::{Cli, ThreadMarkerCommands, should_output_json},
     config::UserConfig,
@@ -98,7 +102,10 @@ fn cmd_marker_list(cli: &Cli, repo: &Repository, filter: Option<String>) -> Resu
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "marker"]),
+        )?;
     } else {
         for entry in &output.markers {
             println!("{} -> {}", entry.name, entry.state_id);
@@ -132,7 +139,10 @@ fn cmd_marker_create(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "marker"]),
+        )?;
     } else {
         println!("{}", output.message);
     }
@@ -153,7 +163,10 @@ fn cmd_marker_delete(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "marker"]),
+        )?;
     } else {
         println!("{}", output.message);
     }
@@ -194,7 +207,10 @@ fn cmd_marker_delete_prefix(cli: &Cli, repo: &Repository, prefix: String) -> Res
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "marker"]),
+        )?;
     } else {
         println!("{}", output.message);
         for entry in &output.deleted {
@@ -274,7 +290,10 @@ fn cmd_marker_show(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "marker"]),
+        )?;
     } else {
         println!("Marker: {}", name);
         println!("State: {}", state_id.short());

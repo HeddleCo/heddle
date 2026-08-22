@@ -13,6 +13,7 @@ use serde::Serialize;
 use verbs::{PurgeApplyPlan, plan_purge_apply, purge_apply_message, purge_force_command};
 
 use super::advice::RecoveryAdvice;
+use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::{
     cli::{Cli, PurgeApplyArgs, PurgeCommands, PurgeListArgs, should_output_json},
     config::UserConfig,
@@ -163,7 +164,10 @@ fn cmd_purge_list(cli: &Cli, repo: &Repository, _args: PurgeListArgs) -> Result<
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&payload)?);
+        write_full_command_json(
+            &payload,
+            NextActionValidationContext::without_repo(&["redact", "purge"]),
+        )?;
     } else if count == 0 {
         println!("no purges in repo");
     } else {

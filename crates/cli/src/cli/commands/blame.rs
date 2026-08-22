@@ -18,6 +18,7 @@ use verbs::{fit_author as core_fit_author, summarize_context_line};
 use super::{
     advice::RecoveryAdvice,
     history_target::{require_resolved_state, resolve_state_id},
+    next_action::{NextActionValidationContext, write_full_command_json},
     snapshot::ensure_current_state,
 };
 use crate::{
@@ -238,7 +239,10 @@ fn cmd_blame_with_output_kind(
             lines: output_lines,
         };
 
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["query", "--attribution"]),
+        )?;
     } else {
         if show_context && !context.is_empty() {
             println!("Applicable Context:");
@@ -308,7 +312,10 @@ fn render_unbound_overlay_blame(
         lines,
     };
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["query", "--attribution"]),
+        )?;
     } else {
         for line in &output.lines {
             let author = format!("{} <{}>", line.principal.name, line.principal.email);

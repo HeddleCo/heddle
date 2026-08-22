@@ -10,6 +10,7 @@ use super::{
     checkpoint::{GitCheckpointRequest, create_git_checkpoint},
     command_catalog::ActionTemplate,
     git_overlay_txn,
+    next_action::{NextActionValidationContext, write_full_command_json},
     ready_cmd::worktree_dirty,
     verification_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
@@ -95,7 +96,10 @@ pub fn cmd_commit(cli: &Cli, args: CommitArgs) -> Result<()> {
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        crate::cli::render::write_json_stdout(&output)?;
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["commit"]),
+        )?;
     } else {
         let verb = if already_current {
             "Already committed"
