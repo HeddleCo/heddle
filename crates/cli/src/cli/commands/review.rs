@@ -4,15 +4,15 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use daemon::local_review::{
-    LocalReviewContext, LocalStateReview, ReviewSignal, ReviewSignalKind, ReviewSignalVisibility,
-    SignReviewRequest, get_repo_signal_health,
-};
 use objects::object::{
     Discussion, DiscussionResolution, ReviewKind, ReviewScope, StateId, SymbolAnchor,
 };
 use repo::{HistoryQuery, operation_dedup::OperationDedupStore};
 use serde::Serialize;
+use verbs::review::{
+    LocalReviewContext, LocalStateReview, ReviewSignal, ReviewSignalKind, ReviewSignalVisibility,
+    SignReviewRequest, get_repo_signal_health,
+};
 
 use super::{
     advice::RecoveryAdvice,

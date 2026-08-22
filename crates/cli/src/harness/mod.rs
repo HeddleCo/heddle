@@ -9,14 +9,6 @@ use std::{
 use anyhow::{Result, anyhow};
 use base64::Engine as _;
 use chrono::Utc;
-use heddle_core::{
-    ExplicitAgentBind, SessionAttachFacts, SessionLookupFact, SessionPolicy, TokenSidFact,
-    WorktreeSessionFact, decide_session_attach, first_value_string, map_from_pairs,
-    merge_string_vec, opencode_tool_name, opencode_tool_status,
-    parse_relay_payload as core_parse_relay_payload,
-    should_rotate_segment as pure_should_rotate_segment, value_array_join, value_cost_micros,
-    value_cost_micros_u64, value_string, value_string_array, value_u64, value_u64_string,
-};
 use objects::{
     fs_atomic::write_file_atomic,
     object::{
@@ -25,17 +17,24 @@ use objects::{
         TimelineToolCallStatus, TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
         Tree,
     },
-    store::{
-        ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, ObjectStore,
-    },
+    store::ObjectStore,
 };
 use refs::Head;
 use repo::{
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
     Repository, SessionManager, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
     ThreadMode, ThreadState, TimelineStore, TimelineView,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use verbs::{
+    ExplicitAgentBind, SessionAttachFacts, SessionLookupFact, SessionPolicy, TokenSidFact,
+    WorktreeSessionFact, decide_session_attach, first_value_string, map_from_pairs,
+    merge_string_vec, opencode_tool_name, opencode_tool_status,
+    parse_relay_payload as core_parse_relay_payload,
+    should_rotate_segment as pure_should_rotate_segment, value_array_join, value_cost_micros,
+    value_cost_micros_u64, value_string, value_string_array, value_u64, value_u64_string,
+};
 use wire::{
     HarnessIdentity, ProgressCheckpoint, SessionDiffSummary, SessionReportEnvelope,
     TranscriptAttachmentRef, UsageTotals, WorktreeChangeBaseline,
@@ -63,6 +62,18 @@ use crate::{
         UserHarnessRootThreadPolicy, UserHarnessSubagentThreadPolicy, UserThreadWorkspaceMode,
     },
 };
+
+/// Provider/model hint from the wrapping harness, in the shape the hosted
+/// client's attribution resolver consumes (installed at startup).
+pub fn current_process_harness_hint(
+    repo: &Repository,
+) -> (Option<String>, Option<String>) {
+    let probe = probe_current_process_harness(repo, None, None, None).ok();
+    (
+        probe.as_ref().and_then(|probe| probe.provider.clone()),
+        probe.as_ref().and_then(|probe| probe.model.clone()),
+    )
+}
 
 pub(crate) fn probe_current_process_harness(
     repo: &Repository,
@@ -708,7 +719,7 @@ fn record_timeline_tool_finished<E: HarnessTimelineExtractor>(
             Ok(_) => runtime.repo.head()?,
             Err(err) => {
                 capture_failed = true;
-                tracing::warn!(?err, "heddle timeline tool capture failed");
+                tracing::warn!(?err, "heddle agent timeline tool capture failed");
                 None
             }
         }
@@ -797,7 +808,7 @@ fn current_state_id(repo: &Repository) -> Result<Option<StateId>> {
         .or(repo.head()?))
 }
 
-// opencode_tool_name / opencode_tool_status: heddle_core::harness_json
+// opencode_tool_name / opencode_tool_status: verbs::harness_json
 
 fn opencode_payload_metadata(event: &str, payload: &Value) -> Result<TimelineToolPayloadMetadata> {
     let tool_name = opencode_tool_name(payload);
@@ -2247,7 +2258,7 @@ fn decode_token_claims(token: &str) -> Option<TokenClaims> {
 fn active_token_claims() -> Option<TokenClaims> {
     #[cfg(feature = "client")]
     {
-        crate::client::resolve_active_bearer()
+        hosted_client::client::resolve_active_bearer()
             .ok()
             .flatten()
             .and_then(|token| decode_token_claims(&token.id))

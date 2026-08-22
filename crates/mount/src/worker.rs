@@ -121,7 +121,7 @@ pub const WORKER_BINARY_ENV: &str = "HEDDLE_FUSE_WORKER_BIN";
 
 /// Default grace window between a clean `Stop` and the supervisor
 /// falling through to `SIGTERM` → `SIGKILL`. 2 seconds matches the
-/// daemon's existing reap window in `crates/daemon/src/local_daemon.rs`.
+/// historical daemon's reap window this constant was carried over from.
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(2);
 
 /// The supervisor sends one of these to the worker. The worker

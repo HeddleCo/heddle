@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Asserter for Track A verification ownership (docs/VERIFICATION_CLEANUP_PLAN.md).
 # Repository Verification State / health proof construction is owned by
-# heddle-core. This wrapper keeps a stable CI entrypoint and pins the
+# heddle-verbs. This wrapper keeps a stable CI entrypoint and pins the
 # allowlist outside the Rust binary.
 #
 # Driving knobs:

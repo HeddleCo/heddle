@@ -162,7 +162,7 @@ occurs.
 
 ### Method
 
-The source baseline was built as `heddle 0.11.0` with:
+The source baseline was built at heddle 0.11.0 with:
 
 ```text
 TMPDIR=/home/scratch

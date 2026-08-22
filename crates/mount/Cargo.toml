@@ -20,6 +20,7 @@ libc.workspace = true
 lru = { workspace = true }
 objects = { path = "../objects", package = "heddle-objects", version = "0.14" }
 oplog = { path = "../oplog", package = "heddle-oplog", version = "0.14" }
+pollster.workspace = true
 refs = { path = "../refs", package = "heddle-refs", version = "0.14" }
 repo = { path = "../repo", package = "heddle-repo", version = "0.14" }
 # `serde`/`serde_json` carry the framed control-plane messages between

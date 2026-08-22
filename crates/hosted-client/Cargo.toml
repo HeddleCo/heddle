@@ -1,0 +1,107 @@
+[package]
+name = "heddle-hosted-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Heddle's in-repo hosted client: transport, credentials, identity, and hosted sync."
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "hosted_client"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+api = { package = "heddle-api", version = "0.12", optional = true }
+base64.workspace = true
+biscuit-auth = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+blake3.workspace = true
+chrono.workspace = true
+getrandom.workspace = true
+libc.workspace = true
+config = { path = "../config", package = "heddle-config", version = "0.14" }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.14" }
+futures = { workspace = true, optional = true }
+hex.workspace = true
+refs = { path = "../refs", package = "heddle-refs", version = "0.14" }
+rmp-serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+wire = { path = "../wire", package = "heddle-wire", version = "0.14" }
+heddle-perf-contract = { path = "../perf-contract", version = "0.14" }
+iroh = { workspace = true, optional = true }
+iroh-base = { workspace = true, optional = true }
+n0-watcher = { workspace = true, optional = true }
+noq-udp = { workspace = true, optional = true }
+objects = { path = "../objects", package = "heddle-objects", version = "0.14" }
+heddle-cli-args = { path = "../cli-args", version = "0.14", default-features = false }
+heddle-cli-contract = { path = "../cli-contract", version = "0.14", default-features = false }
+heddle-cli-render = { path = "../cli-render", version = "0.14", default-features = false }
+prost = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+repo = { path = "../repo", package = "heddle-repo", version = "0.14", default-features = false }
+rustls = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = { workspace = true, optional = true }
+sley.workspace = true
+tempfile = { workspace = true, optional = true }
+tokio.workspace = true
+tokio-stream = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+tracing.workspace = true
+uuid = { workspace = true, features = ["v5"] }
+verbs = { path = "../verbs", package = "heddle-verbs", version = "0.14", default-features = false }
+webpki-roots = { workspace = true, optional = true }
+
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+
+[dev-dependencies]
+iroh-relay = { version = "=1.0.3", default-features = false, features = ["server"] }
+rcgen = "0.14.8"
+tracing-subscriber.workspace = true
+
+[features]
+# The hosted surface: native Iroh transport, credentials, identity, and the
+# hosted sync glue. Off by default so local-only CLI builds never compile the
+# hosted stack; the `heddle-cli` `client` marker feature forwards here.
+client = [
+    "api",
+    "api/reflection",
+    "dep:biscuit-auth",
+    "dep:bytes",
+    "dep:futures",
+    "dep:iroh",
+    "dep:iroh-base",
+    "dep:n0-watcher",
+    "dep:noq-udp",
+    "dep:prost",
+    "dep:prost-types",
+    "dep:rand",
+    "dep:reqwest",
+    "dep:rustls",
+    "dep:sha2",
+    "dep:tempfile",
+    "dep:tokio-stream",
+    "dep:tokio-tungstenite",
+    "dep:webpki-roots",
+    "heddle-cli-args/client",
+    "heddle-cli-contract/client",
+    "heddle-cli-render/client",
+]
+# Forwarded from the CLI's `telemetry` feature: trace-context propagation on
+# hosted calls.
+telemetry = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:tracing-opentelemetry",
+]

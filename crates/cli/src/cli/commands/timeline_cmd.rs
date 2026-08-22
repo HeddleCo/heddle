@@ -2,7 +2,14 @@
 //! Timeline navigation action commands.
 
 use anyhow::{Result, anyhow};
-use heddle_core::{
+use objects::object::{ContentHash, StateId};
+use repo::{
+    NativeToolCallRefV1, Repository, TimelineBranchId, TimelineLabel, TimelineMaterializeStatus,
+    TimelineOperationBodyV1, TimelineOperationEnvelope, TimelineStore, TimelineToolPayloadMetadata,
+    TimelineView, ToolCallFinishedV1, ToolCallStartedV1,
+};
+use serde::Serialize;
+use verbs::{
     timeline_cursor_reason, timeline_label,
     timeline_plan::{
         TimelinePlanError, TimelineSelection, TimelineTargetOptions, parse_branch_reason,
@@ -11,26 +18,20 @@ use heddle_core::{
     },
     timeline_recovery_status, timeline_tool_status,
 };
-use objects::object::{ContentHash, StateId};
-use repo::{
-    NativeToolCallRefV1, Repository, TimelineBranchId, TimelineLabel, TimelineMaterializeStatus,
-    TimelineOperationBodyV1, TimelineOperationEnvelope, TimelineStore, TimelineToolPayloadMetadata,
-    TimelineView, ToolCallFinishedV1, ToolCallStartedV1,
-};
-use serde::Serialize;
 
 use super::advice::RecoveryAdvice;
 use crate::cli::{
-    Cli, TimelineArgs, TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs,
-    TimelineRecordStartArgs, TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs,
-    TimelineStatusArgs, TimelineTargetArgs, should_output_json, style,
+    Cli, TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs,
+    TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs,
+    TimelineTargetArgs, should_output_json, style,
 };
 
-const TIMELINE_RESET_CURRENT_COMMAND: &str = "heddle timeline reset --thread <thread> --current";
+const TIMELINE_RESET_CURRENT_COMMAND: &str =
+    "heddle agent timeline reset --thread <thread> --current";
 const TIMELINE_TOOL_CALL_COMMAND: &str =
-    "heddle timeline reset --thread <thread> --tool-call <tool-call-id> --harness opencode";
+    "heddle agent timeline reset --thread <thread> --tool-call <tool-call-id> --harness opencode";
 
-pub fn cmd_timeline(cli: &Cli, args: TimelineArgs) -> Result<()> {
+pub fn cmd_timeline(cli: &Cli, command: TimelineCommands) -> Result<()> {
     let start = cli
         .repo
         .clone()
@@ -38,7 +39,7 @@ pub fn cmd_timeline(cli: &Cli, args: TimelineArgs) -> Result<()> {
     let repo = Repository::open(start)?;
     let store = TimelineStore::open(repo.heddle_dir())?;
 
-    match args.command {
+    match command {
         TimelineCommands::Status(args) => cmd_timeline_status(cli, &repo, &store, args),
         TimelineCommands::RecordStart(args) => cmd_timeline_record_start(cli, &repo, &store, args),
         TimelineCommands::RecordFinish(args) => {
@@ -61,7 +62,7 @@ fn cmd_timeline_status(
             "timeline_thread_required",
             "--thread",
             "timeline status",
-            "heddle timeline status --thread <thread>",
+            "heddle agent timeline status --thread <thread>",
         )));
     }
     let snapshot = repo.timeline_navigation_snapshot(store, &args.thread)?;
@@ -528,7 +529,7 @@ fn native_tool_ref(args: &TimelineRecordToolArgs) -> Result<NativeToolCallRefV1>
             "timeline_thread_required",
             "--thread",
             "timeline recording",
-            "heddle timeline record-start --thread <thread> --tool-call <id>",
+            "heddle agent timeline record-start --thread <thread> --tool-call <id>",
         )));
     }
     if args.harness.trim().is_empty() {
@@ -536,7 +537,7 @@ fn native_tool_ref(args: &TimelineRecordToolArgs) -> Result<NativeToolCallRefV1>
             "timeline_record_harness_required",
             "--harness",
             "timeline recording",
-            "heddle timeline record-start --harness opencode --tool-call <id>",
+            "heddle agent timeline record-start --harness opencode --tool-call <id>",
         )));
     }
     if args.tool_call.trim().is_empty() {
@@ -544,7 +545,7 @@ fn native_tool_ref(args: &TimelineRecordToolArgs) -> Result<NativeToolCallRefV1>
             "timeline_record_tool_call_required",
             "--tool-call",
             "timeline recording",
-            "heddle timeline record-start --tool-call <id>",
+            "heddle agent timeline record-start --tool-call <id>",
         )));
     }
     Ok(NativeToolCallRefV1 {
@@ -618,7 +619,7 @@ fn parse_payload_hash(value: &str) -> Result<ContentHash> {
             "--payload-hash",
             value,
             "a 64-character hex content hash",
-            "heddle timeline record-start --tool-call <id> --payload-hash <hex>",
+            "heddle agent timeline record-start --tool-call <id> --payload-hash <hex>",
         ))
     })
 }
@@ -660,7 +661,7 @@ fn map_timeline_plan_error(err: TimelinePlanError) -> anyhow::Error {
                 "--status",
                 &raw,
                 "succeeded, failed, or cancelled",
-                "heddle timeline record-finish --tool-call <id> --status succeeded",
+                "heddle agent timeline record-finish --tool-call <id> --status succeeded",
             ))
         }
         TimelinePlanError::InvalidBranchReason { raw } => {
@@ -669,7 +670,7 @@ fn map_timeline_plan_error(err: TimelinePlanError) -> anyhow::Error {
                 "--reason",
                 &raw,
                 "explicit-fork, edit-from-rewound-cursor, retry, or fan-out",
-                "heddle timeline fork --thread <thread> --current --reason explicit-fork",
+                "heddle agent timeline fork --thread <thread> --current --reason explicit-fork",
             ))
         }
         TimelinePlanError::InvalidMaterializeMode { raw } => {
@@ -678,7 +679,7 @@ fn map_timeline_plan_error(err: TimelinePlanError) -> anyhow::Error {
                 "--mode",
                 &raw,
                 "fail-if-dirty or capture-current-then-seek",
-                "heddle timeline reset --thread <thread> --current --mode fail-if-dirty",
+                "heddle agent timeline reset --thread <thread> --current --mode fail-if-dirty",
             ))
         }
         TimelinePlanError::ThreadRequired => anyhow!(RecoveryAdvice::missing_option(

@@ -20,9 +20,6 @@ mod resolve;
 mod text;
 mod types;
 
-#[cfg(feature = "postgres")]
-mod pg_refs;
-
 #[cfg(test)]
 mod refs_tests;
 
@@ -32,11 +29,9 @@ mod refs_packed_tests;
 pub use backend::CoreRefBackend;
 pub use facet::SpoolFacet;
 pub use head::{Head, HeadParseError};
-pub use heddle_schema::refs::PackedRefsModel;
+pub use heddle_object_model::refs::PackedRefsModel;
 pub use name::{RefNameError, require_user_ref_name, validate_ref_name};
 pub use operation_index::{IndexedOperation, OperationLogIndex, OperationLogQuery};
-#[cfg(feature = "postgres")]
-pub use pg_refs::PgRefBackend;
 pub use reconcile::{LoadRequest, Loaded, ReconcileOutcome, RefClass, RefCommitter, RefReconciler};
 pub use ref_backend::RefBackend;
 pub use ref_summary_index::RefSummaryIndexInspection;

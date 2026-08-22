@@ -8,6 +8,7 @@ pub mod observe;
 pub mod progress;
 pub mod store;
 pub mod sync;
+pub mod transfer;
 pub mod util;
 pub mod worktree;
 

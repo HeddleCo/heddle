@@ -1,0 +1,230 @@
+// SPDX-License-Identifier: Apache-2.0
+use crate::{
+    error::Result,
+    store::ObjectStore,
+    transfer::graph::{ObjectId, ObjectInfo, ObjectType},
+};
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObjectAvailabilityPlan {
+    pub have_objects: Vec<ObjectId>,
+    pub want_objects: Vec<ObjectId>,
+    pub partial_fetch_allowed: bool,
+}
+
+pub fn has_object(store: &impl ObjectStore, info: &ObjectInfo) -> Result<bool> {
+    match (&info.id, info.obj_type) {
+        (ObjectId::Hash(hash), ObjectType::Blob) => Ok(store.has_blob(hash)?),
+        (ObjectId::Hash(hash), ObjectType::Tree) => Ok(store.has_tree(hash)?),
+        (ObjectId::StateId(state_id), ObjectType::State) => Ok(store.has_state(state_id)?),
+        (ObjectId::StateAttachment { state, id, kind: _ }, ObjectType::StateAttachment) => {
+            Ok(store.get_state_attachment(state, id)?.is_some())
+        }
+        // Redactions are keyed by the redacted blob's hash. Two senders
+        // can declare different redactions on the same blob (different
+        // reason / signature / timestamp), so we conservatively report
+        // "do not have" and always re-fetch — `accept_wire_redactions`
+        // deduplicates via the content-addressed `put_redaction`
+        // idempotency rule. Cheap to refetch; correct under merge.
+        (ObjectId::Hash(_), ObjectType::Redaction) => Ok(false),
+        // Purge carries separately authorized destructive evidence and must
+        // always reach the repository verification boundary.
+        (ObjectId::Hash(_), ObjectType::Purge) => Ok(false),
+        // StateVisibility is a per-state sidecar with append/merge
+        // semantics. Like Redaction, conservatively refetch and let the
+        // repository boundary validate + dedupe.
+        (ObjectId::StateId(_), ObjectType::StateVisibility) => Ok(false),
+        // Hosted registries are materialized snapshots with a liveness overlay;
+        // let the receiver validate and deduplicate the complete payload.
+        (ObjectId::Hash(_), ObjectType::KeyBinding) => Ok(false),
+        _ => Ok(false),
+    }
+}
+
+pub fn plan_object_availability(
+    store: &impl ObjectStore,
+    objects: &[ObjectInfo],
+) -> Result<ObjectAvailabilityPlan> {
+    let mut plan = ObjectAvailabilityPlan::default();
+
+    for info in objects {
+        if has_object(store, info)? {
+            plan.have_objects.push(info.id.clone());
+        } else {
+            plan.want_objects.push(info.id.clone());
+        }
+    }
+
+    Ok(plan)
+}
+
+impl ObjectAvailabilityPlan {
+    pub fn with_partial_fetch_allowed(mut self, allowed: bool) -> Self {
+        self.partial_fetch_allowed = allowed;
+        self
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.want_objects.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        object::{Blob, ContentHash, StateId, Tree},
+        store::{ObjectStore, Result as StoreResult},
+    };
+
+    use super::*;
+
+    #[derive(Default)]
+    struct DummyStore {
+        blob: Option<ContentHash>,
+        state: Option<StateId>,
+    }
+
+    impl ObjectStore for DummyStore {
+        fn get_blob(&self, _hash: &ContentHash) -> StoreResult<Option<Blob>> {
+            Ok(None)
+        }
+
+        fn put_blob(&self, _blob: &Blob) -> StoreResult<ContentHash> {
+            unreachable!("not used in test")
+        }
+
+        fn has_blob(&self, hash: &ContentHash) -> StoreResult<bool> {
+            Ok(self.blob == Some(*hash))
+        }
+
+        fn get_tree(&self, _hash: &ContentHash) -> StoreResult<Option<Tree>> {
+            Ok(None)
+        }
+
+        fn put_tree(&self, _tree: &Tree) -> StoreResult<ContentHash> {
+            unreachable!("not used in test")
+        }
+
+        fn has_tree(&self, _hash: &ContentHash) -> StoreResult<bool> {
+            Ok(false)
+        }
+
+        fn get_state(&self, _id: &StateId) -> StoreResult<Option<crate::object::State>> {
+            Ok(None)
+        }
+
+        fn put_state(&self, _state: &crate::object::State) -> StoreResult<()> {
+            unreachable!("not used in test")
+        }
+
+        fn has_state(&self, id: &StateId) -> StoreResult<bool> {
+            Ok(self.state == Some(*id))
+        }
+
+        fn list_states(&self) -> StoreResult<Vec<StateId>> {
+            Ok(vec![])
+        }
+
+        fn get_action(
+            &self,
+            _id: &crate::object::ActionId,
+        ) -> StoreResult<Option<crate::object::Action>> {
+            Ok(None)
+        }
+
+        fn put_action(
+            &self,
+            _action: &mut crate::object::Action,
+        ) -> StoreResult<crate::object::ActionId> {
+            unreachable!("not used in test")
+        }
+
+        fn list_actions(&self) -> StoreResult<Vec<crate::object::ActionId>> {
+            Ok(vec![])
+        }
+
+        fn list_blobs(&self) -> StoreResult<Vec<ContentHash>> {
+            Ok(vec![])
+        }
+
+        fn list_trees(&self) -> StoreResult<Vec<ContentHash>> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn test_plan_tracks_available_and_wanted_objects() {
+        let blob = Blob::new(b"hello".to_vec());
+        let blob_hash = blob.hash();
+        let store = DummyStore {
+            blob: Some(blob_hash),
+            state: None,
+        };
+        let missing_hash = ContentHash::from_bytes([7; 32]);
+        let objects = vec![
+            ObjectInfo {
+                id: ObjectId::Hash(blob_hash),
+                obj_type: ObjectType::Blob,
+                size: blob.size() as u64,
+                delta_base: None,
+            },
+            ObjectInfo {
+                id: ObjectId::Hash(missing_hash),
+                obj_type: ObjectType::Tree,
+                size: 0,
+                delta_base: None,
+            },
+        ];
+
+        let plan = plan_object_availability(&store, &objects).unwrap();
+
+        assert_eq!(plan.have_objects.len(), 1);
+        assert_eq!(plan.want_objects.len(), 1);
+        assert!(!plan.is_complete());
+    }
+
+    #[test]
+    fn missing_state_objects_are_requested() {
+        let store = DummyStore::default();
+        let state = StateId::from_bytes([9; 32]);
+        let objects = vec![ObjectInfo {
+            id: ObjectId::StateId(state),
+            obj_type: ObjectType::State,
+            size: 0,
+            delta_base: None,
+        }];
+
+        let plan = plan_object_availability(&store, &objects).unwrap();
+
+        assert!(plan.have_objects.is_empty());
+        assert_eq!(plan.want_objects, vec![ObjectId::StateId(state)]);
+    }
+
+    #[test]
+    fn immutable_state_objects_are_not_requested_when_present() {
+        let state = StateId::from_bytes([9; 32]);
+        let store = DummyStore {
+            state: Some(state),
+            ..DummyStore::default()
+        };
+        let objects = vec![ObjectInfo {
+            id: ObjectId::StateId(state),
+            obj_type: ObjectType::State,
+            size: 0,
+            delta_base: None,
+        }];
+
+        let plan = plan_object_availability(&store, &objects).unwrap();
+
+        assert_eq!(plan.have_objects, vec![ObjectId::StateId(state)]);
+        assert!(plan.want_objects.is_empty());
+    }
+
+    #[test]
+    fn test_partial_fetch_flag_helpers() {
+        let plan = ObjectAvailabilityPlan::default().with_partial_fetch_allowed(true);
+
+        assert!(plan.partial_fetch_allowed);
+        assert!(plan.is_complete());
+    }
+}

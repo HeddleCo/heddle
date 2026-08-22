@@ -8,8 +8,6 @@ use crate::object::{
     StateId, Tree,
 };
 
-pub mod actor_presence;
-pub mod agent_task;
 pub mod codec;
 pub mod fs;
 pub mod liveness;
@@ -22,14 +20,6 @@ pub mod source;
 pub mod store_compliance;
 pub mod writer_lease;
 
-pub use actor_presence::{
-    ActorChainNode, ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
-    ContextQueryEntry, generate_actor_session_id,
-};
-pub use agent_task::{
-    AGENT_TASK_SCHEMA_VERSION, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
-    generate_agent_task_id, validate_task_id,
-};
 pub use fs::{
     DEFAULT_PACK_INSTALL_INTENT_TTL_SECS, FsRepackOperation, FsStore, PackInstallIntent,
     PackInstallMetricsSnapshot, PackInstallPhase, PackInstallRecoverReport,
@@ -89,6 +79,16 @@ pub use crate::error::{HeddleError as StoreError, HeddleError, Result};
 #[derive(Clone)]
 pub enum AnyStore {
     Fs(FsStore),
+}
+
+impl std::ops::Deref for AnyStore {
+    type Target = FsStore;
+
+    fn deref(&self) -> &FsStore {
+        match self {
+            AnyStore::Fs(inner) => inner,
+        }
+    }
 }
 
 /// Forward an [`ObjectStore`] call to the active [`AnyStore`] variant.
@@ -281,6 +281,9 @@ impl ObjectStore for AnyStore {
     fn abort_snapshot_write_batch(&self) {
         any_store_dispatch!(self, abort_snapshot_write_batch())
     }
+}
+
+impl SidecarStore for AnyStore {
     fn has_redactions_for_blob(&self, blob: &ContentHash) -> Result<bool> {
         any_store_dispatch!(self, has_redactions_for_blob(blob))
     }
@@ -296,10 +299,17 @@ impl ObjectStore for AnyStore {
     fn has_state_visibility_for_state(&self, state: &StateId) -> Result<bool> {
         any_store_dispatch!(self, has_state_visibility_for_state(state))
     }
-    fn get_state_visibility_bytes_for_state(&self, state: &StateId) -> Result<Option<Vec<u8>>> {
+    fn get_state_visibility_bytes_for_state(
+        &self,
+        state: &StateId,
+    ) -> Result<Option<Vec<u8>>> {
         any_store_dispatch!(self, get_state_visibility_bytes_for_state(state))
     }
-    fn put_state_visibility_bytes_for_state(&self, state: &StateId, bytes: &[u8]) -> Result<()> {
+    fn put_state_visibility_bytes_for_state(
+        &self,
+        state: &StateId,
+        bytes: &[u8],
+    ) -> Result<()> {
         any_store_dispatch!(self, put_state_visibility_bytes_for_state(state, bytes))
     }
     fn list_states_with_visibility(&self) -> Result<Vec<StateId>> {
@@ -368,6 +378,101 @@ impl AnyStore {
                 artifact,
             ),
         }
+    }
+}
+
+/// Sidecar records that live outside the content-addressed object graph —
+/// signed redactions and state-visibility tiers. They never ride native packs
+/// and are transferred out-of-band, so they sit behind their own trait: a
+/// store can be a full [`ObjectStore`] without modelling either sidecar.
+pub trait SidecarStore: Send + Sync {
+    /// Whether the store holds any redaction record for the given blob.
+    ///
+    /// Redactions live in a sidecar (`<heddle_dir>/redactions/`) that is
+    /// structurally outside the content-addressed object graph so GC
+    /// can't reach them. The wire layer needs a cheap probe to decide
+    /// whether to ship a redaction for a blob in the closure, so this
+    /// is a separate method rather than a `get_*` + null check.
+    ///
+    /// Default impl returns `Ok(false)` — stores that don't model
+    /// redactions silently report "no redactions," which is the
+    /// correct behaviour for purely in-memory or remote-shim stores.
+    fn has_redactions_for_blob(&self, _blob: &ContentHash) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Return the raw rmp-encoded `RedactionsBlob` bytes for the given
+    /// blob, or `Ok(None)` if no redaction record exists. The bytes
+    /// are byte-identical to what was written by `put_redactions_bytes_for_blob`
+    /// (or by `Repository::put_redaction`); this is the wire-transfer
+    /// payload, not a re-serialized view.
+    ///
+    /// Default impl returns `Ok(None)`.
+    fn get_redactions_bytes_for_blob(&self, _blob: &ContentHash) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Persist the rmp-encoded `RedactionsBlob` bytes for the given
+    /// blob. Receiver-side replay calls this after signature
+    /// verification so the bytes land in the same sidecar that the
+    /// sender's `Repository::put_redaction` writes to.
+    ///
+    /// Default impl returns an "unsupported" error — stores that don't
+    /// model redactions (e.g. read-only shims) refuse rather than
+    /// silently dropping the record.
+    fn put_redactions_bytes_for_blob(&self, _blob: &ContentHash, _bytes: &[u8]) -> Result<()> {
+        Err(HeddleError::InvalidObject(
+            "this object store does not support persisting redactions".to_string(),
+        ))
+    }
+
+    /// List every blob that has at least one redaction record. Used by
+    /// the GC pin guard and by sync to enumerate redactions for the
+    /// state closure. Order is unspecified; callers that need stable
+    /// ordering should sort.
+    ///
+    /// Default impl returns `Ok(vec![])`.
+    fn list_blobs_with_redactions(&self) -> Result<Vec<ContentHash>> {
+        Ok(Vec::new())
+    }
+
+    /// Whether the store holds any state-visibility record for `state`.
+    ///
+    /// Like redactions, state-visibility records live in a sidecar outside
+    /// the content-addressed object graph and cannot ride native packs.
+    /// Sync uses this probe while enumerating a state closure so a non-public
+    /// state can advertise the sidecar that must travel out-of-pack.
+    ///
+    /// Default impl returns `Ok(false)` for stores that do not model this
+    /// sidecar.
+    fn has_state_visibility_for_state(&self, _state: &StateId) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Return the raw rmp-encoded `StateVisibilityBlob` bytes for `state`,
+    /// or `Ok(None)` if no sidecar exists. The bytes are the wire-transfer
+    /// payload for state visibility.
+    ///
+    /// Default impl returns `Ok(None)`.
+    fn get_state_visibility_bytes_for_state(&self, _state: &StateId) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Persist raw `StateVisibilityBlob` bytes for `state`.
+    ///
+    /// Default impl returns an "unsupported" error so stores that do not
+    /// model the sidecar refuse instead of dropping it.
+    fn put_state_visibility_bytes_for_state(&self, _state: &StateId, _bytes: &[u8]) -> Result<()> {
+        Err(HeddleError::InvalidObject(
+            "this object store does not support persisting state visibility".to_string(),
+        ))
+    }
+
+    /// List every state with at least one state-visibility record.
+    ///
+    /// Default impl returns `Ok(vec![])`.
+    fn list_states_with_visibility(&self) -> Result<Vec<StateId>> {
+        Ok(Vec::new())
     }
 }
 
@@ -783,94 +888,6 @@ pub trait ObjectStore: Send + Sync {
 
     fn abort_snapshot_write_batch(&self) {}
 
-    /// Whether the store holds any redaction record for the given blob.
-    ///
-    /// Redactions live in a sidecar (`<heddle_dir>/redactions/`) that is
-    /// structurally outside the content-addressed object graph so GC
-    /// can't reach them. The wire layer needs a cheap probe to decide
-    /// whether to ship a redaction for a blob in the closure, so this
-    /// is a separate method rather than a `get_*` + null check.
-    ///
-    /// Default impl returns `Ok(false)` — stores that don't model
-    /// redactions silently report "no redactions," which is the
-    /// correct behaviour for purely in-memory or remote-shim stores.
-    fn has_redactions_for_blob(&self, _blob: &ContentHash) -> Result<bool> {
-        Ok(false)
-    }
-
-    /// Return the raw rmp-encoded `RedactionsBlob` bytes for the given
-    /// blob, or `Ok(None)` if no redaction record exists. The bytes
-    /// are byte-identical to what was written by `put_redactions_bytes_for_blob`
-    /// (or by `Repository::put_redaction`); this is the wire-transfer
-    /// payload, not a re-serialized view.
-    ///
-    /// Default impl returns `Ok(None)`.
-    fn get_redactions_bytes_for_blob(&self, _blob: &ContentHash) -> Result<Option<Vec<u8>>> {
-        Ok(None)
-    }
-
-    /// Persist the rmp-encoded `RedactionsBlob` bytes for the given
-    /// blob. Receiver-side replay calls this after signature
-    /// verification so the bytes land in the same sidecar that the
-    /// sender's `Repository::put_redaction` writes to.
-    ///
-    /// Default impl returns an "unsupported" error — stores that don't
-    /// model redactions (e.g. read-only shims) refuse rather than
-    /// silently dropping the record.
-    fn put_redactions_bytes_for_blob(&self, _blob: &ContentHash, _bytes: &[u8]) -> Result<()> {
-        Err(HeddleError::InvalidObject(
-            "this object store does not support persisting redactions".to_string(),
-        ))
-    }
-
-    /// List every blob that has at least one redaction record. Used by
-    /// the GC pin guard and by sync to enumerate redactions for the
-    /// state closure. Order is unspecified; callers that need stable
-    /// ordering should sort.
-    ///
-    /// Default impl returns `Ok(vec![])`.
-    fn list_blobs_with_redactions(&self) -> Result<Vec<ContentHash>> {
-        Ok(Vec::new())
-    }
-
-    /// Whether the store holds any state-visibility record for `state`.
-    ///
-    /// Like redactions, state-visibility records live in a sidecar outside
-    /// the content-addressed object graph and cannot ride native packs.
-    /// Sync uses this probe while enumerating a state closure so a non-public
-    /// state can advertise the sidecar that must travel out-of-pack.
-    ///
-    /// Default impl returns `Ok(false)` for stores that do not model this
-    /// sidecar.
-    fn has_state_visibility_for_state(&self, _state: &StateId) -> Result<bool> {
-        Ok(false)
-    }
-
-    /// Return the raw rmp-encoded `StateVisibilityBlob` bytes for `state`,
-    /// or `Ok(None)` if no sidecar exists. The bytes are the wire-transfer
-    /// payload for state visibility.
-    ///
-    /// Default impl returns `Ok(None)`.
-    fn get_state_visibility_bytes_for_state(&self, _state: &StateId) -> Result<Option<Vec<u8>>> {
-        Ok(None)
-    }
-
-    /// Persist raw `StateVisibilityBlob` bytes for `state`.
-    ///
-    /// Default impl returns an "unsupported" error so stores that do not
-    /// model the sidecar refuse instead of dropping it.
-    fn put_state_visibility_bytes_for_state(&self, _state: &StateId, _bytes: &[u8]) -> Result<()> {
-        Err(HeddleError::InvalidObject(
-            "this object store does not support persisting state visibility".to_string(),
-        ))
-    }
-
-    /// List every state with at least one state-visibility record.
-    ///
-    /// Default impl returns `Ok(vec![])`.
-    fn list_states_with_visibility(&self) -> Result<Vec<StateId>> {
-        Ok(Vec::new())
-    }
 }
 
 #[cfg(test)]

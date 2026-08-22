@@ -3,22 +3,16 @@
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use heddle_core::{
-    AgentCaptureOptions, AgentCaptureThreadCheck, AgentReadyOptions, AgentReservationReport,
-    FanoutLaneAvailability, FanoutLanePreflightBlock, FanoutNodeSpec, FanoutPlan, FanoutPlanError,
-    FanoutPlanRequest, assemble_agent_reservation, assemble_agent_reservation_list,
-    assemble_fanout_plan_report, check_agent_capture_thread, check_fanout_start_preflight,
-    fanout_child_body, fanout_parent_delegated_by, fanout_start_attach_rule, plan_agent_capture,
-    plan_agent_ready, plan_fanout, select_fanout_parent_thread,
-};
 use objects::{
     object::ThreadName,
     store::{
-        ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStatus,
-        AgentTaskStore, AgentUsageSummary, ObjectStore, WriterLease, WriterLeaseAuthOutcome,
-        WriterLeaseDraft, WriterLeaseReserveOutcome, WriterLeaseStatus, WriterLeaseStore,
-        current_boot_id, validate_task_id,
+        ObjectStore, WriterLease, WriterLeaseAuthOutcome, WriterLeaseDraft,
+        WriterLeaseReserveOutcome, WriterLeaseStatus, WriterLeaseStore, current_boot_id,
     },
+};
+use repo::{
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStatus,
+    AgentTaskStore, AgentUsageSummary, validate_task_id,
 };
 use refs::{Head, RefExpectation};
 use repo::{
@@ -27,6 +21,14 @@ use repo::{
 };
 use schemars::JsonSchema;
 use serde::Serialize;
+use verbs::{
+    AgentCaptureOptions, AgentCaptureThreadCheck, AgentReadyOptions, AgentReservationReport,
+    FanoutLaneAvailability, FanoutLanePreflightBlock, FanoutNodeSpec, FanoutPlan, FanoutPlanError,
+    FanoutPlanRequest, assemble_agent_reservation, assemble_agent_reservation_list,
+    assemble_fanout_plan_report, check_agent_capture_thread, check_fanout_start_preflight,
+    fanout_child_body, fanout_parent_delegated_by, fanout_start_attach_rule, plan_agent_capture,
+    plan_agent_ready, plan_fanout, select_fanout_parent_thread,
+};
 
 use super::{
     advice::RecoveryAdvice,
@@ -400,13 +402,13 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
         &repo,
         std::env::var("HEDDLE_AGENT_PROVIDER")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
         std::env::var("HEDDLE_AGENT_MODEL")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
         std::env::var("HEDDLE_AGENT_POLICY")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
     )?;
     let presence_store = ActorPresenceStore::new(repo.heddle_dir());
     let task_assignment_id = task_record.as_ref().map(|task| task.task_id.clone());

@@ -4,16 +4,16 @@
 use std::fs;
 
 use anyhow::{Context, Result, anyhow};
-use heddle_core::{
-    ConflictRegionReport, ConflictResolutionReport, ResolveReport,
-    contains_line_start_conflict_markers, path_is_active_conflict, unresolved_conflict_paths,
-};
 use objects::{
     object::{Attribution, StructuredConflict},
     store::ObjectStore,
 };
 use oplog::{ConflictResolutionMode, OpLogBackend, OpRecord};
 use repo::{MergeState, Repository};
+use verbs::{
+    ConflictRegionReport, ConflictResolutionReport, ResolveReport,
+    contains_line_start_conflict_markers, path_is_active_conflict, unresolved_conflict_paths,
+};
 
 use super::{action_line::print_next_step, advice::RecoveryAdvice, snapshot::resolve_attribution};
 use crate::{
@@ -324,7 +324,7 @@ fn render_conflict_region(conflict: &ConflictRegionReport) {
     render_conflict_side("theirs", &conflict.theirs);
 }
 
-fn render_conflict_side(label: &str, side: &heddle_core::ConflictSideReport) {
+fn render_conflict_side(label: &str, side: &verbs::ConflictSideReport) {
     println!(
         "    {label}: state {} blob {} lines {}..{} hunk {}",
         side.source_state,

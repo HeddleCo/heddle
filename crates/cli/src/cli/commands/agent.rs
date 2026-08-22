@@ -22,6 +22,8 @@ pub async fn run(cli: &Cli, command: &AgentCommands) -> Result<()> {
         AgentCommands::Task(command) => super::agent_cmd::cmd_agent_task(cli, command.clone()),
         AgentCommands::Fanout(command) => super::agent_cmd::cmd_agent_fanout(cli, command.clone()),
         AgentCommands::Provenance(command) => run_provenance(cli, command).await,
+        AgentCommands::Presence(command) => run_presence(cli, command).await,
+        AgentCommands::Timeline(command) => super::timeline_cmd::cmd_timeline(cli, command.clone()),
     }
 }
 

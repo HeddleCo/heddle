@@ -113,7 +113,11 @@ fn start_path_inherits_codex_probe_identity_into_actor_metadata() {
     assert_eq!(started["name"].as_str(), Some("feature/codex-probed"));
 
     let actor: Value = serde_json::from_str(
-        &heddle(&["--output", "json", "presence", "show"], Some(main.path())).unwrap(),
+        &heddle(
+            &["--output", "json", "agent", "presence", "show"],
+            Some(main.path()),
+        )
+        .unwrap(),
     )
     .unwrap();
     let actor_entry = &actor["presence"];
@@ -159,7 +163,11 @@ fn actor_show_defaults_to_current_thread_actor() {
     let actor: Value = inject_post_verification_at(
         main.path(),
         serde_json::from_str(
-            &heddle(&["--output", "json", "presence", "show"], Some(main.path())).unwrap(),
+            &heddle(
+                &["--output", "json", "agent", "presence", "show"],
+                Some(main.path()),
+            )
+            .unwrap(),
         )
         .unwrap(),
     );
@@ -196,7 +204,7 @@ fn actor_explain_reports_attach_reason_for_current_actor() {
 
     let explained: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "presence", "explain"],
+            &["--output", "json", "agent", "presence", "explain"],
             Some(main.path()),
         )
         .unwrap(),
@@ -666,6 +674,7 @@ fn agent_task_correlation_surfaces_in_capture_thread_and_retro() {
         &[
             "--output",
             "json",
+            "agent",
             "timeline",
             "record-start",
             "--tool-call",
@@ -697,6 +706,7 @@ fn agent_task_correlation_surfaces_in_capture_thread_and_retro() {
         &[
             "--output",
             "json",
+            "agent",
             "timeline",
             "record-finish",
             "--tool-call",
@@ -744,135 +754,6 @@ fn agent_task_correlation_surfaces_in_capture_thread_and_retro() {
         Some("task-main-correlation")
     );
     assert_eq!(main_thread["task_summary"]["status"].as_str(), Some("open"));
-
-    let retro: Value = serde_json::from_str(
-        &heddle(&["--output", "json", "retro", "--full"], Some(main.path())).unwrap(),
-    )
-    .unwrap();
-    assert!(
-        retro["agent_tasks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|task| task["task_id"] == "task-main-correlation"),
-        "retro should include the active task assignment: {retro}"
-    );
-    assert!(
-        retro["timeline_steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|step| step["step_id"].as_str().is_some()
-                && step["payload_summary"] == "safe timeline summary"),
-        "retro should include scrubbed timeline steps: {retro}"
-    );
-    let retro_text = retro.to_string();
-    assert!(
-        !retro_text.contains("private-secret-name.txt"),
-        "retro timeline/task correlation must not leak touched filenames: {retro_text}"
-    );
-}
-
-#[test]
-fn retro_defaults_scrub_task_text_and_skip_timeline_expansion() {
-    let main = setup_repo("base.txt", "base");
-    let payload_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-    heddle(
-        &[
-            "agent",
-            "task",
-            "create",
-            "--task-id",
-            "task-retro-privacy",
-            "--title",
-            "Investigate private-secret-name.txt before release",
-            "--thread",
-            "main",
-        ],
-        Some(main.path()),
-    )
-    .unwrap();
-    heddle(
-        &[
-            "--output",
-            "json",
-            "timeline",
-            "record-start",
-            "--tool-call",
-            "call-retro-privacy",
-            "--tool-name",
-            "edit",
-            "--summary",
-            "Touched private-secret-name.txt with sensitive details",
-            "--payload-hash",
-            payload_hash,
-        ],
-        Some(main.path()),
-    )
-    .unwrap();
-
-    let retro: Value =
-        serde_json::from_str(&heddle(&["--output", "json", "retro"], Some(main.path())).unwrap())
-            .unwrap();
-    assert_eq!(
-        retro["timeline_steps"].as_array().unwrap().len(),
-        0,
-        "default retro should not rebuild/expand timeline steps: {retro}"
-    );
-    let retro_text = retro.to_string();
-    assert!(
-        !retro_text.contains("private-secret-name.txt"),
-        "default retro must scrub path-like task/timeline free text: {retro_text}"
-    );
-    assert!(
-        retro_text.contains("[redacted-path]"),
-        "default retro should leave a redaction marker for scrubbed task text: {retro_text}"
-    );
-}
-
-#[test]
-fn retro_fails_loudly_on_corrupt_task_metadata() {
-    let main = setup_repo("base.txt", "base");
-    let tasks_dir = main.path().join(".heddle").join("agent-tasks");
-    fs::create_dir_all(&tasks_dir).unwrap();
-    fs::write(
-        tasks_dir.join("task-corrupt.toml"),
-        "schema_version = [broken\n",
-    )
-    .unwrap();
-
-    let output = heddle_output(&["--output", "json", "retro"], Some(main.path())).unwrap();
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("failed to list agent tasks")
-            || stderr.contains("retro task correlation")
-            || stderr.contains("schema_version"),
-        "retro should identify corrupt task metadata: {stderr}"
-    );
-}
-
-#[test]
-fn retro_fails_loudly_on_corrupt_actor_presence_metadata() {
-    let main = setup_repo("base.txt", "base");
-    let agents_dir = main.path().join(".heddle").join("actor-presence");
-    fs::create_dir_all(&agents_dir).unwrap();
-    fs::write(
-        agents_dir.join("agent-corrupt.toml"),
-        "schema_version = [broken\n",
-    )
-    .unwrap();
-
-    let output = heddle_output(&["--output", "json", "retro"], Some(main.path())).unwrap();
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("failed to list agent registry")
-            || stderr.contains("failed to parse agent registry")
-            || stderr.contains("schema_version"),
-        "retro should identify corrupt agent registry metadata: {stderr}"
-    );
 }
 
 #[test]

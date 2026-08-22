@@ -2,7 +2,7 @@
 //! Typed risk signals computed against a state and persisted alongside it.
 //!
 //! Computation is pure (`(prior_state, new_state, repo_config) -> Vec<RiskSignal>`)
-//! and lives in `crates/state_review/`. This module owns only the shape: what
+//! and lives in `crates/state-review/`. This module owns only the shape: what
 //! a signal is, how it serializes on disk, and the validation rules.
 //!
 //! Fired signals are referenced by detached state attachments. Tick budgeting

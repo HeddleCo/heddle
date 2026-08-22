@@ -4,9 +4,10 @@
 use clap::{Args, Subcommand};
 
 use super::{
-    ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs,
-    ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs,
-    ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs,
+    CollapseArgs, ExpandArgs, ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs,
+    ThreadCapturesArgs, ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs,
+    ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs,
+    ThreadShowArgs,
 };
 
 #[derive(Subcommand, Clone)]
@@ -137,6 +138,12 @@ Examples:
 "
     )]
     Cleanup(ThreadCleanupArgs),
+
+    /// Collapse (squash) multiple states into one.
+    Collapse(CollapseArgs),
+
+    /// Expand a squashed land into the captures it collapsed.
+    Expand(ExpandArgs),
 
     /// Manage named state markers under the thread namespace.
     Marker {

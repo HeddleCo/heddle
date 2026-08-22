@@ -301,13 +301,13 @@ implementer cannot route around. Hosted consumers rely on the separately owned
   that's covered by `heddle doctor docs` /
   `heddle doctor schemas` plus the conventions in
   [`CONTRIBUTING.md`](../CONTRIBUTING.md).
-- `heddle-cli-shared`, `heddle-daemon`,
+- `heddle-config`,
   `heddle-devtools`, `heddle-ingest`, `heddle-mount`,
   `heddle-oplog`, `heddle-refs`, `heddle-repo`, `heddle-review`,
   `heddle-semantic`, `heddle-state-review`, `heddle-crypto`,
   `weft-client-shim` — internal-shaped today, may absorb churn from
-  ongoing work (hosted control plane, semantic diff evolution,
-  daemon redesigns). Promoting any of these to 1.0 is a follow-up
+  ongoing work (hosted control plane, semantic diff evolution).
+  Promoting any of these to 1.0 is a follow-up
   decision after the first 1.0.x release proves the stability
   contract is workable on the three above.
 

@@ -1,0 +1,24 @@
+[package]
+name = "heddle-state-review"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+objects = { path = "../objects", package = "heddle-objects", version = "0.14" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.14", features = ["tree-sitter-symbols"] }
+tracing.workspace = true
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.14" }
+serde.workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "state_review"
+
+[dev-dependencies]
+tempfile.workspace = true

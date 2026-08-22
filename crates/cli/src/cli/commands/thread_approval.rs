@@ -16,19 +16,20 @@
 
 use anyhow::{Context, Result, anyhow};
 use api::heddle::api::v1alpha1::{RepositoryRef, StateId as ApiStateId, repository_ref::Reference};
-use heddle_core::approval_plan::{
+use objects::object::ThreadName;
+use repo::Repository;
+use serde::Serialize;
+use verbs::approval_plan::{
     EligibilitySummary, approval_recorded_message, approval_revoked_message,
     approvals_empty_message, approvals_header, eligibility_allowed_message,
     eligibility_approvals_counted_message, eligibility_blocked_message, format_unix_secs_display,
     format_unix_secs_label, plan_eligibility_summary, short_state_id, state_id_bytes_to_string,
     timestamp_secs_u64, unmet_requirement_line,
 };
-use objects::object::ThreadName;
-use repo::Repository;
-use serde::Serialize;
-use weft_client_shim::CliContext as _;
+use heddle_cli_args::CliContext as _;
 
 use super::RecoveryAdvice;
+use hosted_client::client::{HostedAuthMode, HostedClient};
 use crate::{
     cli::{
         Cli,
@@ -37,7 +38,6 @@ use crate::{
         },
         should_output_json,
     },
-    client::{HostedAuthMode, HostedClient},
     config::UserConfig,
     remote::{RemoteTarget, resolve_remote_with_key},
 };
@@ -134,7 +134,7 @@ async fn open_hosted_session(
         HostedAuthMode::CredentialFallback,
     )
     .await?
-    .with_human_signature_callback(crate::client::cli_human_signature_callback());
+    .with_human_signature_callback(hosted_client::client::cli_human_signature_callback());
     Ok((client, repo_path))
 }
 

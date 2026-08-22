@@ -12,7 +12,7 @@ categories.workspace = true
 [dependencies]
 chrono.workspace = true
 fs2.workspace = true
-heddle-schema = { path = "../schema", version = "0.14" }
+heddle-object-model = { path = "../object-model", version = "0.14" }
 heddle-perf-contract = { path = "../perf-contract", version = "0.14" }
 objects = { path = "../objects", package = "heddle-objects", version = "0.14" }
 rand.workspace = true
@@ -21,17 +21,12 @@ serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.14", optional = true }
-sqlx = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
-uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 pollster = "0.4"
 tempfile.workspace = true
 
 [features]
-postgres = ["dep:sqlx", "dep:tokio", "dep:uuid", "dep:runtime-bridge"]
 
 [lib]
 path = "src/lib.rs"

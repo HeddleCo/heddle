@@ -24,7 +24,7 @@
 //! `heddle` binary — the wrapper is invisible for non-thread work.
 
 use anyhow::Result;
-use heddle_core::shell_plan::{ShellHookKind, shell_hook_snippet};
+use verbs::shell_plan::{ShellHookKind, shell_hook_snippet};
 
 use super::{cmd_completion, status::prompt_segment};
 use crate::cli::{Cli, ShellCommands, ShellKind};
@@ -46,7 +46,7 @@ pub fn cmd_shell(cli: &Cli, command: ShellCommands) -> Result<()> {
     }
 }
 
-/// Map CLI clap shell kind onto the pure hook kind in heddle-core.
+/// Map CLI clap shell kind onto the pure hook kind in heddle-verbs.
 fn shell_hook_kind(kind: ShellKind) -> ShellHookKind {
     match kind {
         ShellKind::Zsh => ShellHookKind::Zsh,

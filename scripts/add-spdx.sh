@@ -22,13 +22,13 @@ OSS_CRATES=(
   crates/wire
   crates/ingest
   crates/mount
-  crates/daemon
   crates/cli
-  crates/cli-shared
+  crates/config
   crates/hosted-client-shim
   crates/devtools
   crates/review
-  crates/state_review
+  crates/verbs
+  crates/state-review
 )
 
 changed=0

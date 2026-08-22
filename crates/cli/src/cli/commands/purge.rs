@@ -6,11 +6,11 @@
 //! the clone-pinned owner genesis. `--force` remains local intent confirmation.
 
 use anyhow::{Context, Result, anyhow};
-use heddle_core::{PurgeApplyPlan, plan_purge_apply, purge_apply_message, purge_force_command};
 use objects::object::StateId;
 use oplog::OpLogRecorder;
 use repo::Repository;
 use serde::Serialize;
+use verbs::{PurgeApplyPlan, plan_purge_apply, purge_apply_message, purge_force_command};
 
 use super::advice::RecoveryAdvice;
 use crate::{

@@ -45,6 +45,10 @@ mkdir -p "$benchmark_tmp" "$benchmark_target"
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
 
+# The heddle binary ships normally; the storage benchmark is inert
+# archived source (experiments/native-lineage-solid/, no Cargo.toml),
+# compiled here straight against the release artifacts the build above
+# just produced.
 TMPDIR="$benchmark_tmp" CARGO_TARGET_DIR="$benchmark_target" \
   cargo build \
     --manifest-path "$source_root/Cargo.toml" \
@@ -52,11 +56,27 @@ TMPDIR="$benchmark_tmp" CARGO_TARGET_DIR="$benchmark_target" \
     --release \
     -p heddle-cli \
     --bin heddle \
-    --example native_lineage_solid \
     --features semantic,zstd
 
 heddle_bin="$benchmark_target/release/heddle"
-benchmark_bin="$benchmark_target/release/examples/native_lineage_solid"
+benchmark_deps="$benchmark_target/release/deps"
+benchmark_bin="$benchmark_target/release/native_lineage_solid"
+
+rustc_externs=()
+for bench_crate in anyhow objects semantic serde serde_json; do
+  candidates=("$benchmark_deps"/lib"$bench_crate"-*.rlib)
+  if [[ ! -e "${candidates[0]}" ]]; then
+    echo "missing benchmark dependency artifact: $bench_crate" >&2
+    exit 69
+  fi
+  benchmark_rlib=$(ls -t "${candidates[@]}" | head -n1)
+  rustc_externs+=(--extern "$bench_crate=$benchmark_rlib")
+done
+
+rustc --edition 2024 -O "${rustc_externs[@]}" \
+  -L "dependency=$benchmark_deps" \
+  -o "$benchmark_bin" \
+  "$source_root/experiments/native-lineage-solid/native_lineage_solid.rs"
 
 corpus_details() {
   case "$1" in

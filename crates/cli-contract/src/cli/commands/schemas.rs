@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `heddle schemas <verb>` — runtime introspection for CLI JSON output shapes.
+//! JSON Schema registry for `--output json` verb payloads.
 //!
 //! This module owns the JSON Schema registry for `--output json`
 //! verbs. Schema *membership* comes from the active command catalog.
@@ -13,14 +13,13 @@
 
 use std::{collections::BTreeMap, sync::OnceLock};
 
-use anyhow::{Result, anyhow};
-use heddle_core::{DiffReport, FsckReport, QueryReport, ResolveReport, StatusReport, VerifyReport};
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
+use verbs::{DiffReport, FsckReport, QueryReport, ResolveReport, StatusReport, VerifyReport};
 
-use super::{RecoveryAdvice, command_catalog, init_output::InitOutput};
-use crate::cli::{Cli, INIT_VERB, should_output_json};
+use super::{command_catalog, init_output::InitOutput};
+use crate::cli::INIT_VERB;
 
 static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
 static DOCUMENTED_SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -101,21 +100,19 @@ schema_registry! {
     (&["remote add", "remote remove", "remote set-default"], RemoteMutationSchema),
     (&["pull"], PullSchema),
     (&["push"], PushSchema),
-    (&["expand"], ExpandSchema),
+    (&["thread expand"], ExpandSchema),
     (&["log"], LogSchema),
     (&["log --reflog"], LogReflogSchema),
     (&["log --timeline"], TimelineLogSchema),
-    (&["timeline status"], TimelineStatusSchema),
-    (&["timeline record-start", "timeline record-finish"], TimelineRecordingSchema),
-    (&["timeline fork", "timeline reset", "timeline recover"], TimelineActionSchema),
+    (&["agent timeline status"], TimelineStatusSchema),
+    (&["agent timeline record-start", "agent timeline record-finish"], TimelineRecordingSchema),
+    (&["agent timeline fork", "agent timeline reset", "agent timeline recover"], TimelineActionSchema),
     (&["show"], ShowSchema),
     (&["thread list"], ThreadListSchema),
-    (&["schemas"], SchemasListSchema),
     (&["review show"], ReviewShowSchema),
     (&["review sign"], ReviewSignSchema),
     (&["review next"], ReviewNextSchema),
     (&["review health"], ReviewHealthSchema),
-    (&["retro"], RetroSchema),
     (&["discuss open", "discuss append", "discuss resolve", "discuss reopen"], DiscussionWriteSchema),
     (&["discuss show"], DiscussionShowSchema),
     (&["discuss list"], DiscussionListSchema),
@@ -127,10 +124,10 @@ schema_registry! {
     (&["doctor"], DoctorSchema),
     (&["doctor docs"], DoctorDocsSchema),
     (&["doctor schemas"], DoctorSchemasSchema),
-    (&["presence show"], AgentPresenceSingleSchema),
-    (&["presence list"], AgentPresenceListSchema),
-    (&["presence complete"], AgentPresenceCompleteSchema),
-    (&["presence explain"], AgentPresenceExplainSchema),
+    (&["agent presence show"], AgentPresenceSingleSchema),
+    (&["agent presence list"], AgentPresenceListSchema),
+    (&["agent presence complete"], AgentPresenceCompleteSchema),
+    (&["agent presence explain"], AgentPresenceExplainSchema),
     (&["agent reserve", "agent heartbeat", "agent release"], AgentReservationEnvelopeSchema),
     (&["agent capture"], CaptureSchema),
     (&["agent ready"], ReadySchema),
@@ -149,7 +146,6 @@ schema_registry! {
     (&["agent provenance list"], AgentProvenanceListSchema),
     (&["watch"], WatchLineSchema),
     (&["integration list", "integration doctor"], IntegrationStatusListSchema),
-    (&["try"], TrySchema),
     (&["maintenance inspect"], MaintenanceInspectSchema),
     (&["maintenance refresh"], MaintenanceRefreshSchema),
     (&["maintenance repack"], MaintenanceRepackSchema),
@@ -473,148 +469,6 @@ fn add_json_discriminator_to_schema_object(schema: &mut Value, field: &str, valu
 fn schema_verb_supports_op_id(verb: &str) -> bool {
     command_catalog::command_runtime_contract_for_schema_verb(verb)
         .is_some_and(|contract| contract.supports_op_id)
-}
-
-/// Public entrypoint for `heddle schemas [<verb>]`.
-///
-/// `verb_parts` are the raw trailing tokens after `schemas`.
-/// Lookup is a flat string match after filtering global flags that
-/// clap cannot see because the schema command intentionally accepts
-/// literal command flags like `--preview` and `--reflog`.
-pub fn cmd_schemas(cli: &Cli, verb_parts: &[String]) -> Result<()> {
-    let verb_parts = normalize_schema_verb_parts(verb_parts)?;
-    if verb_parts.is_empty() {
-        let out = serde_json::json!({
-            "output_kind": "schemas",
-            "status": "completed",
-            "schema_verbs": schema_verbs(),
-            "documented_schema_verbs": documented_schema_verbs(),
-        });
-        return render_schema_json(&out);
-    }
-
-    let verb = verb_parts.join(" ");
-    let schema = schema_for_verb(&verb)
-        .ok_or_else(|| anyhow!(schema_not_registered_advice(&verb, schema_verbs())))?;
-
-    // `heddle schemas` always emits machine-readable JSON.
-    let _json = should_output_json(cli, None);
-    render_schema_json(&schema)
-}
-
-fn render_schema_json(value: &serde_json::Value) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(value)?);
-    Ok(())
-}
-
-fn schema_not_registered_advice(verb: &str, known_verbs: &[&str]) -> RecoveryAdvice {
-    let matches = suggested_schema_verbs(verb, known_verbs);
-    let primary_command = matches
-        .first()
-        .map(|matched| format!("heddle schemas {matched}"))
-        .unwrap_or_else(|| "heddle schemas".to_string());
-    let hint = if matches.is_empty() {
-        "Run `heddle schemas` to list schema-backed verbs, or inspect the command catalog with `heddle help --output json`.".to_string()
-    } else {
-        format!(
-            "`{verb}` is not exact; available schema verb{}: {}.",
-            if matches.len() == 1 { "" } else { "s" },
-            matches
-                .iter()
-                .map(|matched| format!("`{matched}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    let mut recovery_commands = Vec::new();
-    push_unique_command(&mut recovery_commands, primary_command.clone());
-    push_unique_command(&mut recovery_commands, "heddle schemas".to_string());
-    push_unique_command(
-        &mut recovery_commands,
-        "heddle help --output json".to_string(),
-    );
-    for matched in matches.iter().skip(1) {
-        push_unique_command(&mut recovery_commands, format!("heddle schemas {matched}"));
-    }
-
-    RecoveryAdvice::safety_refusal(
-        "schema_not_registered",
-        format!("No JSON schema is registered for `{verb}`"),
-        hint,
-        format!("`{verb}` is not in the runtime schema registry"),
-        "schema lookup does not change repository state; retrying the same unknown verb will fail until a schema is registered",
-        "no repository objects, refs, metadata, or worktree files were changed",
-        primary_command,
-        recovery_commands,
-    )
-}
-
-fn suggested_schema_verbs<'a>(verb: &str, known_verbs: &'a [&'a str]) -> Vec<&'a str> {
-    let exactish = matching_schema_verbs(verb, known_verbs);
-    if !exactish.is_empty() {
-        return exactish;
-    }
-
-    let normalized = verb.trim();
-    if normalized.is_empty() {
-        return Vec::new();
-    }
-    let bare = command_catalog::schema_verb_without_flags(normalized);
-    if bare.is_empty() {
-        return Vec::new();
-    }
-
-    known_verbs
-        .iter()
-        .copied()
-        .filter(|known| {
-            known.starts_with(normalized)
-                || command_catalog::schema_verb_without_flags(known).starts_with(&bare)
-        })
-        .take(5)
-        .collect()
-}
-
-fn push_unique_command(commands: &mut Vec<String>, command: String) {
-    if !commands.iter().any(|existing| existing == &command) {
-        commands.push(command);
-    }
-}
-
-fn matching_schema_verbs<'a>(verb: &str, known_verbs: &'a [&'a str]) -> Vec<&'a str> {
-    let normalized = verb.trim();
-    if normalized.is_empty() {
-        return Vec::new();
-    }
-    let bare = command_catalog::schema_verb_without_flags(normalized);
-    let prefix = format!("{bare} ");
-    known_verbs
-        .iter()
-        .copied()
-        .filter(|known| {
-            *known != normalized
-                && (*known == bare
-                    || known.starts_with(&prefix)
-                    || command_catalog::schema_verb_without_flags(known) == bare)
-        })
-        .collect()
-}
-
-fn normalize_schema_verb_parts(parts: &[String]) -> Result<Vec<String>> {
-    let mut normalized = Vec::new();
-    let mut iter = parts.iter();
-    while let Some(part) = iter.next() {
-        match part.as_str() {
-            "--no-color" | "-q" | "--quiet" | "-v" | "--verbose" => {}
-            "--output" | "--repo" => {
-                iter.next()
-                    .ok_or_else(|| anyhow!("missing value for `{part}`"))?;
-            }
-            _ if part.starts_with("--output=") || part.starts_with("--repo=") => {}
-            _ => normalized.push(part.clone()),
-        }
-    }
-    Ok(normalized)
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,110 +884,6 @@ pub enum InspectSchema {
     State(ShowSchema),
     #[allow(dead_code)]
     Thread(ThreadShowSchema),
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroSchema {
-    pub since: Option<String>,
-    pub until: Option<String>,
-    pub duration_secs: Option<i64>,
-    pub states_captured: Vec<RetroStateEntrySchema>,
-    pub agents_active: Vec<RetroAgentEntrySchema>,
-    pub agent_tasks: Vec<RetroAgentTaskEntrySchema>,
-    pub timeline_steps: Vec<RetroTimelineStepEntrySchema>,
-    pub markers_created: Vec<RetroMarkerEntrySchema>,
-    pub context_annotations: Vec<RetroContextAnnotationEntrySchema>,
-    pub verify_signals: Vec<RetroVerifySignalSchema>,
-    pub merges: Vec<RetroOperationEntrySchema>,
-    pub undos: Vec<RetroOperationEntrySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroStateEntrySchema {
-    pub state_id: String,
-    pub intent: Option<String>,
-    pub confidence: Option<f32>,
-    pub agent: Option<String>,
-    pub principal: String,
-    pub timestamp: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroAgentEntrySchema {
-    pub session_id: String,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub status: String,
-    pub started_at: String,
-    pub completed_at: Option<String>,
-    pub tokens: RetroAgentTokensSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroAgentTokensSchema {
-    pub input: Option<u64>,
-    pub output: Option<u64>,
-    pub reasoning: Option<u64>,
-    pub tool_calls: Option<u32>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroAgentTaskEntrySchema {
-    pub task_id: String,
-    pub title: String,
-    pub status: String,
-    pub target_thread: String,
-    pub updated_at: String,
-    pub completed_at: Option<String>,
-    pub coordination_discussion_id: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroTimelineStepEntrySchema {
-    pub thread: String,
-    pub step_id: String,
-    pub branch_id: String,
-    pub parent_step_id: Option<String>,
-    pub tool_name: Option<String>,
-    pub tool_status: Option<String>,
-    pub changed: Option<bool>,
-    pub payload_summary: Option<String>,
-    pub payload_hash: Option<String>,
-    pub before_state: Option<String>,
-    pub after_state: Option<String>,
-    pub capture_state: Option<String>,
-    pub started_at_ms: Option<i64>,
-    pub finished_at_ms: Option<i64>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroMarkerEntrySchema {
-    pub name: String,
-    pub state: String,
-    pub timestamp: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroContextAnnotationEntrySchema {
-    pub path: String,
-    pub scope: String,
-    pub kind: String,
-    pub content_excerpt: String,
-    pub attribution: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroVerifySignalSchema {
-    pub kind: String,
-    pub label: String,
-    pub timestamp: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroOperationEntrySchema {
-    pub description: String,
-    pub timestamp: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2806,14 +2556,6 @@ pub struct ReviewHealthEntrySchema {
 // ---- command/schema introspection ----------------------------------------
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct SchemasListSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub schema_verbs: Vec<String>,
-    pub documented_schema_verbs: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct DoctorDocsSchema {
     pub output_kind: String,
     pub status: String,
@@ -2925,26 +2667,6 @@ pub struct WatchLineSchema {
     pub confidence: Option<f32>,
     pub actor: Option<ActorInfoSchema>,
     pub id: u64,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TrySchema {
-    pub status: String,
-    pub action: String,
-    pub message: String,
-    pub thread: String,
-    pub thread_dropped: bool,
-    pub cleanup_error: Option<String>,
-    pub exit_code: Option<i32>,
-    pub duration_ms: u128,
-    pub captured_state: Option<String>,
-    pub merge_state: Option<String>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub recovery_commands: Vec<String>,
-    pub recovery_action_templates: Vec<ActionTemplateSchema>,
 }
 
 // ---- git projection ops -----------------------------------------------------------
@@ -3329,7 +3051,7 @@ mod tests {
     ///
     /// heddle#272 r6 (Codex P2): `schema_for_verb` injects the
     /// discriminator from the catalog after deriving the struct schema,
-    /// so `heddle schemas <verb>` already surfaces `output_kind`. That
+    /// so every emitted payload already surfaces `output_kind`. That
     /// injection masks the fact that the Rust mirror struct (e.g.
     /// `DiffSchema`) never declares the field. The mirror
     /// is the source of truth a reader greps; it must be honest about the
@@ -3369,7 +3091,7 @@ mod tests {
             missing.is_empty(),
             "Documented swept schema structs missing the `output_kind` property. Add \
              `pub output_kind: String` to each mirror struct so it matches the runtime \
-             emission (the catalog injection masks this at the `heddle schemas` layer, \
+             emission (the catalog injection masks this at the emission layer, \
              but the struct must be honest):\n  - {}",
             missing.join("\n  - ")
         );
@@ -3426,7 +3148,7 @@ mod tests {
 
         assert_eq!(
             catalog_verbs, listed_verbs,
-            "`heddle help --output json` command schema verbs must match `heddle schemas` except for the cross-cutting JSON error envelope"
+            "`heddle help --output json` command schema verbs must match the registered schema registry except for the cross-cutting JSON error envelope"
         );
     }
 
@@ -3906,7 +3628,6 @@ mod tests {
         for verb in [
             "maintenance fsck",
             "resolve",
-            "retro",
             "discuss open",
             "discuss append",
             "discuss resolve",

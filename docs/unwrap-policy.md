@@ -20,9 +20,8 @@ Counts below are unique primary clippy diagnostics from `cargo clippy --workspac
 |---|---:|---:|---:|
 | heddle-cli | 1099 | 336 | 58 |
 | heddle-cli-macro-poc | 0 | 2 | 0 |
-| heddle-cli-shared | 0 | 21 | 2 |
+| heddle-config | 0 | 0 | 0 |
 | heddle-crypto | 0 | 78 | 5 |
-| heddle-daemon | 183 | 95 | 8 |
 | heddle-devtools | 32 | 12 | 0 |
 | heddle-format | 25 | 5 | 1 |
 | heddle-ingest | 478 | 79 | 3 |
@@ -34,8 +33,8 @@ Counts below are unique primary clippy diagnostics from `cargo clippy --workspac
 | heddle-repo | 1993 | 430 | 22 |
 | heddle-review | 57 | 15 | 1 |
 | heddle-runtime-bridge | 0 | 18 | 1 |
-| heddle-schema | 37 | 0 | 2 |
 | heddle-semantic | 189 | 58 | 89 |
 | heddle-state-review | 2 | 0 | 0 |
+| heddle-verbs | 2 | 9 | 0 |
 | heddle-wire | 96 | 2 | 0 |
 | weft-client-shim | 0 | 0 | 0 |

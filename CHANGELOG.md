@@ -668,8 +668,8 @@ public API was removed or changed in a breaking way.
 
 ### Security
 
-- `heddle try` now sanitizes the spawned command's environment —
-  `env_clear()` plus an allowlist, matching `heddle run` — so `GIT_DIR`,
+- `try` (verb since culled from the surface) sanitized the spawned command's environment —
+  `env_clear()` plus an allowlist, matching `run` — so `GIT_DIR`,
   `GIT_WORK_TREE`, and other inherited parent-process secrets no longer leak
   into commands run via `try`.
 
@@ -754,13 +754,13 @@ release ships signed macOS + Homebrew distribution.
 
 ### Added
 
-- `heddle oplog recover` / operator recover: reconstructs a truncated oplog from the EOF footer plus a salvage sidecar, so a truncated log no longer bricks a repo (#682, #736, #618)
+- `heddle maintenance oplog recover` / operator recover: reconstructs a truncated oplog from the EOF footer plus a salvage sidecar, so a truncated log no longer bricks a repo (#682, #736, #618)
 - Packed oplog v3: single-file tail format with an EOF footer carrying entry-offset, batch, and sorted `transaction_id` indexes (#429)
 - Lossless git round-trip: git-fidelity fields (committer, tz offsets, verbatim message, ordered extra headers, GPG sig) captured on import with a format bump (#569); a byte-exact `reconstruct_commit_bytes` serializer + conformance harness (#579); export reconstructs commit objects from state (#591); and a `bridge backfill-fidelity` migration for pre-bump repos (#587)
 - Automatic ed25519 state signing on capture/commit/merge, wiring the device key into every recorded state (#486)
 - Function-level semantic merge driver: AST-aware three-way merge plus a native hunk-level (diff3-style) text merger; Rust `use` re-exports merge as path-keyed items (#114, #84, #477)
 - Cross-thread undo, undoable rebase (transaction grouping), `FastForward`/`FastForwardV2` merge undo, and a pre-undo recovery marker so undo never silently loses worktree edits (#112, #218, #109, #118, #314)
-- `heddle expand <oid|state|thread>` reconstructs the constituent captures of a collapsed squashed land (#721)
+- `heddle thread expand <oid|state|thread>` reconstructs the constituent captures of a collapsed squashed land (#721)
 - Partial clone: `clone --depth` and `clone --filter blob:none` (synonym for `--lazy`) wired through the Git-overlay clone, plus lazy on-read blob hydration via a `BlobHydrator` trait (#52, #51, #53)
 - Dynamic shell completion (`__complete`) and a `heddle shell prompt` segment (#731)
 - Structured `blame --output json` with per-line principal + agent attribution (#322)
@@ -865,10 +865,11 @@ addition.
     an empty trust list rejects every signed redaction.
   - New `[redact] trusted_keys` repo config section. Operators manage
     via the new CLI subcommands:
-    - `heddle redact trust add --from-pem <path>` (or
+    - `redact trust add --from-pem <path>` (verb group since folded
+      into `auth trust`; subcommands culled)
       `--algorithm <a> --public-key <hex>`)
-    - `heddle redact trust list`
-    - `heddle redact trust remove <hex>`
+    - `redact trust list`
+    - `redact trust remove <hex>`
   - `LocalSync` ferries redaction sidecars during local→local copies.
     Propagation runs unconditionally on every state walk, so the
     redact-after-peer-fetched flow re-syncs correctly even when no new
@@ -911,7 +912,7 @@ addition.
   redaction, sign with their own key, and pass. The new trust gate
   ties acceptance to an operator-configured `[redact] trusted_keys`
   list. Fail-closed default rejects every signed redaction until the
-  operator explicitly trusts a key via `heddle redact trust add`.
+  operator explicitly trusts a key via `auth trust replace`.
 
 ## 0.2.2 - 2026-05-14
 

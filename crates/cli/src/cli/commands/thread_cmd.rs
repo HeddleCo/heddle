@@ -8,25 +8,26 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use heddle_core::{
-    CleanWorktreeGuard, ThreadDropDisposition, ThreadDropOptions, ThreadPromoteOptions,
-    ThreadRefreshOptions, ThreadRefreshPlan, format_refresh_conflict_markers,
-    plan_cleanup_thread_drop, plan_thread_drop, plan_thread_promote, plan_thread_refresh,
-    promote_confirm_in_place_removal, should_materialize_refresh_conflict_markers,
-};
 use objects::{
     fs_ops::remove_path_recursively,
     object::{Blob, StateId, ThreadName},
-    store::{ActorPresenceStore, ObjectStore, WriterLeaseStatus, WriterLeaseStore},
+    store::{ObjectStore, WriterLeaseStatus, WriterLeaseStore},
 };
 use oplog::{OpLogRecorder, OpRecord, ThreadUpdateSnapshots};
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
+    ActorPresenceStore,
     Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,
     describe_thread_advice,
 };
 use serde::Serialize;
 use tokio::time::{Duration, sleep};
+use verbs::{
+    CleanWorktreeGuard, ThreadDropDisposition, ThreadDropOptions, ThreadPromoteOptions,
+    ThreadRefreshOptions, ThreadRefreshPlan, format_refresh_conflict_markers,
+    plan_cleanup_thread_drop, plan_thread_drop, plan_thread_promote, plan_thread_refresh,
+    promote_confirm_in_place_removal, should_materialize_refresh_conflict_markers,
+};
 
 use super::{
     action_line::print_next,
@@ -503,6 +504,13 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
         | ThreadCommands::CheckMerge(_) => Err(anyhow!(
             "rebuild cli with --features client to use thread approvals"
         )),
+        ThreadCommands::Collapse(args) => super::collapse::cmd_collapse(
+            cli,
+            args.states.clone(),
+            args.into.clone(),
+            args.confidence,
+        ),
+        ThreadCommands::Expand(args) => super::expand::cmd_expand(cli, args.reference.clone()),
     }
 }
 
@@ -780,7 +788,7 @@ fn persist_refresh_conflict_state(
         let base_tree = tree_for_state(thread_repo, &base_id)?;
         let our_tree = tree_for_state(thread_repo, &ours)?;
         let their_tree = tree_for_state(thread_repo, &theirs)?;
-        let payload = heddle_core::merge::build_conflict_payload(
+        let payload = verbs::merge::build_conflict_payload(
             thread_repo,
             (base_id, &base_tree),
             (ours, &our_tree),
@@ -1408,8 +1416,8 @@ pub(crate) enum DropOutcome {
 }
 
 /// Tear down an active thread without printing. Used by `cmd_thread_drop`
-/// (which then prints) and by `heddle try` (which embeds the drop
-/// inside its own output). The tear-down sequence is identical to the
+/// (which then prints) and by the silent drop path shared with thread
+/// teardown helpers. The tear-down sequence is identical to the
 /// public verb: unmount → remove checkout → mark Abandoned → strip
 /// agent registry entries → optionally delete the ref.
 pub(crate) fn drop_thread_silent(

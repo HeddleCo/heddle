@@ -50,7 +50,7 @@ jobs:
       # OSS resolves to the reservation stub and won't compile. Cover the OSS
       # feature set instead.
       - name: Generate coverage report
-        run: cargo llvm-cov --locked --workspace --features git-overlay,native,semantic,zstd --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked --workspace --features git-overlay,native,semantic,zstd,heddle-cli/ci --lcov --output-path lcov.info
 
       - name: Generate coverage summary
         run: cargo llvm-cov report --summary-only | tee coverage-summary.txt
@@ -70,9 +70,8 @@ jobs:
               --gate semantic=80 \
               --gate oplog=78 \
               --gate wire=80 \
-              --gate state_review=80 \
+              --gate state-review=80 \
               --gate crypto=80 \
-              --gate daemon=80 \
               --gate ingest=80
 
       - name: Upload coverage to Codecov

@@ -2,8 +2,8 @@
 //! Fsck command - verify repository integrity.
 
 use anyhow::{Result, anyhow};
-use heddle_core::{FsckOptions, FsckRepair, fsck};
 use repo::RepositorySourceAuthority;
+use verbs::{FsckOptions, FsckRepair, fsck};
 
 use super::advice::RecoveryAdvice;
 use crate::cli::{Cli, execution_context_from_cli, render, should_output_json};
@@ -32,7 +32,7 @@ pub fn cmd_fsck_repair_git(
 
 fn run_fsck(
     cli: &Cli,
-    ctx: &heddle_core::ExecutionContext,
+    ctx: &verbs::ExecutionContext,
     full: bool,
     thorough: bool,
     provenance: bool,
@@ -282,7 +282,7 @@ fn git_repair_authority_mismatch_advice(
         RepositorySourceAuthority::Native => {
             let import = ref_name.map_or_else(
                 || "heddle bridge git import".to_string(),
-                heddle_core::status::next_action::canonical_git_import_ref_command,
+                verbs::status::next_action::canonical_git_import_ref_command,
             );
             RecoveryAdvice::safety_refusal(
                 "git_repair_requires_import",
@@ -301,7 +301,7 @@ fn git_repair_authority_mismatch_advice(
 }
 
 fn git_repair_missing_heddle_thread_advice(ref_name: &str) -> RecoveryAdvice {
-    use heddle_core::status::next_action::canonical_git_import_ref_command;
+    use verbs::status::next_action::canonical_git_import_ref_command;
 
     let import_command = canonical_git_import_ref_command(ref_name);
     RecoveryAdvice::safety_refusal(

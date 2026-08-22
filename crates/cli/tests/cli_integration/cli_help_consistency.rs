@@ -11,7 +11,8 @@ use super::*;
 /// instead of spawning the binary, on the premise that the two produce
 /// byte-identical stdout. This test pins that premise: for a representative
 /// spread of help-shaped argv — per-verb `--help`, nested-path `--help`, the
-/// `capture --help-agent` reveal, the curated bare/advanced surfaces, and a
+/// `capture --help-agent` reveal, the curated bare surface and topic pages,
+/// and a
 /// topic page — the in-process render must equal the spawned binary's stdout
 /// exactly. If a future change makes a `print_*` helper diverge from its
 /// `render_*` core, this fails before the substring assertions silently drift.
@@ -26,7 +27,7 @@ fn help_render_matches_spawned_binary() {
         vec!["bridge", "git", "import", "--help"],
         // Curated topic page + `heddle help <verb>` clap fall-through.
         vec!["help"],
-        vec!["help", "advanced"],
+        vec!["help", "config"],
         vec!["help", "git-concepts"],
         vec!["help", "threads"],
         vec!["help", "git-overlay"],

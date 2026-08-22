@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use ci_config::Check;
 use crypto::Conclusion;
 pub use entry::{
-    evidence_digest, ResultCacheEntry, ResultCacheError, SpotCheckDivergence,
-    RESULT_CACHE_SCHEMA_VERSION,
+    RESULT_CACHE_SCHEMA_VERSION, ResultCacheEntry, ResultCacheError, SpotCheckDivergence,
+    evidence_digest,
 };
 pub use key::CacheKey;
 pub use spot_check::SpotCheck;

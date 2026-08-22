@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
-use heddle_core::QueryReport;
+use verbs::QueryReport;
 
 use crate::cli::render::write_stdout;
 
