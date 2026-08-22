@@ -1,10 +1,7 @@
 use chrono::Utc;
-use objects::{
-    object::ThreadName,
-    store::{ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary},
-};
+use objects::object::ThreadName;
 use refs::Head;
-use repo::Repository;
+use repo::{ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, Repository};
 use tempfile::TempDir;
 
 use super::{heddle, heddle_output_with_stdin};

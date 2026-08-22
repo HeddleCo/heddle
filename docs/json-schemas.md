@@ -1366,11 +1366,9 @@ The foreground daemon emits one JSON value when it exits cleanly.
 
 ```json
 {
-  "output_kind": "agent_stop",
-  "stopped": false,
-  "swept_stale": false,
-  "pid": null,
-  "reason": "no pidfile"
+  "output_kind": "daemon_stop",
+  "action": "daemon stop",
+  "status": "not_running"
 }
 ```
 

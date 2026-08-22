@@ -331,9 +331,7 @@ fn ready_via_repo_flag_quotes_shell_metacharacters() {
 #[test]
 fn presence_show_multi_match_next_is_not_help_catalog() {
     use chrono::Utc;
-    use objects::store::{
-        ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
-    };
+    use repo::{ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary};
 
     let repo = setup_native_repo();
     let opened = Repository::open(repo.path()).unwrap();
