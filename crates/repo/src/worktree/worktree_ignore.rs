@@ -167,10 +167,7 @@ fn paths_equivalent(a: &Path, b: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        path::{Path, PathBuf},
-        sync::{OnceLock, RwLock},
-    };
+    use std::path::{Path, PathBuf};
 
     use objects::worktree::should_ignore;
 
