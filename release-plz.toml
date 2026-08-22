@@ -57,9 +57,6 @@ release = true
 name = "heddle-crypto"
 release = true
 
-[[package]]
-name = "heddle-runtime-bridge"
-release = true
 
 [[package]]
 name = "heddle-merge"

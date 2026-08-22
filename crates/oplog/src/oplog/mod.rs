@@ -8,9 +8,6 @@ mod oplog_types;
 mod packed_oplog;
 mod segmented_oplog;
 
-#[cfg(feature = "postgres")]
-mod pg_oplog;
-
 #[cfg(test)]
 mod oplog_tests;
 
@@ -23,9 +20,6 @@ pub use oplog_types::{
     is_transaction_commit, is_transaction_commit_for, isolation_keys_for_record,
 };
 pub use packed_oplog::OplogRecoveryReport;
-#[cfg(feature = "postgres")]
-pub use pg_oplog::PgOpLogBackend;
-
 #[cfg(test)]
 pub(crate) fn fresh_state_id() -> objects::object::StateId {
     use std::sync::atomic::{AtomicU64, Ordering};
