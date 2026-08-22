@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pure oplog recover planning and message assembly (no FS / oplog I/O).
 //!
-//! Owns status classification and human field strings for `heddle oplog recover`
+//! Owns status classification and human field strings for `heddle maintenance oplog recover`
 //! that can be decided from recovery report facts alone. Actual salvage,
 //! quarantine paths, and store access stay CLI/repo-owned.
 

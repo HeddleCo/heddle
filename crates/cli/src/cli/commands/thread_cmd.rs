@@ -15,7 +15,8 @@ use objects::{
 };
 use oplog::{OpLogRecorder, OpRecord, ThreadUpdateSnapshots};
 use refs::{Head, RefExpectation, RefUpdate};
-use repo::{ActorPresenceStore, 
+use repo::{
+    ActorPresenceStore,
     Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,
     describe_thread_advice,
 };
@@ -503,6 +504,13 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
         | ThreadCommands::CheckMerge(_) => Err(anyhow!(
             "rebuild cli with --features client to use thread approvals"
         )),
+        ThreadCommands::Collapse(args) => super::collapse::cmd_collapse(
+            cli,
+            args.states.clone(),
+            args.into.clone(),
+            args.confidence,
+        ),
+        ThreadCommands::Expand(args) => super::expand::cmd_expand(cli, args.reference.clone()),
     }
 }
 
@@ -1408,8 +1416,8 @@ pub(crate) enum DropOutcome {
 }
 
 /// Tear down an active thread without printing. Used by `cmd_thread_drop`
-/// (which then prints) and by `heddle try` (which embeds the drop
-/// inside its own output). The tear-down sequence is identical to the
+/// (which then prints) and by the silent drop path shared with thread
+/// teardown helpers. The tear-down sequence is identical to the
 /// public verb: unmount → remove checkout → mark Abandoned → strip
 /// agent registry entries → optionally delete the ref.
 pub(crate) fn drop_thread_silent(

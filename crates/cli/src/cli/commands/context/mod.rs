@@ -15,7 +15,7 @@ use objects::{
     },
     store::ObjectStore,
 };
-use repo::{Repository, ResolvePolicy, StateAttachmentKind};
+use repo::{Repository, ResolvePolicy};
 use serde::Serialize;
 
 use super::{
@@ -392,6 +392,8 @@ fn extract_scope_bytes(source: &[u8], range: Option<(u32, u32)>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use objects::object::Tree;
+
+    use repo::StateAttachmentKind;
 
     use super::*;
 

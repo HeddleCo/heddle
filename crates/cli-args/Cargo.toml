@@ -19,6 +19,7 @@ repo = { path = "../repo", package = "heddle-repo", version = "0.13", default-fe
 
 [features]
 default = []
+ci = []
 client = []
 git-overlay = []
 ingest = []

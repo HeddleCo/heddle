@@ -4,7 +4,7 @@ use super::*;
 const PAYLOAD_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn timeline_json(args: &[&str], cwd: &std::path::Path) -> Value {
-    let mut argv = vec!["--output", "json", "timeline"];
+    let mut argv = vec!["--output", "json", "agent", "timeline"];
     argv.extend(args.iter().copied());
     let output = heddle_output(&argv, Some(cwd)).expect("invoke timeline command");
     let stdout = String::from_utf8_lossy(&output.stdout);

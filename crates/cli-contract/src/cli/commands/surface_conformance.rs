@@ -34,7 +34,6 @@ pub const CANONICAL_ROOT_COMMANDS: &[&str] = &[
     "land",
     "log",
     "maintenance",
-    "presence",
     "pull",
     "push",
     "query",
@@ -43,7 +42,6 @@ pub const CANONICAL_ROOT_COMMANDS: &[&str] = &[
     "remote",
     "resolve",
     "review",
-    "run",
     "shell",
     "show",
     "start",
@@ -51,7 +49,6 @@ pub const CANONICAL_ROOT_COMMANDS: &[&str] = &[
     "switch",
     "sync",
     "thread",
-    "try",
     "undo",
     "verify",
     "watch",
@@ -61,33 +58,25 @@ pub const CANONICAL_ROOT_COMMANDS: &[&str] = &[
 ///
 /// This list is intentionally closed. Adding a new root requires updating the
 /// design and this list in the same review; otherwise the source and
-/// `doctor docs` conformance gates fail. `schemas` is retained as the audited
-/// pre-existing Phase 2 regression and must not be mistaken for a canonical
-/// root when that follow-up is handled. `completions` is the public script
+/// `doctor docs` conformance gates fail. `completions` is the public script
 /// verb from heddle#1439; `shell completion` remains the namespaced path.
 pub const APPROVED_NON_EVERYDAY_ROOT_COMMANDS: &[&str] = &[
     "capture",
     "ci",
-    "collapse",
     "complete",
     "completions",
     "daemon",
-    "expand",
     "hook",
     "identity",
-    "oplog",
-    "retro",
     "revert",
-    "schemas",
     "semantic",
-    "timeline",
     "visibility",
     "whoami",
 ];
 
 /// Reviewed root aliases. Keeping this set closed prevents a removed verb from
 /// returning as a hidden clap alias and bypassing the root-variant check.
-pub const APPROVED_ROOT_ALIASES: &[&str] = &["__complete", "history", "schema"];
+pub const APPROVED_ROOT_ALIASES: &[&str] = &["__complete", "history"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSurfaceViolation {

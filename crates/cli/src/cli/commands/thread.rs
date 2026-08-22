@@ -16,7 +16,8 @@ use objects::{
 use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
-    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, Repository, Thread, ThreadCaptureOutcome, ThreadFreshness, ThreadId,
+    AgentUsageSummary, ActorPresence, ActorPresenceStatus, ActorPresenceStore, Repository, Thread,
+    ThreadCaptureOutcome, ThreadFreshness, ThreadId,
     ThreadIdError, ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState,
 };
 use serde::Serialize;

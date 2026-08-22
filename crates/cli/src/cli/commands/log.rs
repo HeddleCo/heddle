@@ -1154,7 +1154,7 @@ fn write_full<W: std::io::Write>(
                 out,
                 "  {}",
                 style::dim(&format!(
-                    "Collapsed: expandable with `heddle expand {}` ({} captures)",
+                    "Collapsed: expandable with `heddle thread expand {}` ({} captures)",
                     entry.state_id, collapsed.source_count
                 ))
             )?;

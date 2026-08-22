@@ -5,6 +5,7 @@ mod cli_base;
 mod command_suggestions;
 mod commands_agent;
 mod commands_args;
+#[cfg(feature = "ci")]
 mod commands_ci;
 #[cfg(feature = "client")]
 mod commands_client;
@@ -42,14 +43,15 @@ pub use commands_args::{
     AgentTaskListArgs, AgentTaskShowArgs, AgentTaskStatusArg, AgentTaskUpdateArgs, CloneArgs,
     CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs,
     DoctorSchemasArgs, ExpandArgs, INIT_VERB, InitArgs, LandArgs, LogArgs, PullArgs, PushArgs,
-    ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SnapshotArgs, SyncArgs,
-    ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs,
-    ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs,
-    ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs,
-    TimelineArgs, TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs,
-    TimelineRecordStartArgs, TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs,
-    TimelineStatusArgs, TimelineTargetArgs, TryArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
+    ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs, ThreadAbsorbArgs,
+    ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs, ThreadCheckMergeArgs,
+    ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs,
+    ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs, TimelineCommands,
+    TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs, TimelineRecordToolArgs,
+    TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs, TimelineTargetArgs, UndoArgs,
+    WatchArgs, WorkspaceModeArg,
 };
+#[cfg(feature = "ci")]
 pub use commands_ci::{CiCommands, CiRunArgs};
 #[cfg(feature = "client")]
 pub use commands_client::{AgentTemplateArg, AuthCommands, AuthTrustCommands, IdentityCommands};

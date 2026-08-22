@@ -8,14 +8,13 @@ use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
-    AgentCommands, CiCommands, CompletionSubject, ContextCommands, DiscussCommands, HookCommands,
-    IntegrationCommands, OplogCommands, PresenceCommands, QueryArgs, RedactCommands,
-    RemoteCommands, ReviewCommands, ShellCommands, ThreadCommands, VisibilityCommands,
+    AgentCommands, CompletionSubject, ContextCommands, DiscussCommands, HookCommands,
+    IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
+    ShellCommands, ThreadCommands, VisibilityCommands,
     commands_args::{
-        AdoptArgs, CloneArgs, CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, ExpandArgs,
-        INIT_VERB, InitArgs, LandArgs, LogArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs,
-        RetroArgs, RevertArgs, RunArgs, SnapshotArgs, SyncArgs, ThreadStartArgs, TimelineArgs,
-        TryArgs, UndoArgs, WatchArgs,
+        AdoptArgs, CloneArgs, CommitArgs, DiffArgs, DoctorArgs, INIT_VERB, InitArgs, LandArgs,
+        LogArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs,
+        ThreadStartArgs, UndoArgs, WatchArgs,
     },
 };
 #[cfg(feature = "client")]
@@ -156,69 +155,14 @@ Examples:
     /// into CI to stop docs from going stale.
     Doctor(DoctorArgs),
 
-    /// Print the JSON Schema for a `--output json`-emitting verb.
-    ///
-    /// Contract-table introspection over CLI output shapes —
-    /// useful when wiring tools that consume `heddle <verb>
-    /// --output json` and want to validate or generate types. The schemas
-    /// live in `crates/cli-contract/src/cli/commands/schemas.rs`; the
-    /// command contract table registers available and documented
-    /// schema verbs for `heddle doctor schemas` drift detection
-    /// against `docs/json-schemas.md`.
-    ///
-    /// With no `<verb>`, prints the registered schema verbs. `<verb>`
-    /// is the joined subcommand path — e.g. `status`, `log`,
-    /// `fsck repair git`, `marker list`.
-    #[command(visible_alias = "schema")]
-    Schemas {
-        /// The verb whose schema to emit. Run `heddle schemas --help`
-        /// or look at `docs/json-schemas.md` for the registered list.
-        ///
-        /// `trailing_var_arg = true` lets the verb spec carry literal
-        /// `--flag` tokens (e.g. `heddle schemas log --reflog`,
-        /// `heddle schemas marker delete --prefix`) without clap
-        /// parsing them as options on `schemas` itself.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        verb: Vec<String>,
-    },
-
     /// Create or resume an isolated thread for focused work.
     Start(ThreadStartArgs),
 
-    /// Run a command in a sandboxed ephemeral thread.
-    ///
-    /// Heddle creates a fresh thread with an isolated checkout, runs
-    /// `<cmd>` inside it, and then either captures the result on a
-    /// zero exit or drops the thread on a non-zero exit. The parent
-    /// thread's working tree is never touched — the ephemeral thread
-    /// is the sandbox. Implements item 3.1 from the heddle 6→8 plan.
-    ///
-    /// `try` is the **new-sandbox** sibling to `run`. Reach for `run`
-    /// when you already have a thread and just want to exec a command
-    /// inside its checkout (no thread creation, no capture, no
-    /// rollback).
-    #[command(after_help = "\
-Heddle options must appear before `--`. Everything after `--` is passed unchanged to the inner command. If the inner command uses a Heddle global-option spelling, pass `--allow-heddle-global-args` before `--`.
-")]
-    Try(TryArgs),
-
-    /// Automation/workflow command: run a command inside an existing
-    /// thread's execution root.
-    ///
-    /// `run` is the **existing-thread** sibling to `try`. It looks up
-    /// the named (or current) thread, sets the child's cwd to that
-    /// thread's checkout, exports `HEDDLE_THREAD_*`, and runs `<cmd>`.
-    /// It does NOT create a thread, capture
-    /// state on success, or roll back on failure — those are `try`'s
-    /// job. Reach for `try` when you want the sandbox lifecycle; reach
-    /// for `run` when you already have a thread and just need to exec
-    /// inside it.
-    Run(RunArgs),
-
     /// Run Heddle CI checks.
+    #[cfg(feature = "ci")]
     Ci {
         #[command(subcommand)]
-        command: CiCommands,
+        command: super::CiCommands,
     },
 
     /// Automation/workflow command: refresh the current thread onto its target when safe.
@@ -263,30 +207,12 @@ Heddle options must appear before `--`. Everything after `--` is passed unchange
     #[command(visible_alias = "history")]
     Log(LogArgs),
 
-    /// Navigate, fork, reset, and recover agent tool-call timelines.
-    #[command(after_help = "\
-Examples:
-  heddle log --timeline
-  heddle timeline fork --tool-call call_123 --branch tlb-alt
-  heddle timeline reset --step tls-abc --materialize
-  heddle timeline recover
-")]
-    Timeline(TimelineArgs),
-
     /// Show state details.
     Show {
         /// State by physical state ID, logical change ID, or unambiguous prefix.
         /// Defaults to HEAD.
         state: Option<String>,
     },
-
-    /// Summarize a working session.
-    ///
-    /// Combines oplog, agent registry, marker, and context-annotation
-    /// reads into one structured payload — agent-readable retro of
-    /// captures, signals, and notable events since `--since`. Replaces
-    /// the reconstruct-from-`heddle log` boilerplate.
-    Retro(RetroArgs),
 
     /// Show what changed in the worktree, a thread, or two states.
     Diff(DiffArgs),
@@ -373,12 +299,6 @@ Examples:
     /// Undo the last Heddle operation.
     Undo(UndoArgs),
 
-    /// Collapse (squash) multiple states into one.
-    Collapse(CollapseArgs),
-
-    /// Expand a squashed land into the captures it collapsed.
-    Expand(ExpandArgs),
-
     /// Manage threads.
     Thread {
         #[command(subcommand)]
@@ -411,16 +331,6 @@ Examples:
 
     /// Resolve merge conflicts.
     Resolve(ResolveArgs),
-
-    /// Inspect and repair the operation log.
-    ///
-    /// `heddle oplog recover` explicitly salvages a truncated or torn oplog,
-    /// reporting what was recovered — the operator-facing entrypoint over the
-    /// same recovery the everyday read path runs automatically.
-    Oplog {
-        #[command(subcommand)]
-        command: OplogCommands,
-    },
 
     /// Explicit interoperability with other version-control formats.
     #[cfg(feature = "git-overlay")]
@@ -542,15 +452,6 @@ Examples:
         command: AgentCommands,
     },
 
-    /// Inspect attribution and work context for local agents.
-    ///
-    /// Presence is intentionally separate from `agent`: presence records
-    /// explain who is acting, while `agent reserve` grants writer authority.
-    Presence {
-        #[command(subcommand)]
-        command: PresenceCommands,
-    },
-
     /// Inspect and refresh rebuildable performance sidecars.
     Maintenance {
         #[command(subcommand)]
@@ -595,6 +496,17 @@ pub enum MaintenanceCommands {
         /// Show what would be removed without removing.
         #[arg(long)]
         dry_run: bool,
+    },
+
+    /// Inspect and repair the operation log.
+    ///
+    /// `heddle maintenance oplog recover` explicitly salvages a truncated or
+    /// torn oplog, reporting what was recovered — the operator-facing
+    /// entrypoint over the same recovery the everyday read path runs
+    /// automatically.
+    Oplog {
+        #[command(subcommand)]
+        command: OplogCommands,
     },
 }
 

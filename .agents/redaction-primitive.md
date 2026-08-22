@@ -11,7 +11,7 @@
 >   redactions through `Repository::accept_wire_redactions`.
 > - The wire path is fail-closed: unsigned, tampered, and
 >   untrusted-key redactions are refused. Operators populate
->   `[redact] trusted_keys` per repo via `heddle redact trust add`.
+>   `[redact] trusted_keys` per repo via `heddle auth trust replace`.
 > - `purge` propagates as a `Redaction` with `purged_at: Some(_)` and
 >   replays via the same `accept_wire_redactions` chokepoint on each
 >   replica. Bytes are dropped locally on the receiver, matching

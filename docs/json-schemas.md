@@ -10,20 +10,10 @@ on.
 Schemas in this document are registered at runtime by
 `crates/cli-contract/src/cli/commands/schemas.rs`. `init` registers the
 real `InitOutput` type (no hand-written `InitSchema` mirror); remaining
-verbs still use a hand-written mirror. Generate the canonical JSON
-Schema for any verb with:
+verbs still use a hand-written mirror. The registered verb list is the
+`schema_verbs` field of the command catalog:
 
-    heddle schemas                    # list registered schema verbs
-    heddle schemas <verb>             # e.g. heddle schemas status
-    heddle schemas log --reflog       # subcommands taking --flags work too
-    heddle schemas agent ready --output text
-    heddle schemas status
-
-(Indented as plain text rather than a fenced block so the
-`heddle doctor docs` flag-checker doesn't flag `--reflog` as
-unknown — the schemas verb takes its argument as
-`trailing_var_arg`. Schema output is always JSON; trailing global
-flags such as `--output text` are ignored for lookup.)
+    heddle help --output json
 
 CI runs `heddle doctor schemas` on every PR and validates each literal
 JSON sample below against the registered schema. Drift — a sample
@@ -103,7 +93,7 @@ specifiers. Pass any of them — they all resolve to the same change ID:
 
 Verbs covered: `show`, `diff`, `revert`, `query --attribution --state`,
 `log --since`, `review show`,
-`review sign`, `discuss open|list|resolve --state`, `retro --since`.
+`review sign`, `discuss open|list|resolve --state`.
 The `heddle log --output json` `change_id` field is the canonical short form
 that downstream verbs consume.
 
@@ -1200,7 +1190,7 @@ verification.
 }
 ```
 
-## `heddle presence show --output json`
+## `heddle agent presence show --output json`
 
 Presence inspection emits an envelope with post-command verification. Lists are
 also enveloped so agents never have to special-case a raw array.
@@ -1229,7 +1219,7 @@ also enveloped so agents never have to special-case a raw array.
 
 ---
 
-## `heddle presence list --output json`
+## `heddle agent presence list --output json`
 
 ```json
 {
@@ -1261,7 +1251,7 @@ also enveloped so agents never have to special-case a raw array.
 
 ---
 
-## `heddle presence complete --output json`
+## `heddle agent presence complete --output json`
 
 ```json
 {
@@ -1275,7 +1265,7 @@ also enveloped so agents never have to special-case a raw array.
 
 ---
 
-## `heddle presence explain --output json`
+## `heddle agent presence explain --output json`
 
 ```json
 {
@@ -1323,7 +1313,7 @@ also enveloped so agents never have to special-case a raw array.
 
 ---
 
-## `heddle agent serve --output json`
+## `heddle daemon serve --output json`
 
 The foreground daemon emits one JSON value when it exits cleanly.
 
@@ -1338,7 +1328,7 @@ The foreground daemon emits one JSON value when it exits cleanly.
 
 ---
 
-## `heddle agent status --output json`
+## `heddle daemon status --output json`
 
 ```json
 {
@@ -1372,7 +1362,7 @@ The foreground daemon emits one JSON value when it exits cleanly.
 
 ---
 
-## `heddle agent stop --output json`
+## `heddle daemon stop --output json`
 
 ```json
 {
@@ -2378,7 +2368,7 @@ tool-call navigation state:
 }
 ```
 
-`heddle timeline status --output json` emits a scrubbed status envelope for
+`heddle agent timeline status --output json` emits a scrubbed status envelope for
 the selected timeline thread. It reports cursor and summary metadata only; it
 does not include raw tool payloads, transcripts, stdout, stderr, environment
 values, argv, or filename lists.
@@ -2418,7 +2408,7 @@ values, argv, or filename lists.
 }
 ```
 
-`heddle timeline record-start --output json` emits the scrubbed append
+`heddle agent timeline record-start --output json` emits the scrubbed append
 result after appending a versioned tool-call-start operation body:
 
 ```json
@@ -2442,7 +2432,7 @@ result after appending a versioned tool-call-start operation body:
 }
 ```
 
-`heddle timeline record-finish --output json` emits the scrubbed append
+`heddle agent timeline record-finish --output json` emits the scrubbed append
 result after appending a versioned tool-call-finish operation body:
 
 ```json
@@ -2466,7 +2456,7 @@ result after appending a versioned tool-call-finish operation body:
 }
 ```
 
-`heddle timeline fork|reset|recover --output json` emit timeline
+`heddle agent timeline fork|reset|recover --output json` emit timeline
 action results:
 
 ```json
@@ -3055,28 +3045,6 @@ Sync emits:
 
 ---
 
-## `heddle schemas --output json`
-
-List every runtime schema verb and the subset enforced by
-`heddle doctor schemas`.
-
-```json
-{
-  "output_kind": "schemas",
-  "schema_verbs": ["status", "verify", "try"],
-  "documented_schema_verbs": ["status", "verify", "try"]
-}
-```
-
-### Fields
-
-| Field | Type | Optionality | Semantics |
-|-------|------|-------------|-----------|
-| `schema_verbs` | array<string> | required | Every verb with a runtime JSON Schema mirror. |
-| `documented_schema_verbs` | array<string> | required | Schema verbs whose samples are checked against this document. |
-
----
-
 ## `heddle doctor --output json`
 
 Doctor is the comprehensive health report; it includes the shared
@@ -3152,60 +3120,60 @@ as one; no `help advanced`).
   "command_contract_schema_coverage": {
     "accepted_opaque_schema_examples": [
       "help",
-      "ci run",
       "redact apply",
       "redact list",
       "redact show",
       "redact purge apply",
       "redact purge list",
-      "visibility set"
+      "visibility set",
+      "visibility promote"
     ],
     "accepted_opaque_schema_verbs_total": 39,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
-      "ci run",
       "redact apply",
       "redact list",
       "redact show",
       "redact purge apply",
       "redact purge list",
-      "visibility set"
+      "visibility set",
+      "visibility promote"
     ],
-    "advanced_scope_json_commands_total": 112,
+    "advanced_scope_json_commands_total": 100,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 39,
-    "advanced_scope_mutating_commands_total": 64,
+    "advanced_scope_mutating_commands_total": 57,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 21,
-    "catalog_commands_total": 192,
-    "catalog_mutating_commands_total": 93,
-    "json_commands_total": 151,
+    "catalog_commands_total": 188,
+    "catalog_mutating_commands_total": 91,
+    "json_commands_total": 148,
     "json_commands_with_accepted_opaque_schema": 39,
-    "json_commands_with_schema": 112,
+    "json_commands_with_schema": 109,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 88,
+    "json_mutating_commands_total": 87,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 88,
+    "mutating_commands_total": 87,
     "mutating_commands_with_accepted_opaque_schema": 21,
-    "mutating_commands_with_schema": 67,
+    "mutating_commands_with_schema": 66,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 39,
     "status": "available",
-    "summary": "192 command(s), 151 JSON command(s), 93 mutating command(s), 88 mutating JSON command(s); verified everyday/agent machine surface has 39 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+    "summary": "188 command(s), 148 JSON command(s), 91 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
     "undocumented_schema_verbs_total": 0,
     "verified_scope": "everyday_and_agent",
     "verified_scope_accepted_opaque_schema_examples": [],
-    "verified_scope_json_commands_total": 39,
+    "verified_scope_json_commands_total": 48,
     "verified_scope_json_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_json_commands_with_schema": 39,
+    "verified_scope_json_commands_with_schema": 48,
     "verified_scope_json_commands_without_schema": 0,
     "verified_scope_missing_schema_examples": [],
-    "verified_scope_mutating_commands_total": 24,
+    "verified_scope_mutating_commands_total": 30,
     "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_mutating_commands_with_schema": 24,
+    "verified_scope_mutating_commands_with_schema": 30,
     "verified_scope_mutating_commands_without_schema": 0
   },
   "doc_path": "/repo/docs/json-schemas.md",
@@ -3229,7 +3197,7 @@ as one; no `help advanced`).
     "try"
   ],
   "status": "available",
-  "summary": "192 command(s), 151 JSON command(s), 93 mutating command(s), 88 mutating JSON command(s); verified everyday/agent machine surface has 39 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+  "summary": "188 command(s), 148 JSON command(s), 91 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -3252,32 +3220,6 @@ as one; no `help advanced`).
   "confidence": 0.91,
   "actor": {"provider": "openai", "model": "gpt-5"},
   "id": 12
-}
-```
-
----
-
-## `heddle try --output json`
-
-Run a command in an ephemeral isolated thread. A successful run leaves
-the thread ready for merge unless `--auto-merge` lands and drops it.
-Every action field is a single parseable command; discard guidance
-lives in `recovery_commands`.
-
-```json
-{
-  "status": "completed",
-  "action": "try",
-  "message": "`cargo test` succeeded; thread 'try-1234abcd' ready (state hc-sqr398dvx9ay). Run `heddle ready --thread try-1234abcd` to land.",
-  "thread": "try-1234abcd",
-  "thread_dropped": false,
-  "exit_code": 0,
-  "duration_ms": 1420,
-  "captured_state": "hc-sqr398dvx9ay",
-  "merge_state": null,
-  "next_action": "heddle ready --thread try-1234abcd",
-  "recommended_action": "heddle ready --thread try-1234abcd",
-  "recovery_commands": ["heddle thread drop try-1234abcd"]
 }
 ```
 
@@ -3389,13 +3331,13 @@ required:
 {"commits_scanned":2,"commits_with_matches":1,"sessions_mined":3,"points_extracted":4,"states_updated":1,"annotations_written":4}
 ```
 
-`heddle collapse --output json` emits:
+`heddle thread collapse --output json` emits:
 
 ```json
 {"change_id": "hc-collapsed123", "collapsed": 3, "message": "collapse feature checkpoints", "parents": ["hc-base123"]}
 ```
 
-`heddle expand --output json` emits the ordered captures recorded by a squashed land collapse:
+`heddle thread expand --output json` emits the ordered captures recorded by a squashed land collapse:
 
 ```json
 {"output_kind": "expand", "status": "completed", "requested": "HEAD", "collapsed": {"change_id": "hc-collapsed123", "change_id_full": "hc-collapsed123000000000000000000", "git_commit": "abc123def456abc123def456abc123def456abcd", "thread": "feature/parser", "source_count": 2}, "captures": [{"change_id": "hc-source111", "change_id_full": "hc-source1110000000000000000000", "content_hash": "h1-source", "intent": "first parser checkpoint", "principal": "A. Engineer <a@example.com>", "agent": null, "confidence": null, "created_at": "2026-01-01 00:00:00", "parents": ["hc-base123"]}, {"change_id": "hc-source222", "change_id_full": "hc-source2220000000000000000000", "content_hash": "h1-source2", "intent": "second parser checkpoint", "principal": "A. Engineer <a@example.com>", "agent": "codex/gpt-5", "confidence": 0.91, "created_at": "2026-01-01 00:05:00", "parents": ["hc-source111"]}]}
@@ -3459,7 +3401,7 @@ the `discuss_show` discriminator:
 {"valid": true, "errors": [], "warnings": [], "objects_checked": 42, "git_projection_checked": false, "repair_target": null, "repaired": false, "repairs": []}
 ```
 
-`heddle oplog recover --output json` emits the health or explicit salvage
+`heddle maintenance oplog recover --output json` emits the health or explicit salvage
 report for the manifest-selected oplog containers. Optional recovery detail
 fields appear when the invocation repaired damage or found a durable report
 from an earlier recovery:
@@ -3581,14 +3523,6 @@ state, source blob (or `null` when absent), and BLAKE3 hunk hash. `resolutions`
 records the stable region id, resolution mode (`ours`, `theirs`, `edit`, or
 `auto`), and complete human/agent attribution written to the operation log.
 
-`heddle retro --output json` emits the same shape with bounded session data;
-`timeline_steps` is `[]` unless expanded with `--full`. `heddle retro
---full --output json` emits expanded timeline summaries:
-
-```json
-{"since": "hc-base123", "until": "hc-head456", "duration_secs": 3600, "states_captured": [{"change_id": "hc-head456", "intent": "capture parser fix", "confidence": 0.91, "agent": "codex/gpt-5", "principal": "A. Engineer <a@example.com>", "timestamp": "2026-01-01T00:00:00Z"}], "agents_active": [{"session_id": "session-123", "provider": "codex", "model": "gpt-5", "status": "active", "started_at": "2026-01-01T00:00:00Z", "completed_at": null, "tokens": {"input": 1200, "output": 800, "reasoning": 300, "tool_calls": 12}}], "agent_tasks": [{"task_id": "task-parser-fast", "title": "Tighten parser validation", "status": "in_progress", "target_thread": "feature/parser-fast", "updated_at": "2026-01-01T00:00:00Z", "completed_at": null, "coordination_discussion_id": null}], "timeline_steps": [{"thread": "feature/parser-fast", "step_id": "tls-1", "branch_id": "tlb-main", "parent_step_id": null, "tool_name": "edit", "tool_status": "succeeded", "changed": true, "payload_summary": "Edit parser validation", "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "before_state": "hc-base123", "after_state": "hc-head456", "capture_state": "hc-head456", "started_at_ms": 1770000000000, "finished_at_ms": 1770000001000}], "markers_created": [{"name": "verified-parser", "state": "hc-head456", "timestamp": "2026-01-01T00:00:00Z"}], "context_annotations": [{"path": "src/lib.rs", "scope": "file", "kind": "rationale", "content_excerpt": "Parser accepts the new token form.", "attribution": "A. Engineer <a@example.com>", "created_at": "2026-01-01T00:00:00Z"}], "verify_signals": [{"kind": "test_passed", "label": "verified: cargo test", "timestamp": "2026-01-01T00:00:00Z"}], "merges": [{"description": "Collapsed feature/parser", "timestamp": "2026-01-01T00:00:00Z"}], "undos": [{"description": "Undo capture", "timestamp": "2026-01-01T00:00:00Z"}]}
-```
-
 `heddle semantic hot --output json` emits:
 
 ```json
@@ -3615,15 +3549,15 @@ weft#451 Tier-2 body (`SemanticGraphQueryResponse`); hosted RPCs remain residual
 The following verbs also emit `--output json`. Their shapes follow the same
 discipline; see the corresponding handler in `crates/cli/src/cli/commands/`:
 
-`heddle clone`, `heddle collapse`,
-`heddle context get/set`, `heddle diff`, `heddle expand`,
+`heddle clone`, `heddle thread collapse`,
+`heddle context get/set`, `heddle diff`, `heddle thread expand`,
 `heddle discuss`, `heddle doctor docs`,
 `heddle maintenance fsck`, `heddle init`, `heddle integration`,
 `heddle maintenance`, `heddle ready`,
-`heddle remote`, `heddle resolve`, `heddle retro`,
+`heddle remote`, `heddle resolve`,
 `heddle agent provenance`, `heddle capture`,
 `heddle thread show/start`,
-`heddle try`, `heddle undo`, `heddle watch`.
+`heddle undo`, `heddle watch`.
 
 Each of these:
 

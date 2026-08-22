@@ -506,7 +506,7 @@ fn doctor_schemas_doc_missing_advice(repo_root: &Path) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "doctor_schemas_source_docs_missing",
         "Cannot run schema docs drift check outside a Heddle source checkout",
-        "Run this from the Heddle source checkout, pass `--repo <source-root>`, or use `heddle help --output json` and `heddle schemas status` for installed CLI introspection.",
+        "Run this from the Heddle source checkout, pass `--repo <source-root>`, or use `heddle help --output json` for installed CLI introspection.",
         format!(
             "docs/json-schemas.md was not found under {}",
             repo_root.display()
@@ -516,7 +516,6 @@ fn doctor_schemas_doc_missing_advice(repo_root: &Path) -> RecoveryAdvice {
         "heddle help --output json",
         vec![
             "heddle help --output json".to_string(),
-            "heddle schemas status".to_string(),
             "heddle doctor schemas --output json".to_string(),
         ],
     )

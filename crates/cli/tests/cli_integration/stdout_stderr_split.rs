@@ -28,20 +28,12 @@ const SKIP: &[&str] = &[
     "shell",
     "discuss",
     "review",
-    // `run` invokes external child processes that need their own
-    // sandboxing setup.
-    "run",
-    // `try` runs a child Heddle in a worktree it sets up — too
-    // expensive for a per-command lint sweep.
-    "try",
     // Hosted commands need network credentials.
     "auth",
     "support",
     "support grant",
     "support list",
     "support revoke",
-    "presence",
-    "presence publish",
 ];
 
 #[test]

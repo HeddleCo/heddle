@@ -719,7 +719,7 @@ fn record_timeline_tool_finished<E: HarnessTimelineExtractor>(
             Ok(_) => runtime.repo.head()?,
             Err(err) => {
                 capture_failed = true;
-                tracing::warn!(?err, "heddle timeline tool capture failed");
+                tracing::warn!(?err, "heddle agent timeline tool capture failed");
                 None
             }
         }

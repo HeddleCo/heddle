@@ -175,22 +175,6 @@ fn land_dry_run_emits_plan_without_landing() {
 }
 
 #[test]
-fn run_cmd_requires_command_and_executes_when_present() {
-    let main = setup_native_repo();
-    // Missing command → typed usage refusal.
-    let missing = heddle_output(&["--output", "json", "run"], Some(main.path()))
-        .expect("run with no command should invoke");
-    assert!(
-        !missing.status.success(),
-        "run without a command must refuse"
-    );
-
-    // With a command, run succeeds and does not mutate the repo.
-    let ok = heddle(&["run", "--", "true"], Some(main.path()));
-    assert!(ok.is_ok(), "run -- true should succeed: {ok:?}");
-}
-
-#[test]
 fn push_dry_run_emits_plan_without_network() {
     let main = setup_native_repo();
     // No remote configured — dry-run should still produce a plan or a typed

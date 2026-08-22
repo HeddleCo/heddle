@@ -165,7 +165,7 @@ fn not_expandable_advice(reference: &str, target: &StateId) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "collapse_not_found",
         format!("No collapse found for {reference}"),
-        "Run `heddle log` to find entries marked `[collapsed]`, then retry `heddle expand <state>` with one of those entries.",
+        "Run `heddle log` to find entries marked `[collapsed]`, then retry `heddle thread expand <state>` with one of those entries.",
         format!(
             "reference '{reference}' resolved to {}, but no matching OpRecord::Collapse result exists",
             target.short()

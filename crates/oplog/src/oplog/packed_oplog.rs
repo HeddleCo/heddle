@@ -1082,7 +1082,7 @@ impl TruncatedTailRecovery {
 /// Structured outcome of an explicit (operator-invoked) or auto salvage.
 ///
 /// Reuses the exact recovery planning used by validation repair, so the
-/// `heddle oplog recover` operator entrypoint and lower-level repair agree on
+/// `heddle maintenance oplog recover` operator entrypoint and lower-level repair agree on
 /// the complete records that can be retained.
 #[derive(Clone, Debug)]
 pub struct OplogRecoveryReport {

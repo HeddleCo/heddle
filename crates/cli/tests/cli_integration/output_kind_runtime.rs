@@ -17,7 +17,7 @@ use std::fs;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{heddle, heddle_output_with_env};
+use super::{heddle, heddle_output_with_env, heddle_schema};
 
 /// Init a repo, write a tracked file, capture one state.
 fn init_and_capture() -> TempDir {
@@ -291,14 +291,10 @@ fn show_and_thread_show_emit_distinct_output_kinds() {
 #[test]
 fn show_and_thread_show_schemas_accept_payloads() {
     let temp = init_and_capture();
-    let show_schema: Value = serde_json::from_str(
-        &heddle(&["schemas", "show"], Some(temp.path())).expect("schemas show"),
-    )
-    .expect("schemas show emits JSON schema");
-    let thread_show_schema: Value = serde_json::from_str(
-        &heddle(&["schemas", "thread", "show"], Some(temp.path())).expect("schemas thread show"),
-    )
-    .expect("schemas thread show emits JSON schema");
+    let show_schema: Value =
+        serde_json::from_str(&heddle_schema("show").to_string()).expect("show emits JSON schema");
+    let thread_show_schema: Value = serde_json::from_str(&heddle_schema("thread show").to_string())
+        .expect("thread show emits JSON schema");
 
     let show = heddle_json(&["show", "HEAD"], &temp);
     assert_output_kind(&show, "show");

@@ -23,8 +23,8 @@ base64.workspace = true
 getrandom.workspace = true
 blake3.workspace = true
 chrono.workspace = true
-ci-config = { path = "../ci-config", package = "heddle-ci-config", version = "0.13" }
-ci-engine = { path = "../ci-engine", package = "heddle-ci-engine", version = "0.13" }
+ci-config = { path = "../ci-config", package = "heddle-ci-config", version = "0.13", optional = true }
+ci-engine = { path = "../ci-engine", package = "heddle-ci-engine", version = "0.13", optional = true }
 clap.workspace = true
 clap_complete.workspace = true
 futures.workspace = true
@@ -143,6 +143,15 @@ default = [
     "semantic",
     "zstd",
     "client",
+]
+# `ci` gates the local `heddle ci` executor (constitutional later after
+# treadle). Non-default: the everyday loop never invokes it, and the
+# default binary should not carry the check runner.
+ci = [
+    "dep:ci-config",
+    "dep:ci-engine",
+    "heddle-cli-args/ci",
+    "heddle-cli-contract/ci",
 ]
 local = []
 # Repository mode features. At least one must be enabled. The default
@@ -282,6 +291,11 @@ path = "src/lib.rs"
 
 # Integration tests for cli live under `tests/` (auto-discovered) so
 # that `cargo publish` can package the crate cleanly.
+
+[[test]]
+name = "ci_run_local"
+path = "tests/ci_run_local.rs"
+required-features = ["ci"]
 
 [[test]]
 name = "semantic_diff_integration"

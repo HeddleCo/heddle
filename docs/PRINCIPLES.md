@@ -29,13 +29,11 @@ quality is part of the contract, not a polish step.
 
 ## 2. Disposability
 
-Speculation has no cost. `heddle try -- <cmd>` spins up an ephemeral
-thread with an isolated checkout, runs the command, and either captures
-the result on success or drops the thread on failure — the parent
-worktree is never touched ([`crates/cli/src/cli/commands/try_cmd.rs`](../crates/cli/src/cli/commands/try_cmd.rs)).
-For parallel speculation, create isolated child threads with
+Speculation is cheap. For parallel speculation, create isolated child
+threads with
 `heddle start <name> --parent-thread <parent> --task <task>` and run each
-experiment in its own checkout.
+experiment in its own checkout; drop it with `heddle thread drop` when
+the experiment fails.
 
 Disposability is what makes those verbs possible. Threads are cheap, the
 oplog is reliable, and rolling back is `heddle undo` — not a manual file
@@ -45,19 +43,16 @@ agent's strategy changes. We design for that.
 ## 3. Composability
 
 The same primitives appear in multiple verbs because the right ones were
-chosen first. A thread is a thread whether it came from `heddle start`,
-`heddle try`, or a child `heddle start --parent-thread` workflow. A capture is a capture
+chosen first. A thread is a thread whether it came from `heddle start`
+or a child `heddle start --parent-thread` workflow. A capture is a capture
 whether you triggered it explicitly or the verify hook fired it after a
 green test run.
 
-`heddle retro --since <marker>` is the clearest example
-([`crates/cli/src/cli/commands/retro.rs`](../crates/cli/src/cli/commands/retro.rs)).
-Before retro, reconstructing "what happened this turn" meant
-cross-referencing `heddle log`, `heddle agent list`,
-`heddle context history`, and `heddle thread marker list` separately, then
-aligning timestamps by hand. Retro folds those four reads into one trip on
-a single time window. It isn't new data — it's an idiom that emerged often
-enough to deserve a name.
+Composition beats accretion: reconstructing "what happened this turn"
+is a matter of reading `heddle log`, `heddle agent list`,
+`heddle context history`, and `heddle thread marker list` — four reads
+over one shared time window — rather than a fifth verb that duplicates
+them.
 
 ## 4. Restraint
 
@@ -67,7 +62,7 @@ check integration, land or push, undo, inspect history, and recover.
 The exact verb list comes from the command contract table so human help
 and `heddle help --output json` do not drift. Collaboration and
 annotation surfaces such as `review`, `discuss`, and `context` stay
-behind `heddle help advanced` and their topic pages for the moments you
+behind `heddle <verb> --help` and topic pages for the moments you
 need them. First-time users see the smallest surface that explains where
 they are, what is in flight, what to do next, and how to recover.
 
@@ -75,8 +70,8 @@ State IDs follow the same logic. Every state-taking verb accepts the same
 specifiers — full change ID, 4-character-or-longer prefix, marker name,
 `HEAD`, `HEAD~N`, thread name — so the muscle memory you build on
 `heddle show` carries to `heddle diff`, `heddle revert`,
-`heddle query --attribution --state`, `heddle review show`,
-and `heddle retro --since`. One acceptance rule, every state-taking verb.
+`heddle query --attribution --state`, and `heddle review show`.
+One acceptance rule, every state-taking verb.
 
 Restraint in defaults: child thread workflows can share a Cargo target
 directory whenever the workspace has a `Cargo.toml`, because ten parallel

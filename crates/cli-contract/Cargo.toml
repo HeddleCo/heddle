@@ -27,6 +27,7 @@ tracing.workspace = true
 
 [features]
 default = ["client", "git-overlay", "ingest", "semantic"]
+ci = ["heddle-cli-args/ci"]
 client = ["heddle-cli-args/client", "heddle-cli-render/client"]
 git-overlay = ["heddle-cli-args/git-overlay", "repo/git-overlay"]
 ingest = ["heddle-cli-args/ingest"]

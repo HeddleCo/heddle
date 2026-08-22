@@ -54,6 +54,7 @@ fn test_collapse_two_states() {
         .collect();
     let result = heddle(
         &[
+            "thread",
             "collapse",
             &states[0].to_string_full(),
             &states[1].to_string_full(),

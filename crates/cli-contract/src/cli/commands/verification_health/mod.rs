@@ -1029,10 +1029,7 @@ fn machine_contract_verified_scope(command: &super::command_catalog::CommandCata
         return false;
     }
     command.help_visibility == "everyday"
-        || matches!(
-            command.path.first().map(String::as_str),
-            Some("agent" | "schemas")
-        )
+        || command.path.first().map(String::as_str) == Some("agent")
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteDriftDecision {
