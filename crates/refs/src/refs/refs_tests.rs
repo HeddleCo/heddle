@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::{sync::mpsc, time::Duration};
 
+use heddle_object_model::op_record::OpRecord;
 use objects::{
     error::HeddleError,
     object::{MarkerName, StateId, ThreadName},
@@ -8,6 +9,13 @@ use objects::{
 use tempfile::TempDir;
 
 use super::*;
+
+fn test_record() -> OpRecord {
+    OpRecord::ThreadDelete {
+        name: "feature".to_string(),
+        state: crate::refs::fresh_state_id(),
+    }
+}
 
 fn create_ref_manager() -> (TempDir, RefManager) {
     let temp_dir = TempDir::new().unwrap();
@@ -768,6 +776,7 @@ mod chokepoint {
         atomic::{AtomicU64, Ordering},
     };
 
+    use heddle_object_model::op_record::OpRecord;
     use objects::{
         error::Result,
         object::{MarkerName, StateId, ThreadName},
@@ -779,6 +788,7 @@ mod chokepoint {
         LoadRequest, Loaded, ReconcileOutcome, RefCommitter, RefExpectation, RefManager,
         RefReconciler, RefUpdate,
     };
+    use super::test_record;
 
     fn manager() -> (TempDir, std::path::PathBuf) {
         let temp = TempDir::new().unwrap();
@@ -851,18 +861,18 @@ mod chokepoint {
         }
     }
 
-    type CommitCall = (Vec<Vec<u8>>, Option<String>);
+    type CommitCall = (Vec<OpRecord>, Option<String>);
 
     struct FakeCommitter {
         seen: Mutex<Vec<CommitCall>>,
     }
 
     impl RefCommitter for FakeCommitter {
-        fn commit_records(&self, encoded_records: &[Vec<u8>], scope: Option<&str>) -> Result<()> {
+        fn commit_records(&self, records: &[OpRecord], scope: Option<&str>) -> Result<()> {
             self.seen
                 .lock()
                 .unwrap()
-                .push((encoded_records.to_vec(), scope.map(str::to_string)));
+                .push((records.to_vec(), scope.map(str::to_string)));
             Ok(())
         }
     }
@@ -1113,7 +1123,7 @@ mod chokepoint {
         refs.init().unwrap();
 
         let state = crate::refs::fresh_state_id();
-        let records = vec![vec![1u8, 2, 3]];
+        let records = vec![test_record()];
         let updates = vec![RefUpdate::Thread {
             name: ThreadName::new("feature"),
             expected: RefExpectation::Missing,
@@ -1125,7 +1135,16 @@ mod chokepoint {
         // The committer saw the records (phase 4) and the ref published (phase 5).
         let seen = committer.seen.lock_or_poisoned();
         assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].0, records);
+        let seen_bytes = seen[0]
+            .0
+            .iter()
+            .map(|record| rmp_serde::to_vec(record).unwrap())
+            .collect::<Vec<_>>();
+        let records_bytes = records
+            .iter()
+            .map(|record| rmp_serde::to_vec(record).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(seen_bytes, records_bytes);
         assert_eq!(seen[0].1.as_deref(), Some("lane"));
         drop(seen);
         assert_eq!(
@@ -1168,7 +1187,7 @@ mod chokepoint {
 
         let state = crate::refs::fresh_state_id();
         let result = plain.commit_and_publish(
-            &[vec![1u8, 2, 3]],
+            &[test_record()],
             &[RefUpdate::Thread {
                 name: ThreadName::new("feature"),
                 expected: RefExpectation::Missing,

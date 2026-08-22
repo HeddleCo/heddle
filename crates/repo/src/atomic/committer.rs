@@ -2,15 +2,15 @@
 //! The oplog-backed [`RefCommitter`] (heddle#330 write chokepoint).
 //!
 //! The write-side dual of [`OplogRefReconciler`](super::OplogRefReconciler):
-//! decodes the opaque `OpRecord` batch handed across the `refs`→`repo` seam and
-//! appends it to the file oplog (phase 4) before `RefManager` publishes the ref
-//! batch (phase 5). Defined in `repo` (which names `OpRecord`) and injected into
-//! `RefManager`, so `refs` keeps no `oplog` dependency.
+//! appends the typed `OpRecord` batch handed across the `refs`→`repo` seam to
+//! the file oplog (phase 4) before `RefManager` publishes the ref batch
+//! (phase 5). Defined in `repo` and injected into `RefManager`, so the oplog
+//! append stays next to the code that owns the file layout.
 
 use std::path::{Path, PathBuf};
 
 use objects::{
-    error::{HeddleError, Result},
+    error::Result,
     object::Principal,
 };
 use oplog::{OpLog, OpLogBackend, OpRecord};
@@ -32,17 +32,10 @@ impl OplogRefCommitter {
 }
 
 impl RefCommitter for OplogRefCommitter {
-    fn commit_records(&self, encoded_records: &[Vec<u8>], scope: Option<&str>) -> Result<()> {
-        if encoded_records.is_empty() {
+    fn commit_records(&self, records: &[OpRecord], scope: Option<&str>) -> Result<()> {
+        if records.is_empty() {
             return Ok(());
         }
-        let records = encoded_records
-            .iter()
-            .map(|bytes| {
-                rmp_serde::from_slice::<OpRecord>(bytes)
-                    .map_err(|e| HeddleError::Serialization(e.to_string()))
-            })
-            .collect::<Result<Vec<_>>>()?;
         // heddle#382 boundary: ref commit-and-publish is not an AtomicMutation
         // transaction and does not append a TransactionCommit marker. Commands
         // needing same-thread isolation must enter through an AtomicMutation
@@ -50,7 +43,7 @@ impl RefCommitter for OplogRefCommitter {
         // Fresh handle so the append reloads the current log under the write
         // lock; preserves the configured principal for attribution.
         let oplog = OpLog::new(&self.heddle_dir, self.principal.clone());
-        oplog.record_batch_scoped(records, scope)?;
+        oplog.record_batch_scoped(records.to_vec(), scope)?;
         Ok(())
     }
 }

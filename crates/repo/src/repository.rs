@@ -2761,16 +2761,10 @@ impl Repository {
         records: Vec<OpRecord>,
         ref_updates: &[RefUpdate],
     ) -> Result<()> {
-        let encoded = records
-            .iter()
-            .map(|record| {
-                rmp_serde::to_vec(record).map_err(|e| HeddleError::Serialization(e.to_string()))
-            })
-            .collect::<Result<Vec<_>>>()?;
         let scope = self.op_scope();
         let result = self
             .refs
-            .commit_and_publish(&encoded, ref_updates, Some(&scope));
+            .commit_and_publish(&records, ref_updates, Some(&scope));
         // The committer appended through a fresh `OpLog` handle (the `refs`→`repo`
         // seam), so this repository's own cached oplog handle is now stale.
         // Refresh it so a same-process read via `self.oplog()` observes the
