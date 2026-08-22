@@ -249,6 +249,7 @@ where
     config: RepoConfig,
     shallow: RwLock<ShallowInfo>,
     blob_hydrator: RwLock<Option<Arc<dyn BlobHydrator>>>,
+    signal_computer: RwLock<Option<Arc<dyn crate::signals::SignalComputer>>>,
     git_overlay_repo: RwLock<Option<SleyRepository>>,
     /// Live progress handle driven by long-running operations (tree
     /// materialization, and future streaming seams). Defaults to
@@ -302,6 +303,7 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
             config,
             shallow: RwLock::new(shallow),
             blob_hydrator: RwLock::new(None),
+            signal_computer: RwLock::new(None),
             git_overlay_repo: RwLock::new(None),
             progress: RwLock::new(Progress::null()),
         }
@@ -1788,6 +1790,17 @@ impl Repository {
     /// registered factory and re-install the hydrator automatically.
     pub fn set_blob_hydrator(&self, hydrator: Arc<dyn BlobHydrator>) {
         *self.blob_hydrator.write_or_poisoned() = Some(hydrator);
+    }
+
+    /// Register a capture-time risk-signal computer. Entry points opt in
+    /// once at startup; see [`crate::signals`] for the seam.
+    pub fn set_signal_computer(&self, computer: Arc<dyn crate::signals::SignalComputer>) {
+        *self.signal_computer.write_or_poisoned() = Some(computer);
+    }
+
+    /// The currently registered signal computer, if any.
+    pub fn signal_computer(&self) -> Option<Arc<dyn crate::signals::SignalComputer>> {
+        self.signal_computer.read_or_poisoned().clone()
     }
 
     /// The currently registered hydrator, if any.

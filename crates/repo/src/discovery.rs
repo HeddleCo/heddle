@@ -319,6 +319,7 @@ impl Repository {
             config,
             shallow: RwLock::new(ShallowInfo::load(&heddle_dir)?),
             blob_hydrator: RwLock::new(None),
+            signal_computer: RwLock::new(None),
             git_overlay_repo: RwLock::new(None),
             progress: RwLock::new(Progress::null()),
         };
@@ -400,6 +401,7 @@ impl Repository {
             config,
             shallow: RwLock::new(ShallowInfo::load(&heddle_dir)?),
             blob_hydrator: RwLock::new(None),
+            signal_computer: RwLock::new(None),
             git_overlay_repo: RwLock::new(None),
             progress: RwLock::new(Progress::null()),
         };

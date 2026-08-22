@@ -11,12 +11,14 @@
 //! Per-repo health metrics (per-signal fire rates) are in [`health`]. The
 //! high-level entry point is [`registry::run_all`].
 
+pub mod capture;
 pub mod config;
 pub mod health;
 pub mod modules;
 pub mod payload;
 pub mod registry;
 
+pub use capture::CaptureSignalComputer;
 pub use config::{
     InvariantAdjacencyConfig, NoveltyConfig, PatternDeviationConfig, ReviewSignalsConfig,
     SelfFlaggedUncertaintyConfig, TestReachabilityConfig,

@@ -74,12 +74,16 @@ pub use repository_symbol_graph_query::ResolvedSemanticEdgeSet;
 pub mod remote;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_semantic_context;
+pub mod signals;
+pub use repository::{PatternDeviationToml, ReviewConfig, ReviewSignalsToml};
+#[cfg(feature = "tree-sitter-symbols")]
+pub use repository_semantic_context::{CaptureSemanticContext, build_semantic_context};
+#[cfg(feature = "tree-sitter-symbols")]
+pub use repository_semantic_corpus::CORPUS_FILE_BUDGET;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_semantic_corpus;
 #[cfg(all(test, feature = "tree-sitter-symbols"))]
 mod repository_semantic_graph_e2e_tests;
-#[cfg(feature = "tree-sitter-symbols")]
-mod repository_signals;
 mod repository_state_visibility;
 #[cfg(all(test, feature = "tree-sitter-symbols"))]
 mod repository_symbol_graph_tests;
