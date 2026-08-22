@@ -10,6 +10,8 @@ use std::{
 };
 
 use chrono::Utc;
+#[cfg(feature = "git-overlay")]
+use objects::object::MarkerName;
 use objects::{
     error::{HeddleError, Result},
     fs_atomic::{enrich_fs_error, write_file_atomic},
@@ -17,8 +19,6 @@ use objects::{
     store::ObjectStore,
     worktree::WorktreeStatus,
 };
-#[cfg(feature = "git-overlay")]
-use objects::object::MarkerName;
 use oplog::OpRecord;
 use refs::Head;
 use rusqlite::{Connection, OpenFlags};

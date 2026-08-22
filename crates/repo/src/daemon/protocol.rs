@@ -6,14 +6,14 @@
 //! shipped on for ~6 months, deliberately kept that way so we don't
 //! have to reason about half-read messages or framing under restart.
 
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::{
     io::{BufRead, BufReader, Write},
     net::{Shutdown, TcpStream},
     path::Path,
     time::Duration,
 };
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
 
 use objects::error::HeddleError;
 use serde::{Serialize, de::DeserializeOwned};
