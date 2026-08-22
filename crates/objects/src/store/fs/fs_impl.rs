@@ -731,23 +731,32 @@ impl FsStore {
         id: &StateAttachmentId,
     ) -> Result<Option<StateAttachment>> {
         let path = state_attachment_path(&self.root, state, id);
-        let bytes = if let Some(bytes) = read_file_bytes(&path)? {
-            bytes.as_slice().to_vec()
-        } else if let Ok(manager) = self.pack_manager().read()
-            && let Some((ObjectType::StateAttachment, bytes)) =
+        let file_bytes = read_file_bytes(&path)?;
+        if let Some(bytes) = file_bytes.as_ref() {
+            let attachment: StateAttachment = rmp_serde::from_slice(bytes.as_slice())?;
+            return Self::validate_state_attachment(attachment, state, id).map(Some);
+        }
+        if let Ok(manager) = self.pack_manager().read()
+            && let Some((ObjectType::StateAttachment, pack_bytes)) =
                 manager.get_hashed_object(id.as_hash())?
         {
-            bytes
-        } else {
-            return Ok(None);
-        };
-        let attachment: StateAttachment = rmp_serde::from_slice(&bytes)?;
+            let attachment: StateAttachment = rmp_serde::from_slice(&pack_bytes)?;
+            return Self::validate_state_attachment(attachment, state, id).map(Some);
+        }
+        Ok(None)
+    }
+
+    fn validate_state_attachment(
+        attachment: StateAttachment,
+        state: &StateId,
+        id: &StateAttachmentId,
+    ) -> Result<StateAttachment> {
         if attachment.state_id != *state || attachment.id() != *id {
             return Err(HeddleError::InvalidObject(
                 "state attachment address does not match content".to_string(),
             ));
         }
-        Ok(Some(attachment))
+        Ok(attachment)
     }
 }
 
@@ -1491,10 +1500,13 @@ impl ObjectStore for FsStore {
                 .map(|tag| (ObjectType::AnnotatedTag, tag.encode_current_msgpack()))),
             PackObjectId::Hash(hash) => {
                 if let Some(blob) = self.get_blob(hash)? {
-                    return Ok(Some((ObjectType::Blob, blob.content().to_vec())));
+                    return Ok(Some((ObjectType::Blob, blob.into_content())));
                 }
-                if let Some(tree) = self.get_tree(hash)? {
-                    return Ok(Some((ObjectType::Tree, rmp_serde::to_vec_named(&tree)?)));
+                // Raw storage body: skips a full tree decode + re-encode on
+                // the pack-building path. Byte-compatible with `to_vec_named`
+                // (the receiver installs through `put_tree_serialized`).
+                if let Some(tree_data) = self.get_tree_serialized(hash)? {
+                    return Ok(Some((ObjectType::Tree, tree_data)));
                 }
                 if let Some(action) = self.get_action(&ActionId::from_hash(*hash))? {
                     return Ok(Some((
