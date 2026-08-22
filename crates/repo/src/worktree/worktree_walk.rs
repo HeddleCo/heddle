@@ -21,7 +21,9 @@ use crate::{
     worktree_index::{IndexEntry as CachedWorktreeEntry, IndexEntryKind as CachedEntryKind},
 };
 
-const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
+/// Per-blob capture cap shared with the mount's write-extent cap
+/// (`mount::core`), so a file servable over FUSE is always capturable.
+pub const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 
 #[derive(Debug)]
 pub(crate) struct WalkEntry<'a> {

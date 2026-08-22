@@ -5,15 +5,17 @@
 //! supports the full gitignore syntax: `*` / `**` globs, character
 //! classes (`[abc]`), `!` negation, leading `/` for root-anchored,
 //! trailing `/` for directory-only. See
-//! `crates/objects/src/worktree/worktree_ignore.rs` for the matcher
-//! contract documentation; this file mirrors the same rules but
-//! pre-compiles them once per walk instead of rebuilding for each
-//! path test.
+//! `crates/objects/src/worktree/worktree_ignore.rs` owns the matcher
+//! contract (and the shared pattern compiler); this wrapper keeps one
+//! compiled matcher per walk instead of rebuilding per path test.
 
 use std::path::{Path, PathBuf};
 
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use objects::{object::ContentHash, worktree::is_reserved_worktree_path};
+use ignore::gitignore::Gitignore;
+use objects::{
+    object::ContentHash,
+    worktree::{build_matcher as objects_build_matcher, is_reserved_worktree_path},
+};
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct WorktreeIgnoreMatcher {
@@ -37,7 +39,7 @@ pub(crate) struct WorktreeIgnoreMatcher {
 impl WorktreeIgnoreMatcher {
     pub(crate) fn new(patterns: &[String]) -> Self {
         Self {
-            matcher: Some(build_matcher(patterns)),
+            matcher: Some(objects_build_matcher(patterns)),
             raw_patterns: patterns.to_vec(),
             nested_worktree_exclusions: Vec::new(),
         }
@@ -122,28 +124,6 @@ impl WorktreeIgnoreMatcher {
         // different ignore semantics, and the untracked-cache layer
         // needs cache keys to reflect that.
         ContentHash::compute_typed("heddle.ignore", patterns.join("\0").as_bytes())
-    }
-}
-
-/// Build a `Gitignore` matcher from raw pattern strings, applying
-/// heddle's root-admin special-cases (`.heddle`, `.heddleignore`,
-/// `.git` become root-anchored `/.heddle`, etc.). See the matching
-/// helper in `objects::worktree::worktree_ignore`.
-fn build_matcher(patterns: &[String]) -> Gitignore {
-    let mut builder = GitignoreBuilder::new("");
-    for pattern in patterns {
-        let line = canonical_line(pattern);
-        let _ = builder.add_line(None, &line);
-    }
-    builder.build().unwrap_or_else(|_| Gitignore::empty())
-}
-
-fn canonical_line(pattern: &str) -> String {
-    match pattern {
-        ".heddle" => "/.heddle".to_string(),
-        ".heddleignore" => "/.heddleignore".to_string(),
-        ".git" => "/.git".to_string(),
-        other => other.to_string(),
     }
 }
 

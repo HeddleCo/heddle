@@ -104,7 +104,8 @@ const DEFAULT_SWEEP_INTERVAL: Option<Duration> = Some(Duration::from_secs(5));
 /// [`ContentAddressedMount::apply_truncate`]. Matches the 100 MiB cap in
 /// `repo::worktree_walk` so mount promotion cannot build blobs capture would
 /// reject anyway.
-pub(crate) const MAX_MOUNT_HOT_FILE_SIZE: u64 = 100 * 1024 * 1024;
+/// One source of truth with the walker's per-blob capture cap.
+pub(crate) use repo::worktree_walk::MAX_FILE_SIZE as MAX_MOUNT_HOT_FILE_SIZE;
 
 /// Reject wire offsets/sizes at the trust boundary before they reach
 /// `Vec::resize` (overflow panic or multi-TiB allocation abort).

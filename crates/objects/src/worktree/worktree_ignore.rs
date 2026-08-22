@@ -78,7 +78,10 @@ pub fn build_worktree_ignore(patterns: &[String]) -> WorktreeIgnoreMatcher {
 /// Build a `Gitignore` matcher from the given pattern strings,
 /// translating the root-admin special cases (`.heddle`,
 /// `.heddleignore`, `.git`) into root-anchored gitignore syntax.
-fn build_matcher(patterns: &[String]) -> Gitignore {
+/// Compile patterns with heddle's root-admin special cases applied.
+/// Shared by this crate's one-shot matcher and `repo`'s compiled-once
+/// walker matcher so both sides can never drift on ignore semantics.
+pub fn build_matcher(patterns: &[String]) -> Gitignore {
     // Root path is symbolic — paths fed to `matched` are interpreted
     // relative to it. Callers always pass repo-relative paths, so the
     // root just needs to be a stable, in-memory anchor.

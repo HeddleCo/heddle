@@ -3,8 +3,8 @@ use std::cell::Cell;
 use std::path::Path;
 
 use crate::blame::{
-    advance_file_blame_slice, prepare_file_blame, BlameLineMap, BlamePreparation,
-    BlameSliceAdvance, BlameSliceError, BlameSliceLimits,
+    BlameLineMap, BlamePreparation, BlameSliceAdvance, BlameSliceError, BlameSliceLimits,
+    advance_file_blame_slice, prepare_file_blame,
 };
 use crate::object::{
     Attribution, Blob, ContentHash, ObjectSource, Principal, State, StateId, Tree,
