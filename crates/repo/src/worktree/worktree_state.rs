@@ -6,7 +6,7 @@ use std::path::Path;
 use objects::fs_atomic::write_file_atomic;
 use serde::{Deserialize, Serialize};
 
-use super::Result;
+use crate::Result;
 
 /// Runtime state that belongs to a specific checkout/worktree, not repo config.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

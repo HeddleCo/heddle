@@ -28,9 +28,7 @@ mod discussion_anchor_travel;
 #[cfg(feature = "tree-sitter-symbols")]
 mod discussion_snapshot_travel;
 mod ephemeral_thread;
-mod fsmonitor;
 mod git_ref_name;
-pub mod git_worktree_status;
 mod grant_audience;
 mod hooks;
 pub mod identity;
@@ -96,7 +94,6 @@ mod session_storage;
 pub mod snapshot_metadata;
 pub mod staleness;
 mod stash;
-mod stat_signature;
 /// Re-export of the symbol resolver. The implementation lives in
 /// `crates/semantic/src/symbol_resolver.rs` so anchor-travel code in
 /// `objects`-adjacent modules can use it without depending on `repo`.
@@ -120,12 +117,14 @@ mod timeline_pack;
 mod timeline_store;
 mod timeline_view;
 pub mod visibility;
-mod worktree_ignore;
-pub mod worktree_index;
-mod worktree_state;
-mod worktree_status_options;
 
-pub mod worktree_walk;
+#[path = "worktree/mod.rs"]
+pub mod worktree;
+pub(crate) use worktree::{
+    fsmonitor, stat_signature, status_tracked_refresh, status_untracked_scan, worktree_ignore,
+    worktree_state,
+};
+pub use worktree::{git_worktree_status, worktree_index, worktree_status_options, worktree_walk};
 
 // Re-export commonly used types from underlying crates.
 pub use ci_runner_trust::{CiRunnerTrustEntry, CiRunnerTrustSet};
