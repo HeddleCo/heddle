@@ -3120,25 +3120,25 @@ as one; no `help advanced`).
   "command_contract_schema_coverage": {
     "accepted_opaque_schema_examples": [
       "help",
-      "ci run",
       "redact apply",
       "redact list",
       "redact show",
       "redact purge apply",
       "redact purge list",
-      "visibility set"
+      "visibility set",
+      "visibility promote"
     ],
     "accepted_opaque_schema_verbs_total": 39,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
-      "ci run",
       "redact apply",
       "redact list",
       "redact show",
       "redact purge apply",
       "redact purge list",
-      "visibility set"
+      "visibility set",
+      "visibility promote"
     ],
     "advanced_scope_json_commands_total": 100,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 39,

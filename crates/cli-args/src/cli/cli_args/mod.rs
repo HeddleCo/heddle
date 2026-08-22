@@ -5,6 +5,7 @@ mod cli_base;
 mod command_suggestions;
 mod commands_agent;
 mod commands_args;
+#[cfg(feature = "ci")]
 mod commands_ci;
 #[cfg(feature = "client")]
 mod commands_client;
@@ -50,6 +51,7 @@ pub use commands_args::{
     TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs, TimelineTargetArgs, UndoArgs,
     WatchArgs, WorkspaceModeArg,
 };
+#[cfg(feature = "ci")]
 pub use commands_ci::{CiCommands, CiRunArgs};
 #[cfg(feature = "client")]
 pub use commands_client::{AgentTemplateArg, AuthCommands, AuthTrustCommands, IdentityCommands};

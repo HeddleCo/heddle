@@ -20,6 +20,7 @@ weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim",
 
 [features]
 default = []
+ci = []
 client = []
 git-overlay = []
 ingest = []

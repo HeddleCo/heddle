@@ -26,6 +26,7 @@ struct RuntimeContractParseSample {
 const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["abort"], &["abort"]),
     sample(&["adopt"], &["adopt"]),
+    #[cfg(feature = "ci")]
     sample(&["ci", "run"], &["ci", "run", "--local"]),
     sample(
         &["agent", "presence", "list"],
@@ -2375,11 +2376,12 @@ fn op_id_persistence_reads_contract_table() {
 
 #[test]
 fn feature_gated_command_roots_are_catalog_owned() {
-    // These are the client-gated top-level roots: their clap
-    // variants are `#[cfg(feature = "client")]` and their catalog entries carry
-    // `feature_gate = "client"`. Any new feature-gated root MUST be listed here.
+    // These are the feature-gated top-level roots: `auth`/`identity`/
+    // `whoami` are `#[cfg(feature = "client")]`, `ci` is
+    // `#[cfg(feature = "ci")]`. Any new feature-gated root MUST be
+    // listed here.
     assert_eq!(
         feature_gated_command_roots(),
-        &["auth", "identity", "whoami"]
+        &["auth", "ci", "identity", "whoami"]
     );
 }

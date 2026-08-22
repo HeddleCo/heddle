@@ -10,6 +10,7 @@ mod agent_provenance;
 mod auto_capture;
 mod blame;
 mod checkpoint;
+#[cfg(feature = "ci")]
 mod ci;
 mod clone;
 mod collapse;
@@ -91,6 +92,7 @@ pub use agent_cmd::{
     agent_api_schema, cmd_agent_capture, cmd_agent_heartbeat, cmd_agent_list, cmd_agent_ready,
     cmd_agent_release, cmd_agent_reserve,
 };
+#[cfg(feature = "ci")]
 pub use ci::cmd_ci;
 #[cfg(feature = "client")]
 pub use clone::recover_interrupted_clone;

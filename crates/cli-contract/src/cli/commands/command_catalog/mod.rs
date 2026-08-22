@@ -1172,10 +1172,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
             210,
         ),
     ),
-    entry(&["ci"], surface(GROUP, "automation")),
+    entry(&["ci"], feature_gated(surface(GROUP, "automation"), "ci")),
     entry(
         &["ci", "run"],
-        surface(opaque_schemas(CI_RUN, &["ci run"]), "automation"),
+        feature_gated(
+            surface(opaque_schemas(CI_RUN, &["ci run"]), "automation"),
+            "ci",
+        ),
     ),
     entry(&["agent"], surface(GROUP, "automation")),
     entry(
@@ -4428,6 +4431,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             Some(DoctorCommands::Schemas(_)) => vec!["doctor", "schemas"],
         },
         Commands::Start(_) => vec!["start"],
+        #[cfg(feature = "ci")]
         Commands::Ci { command } => match command {
             heddle_cli_args::CiCommands::Run(_) => vec!["ci", "run"],
         },

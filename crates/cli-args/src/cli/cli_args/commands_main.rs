@@ -8,7 +8,7 @@ use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
-    AgentCommands, CiCommands, CompletionSubject, ContextCommands, DiscussCommands, HookCommands,
+    AgentCommands, CompletionSubject, ContextCommands, DiscussCommands, HookCommands,
     IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
     ShellCommands, ThreadCommands, VisibilityCommands,
     commands_args::{
@@ -159,9 +159,10 @@ Examples:
     Start(ThreadStartArgs),
 
     /// Run Heddle CI checks.
+    #[cfg(feature = "ci")]
     Ci {
         #[command(subcommand)]
-        command: CiCommands,
+        command: super::CiCommands,
     },
 
     /// Automation/workflow command: refresh the current thread onto its target when safe.

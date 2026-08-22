@@ -373,6 +373,14 @@ jobs:
           cargo check --locked -p heddle-repo --no-default-features --features native,zstd
           cargo check --locked -p heddle-cli --no-default-features --features git-overlay,client,semantic,zstd
           cargo check --locked -p heddle-cli --no-default-features --features native,semantic,zstd
+          # `ci` is non-default; compile the gated surface explicitly.
+          cargo check --locked -p heddle-cli --no-default-features --features ci
+          cargo check --locked -p heddle-cli --features ci
+
+      - name: CI feature tests
+        run: |
+          set -euo pipefail
+          cargo test --locked -p heddle-cli --features ci --test ci_run_local
 
       - name: Telemetry build, clippy, and tests
         run: |
@@ -806,9 +814,10 @@ jobs:
 
       # `--all-features` would enable `heddle-cli/weft-client`, which from
       # OSS resolves to the 0.0.0 reservation stub and won't compile.
-      # Cover the OSS feature set instead.
+      # Cover the OSS feature set instead; `ci` is included so the gated
+      # executor stays measured.
       - name: Generate coverage report
-        run: cargo llvm-cov --locked --workspace --features git-overlay,native,semantic,zstd --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked --workspace --features git-overlay,native,semantic,zstd,heddle-cli/ci --lcov --output-path lcov.info
 
       - name: Generate coverage summary
         run: cargo llvm-cov report --summary-only | tee coverage-summary.txt
