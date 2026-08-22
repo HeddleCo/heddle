@@ -3,8 +3,15 @@
 
 use anyhow::Result;
 use repo::{Repository, format_confidence};
-use serde::Serialize;
 use verbs::status::next_action::canonical_git_import_ref_command;
+
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types.
+pub use heddle_cli_contract::cli::commands::wire::history::{
+    ShowAgentInfo as AgentInfo, ShowImportGuidanceOutput, ShowOutput, ShowPrincipalInfo
+    as PrincipalInfo, ShowVerificationInfo as VerificationInfo,
+};
+
 
 use super::{
     action_line::{print_next_step, print_next_step_dim},
@@ -18,62 +25,10 @@ use crate::{
     config::UserConfig,
 };
 
-#[derive(Serialize)]
-struct ShowOutput {
-    output_kind: &'static str,
-    repository_capability: String,
-    storage_model: String,
-    state_id: String,
-    state_id_full: String,
-    content_hash: String,
-    tree: String,
-    parents: Vec<String>,
-    intent: Option<String>,
-    confidence: Option<f32>,
-    principal: PrincipalInfo,
-    agent: Option<AgentInfo>,
-    created_at: String,
-    status: String,
-    verification: Option<VerificationInfo>,
-    git_checkpoint: Option<String>,
-    /// Carried for the human-readable renderer only. Not part of the
-    /// JSON contract.
-    #[serde(skip)]
-    import_guidance: Option<ShowImportGuidanceOutput>,
-}
 
-#[derive(Serialize)]
-struct PrincipalInfo {
-    name: String,
-    email: String,
-}
 
-#[derive(Serialize)]
-struct AgentInfo {
-    provider: String,
-    model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    policy_id: Option<String>,
-}
 
-#[derive(Serialize)]
-struct VerificationInfo {
-    tests_passed: Option<bool>,
-    tests_failed: Option<u32>,
-    coverage_pct: Option<f32>,
-    coverage_delta: Option<f32>,
-    lint_warnings: Option<u32>,
-}
 
-#[derive(Serialize)]
-struct ShowImportGuidanceOutput {
-    current_branch: String,
-    missing_branch_count: usize,
-    missing_branches: Vec<String>,
-    recommended_command: String,
-}
 
 pub fn cmd_show(cli: &Cli, state_spec: Option<String>) -> Result<()> {
     cmd_show_with_output_kind(cli, state_spec, "show")

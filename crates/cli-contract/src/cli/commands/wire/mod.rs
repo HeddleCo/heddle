@@ -17,12 +17,19 @@
 
 pub mod core_loop;
 pub mod land;
+pub mod history;
 pub mod operator;
 pub mod ready;
 
 pub use land::{
     LandBlockerCheck, LandBlockerCode, LandBlockerDetail, LandBlockerStateContext, LandOutput,
     MultiLandOutput, MultiLandPeerResult, SiblingRestackFailure, SyncOutput,
+};
+pub use history::{
+    BlameLine, BlameOrigin, BlameOutput, CollapsedLandOutput, ContextSnippet,
+    ExpandedCaptureOutput, ExpandOutput, MarkerBulkDeleteOutput, MarkerEntry, MarkerListOutput,
+    MarkerOpOutput, PrincipalInfo, RevertOutput, ShowAgentInfo, ShowImportGuidanceOutput,
+    ShowOutput, ShowPrincipalInfo, ShowVerificationInfo,
 };
 pub use core_loop::{CommitOutput, SnapshotAgentOutput, SnapshotOutput, SnapshotPrincipalOutput, UndoRedoOutput};
 pub use operator::{

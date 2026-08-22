@@ -25,6 +25,8 @@ use verbs::{
 use super::command_catalog;
 use super::init_output::InitOutput;
 use super::wire::{
+    BlameLine as _, BlameOutput, ExpandOutput, MarkerBulkDeleteOutput, MarkerListOutput,
+    MarkerOpOutput, RevertOutput, ShowOutput,
     CommitOutput, LandOutput, MultiLandOutput, OperatorCommandOutput, ReadyOutput, SnapshotOutput,
     SyncOutput, UndoRedoOutput,
 };
@@ -100,8 +102,9 @@ schema_registry! {
     (&["thread revoke-approval"], ThreadRevokeApprovalSchema),
     (&["thread check-merge"], ThreadMergeEligibilitySchema),
     (&["thread cleanup"], ThreadCleanupSchema),
-    (&["thread marker list"], ThreadMarkerListSchema),
-    (&["thread marker create", "thread marker delete", "thread marker show"], ThreadMarkerOpSchema),
+    (&["thread marker list"], MarkerListOutput),
+    (&["thread marker create", "thread marker show"], MarkerOpOutput),
+    (&["thread marker delete"], MarkerBulkDeleteOutput),
     (&["thread show"], ThreadShowSchema),
     (&["clone"], CloneSchema),
     (&["remote list"], RemoteListReport),
@@ -109,14 +112,14 @@ schema_registry! {
     (&["remote add", "remote remove", "remote set-default"], RemoteMutationSchema),
     (&["pull"], PullSchema),
     (&["push"], PushSchema),
-    (&["thread expand"], ExpandSchema),
+    (&["thread expand"], ExpandOutput),
     (&["log"], LogSchema),
     (&["log --reflog"], LogReflogSchema),
     (&["log --timeline"], TimelineLogSchema),
     (&["agent timeline status"], TimelineStatusSchema),
     (&["agent timeline record-start", "agent timeline record-finish"], TimelineRecordingSchema),
     (&["agent timeline fork", "agent timeline reset", "agent timeline recover"], TimelineActionSchema),
-    (&["show"], ShowSchema),
+    (&["show"], ShowOutput),
     (&["thread list"], ThreadListSchema),
     (&["review show"], ReviewShowSchema),
     (&["review sign"], ReviewSignSchema),
@@ -125,11 +128,11 @@ schema_registry! {
     (&["discuss open", "discuss append", "discuss resolve", "discuss reopen"], DiscussionWriteSchema),
     (&["discuss show"], DiscussionShowSchema),
     (&["discuss list"], DiscussionListSchema),
-    (&["query --attribution"], BlameSchema),
+    (&["query --attribution"], BlameOutput),
     (&["bridge git export"], ExportGitSchema),
     (&["bridge git import"], ImportGitSchema),
     (&["sync git"], SyncGitSchema),
-    (&["revert"], RevertSchema),
+    (&["revert"], RevertOutput),
     (&["doctor"], DoctorSchema),
     (&["doctor docs"], DoctorDocsSchema),
     (&["doctor schemas"], DoctorSchemasSchema),
@@ -734,68 +737,6 @@ pub struct MaintenanceRepackSchema {
 
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct BlameSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub file: String,
-    pub context: Vec<BlameContextSnippetSchema>,
-    pub lines: Vec<BlameLineSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BlameLineSchema {
-    pub line_number: usize,
-    pub content: String,
-    pub state_id: String,
-    pub principal: BlamePrincipalSchema,
-    pub agent: Option<BlameAgentSchema>,
-    pub timestamp: String,
-    pub origins: Option<Vec<BlameOriginSchema>>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BlameOriginSchema {
-    pub state_id: String,
-    pub principal: BlamePrincipalSchema,
-    pub agent: Option<BlameAgentSchema>,
-    pub timestamp: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BlamePrincipalSchema {
-    pub name: String,
-    pub email: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BlameAgentSchema {
-    pub provider: String,
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy_id: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BlameContextSnippetSchema {
-    pub annotation_id: String,
-    pub kind: String,
-    pub content: String,
-    pub revision_count: usize,
-}
-
-#[allow(dead_code, clippy::large_enum_variant)]
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(untagged)]
-pub enum InspectSchema {
-    #[allow(dead_code)]
-    State(ShowSchema),
-    #[allow(dead_code)]
-    Thread(ThreadShowSchema),
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct DiscussionSchema {
     pub id: String,
     pub title: String,
@@ -1020,28 +961,6 @@ pub struct ThreadCleanupSkippedSchema {
     pub id: String,
     pub reason: String,
     pub note: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadMarkerListSchema {
-    pub output_kind: String,
-    pub markers: Vec<ThreadMarkerEntrySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadMarkerEntrySchema {
-    pub name: String,
-    pub state_id: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadMarkerOpSchema {
-    pub output_kind: String,
-    pub name: Option<String>,
-    pub state_id: Option<String>,
-    pub deleted: Option<Vec<ThreadMarkerEntrySchema>>,
-    pub count: Option<usize>,
-    pub message: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1973,37 +1892,6 @@ pub struct TimelineActionSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct ExpandSchema {
-    pub output_kind: String,
-    pub status: String,
-    pub requested: String,
-    pub collapsed: ExpandedCollapseSchema,
-    pub captures: Vec<ExpandedCaptureSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ExpandedCollapseSchema {
-    pub state_id: String,
-    pub state_id_full: String,
-    pub git_commit: Option<String>,
-    pub thread: Option<String>,
-    pub source_count: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ExpandedCaptureSchema {
-    pub state_id: String,
-    pub state_id_full: String,
-    pub content_hash: String,
-    pub intent: Option<String>,
-    pub principal: String,
-    pub agent: Option<String>,
-    pub confidence: Option<f32>,
-    pub created_at: String,
-    pub parents: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct LogReflogSchema {
     pub output_kind: Option<String>,
     pub status: Option<String>,
@@ -2024,42 +1912,6 @@ pub struct ReflogEntrySchema {
 }
 
 // ---- show -----------------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ShowSchema {
-    pub output_kind: String,
-    pub repository_capability: String,
-    pub storage_model: String,
-    pub state_id: String,
-    pub state_id_full: String,
-    pub content_hash: String,
-    pub tree: String,
-    pub parents: Vec<String>,
-    pub intent: Option<String>,
-    pub confidence: Option<f32>,
-    pub principal: ShowPrincipalSchema,
-    pub agent: Option<ShowAgentSchema>,
-    pub created_at: String,
-    pub status: String,
-    pub verification: OpaqueObject,
-    pub git_checkpoint: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ShowPrincipalSchema {
-    pub name: String,
-    pub email: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ShowAgentSchema {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy_id: Option<String>,
-}
 
 // ---- thread list ----------------------------------------------------------
 
@@ -2348,15 +2200,6 @@ pub struct SyncGitSchema {
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RevertSchema {
-    pub output_kind: String,
-    pub state_id: Option<String>,
-    pub reverted_state: String,
-    pub files_affected: Vec<String>,
-    pub message: String,
 }
 
 // ---- git overlay diagnostics ---------------------------------------------

@@ -4,12 +4,14 @@
 use anyhow::{Result, anyhow};
 use objects::{object::MarkerName, store::ObjectStore};
 use repo::Repository;
-use serde::Serialize;
 use verbs::{
-    MarkerDeleteSelector, MarkerDeleteSelectorError, marker_bulk_delete_message,
-    marker_create_message, marker_delete_message, marker_list_filter_matches,
-    marker_prefix_is_valid, plan_marker_delete_selector,
+    marker_bulk_delete_message, marker_create_message, marker_delete_message,
+    marker_list_filter_matches, marker_prefix_is_valid, plan_marker_delete_selector,
+    MarkerDeleteSelector, MarkerDeleteSelectorError,
 };
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::history::{MarkerListOutput, MarkerEntry, MarkerOpOutput, MarkerBulkDeleteOutput};
 
 use super::{
     advice::RecoveryAdvice,
@@ -21,36 +23,9 @@ use crate::{
     config::UserConfig,
 };
 
-#[derive(Serialize)]
-struct MarkerListOutput {
-    output_kind: &'static str,
-    markers: Vec<MarkerEntry>,
-}
 
-#[derive(Serialize)]
-struct MarkerEntry {
-    name: String,
-    /// Short change-id of the state the marker points at.
-    state_id: String,
-}
 
-#[derive(Serialize)]
-struct MarkerOpOutput {
-    output_kind: &'static str,
-    name: String,
-    /// Short change-id of the state the marker pointed at after the op.
-    /// `None` for ops that delete the marker.
-    state_id: Option<String>,
-    message: String,
-}
 
-#[derive(Serialize)]
-struct MarkerBulkDeleteOutput {
-    output_kind: &'static str,
-    deleted: Vec<MarkerEntry>,
-    count: usize,
-    message: String,
-}
 
 pub fn cmd_thread_marker(
     cli: &Cli,

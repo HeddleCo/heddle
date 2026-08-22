@@ -1106,8 +1106,10 @@ verification.
 ```json
 {
   "output_kind": "thread_marker_delete",
-  "name": "verified-parser",
-  "state_id": null,
+  "deleted": [
+    {"name": "verified-parser", "state_id": "hc-def456"}
+  ],
+  "count": 1,
   "message": "Deleted marker 'verified-parser'"
 }
 ```

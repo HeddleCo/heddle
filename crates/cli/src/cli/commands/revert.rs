@@ -3,10 +3,14 @@
 
 use std::fs;
 
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::history::RevertOutput;
+
+
 use anyhow::{Result, anyhow};
 use objects::object::{Attribution, ChangeLineage, ChangeLineageKind, FileChangeSet, Tree};
 use repo::{DiffKind, Repository};
-use serde::Serialize;
 use verbs::{
     RevertMessageMode, RevertOutcome, RevertPlan, RevertSuccessFacts,
     default_revert_commit_message, no_changes_to_revert_kind, no_changes_to_revert_summary,
@@ -21,14 +25,6 @@ use super::{
 };
 use crate::cli::{Cli, should_output_json};
 
-#[derive(Serialize)]
-struct RevertOutput {
-    output_kind: &'static str,
-    state_id: Option<String>,
-    reverted_state: String,
-    files_affected: Vec<String>,
-    message: String,
-}
 
 pub fn cmd_revert(
     cli: &Cli,
