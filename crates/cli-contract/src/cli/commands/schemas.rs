@@ -14,10 +14,10 @@
 use std::{collections::BTreeMap, sync::OnceLock};
 
 use anyhow::{Result, anyhow};
-use verbs::{DiffReport, FsckReport, QueryReport, ResolveReport, StatusReport, VerifyReport};
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
+use verbs::{DiffReport, FsckReport, QueryReport, ResolveReport, StatusReport, VerifyReport};
 
 use super::{RecoveryAdvice, command_catalog, init_output::InitOutput};
 use crate::cli::{Cli, INIT_VERB, should_output_json};

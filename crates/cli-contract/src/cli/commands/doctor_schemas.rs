@@ -23,6 +23,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use serde::Serialize;
+use serde_json::Value;
+use sley::Repository as SleyRepository;
 use verbs::doctor_schemas_plan::{
     DocSample, SchemaCoverageBlockingFacts, collect_coverage_field_drifts,
     coverage_has_no_blocking_schema_gaps as coverage_gaps_clean, doctor_schemas_json_sample_span,
@@ -30,9 +33,6 @@ use verbs::doctor_schemas_plan::{
     extract_samples, sample_matches_verb_with_hints, schema_allows_additional_properties,
     schema_property_keys, top_level_keys,
 };
-use serde::Serialize;
-use serde_json::Value;
-use sley::Repository as SleyRepository;
 
 use super::{
     advice::RecoveryAdvice,

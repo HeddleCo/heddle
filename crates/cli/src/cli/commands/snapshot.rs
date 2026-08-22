@@ -4,10 +4,6 @@
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
-use verbs::{
-    GitScope, MachineContractInput, SavePlan, SaveVerb, execute_save, large_capture_requires_force,
-    principal_lacks_accountable_identity,
-};
 use heddle_git_projection::GitProjection;
 use objects::{
     lock::RepositoryLockExt,
@@ -17,6 +13,10 @@ use objects::{
 };
 use refs::Head;
 use repo::{Repository, RepositoryCapability, SessionManager, SnapshotProfile, format_confidence};
+use verbs::{
+    GitScope, MachineContractInput, SavePlan, SaveVerb, execute_save, large_capture_requires_force,
+    principal_lacks_accountable_identity,
+};
 // Re-export the helper derivations so existing CLI call sites
 // (`thread.rs`, `harness/mod.rs`) keep `super::snapshot::summarize_*`
 // imports working without churn. The implementations live in

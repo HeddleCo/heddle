@@ -21,13 +21,6 @@ use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use verbs::retro_plan::{
-    DEFAULT_FALLBACK_WINDOW_HOURS, MAX_OPLOG_BATCHES, agent_task_window_overlaps,
-    agent_window_overlaps, choose_default_since_ts, context_annotation_in_window,
-    display_free_text, duration_secs as plan_duration_secs, excerpt, is_turn_boundary_intent,
-    is_verify_fail_marker, is_verify_pass_signal, retro_header_line, short_state_id,
-    timeline_step_in_window,
-};
 use objects::{
     object::{State, StateId},
     store::{
@@ -37,6 +30,13 @@ use objects::{
 use oplog::OpRecord;
 use repo::{Repository, TimelineStore, TimelineView};
 use serde::Serialize;
+use verbs::retro_plan::{
+    DEFAULT_FALLBACK_WINDOW_HOURS, MAX_OPLOG_BATCHES, agent_task_window_overlaps,
+    agent_window_overlaps, choose_default_since_ts, context_annotation_in_window,
+    display_free_text, duration_secs as plan_duration_secs, excerpt, is_turn_boundary_intent,
+    is_verify_fail_marker, is_verify_pass_signal, retro_header_line, short_state_id,
+    timeline_step_in_window,
+};
 
 use super::history_target::resolve_state_id;
 use crate::cli::{Cli, should_output_json};

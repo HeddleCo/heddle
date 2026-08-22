@@ -232,10 +232,14 @@ mod tests {
         fn update_refs(&self, updates: &[RefUpdate]) -> Result<(), HeddleError> {
             for update in updates {
                 match update {
-                    RefUpdate::Thread { name, new: Some(_), .. } => {
+                    RefUpdate::Thread {
+                        name, new: Some(_), ..
+                    } => {
                         require_user_ref_name(name.as_str())?;
                     }
-                    RefUpdate::Marker { name, new: Some(_), .. } => {
+                    RefUpdate::Marker {
+                        name, new: Some(_), ..
+                    } => {
                         require_user_ref_name(name.as_str())?;
                     }
                     RefUpdate::Head {

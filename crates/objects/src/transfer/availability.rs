@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
-
-use crate::{ObjectId, ObjectInfo, ObjectType, Result};
+use crate::{
+    error::Result,
+    store::ObjectStore,
+    transfer::graph::{ObjectId, ObjectInfo, ObjectType},
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjectAvailabilityPlan {
@@ -69,7 +71,7 @@ impl ObjectAvailabilityPlan {
 
 #[cfg(test)]
 mod tests {
-    use objects::{
+    use crate::{
         object::{Blob, ContentHash, StateId, Tree},
         store::{ObjectStore, Result as StoreResult},
     };
@@ -107,11 +109,11 @@ mod tests {
             Ok(false)
         }
 
-        fn get_state(&self, _id: &StateId) -> StoreResult<Option<objects::object::State>> {
+        fn get_state(&self, _id: &StateId) -> StoreResult<Option<crate::object::State>> {
             Ok(None)
         }
 
-        fn put_state(&self, _state: &objects::object::State) -> StoreResult<()> {
+        fn put_state(&self, _state: &crate::object::State) -> StoreResult<()> {
             unreachable!("not used in test")
         }
 
@@ -125,19 +127,19 @@ mod tests {
 
         fn get_action(
             &self,
-            _id: &objects::object::ActionId,
-        ) -> StoreResult<Option<objects::object::Action>> {
+            _id: &crate::object::ActionId,
+        ) -> StoreResult<Option<crate::object::Action>> {
             Ok(None)
         }
 
         fn put_action(
             &self,
-            _action: &mut objects::object::Action,
-        ) -> StoreResult<objects::object::ActionId> {
+            _action: &mut crate::object::Action,
+        ) -> StoreResult<crate::object::ActionId> {
             unreachable!("not used in test")
         }
 
-        fn list_actions(&self) -> StoreResult<Vec<objects::object::ActionId>> {
+        fn list_actions(&self) -> StoreResult<Vec<crate::object::ActionId>> {
             Ok(vec![])
         }
 

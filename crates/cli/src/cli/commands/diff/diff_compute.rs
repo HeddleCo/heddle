@@ -4,12 +4,12 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
+use objects::worktree::WorktreeStatus;
+use repo::{Config, Repository, RepositoryCapability, discover_heddle_root};
 use verbs::{
     DiffOptions, DiffReport, PlainGitDiffProbe, diff as core_diff, diff_worktree_status,
     plain_git_head_diff,
 };
-use objects::worktree::WorktreeStatus;
-use repo::{Config, Repository, RepositoryCapability, discover_heddle_root};
 
 use super::{
     super::{
@@ -155,7 +155,10 @@ pub fn cmd_diff(
     }
 
     let config = UserConfig::load_default().unwrap_or_default();
-    let fsmonitor_mode = config.worktree_status_options(Some(repo.config())).fsmonitor.mode;
+    let fsmonitor_mode = config
+        .worktree_status_options(Some(repo.config()))
+        .fsmonitor
+        .mode;
     let ctx = verbs::ExecutionContext::builder()
         .repo(repo)
         .start_path(start.to_path_buf())

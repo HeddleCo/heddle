@@ -4,7 +4,6 @@
 use std::{collections::HashMap, path::Path};
 
 use anyhow::{Result, anyhow};
-use verbs::{fit_author as core_fit_author, summarize_context_line};
 use objects::{
     object::{
         AnnotationStatus, Attribution, ContentHash, ContextTarget, FileProvenance, ProvenanceError,
@@ -14,6 +13,7 @@ use objects::{
 };
 use repo::Repository;
 use serde::Serialize;
+use verbs::{fit_author as core_fit_author, summarize_context_line};
 
 use super::{
     advice::RecoveryAdvice,

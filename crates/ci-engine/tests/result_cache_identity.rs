@@ -3,8 +3,8 @@
 use std::{collections::BTreeMap, path::Path};
 
 use ci_engine::{
-    run_checks_with, ExecutionContext, FsResultCache, HermeticEnv, MemoryResultCache, NoopProvider,
-    ResultCache, RunControls, RunOptions, SpotCheck,
+    ExecutionContext, FsResultCache, HermeticEnv, MemoryResultCache, NoopProvider, ResultCache,
+    RunControls, RunOptions, SpotCheck, run_checks_with,
 };
 use crypto::{Basis, BasisKind, CheckClass, StateRef};
 

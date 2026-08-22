@@ -3,8 +3,8 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
-use chrono::{DateTime, Utc};
 use crate::object::{Attribution, ContentHash, OperationId, Principal, StateId, VisibilityTier};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// How a conflict was resolved.

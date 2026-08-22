@@ -2742,7 +2742,6 @@ dependencies = [
  "blake3",
  "chrono",
  "heddle-objects",
- "heddle-repo",
  "rmp-serde",
  "serde",
  "sley",

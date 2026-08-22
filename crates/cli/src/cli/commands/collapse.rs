@@ -4,11 +4,11 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use verbs::{CollapsePlan, plan_collapse};
 use objects::object::{ChangeLineage, ChangeLineageKind, State, StateId, ThreadName};
 use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
 use serde::Serialize;
+use verbs::{CollapsePlan, plan_collapse};
 
 use super::{
     advice::RecoveryAdvice,

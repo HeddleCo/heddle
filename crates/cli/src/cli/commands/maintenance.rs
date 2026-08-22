@@ -2,12 +2,12 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
 use anyhow::Result;
-use verbs::maintenance_plan::{MaintenanceInspectView, MaintenanceRefreshView};
 use objects::store::{
     AnyStore, FsRepackOperation, RepackPolicy, RepackResourceLimits, RepackSchedule,
     RepackScheduler,
 };
 use serde::Serialize;
+use verbs::maintenance_plan::{MaintenanceInspectView, MaintenanceRefreshView};
 
 use crate::cli::{
     Cli, FsckCommands, FsckRepairCommands, MaintenanceCommands,

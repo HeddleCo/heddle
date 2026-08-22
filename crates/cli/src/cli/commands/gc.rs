@@ -12,14 +12,6 @@
 //! output makes the invariant visible to operators.
 
 use anyhow::Result;
-use verbs::{
-    gc_plan::{
-        gc_consolidated_mirror_message, gc_dry_run_messages, gc_pack_message,
-        gc_preserved_redactions_message, gc_prune_loose_message, gc_pruned_git_mapping_message,
-        gc_status_token, plan_gc_dry_run,
-    },
-    maintenance_plan::{pack_install_recover_line, unpaired_packs_pruned_line},
-};
 #[cfg(feature = "git-overlay")]
 use heddle_git_projection::GitProjection;
 use objects::store::{
@@ -28,6 +20,14 @@ use objects::store::{
 };
 use repo::TimelineStore;
 use serde::Serialize;
+use verbs::{
+    gc_plan::{
+        gc_consolidated_mirror_message, gc_dry_run_messages, gc_pack_message,
+        gc_preserved_redactions_message, gc_prune_loose_message, gc_pruned_git_mapping_message,
+        gc_status_token, plan_gc_dry_run,
+    },
+    maintenance_plan::{pack_install_recover_line, unpaired_packs_pruned_line},
+};
 
 use crate::cli::{Cli, render::write_json_stdout, should_output_json};
 

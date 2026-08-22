@@ -37,12 +37,12 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
+use repo::{Repository, ThreadManager, shell_quote};
+use serde::Serialize;
 use verbs::try_plan::{
     TrySuccessMessageFacts, display_cmd, format_try_thread_name, plan_try_drop_outcome,
     try_exit_label, try_failed_message, try_success_message, try_thread_name_collision_kind,
 };
-use repo::{Repository, ThreadManager, shell_quote};
-use serde::Serialize;
 
 use super::{
     action_line::print_next,

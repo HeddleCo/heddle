@@ -4,16 +4,16 @@
 use std::fs;
 
 use anyhow::{Context, Result, anyhow};
-use verbs::{
-    ConflictRegionReport, ConflictResolutionReport, ResolveReport,
-    contains_line_start_conflict_markers, path_is_active_conflict, unresolved_conflict_paths,
-};
 use objects::{
     object::{Attribution, StructuredConflict},
     store::ObjectStore,
 };
 use oplog::{ConflictResolutionMode, OpLogBackend, OpRecord};
 use repo::{MergeState, Repository};
+use verbs::{
+    ConflictRegionReport, ConflictResolutionReport, ResolveReport,
+    contains_line_start_conflict_markers, path_is_active_conflict, unresolved_conflict_paths,
+};
 
 use super::{action_line::print_next_step, advice::RecoveryAdvice, snapshot::resolve_attribution};
 use crate::{

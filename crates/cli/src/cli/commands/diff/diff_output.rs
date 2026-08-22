@@ -814,9 +814,7 @@ fn semantic_path(change: &SemanticChangeEntry) -> String {
 
 #[cfg(test)]
 mod tests {
-    use verbs::{
-        LineDiff, SemanticChangeEntry, change_line_counts, should_render_modified_pair,
-    };
+    use verbs::{LineDiff, SemanticChangeEntry, change_line_counts, should_render_modified_pair};
 
     use super::{
         SIGNATURE_CHANGE_SEPARATOR, aligned_added_tokens, group_semantic_changes, paint_line,

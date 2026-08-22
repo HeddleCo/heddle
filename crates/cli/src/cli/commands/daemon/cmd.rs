@@ -17,6 +17,10 @@
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use repo::daemon::{
+    MountDaemonRequest, MountDaemonResponse, load_endpoint, mount_daemon_endpoint_path, pid_alive,
+};
+use serde::Serialize;
 use verbs::daemon_plan::{
     daemon_health_failed_kind, daemon_materialized_thread_line, daemon_materialized_threads_header,
     daemon_not_running_status_token, daemon_running_status_token, daemon_short_tree,
@@ -24,10 +28,6 @@ use verbs::daemon_plan::{
     daemon_stop_not_running_line, daemon_stop_status_token, daemon_stop_stopped_line,
     daemon_unexpected_response_kind,
 };
-use repo::daemon::{
-    MountDaemonRequest, MountDaemonResponse, load_endpoint, mount_daemon_endpoint_path, pid_alive,
-};
-use serde::Serialize;
 
 use super::client::{rpc, sweep_stale_mounts};
 use crate::cli::{

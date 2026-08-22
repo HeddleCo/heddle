@@ -2,8 +2,8 @@
 //! Fsck command - verify repository integrity.
 
 use anyhow::{Result, anyhow};
-use verbs::{FsckOptions, FsckRepair, fsck};
 use repo::RepositorySourceAuthority;
+use verbs::{FsckOptions, FsckRepair, fsck};
 
 use super::advice::RecoveryAdvice;
 use crate::cli::{Cli, execution_context_from_cli, render, should_output_json};

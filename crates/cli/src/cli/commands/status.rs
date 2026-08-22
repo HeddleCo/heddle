@@ -10,13 +10,6 @@ use std::{
 use anyhow::Result;
 #[cfg(feature = "client")]
 use futures::{SinkExt, StreamExt};
-use verbs::{
-    ChangesInfo, CoordinationStatus, FastShortStatusReport, GitIndexPlan as CoreGitIndexPlan,
-    MachineContractInput, MaterializedThreadInfo, PlainGitStatusReport, StatusDetail,
-    StatusOptions, StatusReport as StatusOutput, changes_paths, coordination_label,
-    fast_short_status_report, human_thread_health, plain_git_status_report, status as core_status,
-    status_combined_verdict,
-};
 use repo::{
     RepoConfig, Repository, ThreadFreshness, ThreadMode, ThreadState, WorktreeCompareProfile,
     discover_heddle_root,
@@ -32,6 +25,13 @@ use tokio_tungstenite::tungstenite::{
     client::IntoClientRequest, http::header::AUTHORIZATION, protocol::Message,
 };
 use tracing::debug;
+use verbs::{
+    ChangesInfo, CoordinationStatus, FastShortStatusReport, GitIndexPlan as CoreGitIndexPlan,
+    MachineContractInput, MaterializedThreadInfo, PlainGitStatusReport, StatusDetail,
+    StatusOptions, StatusReport as StatusOutput, changes_paths, coordination_label,
+    fast_short_status_report, human_thread_health, plain_git_status_report, status as core_status,
+    status_combined_verdict,
+};
 
 use super::{
     action_line::print_command,
@@ -1657,13 +1657,13 @@ mod tests {
     use std::fs;
 
     use clap::Parser as _;
+    use repo::{AgentUsageSummary, Repository, ThreadMode};
+    use serde_json::Value;
+    use tempfile::TempDir;
     use verbs::{
         ActorInfo, ChangesInfo, PlainGitStatusReport, RepositoryVerificationState,
         repository_mode_label,
     };
-    use repo::{AgentUsageSummary, Repository, ThreadMode};
-    use serde_json::Value;
-    use tempfile::TempDir;
 
     use super::{
         MaterializedThreadInfo, assess_materialized_threads, build_status_output,

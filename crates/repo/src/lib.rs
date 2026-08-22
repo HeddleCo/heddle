@@ -73,6 +73,7 @@ mod repository_symbol_graph_frontier;
 mod repository_symbol_graph_load;
 mod repository_symbol_graph_query;
 pub use repository_symbol_graph_query::ResolvedSemanticEdgeSet;
+pub mod remote;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_semantic_context;
 #[cfg(feature = "tree-sitter-symbols")]
@@ -81,7 +82,6 @@ mod repository_semantic_corpus;
 mod repository_semantic_graph_e2e_tests;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_signals;
-pub mod remote;
 mod repository_state_visibility;
 #[cfg(all(test, feature = "tree-sitter-symbols"))]
 mod repository_symbol_graph_tests;

@@ -1,8 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
-use objects::{error::HeddleError, object::{MarkerName, StateId, ThreadName}};
-use uuid::Uuid;
+use objects::{
+    error::HeddleError,
+    object::{MarkerName, StateId, ThreadName},
+};
 use sqlx::{AssertSqlSafe, Executor, PgPool, postgres::PgPoolOptions};
+use uuid::Uuid;
 
 use super::*;
 
