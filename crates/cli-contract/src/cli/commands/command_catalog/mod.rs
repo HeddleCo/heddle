@@ -333,15 +333,6 @@ struct CommandContract {
     surface: &'static str,
     help_visibility: &'static str,
     help_rank: u16,
-    /// Area grouping for the `heddle help advanced` listing (heddle#652).
-    /// Only meaningful on native-surface root commands with an advanced
-    /// help visibility; commands on the `automation` / `admin` /
-    /// `git_projection` surfaces derive their group from the surface itself
-    /// (see [`advanced_help_groups`]). The
-    /// `advanced_help_groups_cover_every_advanced_verb` test forces
-    /// every advanced native root command to pick one, so the grouped
-    /// help can never silently grow an uncategorized verb.
-    help_category: Option<&'static str>,
     canonical_command: Option<&'static str>,
     canonical_kind: Option<&'static str>,
     canonical_note: Option<&'static str>,
@@ -724,7 +715,6 @@ const READ_JSON: CommandContract = CommandContract {
     surface: "native",
     help_visibility: "advanced",
     help_rank: 1000,
-    help_category: None,
     canonical_command: None,
     canonical_kind: None,
     canonical_note: None,
@@ -1096,16 +1086,6 @@ const fn user_scoped(contract: CommandContract) -> CommandContract {
     }
 }
 
-/// Assign the `heddle help advanced` area group for a native-surface
-/// advanced root command (heddle#652). See [`advanced_help_groups`] for
-/// the recognized ids and their display titles.
-const fn category(contract: CommandContract, help_category: &'static str) -> CommandContract {
-    CommandContract {
-        help_category: Some(help_category),
-        ..contract
-    }
-}
-
 const fn feature_gated(contract: CommandContract, feature_gate: &'static str) -> CommandContract {
     CommandContract {
         feature_gate: Some(feature_gate),
@@ -1169,13 +1149,11 @@ const fn advertised_action(
 const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["abort"],
-        category(
+        
             json_discriminators(
                 documented_schemas(operator_envelope(compact_json(REF_MUTATION)), &["abort"]),
                 &[json_discriminator(Some("abort"), "output_kind", "abort")],
             ),
-            "recovery",
-        ),
     ),
     entry(
         &["adopt"],
@@ -1435,7 +1413,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["auth"],
-        category(feature_gated(user_scoped(GROUP), "client"), "repo"),
+        feature_gated(user_scoped(GROUP), "client"),
     ),
     entry(
         &["auth", "login"],
@@ -1471,7 +1449,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["auth", "trust"],
-        category(feature_gated(user_scoped(GROUP), "client"), "repo"),
+        feature_gated(user_scoped(GROUP), "client"),
     ),
     entry(
         &["auth", "trust", "show"],
@@ -1527,7 +1505,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["identity"],
-        category(feature_gated(user_scoped(GROUP), "client"), "repo"),
+        feature_gated(user_scoped(GROUP), "client"),
     ),
     entry(
         &["identity", "ensure"],
@@ -1567,7 +1545,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["whoami"],
         front_door(
-            category(
+            
                 feature_gated(
                     json_discriminators(
                         documented_schemas(READ_JSON, &["whoami"]),
@@ -1575,8 +1553,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     ),
                     "client",
                 ),
-                "repo",
-            ),
             190,
         ),
     ),
@@ -1643,7 +1619,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["capture"],
         front_door(
-            category(
+            
                 json_discriminators(
                     documented_schemas(compact_json(CAPTURE), &["capture"]),
                     &[json_discriminator(
@@ -1652,8 +1628,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                         "capture",
                     )],
                 ),
-                "states",
-            ),
             30,
         ),
     ),
@@ -1750,7 +1724,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["continue"],
         front_door(
-            category(
+            
                 json_discriminators(
                     documented_schemas(
                         operator_envelope(compact_json(REF_MUTATION)),
@@ -1762,12 +1736,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
                         "continue",
                     )],
                 ),
-                "recovery",
-            ),
             95,
         ),
     ),
-    entry(&["context"], front_door(category(GROUP, "collab"), 180)),
+    entry(&["context"], front_door(GROUP, 180)),
     entry(
         &["context", "set"],
         json_discriminators(
@@ -1879,7 +1851,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     #[cfg(all(feature = "git-overlay", feature = "ingest"))]
-    entry(&["context", "reason"], category(GROUP, "context")),
+    entry(&["context", "reason"], GROUP),
     #[cfg(all(feature = "git-overlay", feature = "ingest"))]
     entry(
         &["context", "reason", "git"],
@@ -1918,7 +1890,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             20,
         ),
     ),
-    entry(&["discuss"], front_door(category(GROUP, "collab"), 170)),
+    entry(&["discuss"], front_door(GROUP, 170)),
     entry(
         &["discuss", "open"],
         json_discriminators(
@@ -2017,31 +1989,27 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
-    entry(&["maintenance", "oplog"], category(GROUP, "recovery")),
+    entry(&["maintenance", "oplog"], GROUP),
     entry(
         &["maintenance", "fsck"],
-        category(
+        
             documented_core_report_schema(READ_JSON, FsckReport::CONTRACT),
-            "recovery",
-        ),
     ),
     entry(
         &["maintenance", "fsck", "repair"],
-        category(GROUP, "recovery"),
+        GROUP,
     ),
     entry(
         &["maintenance", "fsck", "repair", "git"],
-        category(
+        
             documented_schemas(
                 documented_core_report_schema(FSCK_GIT_REPAIR, FsckReport::CONTRACT),
                 &["maintenance fsck repair git"],
             ),
-            "recovery",
-        ),
     ),
     entry(
         &["maintenance", "oplog", "recover"],
-        category(
+        
             json_discriminators(
                 opaque_schemas(METADATA_MUTATION_NO_OP_ID, &["maintenance oplog recover"]),
                 &[json_discriminator(
@@ -2050,19 +2018,15 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     "oplog_recover",
                 )],
             ),
-            "recovery",
-        ),
     ),
     entry(
         &["help"],
         front_door(
-            category(
+            
                 json_discriminators(
                     opaque_schemas(READ_JSON, &["help"]),
                     &[json_discriminator(Some("help"), "kind", "command_catalog")],
                 ),
-                "repo",
-            ),
             230,
         ),
     ),
@@ -2304,7 +2268,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["query"],
         front_door(
-            category(
+            
                 json_discriminators(
                     documented_schemas(
                         documented_core_report_schema(READ_JSON, QueryReport::CONTRACT),
@@ -2312,8 +2276,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     ),
                     QUERY_JSON_DISCRIMINATORS,
                 ),
-                "states",
-            ),
             150,
         ),
     ),
@@ -2327,7 +2289,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             50,
         ),
     ),
-    entry(&["redact"], category(GROUP, "recovery")),
+    entry(&["redact"], GROUP),
     entry(
         &["redact", "apply"],
         json_discriminators(
@@ -2392,7 +2354,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["remote"],
-        category(surface(GROUP, "source_authority"), "repo"),
+        surface(GROUP, "source_authority"),
     ),
     entry(
         &["remote", "list"],
@@ -2473,15 +2435,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["revert"],
-        category(
+        
             json_discriminators(
                 documented_schemas(WORKTREE_MUTATION, &["revert"]),
                 &[json_discriminator(Some("revert"), "output_kind", "revert")],
             ),
-            "states",
-        ),
     ),
-    entry(&["review"], front_door(category(GROUP, "collab"), 160)),
+    entry(&["review"], front_door(GROUP, 160)),
     entry(
         &["review", "show"],
         json_discriminators(
@@ -2526,7 +2486,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
-    entry(&["semantic"], category(GROUP, "states")),
+    entry(&["semantic"], GROUP),
     entry(
         &["semantic", "diff"],
         json_discriminators(
@@ -2567,7 +2527,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         },
     ),
     entry(&["completions"], front_door(READ_TEXT, 200)),
-    entry(&["shell"], category(READ_TEXT, "repo")),
+    entry(&["shell"], READ_TEXT),
     entry(&["shell", "init"], READ_TEXT),
     entry(&["shell", "completion"], READ_TEXT),
     entry(&["shell", "prompt"], READ_TEXT),
@@ -2631,22 +2591,20 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["sync"],
-        category(
+        
             json_discriminators(
                 documented_schemas(operator_envelope(compact_json(REF_MUTATION)), &["sync"]),
                 &[json_discriminator(Some("sync"), "output_kind", "sync")],
             ),
-            "threads",
-        ),
     ),
-    entry(&["thread"], category(surface(GROUP, "native"), "threads")),
+    entry(&["thread"], surface(GROUP, "native")),
     entry(
         &["thread", "collapse"],
-        category(opaque_schemas(REF_MUTATION, &["thread collapse"]), "states"),
+        opaque_schemas(REF_MUTATION, &["thread collapse"]),
     ),
     entry(
         &["thread", "expand"],
-        category(
+        
             json_discriminators(
                 documented_schemas(READ_JSON, &["thread expand"]),
                 &[json_discriminator(
@@ -2655,8 +2613,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     "expand",
                 )],
             ),
-            "states",
-        ),
     ),
     entry(
         &["thread", "create"],
@@ -2951,7 +2907,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ],
         ),
     ),
-    entry(&["visibility"], category(GROUP, "collab")),
+    entry(&["visibility"], GROUP),
     entry(
         &["visibility", "set"],
         json_discriminators(
@@ -4033,12 +3989,6 @@ pub fn command_supports_json_for_command(command: &Commands) -> bool {
     command_runtime_contract_for_command(command).supports_json
 }
 
-pub fn command_help_tier(command_name: &str) -> &'static str {
-    command_runtime_contract(command_name)
-        .map(|contract| help_visibility_to_tier(contract.help_visibility))
-        .unwrap_or("advanced")
-}
-
 pub fn command_surface(command_name: &str) -> &'static str {
     command_runtime_contract(command_name)
         .map(|contract| contract.surface)
@@ -4065,74 +4015,18 @@ pub fn root_commands_for_help_visibility(visibility: &str) -> Vec<&'static str> 
     entries.into_iter().map(|entry| entry.path[0]).collect()
 }
 
-pub fn root_commands_for_advanced_help() -> Vec<&'static str> {
-    let mut entries = advanced_help_root_entries();
-    entries.sort_by_key(|entry| (entry.contract.help_rank, entry.path[0]));
-    entries.into_iter().map(|entry| entry.path[0]).collect()
-}
-
-/// Root commands on the advanced help surface, unsorted.
-fn advanced_help_root_entries() -> Vec<&'static CommandContractEntry> {
-    active_command_contract_entries()
+/// Every non-hidden root command ranked by `(help_rank, name)` — the
+/// tail of the ranked first screen after the locked everyday head.
+/// Feature-gated verbs absent from the current build simply don't
+/// appear.
+pub fn ranked_visible_roots() -> Vec<&'static str> {
+    let mut entries = active_command_contract_entries()
         .iter()
         .copied()
-        .filter(|entry| {
-            entry.path.len() == 1
-                && !matches!(entry.contract.help_visibility, "everyday" | "hidden")
-        })
-        .collect()
-}
-
-/// Area groups for the `heddle help advanced` listing, in render order,
-/// as `(display title, verbs)` pairs (heddle#652). The grouping is
-/// contract-table data, not a hand-maintained help string: native
-/// advanced commands carry an explicit `help_category` on their
-/// registration, while `automation` / `admin` / `git_projection` commands
-/// derive their group from the surface they already declare. Verbs keep
-/// contract order (help_rank, then name) within each group — the same
-/// ordering the flat list used. Feature-gated verbs absent from the
-/// current build simply don't appear; a group may come back empty.
-pub fn advanced_help_groups() -> Vec<(&'static str, Vec<&'static str>)> {
-    const GROUPS: &[(&str, &str)] = &[
-        ("threads", "Threads and integration"),
-        ("states", "States and history"),
-        ("collab", "Collaboration and review"),
-        ("recovery", "Recovery and integrity"),
-        ("repo", "Repo and environment"),
-        ("automation", "Agents and automation"),
-        ("git-interop", "Git interop"),
-        ("admin", "Admin and maintenance"),
-    ];
-    let mut entries = advanced_help_root_entries();
+        .filter(|entry| entry.path.len() == 1 && entry.contract.help_visibility != "hidden")
+        .collect::<Vec<_>>();
     entries.sort_by_key(|entry| (entry.contract.help_rank, entry.path[0]));
-    GROUPS
-        .iter()
-        .map(|(id, title)| {
-            (
-                *title,
-                entries
-                    .iter()
-                    .filter(|entry| advanced_help_group_id(&entry.contract) == *id)
-                    .map(|entry| entry.path[0])
-                    .collect(),
-            )
-        })
-        .collect()
-}
-
-/// Resolve which advanced-help group a root command belongs to. The
-/// non-native surfaces are themselves the grouping; native commands use
-/// the `help_category` set at registration. An unset category on a
-/// native advanced command maps to "" (member of no group) — the
-/// `advanced_help_groups_cover_every_advanced_verb` test turns that into
-/// a build failure rather than a silently missing help line.
-fn advanced_help_group_id(contract: &CommandContract) -> &'static str {
-    match contract.surface {
-        "automation" => "automation",
-        "admin" => "admin",
-        "git_projection" => "git-interop",
-        _ => contract.help_category.unwrap_or(""),
-    }
+    entries.into_iter().map(|entry| entry.path[0]).collect()
 }
 
 pub fn recommended_action_template(action: &str) -> Option<ActionTemplate> {

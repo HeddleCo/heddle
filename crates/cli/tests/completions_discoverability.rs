@@ -44,7 +44,7 @@ fn field_study_1439_heddle_completions_is_recognized() {
 }
 
 #[test]
-fn first_screen_and_help_find_completions_without_advanced() {
+fn first_screen_and_help_find_completions() {
     for args in [&[][..], &["help"][..], &["--help"][..]] {
         let help = heddle(args, None).unwrap_or_else(|err| {
             panic!(
@@ -54,12 +54,12 @@ fn first_screen_and_help_find_completions_without_advanced() {
         });
         assert!(
             help.contains("heddle completions"),
-            "`heddle {}` must name completions without `help advanced`: {help}",
+            "`heddle {}` must name completions on the ranked screen: {help}",
             args.join(" ")
         );
         assert!(
-            !help.contains("heddle help advanced") || help.contains("heddle completions"),
-            "first-screen mention must not depend on opening advanced help: {help}"
+            !help.contains("heddle help advanced"),
+            "the retired advanced view must not be advertised: {help}"
         );
     }
 

@@ -45,10 +45,10 @@ pub use commands_args::{
     ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs, ThreadAbsorbArgs,
     ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs, ThreadCheckMergeArgs,
     ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs,
-    ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs,
-    TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs,
-    TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs,
-    TimelineTargetArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
+    ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs, TimelineCommands,
+    TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs, TimelineRecordToolArgs,
+    TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs, TimelineTargetArgs, UndoArgs,
+    WatchArgs, WorkspaceModeArg,
 };
 pub use commands_ci::{CiCommands, CiRunArgs};
 #[cfg(feature = "client")]

@@ -503,9 +503,12 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
         | ThreadCommands::CheckMerge(_) => Err(anyhow!(
             "rebuild cli with --features client to use thread approvals"
         )),
-        ThreadCommands::Collapse(args) => {
-            super::collapse::cmd_collapse(cli, args.states.clone(), args.into.clone(), args.confidence)
-        }
+        ThreadCommands::Collapse(args) => super::collapse::cmd_collapse(
+            cli,
+            args.states.clone(),
+            args.into.clone(),
+            args.confidence,
+        ),
         ThreadCommands::Expand(args) => super::expand::cmd_expand(cli, args.reference.clone()),
     }
 }

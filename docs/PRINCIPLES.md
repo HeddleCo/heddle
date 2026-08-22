@@ -62,7 +62,7 @@ check integration, land or push, undo, inspect history, and recover.
 The exact verb list comes from the command contract table so human help
 and `heddle help --output json` do not drift. Collaboration and
 annotation surfaces such as `review`, `discuss`, and `context` stay
-behind `heddle help advanced` and their topic pages for the moments you
+behind `heddle <verb> --help` and topic pages for the moments you
 need them. First-time users see the smallest surface that explains where
 they are, what is in flight, what to do next, and how to recover.
 

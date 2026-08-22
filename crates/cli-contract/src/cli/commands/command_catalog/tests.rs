@@ -2233,7 +2233,6 @@ fn command_contract_table_drives_help_tiers() {
                 .is_some_and(|action| action.executable),
             executable
         );
-        assert_eq!(command_help_tier(display), tier);
         assert_eq!(command_surface(display), surface);
         assert_eq!(command_help_visibility(display), visibility);
         assert_eq!(command_canonical_command(display), canonical);

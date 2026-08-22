@@ -8792,7 +8792,10 @@ fn agent_presence_and_provenance_outputs_match_registered_schemas() {
         .as_str()
         .expect("reserve should attach presence");
 
-    let actor_list = json_value(temp.path(), &["agent", "presence", "list", "--output", "json"]);
+    let actor_list = json_value(
+        temp.path(),
+        &["agent", "presence", "list", "--output", "json"],
+    );
     assert_schema_declares_runtime_top_level(&["agent", "presence", "list"], &actor_list);
     assert_eq!(actor_list["output_kind"], "presence_list", "{actor_list}");
     assert!(

@@ -184,7 +184,10 @@ mod tests {
             &choices(),
         );
         assert_eq!(advice.kind, "ambiguous_actor_selection");
-        assert_eq!(advice.primary_command, "heddle agent presence show <session>");
+        assert_eq!(
+            advice.primary_command,
+            "heddle agent presence show <session>"
+        );
         assert_ne!(advice.primary_command, "heddle help --output json");
         validate_recommended_action(&advice.primary_command)
             .unwrap_or_else(|err| panic!("presence show multi-match next must validate: {err}"));

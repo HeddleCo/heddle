@@ -26,7 +26,8 @@ use crate::cli::{
     TimelineTargetArgs, should_output_json, style,
 };
 
-const TIMELINE_RESET_CURRENT_COMMAND: &str = "heddle agent timeline reset --thread <thread> --current";
+const TIMELINE_RESET_CURRENT_COMMAND: &str =
+    "heddle agent timeline reset --thread <thread> --current";
 const TIMELINE_TOOL_CALL_COMMAND: &str =
     "heddle agent timeline reset --thread <thread> --tool-call <tool-call-id> --harness opencode";
 

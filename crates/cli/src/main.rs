@@ -31,11 +31,11 @@ use cli::{
             cmd_context_get, cmd_context_history, cmd_context_list, cmd_context_rm,
             cmd_context_set, cmd_context_suggest, cmd_context_supersede, cmd_continue,
             cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop, cmd_diff, cmd_discuss,
-            cmd_doctor, cmd_doctor_docs, cmd_doctor_schemas, cmd_hook, cmd_init,
-            cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_pull, cmd_push, cmd_query,
-            cmd_ready, cmd_redo, cmd_remote, cmd_resolve, cmd_revert, cmd_review, cmd_shell,
-            cmd_show, cmd_snapshot, cmd_start, cmd_status, cmd_sync_smart, cmd_thread, cmd_undo, cmd_undo_recover, cmd_verify, cmd_watch,
-            command_runtime_contract_for_command, print_error_with_hint,
+            cmd_doctor, cmd_doctor_docs, cmd_doctor_schemas, cmd_hook, cmd_init, cmd_integration,
+            cmd_land, cmd_log, cmd_maintenance, cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_redo,
+            cmd_remote, cmd_resolve, cmd_revert, cmd_review, cmd_shell, cmd_show, cmd_snapshot,
+            cmd_start, cmd_status, cmd_sync_smart, cmd_thread, cmd_undo, cmd_undo_recover,
+            cmd_verify, cmd_watch, command_runtime_contract_for_command, print_error_with_hint,
             print_or_suggest_parse_error, print_parse_error_json_envelope,
             recover_incomplete_land_if_present,
         },
@@ -501,7 +501,8 @@ async fn async_main() -> Result<()> {
 
         Commands::Show { state } => cmd_show(&cli, state.clone()),
 
-        Commands::Diff(DiffArgs {            from,
+        Commands::Diff(DiffArgs {
+            from,
             to,
             path_filters,
             paths,
@@ -1074,9 +1075,10 @@ fn incomplete_land_recovery_start(
         // the recovery-only command path performs its own non-validating
         // repository discovery and cannot inspect the land journal safely yet.
         Commands::Maintenance {
-            command: MaintenanceCommands::Oplog {
-                command: cli::cli::OplogCommands::Recover,
-            },
+            command:
+                MaintenanceCommands::Oplog {
+                    command: cli::cli::OplogCommands::Recover,
+                },
         } => Ok(None),
         // Positional init resolves conflicts/canonicalization in cmd_init and
         // recovers the selected existing target there. Opening cwd here would

@@ -115,7 +115,7 @@ score. A global hard-gate failure blocks release.
 - 2 pts: command does not duplicate another command's job without a clear
   compositional reason.
 
-Audit evidence: `heddle help`, `heddle help advanced`, command enum, docs, and
+Audit evidence: `heddle help`, per-verb `--help`, command enum, docs, and
 real invocation transcripts.
 
 ### 2. Arguments and flags: 10 pts
