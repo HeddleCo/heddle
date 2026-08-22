@@ -192,7 +192,9 @@ pub use repository::{
     is_major_rewrite, is_synthetic_root, open_git_repository_at_root, query_history_from_source,
 };
 #[cfg(feature = "git-overlay")]
-pub use repository::{GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitOverlayShortStatus};
+pub use repository::{
+    GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitOverlayShortStatus, GitOverlayTagTip,
+};
 #[cfg(feature = "async-source")]
 pub use repository::{find_merge_base_async, is_ancestor_async};
 pub use repository_key_binding::AuthorshipVerification;
