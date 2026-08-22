@@ -26,9 +26,6 @@ use verbs::approval_plan::{
     format_unix_secs_label, plan_eligibility_summary, short_state_id, state_id_bytes_to_string,
     timestamp_secs_u64, unmet_requirement_line,
 };
-use objects::object::ThreadName;
-use repo::Repository;
-use serde::Serialize;
 use heddle_cli_args::CliContext as _;
 
 use super::RecoveryAdvice;
