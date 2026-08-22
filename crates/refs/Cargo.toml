@@ -12,7 +12,7 @@ categories.workspace = true
 [dependencies]
 chrono.workspace = true
 fs2.workspace = true
-heddle-schema = { path = "../schema", version = "0.13" }
+heddle-object-model = { path = "../object-model", version = "0.13" }
 heddle-perf-contract = { path = "../perf-contract", version = "0.13" }
 objects = { path = "../objects", package = "heddle-objects", version = "0.13" }
 rand.workspace = true

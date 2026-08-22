@@ -4,7 +4,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use chrono::{DateTime, Utc};
-use objects::object::{Attribution, ContentHash, OperationId, Principal, StateId, VisibilityTier};
+use crate::object::{Attribution, ContentHash, OperationId, Principal, StateId, VisibilityTier};
 use serde::{Deserialize, Serialize};
 
 /// How a conflict was resolved.
@@ -1095,7 +1095,7 @@ impl OpBatch {
 
 #[cfg(test)]
 mod verb_catalog_tests {
-    use objects::object::{ContentHash, StateId, VisibilityTier};
+    use crate::object::{ContentHash, StateId, VisibilityTier};
 
     use super::*;
 

@@ -25,7 +25,6 @@ members = [
     "crates/refs",
     "crates/repo",
     "crates/runtime-bridge",
-    "crates/schema",
     "crates/semantic",
     "crates/semantic-recovery",
     "crates/state-review",

@@ -2560,10 +2560,10 @@ version = "0.13.0"
 dependencies = [
  "chrono",
  "criterion",
+ "heddle-object-model",
  "heddle-objects",
  "heddle-perf-contract",
  "heddle-runtime-bridge",
- "heddle-schema",
  "pollster",
  "rmp-serde",
  "serde",
@@ -2601,10 +2601,10 @@ version = "0.13.0"
 dependencies = [
  "chrono",
  "fs2",
+ "heddle-object-model",
  "heddle-objects",
  "heddle-perf-contract",
  "heddle-runtime-bridge",
- "heddle-schema",
  "pollster",
  "rand 0.10.2",
  "rmp-serde",
@@ -2659,17 +2659,6 @@ name = "heddle-runtime-bridge"
 version = "0.13.0"
 dependencies = [
  "tokio",
-]
-
-[[package]]
-name = "heddle-schema"
-version = "0.13.0"
-dependencies = [
- "chrono",
- "heddle-objects",
- "rmp-serde",
- "serde",
- "thiserror 2.0.18",
 ]
 
 [[package]]

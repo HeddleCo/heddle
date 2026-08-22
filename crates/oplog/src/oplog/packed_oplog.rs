@@ -20,7 +20,7 @@ use std::{
 };
 
 use chrono::{TimeZone, Utc};
-use heddle_schema::op_record::{
+use heddle_object_model::op_record::{
     CURRENT_OP_RECORD_SCHEMA_VERSION, decode_current_record, encode_current_record,
     validate_op_record_schema_version,
 };

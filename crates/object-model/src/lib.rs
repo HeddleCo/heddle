@@ -4,5 +4,7 @@
 pub mod compact;
 pub mod error;
 pub mod object;
+pub mod op_record;
+pub mod refs;
 
 pub use error::{HeddleError, RecoveryDetails};

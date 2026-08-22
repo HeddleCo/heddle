@@ -36,8 +36,6 @@ name = "heddle-objects"
 release = true
 
 [[package]]
-name = "heddle-schema"
-release = true
 
 [[package]]
 name = "heddle-refs"

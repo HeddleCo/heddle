@@ -83,7 +83,6 @@ env:
     heddle-objects
     heddle-crypto
     heddle-runtime-bridge
-    heddle-schema
     heddle-oplog
     heddle-refs
     heddle-merge
