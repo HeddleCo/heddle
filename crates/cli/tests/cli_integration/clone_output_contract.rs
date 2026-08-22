@@ -118,17 +118,13 @@ mod fixture {
                 .is_some_and(|message| message.contains("Broken pipe")),
             "error envelope must retain the peer disconnect: {error}"
         );
+        // Since #1446 the recovery intent is written only after the remote
+        // advertises folded refs, so a disconnect before PullReady leaves no
+        // half-built destination; a fresh `heddle clone` is the resume path.
         assert!(
-            repo::clone_intent::CloneIntent::path(&destination).is_file(),
-            "a connected interrupted clone retains its durable recovery intent"
+            !destination.exists(),
+            "a disconnect before folded refs must not leave a half-built destination"
         );
-        let canonical_destination = destination
-            .canonicalize()
-            .expect("canonical interrupted clone destination");
-        assert!(matches!(
-            repo::Repository::open(&destination),
-            Err(repo::HeddleError::IncompleteClone(path)) if path == canonical_destination
-        ));
     }
 
     #[test]
@@ -183,9 +179,11 @@ mod fixture {
             !output.status.success(),
             "fixture terminates the folded Pull"
         );
+        // The recovery intent is durable only once folded refs arrive; a
+        // termination before PullReady cleans the destination instead.
         assert!(
-            repo::clone_intent::CloneIntent::path(&destination).is_file(),
-            "folded-pull interruption must remain detectable and resumable"
+            !destination.exists(),
+            "a folded-pull interruption before refs must not leave a half-built destination"
         );
     }
 
