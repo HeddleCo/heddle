@@ -426,8 +426,8 @@ impl Repository {
         stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
         defer_object_writes: bool,
     ) -> Result<TreeBuildOutput> {
-        let ignore_matcher =
-            WorktreeIgnoreMatcher::cached(patterns).with_nested_worktree_exclusions(nested_exclusions);
+        let ignore_matcher = WorktreeIgnoreMatcher::cached(patterns)
+            .with_nested_worktree_exclusions(nested_exclusions);
         let incremental_state = (dir == self.root() && baseline_tree.is_some()).then(|| {
             let monitor = ChangeMonitorSession::prepare(
                 self.root(),

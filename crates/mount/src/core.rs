@@ -3970,7 +3970,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
             None => return Err(MountError::NotADirectory(format!("{record:?}"))),
         };
         let tree = self.tree_for_record(&record)?;
-        let mut by_name: BTreeMap<String, Entry> = BTreeMap::new();
+        let mut by_name: BTreeMap<&str, Entry> = BTreeMap::new();
 
         // If this directory itself is dir-tombstoned, enumerate
         // returns empty regardless of any captured children. (A
@@ -4001,84 +4001,75 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
                     if let Some(entry) =
                         self.entry_from_pending_hit(hit, &entry_path, OsStr::new(tree_entry.name()))
                     {
-                        by_name.insert(tree_entry.name().to_string(), entry);
+                        by_name.insert(tree_entry.name(), entry);
                     }
                     continue;
                 }
                 None => {}
             }
             let entry = self.entry_from_tree_entry(&parent_path, tree_entry)?;
-            by_name.insert(tree_entry.name().to_string(), entry);
+            by_name.insert(tree_entry.name(), entry);
         }
 
         // Pass 2: pending-only children of `parent_path` (mount-only
         // files and implicit subdirectories the agent created).
+        let mut pending_entries: Vec<Entry> = Vec::new();
         let pending_children = self.pending_children_at(&parent_path);
         for (name, kind) in pending_children {
             // Don't shadow a captured-tree entry (already handled in
             // pass 1 via pending_lookup).
-            if by_name.contains_key(&name) {
+            if by_name.contains_key(name.as_str()) {
                 continue;
             }
             let full_path = join_child(&parent_path, &name);
             match kind {
                 PendingChildKind::HotFile { node, size, mode } => {
-                    by_name.insert(
-                        name.clone(),
-                        Entry {
-                            node,
-                            name: OsString::from(&name),
-                            kind: kind_for_mode(mode),
-                            size,
-                            unix_mode: mode.to_unix_mode(),
-                        },
-                    );
+                    pending_entries.push(Entry {
+                        node,
+                        name: OsString::from(&name),
+                        kind: kind_for_mode(mode),
+                        size,
+                        unix_mode: mode.to_unix_mode(),
+                    });
                 }
                 PendingChildKind::WarmFile { size, mode } => {
                     let node = self.intern(NodeRecord::PendingFile {
                         path: full_path,
                         mode,
                     });
-                    by_name.insert(
-                        name.clone(),
-                        Entry {
-                            node,
-                            name: OsString::from(&name),
-                            kind: kind_for_mode(mode),
-                            size,
-                            unix_mode: mode.to_unix_mode(),
-                        },
-                    );
+                    pending_entries.push(Entry {
+                        node,
+                        name: OsString::from(&name),
+                        kind: kind_for_mode(mode),
+                        size,
+                        unix_mode: mode.to_unix_mode(),
+                    });
                 }
                 PendingChildKind::Dir => {
                     let node = self.intern(NodeRecord::PendingDir { path: full_path });
-                    by_name.insert(
-                        name.clone(),
-                        Entry {
-                            node,
-                            name: OsString::from(&name),
-                            kind: NodeKind::Directory,
-                            size: 0,
-                            unix_mode: DIR_UNIX_MODE,
-                        },
-                    );
+                    pending_entries.push(Entry {
+                        node,
+                        name: OsString::from(&name),
+                        kind: NodeKind::Directory,
+                        size: 0,
+                        unix_mode: DIR_UNIX_MODE,
+                    });
                 }
                 PendingChildKind::Symlink { size } => {
                     let node = self.intern(NodeRecord::PendingSymlink { path: full_path });
-                    by_name.insert(
-                        name.clone(),
-                        Entry {
-                            node,
-                            name: OsString::from(&name),
-                            kind: NodeKind::Symlink,
-                            size,
-                            unix_mode: FileMode::Symlink.to_unix_mode(),
-                        },
-                    );
+                    pending_entries.push(Entry {
+                        node,
+                        name: OsString::from(&name),
+                        kind: NodeKind::Symlink,
+                        size,
+                        unix_mode: FileMode::Symlink.to_unix_mode(),
+                    });
                 }
             }
         }
-        Ok(by_name.into_values().collect())
+        let mut entries: Vec<Entry> = by_name.into_values().collect();
+        entries.extend(pending_entries);
+        Ok(entries)
     }
 
     fn attrs(&self, node: NodeId) -> Result<Attrs> {

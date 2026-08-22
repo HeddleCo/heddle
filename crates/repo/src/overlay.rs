@@ -758,25 +758,48 @@ impl Repository {
         Ok(None)
     }
     fn git_projection_mapping(&self) -> Result<HashMap<String, String>> {
+        use objects::sync::LockExt;
+        use std::sync::{Mutex, OnceLock};
+
+        // The mapping file only changes when a Git Projection import or
+        // bridge lands; status paths re-read it many times per process.
+        // Cache the parsed map keyed by (path, mtime).
+        static CACHE: OnceLock<
+            Mutex<Option<(PathBuf, std::time::SystemTime, HashMap<String, String>)>>,
+        > = OnceLock::new();
+
         let path = self
             .heddle_dir
             .join("git-projection")
             .join("git-projection-mapping.json");
-        if !path.exists() {
-            return Ok(HashMap::new());
+        let modified = match fs::metadata(&path).and_then(|meta| meta.modified()) {
+            Ok(modified) => modified,
+            Err(_) => return Ok(HashMap::new()),
+        };
+
+        let cache = CACHE.get_or_init(|| Mutex::new(None));
+        {
+            let cached = cache.lock_or_poisoned();
+            if let Some((cached_path, cached_mtime, mapping)) = cached.as_ref()
+                && *cached_path == path
+                && *cached_mtime == modified
+            {
+                return Ok(mapping.clone());
+            }
         }
 
-        let contents = fs::read_to_string(path)?;
+        let contents = fs::read_to_string(&path)?;
         if contents.trim().is_empty() {
             return Ok(HashMap::new());
         }
-
         let file: GitProjectionMappingFile = serde_json::from_str(&contents)?;
-        Ok(file
+        let mapping: HashMap<String, String> = file
             .entries
             .into_iter()
             .map(|entry| (entry.git_oid, entry.state_id))
-            .collect())
+            .collect();
+        *cache.lock_or_poisoned() = Some((path, modified, mapping.clone()));
+        Ok(mapping)
     }
 
     pub fn git_overlay_ingest_commit_mapping(&self) -> Result<HashMap<String, String>> {
@@ -1503,4 +1526,48 @@ pub(super) fn detect_git_in_progress_branch(path: &Path) -> Result<Option<String
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// The mtime-keyed projection-mapping cache must serve fresh parses
+    /// when the mapping file changes under the same path.
+    #[test]
+    fn git_projection_mapping_picks_up_changed_mapping_file() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+
+        let dir = repo.heddle_dir().join("git-projection");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("git-projection-mapping.json");
+
+        let write_mapping = |state_suffix: &str| {
+            let contents = format!(
+                r#"{{"entries":[{{"git_oid":"abc123","state_id":"{}{state_suffix}"}}]}}"#,
+                "0".repeat(64 - state_suffix.len()),
+            );
+            fs::write(&path, contents).unwrap();
+            // Ensure the filesystem reports a distinct mtime.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+
+        write_mapping("a");
+        let first = repo.git_projection_mapping().unwrap();
+        assert_eq!(
+            first.get("abc123").unwrap(),
+            &format!("{}a", "0".repeat(63))
+        );
+
+        write_mapping("b");
+        let second = repo.git_projection_mapping().unwrap();
+        assert_eq!(
+            second.get("abc123").unwrap(),
+            &format!("{}b", "0".repeat(63)),
+            "changed mapping file must be re-parsed"
+        );
+    }
 }
