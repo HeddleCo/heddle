@@ -232,6 +232,10 @@ mount = [
 ]
 
 [dev-dependencies]
+# Test-only: hosted fixtures mint biscuits and stand up Iroh endpoints
+# directly; the production CLI gets both through `hosted-client`.
+biscuit-auth.workspace = true
+iroh.workspace = true
 criterion = "0.8"
 heddle-cli-render = { path = "../cli-render", version = "0.13", features = ["test-utils"] }
 hyper-util.workspace = true
