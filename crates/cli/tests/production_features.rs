@@ -847,6 +847,7 @@ mod blame {
 
         heddle(
             &[
+                "thread",
                 "collapse",
                 &first.to_string_full(),
                 &head.state_id.to_string_full(),

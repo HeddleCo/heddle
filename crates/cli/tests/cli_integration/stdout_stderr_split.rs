@@ -34,8 +34,6 @@ const SKIP: &[&str] = &[
     "support grant",
     "support list",
     "support revoke",
-    "presence",
-    "presence publish",
 ];
 
 #[test]

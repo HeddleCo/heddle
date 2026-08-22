@@ -310,13 +310,6 @@ pub struct LogArgs {
     pub since: Option<String>,
 }
 
-/// Arguments for `heddle timeline`.
-#[derive(Clone, Debug, clap::Args)]
-pub struct TimelineArgs {
-    #[command(subcommand)]
-    pub command: TimelineCommands,
-}
-
 /// Timeline navigation action commands.
 #[derive(Clone, Debug, clap::Subcommand)]
 pub enum TimelineCommands {

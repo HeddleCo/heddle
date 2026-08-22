@@ -113,7 +113,7 @@ fn start_path_inherits_codex_probe_identity_into_actor_metadata() {
     assert_eq!(started["name"].as_str(), Some("feature/codex-probed"));
 
     let actor: Value = serde_json::from_str(
-        &heddle(&["--output", "json", "presence", "show"], Some(main.path())).unwrap(),
+        &heddle(&["--output", "json", "agent", "presence", "show"], Some(main.path())).unwrap(),
     )
     .unwrap();
     let actor_entry = &actor["presence"];
@@ -159,7 +159,7 @@ fn actor_show_defaults_to_current_thread_actor() {
     let actor: Value = inject_post_verification_at(
         main.path(),
         serde_json::from_str(
-            &heddle(&["--output", "json", "presence", "show"], Some(main.path())).unwrap(),
+            &heddle(&["--output", "json", "agent", "presence", "show"], Some(main.path())).unwrap(),
         )
         .unwrap(),
     );
@@ -196,7 +196,7 @@ fn actor_explain_reports_attach_reason_for_current_actor() {
 
     let explained: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "presence", "explain"],
+            &["--output", "json", "agent", "presence", "explain"],
             Some(main.path()),
         )
         .unwrap(),
@@ -666,6 +666,7 @@ fn agent_task_correlation_surfaces_in_capture_thread_and_retro() {
         &[
             "--output",
             "json",
+            "agent",
             "timeline",
             "record-start",
             "--tool-call",
@@ -697,6 +698,7 @@ fn agent_task_correlation_surfaces_in_capture_thread_and_retro() {
         &[
             "--output",
             "json",
+            "agent",
             "timeline",
             "record-finish",
             "--tool-call",

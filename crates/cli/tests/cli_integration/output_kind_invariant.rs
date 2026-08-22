@@ -65,10 +65,10 @@ const SWEPT: &[&str] = &[
     // no override needed).
     "whoami",
     // heddle#272 — output_kind sweep on the named-by-persona verbs.
-    "presence list",
-    "presence show",
-    "presence explain",
-    "presence complete",
+    "agent presence list",
+    "agent presence show",
+    "agent presence explain",
+    "agent presence complete",
     "auth logout",
     "auth status",
     "auth trust show",
@@ -131,14 +131,14 @@ const SWEPT: &[&str] = &[
     "continue",
     "daemon stop",
     "doctor",
-    "expand",
+    "thread expand",
     "land",
     "log",
     "maintenance gc",
     "maintenance inspect",
     "maintenance repack",
     "maintenance refresh",
-    "oplog recover",
+    "maintenance oplog recover",
     "pull",
     "push",
     "query",
@@ -150,12 +150,12 @@ const SWEPT: &[&str] = &[
     "remote show",
     "start",
     "sync",
-    "timeline status",
-    "timeline record-start",
-    "timeline record-finish",
-    "timeline fork",
-    "timeline reset",
-    "timeline recover",
+    "agent timeline status",
+    "agent timeline record-start",
+    "agent timeline record-finish",
+    "agent timeline fork",
+    "agent timeline reset",
+    "agent timeline recover",
     "thread cleanup",
     "thread create",
     "thread drop",
@@ -193,7 +193,7 @@ const UNSWEPT_TODO: &[&str] = &[
     "agent reserve",
     "context reason git",
     "ci run",
-    "collapse",
+    "thread collapse",
     "daemon serve",
     "daemon status",
     "maintenance fsck",
@@ -256,9 +256,24 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         // `redact purge` preserves the pre-consolidation wire values.
         "redact purge apply" => Some("purge_apply"),
         "redact purge list" => Some("purge_list"),
-        // Timeline navigation subcommands intentionally share one action
-        // envelope so agents can handle fork/reset/recover uniformly.
-        "timeline fork" | "timeline reset" | "timeline recover" => Some("timeline_action"),
+        // Presence folded under `agent`; the wire values keep the
+        // pre-fold spellings so agents don't churn.
+        "agent presence list" => Some("presence_list"),
+        "agent presence show" => Some("presence_show"),
+        "agent presence explain" => Some("presence_explain"),
+        "agent presence complete" => Some("presence_complete"),
+        // Expand folded under `thread`; wire value keeps the root spelling.
+        "thread expand" => Some("expand"),
+        // Oplog recover folded under `maintenance`; wire value unchanged.
+        "maintenance oplog recover" => Some("oplog_recover"),
+        // Timeline folded under `agent`; the action verbs share one
+        // pre-fold envelope value.
+        "agent timeline status" => Some("timeline_status"),
+        "agent timeline record-start" => Some("timeline_record_start"),
+        "agent timeline record-finish" => Some("timeline_record_finish"),
+        "agent timeline fork" | "agent timeline reset" | "agent timeline recover" => {
+            Some("timeline_action")
+        }
         _ => None,
     }
 }
@@ -715,7 +730,7 @@ fn runtime_invocation_args(
         "maintenance refresh" => Some((&["maintenance", "refresh"], true)),
         "query" => Some((&["query"], true)),
         "remote list" => Some((&["remote", "list"], true)),
-        "timeline status" => Some((&["timeline", "status"], true)),
+        "timeline status" => Some((&["agent", "timeline", "status"], true)),
         "timeline record-start" => Some((
             &[
                 "timeline",
@@ -1255,9 +1270,9 @@ fn runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
             let bytes = std::fs::read(&oplog).expect("read fixture oplog");
             let cut = bytes.len() * 6 / 10;
             std::fs::write(&oplog, &bytes[..cut]).expect("truncate fixture oplog");
-            heddle(&["oplog", "recover"], Some(t.path()))
+            heddle(&["maintenance", "oplog", "recover"], Some(t.path()))
                 .expect("explicit recovery prepares the prior-sidecar fixture");
-            (t, sv(&["oplog", "recover"]))
+            (t, sv(&["maintenance", "oplog", "recover"]))
         }
         "timeline_log" => (init_fixture(), sv(&["log", "--timeline"])),
         _ => return None,

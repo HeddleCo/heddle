@@ -374,7 +374,7 @@ fn presence_show_multi_match_next_is_not_help_catalog() {
             .unwrap();
     }
 
-    let output = heddle_output(&["--output", "json", "presence", "show"], Some(repo.path()))
+    let output = heddle_output(&["--output", "json", "agent", "presence", "show"], Some(repo.path()))
         .expect("presence show should spawn");
     assert!(
         !output.status.success(),
@@ -391,7 +391,7 @@ fn presence_show_multi_match_next_is_not_help_catalog() {
     .unwrap_or_else(|err| panic!("JSON envelope: {err}\n{stderr}"));
     assert_eq!(envelope["kind"], "ambiguous_actor_selection", "{envelope}");
     assert_eq!(
-        envelope["primary_command"], "heddle presence show <session>",
+        envelope["primary_command"], "heddle agent presence show <session>",
         "{envelope}"
     );
     assert_ne!(

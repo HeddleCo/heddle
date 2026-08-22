@@ -174,7 +174,7 @@ pub async fn show(cli: &Cli, session_id: Option<String>) -> Result<()> {
         &repo,
         &registry,
         session_id.as_deref(),
-        "heddle presence show <session>",
+        "heddle agent presence show <session>",
     )?;
     let show = show_actor_from_entry(&registry, &entry)?;
 
@@ -281,7 +281,7 @@ pub async fn complete(cli: &Cli, session_id: Option<String>) -> Result<()> {
         &repo,
         &registry,
         session_id.as_deref(),
-        "heddle presence complete --session <session>",
+        "heddle agent presence complete --session <session>",
     )?;
     let plan = plan_actor_done(&entry);
     mark_actor_done(&registry, &plan.session_id)?;
@@ -333,7 +333,7 @@ pub async fn explain(cli: &Cli, session_id: Option<String>) -> Result<()> {
         &repo,
         &registry,
         session_id.as_deref(),
-        "heddle presence explain <session>",
+        "heddle agent presence explain <session>",
     ) {
         Ok(entry) => entry,
         Err(err) if session_id.is_none() && is_no_active_actor_error(&err) => {
@@ -637,11 +637,11 @@ fn no_active_actor_advice() -> RecoveryAdvice {
         "no active actor registry entry matches the current thread or checkout path",
         "choosing a completed actor implicitly could show the wrong session",
         "no actor registry entries, refs, repository objects, or worktree files were changed",
-        "heddle presence list",
+        "heddle agent presence list",
         vec![
-            "heddle presence list".to_string(),
-            "heddle presence explain".to_string(),
-            "heddle presence show <session>".to_string(),
+            "heddle agent presence list".to_string(),
+            "heddle agent presence explain".to_string(),
+            "heddle agent presence show <session>".to_string(),
         ],
     )
 }

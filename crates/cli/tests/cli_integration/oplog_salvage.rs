@@ -40,7 +40,7 @@ fn truncated_packed_oplog_salvages_prefix_quarantines_tail_and_keeps_repo_usable
             String::from_utf8_lossy(&refused.stderr)
         );
 
-        let recovery = heddle_output(&["oplog", "recover"], Some(temp.path()))
+        let recovery = heddle_output(&["maintenance", "oplog", "recover"], Some(temp.path()))
             .expect("explicit oplog recovery should remain reachable");
         let recovery_out = String::from_utf8_lossy(&recovery.stdout);
         assert!(
@@ -119,7 +119,7 @@ fn oplog_recover_subcommand_reports_salvage_in_text_and_json() {
 
     // Text mode: human-readable report naming the salvage detail.
     let text =
-        heddle_output(&["oplog", "recover"], Some(temp.path())).expect("oplog recover should run");
+        heddle_output(&["maintenance", "oplog", "recover"], Some(temp.path())).expect("oplog recover should run");
     let text_out = String::from_utf8_lossy(&text.stdout);
     assert!(
         text.status.success(),
@@ -144,7 +144,7 @@ fn oplog_recover_subcommand_reports_salvage_in_text_and_json() {
     );
 
     // JSON mode reports the same salvage with machine-readable fields.
-    let json = heddle_output(&["oplog", "recover", "--output", "json"], Some(temp.path()))
+    let json = heddle_output(&["maintenance", "oplog", "recover", "--output", "json"], Some(temp.path()))
         .expect("oplog recover --output json should run");
     assert!(
         json.status.success(),
@@ -189,7 +189,7 @@ fn oplog_recover_subcommand_json_reports_footer_guided_strategy() {
     torn.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
     std::fs::write(&oplog_path, &torn).expect("write torn packed oplog");
 
-    let json = heddle_output(&["oplog", "recover", "--output", "json"], Some(temp.path()))
+    let json = heddle_output(&["maintenance", "oplog", "recover", "--output", "json"], Some(temp.path()))
         .expect("oplog recover --output json should run");
     assert!(
         json.status.success(),

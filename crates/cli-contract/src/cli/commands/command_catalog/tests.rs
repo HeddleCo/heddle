@@ -27,10 +27,22 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["abort"], &["abort"]),
     sample(&["adopt"], &["adopt"]),
     sample(&["ci", "run"], &["ci", "run", "--local"]),
-    sample(&["presence", "list"], &["presence", "list"]),
-    sample(&["presence", "show"], &["presence", "show"]),
-    sample(&["presence", "explain"], &["presence", "explain"]),
-    sample(&["presence", "complete"], &["presence", "complete"]),
+    sample(
+        &["agent", "presence", "list"],
+        &["agent", "presence", "list"],
+    ),
+    sample(
+        &["agent", "presence", "show"],
+        &["agent", "presence", "show"],
+    ),
+    sample(
+        &["agent", "presence", "explain"],
+        &["agent", "presence", "explain"],
+    ),
+    sample(
+        &["agent", "presence", "complete"],
+        &["agent", "presence", "complete"],
+    ),
     sample(
         &["agent", "reserve"],
         &["agent", "reserve", "--thread", "main"],
@@ -186,11 +198,10 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["clone"], &["clone", "remote", "local"]),
     sample(&["commit"], &["commit"]),
     sample(
-        &["collapse"],
-        &["collapse", "s1", "s2", "--into", "squashed"],
+        &["thread", "collapse"],
+        &["thread", "collapse", "s1", "s2", "--into", "squashed"],
     ),
     sample(&["continue"], &["continue"]),
-    sample(&["expand"], &["expand", "HEAD"]),
     sample(
         &["context", "set"],
         &["context", "set", "--path", "src/lib.rs"],
@@ -257,7 +268,10 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
             "--preview",
         ],
     ),
-    sample(&["oplog", "recover"], &["oplog", "recover"]),
+    sample(
+        &["maintenance", "oplog", "recover"],
+        &["maintenance", "oplog", "recover"],
+    ),
     sample(&["help"], &["help"]),
     sample(&["hook", "list"], &["hook", "list"]),
     sample(&["hook", "install"], &["hook", "install", "pre-snapshot"]),
@@ -454,24 +468,30 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["thread", "marker", "show"],
         &["thread", "marker", "show", "checkpoint"],
     ),
-    sample(&["timeline", "status"], &["timeline", "status"]),
     sample(
-        &["timeline", "record-start"],
-        &["timeline", "record-start", "--tool-call", "call-1"],
+        &["agent", "timeline", "status"],
+        &["agent", "timeline", "status"],
     ),
     sample(
-        &["timeline", "record-finish"],
-        &["timeline", "record-finish", "--tool-call", "call-1"],
+        &["agent", "timeline", "record-start"],
+        &["agent", "timeline", "record-start", "--tool-call", "call-1"],
     ),
     sample(
-        &["timeline", "fork"],
-        &["timeline", "fork", "--step", "tls-abc"],
+        &["agent", "timeline", "record-finish"],
+        &["agent", "timeline", "record-finish", "--tool-call", "call-1"],
     ),
     sample(
-        &["timeline", "reset"],
-        &["timeline", "reset", "--step", "tls-abc"],
+        &["agent", "timeline", "fork"],
+        &["agent", "timeline", "fork", "--step", "tls-abc"],
     ),
-    sample(&["timeline", "recover"], &["timeline", "recover"]),
+    sample(
+        &["agent", "timeline", "reset"],
+        &["agent", "timeline", "reset", "--step", "tls-abc"],
+    ),
+    sample(
+        &["agent", "timeline", "recover"],
+        &["agent", "timeline", "recover"],
+    ),
     sample(&["verify"], &["verify"]),
     sample(
         &["visibility", "set"],
@@ -483,6 +503,10 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(&["visibility", "show"], &["visibility", "show", "HEAD"]),
     sample(&["visibility", "list"], &["visibility", "list"]),
+    sample(
+        &["thread", "expand"],
+        &["thread", "expand", "HEAD"],
+    ),
     sample(&["undo"], &["undo"]),
     sample(&["watch"], &["watch"]),
 ];
@@ -749,7 +773,7 @@ fn contracted_commands_are_not_parseable() {
 #[test]
 fn phase_3_old_command_paths_are_not_parseable() {
     for argv in [
-        &["heddle", "agent", "presence", "list"][..],
+        &["heddle", "presence", "list"][..],
         &["heddle", "fsck"],
         &["heddle", "import", "git"],
         &["heddle", "export", "git"],
@@ -1341,7 +1365,7 @@ fn assert_command_effects(path: &[&str], expected: &[CommandSideEffect]) {
 #[test]
 fn sidecar_only_effect_sets_exclude_refs() {
     for path in [
-        &["presence", "complete"][..],
+        &["agent", "presence", "complete"][..],
         &["agent", "heartbeat"],
         &["agent", "release"],
         &["agent", "task", "create"],
@@ -1355,10 +1379,10 @@ fn sidecar_only_effect_sets_exclude_refs() {
         &["agent", "provenance", "begin"],
         &["agent", "provenance", "segment"],
         &["agent", "provenance", "end"],
-        &["timeline", "record-start"],
-        &["timeline", "record-finish"],
-        &["timeline", "fork"],
-        &["timeline", "recover"],
+        &["agent", "timeline", "record-start"],
+        &["agent", "timeline", "record-finish"],
+        &["agent", "timeline", "fork"],
+        &["agent", "timeline", "recover"],
         &["visibility", "set"],
         &["visibility", "promote"],
     ] {
@@ -1386,7 +1410,10 @@ fn state_attached_effect_sets_include_refs() {
 
 #[test]
 fn materializer_effect_sets_include_refs_metadata_and_worktree() {
-    for path in [&["timeline", "reset"][..], &["integration", "relay"]] {
+    for path in [
+        &["agent", "timeline", "reset"][..],
+        &["integration", "relay"],
+    ] {
         assert_command_effects(
             path,
             &[
@@ -1638,10 +1665,10 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "agent task update",
             "agent fanout plan",
             "agent fanout start",
-            "presence list",
-            "presence show",
-            "presence explain",
-            "presence complete",
+            "agent presence list",
+            "agent presence show",
+            "agent presence explain",
+            "agent presence complete",
             "auth logout",
             "auth status",
             // heddle#1130: descriptor-trust inspection and explicit
@@ -1666,7 +1693,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             // (Spool epic P9) emits a monorepo summary record.
             "clone",
             "commit",
-            "expand",
             "continue",
             "context set",
             "context get",
@@ -1689,7 +1715,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "doctor",
             "doctor docs",
             "doctor schemas",
-            "oplog recover",
+            "maintenance oplog recover",
             "help",
             "init",
             // `log` appears three times: the entry advertises `log`,
@@ -1736,6 +1762,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "start",
             "status",
             "sync",
+            "thread expand",
             "thread create",
             "thread switch",
             "thread list",
@@ -1751,12 +1778,12 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "thread marker create",
             "thread marker delete",
             "thread marker show",
-            "timeline status",
-            "timeline record-start",
-            "timeline record-finish",
-            "timeline fork",
-            "timeline reset",
-            "timeline recover",
+            "agent timeline status",
+            "agent timeline record-start",
+            "agent timeline record-finish",
+            "agent timeline fork",
+            "agent timeline reset",
+            "agent timeline recover",
             "verify",
             "visibility set",
             "visibility promote",

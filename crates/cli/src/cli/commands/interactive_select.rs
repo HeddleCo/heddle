@@ -180,19 +180,19 @@ mod tests {
         let advice = ambiguous_target_advice(
             "actor",
             "<session>",
-            "heddle presence show <session>",
+            "heddle agent presence show <session>",
             &choices(),
         );
         assert_eq!(advice.kind, "ambiguous_actor_selection");
-        assert_eq!(advice.primary_command, "heddle presence show <session>");
+        assert_eq!(advice.primary_command, "heddle agent presence show <session>");
         assert_ne!(advice.primary_command, "heddle help --output json");
         validate_recommended_action(&advice.primary_command)
             .unwrap_or_else(|err| panic!("presence show multi-match next must validate: {err}"));
         assert_eq!(
             advice.recovery_commands,
             vec![
-                "heddle presence show alpha".to_string(),
-                "heddle presence show beta".to_string(),
+                "heddle agent presence show alpha".to_string(),
+                "heddle agent presence show beta".to_string(),
             ]
         );
     }

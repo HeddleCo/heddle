@@ -410,9 +410,9 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle agent provenance begin",
     "heddle start <name> --path <empty-path>",
     "heddle start <name> --path ../<name>",
-    "heddle presence show <session>",
-    "heddle presence complete --session <session>",
-    "heddle presence explain <session>",
+    "heddle agent presence show <session>",
+    "heddle agent presence complete --session <session>",
+    "heddle agent presence explain <session>",
     "heddle thread show <THREAD>",
     // Remote setup requires filling in a real name and URL after
     // inspecting current configuration.
@@ -528,19 +528,19 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
-        "heddle presence show <session>",
+        "heddle agent presence show <session>",
         &["heddle", "presence", "show", "<session>"],
         &["session"],
         true,
     ),
     (
-        "heddle presence complete --session <session>",
+        "heddle agent presence complete --session <session>",
         &["heddle", "presence", "complete", "--session", "<session>"],
         &["session"],
         true,
     ),
     (
-        "heddle presence explain <session>",
+        "heddle agent presence explain <session>",
         &["heddle", "presence", "explain", "<session>"],
         &["session"],
         true,
@@ -1339,14 +1339,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
-    entry(&["presence"], surface(GROUP, "automation")),
     entry(
-        &["presence", "list"],
+        &["agent", "presence", "list"],
         surface(
             json_discriminators(
-                documented_schemas(READ_JSON, &["presence list"]),
+                documented_schemas(READ_JSON, &["agent presence list"]),
                 &[json_discriminator(
-                    Some("presence list"),
+                    Some("agent presence list"),
                     "output_kind",
                     "presence_list",
                 )],
@@ -1355,12 +1354,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["presence", "show"],
+        &["agent", "presence", "show"],
         surface(
             json_discriminators(
-                documented_schemas(READ_JSON, &["presence show"]),
+                documented_schemas(READ_JSON, &["agent presence show"]),
                 &[json_discriminator(
-                    Some("presence show"),
+                    Some("agent presence show"),
                     "output_kind",
                     "presence_show",
                 )],
@@ -1369,12 +1368,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["presence", "explain"],
+        &["agent", "presence", "explain"],
         surface(
             json_discriminators(
-                documented_schemas(READ_JSON, &["presence explain"]),
+                documented_schemas(READ_JSON, &["agent presence explain"]),
                 &[json_discriminator(
-                    Some("presence explain"),
+                    Some("agent presence explain"),
                     "output_kind",
                     "presence_explain",
                 )],
@@ -1383,12 +1382,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["presence", "complete"],
+        &["agent", "presence", "complete"],
         surface(
             json_discriminators(
-                documented_schemas(METADATA_MUTATION, &["presence complete"]),
+                documented_schemas(METADATA_MUTATION, &["agent presence complete"]),
                 &[json_discriminator(
-                    Some("presence complete"),
+                    Some("agent presence complete"),
                     "output_kind",
                     "presence_complete",
                 )],
@@ -1396,6 +1395,8 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
+    entry(&["agent", "presence"], surface(GROUP, "automation")),
+    entry(&["agent", "timeline"], surface(GROUP, "automation")),
     entry(&["agent", "provenance"], surface(GROUP, "automation")),
     entry(
         &["agent", "provenance", "begin"],
@@ -1713,10 +1714,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["collapse"],
-        category(opaque_schemas(REF_MUTATION, &["collapse"]), "states"),
-    ),
-    entry(
         &["commit"],
         exits(
             front_door(
@@ -1748,16 +1745,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 (65, "repository mode or worktree preflight refused"),
                 (74, "io while writing Git state"),
             ],
-        ),
-    ),
-    entry(
-        &["expand"],
-        category(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["expand"]),
-                &[json_discriminator(Some("expand"), "output_kind", "expand")],
-            ),
-            "states",
         ),
     ),
     entry(
@@ -2030,6 +2017,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    entry(&["maintenance", "oplog"], category(GROUP, "recovery")),
     entry(
         &["maintenance", "fsck"],
         category(
@@ -2051,14 +2039,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "recovery",
         ),
     ),
-    entry(&["oplog"], category(GROUP, "recovery")),
     entry(
-        &["oplog", "recover"],
+        &["maintenance", "oplog", "recover"],
         category(
             json_discriminators(
-                opaque_schemas(METADATA_MUTATION_NO_OP_ID, &["oplog recover"]),
+                opaque_schemas(METADATA_MUTATION_NO_OP_ID, &["maintenance oplog recover"]),
                 &[json_discriminator(
-                    Some("oplog recover"),
+                    Some("maintenance oplog recover"),
                     "output_kind",
                     "oplog_recover",
                 )],
@@ -2654,6 +2641,24 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(&["thread"], category(surface(GROUP, "native"), "threads")),
     entry(
+        &["thread", "collapse"],
+        category(opaque_schemas(REF_MUTATION, &["thread collapse"]), "states"),
+    ),
+    entry(
+        &["thread", "expand"],
+        category(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["thread expand"]),
+                &[json_discriminator(
+                    Some("thread expand"),
+                    "output_kind",
+                    "expand",
+                )],
+            ),
+            "states",
+        ),
+    ),
+    entry(
         &["thread", "create"],
         json_discriminators(
             documented_schemas(REF_MUTATION, &["thread create"]),
@@ -2848,14 +2853,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
-    entry(&["timeline"], surface(GROUP, "automation")),
     entry(
-        &["timeline", "status"],
+        &["agent", "timeline", "status"],
         surface(
             json_discriminators(
-                documented_schemas(READ_JSON, &["timeline status"]),
+                documented_schemas(READ_JSON, &["agent timeline status"]),
                 &[json_discriminator(
-                    Some("timeline status"),
+                    Some("agent timeline status"),
                     "output_kind",
                     "timeline_status",
                 )],
@@ -2864,12 +2868,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["timeline", "record-start"],
+        &["agent", "timeline", "record-start"],
         surface(
             json_discriminators(
-                documented_schemas(METADATA_MUTATION, &["timeline record-start"]),
+                documented_schemas(METADATA_MUTATION, &["agent timeline record-start"]),
                 &[json_discriminator(
-                    Some("timeline record-start"),
+                    Some("agent timeline record-start"),
                     "output_kind",
                     "timeline_record_start",
                 )],
@@ -2878,12 +2882,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["timeline", "record-finish"],
+        &["agent", "timeline", "record-finish"],
         surface(
             json_discriminators(
-                documented_schemas(METADATA_MUTATION, &["timeline record-finish"]),
+                documented_schemas(METADATA_MUTATION, &["agent timeline record-finish"]),
                 &[json_discriminator(
-                    Some("timeline record-finish"),
+                    Some("agent timeline record-finish"),
                     "output_kind",
                     "timeline_record_finish",
                 )],
@@ -2892,12 +2896,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["timeline", "fork"],
+        &["agent", "timeline", "fork"],
         surface(
             json_discriminators(
-                documented_schemas(METADATA_MUTATION, &["timeline fork"]),
+                documented_schemas(METADATA_MUTATION, &["agent timeline fork"]),
                 &[json_discriminator(
-                    Some("timeline fork"),
+                    Some("agent timeline fork"),
                     "output_kind",
                     "timeline_action",
                 )],
@@ -2906,12 +2910,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["timeline", "reset"],
+        &["agent", "timeline", "reset"],
         surface(
             json_discriminators(
-                documented_schemas(REF_METADATA_WORKTREE_MUTATION, &["timeline reset"]),
+                documented_schemas(REF_METADATA_WORKTREE_MUTATION, &["agent timeline reset"]),
                 &[json_discriminator(
-                    Some("timeline reset"),
+                    Some("agent timeline reset"),
                     "output_kind",
                     "timeline_action",
                 )],
@@ -2920,12 +2924,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["timeline", "recover"],
+        &["agent", "timeline", "recover"],
         surface(
             json_discriminators(
-                documented_schemas(METADATA_MUTATION, &["timeline recover"]),
+                documented_schemas(METADATA_MUTATION, &["agent timeline recover"]),
                 &[json_discriminator(
-                    Some("timeline recover"),
+                    Some("agent timeline recover"),
                     "output_kind",
                     "timeline_action",
                 )],
@@ -4585,8 +4589,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         },
         Commands::Revert(_) => vec!["revert"],
         Commands::Undo(_) => vec!["undo"],
-        Commands::Collapse(_) => vec!["collapse"],
-        Commands::Expand(_) => vec!["expand"],
         Commands::Thread { command } => match command {
             ThreadCommands::Create { .. } => vec!["thread", "create"],
             ThreadCommands::Current => vec!["thread", "current"],
@@ -4607,6 +4609,8 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             ThreadCommands::RevokeApproval(_) => vec!["thread", "revoke-approval"],
             ThreadCommands::CheckMerge(_) => vec!["thread", "check-merge"],
             ThreadCommands::Cleanup(_) => vec!["thread", "cleanup"],
+            ThreadCommands::Collapse(_) => vec!["thread", "collapse"],
+            ThreadCommands::Expand(_) => vec!["thread", "expand"],
             ThreadCommands::Marker { command } => match command {
                 ThreadMarkerCommands::List { .. } => vec!["thread", "marker", "list"],
                 ThreadMarkerCommands::Create { .. } => {
@@ -4617,14 +4621,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 }
                 ThreadMarkerCommands::Show { .. } => vec!["thread", "marker", "show"],
             },
-        },
-        Commands::Timeline(args) => match &args.command {
-            TimelineCommands::Status(_) => vec!["timeline", "status"],
-            TimelineCommands::RecordStart(_) => vec!["timeline", "record-start"],
-            TimelineCommands::RecordFinish(_) => vec!["timeline", "record-finish"],
-            TimelineCommands::Fork(_) => vec!["timeline", "fork"],
-            TimelineCommands::Reset(_) => vec!["timeline", "reset"],
-            TimelineCommands::Recover(_) => vec!["timeline", "recover"],
         },
         Commands::Shell { command } => match command {
             ShellCommands::Init { .. } => vec!["shell", "init"],
@@ -4640,9 +4636,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 BridgeGitCommands::Import { .. } => vec!["bridge", "git", "import"],
                 BridgeGitCommands::Export { .. } => vec!["bridge", "git", "export"],
             },
-        },
-        Commands::Oplog { command } => match command {
-            OplogCommands::Recover => vec!["oplog", "recover"],
         },
         Commands::Push(_) => vec!["push"],
         Commands::Pull(_) => vec!["pull"],
@@ -4735,12 +4728,20 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 AgentProvenanceCommands::Show(_) => vec!["agent", "provenance", "show"],
                 AgentProvenanceCommands::List(_) => vec!["agent", "provenance", "list"],
             },
-        },
-        Commands::Presence { command } => match command {
-            PresenceCommands::List(_) => vec!["presence", "list"],
-            PresenceCommands::Show(_) => vec!["presence", "show"],
-            PresenceCommands::Explain(_) => vec!["presence", "explain"],
-            PresenceCommands::Complete(_) => vec!["presence", "complete"],
+            AgentCommands::Presence(command) => match command {
+                PresenceCommands::List(_) => vec!["agent", "presence", "list"],
+                PresenceCommands::Show(_) => vec!["agent", "presence", "show"],
+                PresenceCommands::Explain(_) => vec!["agent", "presence", "explain"],
+                PresenceCommands::Complete(_) => vec!["agent", "presence", "complete"],
+            },
+            AgentCommands::Timeline(command) => match command {
+                TimelineCommands::Status(_) => vec!["agent", "timeline", "status"],
+                TimelineCommands::RecordStart(_) => vec!["agent", "timeline", "record-start"],
+                TimelineCommands::RecordFinish(_) => vec!["agent", "timeline", "record-finish"],
+                TimelineCommands::Fork(_) => vec!["agent", "timeline", "fork"],
+                TimelineCommands::Reset(_) => vec!["agent", "timeline", "reset"],
+                TimelineCommands::Recover(_) => vec!["agent", "timeline", "recover"],
+            },
         },
         Commands::Maintenance { command } => match command {
             MaintenanceCommands::Fsck(args) => match &args.command {
@@ -4755,6 +4756,9 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             MaintenanceCommands::Refresh => vec!["maintenance", "refresh"],
             MaintenanceCommands::Repack => vec!["maintenance", "repack"],
             MaintenanceCommands::Gc { .. } => vec!["maintenance", "gc"],
+            MaintenanceCommands::Oplog { command } => match command {
+                OplogCommands::Recover => vec!["maintenance", "oplog", "recover"],
+            },
         },
         Commands::Clone(_) => vec!["clone"],
         Commands::Hook { command } => match command {

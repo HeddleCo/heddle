@@ -423,6 +423,7 @@ fn test_cli_collapse_squashes_states() {
     state_ids.reverse();
     let output = heddle(
         &[
+            "thread",
             "collapse",
             &state_ids[0],
             &state_ids[1],

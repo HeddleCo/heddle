@@ -84,6 +84,7 @@ fn authored_commands_auto_sign_their_states() {
         let first = head.parents[0];
         heddle_signed(
             &[
+                "thread",
                 "collapse",
                 &first.to_string_full(),
                 &head.state_id.to_string_full(),

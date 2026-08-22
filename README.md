@@ -11,7 +11,7 @@ Heddle is an agent-native version control CLI written in Rust. It keeps its own 
 - content-addressed immutable history with stable change identifiers that survive rewrites
 - provenance-aware inspection (`heddle query --attribution`, `heddle show`, `heddle diff`)
 - operation-agnostic recovery (`heddle continue` / `heddle abort`) without per-command lifecycle flags
-- separate coordination surfaces for writer leases (`heddle agent`) and acting-worker context (`heddle presence`)
+- separate coordination surfaces for writer leases (`heddle agent`) and acting-worker context (`heddle agent presence`)
 - explicit maintenance and interoperability namespaces (`heddle maintenance`, `heddle bridge git`)
 
 ```bash
@@ -147,7 +147,7 @@ heddle diff HEAD~1 HEAD
 heddle query --attribution path/to/file.rs
 
 # Inspect acting-worker context separately from writer authority
-heddle presence list
+heddle agent presence list
 
 # Run advanced integrity and Git projection operations
 heddle maintenance fsck --full
@@ -156,7 +156,7 @@ heddle bridge git export --destination ../project.git
 
 `heddle status` reports the current branch or thread, what is dirty, whether another operation is in progress, and the recommended next command. The same `recommended_action` field is carried through `heddle doctor`, `heddle thread show`, and `heddle status` for programmatic use.
 
-`heddle presence` reports attribution and active-work context without granting write authority; lease-backed mutations remain under `heddle agent`. Repository integrity checks live under `heddle maintenance fsck`, while explicit Git import/export lives under `heddle bridge git`. These namespaces keep operational plumbing available without expanding the everyday verb surface.
+`heddle agent presence` reports attribution and active-work context without granting write authority; lease-backed mutations remain under `heddle agent`. Repository integrity checks live under `heddle maintenance fsck`, while explicit Git import/export lives under `heddle bridge git`. These namespaces keep operational plumbing available without expanding the everyday verb surface.
 
 In Git-overlay repositories, `heddle land` projects a landed thread as one atomic Git commit by default. The original per-State captures remain in Heddle history. Use `heddle land --no-squash` for a single invocation that should export one Git commit per State.
 

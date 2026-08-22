@@ -9,12 +9,12 @@ use super::BridgeCommands;
 use super::SemanticCommands;
 use super::{
     AgentCommands, CiCommands, CompletionSubject, ContextCommands, DiscussCommands, HookCommands,
-    IntegrationCommands, OplogCommands, PresenceCommands, QueryArgs, RedactCommands,
-    RemoteCommands, ReviewCommands, ShellCommands, ThreadCommands, VisibilityCommands,
+    IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
+    ShellCommands, ThreadCommands, VisibilityCommands,
     commands_args::{
-        AdoptArgs, CloneArgs, CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, ExpandArgs,
-        INIT_VERB, InitArgs, LandArgs, LogArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs,
-        RevertArgs, SnapshotArgs, SyncArgs, ThreadStartArgs, TimelineArgs, UndoArgs, WatchArgs,
+        AdoptArgs, CloneArgs, CommitArgs, DiffArgs, DoctorArgs, INIT_VERB, InitArgs, LandArgs,
+        LogArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs,
+        ThreadStartArgs, UndoArgs, WatchArgs,
     },
 };
 #[cfg(feature = "client")]
@@ -206,16 +206,6 @@ Examples:
     #[command(visible_alias = "history")]
     Log(LogArgs),
 
-    /// Navigate, fork, reset, and recover agent tool-call timelines.
-    #[command(after_help = "\
-Examples:
-  heddle log --timeline
-  heddle timeline fork --tool-call call_123 --branch tlb-alt
-  heddle timeline reset --step tls-abc --materialize
-  heddle timeline recover
-")]
-    Timeline(TimelineArgs),
-
     /// Show state details.
     Show {
         /// State by physical state ID, logical change ID, or unambiguous prefix.
@@ -308,12 +298,6 @@ Examples:
     /// Undo the last Heddle operation.
     Undo(UndoArgs),
 
-    /// Collapse (squash) multiple states into one.
-    Collapse(CollapseArgs),
-
-    /// Expand a squashed land into the captures it collapsed.
-    Expand(ExpandArgs),
-
     /// Manage threads.
     Thread {
         #[command(subcommand)]
@@ -346,16 +330,6 @@ Examples:
 
     /// Resolve merge conflicts.
     Resolve(ResolveArgs),
-
-    /// Inspect and repair the operation log.
-    ///
-    /// `heddle oplog recover` explicitly salvages a truncated or torn oplog,
-    /// reporting what was recovered — the operator-facing entrypoint over the
-    /// same recovery the everyday read path runs automatically.
-    Oplog {
-        #[command(subcommand)]
-        command: OplogCommands,
-    },
 
     /// Explicit interoperability with other version-control formats.
     #[cfg(feature = "git-overlay")]
@@ -477,15 +451,6 @@ Examples:
         command: AgentCommands,
     },
 
-    /// Inspect attribution and work context for local agents.
-    ///
-    /// Presence is intentionally separate from `agent`: presence records
-    /// explain who is acting, while `agent reserve` grants writer authority.
-    Presence {
-        #[command(subcommand)]
-        command: PresenceCommands,
-    },
-
     /// Inspect and refresh rebuildable performance sidecars.
     Maintenance {
         #[command(subcommand)]
@@ -530,6 +495,17 @@ pub enum MaintenanceCommands {
         /// Show what would be removed without removing.
         #[arg(long)]
         dry_run: bool,
+    },
+
+    /// Inspect and repair the operation log.
+    ///
+    /// `heddle maintenance oplog recover` explicitly salvages a truncated or
+    /// torn oplog, reporting what was recovered — the operator-facing
+    /// entrypoint over the same recovery the everyday read path runs
+    /// automatically.
+    Oplog {
+        #[command(subcommand)]
+        command: OplogCommands,
     },
 }
 

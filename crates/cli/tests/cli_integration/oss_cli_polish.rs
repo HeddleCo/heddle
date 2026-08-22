@@ -8708,7 +8708,7 @@ fn agent_presence_explain_json_detects_harness_without_active_presence() {
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let output = heddle_output_with_env_removed(
-        &["presence", "explain", "--output", "json"],
+        &["agent", "presence", "explain", "--output", "json"],
         Some(temp.path()),
         &[
             ("CODEX_THREAD_ID", "thread-cold-agent"),
@@ -8770,7 +8770,7 @@ fn agent_presence_explain_json_detects_harness_without_active_presence() {
         heddle_argv_json(["agent", "reserve", "--thread", "main"]),
         "presence explain should expose replayable argv for reservation: {parsed}"
     );
-    assert_schema_declares_runtime_top_level(&["presence", "explain"], &parsed);
+    assert_schema_declares_runtime_top_level(&["agent", "presence", "explain"], &parsed);
     assert!(
         parsed.get("verification").is_some(),
         "actor explain should prove repository verify for agents: {parsed}"
@@ -8792,8 +8792,8 @@ fn agent_presence_and_provenance_outputs_match_registered_schemas() {
         .as_str()
         .expect("reserve should attach presence");
 
-    let actor_list = json_value(temp.path(), &["presence", "list", "--output", "json"]);
-    assert_schema_declares_runtime_top_level(&["presence", "list"], &actor_list);
+    let actor_list = json_value(temp.path(), &["agent", "presence", "list", "--output", "json"]);
+    assert_schema_declares_runtime_top_level(&["agent", "presence", "list"], &actor_list);
     assert_eq!(actor_list["output_kind"], "presence_list", "{actor_list}");
     assert!(
         actor_list["presence"].as_array().is_some(),
@@ -8803,15 +8803,16 @@ fn agent_presence_and_provenance_outputs_match_registered_schemas() {
 
     let actor_show = json_value(
         temp.path(),
-        &["presence", "show", presence_id, "--output", "json"],
+        &["agent", "presence", "show", presence_id, "--output", "json"],
     );
-    assert_schema_declares_runtime_top_level(&["presence", "show"], &actor_show);
+    assert_schema_declares_runtime_top_level(&["agent", "presence", "show"], &actor_show);
     assert_eq!(actor_show["output_kind"], "presence_show", "{actor_show}");
     assert_eq!(actor_show["presence"]["session_id"], presence_id);
 
     let actor_done = json_value(
         temp.path(),
         &[
+            "agent",
             "presence",
             "complete",
             "--session",
@@ -8820,7 +8821,7 @@ fn agent_presence_and_provenance_outputs_match_registered_schemas() {
             "json",
         ],
     );
-    assert_schema_declares_runtime_top_level(&["presence", "complete"], &actor_done);
+    assert_schema_declares_runtime_top_level(&["agent", "presence", "complete"], &actor_done);
     assert_eq!(
         actor_done["output_kind"], "presence_complete",
         "{actor_done}"
