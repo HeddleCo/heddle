@@ -16,9 +16,14 @@
 //! stay one maintenance unit.
 
 pub mod core_loop;
+pub mod land;
 pub mod operator;
 pub mod ready;
 
+pub use land::{
+    LandBlockerCheck, LandBlockerCode, LandBlockerDetail, LandBlockerStateContext, LandOutput,
+    MultiLandOutput, MultiLandPeerResult, SiblingRestackFailure, SyncOutput,
+};
 pub use core_loop::{CommitOutput, SnapshotAgentOutput, SnapshotOutput, SnapshotPrincipalOutput, UndoRedoOutput};
 pub use operator::{
     OperatorAction, OperatorCommandEnvelope, OperatorCommandOutput, VerificationClaimPolicy,

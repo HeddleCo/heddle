@@ -24,7 +24,10 @@ use verbs::{
 
 use super::command_catalog;
 use super::init_output::InitOutput;
-use super::wire::{CommitOutput, OperatorCommandOutput, ReadyOutput, SnapshotOutput, UndoRedoOutput};
+use super::wire::{
+    CommitOutput, LandOutput, MultiLandOutput, OperatorCommandOutput, ReadyOutput, SnapshotOutput,
+    SyncOutput, UndoRedoOutput,
+};
 use crate::cli::INIT_VERB;
 
 static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -79,9 +82,9 @@ schema_registry! {
     (&["undo", "undo --redo", "undo --recover"], UndoRedoOutput),
     (&["undo --list"], UndoListReport),
     (&["ready"], ReadyOutput),
-    (&["land"], LandSchema),
-    (&["land --threads"], LandBatchSchema),
-    (&["sync"], SyncSchema),
+    (&["land"], LandOutput),
+    (&["land --threads"], MultiLandOutput),
+    (&["sync"], SyncOutput),
     (&["continue", "abort"], OperatorCommandOutput),
     (&["start"], ThreadStartSchema),
     (&["thread create", "thread switch", "thread rename"], ThreadStartSchema),
@@ -858,127 +861,6 @@ pub struct DiscussionListSchema {
 // ---- core loop write/read helpers -----------------------------------------
 
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SyncSchema {
-    #[serde(flatten)]
-    pub operator: OperatorCommandOutput,
-    pub thread: Option<String>,
-    pub current_state: Option<String>,
-    pub chosen_path: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct LandSchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: String,
-    pub message: String,
-    pub blockers: Option<Vec<String>>,
-    pub warnings: Option<Vec<String>>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub thread: String,
-    pub captured: bool,
-    pub checkpointed: bool,
-    pub git_commit: Option<String>,
-    pub synced: bool,
-    pub integrated: bool,
-    pub performed_steps: Vec<String>,
-    pub skipped_steps: Vec<String>,
-    pub merge_state: Option<String>,
-    pub blocker_details: Vec<LandBlockerDetailSchema>,
-    pub chosen_path: String,
-    pub siblings_restacked: Vec<String>,
-    pub siblings_restack_failed: Vec<SiblingRestackFailureSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct LandBlockerDetailSchema {
-    /// Stable condition code for machine branching.
-    pub code: LandBlockerCodeSchema,
-    /// Eligibility check that produced the blocker.
-    pub check: LandBlockerCheckSchema,
-    /// Human explanation of the observed condition.
-    pub message: String,
-    /// Concrete affected paths; empty for non-path conditions.
-    pub paths: Vec<String>,
-    pub state_context: Option<LandBlockerStateContextSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum LandBlockerCodeSchema {
-    ThreadStateBlocked,
-    MergeConflicts,
-    AutoLandConfidenceBelowThreshold,
-    VerificationTestsFailed,
-    ThreadStale,
-    IntegrationPreviewBlocked,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum LandBlockerCheckSchema {
-    ThreadState,
-    MergePreview,
-    AutoLandConfidence,
-    VerificationSummary,
-    Freshness,
-    IntegrationPreview,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct LandBlockerStateContextSchema {
-    pub recorded_thread_state: String,
-    pub recorded_state_id: Option<String>,
-    pub thread_tip_state_id: Option<String>,
-    pub integration_policy_status: Option<String>,
-    pub integration_policy_reason: Option<String>,
-    pub merge_relation: String,
-    pub conflict_count: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SiblingRestackFailureSchema {
-    pub thread: String,
-    pub message: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct LandBatchPeerSchema {
-    pub thread: String,
-    pub status: String,
-    pub message: String,
-    pub captured: bool,
-    pub checkpointed: bool,
-    pub git_commit: Option<String>,
-    pub integrated: bool,
-    pub synced: bool,
-    pub siblings_restacked: Vec<String>,
-    pub siblings_restack_failed: Vec<SiblingRestackFailureSchema>,
-    pub blockers: Vec<String>,
-    pub blocker_details: Vec<LandBlockerDetailSchema>,
-    pub warnings: Vec<String>,
-    pub primary_command: Option<String>,
-    pub recovery_commands: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct LandBatchSchema {
-    pub output_kind: String,
-    pub status: String,
-    pub action: String,
-    pub message: String,
-    pub threads: Vec<String>,
-    pub landed: Vec<String>,
-    pub stopped_at: Option<String>,
-    pub peers: Vec<LandBatchPeerSchema>,
-    pub git_head: Option<String>,
-    pub recommended_action: Option<String>,
-    pub verification: Option<RepositoryVerificationStateSchema>,
-}
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ThreadStartSchema {

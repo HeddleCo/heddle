@@ -291,6 +291,7 @@ impl Serialize for OperatorCommandEnvelope<'_> {
 
 #[derive(JsonSchema)]
 #[allow(dead_code)] // fields describe the wire; the serializer writes them
+#[schemars(rename = "OperatorCommandSchema")]
 struct OperatorCommandShape {
     pub output_kind: String,
     pub status: String,
