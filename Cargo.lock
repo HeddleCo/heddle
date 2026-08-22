@@ -2448,6 +2448,7 @@ dependencies = [
  "heddleco-iroh",
  "hex",
  "iroh-base",
+ "iroh-relay",
  "libc",
  "n0-watcher",
  "noq-udp",
@@ -2472,6 +2473,7 @@ dependencies = [
  "toml 1.1.4+spec-1.1.0",
  "tracing",
  "tracing-opentelemetry",
+ "tracing-subscriber",
  "uuid",
  "webpki-roots 1.0.9",
 ]

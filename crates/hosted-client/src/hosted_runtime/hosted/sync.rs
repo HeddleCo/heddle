@@ -731,27 +731,6 @@ impl HostedClient {
         })
     }
 
-    pub async fn push(
-        &mut self,
-        repo: &Repository,
-        repo_path: &str,
-        local_state: StateId,
-        target_thread: &str,
-        force: bool,
-        client_operation_id: String,
-    ) -> Result<PushComplete, ProtocolError> {
-        self.push_profiled(
-            repo,
-            repo_path,
-            local_state,
-            target_thread,
-            force,
-            client_operation_id,
-        )
-        .await
-        .map(|(complete, _)| complete)
-    }
-
     pub async fn push_profiled(
         &mut self,
         repo: &Repository,
@@ -778,30 +757,6 @@ impl HostedClient {
             &Progress::null(),
         )
         .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn push_with_expected_head(
-        &mut self,
-        repo: &Repository,
-        repo_path: &str,
-        local_state: StateId,
-        target_thread: &str,
-        force: bool,
-        expected_remote_head: ExpectedRemoteHead,
-        client_operation_id: String,
-    ) -> Result<PushComplete, ProtocolError> {
-        self.push_with_expected_head_profiled(
-            repo,
-            repo_path,
-            local_state,
-            target_thread,
-            force,
-            expected_remote_head,
-            client_operation_id,
-        )
-        .await
-        .map(|(complete, _)| complete)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -871,7 +826,7 @@ impl HostedClient {
             &remote_ref_expectations,
         )?;
         let local_revision_address = git_lane.local_revision_address.clone();
-        self.push_with_revision(
+        self.push_with_revision_profiled(
             repo,
             repo_path,
             local_state,
@@ -884,6 +839,7 @@ impl HostedClient {
             progress,
         )
         .await
+        .map(|(complete, _)| complete)
     }
 
     /// Fetch the server's current ref → git-revision-address map so the
@@ -900,36 +856,6 @@ impl HostedClient {
             expectations.insert(entry.name, expectation);
         }
         Ok(expectations)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn push_with_revision(
-        &mut self,
-        repo: &Repository,
-        repo_path: &str,
-        local_state: StateId,
-        target_thread: &str,
-        force: bool,
-        operation_id: ClientOperationId,
-        local_revision_address: String,
-        git_lane: Option<GitLanePushPlan>,
-        expected_remote_head: Option<ExpectedRemoteHead>,
-        progress: &Progress,
-    ) -> Result<PushComplete, ProtocolError> {
-        self.push_with_revision_profiled(
-            repo,
-            repo_path,
-            local_state,
-            target_thread,
-            force,
-            operation_id,
-            local_revision_address,
-            git_lane,
-            expected_remote_head,
-            progress,
-        )
-        .await
-        .map(|(complete, _)| complete)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1282,29 +1208,6 @@ impl HostedClient {
         profile.metadata_sync = metadata_sync_started.elapsed();
         profile.total = total_started.elapsed();
         Ok((result, profile))
-    }
-
-    pub async fn pull(
-        &mut self,
-        repo: &Repository,
-        repo_path: &str,
-        remote_thread: &str,
-        local_thread: Option<&str>,
-    ) -> Result<PullComplete, ProtocolError> {
-        self.pull_with_options(
-            repo,
-            repo_path,
-            remote_thread,
-            PullOptions {
-                local_thread,
-                depth: None,
-                target_state: None,
-                materialization: PullMaterialization::Full,
-                publish_refs: true,
-                wanted_hashes: None,
-            },
-        )
-        .await
     }
 
     pub async fn pull_profiled(
@@ -3850,7 +3753,7 @@ mod native_exchange_tests {
 
         assert!(client.list_refs("acme/widgets").await.unwrap().is_empty());
         let pushed = client
-            .push_with_expected_head(
+            .push_with_expected_head_profiled(
                 &repo,
                 "acme/widgets",
                 state,
@@ -3860,7 +3763,8 @@ mod native_exchange_tests {
                 "push-test-op".to_string(),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         assert!(!pushed.success);
         assert_eq!(pushed.error.as_deref(), Some("test rejection"));
 
@@ -3917,9 +3821,10 @@ mod native_exchange_tests {
 
         assert!(
             client
-                .pull(&repo, "acme/widgets", bootstrap, None)
+                .pull_profiled(&repo, "acme/widgets", bootstrap, None)
                 .await
                 .unwrap()
+                .0
                 .success
         );
         let (profiled, profile) = client

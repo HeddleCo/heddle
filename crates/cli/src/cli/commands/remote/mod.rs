@@ -1581,7 +1581,7 @@ async fn push_network_one_thread(
             .await?)
     } else {
         Ok(client
-            .push(
+            .push_profiled(
                 repo,
                 repo_path,
                 *state_id,
@@ -1589,7 +1589,8 @@ async fn push_network_one_thread(
                 force,
                 client_operation_id,
             )
-            .await?)
+            .await
+            .map(|(complete, _)| complete)?)
     }
 }
 
