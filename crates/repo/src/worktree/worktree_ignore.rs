@@ -9,11 +9,15 @@
 //! contract (and the shared pattern compiler); this wrapper keeps one
 //! compiled matcher per walk instead of rebuilding per path test.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{OnceLock, RwLock},
+};
 
 use ignore::gitignore::Gitignore;
 use objects::{
     object::ContentHash,
+    sync::RwLockExt,
     worktree::{build_matcher as objects_build_matcher, is_reserved_worktree_path},
 };
 
@@ -37,6 +41,25 @@ pub(crate) struct WorktreeIgnoreMatcher {
 }
 
 impl WorktreeIgnoreMatcher {
+    /// Compile-once-per-pattern-set constructor. Walkers re-enter with the
+    /// same `.heddleignore` rules many times per process; this keeps one
+    /// compiled `Gitignore` alive, keyed by the pattern fingerprint, and
+    /// hands out clones (the nested-exclusion list is attached by callers).
+    pub(crate) fn cached(patterns: &[String]) -> Self {
+        static CACHE: OnceLock<RwLock<Option<(ContentHash, WorktreeIgnoreMatcher)>>> =
+            OnceLock::new();
+        let cache = CACHE.get_or_init(|| RwLock::new(None));
+        let fingerprint = Self::fingerprint_patterns(patterns);
+        if let Some((cached_fingerprint, matcher)) = cache.read_or_poisoned().as_ref()
+            && *cached_fingerprint == fingerprint
+        {
+            return matcher.clone();
+        }
+        let matcher = Self::new(patterns);
+        *cache.write_or_poisoned() = Some((fingerprint, matcher.clone()));
+        matcher
+    }
+
     pub(crate) fn new(patterns: &[String]) -> Self {
         Self {
             matcher: Some(objects_build_matcher(patterns)),
@@ -144,7 +167,10 @@ fn paths_equivalent(a: &Path, b: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+    path::{Path, PathBuf},
+    sync::{OnceLock, RwLock},
+};
 
     use objects::worktree::should_ignore;
 

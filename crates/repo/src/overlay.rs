@@ -678,7 +678,8 @@ impl Repository {
         let mut modified = BTreeSet::new();
         let mut deleted = BTreeSet::new();
         let ignore_patterns = self.ignore_patterns()?;
-        let worktree_ignore = crate::worktree_ignore::WorktreeIgnoreMatcher::new(&ignore_patterns);
+        let worktree_ignore =
+            crate::worktree_ignore::WorktreeIgnoreMatcher::cached(&ignore_patterns);
         let index_ignore = objects::worktree::build_worktree_ignore(&ignore_patterns);
         let index_plan_applicable = git_worktree_matches_repo_root(&git_repo, self.root());
         let mut index_staged_paths = Vec::new();
@@ -691,7 +692,9 @@ impl Repository {
                     ..SleyShortStatusOptions::default()
                 },
                 |entry| {
-                    let path = git_path(entry.path);
+                    // Borrow when the path is clean UTF-8; only kept rows
+                    // materialize an owned PathBuf.
+                    let path = String::from_utf8_lossy(entry.path);
                     if path.is_empty() {
                         return Ok(SleyStreamControl::Continue);
                     }
@@ -707,7 +710,7 @@ impl Repository {
                     if ignored_git_overlay_status_path(&path) {
                         return Ok(SleyStreamControl::Continue);
                     }
-                    let path = PathBuf::from(path);
+                    let path = PathBuf::from(&*path);
 
                     if entry.index == b'?' && entry.worktree == b'?' {
                         if git_overlay_untracked_path_ignored(&worktree_ignore, &path) {
@@ -1254,11 +1257,6 @@ fn git_overlay_exclude_line_matches(line: &str, pattern: &str) -> bool {
             (".heddle", ".heddle/") | ("/.heddle/", ".heddle/") | ("/.heddle", ".heddle/")
         )
 }
-#[cfg(feature = "git-overlay")]
-fn git_path(path: &[u8]) -> String {
-    String::from_utf8_lossy(path).into_owned()
-}
-
 #[cfg(feature = "git-overlay")]
 fn ignored_git_overlay_status_path(path: &str) -> bool {
     path == ".heddle" || path.starts_with(".heddle/")

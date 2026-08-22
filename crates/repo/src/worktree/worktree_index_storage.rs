@@ -424,8 +424,9 @@ fn load_v1(file: &mut File, file_size: u64) -> Result<WorktreeIndex, IndexError>
             ));
         }
 
-        let path = String::from_utf8(data[offset..offset + path_len].to_vec())
-            .map_err(|_| IndexError::InvalidUtf8(format!("path at offset {}", offset)))?;
+        let path = std::str::from_utf8(&data[offset..offset + path_len])
+            .map_err(|_| IndexError::InvalidUtf8(format!("path at offset {}", offset)))?
+            .to_string();
         offset += path_len;
 
         let mut hash_bytes = [0u8; 32];
@@ -930,8 +931,9 @@ fn read_file_entry(
         ));
     }
 
-    let path = String::from_utf8(data[offset..offset + path_len].to_vec())
-        .map_err(|_| IndexError::InvalidUtf8(format!("path at offset {}", offset)))?;
+    let path = std::str::from_utf8(&data[offset..offset + path_len])
+        .map_err(|_| IndexError::InvalidUtf8(format!("path at offset {}", offset)))?
+        .to_string();
     offset += path_len;
 
     let mut hash_bytes = [0u8; 32];
@@ -989,8 +991,9 @@ fn read_legacy_directory_entry(
         ));
     }
 
-    let path = String::from_utf8(data[offset..offset + path_len].to_vec())
-        .map_err(|_| IndexError::InvalidUtf8(format!("path at offset {}", offset)))?;
+    let path = std::str::from_utf8(&data[offset..offset + path_len])
+        .map_err(|_| IndexError::InvalidUtf8(format!("path at offset {}", offset)))?
+        .to_string();
     offset += path_len;
 
     let mtime_sec = read_i64_be(&data[offset..], "compact directory mtime seconds")?;
@@ -1027,20 +1030,17 @@ fn read_legacy_directory_entry(
         ));
     }
 
+    let children_data = &data[offset..offset + children_len];
     let mut children = Vec::new();
-    let mut current = Vec::new();
-    for &byte in &data[offset..offset + children_len] {
-        if byte == 0 {
-            if !current.is_empty() {
-                children.push(
-                    String::from_utf8(current.clone())
-                        .map_err(|_| IndexError::InvalidUtf8("invalid child name".to_string()))?,
-                );
-                current.clear();
-            }
-        } else {
-            current.push(byte);
+    for name in children_data.split(|&byte| byte == 0) {
+        if name.is_empty() {
+            continue;
         }
+        children.push(
+            std::str::from_utf8(name)
+                .map_err(|_| IndexError::InvalidUtf8("invalid child name".to_string()))?
+                .to_string(),
+        );
     }
     offset += children_len;
 
@@ -1079,8 +1079,9 @@ fn read_compact_directory_entry(
         ));
     }
 
-    let path = String::from_utf8(data[offset..offset + path_len].to_vec())
-        .map_err(|_| IndexError::InvalidUtf8(format!("path at offset {}", offset)))?;
+    let path = std::str::from_utf8(&data[offset..offset + path_len])
+        .map_err(|_| IndexError::InvalidUtf8(format!("path at offset {}", offset)))?
+        .to_string();
     offset += path_len;
 
     let mtime_sec = read_i64_be(&data[offset..], "compact file mtime seconds")?;
@@ -1137,8 +1138,9 @@ fn read_untracked_directory_entry(
         ));
     }
 
-    let path = String::from_utf8(data[offset..offset + path_len].to_vec())
-        .map_err(|_| IndexError::InvalidUtf8(format!("path at offset {}", offset)))?;
+    let path = std::str::from_utf8(&data[offset..offset + path_len])
+        .map_err(|_| IndexError::InvalidUtf8(format!("path at offset {}", offset)))?
+        .to_string();
     offset += path_len;
 
     let entry = read_untracked_directory_entry_payload(data, &mut offset)?;
@@ -1588,8 +1590,9 @@ fn read_string(data: &[u8], offset: &mut usize) -> Result<String, IndexError> {
             "truncated string data".to_string(),
         ));
     }
-    let value = String::from_utf8(data[*offset..*offset + path_len].to_vec())
-        .map_err(|_| IndexError::InvalidUtf8(format!("path at offset {}", *offset)))?;
+    let value = std::str::from_utf8(&data[*offset..*offset + path_len])
+        .map_err(|_| IndexError::InvalidUtf8(format!("path at offset {}", *offset)))?
+        .to_string();
     *offset += path_len;
     Ok(value)
 }
