@@ -30,9 +30,7 @@ mod discussion_anchor_travel;
 #[cfg(feature = "tree-sitter-symbols")]
 mod discussion_snapshot_travel;
 mod ephemeral_thread;
-mod fsmonitor;
 mod git_ref_name;
-pub mod git_worktree_status;
 mod grant_audience;
 mod hooks;
 pub mod identity;
@@ -78,12 +76,16 @@ pub use repository_symbol_graph_query::ResolvedSemanticEdgeSet;
 pub mod remote;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_semantic_context;
+pub mod signals;
+pub use repository::{PatternDeviationToml, ReviewConfig, ReviewSignalsToml};
+#[cfg(feature = "tree-sitter-symbols")]
+pub use repository_semantic_context::{CaptureSemanticContext, build_semantic_context};
+#[cfg(feature = "tree-sitter-symbols")]
+pub use repository_semantic_corpus::CORPUS_FILE_BUDGET;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_semantic_corpus;
 #[cfg(all(test, feature = "tree-sitter-symbols"))]
 mod repository_semantic_graph_e2e_tests;
-#[cfg(feature = "tree-sitter-symbols")]
-mod repository_signals;
 mod repository_state_visibility;
 #[cfg(all(test, feature = "tree-sitter-symbols"))]
 mod repository_symbol_graph_tests;
@@ -98,7 +100,6 @@ mod session_storage;
 pub mod snapshot_metadata;
 pub mod staleness;
 mod stash;
-mod stat_signature;
 /// Re-export of the symbol resolver. The implementation lives in
 /// `crates/semantic/src/symbol_resolver.rs` so anchor-travel code in
 /// `objects`-adjacent modules can use it without depending on `repo`.
@@ -122,12 +123,14 @@ mod timeline_pack;
 mod timeline_store;
 mod timeline_view;
 pub mod visibility;
-mod worktree_ignore;
-pub mod worktree_index;
-mod worktree_state;
-mod worktree_status_options;
 
-pub mod worktree_walk;
+#[path = "worktree/mod.rs"]
+pub mod worktree;
+pub(crate) use worktree::{
+    fsmonitor, stat_signature, status_tracked_refresh, status_untracked_scan, worktree_ignore,
+    worktree_state,
+};
+pub use worktree::{git_worktree_status, worktree_index, worktree_status_options, worktree_walk};
 
 // Re-export commonly used types from underlying crates.
 pub use ci_runner_trust::{CiRunnerTrustEntry, CiRunnerTrustSet};
@@ -197,7 +200,9 @@ pub use repository::{
     is_major_rewrite, is_synthetic_root, open_git_repository_at_root, query_history_from_source,
 };
 #[cfg(feature = "git-overlay")]
-pub use repository::{GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitOverlayShortStatus};
+pub use repository::{
+    GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitOverlayShortStatus, GitOverlayTagTip,
+};
 #[cfg(feature = "async-source")]
 pub use repository::{find_merge_base_async, is_ancestor_async};
 pub use repository_key_binding::AuthorshipVerification;

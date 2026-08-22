@@ -145,7 +145,7 @@ fn scan_directory(
         return Ok(subtree_has_untracked);
     }
     ctx.index.remove_untracked_directory(dir_key);
-    let entries = list_directory(dir, false)?;
+    let entries = list_directory(dir, false, |_| true)?;
     ctx.stats.directories_scanned += 1;
 
     let tree = tree.expect("tracked-tree scan requires a tree");
@@ -304,7 +304,14 @@ fn scan_pure_untracked_subtree(
         }
     };
     ctx.index.remove_directory(dir_key);
-    let entries = list_directory(dir, false)?;
+    // Prune ignored names before allocating their entries; the summary
+    // digest below is computed over the same filtered set on both sides.
+    let entries = {
+        let ignore_matcher = &ctx.ignore_matcher;
+        list_directory(dir, false, |name| {
+            !ignore_matcher.should_prune_directory_child(rel_path, name)
+        })?
+    };
     ctx.stats.directories_scanned += 1;
 
     if let Some(existing_summary) = ctx.index.get_untracked_directory(dir_key)
@@ -324,12 +331,6 @@ fn scan_pure_untracked_subtree(
 
     let mut added_paths = Vec::new();
     for entry in &entries {
-        if ctx
-            .ignore_matcher
-            .should_prune_directory_child(rel_path, &entry.name)
-        {
-            continue;
-        }
         if ctx.ignore_matcher.should_prune_absolute_path(&entry.path) {
             continue;
         }
@@ -428,7 +429,7 @@ mod tests {
 
         let matcher = WorktreeIgnoreMatcher::new(&[]);
         let metadata = fs::symlink_metadata(&dir).unwrap();
-        let entries = list_directory(&dir, false).unwrap();
+        let entries = list_directory(&dir, false, |_| true).unwrap();
         let summary = UntrackedDirectoryCacheEntry::from_relative_added_paths(
             &metadata,
             entries.iter().map(|entry| entry.name.as_str()),
@@ -440,7 +441,7 @@ mod tests {
 
         fs::write(dir.join("c.txt"), "c").unwrap();
         let updated_metadata = fs::symlink_metadata(&dir).unwrap();
-        let updated_entries = list_directory(&dir, false).unwrap();
+        let updated_entries = list_directory(&dir, false, |_| true).unwrap();
 
         assert!(!summary.matches_current_directory(
             &updated_metadata,
@@ -459,7 +460,7 @@ mod tests {
         fs::write(dir.join("visible.txt"), "visible").unwrap();
 
         let metadata = fs::symlink_metadata(&dir).unwrap();
-        let entries = list_directory(&dir, false).unwrap();
+        let entries = list_directory(&dir, false, |_| true).unwrap();
         let cached_matcher = WorktreeIgnoreMatcher::new(&["build/".to_string()]);
         let summary = UntrackedDirectoryCacheEntry::from_relative_added_paths(
             &metadata,

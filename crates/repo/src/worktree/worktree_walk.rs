@@ -21,7 +21,9 @@ use crate::{
     worktree_index::{IndexEntry as CachedWorktreeEntry, IndexEntryKind as CachedEntryKind},
 };
 
-const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
+/// Per-blob capture cap shared with the mount's write-extent cap
+/// (`mount::core`), so a file servable over FUSE is always capturable.
+pub const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
 
 #[derive(Debug)]
 pub(crate) struct WalkEntry<'a> {
@@ -194,7 +196,7 @@ fn walk_directory<P: WorktreeWalkPolicy>(
     if let Some(output) = policy.skip_directory_before_enumeration(&rel_path, &metadata, tree)? {
         return Ok(output);
     }
-    let dir_entries = list_directory(dir, policy.prefetch_entry_metadata(tree))?;
+    let dir_entries = list_directory(dir, policy.prefetch_entry_metadata(tree), |_| true)?;
     let directory = WalkDirectory {
         rel_path: &rel_path,
     };
@@ -336,11 +338,18 @@ fn walk_directory<P: WorktreeWalkPolicy>(
     policy.leave_directory(&directory, tree, state)
 }
 
-pub(crate) fn list_directory(dir: &Path, prefetch_metadata: bool) -> Result<Vec<ListedDirEntry>> {
+pub(crate) fn list_directory(
+    dir: &Path,
+    prefetch_metadata: bool,
+    keep: impl Fn(&str) -> bool,
+) -> Result<Vec<ListedDirEntry>> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         if let Some(name) = entry.file_name().to_str() {
+            if !keep(name) {
+                continue;
+            }
             let path = entry.path();
             let file_type = entry.file_type()?;
             let (kind, metadata) = if file_type.is_symlink() {

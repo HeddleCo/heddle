@@ -21,7 +21,7 @@ use super::repository_semantic_context::{
 
 /// File page for the new-state corpus. Alias of the shared parse-cache
 /// page so a filled page is a bound, not a smaller product universe.
-pub(crate) const CORPUS_FILE_BUDGET: usize = SemanticParseCache::DEFAULT_MAX_ENTRIES;
+pub const CORPUS_FILE_BUDGET: usize = SemanticParseCache::DEFAULT_MAX_ENTRIES;
 /// Aggregate bytes parsed for the new-state function corpus.
 /// Two times the per-file semantic-index opaque threshold.
 pub(crate) const CORPUS_BYTE_BUDGET: usize = PARSE_BUDGET_BYTES.saturating_mul(2);

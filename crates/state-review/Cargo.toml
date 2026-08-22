@@ -11,9 +11,14 @@ categories.workspace = true
 
 [dependencies]
 objects = { path = "../objects", package = "heddle-objects", version = "0.13" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.13", features = ["tree-sitter-symbols"] }
+tracing.workspace = true
 semantic = { path = "../semantic", package = "heddle-semantic", version = "0.13" }
 serde.workspace = true
 
 [lib]
 path = "src/lib.rs"
 name = "state_review"
+
+[dev-dependencies]
+tempfile.workspace = true

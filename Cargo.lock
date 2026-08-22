@@ -2398,6 +2398,7 @@ dependencies = [
  "lru",
  "memmap2",
  "nfsserve",
+ "pollster",
  "proptest",
  "serde",
  "serde_json",
@@ -2538,7 +2539,6 @@ dependencies = [
  "heddle-refs",
  "heddle-semantic",
  "heddle-semantic-recovery",
- "heddle-state-review",
  "heddle-wire",
  "heddleco-capability-verifier",
  "hex",
@@ -2603,8 +2603,11 @@ name = "heddle-state-review"
 version = "0.13.0"
 dependencies = [
  "heddle-objects",
+ "heddle-repo",
  "heddle-semantic",
  "serde",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

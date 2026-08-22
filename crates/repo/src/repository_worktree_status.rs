@@ -8,11 +8,9 @@ use std::{
 
 use objects::{object::Tree, worktree::WorktreeStatus};
 
-use super::{
-    status_tracked_refresh::refresh_tracked_paths, status_untracked_scan::scan_untracked_paths,
-};
 use crate::{
     Repository, Result, WorktreeIndex, fsmonitor::ChangeMonitorSession,
+    status_tracked_refresh::refresh_tracked_paths, status_untracked_scan::scan_untracked_paths,
     worktree_ignore::WorktreeIgnoreMatcher,
 };
 

@@ -33,7 +33,6 @@ rusqlite.workspace = true
 uuid.workspace = true
 semantic = { path = "../semantic", package = "heddle-semantic", version = "0.13", optional = true }
 semantic-recovery = { path = "../semantic-recovery", package = "heddle-semantic-recovery", version = "0.13", optional = true }
-state_review = { path = "../state-review", package = "heddle-state-review", version = "0.13", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -80,7 +79,6 @@ tree-sitter-symbols = [
     "dep:semantic",
     "semantic/lang-go",
     "semantic/lang-zig",
-    "dep:state_review",
 ]
 # Alias so that `--workspace --features semantic` (used by the
 # Coverage CI job) resolves cleanly across all crates.  The dep is
