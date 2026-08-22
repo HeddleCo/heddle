@@ -7,8 +7,8 @@ use std::{
 };
 
 use anyhow::Result;
-use serde_json::Value;
 use verbs::HarnessKind;
+use serde_json::Value;
 
 use super::{
     HarnessActorProbe, HarnessAttachHints, HarnessProbeInput, HarnessProbeResult, ProbeSource,

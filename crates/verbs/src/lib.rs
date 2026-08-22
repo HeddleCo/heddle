@@ -42,9 +42,9 @@ pub mod redact_plan;
 pub mod remote;
 pub mod resolve;
 pub mod resolve_plan;
+pub mod review;
 pub mod retro_plan;
 pub mod revert_plan;
-pub mod review;
 pub mod run_plan;
 pub mod save;
 pub mod semantic_plan;
@@ -192,15 +192,15 @@ pub use onboarding::{
     OnboardingAction, OnboardingFacts, OnboardingMode, OnboardingPlan, OnboardingRepositoryState,
     plan_repository_onboarding,
 };
+pub use principal::{
+    ResolvedPrincipal, principal_source_display, resolve_principal, resolve_principal_without_repo,
+};
 pub use oplog_plan::{
     OPLOG_RECOVER_DEFAULT_STRATEGY, OplogRecoverFacts, OplogRecoverStatus,
     oplog_recover_damaged_bytes, oplog_recover_damaged_range_display, oplog_recover_detail_fields,
     oplog_recover_entries_lost_display, oplog_recover_headline, oplog_recover_headline_from_facts,
     oplog_recover_shows_detail, oplog_recover_shows_strategy_field, plan_oplog_recover,
     plan_oplog_recover_status,
-};
-pub use principal::{
-    ResolvedPrincipal, principal_source_display, resolve_principal, resolve_principal_without_repo,
 };
 // prove_plan timestamp helpers intentionally not re-exported at crate root (collide with
 // approval_plan::timestamp_secs_u64 / format_unix_secs_label). Use verbs::prove_plan::*.

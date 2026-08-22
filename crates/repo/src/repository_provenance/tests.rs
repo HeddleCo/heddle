@@ -38,9 +38,12 @@ fn put_state_with_file(
 ) -> State {
     let blob_hash = store.put_blob(&Blob::from_slice(content)).unwrap();
     let tree_hash = store
-        .put_tree(&Tree::from_entries(vec![
-            TreeEntry::file(file.to_string(), blob_hash, false).unwrap(),
-        ]))
+        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
+            file.to_string(),
+            blob_hash,
+            false,
+        )
+        .unwrap()]))
         .unwrap();
     let state = State::new(
         tree_hash,
@@ -386,9 +389,12 @@ fn provenance_merge_unions_origin_sets_not_set_indexes() {
 
     let parent_blob_hash = store.put_blob(&Blob::from("kept\n")).unwrap();
     let parent_tree_hash = store
-        .put_tree(&Tree::from_entries(vec![
-            TreeEntry::file("lib.rs", parent_blob_hash, false).unwrap(),
-        ]))
+        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
+            "lib.rs",
+            parent_blob_hash,
+            false,
+        )
+        .unwrap()]))
         .unwrap();
     let parent_origin = Origin {
         state_id: crate::test_state_id(),
@@ -420,9 +426,12 @@ fn provenance_merge_unions_origin_sets_not_set_indexes() {
         ))
         .unwrap();
     let parent_provenance_root = store
-        .put_tree(&Tree::from_entries(vec![
-            TreeEntry::file("lib.rs", parent_provenance_blob, false).unwrap(),
-        ]))
+        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
+            "lib.rs",
+            parent_provenance_blob,
+            false,
+        )
+        .unwrap()]))
         .unwrap();
     let parent = State::new(
         parent_tree_hash,
@@ -434,9 +443,12 @@ fn provenance_merge_unions_origin_sets_not_set_indexes() {
 
     let child_blob_hash = store.put_blob(&Blob::from("kept\nadded\n")).unwrap();
     let child_tree_hash = store
-        .put_tree(&Tree::from_entries(vec![
-            TreeEntry::file("lib.rs", child_blob_hash, false).unwrap(),
-        ]))
+        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
+            "lib.rs",
+            child_blob_hash,
+            false,
+        )
+        .unwrap()]))
         .unwrap();
     let child = State::new(
         child_tree_hash,
@@ -471,14 +483,19 @@ fn lookup_tree_entry_characterizes_entry_policy_paths() {
     let missing_subtree_hash = ContentHash::compute(b"not-in-store");
 
     let nested_tree = store
-        .put_tree(&Tree::from_entries(vec![
-            TreeEntry::file("inner.txt", nested_blob_hash, false).unwrap(),
-        ]))
+        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
+            "inner.txt",
+            nested_blob_hash,
+            false,
+        )
+        .unwrap()]))
         .unwrap();
     let missing_parent = store
-        .put_tree(&Tree::from_entries(vec![
-            TreeEntry::directory("ghost".to_string(), missing_subtree_hash).unwrap(),
-        ]))
+        .put_tree(&Tree::from_entries(vec![TreeEntry::directory(
+            "ghost".to_string(),
+            missing_subtree_hash,
+        )
+        .unwrap()]))
         .unwrap();
     let root_hash = store
         .put_tree(&Tree::from_entries(vec![

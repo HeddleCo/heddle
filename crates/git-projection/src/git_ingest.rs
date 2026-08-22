@@ -8,8 +8,8 @@ use sley::ObjectId;
 
 use super::{
     git_core::{
-        GitProjection, GitProjectionError, GitProjectionResult, RefNamespace,
-        collect_import_source_ref_updates, open_repo,
+        collect_import_source_ref_updates, open_repo, GitProjection, GitProjectionError,
+        GitProjectionResult, RefNamespace,
     },
     git_export::commit_requires_residual,
     git_residual::ResidualStore,

@@ -8,7 +8,9 @@ use std::{
 };
 
 use objects::fs_atomic::{StagedAtomicWrite, stage_file_atomic_secret};
-use repo::{FsMonitorMode, OutputFormat, WorktreeStatusOptions, identity::heddle_home_override};
+use repo::{
+    FsMonitorMode, OutputFormat, WorktreeStatusOptions, identity::heddle_home_override,
+};
 use serde::{Deserialize, Serialize};
 use wire::AuthToken;
 

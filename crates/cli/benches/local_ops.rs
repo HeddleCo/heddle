@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::{env, hint::black_box, path::Path};
 
+use verbs::merge::{bench_detect_renames, bench_find_merge_base, bench_three_way_merge};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group};
 use objects::{
     object::{Blob, MarkerName, StateId, ThreadName, Tree, TreeEntry},
@@ -15,7 +16,6 @@ use semantic::{
     semantic_diff_summary,
 };
 use tempfile::TempDir;
-use verbs::merge::{bench_detect_renames, bench_find_merge_base, bench_three_way_merge};
 
 #[derive(Clone, Copy, Debug)]
 enum SyntheticShape {
@@ -1038,7 +1038,8 @@ fn bench_three_way_merge(c: &mut Criterion) {
 
     c.bench_function("three_way_merge", |b| {
         b.iter(|| {
-            let result = bench_three_way_merge(&repo, &base_tree, &main_tree, &topic_tree).unwrap();
+            let result =
+                bench_three_way_merge(&repo, &base_tree, &main_tree, &topic_tree).unwrap();
             black_box(result.1 + result.2 + result.3);
         });
     });
@@ -1088,7 +1089,8 @@ fn bench_detect_renames(c: &mut Criterion) {
             &file_count,
             |b, _| {
                 b.iter(|| {
-                    let result = bench_detect_renames(&store, &base_tree, &branch_tree).unwrap();
+                    let result =
+                        bench_detect_renames(&store, &base_tree, &branch_tree).unwrap();
                     black_box(result);
                 });
             },

@@ -15,7 +15,7 @@ use objects::{
     object::ThreadName,
 };
 
-use super::{RefManager, name::require_user_ref_name};
+use super::{name::require_user_ref_name, RefManager};
 use crate::fs_atomic::{create_dir_all_durable, write_file_atomic};
 
 const MAX_LOCK_WAIT_SECS: u64 = 10;
@@ -341,11 +341,9 @@ mod tests {
         });
 
         started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(
-            acquired_rx
-                .recv_timeout(Duration::from_millis(100))
-                .is_err()
-        );
+        assert!(acquired_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
         assert!(lock_path.exists());
         assert_eq!(fs::read_to_string(&lock_path).unwrap(), old_lock_body);
 

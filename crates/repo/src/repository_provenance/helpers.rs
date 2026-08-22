@@ -3,13 +3,13 @@ use std::{collections::HashMap, path::Path};
 
 use objects::{
     object::{
-        Blob, ContentHash, FileProvenance, LeafPolicy, LineSpan, Origin, ProvenanceError, State,
-        Tree, TreeEntry, resolve_tree_path,
+        resolve_tree_path, Blob, ContentHash, FileProvenance, LeafPolicy, LineSpan, Origin,
+        ProvenanceError, State, Tree, TreeEntry,
     },
     store::ObjectStore,
 };
 
-use super::{HeddleError, Repository, Result, builder::ProvenanceBuilder};
+use super::{builder::ProvenanceBuilder, HeddleError, Repository, Result};
 
 pub(super) use objects::util::split_text_lines;
 

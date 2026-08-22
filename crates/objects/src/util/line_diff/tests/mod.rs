@@ -5,7 +5,7 @@ mod budget;
 use similar::{Algorithm, DiffOp};
 
 use super::{
-    EqualRun, LineDiffError, LineDiffLimits, scratch_bytes_for_line_counts, visit_lcs_equal_runs,
+    scratch_bytes_for_line_counts, visit_lcs_equal_runs, EqualRun, LineDiffError, LineDiffLimits,
 };
 
 fn collect_runs(

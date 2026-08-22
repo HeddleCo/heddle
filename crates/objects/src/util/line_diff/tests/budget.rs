@@ -2,7 +2,7 @@
 use super::visit_usage;
 use crate::util::budget::ResourceKind;
 use crate::util::line_diff::{
-    LineDiffError, LineDiffLimits, scratch_bytes_for_line_counts, visit_lcs_equal_runs,
+    scratch_bytes_for_line_counts, visit_lcs_equal_runs, LineDiffError, LineDiffLimits,
 };
 
 #[test]
@@ -116,7 +116,11 @@ fn visitor_cancel_stops_before_later_runs() {
         &mut budget,
         |_| {
             seen += 1;
-            if seen == 1 { Err("stop") } else { Ok(()) }
+            if seen == 1 {
+                Err("stop")
+            } else {
+                Ok(())
+            }
         },
     );
     assert!(matches!(err, Err(LineDiffError::Visitor("stop"))));

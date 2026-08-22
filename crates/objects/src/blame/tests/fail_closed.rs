@@ -3,8 +3,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::blame::{
-    BlamePreparation, BlameSliceAdvance, BlameSliceError, BlameSliceLimits,
-    advance_file_blame_slice, blame_file, prepare_file_blame,
+    advance_file_blame_slice, blame_file, prepare_file_blame, BlamePreparation, BlameSliceAdvance,
+    BlameSliceError, BlameSliceLimits,
 };
 use crate::object::{Attribution, ContentHash, Principal, State, StateId, Tree, TreeEntry};
 use crate::store::ObjectStore;
@@ -45,9 +45,12 @@ fn tree_present_blob_missing_parent_is_missing_object_not_missing_path() {
     let store = store();
     let missing_blob = ContentHash::compute(b"absent-parent-blob");
     let parent_tree = store
-        .put_tree(&Tree::from_entries(vec![
-            TreeEntry::file("file.txt".to_string(), missing_blob, false).unwrap(),
-        ]))
+        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
+            "file.txt".to_string(),
+            missing_blob,
+            false,
+        )
+        .unwrap()]))
         .unwrap();
     let parent = State::new(
         parent_tree,

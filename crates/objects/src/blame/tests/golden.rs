@@ -60,7 +60,13 @@ fn insert_delete_replace_keep_surviving_lines() {
 fn a_vs_baaab_credits_the_middle_a_after_one_shift() {
     let store = store();
     let base = put_state_with_file(&store, "lib.rs", b"a\n", Vec::new(), "alice");
-    let edited = put_state_with_file(&store, "lib.rs", b"b\na\na\na\nb\n", vec![base.id()], "bob");
+    let edited = put_state_with_file(
+        &store,
+        "lib.rs",
+        b"b\na\na\na\nb\n",
+        vec![base.id()],
+        "bob",
+    );
     let provenance = blame_file(
         &store,
         &edited,

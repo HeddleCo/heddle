@@ -47,8 +47,8 @@ pub use bootstrap::{
     fetch_signed_endpoint_descriptor,
 };
 pub use call::{BidirectionalRequestStream, BidirectionalStream, ServerStream, ServerStreamItem};
-pub use collaboration::{HostedDiscussion, HostedDiscussionTurn};
 use config::ClientConfig;
+pub use collaboration::{HostedDiscussion, HostedDiscussionTurn};
 use connection::HostedConnection;
 pub use context::CallContextFactory;
 #[cfg(test)]
@@ -77,7 +77,9 @@ pub(crate) struct RenewableAuthorityCredential {
 }
 
 impl RenewableAuthorityCredential {
-    pub(super) fn from_stored(credential: &config::credentials::ServerCredential) -> Option<Self> {
+    pub(super) fn from_stored(
+        credential: &config::credentials::ServerCredential,
+    ) -> Option<Self> {
         let credential_id = credential.credential_id.clone()?;
         let signer = Ed25519Signer::from_pem(credential.private_key_pem.as_ref()?).ok()?;
         let biscuit =

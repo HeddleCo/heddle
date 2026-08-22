@@ -10,11 +10,12 @@ use api::heddle::api::v1alpha1::HostedRole;
 use biscuit_auth::builder::{BlockBuilder, Term};
 use config::UserConfig;
 use crypto::Ed25519Signer;
+use verbs::{
+    ResolvedPrincipal, principal_source_display, resolve_principal,
+    resolve_principal_without_repo,
+};
 use repo::Repository;
 use serde::Serialize;
-use verbs::{
-    ResolvedPrincipal, principal_source_display, resolve_principal, resolve_principal_without_repo,
-};
 use weft_client_shim::CliContext;
 
 use super::{
