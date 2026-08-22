@@ -2015,9 +2015,23 @@ fn capture_auto_detects_codex_model_without_fabricating_plain_shell_agent() {
     assert_eq!(latest_agent(), Value::Null);
 
     std::fs::write(temp.path().join("claude.txt"), "claude work\n").unwrap();
+    // Ambient CLAUDE_MODEL is deliberately not inherited
+    // (`inherited_harness_hint` excludes ambient model identity), so a bare
+    // CLAUDECODE marker must not fabricate a model.
     capture(
         "claude save",
         &[("CLAUDECODE", "1"), ("CLAUDE_MODEL", "claude-fable-5")],
+    );
+    assert_eq!(latest_agent(), Value::Null);
+
+    std::fs::write(temp.path().join("claude-hinted.txt"), "claude work\n").unwrap();
+    capture(
+        "claude hinted save",
+        &[
+            ("CLAUDECODE", "1"),
+            ("HEDDLE_AGENT_PROVIDER", "anthropic"),
+            ("HEDDLE_AGENT_MODEL", "claude-fable-5"),
+        ],
     );
     assert_eq!(latest_agent(), "anthropic/claude-fable-5");
 }
