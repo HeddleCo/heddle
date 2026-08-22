@@ -15,7 +15,7 @@ use objects::{
     },
     store::ObjectStore,
 };
-use repo::{Repository, ResolvePolicy};
+use repo::{Repository, ResolvePolicy, StateAttachmentKind};
 use serde::Serialize;
 
 use super::{
