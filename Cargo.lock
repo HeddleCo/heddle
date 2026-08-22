@@ -2485,6 +2485,7 @@ dependencies = [
  "lru",
  "memmap2",
  "nfsserve",
+ "pollster",
  "proptest",
  "serde",
  "serde_json",
