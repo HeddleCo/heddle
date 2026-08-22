@@ -38,10 +38,9 @@ use repo::{
 use serde_json::{Value, json};
 use tracing::debug;
 
-use crate::{
-    cli::commands::snapshot::{SnapshotAgentOverrides, create_snapshot},
-    config::UserConfig,
-};
+use config::UserConfig;
+
+use crate::bridge::RelayCapture;
 
 /// PreToolUse dispatcher.
 ///
@@ -166,6 +165,7 @@ fn format_stack_context(
 /// described in the payload. Returns `Ok(())` whether or not a capture
 /// happened (clean worktrees are silently skipped).
 pub(crate) fn handle_stop_capture(
+    bridge: &dyn crate::bridge::HarnessCliBridge,
     repo: &Repository,
     user_config: &UserConfig,
     payload: &Value,
@@ -174,26 +174,26 @@ pub(crate) fn handle_stop_capture(
     if !worktree_dirty(repo)? {
         return Ok(());
     }
-    let overrides = SnapshotAgentOverrides {
-        provider: Some("anthropic".to_string()),
-        model: resolve_model(payload),
-        session: payload
-            .get("session_id")
-            .and_then(Value::as_str)
-            .map(|s| s.to_string()),
-        segment: None,
-        policy: None,
-        no_policy: false,
-        no_agent: false,
-    };
     let intent = payload
         .get("message")
         .and_then(Value::as_str)
         .or_else(|| payload.get("stop_reason").and_then(Value::as_str))
         .map(|s| s.to_string())
         .unwrap_or_else(|| intent_hint.to_string());
-    let output = create_snapshot(repo, user_config, Some(intent), None, overrides)?;
-    debug!(state_id = %output.state_id, "heddle stop-hook captured state");
+    let state_id = bridge.capture_snapshot(
+        repo,
+        user_config,
+        RelayCapture {
+            intent,
+            provider: Some("anthropic".to_string()),
+            model: resolve_model(payload),
+            session: payload
+                .get("session_id")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string()),
+        },
+    )?;
+    debug!(state_id = %state_id, "heddle stop-hook captured state");
     Ok(())
 }
 

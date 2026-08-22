@@ -18,6 +18,7 @@ exclude = [
 ]
 
 [dependencies]
+agent-relay = { path = "../agent-relay", package = "heddle-agent-relay", version = "0.14", default-features = false }
 anyhow.workspace = true
 base64.workspace = true
 getrandom.workspace = true
@@ -173,6 +174,7 @@ native = ["repo/native"]
 # alongside the CLI-side client-gated surfaces.
 client = [
     "api/reflection",
+    "agent-relay/client",
     "dep:tokio-tungstenite",
     "hosted-client/client",
     "heddle-cli-args/client",

@@ -2063,6 +2063,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "heddle-agent-relay"
+version = "0.14.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "heddle-cli-render",
+ "heddle-config",
+ "heddle-hosted-client",
+ "heddle-ingest",
+ "heddle-objects",
+ "heddle-refs",
+ "heddle-repo",
+ "heddle-verbs",
+ "heddle-wire",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "heddle-api"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2122,6 +2144,7 @@ dependencies = [
  "criterion",
  "futures",
  "getrandom 0.4.3",
+ "heddle-agent-relay",
  "heddle-api",
  "heddle-ci-config",
  "heddle-ci-engine",

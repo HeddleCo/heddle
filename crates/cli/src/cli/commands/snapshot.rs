@@ -18,7 +18,8 @@ use verbs::{
     principal_lacks_accountable_identity,
 };
 // Re-export the helper derivations so existing CLI call sites
-// (`thread.rs`, `harness/mod.rs`) keep `super::snapshot::summarize_*`
+// (`thread.rs`; the agent relay reads them from `repo` directly) keep
+// `super::snapshot::summarize_*`
 // imports working without churn. The implementations live in
 // `repo::snapshot_metadata` so the mount and CLI paths share the same
 // logic.
