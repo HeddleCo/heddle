@@ -96,7 +96,6 @@ pub use repository_snapshot::{SnapshotExecution, SnapshotProfile};
 pub use repository_thread_materialize::{CheckoutMaterialization, ThreadCaptureOutcome};
 pub use repository_tree::{TreeBuildProfile, WorktreeCompareProfile, WorktreeStateLookupProfile};
 pub use repository_worktree_status::{UntrackedSet, UntrackedSubtree, WorktreeStatusDetailed};
-use serde::{Deserialize, Serialize};
 use sley::Repository as SleyRepository;
 
 #[path = "repository_snapshot.rs"]
@@ -135,9 +134,7 @@ pub use overlay::{
     GitCheckpointIntent, GitCheckpointIntentPhase, GitCheckpointRecord, GitImportGuidance,
     GitRemoteTrackingStatus,
 };
-use overlay::{
-    GitHeadState, detect_git_head_state, detect_git_in_progress_branch, resolve_git_dir,
-};
+use overlay::{GitHeadState, detect_git_head_state, detect_git_in_progress_branch};
 #[cfg(feature = "git-overlay")]
 pub use overlay::{
     GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitOverlayShortStatus, GitOverlayTagTip,
