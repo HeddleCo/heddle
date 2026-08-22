@@ -3050,9 +3050,8 @@ fn fast_remote_health(git: &SleyRepository, branch: &str) -> Result<Option<&'sta
         return Ok(None);
     };
     if git
-        .find_reference(&format!("refs/heads/{branch}"))
+        .reference_exists(&format!("refs/heads/{branch}"))
         .map_err(sley_error)?
-        .is_some()
         && let Some(tracking_ref) = fast_configured_tracking_ref(git, branch)?
         && let Some(upstream) = fast_rev_parse(git, &tracking_ref)
     {
