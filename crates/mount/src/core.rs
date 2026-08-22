@@ -987,7 +987,7 @@ impl SweepShutdown {
         let (guard, _timeout) = self
             .cv
             .wait_timeout_while(guard, dur, |s| !*s)
-            .expect("sweep shutdown wait");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *guard
     }
 }
@@ -1434,8 +1434,7 @@ impl<R: RefBackend + 'static, O: OpLogBackend + 'static, S: ObjectStore + 'stati
     fn record_for(&self, id: NodeId) -> Result<NodeRecord> {
         self.inner
             .inodes
-            .lock()
-            .expect("inode lock")
+            .lock_or_poisoned()
             .get(id)
             .ok_or_else(|| MountError::Stale(format!("node {}", id.0)))
     }
@@ -2289,8 +2288,7 @@ impl<R: RefBackend + 'static, O: OpLogBackend + 'static, S: ObjectStore + 'stati
         let src_id_opt = self
             .inner
             .pending
-            .lock()
-            .expect("pending lock")
+            .lock_or_poisoned()
             .hot_by_path
             .get(old_path)
             .copied();
@@ -2308,13 +2306,7 @@ impl<R: RefBackend + 'static, O: OpLogBackend + 'static, S: ObjectStore + 'stati
             inodes.by_path.get(old_path).copied()
         };
         let needs_synth = match src_id {
-            Some(id) => !self
-                .inner
-                .pending
-                .lock()
-                .expect("pending lock")
-                .warm
-                .contains_key(&id),
+            Some(id) => !self.inner.pending.lock_or_poisoned().warm.contains_key(&id),
             None => true,
         };
         let captured_seed = if needs_synth {
@@ -2867,8 +2859,7 @@ impl<R: RefBackend + 'static, O: OpLogBackend + 'static, S: ObjectStore + 'stati
         let ids: Vec<u64> = self
             .inner
             .pending
-            .lock()
-            .expect("pending lock")
+            .lock_or_poisoned()
             .hot
             .keys()
             .copied()
@@ -3490,13 +3481,7 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> MountInner<R, O, S> {
         match outcome {
             Outcome::Flush => self.flush_node(node),
             Outcome::MaybeUntrackedNoop => {
-                if !self
-                    .inodes
-                    .lock()
-                    .expect("inode lock")
-                    .by_id
-                    .contains_key(&node.0)
-                {
+                if !self.inodes.lock_or_poisoned().by_id.contains_key(&node.0) {
                     return Err(MountError::NotFound(format!("node {}", node.0)));
                 }
                 Ok(())
@@ -3535,11 +3520,7 @@ fn spawn_sweep_worker<
 >(
     inner: &Arc<MountInner<R, O, S>>,
 ) -> Option<SweepHandle> {
-    let interval = inner
-        .promotion
-        .read()
-        .expect("promotion lock")
-        .sweep_interval?;
+    let interval = inner.promotion.read_or_poisoned().sweep_interval?;
     let weak = Arc::downgrade(inner);
     let state = Arc::new(SweepShutdown::new());
     let state_for_thread = Arc::clone(&state);
@@ -4375,15 +4356,13 @@ impl<R: RefBackend + 'static, O: OpLogBackend + 'static, S: ObjectStore + 'stati
         let id = self
             .inner
             .inodes
-            .lock()
-            .expect("inode lock")
+            .lock_or_poisoned()
             .by_path
             .get(path)
             .copied()?;
         self.inner
             .pending
-            .lock()
-            .expect("pending lock")
+            .lock_or_poisoned()
             .warm
             .get(&id)
             .map(|e| e.blob)
@@ -4401,8 +4380,7 @@ impl<R: RefBackend + 'static, O: OpLogBackend + 'static, S: ObjectStore + 'stati
     pub(crate) fn tombstones(&self) -> Vec<PathBuf> {
         self.inner
             .pending
-            .lock()
-            .expect("pending lock")
+            .lock_or_poisoned()
             .tombstones
             .iter()
             .cloned()
@@ -4419,11 +4397,7 @@ impl<R: RefBackend + 'static, O: OpLogBackend + 'static, S: ObjectStore + 'stati
     /// inode (open-unlinked or rename-displaced with surviving fds)?
     #[cfg(test)]
     pub(crate) fn orphans_contains(&self, node: NodeId) -> bool {
-        self.inner
-            .pending
-            .lock()
-            .expect("pending lock")
-            .is_orphan(node.0)
+        self.inner.pending.lock_or_poisoned().is_orphan(node.0)
     }
 }
 
