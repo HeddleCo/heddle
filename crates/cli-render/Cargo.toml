@@ -16,7 +16,7 @@ anyhow.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 heddle-cli-args = { path = "../cli-args", version = "0.14", default-features = false }
-heddle-core = { path = "../core", version = "0.14", default-features = false }
+verbs = { path = "../verbs", package = "heddle-verbs", version = "0.14", default-features = false }
 hex.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.14" }
 repo = { path = "../repo", package = "heddle-repo", version = "0.14", default-features = false, features = ["git-overlay", "native"] }

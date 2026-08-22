@@ -3,7 +3,7 @@
 
 use clap::Subcommand;
 
-#[derive(Subcommand, Clone)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum OplogCommands {
     /// Salvage a truncated or torn operation log and report what was recovered.
     ///
@@ -17,8 +17,8 @@ pub enum OplogCommands {
     /// recovery left a sidecar, reports that last recovery instead.
     #[command(after_help = "\
 Examples:
-  heddle oplog recover                 # salvage and print a human report
-  heddle oplog recover --output json   # machine-readable recovery report
+  heddle maintenance oplog recover                 # salvage and print a human report
+  heddle maintenance oplog recover --output json   # machine-readable recovery report
 ")]
     Recover,
 }

@@ -82,8 +82,6 @@ env:
     heddle-perf-contract
     heddle-objects
     heddle-crypto
-    heddle-runtime-bridge
-    heddle-schema
     heddle-oplog
     heddle-refs
     heddle-merge
@@ -92,12 +90,11 @@ env:
     heddle-state-review
     heddle-wire
     heddle-repo
-    heddle-cli-shared
+    heddle-config
     weft-client-shim
     heddle-ingest
     heddle-git-projection
-    heddle-core
-    heddle-daemon
+    heddle-verbs
     heddle-mount
     heddle-ci-config
     heddle-ci-engine

@@ -32,9 +32,5 @@ path = "src/lib.rs"
 
 name = "wire"
 [dev-dependencies]
-# Circular: heddle-repo depends on heddle-wire. We keep the path-dep
-# for local testing but omit `version` so cargo strips this entry from
-# the published manifest (dev-deps without version are not packaged).
-repo = { path = "../repo", package = "heddle-repo" }
 tempfile.workspace = true
 sley.workspace = true

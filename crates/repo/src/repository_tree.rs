@@ -426,8 +426,8 @@ impl Repository {
         stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
         defer_object_writes: bool,
     ) -> Result<TreeBuildOutput> {
-        let ignore_matcher =
-            WorktreeIgnoreMatcher::new(patterns).with_nested_worktree_exclusions(nested_exclusions);
+        let ignore_matcher = WorktreeIgnoreMatcher::cached(patterns)
+            .with_nested_worktree_exclusions(nested_exclusions);
         let incremental_state = (dir == self.root() && baseline_tree.is_some()).then(|| {
             let monitor = ChangeMonitorSession::prepare(
                 self.root(),
@@ -737,7 +737,7 @@ impl Repository {
 
         let patterns = self.ignore_patterns()?;
         let nested_exclusions = self.nested_thread_worktree_exclusions(self.root())?;
-        let ignore_matcher = WorktreeIgnoreMatcher::new(&patterns)
+        let ignore_matcher = WorktreeIgnoreMatcher::cached(&patterns)
             .with_nested_worktree_exclusions(nested_exclusions);
         let changed_path_mode = monitor.can_filter_directory_children(Path::new(""), &index);
         let compare_start = Instant::now();

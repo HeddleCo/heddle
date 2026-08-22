@@ -35,11 +35,11 @@ mod virtualized_mount;
 mod worktree_add;
 
 fn heddle(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
-    cli_test_support::heddle(args, cwd, &[])
+    cli_test_support::heddle_env(args, cwd, &[])
 }
 
 fn heddle_output(args: &[&str], cwd: Option<&std::path::Path>) -> Result<Output, String> {
-    cli_test_support::heddle_output(args, cwd, &[])
+    cli_test_support::heddle_output_env(args, cwd, &[])
 }
 
 fn assert_undo_requires_hard(cwd: &std::path::Path) {
@@ -90,7 +90,7 @@ fn heddle_output_with_env(
     cwd: Option<&std::path::Path>,
     envs: &[(&str, &str)],
 ) -> Result<Output, String> {
-    cli_test_support::heddle_output(args, cwd, envs)
+    cli_test_support::heddle_output_env(args, cwd, envs)
 }
 
 /// RAII wrapper around a per-test repo `TempDir` that also tears down

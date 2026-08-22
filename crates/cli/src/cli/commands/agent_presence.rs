@@ -6,17 +6,17 @@
 //! presence stored in `.heddle/actor-presence/`.
 //!
 //! List/show/spawn/done domain assembly and pure planning live in
-//! `heddle_core::actor`. This module owns implicit session resolution,
+//! `verbs::actor`. This module owns implicit session resolution,
 //! thread-ref minting, harness probing, recovery advice, and human/JSON render.
 
 use anyhow::{Result, anyhow};
-use heddle_core::{
+use repo::{ActorPresence, ActorPresenceStore};
+use repo::Repository;
+use serde::Serialize;
+use verbs::{
     ActorEntryReport, ActorListReport, list_actors, mark_actor_done, plan_actor_done,
     show_actor_from_entry,
 };
-use objects::store::{ActorPresence, ActorPresenceStore};
-use repo::Repository;
-use serde::Serialize;
 
 use super::{
     action_line::print_next,
@@ -174,7 +174,7 @@ pub async fn show(cli: &Cli, session_id: Option<String>) -> Result<()> {
         &repo,
         &registry,
         session_id.as_deref(),
-        "heddle presence show <session>",
+        "heddle agent presence show <session>",
     )?;
     let show = show_actor_from_entry(&registry, &entry)?;
 
@@ -281,7 +281,7 @@ pub async fn complete(cli: &Cli, session_id: Option<String>) -> Result<()> {
         &repo,
         &registry,
         session_id.as_deref(),
-        "heddle presence complete --session <session>",
+        "heddle agent presence complete --session <session>",
     )?;
     let plan = plan_actor_done(&entry);
     mark_actor_done(&registry, &plan.session_id)?;
@@ -333,7 +333,7 @@ pub async fn explain(cli: &Cli, session_id: Option<String>) -> Result<()> {
         &repo,
         &registry,
         session_id.as_deref(),
-        "heddle presence explain <session>",
+        "heddle agent presence explain <session>",
     ) {
         Ok(entry) => entry,
         Err(err) if session_id.is_none() && is_no_active_actor_error(&err) => {
@@ -408,13 +408,13 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
         repo,
         std::env::var("HEDDLE_AGENT_PROVIDER")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
         std::env::var("HEDDLE_AGENT_MODEL")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
         std::env::var("HEDDLE_AGENT_POLICY")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
     )?;
     let env_signals = actor_identity_env_signals();
     let current_lane = repo.current_lane()?;
@@ -637,16 +637,16 @@ fn no_active_actor_advice() -> RecoveryAdvice {
         "no active actor registry entry matches the current thread or checkout path",
         "choosing a completed actor implicitly could show the wrong session",
         "no actor registry entries, refs, repository objects, or worktree files were changed",
-        "heddle presence list",
+        "heddle agent presence list",
         vec![
-            "heddle presence list".to_string(),
-            "heddle presence explain".to_string(),
-            "heddle presence show <session>".to_string(),
+            "heddle agent presence list".to_string(),
+            "heddle agent presence explain".to_string(),
+            "heddle agent presence show <session>".to_string(),
         ],
     )
 }
 
-fn print_actor_chain(chain: &[heddle_core::ActorChainEntry]) {
+fn print_actor_chain(chain: &[verbs::ActorChainEntry]) {
     if chain.len() <= 1 {
         return;
     }

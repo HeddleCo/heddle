@@ -10,6 +10,7 @@ use std::{
     time::SystemTime,
 };
 
+use heddle_object_model::op_record::OpRecord;
 use objects::{
     error::{HeddleError, Result},
     object::{MarkerName, StateId, ThreadName},
@@ -163,11 +164,10 @@ impl RefManager {
     /// The atomic-write entry of THE write chokepoint (heddle#330 §2.2): commit
     /// the caller-supplied ref-carrying record batch (phase 4) **before**
     /// publishing the atomic ref batch (phase 5), record-before-publish, the
-    /// whole batch published as one unit. `encoded_records` are opaque rmp-serde
-    /// `OpRecord` bytes (so `refs` names no `oplog` type). The bare publish
-    /// (temp→rename, via `update_refs_with_lock`) is reachable through this seam,
-    /// never with a ref published ahead of its record. With no committer it
-    /// degrades to a plain publish (bootstrap).
+    /// whole batch published as one unit. The bare publish (temp→rename, via
+    /// `update_refs_with_lock`) is reachable through this seam, never with a
+    /// ref published ahead of its record. With no committer it degrades to a
+    /// plain publish (bootstrap).
     ///
     /// **Invariant (cid 3329490978 / 3329490984): the oplog record and the ref
     /// publish commit together under the refs lock; a record exists iff its
@@ -183,7 +183,7 @@ impl RefManager {
     /// `pool.begin()…commit()` gives the same atomicity natively.)
     pub fn commit_and_publish(
         &self,
-        encoded_records: &[Vec<u8>],
+        records: &[OpRecord],
         ref_updates: &[RefUpdate],
         scope: Option<&str>,
     ) -> Result<()> {
@@ -191,11 +191,10 @@ impl RefManager {
             self.validate_commit_publish(ref_updates, lock, || {
                 // Phase 4 — the commit point: append the ref-carrying records
                 // only after phase-3 validation has passed, under the held lock.
-                let committed_for_reconcile =
-                    self.committer.is_some() && !encoded_records.is_empty();
+                let committed_for_reconcile = self.committer.is_some() && !records.is_empty();
                 if let Some(committer) = self.committer.as_ref() {
-                    committer.commit_records(encoded_records, scope)?;
-                } else if !encoded_records.is_empty() {
+                    committer.commit_records(records, scope)?;
+                } else if !records.is_empty() {
                     // Fail closed (heddle#354 r9, cid 3330304656): no committer
                     // is wired but records were handed in. Publishing the refs
                     // here would silently drop them — committed data must never
@@ -204,7 +203,7 @@ impl RefManager {
                     return Err(HeddleError::Config(format!(
                         "commit_and_publish was handed {} record(s) but this RefManager has no \
                          committer; refusing to publish and silently drop committed data",
-                        encoded_records.len()
+                        records.len()
                     )));
                 }
                 Ok(committed_for_reconcile)
@@ -1386,11 +1385,11 @@ impl RefBackend for RefManager {
     }
     fn commit_and_publish(
         &self,
-        encoded_records: &[Vec<u8>],
+        records: &[OpRecord],
         ref_updates: &[RefUpdate],
         scope: Option<&str>,
     ) -> Result<()> {
-        RefManager::commit_and_publish(self, encoded_records, ref_updates, scope)
+        RefManager::commit_and_publish(self, records, ref_updates, scope)
     }
     fn inspect_ref_summary_index(&self) -> Result<super::RefSummaryIndexInspection> {
         RefManager::inspect_ref_summary_index(self)

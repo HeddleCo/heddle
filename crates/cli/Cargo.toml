@@ -21,38 +21,31 @@ exclude = [
 anyhow.workspace = true
 base64.workspace = true
 getrandom.workspace = true
-biscuit-auth = { workspace = true, optional = true }
 blake3.workspace = true
-bytes = { workspace = true, optional = true }
 chrono.workspace = true
-ci-config = { path = "../ci-config", package = "heddle-ci-config", version = "0.14" }
-ci-engine = { path = "../ci-engine", package = "heddle-ci-engine", version = "0.14" }
+ci-config = { path = "../ci-config", package = "heddle-ci-config", version = "0.14", optional = true }
+ci-engine = { path = "../ci-engine", package = "heddle-ci-engine", version = "0.14", optional = true }
 clap.workspace = true
 clap_complete.workspace = true
 futures.workspace = true
 hex.workspace = true
 ignore.workspace = true
-iroh = { workspace = true, optional = true }
-iroh-base = { workspace = true, optional = true }
 libc.workspace = true
-n0-watcher = { workspace = true, optional = true }
-noq-udp = { workspace = true, optional = true }
-objects = { path = "../objects", package = "heddle-objects", version = "0.14", features = ["memory-backend"] }
+objects = { path = "../objects", package = "heddle-objects", version = "0.14" }
 crypto = { path = "../crypto", package = "heddle-crypto", version = "0.14" }
-daemon = { path = "../daemon", package = "heddle-daemon", version = "0.14" }
 # `heddle-merge` is the native hunk-level text merge engine extracted from
 # `heddle-semantic` so non-semantic builds (`--no-default-features`) retain
 # text auto-merge. Always-on: the merge driver and rebase replay both call
 # into it unconditionally.
 merge = { path = "../merge", package = "heddle-merge", version = "0.14" }
 api = { package = "heddle-api", version = "0.12" }
-cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.14" }
+config = { path = "../config", package = "heddle-config", version = "0.14" }
+hosted-client = { path = "../hosted-client", package = "heddle-hosted-client", version = "0.14", default-features = false }
 heddle-cli-args = { path = "../cli-args", version = "0.14", default-features = false }
 heddle-cli-contract = { path = "../cli-contract", version = "0.14", default-features = false }
 heddle-cli-render = { path = "../cli-render", version = "0.14", default-features = false }
-heddle-core = { path = "../core", version = "0.14", default-features = false }
+verbs = { path = "../verbs", package = "heddle-verbs", version = "0.14", default-features = false }
 heddle-format = { path = "../format", version = "0.14" }
-weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.14" }
 async-trait.workspace = true
 # `default-features = false` here matches the pattern used for
 # repo below: this crate's `zstd` feature controls the cascade
@@ -72,8 +65,6 @@ opentelemetry-otlp = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 prost.workspace = true
 prost-types.workspace = true
-rand = { workspace = true, optional = true }
-reqwest = { workspace = true, optional = true }
 rmp-serde.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -84,7 +75,6 @@ sley.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-stream = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 toml.workspace = true
 # `uuid::Uuid::new_v4().simple()` suffixes rebase transaction ids
@@ -98,7 +88,6 @@ tracing.workspace = true
 tracing-opentelemetry = { workspace = true, optional = true }
 tracing-subscriber.workspace = true
 walkdir.workspace = true
-webpki-roots = { workspace = true, optional = true }
 
 # Mount is platform-agnostic in source, but each adapter only
 # compiles for one OS — FUSE on Linux (`fuse`), FSKit on macOS
@@ -155,6 +144,15 @@ default = [
     "zstd",
     "client",
 ]
+# `ci` gates the local `heddle ci` executor (constitutional later after
+# treadle). Non-default: the everyday loop never invokes it, and the
+# default binary should not carry the check runner.
+ci = [
+    "dep:ci-config",
+    "dep:ci-engine",
+    "heddle-cli-args/ci",
+    "heddle-cli-contract/ci",
+]
 local = []
 # Repository mode features. At least one must be enabled. The default
 # build enables both modes plus the hosted `client`. Slimmer builds opt
@@ -169,19 +167,14 @@ git-overlay = [
     "heddle-cli-contract/git-overlay",
 ]
 native = ["repo/native"]
+# `client` is now a marker: the hosted stack itself (Iroh transport,
+# credentials, biscuits, websockets, hosted sync) compiles inside
+# `hosted-client`; enabling this just turns that crate's `client` feature on
+# alongside the CLI-side client-gated surfaces.
 client = [
     "api/reflection",
-    "dep:biscuit-auth",
-    "dep:bytes",
-    "dep:iroh",
-    "dep:iroh-base",
-    "dep:n0-watcher",
-    "dep:noq-udp",
-    "dep:rand",
-    "dep:reqwest",
-    "dep:tokio-stream",
     "dep:tokio-tungstenite",
-    "dep:webpki-roots",
+    "hosted-client/client",
     "heddle-cli-args/client",
     "heddle-cli-contract/client",
     "heddle-cli-render/client",
@@ -195,19 +188,20 @@ semantic = [
     "dep:semantic",
     "heddle-cli-args/semantic",
     "heddle-cli-contract/semantic",
-    "heddle-core/semantic",
+    "verbs/semantic",
     "repo/tree-sitter-symbols",
 ]
-semantic-extended = ["semantic", "heddle-core/semantic-extended", "semantic?/extended-languages"]
+semantic-extended = ["semantic", "verbs/semantic-extended", "semantic?/extended-languages"]
 # `telemetry` compiles OTLP support into the CLI. It stays opt-in so the
 # default binary does not carry the exporter and HTTP/TLS dependency stack.
 # Runtime initialization remains endpoint-gated when the feature is enabled.
 telemetry = [
-    "cli-shared/telemetry",
+    "config/telemetry",
     "dep:opentelemetry",
     "dep:opentelemetry-otlp",
     "dep:opentelemetry_sdk",
     "dep:tracing-opentelemetry",
+    "hosted-client/telemetry",
 ]
 # Forward zstd compression to every layer that touches the pack
 # format. The `?` syntax on optional deps activates the feature only
@@ -219,7 +213,7 @@ zstd = [
     "repo/zstd",
     "ingest/zstd",
     "heddle-git-projection/zstd",
-    "heddle-core/zstd",
+    "verbs/zstd",
 ]
 # Wire the content-addressed mount through the CLI. Off by
 # default — each native backend pulls in a kernel-side dep that
@@ -247,9 +241,15 @@ mount = [
 ]
 
 [dev-dependencies]
+# Test-only: hosted fixtures mint biscuits and stand up Iroh endpoints
+# directly; the production CLI gets both through `hosted-client`.
+biscuit-auth.workspace = true
+iroh.workspace = true
 criterion = "0.8"
 heddle-cli-render = { path = "../cli-render", version = "0.14", features = ["test-utils"] }
 hyper-util.workspace = true
+# Test-only: the in-memory object backend never ships in the binary.
+objects = { path = "../objects", package = "heddle-objects", version = "0.14", features = ["memory-backend"] }
 iroh-relay = { version = "=1.0.3", default-features = false, features = ["server"] }
 ntest.workspace = true
 prost-reflect.workspace = true
@@ -291,6 +291,11 @@ path = "src/lib.rs"
 
 # Integration tests for cli live under `tests/` (auto-discovered) so
 # that `cargo publish` can package the crate cleanly.
+
+[[test]]
+name = "ci_run_local"
+path = "tests/ci_run_local.rs"
+required-features = ["ci"]
 
 [[test]]
 name = "semantic_diff_integration"

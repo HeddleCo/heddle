@@ -51,15 +51,7 @@ fn visit_after_right_slide<E>(
     visit: &mut impl FnMut(EqualRun) -> Result<(), E>,
 ) -> Result<(), LineDiffError<E>> {
     let run = if compact_keeps_right_shift(old, new, run, original_end, left_justified) {
-        slide_equal_run_right(
-            old,
-            new,
-            run,
-            original_end,
-            new.offs.len(),
-            left_justified,
-        )
-        .1
+        slide_equal_run_right(old, new, run, original_end, new.offs.len(), left_justified).1
     } else {
         run
     };

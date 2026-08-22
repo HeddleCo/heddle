@@ -3,6 +3,7 @@
 
 use std::future::Future;
 
+
 use objects::object::{MarkerName, StateId, ThreadName};
 
 use super::{Head, RefExpectation, RefUpdate};
@@ -106,6 +107,8 @@ pub trait CoreRefBackend: Send + Sync {
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, sync::Mutex};
+
+    use heddle_object_model::op_record::OpRecord;
 
     use objects::{
         error::HeddleError,
@@ -232,10 +235,14 @@ mod tests {
         fn update_refs(&self, updates: &[RefUpdate]) -> Result<(), HeddleError> {
             for update in updates {
                 match update {
-                    RefUpdate::Thread { name, new: Some(_), .. } => {
+                    RefUpdate::Thread {
+                        name, new: Some(_), ..
+                    } => {
                         require_user_ref_name(name.as_str())?;
                     }
-                    RefUpdate::Marker { name, new: Some(_), .. } => {
+                    RefUpdate::Marker {
+                        name, new: Some(_), ..
+                    } => {
                         require_user_ref_name(name.as_str())?;
                     }
                     RefUpdate::Head {
@@ -295,7 +302,16 @@ mod tests {
     fn default_commit_and_publish_fails_closed_on_records() {
         let backend = MemRefBackend::default();
         assert!(
-            RefBackend::commit_and_publish(&backend, &[vec![1u8, 2, 3]], &[], None).is_err(),
+            RefBackend::commit_and_publish(
+                &backend,
+                &[OpRecord::ThreadDelete {
+                    name: "feature".to_string(),
+                    state: StateId::from_bytes([9; 32]),
+                }],
+                &[],
+                None,
+            )
+            .is_err(),
             "records with no committer must fail closed, not be silently dropped"
         );
         RefBackend::commit_and_publish(&backend, &[], &[], None)

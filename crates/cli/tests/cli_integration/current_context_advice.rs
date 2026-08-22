@@ -123,7 +123,7 @@ fn removed_phase_2_roots_are_unknown_commands() {
 fn removed_phase_3_paths_are_clean_parse_errors() {
     let temp = setup_detached_repo_without_current_thread();
     for args in [
-        &["--output", "json", "agent", "presence", "list"][..],
+        &["--output", "json", "presence", "list"][..],
         &["--output", "json", "fsck"],
         &["--output", "json", "import", "git"],
         &["--output", "json", "export", "git"],

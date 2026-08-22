@@ -9,13 +9,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use heddle_core::{
-    parse_reflog_line, short_oid, status::next_action::canonical_git_import_ref_command,
-    summarize_paths, timeline_branch_reason as core_timeline_branch_reason,
-    timeline_cursor_reason as core_timeline_cursor_reason, timeline_label as core_timeline_label,
-    timeline_recovery_status as core_timeline_recovery_status,
-    timeline_tool_status as core_timeline_tool_status, yes_no,
-};
 use objects::object::{
     Agent, State, StateId, TimelineBranchReason, TimelineCursorMoveReason, TimelineLabel,
     TimelineToolCallStatus,
@@ -26,6 +19,13 @@ use repo::{
     is_synthetic_root,
 };
 use serde::Serialize;
+use verbs::{
+    parse_reflog_line, short_oid, status::next_action::canonical_git_import_ref_command,
+    summarize_paths, timeline_branch_reason as core_timeline_branch_reason,
+    timeline_cursor_reason as core_timeline_cursor_reason, timeline_label as core_timeline_label,
+    timeline_recovery_status as core_timeline_recovery_status,
+    timeline_tool_status as core_timeline_tool_status, yes_no,
+};
 
 use super::{
     action_line::{format_next_step_dim, print_next_step},
@@ -232,8 +232,8 @@ struct ReflogEntry {
     message: String,
 }
 
-impl From<heddle_core::ReflogLine> for ReflogEntry {
-    fn from(line: heddle_core::ReflogLine) -> Self {
+impl From<verbs::ReflogLine> for ReflogEntry {
+    fn from(line: verbs::ReflogLine) -> Self {
         Self {
             source: line.source,
             reference: line.reference,
@@ -495,7 +495,7 @@ struct PlainGitLogOutput<'a> {
     storage_model: &'static str,
     states: &'a [StateEntry],
     #[serde(rename = "verification")]
-    trust: &'a heddle_core::RepositoryVerificationState,
+    trust: &'a verbs::RepositoryVerificationState,
     recommended_action: &'a str,
     recovery_commands: &'a [String],
 }
@@ -1154,7 +1154,7 @@ fn write_full<W: std::io::Write>(
                 out,
                 "  {}",
                 style::dim(&format!(
-                    "Collapsed: expandable with `heddle expand {}` ({} captures)",
+                    "Collapsed: expandable with `heddle thread expand {}` ({} captures)",
                     entry.state_id, collapsed.source_count
                 ))
             )?;

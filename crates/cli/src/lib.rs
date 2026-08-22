@@ -10,16 +10,10 @@ compile_error!(
      The OSS CLI ships as git-overlay-only, native-only, or both."
 );
 
-pub(crate) mod attribution;
-pub mod bench;
 pub mod cli;
-pub mod client;
 pub mod exit;
-pub mod extensions;
 pub mod harness;
 mod hosted_failure;
-#[cfg(feature = "client")]
-mod hosted_runtime;
 pub mod operation_id;
 pub mod perf;
 #[cfg(feature = "semantic")]
@@ -27,22 +21,27 @@ pub mod semantic;
 pub mod ts_codegen;
 pub mod util;
 
-// Shared CLI configuration and credential contracts live in cli-shared.
-pub use cli_shared::{
+// User-config schema, credentials, transport knobs, and tracing init live in
+// the config crate. `::config` disambiguates the extern crate from the
+// module named `config` re-exported below.
+pub use ::config::{
     LogFormat, LoggingConfig, LoggingGuard, OutputMode, config, init_logging, init_logging_default,
-    is_enabled, log_operation, log_repo_event, logging, remote,
+    is_enabled, log_operation, log_repo_event, logging,
 };
+// Remote aliases and `.heddle/remotes.toml` parsing live with the repo layer.
 pub use objects::{
     error::{HeddleError, HeddleError as StoreError},
     store::ObjectStore,
 };
 pub use repo::Repository;
+pub use repo::remote;
 pub type StoreResult<T> = objects::error::Result<T>;
 
 /// Register factories needed to reopen CLI-owned lazy hosted repositories.
+/// The hosted client stack itself lives in `hosted-client`.
 #[cfg(feature = "client")]
 pub fn register_hosted_factory() {
-    hosted_runtime::hosted::register_hosted_factory();
+    hosted_client::register_hosted_factory();
 }
 
 #[cfg(test)]

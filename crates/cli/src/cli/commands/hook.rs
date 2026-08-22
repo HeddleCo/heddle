@@ -98,7 +98,7 @@ pub fn cmd_hook(cli: &Cli, command: HookCommands) -> Result<()> {
 }
 
 fn load_hook_script(source: HookInstallSource) -> Result<String> {
-    use heddle_core::{HookInstallSourcePlan, plan_hook_install_source};
+    use verbs::{HookInstallSourcePlan, plan_hook_install_source};
 
     let from_file = source.from_file.is_some();
     let from_stdin = source.from_stdin || (!from_file && !io::stdin().is_terminal());
@@ -126,7 +126,7 @@ fn load_hook_script(source: HookInstallSource) -> Result<String> {
 }
 
 fn read_hook_stdin() -> Result<String> {
-    use heddle_core::{HookInstallSourcePlan, plan_hook_install_source};
+    use verbs::{HookInstallSourcePlan, plan_hook_install_source};
 
     let mut content = String::new();
     io::stdin().read_to_string(&mut content)?;

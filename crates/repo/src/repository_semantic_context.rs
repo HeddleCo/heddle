@@ -20,7 +20,6 @@ use semantic::{
     SemanticParseCache,
     parser::{FunctionDef, Language},
 };
-use state_review::SemanticContext;
 use tracing::warn;
 
 use crate::{Repository, Result};
@@ -63,15 +62,27 @@ impl<S: ObjectStore> ObjectSource for OverlaySource<'_, S> {
     }
 }
 
-/// Build the capture-time context for `run_all`.
-pub(crate) fn build_semantic_context(
+/// Capture-side semantic context handed to a registered
+/// [`SignalComputer`](crate::signals::SignalComputer). Field-for-field
+/// the same shape `state-review` assembles into its registry input.
+#[derive(Debug)]
+pub struct CaptureSemanticContext {
+    pub prior_functions: BTreeMap<PathBuf, Vec<FunctionDef>>,
+    pub new_functions: BTreeMap<PathBuf, Vec<FunctionDef>>,
+    pub changed_paths: BTreeSet<PathBuf>,
+    pub changed_symbols: BTreeSet<(PathBuf, String)>,
+    pub corpus_complete: bool,
+}
+
+/// Build the capture-time context for signal computation.
+pub fn build_semantic_context(
     repo: &Repository,
     prior: Option<&State>,
     new: &State,
     new_index: Option<&ContentHash>,
     source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
     source_trees: Option<&HashMap<ContentHash, &Tree>>,
-) -> Result<SemanticContext> {
+) -> Result<CaptureSemanticContext> {
     let overlay = OverlaySource {
         store: repo.store(),
         blobs: source_blobs,
@@ -167,7 +178,7 @@ pub(crate) fn build_semantic_context(
         &new_functions,
     );
 
-    Ok(SemanticContext {
+    Ok(CaptureSemanticContext {
         prior_functions,
         new_functions,
         changed_paths,
@@ -295,7 +306,3 @@ fn blob_bytes_at_path(
     };
     Ok(source.get_blob(&hash)?.map(|blob| blob.content().to_vec()))
 }
-
-#[cfg(test)]
-#[path = "repository_semantic_context_tests.rs"]
-mod tests;

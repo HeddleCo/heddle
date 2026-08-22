@@ -12,7 +12,7 @@
 //! docs --all --output json` into CI on every PR to catch doc drift.
 //!
 //! Pure invocation extraction/tokenization lives in
-//! `heddle_core::doctor_docs_plan`.
+//! `verbs::doctor_docs_plan`.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -21,12 +21,12 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use clap::{Command as ClapCommand, CommandFactory};
-use heddle_core::doctor_docs_plan::{
-    DocsInvocation, display_path, extract_invocations, looks_like_value,
-};
 use objects::worktree::should_ignore;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use verbs::doctor_docs_plan::{
+    DocsInvocation, display_path, extract_invocations, looks_like_value,
+};
 
 use super::{
     RecoveryAdvice,

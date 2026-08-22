@@ -2,7 +2,7 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use objects::store::AgentUsageSummary;
+use crate::actor_presence::AgentUsageSummary;
 use serde::{Deserialize, Serialize};
 
 /// A validated thread id. Construction from user- or externally-supplied

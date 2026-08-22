@@ -11,10 +11,10 @@
 
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use heddle_core::visibility_tier_label;
 use objects::object::{StateVisibility, VisibilityTier};
 use repo::{Repository, VisibilityCommitKind};
 use serde::Serialize;
+use verbs::visibility_tier_label;
 
 use super::history_target::resolve_state_id as resolve_state;
 use crate::cli::{

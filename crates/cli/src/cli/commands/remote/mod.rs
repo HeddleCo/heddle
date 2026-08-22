@@ -6,25 +6,6 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use heddle_core::{
-    GitOverlayPushTracking, GitRemoteConfigured, LocalTransferSummary, PushFailure, PushOutcome,
-    PushPath, PushPlan, PushPlanRequest, RemotePreflightBlocker, build_push_outcome,
-    first_multi_thread_push_failure, format_multi_ref_push_progress, format_push_outcome_text,
-    format_pushing_to, git_overlay_push_execution_facts,
-    heddle_single_push_execution_facts_from_local, is_native_transport_mismatch, list_remotes,
-    looks_like_git_forge_remote, looks_like_git_remote_url, looks_like_remote_location,
-    multi_ref_push_begin, multi_ref_thread_failed, multi_ref_thread_succeeded_local,
-    multi_thread_push_execution_facts, named_thread_tip_mismatch_failure, plan_push,
-    refuse_named_thread_tip_overwrite, remote_urls_match, resolve_default_push_remote_name,
-    transport_error_message,
-};
-#[cfg(feature = "client")]
-use heddle_core::{
-    HostedPushPlan, HostedPushResult, HostedPushResultFields, format_connected_to,
-    format_remote_state_detail, heddle_single_push_execution_facts, hosted_spool_display_path,
-    message_indicates_already_exists, multi_ref_progress_from_hosted_thread,
-    parse_hosted_push_result, redact_internal_hosted_paths, remote_push_failure,
-};
 use heddle_git_projection::{
     credential::EmbeddingSafeCredentialProvider,
     git_core::{
@@ -39,8 +20,27 @@ use sley::{
     Repository as SleyRepository,
     remote::{PackGenerationProgress, ProgressSink as SleyProgressSink},
 };
+use verbs::{
+    GitOverlayPushTracking, GitRemoteConfigured, LocalTransferSummary, PushFailure, PushOutcome,
+    PushPath, PushPlan, PushPlanRequest, RemotePreflightBlocker, build_push_outcome,
+    first_multi_thread_push_failure, format_multi_ref_push_progress, format_push_outcome_text,
+    format_pushing_to, git_overlay_push_execution_facts,
+    heddle_single_push_execution_facts_from_local, is_native_transport_mismatch, list_remotes,
+    looks_like_git_forge_remote, looks_like_git_remote_url, looks_like_remote_location,
+    multi_ref_push_begin, multi_ref_thread_failed, multi_ref_thread_succeeded_local,
+    multi_thread_push_execution_facts, named_thread_tip_mismatch_failure, plan_push,
+    refuse_named_thread_tip_overwrite, remote_urls_match, resolve_default_push_remote_name,
+    transport_error_message,
+};
 #[cfg(feature = "client")]
-use weft_client_shim::CliContext as _;
+use verbs::{
+    HostedPushPlan, HostedPushResult, HostedPushResultFields, format_connected_to,
+    format_remote_state_detail, heddle_single_push_execution_facts, hosted_spool_display_path,
+    message_indicates_already_exists, multi_ref_progress_from_hosted_thread,
+    parse_hosted_push_result, redact_internal_hosted_paths, remote_push_failure,
+};
+#[cfg(feature = "client")]
+use heddle_cli_args::CliContext as _;
 #[cfg(feature = "client")]
 use wire::ProtocolError;
 
@@ -57,18 +57,18 @@ use super::{
 #[cfg(feature = "client")]
 use crate::cli::progress_render::clear_line;
 #[cfg(feature = "client")]
-use crate::client::HostedClient;
+use hosted_client::client::HostedClient;
 #[cfg(feature = "client")]
-use crate::client::{HostedAuthMode, HostedSession};
+use hosted_client::client::{HostedAuthMode, HostedSession};
 #[cfg(feature = "client")]
 use crate::remote::Remote;
+use hosted_client::client::LocalSync;
 use crate::{
     cli::{
         Cli,
         progress_render::{finish_line, progress_for},
         should_output_json, style,
     },
-    client::LocalSync,
     config::UserConfig,
     remote::{RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
@@ -370,7 +370,7 @@ pub async fn cmd_push(
     #[cfg(feature = "client")]
     let network_session = if matches!(target, RemoteTarget::Network { .. }) {
         let allow_insecure =
-            insecure || cli_shared::remote_allows_insecure(&repo, remote.as_deref());
+            insecure || repo::remote::remote_allows_insecure(&repo, remote.as_deref());
         Some(
             HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?
                 .with_allow_insecure(allow_insecure),
@@ -871,7 +871,7 @@ fn resolve_push_target_with_key(
         .or_else(|| config.get("remote", Some(&remote), "url"))
         .unwrap_or(remote.as_str());
     let target = RemoteTarget::parse(spec).map_err(anyhow::Error::msg)?;
-    let key = cli_shared::remote::credential_key_from_remote_url(spec);
+    let key = repo::remote::credential_key_from_remote_url(spec);
     Ok((target, key))
 }
 
@@ -911,7 +911,7 @@ pub(super) async fn preflight_native_remote_transport(
 /// Admit a URL at `remote add` time using the same parser `push` uses.
 pub(super) async fn admit_native_remote_url(repo: &Repository, url: &str) -> Result<()> {
     preflight_native_remote_transport(repo, Some(url), "remote add").await?;
-    cli_shared::remote::parse_target_for_repository(repo, url)
+    repo::remote::parse_target_for_repository(repo, url)
         .map_err(|error| anyhow!(RecoveryAdvice::invalid_remote_url(url, &error)))?;
     Ok(())
 }
@@ -932,7 +932,7 @@ async fn discover_native_https_remote(spec: &str, action: &str) -> Result<()> {
     else {
         anyhow::bail!("native HTTPS discovery requires a network remote");
     };
-    let server_key = cli_shared::remote::credential_key_from_remote_url(spec);
+    let server_key = repo::remote::credential_key_from_remote_url(spec);
     let session = HostedSession::build(
         &UserConfig::load_default()?,
         server_key,
@@ -940,7 +940,7 @@ async fn discover_native_https_remote(spec: &str, action: &str) -> Result<()> {
     )?;
     match session.discover_endpoint(addr).await {
         Ok(_) => Ok(()),
-        Err(crate::hosted_runtime::hosted::HostedError::EndpointDescriptorUnavailable) => {
+        Err(hosted_client::hosted_runtime::hosted::HostedError::EndpointDescriptorUnavailable) => {
             Err(RecoveryAdvice::native_https_iroh_endpoint_missing(action, spec).into())
         }
         Err(error) => Err(error.into()),
@@ -1037,7 +1037,7 @@ fn classify_remote_spec(
     if looks_like_git_forge_remote(&spec) {
         return Some(RemoteTransportKind::GitUrl);
     }
-    if let Ok(target) = cli_shared::remote::parse_target_for_repository(repo, &spec) {
+    if let Ok(target) = repo::remote::parse_target_for_repository(repo, &spec) {
         return Some(match target {
             RemoteTarget::Local(path) => {
                 if let Ok(target_repo) = Repository::open(&path) {
@@ -1384,7 +1384,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         .session
         .connect(options.addr)
         .await?
-        .with_human_signature_callback(crate::client::cli_human_signature_callback());
+        .with_human_signature_callback(hosted_client::client::cli_human_signature_callback());
     let result = push_network_connected(repo, &mut client, options).await;
     client.close().await;
     result
@@ -1453,7 +1453,7 @@ async fn push_network_connected(
     // the object push already succeeded, so a discussion-sync hiccup warns
     // rather than failing the push (the next push resumes from the mirror map).
     if result.success {
-        match crate::client::discussion_sync::push_discussions(repo, client, &repo_path).await {
+        match hosted_client::client::discussion_sync::push_discussions(repo, client, &repo_path).await {
             Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                 println!(
                     "{} synced {count} discussion(s) to {}",
@@ -1475,7 +1475,7 @@ async fn push_network_connected(
         // rejects these attachments in the pack, so they only reach the server
         // over the caller-authenticated RPCs. Best-effort: the object push
         // already landed, so a sync hiccup warns rather than failing the push.
-        match crate::client::context_sync::push_context(repo, client, &repo_path).await {
+        match hosted_client::client::context_sync::push_context(repo, client, &repo_path).await {
             Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                 println!(
                     "{} synced {count} annotation(s) to {}",
@@ -1488,7 +1488,7 @@ async fn push_network_connected(
                 eprintln!("{} context sync skipped: {error:#}", style::warn_marker());
             }
         }
-        match crate::client::review_sync::push_review_signatures(repo, client, &repo_path).await {
+        match hosted_client::client::review_sync::push_review_signatures(repo, client, &repo_path).await {
             Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                 println!(
                     "{} synced {count} review signature(s) to {}",
@@ -1581,7 +1581,7 @@ async fn push_network_one_thread(
             .await?)
     } else {
         Ok(client
-            .push(
+            .push_profiled(
                 repo,
                 repo_path,
                 *state_id,
@@ -1589,7 +1589,8 @@ async fn push_network_one_thread(
                 force,
                 client_operation_id,
             )
-            .await?)
+            .await
+            .map(|(complete, _)| complete)?)
     }
 }
 
@@ -2019,7 +2020,7 @@ mod tests {
         );
     }
 
-    // Capability / push-routing pure decisions live in heddle_core::remote.
+    // Capability / push-routing pure decisions live in verbs::remote.
 
     #[cfg(feature = "client")]
     #[test]

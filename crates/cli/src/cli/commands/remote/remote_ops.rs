@@ -7,11 +7,11 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 #[cfg(feature = "client")]
-use heddle_core::{
+use verbs::{
     HostedPullResult, HostedPullResultFields, format_connected_to,
     heddle_pull_execution_facts_from_hosted, parse_hosted_pull_result, pull_tip_changed,
 };
-use heddle_core::{
+use verbs::{
     LocalTransferSummary, PullFailure, PullOutcome, PullPlan, PullPlanRequest, RemoteInfo,
     RemoteListReport, build_pull_outcome, format_pull_outcome_text, format_pulling_from,
     git_overlay_pull_execution_facts, heddle_pull_execution_facts_from_local,
@@ -19,7 +19,6 @@ use heddle_core::{
     plan_pull, pull_should_materialize, show_plain_git_remote, show_remote,
 };
 // Re-export under the historical crate-local names for sibling modules.
-pub(crate) use heddle_core::{resolve_default_remote_name, resolved_default_remote_name};
 use heddle_git_projection::credential::EmbeddingSafeCredentialProvider;
 use objects::{
     object::{StateId, ThreadName, Tree},
@@ -35,6 +34,7 @@ use sley::{
         FetchOptions, PackGenerationProgress, ProgressSink as SleyProgressSink, TransferProgress,
     },
 };
+pub(crate) use verbs::{resolve_default_remote_name, resolved_default_remote_name};
 
 use super::super::{
     action_line::print_next,
@@ -47,16 +47,16 @@ use super::super::{
     worktree_safety::ensure_worktree_clean,
 };
 #[cfg(feature = "client")]
-use crate::client::HostedClient;
+use hosted_client::client::HostedClient;
 #[cfg(feature = "client")]
-use crate::hosted_runtime::hosted::{HostedAuthMode, PullMaterialization};
+use hosted_client::hosted_runtime::hosted::{HostedAuthMode, PullMaterialization};
+use hosted_client::client::LocalSync;
 use crate::{
     cli::{
         Cli, RemoteCommands,
         progress_render::{finish_line, format_transfer_bytes, progress_for},
         should_output_json, style,
     },
-    client::LocalSync,
     config::UserConfig,
     remote::{Remote, RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
@@ -303,7 +303,7 @@ pub async fn cmd_pull(
                     local_thread: local_thread_name,
                     lazy: plan.lazy,
                     insecure: insecure
-                        || cli_shared::remote_allows_insecure(&repo, plan.remote.as_deref()),
+                        || repo::remote::remote_allows_insecure(&repo, plan.remote.as_deref()),
                     plan: &plan,
                     cli,
                 },
@@ -1101,7 +1101,7 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
         options.insecure,
     )
     .await?
-    .with_human_signature_callback(crate::client::cli_human_signature_callback());
+    .with_human_signature_callback(hosted_client::client::cli_human_signature_callback());
     let result = pull_network_connected(repo, &mut client, repo_path, options).await;
     client.close().await;
     result
@@ -1137,7 +1137,7 @@ async fn pull_network_connected(
             },
         )
         .await?;
-    let bootstrap = crate::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
+    let bootstrap = hosted_client::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
         .context("decode hosted pull bootstrap")?;
     let bootstrap = if result.success {
         bootstrap
@@ -1224,7 +1224,7 @@ async fn pull_network_connected(
             // new hosted CollaborationService discussions/turns for the pulled
             // head into the local op-log. Best-effort — a fetch hiccup warns
             // rather than failing the pull.
-            match crate::client::discussion_sync::pull_discussions(
+            match hosted_client::client::discussion_sync::pull_discussions(
                 repo,
                 client,
                 repo_path,
@@ -1250,7 +1250,7 @@ async fn pull_network_connected(
                 }
             }
             // Read path for hosted context annotations — same seam as discussions.
-            match crate::client::context_sync::pull_context(
+            match hosted_client::client::context_sync::pull_context(
                 repo,
                 client,
                 repo_path,

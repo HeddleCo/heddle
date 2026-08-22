@@ -310,13 +310,6 @@ pub struct LogArgs {
     pub since: Option<String>,
 }
 
-/// Arguments for `heddle timeline`.
-#[derive(Clone, Debug, clap::Args)]
-pub struct TimelineArgs {
-    #[command(subcommand)]
-    pub command: TimelineCommands,
-}
-
 /// Timeline navigation action commands.
 #[derive(Clone, Debug, clap::Subcommand)]
 pub enum TimelineCommands {
@@ -501,38 +494,6 @@ pub struct TimelineRecordFinishArgs {
     /// Tool result status: succeeded, failed, or cancelled.
     #[arg(long, default_value = "succeeded")]
     pub status: String,
-}
-
-/// Arguments for the `retro` command.
-///
-/// `heddle retro --since <marker-or-state>` summarizes a working
-/// session by combining oplog, agent registry, marker, and context
-/// annotation reads into one structured payload. Replaces the
-/// reconstruct-from-`heddle log` boilerplate agents wrote before.
-#[derive(Clone, Debug, clap::Args)]
-pub struct RetroArgs {
-    /// Lower bound: marker name or state id (short or full). When
-    /// omitted, the verb walks back to the most recent `Claude Code
-    /// turn`-shaped intent or to one hour ago, whichever is more
-    /// recent.
-    #[arg(long)]
-    pub since: Option<String>,
-
-    /// Include merge entries in the output payload (off by default
-    /// because merges are noisy in agent retros).
-    #[arg(long)]
-    pub include_merges: bool,
-
-    /// Include undo entries in the output payload (off by default
-    /// because undos are noisy in agent retros).
-    #[arg(long)]
-    pub include_undos: bool,
-
-    /// Render full annotation/intent content rather than excerpts.
-    /// Aliased as `--full` because the global `-v/--verbose` flag is
-    /// already wired as a u8 verbosity counter on `Cli`.
-    #[arg(long = "full", alias = "expand")]
-    pub full: bool,
 }
 
 /// Arguments for the `diff` command.
@@ -876,60 +837,6 @@ pub struct ThreadStartArgs {
     /// threads.
     #[arg(long)]
     pub hydrate: bool,
-}
-
-/// Arguments for the `try` command — atomic-ephemeral-thread sugar.
-///
-/// Implements item 3.1 from the heddle 6→8 plan: spin up an ephemeral
-/// thread, run `<cmd>` inside that thread's checkout, capture on
-/// success and drop on failure. The parent's working tree is never
-/// touched, regardless of whether the command succeeds or fails — the
-/// ephemeral thread is a sandbox.
-#[derive(Clone, Debug, clap::Args)]
-pub struct TryArgs {
-    /// Optional thread name. When omitted, defaults to
-    /// `try-<short-hash>` derived from the command and a timestamp.
-    #[arg(long)]
-    pub name: Option<String>,
-
-    /// Workspace mode for the ephemeral thread. Defaults to `materialized`
-    /// (a real isolated checkout) so `<cmd>` runs against a proper
-    /// filesystem. Pass `auto`, `virtualized`, or `solid` to use a different
-    /// workspace strategy.
-    #[arg(long, value_enum, default_value_t = WorkspaceModeArg::Materialized)]
-    pub workspace: WorkspaceModeArg,
-    /// On zero exit, automatically land the resulting thread into
-    /// the current thread. Default: off.
-    #[arg(long = "auto-merge")]
-    pub auto_merge: bool,
-
-    /// Keep the ephemeral thread on success even if `--auto-merge`
-    /// would otherwise drop it after merging. Has no effect on the
-    /// failure path (failed attempts are always dropped).
-    #[arg(long = "keep-on-success")]
-    pub keep_on_success: bool,
-
-    /// Allow Heddle global-option spellings after `--` and pass them
-    /// unchanged to the inner command.
-    #[arg(long)]
-    pub allow_heddle_global_args: bool,
-
-    /// The command to run. Everything after `--` lands here. The
-    /// first token is the program; the rest are its arguments.
-    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
-    pub command: Vec<String>,
-}
-
-/// Arguments for the `run` command.
-#[derive(Clone, Debug, clap::Args)]
-pub struct RunArgs {
-    /// Thread to execute within.
-    #[arg(long = "thread")]
-    pub thread: Option<String>,
-
-    /// Command to run inside the thread execution root.
-    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
-    pub command: Vec<String>,
 }
 
 /// Arguments for the `ready` command.

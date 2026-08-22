@@ -21,30 +21,29 @@ use cli::cli::{
 };
 use cli::{
     cli::{
-        Cli, CloneArgs, CollapseArgs, Commands, ContextCommands, DaemonCommands, DiffArgs,
-        ExpandArgs, IntegrationCommands, LogArgs, MaintenanceCommands, ResolveArgs, RetroArgs,
-        RevertArgs, RunArgs, ThreadCommands, UndoArgs,
+        Cli, CloneArgs, Commands, ContextCommands, DaemonCommands, DiffArgs, IntegrationCommands,
+        LogArgs, MaintenanceCommands, ResolveArgs, RevertArgs, ThreadCommands, UndoArgs,
         cli_args::LandArgs,
         commands::{
-            LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
-            cmd_abort, cmd_adopt, cmd_agent, cmd_capture_split, cmd_ci, cmd_clone, cmd_collapse,
-            cmd_commit, cmd_complete, cmd_completions, cmd_context_audit, cmd_context_check,
-            cmd_context_edit, cmd_context_get, cmd_context_history, cmd_context_list,
-            cmd_context_rm, cmd_context_set, cmd_context_suggest, cmd_context_supersede,
-            cmd_continue, cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop, cmd_diff,
-            cmd_discuss, cmd_doctor, cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_hook,
-            cmd_init, cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_oplog, cmd_presence,
-            cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_redo, cmd_remote, cmd_resolve, cmd_retro,
-            cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_shell, cmd_show, cmd_snapshot,
-            cmd_start, cmd_status, cmd_sync_smart, cmd_thread, cmd_timeline, cmd_try, cmd_undo,
-            cmd_undo_recover, cmd_verify, cmd_watch, command_runtime_contract_for_command,
-            print_error_with_hint, print_or_suggest_parse_error, print_parse_error_json_envelope,
+            LogCommandOptions, SnapshotAgentOverrides, build_command_catalog, cmd_abort, cmd_adopt,
+            cmd_agent, cmd_capture_split, cmd_clone, cmd_commit, cmd_complete, cmd_completions,
+            cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
+            cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
+            cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
+            cmd_daemon_status, cmd_daemon_stop, cmd_diff, cmd_discuss, cmd_doctor, cmd_doctor_docs,
+            cmd_doctor_schemas, cmd_hook, cmd_init, cmd_integration, cmd_land, cmd_log,
+            cmd_maintenance, cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_redo, cmd_remote,
+            cmd_resolve, cmd_revert, cmd_review, cmd_shell, cmd_show, cmd_snapshot, cmd_start,
+            cmd_status, cmd_sync_smart, cmd_thread, cmd_undo, cmd_undo_recover, cmd_verify,
+            cmd_watch, command_runtime_contract_for_command, print_error_with_hint,
+            print_or_suggest_parse_error, print_parse_error_json_envelope,
             recover_incomplete_land_if_present,
         },
         render::write_json_stdout,
     },
     config::UserConfig,
     exit::HeddleExitCode,
+    harness::current_process_harness_hint,
     logging::{CommandTrace, LoggingConfig, LoggingGuard, init_logging},
     operation_id::{resolve_operation_id, run_local_idempotency_if_requested},
     perf::{ProfileField, emit_command_profile, profile_enabled},
@@ -97,13 +96,18 @@ async fn async_main() -> Result<()> {
     // registrations, the second-and-subsequent CLI invocation against a
     // `--lazy` clone would see `MissingObject` on every blob read.
     cli::cli::commands::register_git_overlay_factory();
+    // Install the harness probe the hosted client's attribution resolver
+    // consults for ambient agent detection. Unconditional: local-only builds
+    // resolve attribution through it too.
+    hosted_client::attribution::install_harness_probe(current_process_harness_hint);
+
     #[cfg(feature = "client")]
     cli::register_hosted_factory();
 
-    // Pick the hosted authentication implementation at startup.
+    // Hosted command dispatch (auth / identity / whoami).
     #[cfg(feature = "client")]
-    let hosted: Box<dyn weft_client_shim::WeftExtensions> =
-        Box::new(cli::extensions::EnabledWeftExtensions);
+    let hosted: Box<dyn hosted_client::extensions::HostedExtensions> =
+        Box::new(hosted_client::extensions::EnabledHostedExtensions);
     // OSS builds dispatch no hosted commands (those `Commands` variants
     // are gated behind `client`), so no trait object is needed.
 
@@ -384,17 +388,9 @@ async fn async_main() -> Result<()> {
             }
         },
 
-        Commands::Schemas { verb } => cmd_schemas(&cli, verb),
-
         Commands::Start(args) => cmd_start(&cli, args.clone()),
-
-        Commands::Run(RunArgs { thread, command }) => {
-            cmd_run(&cli, thread.clone(), command.clone())
-        }
-
-        Commands::Ci { command } => cmd_ci(&cli, command),
-
-        Commands::Try(args) => cmd_try(&cli, args.clone()),
+        #[cfg(feature = "ci")]
+        Commands::Ci { command } => cli::cli::commands::cmd_ci(&cli, command),
 
         Commands::Sync(args) => {
             #[cfg(feature = "git-overlay")]
@@ -512,26 +508,6 @@ async fn async_main() -> Result<()> {
 
         Commands::Show { state } => cmd_show(&cli, state.clone()),
 
-        Commands::Timeline(args) => cmd_timeline(&cli, args.clone()),
-
-        Commands::Retro(RetroArgs {
-            since,
-            include_merges,
-            include_undos,
-            full,
-        }) => {
-            cmd_retro(
-                &cli,
-                RetroCommandOptions {
-                    since: since.clone(),
-                    include_merges: *include_merges,
-                    include_undos: *include_undos,
-                    verbose: *full,
-                },
-            )
-            .await
-        }
-
         Commands::Diff(DiffArgs {
             from,
             to,
@@ -602,16 +578,6 @@ async fn async_main() -> Result<()> {
             },
         },
 
-        Commands::Oplog { command } => cmd_oplog(&cli, command.clone()),
-
-        Commands::Collapse(CollapseArgs {
-            states,
-            into,
-            confidence,
-        }) => cmd_collapse(&cli, states.clone(), into.clone(), *confidence),
-
-        Commands::Expand(ExpandArgs { reference }) => cmd_expand(&cli, reference.clone()),
-
         Commands::Thread { command } => cmd_thread(&cli, command.clone()).await,
 
         Commands::Shell { command } => cmd_shell(&cli, command.clone()),
@@ -660,13 +626,13 @@ async fn async_main() -> Result<()> {
         #[cfg(feature = "client")]
         Commands::Auth { command } => {
             let cmd = command.clone();
-            hosted.auth(&cli, &cmd).await
+            hosted.auth(&cli, cmd).await
         }
 
         #[cfg(feature = "client")]
         Commands::Identity { command } => {
             let cmd = command.clone();
-            hosted.identity(&cli, &cmd).await
+            hosted.identity(&cli, cmd).await
         }
 
         #[cfg(feature = "client")]
@@ -790,8 +756,6 @@ async fn async_main() -> Result<()> {
         },
 
         Commands::Agent { command } => cmd_agent(&cli, command).await,
-
-        Commands::Presence { command } => cmd_presence(&cli, command).await,
 
         Commands::Discuss { command } => cmd_discuss(&cli, command).await,
 
@@ -1117,8 +1081,11 @@ fn incomplete_land_recovery_start(
         // Oplog recovery must be able to run before ordinary repository open;
         // the recovery-only command path performs its own non-validating
         // repository discovery and cannot inspect the land journal safely yet.
-        Commands::Oplog {
-            command: cli::cli::OplogCommands::Recover,
+        Commands::Maintenance {
+            command:
+                MaintenanceCommands::Oplog {
+                    command: cli::cli::OplogCommands::Recover,
+                },
         } => Ok(None),
         // Positional init resolves conflicts/canonicalization in cmd_init and
         // recovers the selected existing target there. Opening cwd here would
@@ -1126,7 +1093,7 @@ fn incomplete_land_recovery_start(
         Commands::Init(args) if args.path.is_some() => Ok(None),
         Commands::Adopt(args) => {
             let cwd = std::env::current_dir()?;
-            let plan = heddle_core::plan_adopt(&heddle_core::AdoptPlanOptions {
+            let plan = verbs::plan_adopt(&verbs::AdoptPlanOptions {
                 path: args.path.clone(),
                 repo_flag: cli.repo.clone(),
                 cwd,

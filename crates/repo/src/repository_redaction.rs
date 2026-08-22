@@ -34,7 +34,7 @@ use objects::{
     object::{
         ContentHash, PurgeEvidence, Redaction, RedactionsBlob, StateId, StateSignature, Tree,
     },
-    store::{AnyStore, ObjectStore},
+    store::{ObjectStore, SidecarStore},
 };
 
 use crate::repository::Repository;
@@ -894,7 +894,7 @@ fn parse_blob_hash_hex(hex: &str) -> Result<ContentHash> {
 /// Remove the blob from loose storage and every pack, then verify all public
 /// byte lookup paths miss. Retained bytes are an error rather than a warning.
 fn remove_blob_bytes(repo: &Repository, hash: &ContentHash) -> Result<(bool, bool)> {
-    let AnyStore::Fs(store) = repo.store();
+    let store = repo.store();
     let removed = store.remove_blob_everywhere(hash)?;
     Ok((removed, false))
 }
@@ -1484,7 +1484,7 @@ mod tests {
         assert!(repo.store().get_blob(&hash).unwrap().is_none());
         assert!(repo.store().get_blob_bytes(&hash).unwrap().is_none());
         assert!(!repo.store().has_blob(&hash).unwrap());
-        let AnyStore::Fs(store) = repo.store();
+        let store = repo.store();
         let packed_ids = store
             .pack_manager()
             .read()

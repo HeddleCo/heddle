@@ -191,7 +191,7 @@ impl SegmentedOpLogIndex {
                 let discarded = invalid_suffix(&manifest, path)?;
                 if discarded.segments > 0 {
                     return Err(HeddleError::InvalidObject(format!(
-                        "oplog recovery would discard {} later segment(s) containing {} complete entries; run `heddle oplog recover` to authorize and report that data loss",
+                        "oplog recovery would discard {} later segment(s) containing {} complete entries; run `heddle maintenance oplog recover` to authorize and report that data loss",
                         discarded.segments, discarded.entries
                     )));
                 }
@@ -1371,7 +1371,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("would discard 2 later segment"), "{error}");
-        assert!(error.contains("heddle oplog recover"), "{error}");
+        assert!(error.contains("heddle maintenance oplog recover"), "{error}");
         assert_eq!(fs::read(manifest_path(&path)).unwrap(), manifest_before);
         assert!(
             later.exists(),

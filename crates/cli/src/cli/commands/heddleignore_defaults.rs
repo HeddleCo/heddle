@@ -83,7 +83,7 @@ desktop.ini
 // blocker rendering called `heddleignore_defaults::noise_hint_for` to
 // append an inline `.heddleignore` hint (see e87795ea^:crates/cli/src/
 // cli/commands/merge/git_commit.rs:122); the ported
-// `crates/core/src/merge/git_commit.rs` now builds the same preview list
+// `crates/verbs/src/merge/git_commit.rs` now builds the same preview list
 // via a plain `.cloned().collect()` with no noise-hint decoration.
 // This looks like an accidental feature drop in the reparent (same
 // pattern as the oplog fixture this branch's tip commit restores), not

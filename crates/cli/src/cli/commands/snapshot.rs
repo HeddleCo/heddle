@@ -4,10 +4,6 @@
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
-use heddle_core::{
-    GitScope, MachineContractInput, SavePlan, SaveVerb, execute_save, large_capture_requires_force,
-    principal_lacks_accountable_identity,
-};
 use heddle_git_projection::GitProjection;
 use objects::{
     lock::RepositoryLockExt,
@@ -17,6 +13,10 @@ use objects::{
 };
 use refs::Head;
 use repo::{Repository, RepositoryCapability, SessionManager, SnapshotProfile, format_confidence};
+use verbs::{
+    GitScope, MachineContractInput, SavePlan, SaveVerb, execute_save, large_capture_requires_force,
+    principal_lacks_accountable_identity,
+};
 // Re-export the helper derivations so existing CLI call sites
 // (`thread.rs`, `harness/mod.rs`) keep `super::snapshot::summarize_*`
 // imports working without churn. The implementations live in
@@ -42,11 +42,11 @@ use super::{
     },
 };
 use crate::{
-    attribution::clean_attribution_value,
     cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
     perf::{ProfileField, emit_profile, instrumentation_enabled},
 };
+use hosted_client::attribution::clean_attribution_value;
 
 #[derive(Serialize)]
 pub(crate) struct SnapshotOutput {
@@ -329,7 +329,7 @@ pub async fn cmd_snapshot(
         println!(
             "Captured by: {} from {}",
             style::principal(&output.principal.name, &output.principal.email),
-            cli_shared::principal_source_display(&output.principal_source)
+            verbs::principal_source_display(&output.principal_source)
         );
         if let Some(agent) = &output.agent {
             println!(
@@ -983,7 +983,7 @@ fn clone_worktree_status_result(
 fn snapshot_output_from_save_report(
     repo: &Repository,
     user_config: &UserConfig,
-    report: heddle_core::SaveReport,
+    report: verbs::SaveReport,
 ) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
     let output_build_start = Instant::now();
     let previous_state_ms = report.previous_state_ms;
@@ -1003,7 +1003,7 @@ fn snapshot_output_from_save_report(
     let task_assignment_id = active_task_assignment_id(repo)?;
     let output_task_assignment_ms = task_assignment_start.elapsed().as_millis();
     let principal_start = Instant::now();
-    let principal_source = cli_shared::resolve_principal(repo, user_config)?
+    let principal_source = verbs::resolve_principal(repo, user_config.principal_pair())?
         .source
         .unwrap_or("unknown")
         .to_string();
@@ -1313,77 +1313,9 @@ fn build_attribution_with_env(
     }
 }
 
-/// Resolve the human + agent attribution for a non-capture command (context,
-/// fork, collapse, etc.). Mirrors the principal precedence chain that snapshot
-/// uses (env > repo > user > Unknown) and attaches the ambient agent from the
-/// same env/repo lookup `Repository::resolve_agent` performs.
-///
-/// Differs from the snapshot path in two ways — both intentional: it does not
-/// honor explicit `--agent-*` flag overrides (other commands don't expose
-/// those), and it does not consult the active `heddle agent provenance` chain. Use the
-/// snapshot path's full `resolve_*` for capture flows.
-pub(crate) fn resolve_attribution(
-    repo: &Repository,
-    user_config: &UserConfig,
-) -> Result<Attribution> {
-    let principal = resolve_principal(repo, user_config)?;
-    let harness_probe = crate::harness::probe_current_process_harness(repo, None, None, None).ok();
-    let harness_provider = harness_probe
-        .as_ref()
-        .and_then(|probe| probe.provider.clone())
-        .and_then(clean_attribution_value);
-    let harness_model = harness_probe
-        .as_ref()
-        .and_then(|probe| probe.model.clone())
-        .and_then(clean_attribution_value);
-    let agent_provider = std::env::var("HEDDLE_AGENT_PROVIDER")
-        .ok()
-        .and_then(clean_attribution_value)
-        .or(harness_provider)
-        .or_else(|| {
-            user_config
-                .agent
-                .provider
-                .clone()
-                .and_then(clean_attribution_value)
-        })
-        .or_else(|| {
-            repo.config()
-                .agent
-                .provider
-                .clone()
-                .and_then(clean_attribution_value)
-        });
-    let agent_model = std::env::var("HEDDLE_AGENT_MODEL")
-        .ok()
-        .and_then(clean_attribution_value)
-        .or(harness_model)
-        .or_else(|| {
-            user_config
-                .agent
-                .model
-                .clone()
-                .and_then(clean_attribution_value)
-        })
-        .or_else(|| {
-            repo.config()
-                .agent
-                .model
-                .clone()
-                .and_then(clean_attribution_value)
-        });
-    match (agent_provider, agent_model) {
-        (Some(provider), Some(model)) => {
-            let agent = objects::object::Agent::new(provider, model);
-            Ok(Attribution::with_agent(principal, agent))
-        }
-        _ => Ok(Attribution::human(principal)),
-    }
-}
-
-pub(crate) fn resolve_principal(repo: &Repository, user_config: &UserConfig) -> Result<Principal> {
-    Ok(cli_shared::resolve_principal(repo, user_config)?.principal)
-}
+// Attribution resolution lives in `hosted-client` so the hosted context sync
+// and the CLI verbs share one implementation.
+pub(crate) use hosted_client::attribution::{resolve_attribution, resolve_principal};
 
 pub(crate) fn is_placeholder_principal(principal: &Principal) -> bool {
     let name = principal.name_lossy();
@@ -1445,13 +1377,13 @@ mod tests {
         repo: &Repository,
         provider: &str,
         model: &str,
-    ) -> objects::store::ActorPresence {
+    ) -> repo::ActorPresence {
         let thread = current_thread(repo)
             .unwrap()
             .expect("initialized repository has a current thread");
-        let registry = objects::store::ActorPresenceStore::new(repo.heddle_dir());
-        let entry = objects::store::ActorPresence {
-            session_id: objects::store::generate_actor_session_id(),
+        let registry = repo::ActorPresenceStore::new(repo.heddle_dir());
+        let entry = repo::ActorPresence {
+            session_id: repo::generate_actor_session_id(),
             client_instance_id: None,
             native_actor_key: Some("claude-code:session:session-457".to_string()),
             native_parent_actor_key: None,
@@ -1468,7 +1400,7 @@ mod tests {
             model: Some(model.to_string()),
             harness: Some("claude-code".to_string()),
             thinking_level: None,
-            usage_summary: objects::store::AgentUsageSummary::default(),
+            usage_summary: repo::AgentUsageSummary::default(),
             last_progress_at: None,
             report_flush_state: Some("pending-local".to_string()),
             attach_reason: Some("test detected harness actor".to_string()),
@@ -1477,7 +1409,7 @@ mod tests {
             winning_attach_rule: Some("test".to_string()),
             probe_source: Some("hook_payload".to_string()),
             probe_confidence: Some(0.99),
-            status: objects::store::ActorPresenceStatus::Active,
+            status: repo::ActorPresenceStatus::Active,
             completed_at: None,
             context_queries: Vec::new(),
         };

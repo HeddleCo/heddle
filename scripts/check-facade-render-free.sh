@@ -4,7 +4,7 @@
 set -euo pipefail
 
 manifests=(
-  crates/core/Cargo.toml
+  crates/verbs/Cargo.toml
   crates/repo/Cargo.toml
   crates/objects/Cargo.toml
   crates/fs-prims/Cargo.toml
@@ -14,7 +14,7 @@ manifests=(
   crates/semantic/Cargo.toml
   crates/refs/Cargo.toml
   crates/oplog/Cargo.toml
-  crates/cli-shared/Cargo.toml
+  crates/config/Cargo.toml
   crates/ingest/Cargo.toml
   crates/format/Cargo.toml
   crates/wire/Cargo.toml

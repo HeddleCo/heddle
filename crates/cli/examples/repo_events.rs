@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use cli::client::repo_events::{RepoEventClient, SubscribeRepoEventsRequest};
+use hosted_client::client::repo_events::{RepoEventClient, SubscribeRepoEventsRequest};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

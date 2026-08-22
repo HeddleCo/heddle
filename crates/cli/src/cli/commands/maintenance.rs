@@ -2,16 +2,16 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
 use anyhow::Result;
-use heddle_core::maintenance_plan::{MaintenanceInspectView, MaintenanceRefreshView};
 use objects::store::{
     AnyStore, FsRepackOperation, RepackPolicy, RepackResourceLimits, RepackSchedule,
     RepackScheduler,
 };
 use serde::Serialize;
+use verbs::maintenance_plan::{MaintenanceInspectView, MaintenanceRefreshView};
 
 use crate::cli::{
     Cli, FsckCommands, FsckRepairCommands, MaintenanceCommands,
-    commands::{cmd_fsck, cmd_fsck_repair_git, cmd_gc},
+    commands::{cmd_fsck, cmd_fsck_repair_git, cmd_gc, cmd_oplog},
     should_output_json, worktree_status_options,
 };
 
@@ -47,6 +47,13 @@ fn render_repack(output: &RepackOutput, json: bool) -> Result<()> {
 }
 
 pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
+    // Oplog recovery must run through its own non-validating repository
+    // open: a torn oplog is exactly what it repairs, so the ordinary
+    // (validating) open below would refuse before the handler ever runs.
+    if let MaintenanceCommands::Oplog { command } = &command {
+        return cmd_oplog(cli, command.clone());
+    }
+
     let repo = cli.open_repo()?;
     let options = worktree_status_options(Some(repo.config()));
 
@@ -174,6 +181,8 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
         } => {
             return cmd_gc(cli, prune, aggressive, dry_run);
         }
+        // Handled above, before the validating repository open.
+        MaintenanceCommands::Oplog { .. } => {}
     }
 
     Ok(())

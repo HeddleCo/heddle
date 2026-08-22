@@ -40,7 +40,7 @@ This single line is responsible for `cli → server → axum → hyper-util` (62
 Only two import paths (from `grep -rn 'use server::' crates/cli/src/`):
 
 - `server::server::grpc_local_impl::*` — local gRPC service trait impls (`review`, `query`, `transaction`, `discuss` verbs)
-- `server::local_daemon::*` — the UDS listener + pidfile for `heddle agent serve`
+- `server::local_daemon::*` — the UDS listener + pidfile for `heddle daemon serve`
 
 Imports inside those modules ([crates/server/src/server/grpc_local_impl/](crates/server/src/server/grpc_local_impl/) + [crates/server/src/local_daemon.rs](crates/server/src/local_daemon.rs)) reference:
 

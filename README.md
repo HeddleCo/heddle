@@ -11,7 +11,7 @@ Heddle is an agent-native version control CLI written in Rust. It keeps its own 
 - content-addressed immutable history with stable change identifiers that survive rewrites
 - provenance-aware inspection (`heddle query --attribution`, `heddle show`, `heddle diff`)
 - operation-agnostic recovery (`heddle continue` / `heddle abort`) without per-command lifecycle flags
-- separate coordination surfaces for writer leases (`heddle agent`) and acting-worker context (`heddle presence`)
+- separate coordination surfaces for writer leases (`heddle agent`) and acting-worker context (`heddle agent presence`)
 - explicit maintenance and interoperability namespaces (`heddle maintenance`, `heddle bridge git`)
 
 ```bash
@@ -147,7 +147,7 @@ heddle diff HEAD~1 HEAD
 heddle query --attribution path/to/file.rs
 
 # Inspect acting-worker context separately from writer authority
-heddle presence list
+heddle agent presence list
 
 # Run advanced integrity and Git projection operations
 heddle maintenance fsck --full
@@ -156,7 +156,7 @@ heddle bridge git export --destination ../project.git
 
 `heddle status` reports the current branch or thread, what is dirty, whether another operation is in progress, and the recommended next command. The same `recommended_action` field is carried through `heddle doctor`, `heddle thread show`, and `heddle status` for programmatic use.
 
-`heddle presence` reports attribution and active-work context without granting write authority; lease-backed mutations remain under `heddle agent`. Repository integrity checks live under `heddle maintenance fsck`, while explicit Git import/export lives under `heddle bridge git`. These namespaces keep operational plumbing available without expanding the everyday verb surface.
+`heddle agent presence` reports attribution and active-work context without granting write authority; lease-backed mutations remain under `heddle agent`. Repository integrity checks live under `heddle maintenance fsck`, while explicit Git import/export lives under `heddle bridge git`. These namespaces keep operational plumbing available without expanding the everyday verb surface.
 
 In Git-overlay repositories, `heddle land` projects a landed thread as one atomic Git commit by default. The original per-State captures remain in Heddle history. Use `heddle land --no-squash` for a single invocation that should export one Git commit per State.
 
@@ -241,20 +241,19 @@ This repository is a Cargo workspace. The OSS crates live under `crates/`:
 
 ```text
 crates/cli/                 # the `heddle` binary and private hosted runtime
-crates/cli-shared/          # config types shared between cli and other surfaces
+crates/config/              # user-config TOML schema, credentials, tracing init
+crates/verbs/               # embeddable verb facade: status/diff/merge/save plans
 crates/objects/             # core object and repository model
 crates/repo/                # repository helpers and higher-level repo operations
 crates/refs/                # threads, markers, HEAD, packed refs
 crates/oplog/               # undo/redo oplog model
 crates/semantic/            # semantic diff and code-aware analysis
 crates/merge/               # merge core
-crates/review/              # review primitives
-crates/state_review/        # state-level review helpers
+crates/state-review/        # state-level review helpers
 crates/ingest/              # `heddle-ingest` binary and Git import path
 crates/wire/                # native Heddle wire protocol types
 crates/weft-client-shim/    # shim used by the `client` feature to talk to weft
 crates/crypto/              # crypto primitives
-crates/daemon/              # background daemon
 crates/devtools/            # developer tooling
 crates/mount/               # filesystem mount support
 crates/runtime-bridge/      # runtime bridge between cli and async server stacks

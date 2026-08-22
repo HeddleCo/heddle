@@ -2,13 +2,13 @@
 //! Oplog command — operator-facing inspection and recovery.
 
 use anyhow::{Context, Result};
-use heddle_core::oplog_plan::{
-    OplogRecoverFacts, oplog_recover_detail_fields, oplog_recover_headline_from_facts,
-    oplog_recover_shows_detail, plan_oplog_recover,
-};
 use oplog::OplogRecoveryReport;
 use repo::Repository;
 use serde::Serialize;
+use verbs::oplog_plan::{
+    OplogRecoverFacts, oplog_recover_detail_fields, oplog_recover_headline_from_facts,
+    oplog_recover_shows_detail, plan_oplog_recover,
+};
 
 use crate::cli::{Cli, OplogCommands, should_output_json, style};
 

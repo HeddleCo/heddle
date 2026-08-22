@@ -35,11 +35,11 @@ mod platform_compat;
 mod resolve_comprehensive;
 
 fn heddle(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
-    cli_test_support::heddle(args, cwd, &[])
+    cli_test_support::heddle_env(args, cwd, &[])
 }
 
 fn heddle_output(args: &[&str], cwd: Option<&Path>) -> Result<std::process::Output, String> {
-    cli_test_support::heddle_output(args, cwd, &[])
+    cli_test_support::heddle_output_env(args, cwd, &[])
 }
 
 fn assert_undo_requires_hard(cwd: &Path) {

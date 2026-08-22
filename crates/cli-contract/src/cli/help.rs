@@ -1,41 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Progressive-disclosure help: locked everyday first screen, topic pages.
+//! Ranked-list help: one quiet screen, topic pages on demand.
 //!
-//! The Heddle CLI's default `heddle help` lists the locked everyday verbs
-//! from the 2026-08-19 design lock (heddle#1458). Help topics stay
-//! (`heddle help <topic>`); they are not verbs. Per-verb help via
-//! `heddle <verb> --help` continues to derive from clap doc-comments.
+//! The Heddle CLI's default `heddle help` renders ONE ranked list: the
+//! locked everyday verbs from the 2026-08-19 design lock (heddle#1458)
+//! as the head, then every remaining non-hidden root by contract
+//! help_rank. There is no second view — depth lives in
+//! `heddle <verb> --help` and topic pages (`heddle help <topic>`),
+//! which are not verbs. Per-verb help continues to derive from clap
+//! doc-comments.
 //!
 //! # Cultural deliverable
 //!
-//! The default help is **curated, not auto-generated**. Tier metadata
-//! lives in the command contract table so human help and machine
-//! command catalog output cannot drift. See `AGENTS.md` "CLI surface
-//! curation" for the full doctrine.
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tier {
-    /// Front-door verbs in the locked everyday surface. See
-    /// [`LOCKED_EVERYDAY_VERBS`] for the first-screen list and
-    /// [`everyday_verbs`] for the catalog everyday set.
-    Everyday,
-    /// Reachable via `heddle help <topic>` or `heddle <verb> --help`.
-    /// Not advertised from the first screen.
-    Advanced,
-    /// Hidden verbs that should not be advertised at all.
-    Hidden,
-}
-
-/// Stable name for each verb. Pure presentation — has no relation to the
-/// clap variant identifier so doc-comment regenerations don't churn this
-/// file.
-pub fn tier_of(verb: &str) -> Tier {
-    match crate::cli::commands::command_help_tier(verb) {
-        "everyday" => Tier::Everyday,
-        "hidden" => Tier::Hidden,
-        _ => Tier::Advanced,
-    }
-}
+//! The default help is **curated, not auto-generated**. Rank and
+//! visibility metadata live in the command contract table so human
+//! help and machine command catalog output cannot drift. See
+//! `AGENTS.md` "CLI surface curation" for the full doctrine.
 
 /// Verbs that show in `heddle help`, in command-contract order. Blurbs
 /// are looked up at print time from the command catalog.
@@ -43,30 +22,38 @@ pub fn everyday_verbs() -> Vec<&'static str> {
     crate::cli::commands::root_commands_for_help_visibility("everyday")
 }
 
-/// Design lock 2026-08-19 (heddle#473 / #1458): the first-screen everyday
-/// surface. Umbrella nouns do not count as one. Catalog labels and help
-/// copy only — this does not fold the live parser to these 23.
+/// Head-of-list contract: the locked everyday verbs lead `heddle help`,
+/// ordered by contract help_rank. Everything else on the screen follows
+/// ranked by the same key. Umbrella nouns do not count as one; this is
+/// display order, not a fold of the live parser to these 23.
 pub const LOCKED_EVERYDAY_VERBS: &[&str] = &[
     "init", "clone", "status", "diff", "capture", "start", "ready", "land", "undo", "pull", "push",
     "resolve", "continue", "log", "show", "query", "review", "discuss", "context", "whoami",
     "daemon", "doctor", "help",
 ];
 
-/// First-screen verbs: the locked everyday surface, in lock order.
-/// Feature-gated verbs with no catalog summary are skipped at print time.
-fn primary_loop_verbs(
-    catalog: &crate::cli::commands::CommandCatalogOutput,
-    _authority: repo::RepositorySourceAuthority,
-) -> Vec<&'static str> {
-    LOCKED_EVERYDAY_VERBS
-        .iter()
-        .copied()
-        .filter(|verb| {
-            catalog
-                .command_by_display(verb)
-                .is_some_and(|entry| !entry.summary.is_empty())
-        })
-        .collect()
+/// The ranked first-screen list. Head: the locked everyday verbs in
+/// contract order. Tail: every remaining non-hidden root by the same
+/// rank key, so nothing is reachable only by reading source.
+///
+/// Feature-gated verbs with no catalog summary are skipped at print
+/// time; they stay in the list here so the ORDER is stable across
+/// builds.
+fn ranked_help_roots(catalog: &crate::cli::commands::CommandCatalogOutput) -> Vec<&'static str> {
+    let rank = |verb: &str| {
+        catalog
+            .command_by_display(verb)
+            .map(|entry| entry.help_rank)
+            .unwrap_or(u16::MAX)
+    };
+    let mut head: Vec<&'static str> = LOCKED_EVERYDAY_VERBS.to_vec();
+    head.sort_by_key(|verb| rank(verb));
+    for verb in crate::cli::commands::ranked_visible_roots() {
+        if !head.contains(&verb) {
+            head.push(verb);
+        }
+    }
+    head
 }
 
 /// Discover source authority for first-screen help. Fail closed to Native
@@ -87,7 +74,7 @@ fn probed_source_authority() -> repo::RepositorySourceAuthority {
 fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthority) {
     use std::fmt::Write;
 
-    use heddle_core::source_authority::{SourceAction, SourceAuthorityActions};
+    use verbs::source_authority::{SourceAction, SourceAuthorityActions};
 
     let catalog = crate::cli::commands::build_command_catalog();
     let actions = SourceAuthorityActions::new(authority);
@@ -95,13 +82,12 @@ fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthori
 
     let _ = writeln!(out, "Heddle — agent-native version control");
     let _ = writeln!(out);
-    let _ = writeln!(out, "Common loop:");
-    for name in primary_loop_verbs(&catalog, authority) {
+    for name in ranked_help_roots(&catalog) {
         let blurb = catalog_summary(&catalog, name);
         if blurb.is_empty() {
             continue;
         }
-        let _ = writeln!(out, "  {:<10}  {}", name, blurb);
+        let _ = writeln!(out, "  {:<12}  {}", name, blurb);
     }
     let _ = writeln!(out);
     let _ = writeln!(out, "Save: heddle init -> {capture}");
@@ -150,13 +136,6 @@ fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthori
     );
 }
 
-/// Verbs surfaced by `heddle help advanced`, in command-contract order.
-/// This includes power surfaces, automation/admin commands, and
-/// Git interop surfaces, each labeled by the contract table.
-pub fn advanced_verbs() -> Vec<&'static str> {
-    crate::cli::commands::root_commands_for_advanced_help()
-}
-
 /// Look up the catalog summary for a top-level command. Returns an empty
 /// string when the verb is feature-gated out of the current build.
 fn catalog_summary(catalog: &crate::cli::commands::CommandCatalogOutput, verb: &str) -> String {
@@ -201,36 +180,6 @@ pub fn render_help_for_authority(
     let mut out = String::new();
     match topic {
         [] => write_first_screen(&mut out, authority),
-        [name] if name == "advanced" => {
-            let catalog = crate::cli::commands::build_command_catalog();
-            let _ = writeln!(out, "{}", ADVANCED_HELP);
-            // Grouped by area from the command contract table — the
-            // group is registration data (`help_category` / surface),
-            // not a hand-maintained help string (heddle#652). The group
-            // header replaces the old per-line `[advanced]`-style
-            // surface label; only canonical redirects stay on the line.
-            for (title, verbs) in crate::cli::commands::advanced_help_groups() {
-                let mut lines = Vec::new();
-                for name in verbs {
-                    let blurb = catalog_summary(&catalog, name);
-                    if blurb.is_empty() {
-                        continue;
-                    }
-                    let canonical = crate::cli::commands::command_canonical_command(name)
-                        .map(|canonical| format!(" [use `{canonical}`]"))
-                        .unwrap_or_default();
-                    lines.push(format!("  {name:<14}  {blurb}{canonical}"));
-                }
-                if lines.is_empty() {
-                    continue;
-                }
-                let _ = writeln!(out, "{title}:");
-                for line in lines {
-                    let _ = writeln!(out, "{line}");
-                }
-                let _ = writeln!(out);
-            }
-        }
         [name] if topic_text(name).is_some() => {
             let _ = writeln!(out, "{}", topic_text(name).expect("checked above"));
         }
@@ -530,8 +479,8 @@ pub fn render_for_args(args: &[&str]) -> Option<String> {
 /// Static per-topic help. Topics are addressed via `heddle help <topic>`.
 pub fn topic_text(topic: &str) -> Option<&'static str> {
     Some(match topic {
-        "advanced" => ADVANCED_HELP,
         "agent-flags" => AGENT_FLAGS_TOPIC,
+        "config" | "environment" => CONFIG_TOPIC,
         "agent" | "daemon" => DAEMON_TOPIC,
         "output-formats" | "output-format" | "output" => OUTPUT_FORMATS_TOPIC,
         "clone" => CLONE_TOPIC,
@@ -553,28 +502,21 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
 
 const HEDDLEIGNORE_TOPIC: &str = include_str!("../../../../docs/heddleignore.md");
 
-const ADVANCED_HELP: &str = "Advanced commands for power users, agents, automation, Git interop, and recovery.\n\
-\n\
-The default `heddle help` curates the authority-aware loop: init/adopt/clone,\n\
-status/diff/commit/start, ready/land/push/pull, resolve/continue/abort,\n\
-doctor/verify. Power nouns such as thread/remote/Git projection/agent and\n\
-Git projection commands live behind this topic. Use `heddle help\n\
-<verb>` for curated topics or `heddle <verb> --help` for the full clap-derived\n\
-docs.\n\
-\n\
-This is intentional. The everyday surface stays minimal so first-time users aren't\n\
-overwhelmed; agents and power users reach for the advanced affordances when they\n\
-need them.\n\
-\n\
-Configuration environment:\n\
-  HEDDLE_HOME    Relocates global Heddle state (credentials, device identity,\n\
-                 session state, and the default user config).\n\
-  HEDDLE_CONFIG  Overrides the user config file. Takes precedence over\n\
-                 HEDDLE_HOME; otherwise HEDDLE_HOME uses <path>/config.toml.\n\
-\n\
-Principal resolution (highest first): HEDDLE_PRINCIPAL_NAME and\n\
-HEDDLE_PRINCIPAL_EMAIL, repository config, Git config, user config, then\n\
-Unknown <unknown@example.com>. Init, status, and capture use this same order.\n";
+/// Configuration environment + principal resolution. This reference
+/// material used to live on the retired `heddle help advanced` page;
+/// `heddle help config` keeps it reachable from the ranked screen.
+const CONFIG_TOPIC: &str = r#"Configuration environment and principal resolution.
+
+Configuration environment:
+  HEDDLE_HOME    Relocates global Heddle state (credentials, device identity,
+                 session state, and the default user config).
+  HEDDLE_CONFIG  Overrides the user config file. Takes precedence over
+                 HEDDLE_HOME; otherwise HEDDLE_HOME uses <path>/config.toml.
+
+Principal resolution (highest first): HEDDLE_PRINCIPAL_NAME and
+HEDDLE_PRINCIPAL_EMAIL, repository config, Git config, user config, then
+Unknown <unknown@example.com>. Init, status, and capture use this same order.
+"#;
 
 // The single full statement of the --output machine contract (plus the
 // one-paragraph version on the top-level `heddle help`). The global
@@ -587,9 +529,8 @@ default never switches under you, so scripts and humans see the same thing
 until a flag says otherwise.
 
 `--output json` emits the full machine contract: a stable `output_kind`
-discriminator, exit codes, and recovery templates. Schemas per verb:
-`heddle schemas <verb>`; the catalog of which commands emit what:
-`heddle help --output json`.
+discriminator, exit codes, and recovery templates. The per-verb schema
+catalog: `heddle help --output json`.
 
 `--output json-compact` emits only the decision-surface fields —
 `output_kind`, `status`/`coordination_status`, `blockers`, `next_action`,
@@ -861,7 +802,7 @@ Resolution paths:\n\
 - In Git Overlay, run `heddle commit` when captured source history is ready.\n\
 - Agents and tools can take many small captures without producing noisy Git history.\n\
 \n\
-See also: `heddle help advanced` for the full operational surface,\n\
+See also: `heddle help config` for environment overrides,\n\
 `heddle thread --help` for the thread subcommand list.\n";
 
 const OPERATION_IDS_TOPIC: &str = "Idempotency — machine retries for supported mutating commands.\n\
@@ -1079,9 +1020,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn everyday_verbs_in_curated_list_have_everyday_tier() {
+    fn everyday_verbs_carry_the_everyday_catalog_label() {
+        let catalog = crate::cli::commands::build_command_catalog();
         for verb in everyday_verbs() {
-            assert_eq!(tier_of(verb), Tier::Everyday, "{verb}");
+            assert_eq!(
+                crate::cli::commands::command_help_visibility(verb),
+                "everyday",
+                "{verb}"
+            );
+            assert!(catalog.command_by_display(verb).is_some(), "{verb}");
         }
     }
 
@@ -1093,8 +1040,8 @@ mod tests {
     #[test]
     fn topic_text_returns_some_for_advertised_topics() {
         for topic in [
-            "advanced",
             "agent-flags",
+            "config",
             "git-concepts",
             "git-concept-map",
             "git-veteran",
@@ -1129,35 +1076,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tier_of_advanced_verbs_classifies_correctly() {
-        for verb in advanced_verbs() {
-            let t = tier_of(verb);
-            assert!(
-                matches!(t, Tier::Advanced),
-                "expected Advanced for {verb}, got {t:?}"
-            );
-        }
-    }
-
     /// Regression: heddle#150. Commands referenced in inline tips and
-    /// error messages must remain discoverable on the advanced surface.
+    /// error messages must remain discoverable on the ranked screen.
     #[test]
-    fn advanced_verbs_lists_tip_referenced_commands() {
-        let advanced: std::collections::HashSet<&str> = advanced_verbs().into_iter().collect();
+    fn ranked_screen_lists_tip_referenced_commands() {
+        use clap::CommandFactory;
+        let cmd = crate::cli::cli_args::Cli::command();
+        let help = render_help_for_authority(&cmd, &[], repo::RepositorySourceAuthority::Native);
         for verb in ["abort", "shell"] {
             assert!(
-                advanced.contains(verb),
+                help.lines()
+                    .any(|line| line.trim_start().starts_with(&format!("{verb}  "))),
                 "`{verb}` is referenced in user-facing tips but is not \
-                 advertised by `heddle help advanced`"
+                 advertised by `heddle help`"
             );
         }
     }
 
     /// heddle#1435. Default first screen follows Native source authority:
-    /// capture is the save, and overlay `commit` stays off the front door.
+    /// capture is the save. The ranked tail may list `commit`, but the
+    /// save loop never routes through it.
     #[test]
-    fn first_screen_hides_overlay_commit_by_default() {
+    fn first_screen_teaches_capture_as_the_save() {
         use clap::CommandFactory;
         let cmd = crate::cli::cli_args::Cli::command();
         let help = render_help_for_authority(&cmd, &[], repo::RepositorySourceAuthority::Native);
@@ -1171,18 +1111,12 @@ mod tests {
         );
         assert!(
             !help.contains("-> heddle commit ->"),
-            "default first screen must not teach overlay commit: {help}"
-        );
-        assert!(
-            !help
-                .lines()
-                .any(|line| line.trim_start().starts_with("commit  ")),
-            "default first screen must hide the commit verb unless overlay: {help}"
+            "first screen must not teach overlay commit in the save loop: {help}"
         );
     }
 
     /// heddle#1439. First-screen help names `heddle completions` so tab
-    /// scripts are findable without `heddle help advanced`.
+    /// scripts are findable without digging through topics.
     #[test]
     fn first_screen_mentions_completions() {
         use clap::CommandFactory;
@@ -1215,12 +1149,6 @@ mod tests {
         assert!(
             !help.contains("-> heddle commit"),
             "overlay first screen must not teach capture then commit: {help}"
-        );
-        assert!(
-            !help
-                .lines()
-                .any(|line| line.trim_start().starts_with("commit  ")),
-            "overlay first screen must not list the commit verb: {help}"
         );
     }
 
@@ -1267,12 +1195,6 @@ mod tests {
                     "first screen must list everyday verb `{verb}`: {help}"
                 );
             }
-            assert!(
-                !help
-                    .lines()
-                    .any(|line| line.trim_start().starts_with("commit  ")),
-                "first screen must not list overlay `commit`: {help}"
-            );
         }
     }
 
@@ -1304,8 +1226,8 @@ mod tests {
         );
     }
 
-    /// heddle#1458. The six field-walk residuals plus continue are
-    /// everyday catalog labels, not advanced.
+    /// heddle#1458. The six field-walk residuals plus continue keep
+    /// their everyday catalog labels.
     #[test]
     fn locked_collab_and_identity_verbs_are_everyday() {
         let catalog = crate::cli::commands::build_command_catalog();
@@ -1323,12 +1245,7 @@ mod tests {
             }
             assert_eq!(
                 entry.help_visibility, "everyday",
-                "`{verb}` catalog label must be everyday, not advanced"
-            );
-            assert_eq!(
-                tier_of(verb),
-                Tier::Everyday,
-                "`{verb}` must be everyday, not advanced"
+                "`{verb}` catalog label must be everyday"
             );
         }
     }
@@ -1613,92 +1530,81 @@ mod tests {
         );
     }
 
-    /// heddle#652. `heddle help advanced` renders area groups instead of
-    /// one flat alphabetical wall of commands.
     #[test]
-    fn advanced_help_renders_area_groups() {
+    fn config_topic_documents_home_and_config_overrides() {
+        let config = topic_text("config").expect("config topic exists");
+        assert!(config.contains("HEDDLE_HOME"));
+        assert!(config.contains("HEDDLE_CONFIG"));
+        assert!(config.contains("<path>/config.toml"));
+        assert!(config.contains("Principal resolution (highest first)"));
+    }
+
+    /// The ranked first screen is exhaustive: every non-hidden root in
+    /// the contract table renders (unless feature-gated out of this
+    /// build), and the locked everyday head keeps its rank order ahead
+    /// of the ranked tail.
+    #[test]
+    fn first_screen_ranks_locked_head_then_every_remaining_root() {
         use clap::CommandFactory;
         let cmd = crate::cli::cli_args::Cli::command();
-        let advanced = render_help(&cmd, &["advanced".to_string()]);
-        for header in [
-            "Threads and integration:",
-            "States and history:",
-            "Recovery and integrity:",
-            "Repo and environment:",
-            "Agents and automation:",
-            "Git interop:",
-            "Admin and maintenance:",
-        ] {
+        let catalog = crate::cli::commands::build_command_catalog();
+        let help = render_help_for_authority(&cmd, &[], repo::RepositorySourceAuthority::Native);
+
+        let listed: Vec<&str> = help
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim_start();
+                let name = trimmed.split_whitespace().next()?;
+                catalog.command_by_display(name).is_some().then_some(name)
+            })
+            .collect();
+
+        for entry in &catalog.commands {
+            if entry.path.len() != 1
+                || entry.help_visibility == "hidden"
+                || entry.summary.is_empty()
+            {
+                continue;
+            }
+            let display: &str = &entry.display;
             assert!(
-                advanced.contains(&format!("\n{header}\n")),
-                "advanced help should render the `{header}` group: {advanced}"
+                listed.contains(&display),
+                "non-hidden root `{display}` must render on `heddle help`: {help}"
             );
         }
-        assert!(
-            !advanced.contains("Advanced commands:"),
-            "the flat list header is replaced by area groups: {advanced}"
-        );
-    }
 
-    #[test]
-    fn advanced_help_documents_home_and_config_overrides() {
-        use clap::CommandFactory;
-        let cmd = crate::cli::cli_args::Cli::command();
-        let advanced = render_help(&cmd, &["advanced".to_string()]);
-        assert!(advanced.contains("HEDDLE_HOME"));
-        assert!(advanced.contains("HEDDLE_CONFIG"));
-        assert!(advanced.contains("<path>/config.toml"));
-        assert!(advanced.contains("Principal resolution (highest first)"));
-    }
-
-    /// heddle#652. The grouped advanced surface is exhaustive and
-    /// non-overlapping: every advanced verb appears in exactly one group.
-    /// Because native commands group by the `help_category` on their
-    /// contract registration, a new advanced native root command that
-    /// forgets to pick a category fails here instead of silently
-    /// vanishing from `heddle help advanced`.
-    #[test]
-    fn advanced_help_groups_cover_every_advanced_verb() {
-        let grouped: Vec<&str> = crate::cli::commands::advanced_help_groups()
-            .into_iter()
-            .flat_map(|(_, verbs)| verbs)
+        // Head-of-list: the LAST locked verb's rank must not exceed any
+        // tail verb rendered after it... simpler invariant: every locked
+        // verb appears before every non-locked one.
+        let positions: Vec<usize> = LOCKED_EVERYDAY_VERBS
+            .iter()
+            .filter_map(|verb| listed.iter().position(|name| name == verb))
             .collect();
-        let mut deduped = grouped.clone();
-        deduped.sort_unstable();
-        deduped.dedup();
-        assert_eq!(
-            deduped.len(),
-            grouped.len(),
-            "no verb may appear in two advanced-help groups: {grouped:?}"
-        );
-        let grouped: std::collections::HashSet<&str> = grouped.into_iter().collect();
-        let flat: std::collections::HashSet<&str> = advanced_verbs().into_iter().collect();
-        let missing: Vec<&&str> = flat.difference(&grouped).collect();
-        assert!(
-            missing.is_empty(),
-            "advanced verbs missing from every group — native advanced root \
-             commands must register a help_category in the command contract \
-             table: {missing:?}"
-        );
-        let extra: Vec<&&str> = grouped.difference(&flat).collect();
-        assert!(
-            extra.is_empty(),
-            "grouped verbs not on the advanced surface: {extra:?}"
-        );
+        if let (Some(first_tail), Some(last_head)) = (
+            listed
+                .iter()
+                .position(|name| !LOCKED_EVERYDAY_VERBS.contains(name)),
+            positions.last(),
+        ) {
+            assert!(
+                *last_head < first_tail,
+                "locked everyday head must precede the ranked tail: {listed:?}"
+            );
+        }
     }
 
-    /// Build-break property: every verb listed in `everyday_verbs` and
-    /// `advanced_verbs` that's compiled into the current build MUST
-    /// resolve to a command catalog entry with a non-empty summary. Verbs
-    /// gated behind a feature that isn't enabled (e.g. `semantic` when
-    /// the `semantic` feature is off) are skipped — `print_help`
-    /// already skips them at render time. If a verb is renamed in the
-    /// contract table without a matching catalog entry, this test fails
-    /// for whichever feature combo the variant lives in.
+    /// Build-break property: every verb on the ranked screen that's
+    /// compiled into the current build MUST resolve to a command catalog
+    /// entry with a non-empty summary. Verbs gated behind a feature that
+    /// isn't enabled (e.g. `semantic` when the `semantic` feature is off)
+    /// are skipped — `print_help` already skips them at render time. If a
+    /// verb is renamed in the contract table without a matching catalog
+    /// entry, this test fails for whichever feature combo the variant
+    /// lives in.
     #[test]
     fn verb_blurbs_resolve_from_command_catalog() {
         let catalog = crate::cli::commands::build_command_catalog();
-        for verb in everyday_verbs().into_iter().chain(advanced_verbs()) {
+        for verb in crate::cli::commands::ranked_visible_roots() {
             // Feature-gated verbs may not be present in this build —
             // skip them. The render path mirrors this.
             if catalog.command_by_display(verb).is_none() {

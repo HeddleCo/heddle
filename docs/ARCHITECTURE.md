@@ -58,7 +58,7 @@ Heddle is no longer best understood as a single `src/` tree. The repository is a
 ```text
 crates/
   cli/       # local CLI entry point, command dispatch, private hosted runtime
-  cli-shared/ # published CLI config and credential-file contract
+  config/    # user-config TOML schema, credential store, transport knobs
   objects/      # core object model and shared types
   repo/      # repository operations and helpers
   refs/      # threads, markers, HEAD, packed refs
@@ -78,7 +78,7 @@ product in the sibling **tapestry** repo — neither is part of this workspace.
 
 Heddle uses separate config/state scopes instead of a single repository config file doing everything:
 
-- `UserConfig` and the compatible credential-file store live in `heddle-cli-shared`; they own identity, agent defaults, output preferences, and hosted auth profiles
+- `UserConfig` and the compatible credential-file store live in `heddle-config`; they own identity, agent defaults, output preferences, and hosted auth profiles
 - `RepoConfig` lives in `.heddle/config.toml` and owns repository-local behavior, storage coordinates, and remotes
 - `ServerConfig` lives with the hosted runtime (in the sibling **weft** repo) and owns storage, database, auth, TLS, and admission settings
 - `WorktreeState` is checkout-local runtime state and should not be serialized into repo config
@@ -88,7 +88,7 @@ Binary ownership follows the same split:
 - `heddle` (this repo) owns local repository operations and its private hosted transport/downloader runtime
 - the hosted server runtime and admin operations live in the sibling **weft** repo (no `hosted` binary in this workspace)
 
-Native review commands call `daemon::local_review::LocalStateReview` directly
+Native review commands call `verbs::review::LocalStateReview` directly
 in-process. That module uses Heddle-owned domain types; it is not an
 implementation of the API-owned hosted `StateReviewService` and does not use
 Prost as its local interface. Its repository-local idempotency cache encodes
@@ -198,7 +198,7 @@ This matters for harness integration work:
 - Heddle should follow supported harnesses ambiently rather than requiring users to run tools through Heddle
 - presence records are stored separately from writer leases
 - harness-native identities are tracked separately from Heddle-local reconnect identifiers
-- `heddle presence ...` inspects attribution without granting write authority
+- `heddle agent presence ...` inspects attribution without granting write authority
 - `heddle agent reserve|heartbeat|capture|ready|release` is the writer hot loop
 - `heddle agent provenance ...` records provider, model, and policy epochs
 

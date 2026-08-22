@@ -1,0 +1,1317 @@
+// SPDX-License-Identifier: Apache-2.0
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    io::Read,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
+
+use objects::fs_atomic::{StagedAtomicWrite, stage_file_atomic_secret};
+use repo::{FsMonitorMode, OutputFormat, WorktreeStatusOptions, identity::heddle_home_override};
+use serde::{Deserialize, Serialize};
+use wire::AuthToken;
+
+use crate::client_config::ClientConfig;
+
+/// CLI-selected repository start (`-C` / `--repo`, else startup cwd).
+/// Recorded once so later `UserConfig::load_default()` calls still discover
+/// TLS CA from that checkout instead of a later process cwd.
+static REMOTE_TLS_REPO_START: OnceLock<PathBuf> = OnceLock::new();
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserConfig {
+    #[serde(default)]
+    pub principal: Option<UserPrincipalConfig>,
+    #[serde(default)]
+    pub agent: UserAgentConfig,
+    #[serde(default)]
+    pub capture: UserCaptureConfig,
+    #[serde(default)]
+    pub output: UserOutputConfig,
+    #[serde(default)]
+    pub display: UserDisplayConfig,
+    #[serde(default)]
+    pub worktree: UserWorktreeConfig,
+    #[serde(default)]
+    pub logging: UserLoggingConfig,
+    #[serde(default)]
+    pub remote: UserRemoteConfig,
+    #[serde(default)]
+    pub harness: UserHarnessConfig,
+    #[serde(default)]
+    pub land: UserLandConfig,
+}
+
+pub struct StagedUserConfig {
+    path: PathBuf,
+    write: StagedAtomicWrite,
+}
+
+impl StagedUserConfig {
+    pub fn publish(self) -> anyhow::Result<PathBuf> {
+        self.write.publish()?;
+        Ok(self.path)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserPrincipalConfig {
+    pub name: String,
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserAgentConfig {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub default_policy: Option<String>,
+    #[serde(default = "default_confidence")]
+    pub confidence: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserCaptureConfig {
+    #[serde(default)]
+    pub auto: UserAutoCaptureMode,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UserAutoCaptureMode {
+    #[default]
+    Off,
+    Command,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserOutputConfig {
+    #[serde(default)]
+    pub format: OutputFormat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserDisplayConfig {
+    #[serde(default = "default_hash_length")]
+    pub hash_length: usize,
+    #[serde(default = "default_change_id_format")]
+    pub change_id_format: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserWorktreeConfig {
+    #[serde(default)]
+    pub fsmonitor: UserFsMonitorConfig,
+    #[serde(default)]
+    pub thread_workspace: UserThreadWorkspaceConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserFsMonitorConfig {
+    #[serde(default)]
+    pub mode: Option<FsMonitorMode>,
+}
+
+/// User-config default for thread workspace mode. Same vocabulary
+/// as [`crate::config::repo::ThreadMode`] and the `--workspace` flag,
+/// so a user setting `top_level_default = "materialized"` reads
+/// uniformly across the CLI surface and the thread record on disk.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum UserThreadWorkspaceMode {
+    #[default]
+    Auto,
+    Materialized,
+    Virtualized,
+    Solid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserThreadWorkspaceConfig {
+    #[serde(default)]
+    pub top_level_default: UserThreadWorkspaceMode,
+    #[serde(default)]
+    pub delegated_default: Option<UserThreadWorkspaceMode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserLoggingConfig {
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub include_location: bool,
+    #[serde(default)]
+    pub include_thread_ids: bool,
+    #[serde(default)]
+    pub log_spans: bool,
+    #[serde(default)]
+    pub otel_service_name: Option<String>,
+    #[serde(default)]
+    pub otel_endpoint: Option<String>,
+    #[serde(default)]
+    pub otel_traces_endpoint: Option<String>,
+    #[serde(default)]
+    pub otel_metrics_endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserRemoteConfig {
+    #[serde(default)]
+    pub tls_enabled: bool,
+    #[serde(default)]
+    pub tls_domain_name: Option<String>,
+    #[serde(default)]
+    pub tls_ca_certificate_path: Option<PathBuf>,
+    #[serde(default)]
+    pub auth_proof_key_pem_path: Option<PathBuf>,
+    #[serde(default)]
+    pub iroh_descriptor_key_id: Option<String>,
+    #[serde(default)]
+    pub iroh_descriptor_public_key_path: Option<PathBuf>,
+    #[serde(default)]
+    pub provider_global_concurrency: Option<usize>,
+    #[serde(default)]
+    pub provider_per_endpoint_concurrency: Option<usize>,
+    #[serde(default)]
+    pub provider_max_inflight_bytes: Option<usize>,
+    #[serde(default)]
+    pub provider_stall_timeout_secs: Option<u64>,
+    /// Allow cleartext connections to non-loopback hosts without TLS.
+    /// Prefer enabling TLS; this is an explicit opt-in for lab/VPN testing.
+    #[serde(default)]
+    pub insecure: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserLandConfig {
+    #[serde(default = "default_land_squash")]
+    pub squash: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HarnessMode {
+    #[default]
+    Auto,
+    Off,
+    Required,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HarnessTransport {
+    #[default]
+    Spool,
+    Direct,
+    End,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HarnessTranscriptMode {
+    #[default]
+    Off,
+    Summary,
+    Full,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserHarnessOverride {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub thinking_level: Option<String>,
+    #[serde(default)]
+    pub policy: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserHarnessConfig {
+    #[serde(default)]
+    pub mode: HarnessMode,
+    #[serde(default)]
+    pub transport: HarnessTransport,
+    #[serde(default)]
+    pub transcript: HarnessTranscriptMode,
+    #[serde(default = "default_auto_infer")]
+    pub auto_infer: bool,
+    #[serde(default)]
+    pub threading: UserHarnessThreadingConfig,
+    #[serde(default)]
+    pub harnesses: BTreeMap<String, UserHarnessOverride>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum UserHarnessRootThreadPolicy {
+    CreateNew,
+    #[default]
+    AttachCurrent,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum UserHarnessSubagentThreadPolicy {
+    AttachCurrent,
+    #[default]
+    CreateChild,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserHarnessThreadingConfig {
+    #[serde(default)]
+    pub root_actor: UserHarnessRootThreadPolicy,
+    #[serde(default)]
+    pub subagent: UserHarnessSubagentThreadPolicy,
+    #[serde(default)]
+    pub workspace_default: Option<UserThreadWorkspaceMode>,
+}
+
+fn default_confidence() -> f32 {
+    0.8
+}
+
+fn default_hash_length() -> usize {
+    8
+}
+
+fn default_change_id_format() -> String {
+    "short".to_string()
+}
+
+fn default_auto_infer() -> bool {
+    true
+}
+
+fn default_land_squash() -> bool {
+    true
+}
+
+impl Default for UserDisplayConfig {
+    fn default() -> Self {
+        Self {
+            hash_length: default_hash_length(),
+            change_id_format: default_change_id_format(),
+        }
+    }
+}
+
+impl Default for UserHarnessConfig {
+    fn default() -> Self {
+        Self {
+            mode: HarnessMode::Auto,
+            transport: HarnessTransport::Spool,
+            transcript: HarnessTranscriptMode::Off,
+            auto_infer: default_auto_infer(),
+            threading: UserHarnessThreadingConfig::default(),
+            harnesses: BTreeMap::new(),
+        }
+    }
+}
+
+impl Default for UserLandConfig {
+    fn default() -> Self {
+        Self {
+            squash: default_land_squash(),
+        }
+    }
+}
+
+impl UserConfig {
+    pub fn default_path() -> Option<PathBuf> {
+        if let Ok(path) = std::env::var("HEDDLE_CONFIG")
+            && !path.is_empty()
+        {
+            return Some(PathBuf::from(path));
+        }
+        if let Some(home) = heddle_home_override() {
+            return Some(home.join("config.toml"));
+        }
+        if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+            && !xdg.is_empty()
+        {
+            return Some(PathBuf::from(xdg).join("heddle").join("config.toml"));
+        }
+        if let Ok(home) = std::env::var("HOME")
+            && !home.is_empty()
+        {
+            return Some(PathBuf::from(home).join(".config/heddle/config.toml"));
+        }
+        None
+    }
+
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
+        let mut file = fs::File::open(path)?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+        let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if let Some(value) = invalid_output_format_value(&contents) {
+            return Err(objects::error::HeddleError::ConfigInvalidValue {
+                path: resolved,
+                key: "output.format".to_string(),
+                value,
+                valid_values: vec!["'text'".to_string(), "'json'".to_string()],
+            }
+            .into());
+        }
+        // Route TOML parse failures through `HeddleError::ConfigParse` so
+        // the CLI error envelope (see `print_error_with_hint`) can
+        // classify them and render the *actual* source file in the
+        // recovery advice — not a hard-coded `.heddle/config.toml`
+        // (Codex R3 cid 3313132711 on #271). The path is canonicalized
+        // so the rendered hint is copy/paste-safe even when the caller
+        // passed a relative or env-derived path.
+        toml::from_str::<Self>(&contents).map_err(|err| {
+            objects::error::HeddleError::ConfigParse {
+                path: resolved,
+                source: err,
+            }
+            .into()
+        })
+    }
+
+    pub fn load_default() -> anyhow::Result<Self> {
+        match Self::default_path() {
+            Some(path) => match Self::load(&path) {
+                Ok(config) => Ok(config),
+                Err(err) if path_missing(&err) => Ok(Self::default()),
+                Err(err) => Err(err),
+            },
+            None => Ok(Self::default()),
+        }
+    }
+
+    pub fn save_default(&self) -> anyhow::Result<PathBuf> {
+        self.stage_default()?.publish()
+    }
+
+    pub fn stage_default(&self) -> anyhow::Result<StagedUserConfig> {
+        let path = Self::default_path()
+            .ok_or_else(|| anyhow::anyhow!("unable to determine user config path"))?;
+        self.stage(&path)
+    }
+
+    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
+        self.stage(path)?.publish()?;
+        Ok(())
+    }
+
+    pub fn stage(&self, path: &Path) -> anyhow::Result<StagedUserConfig> {
+        let contents = toml::to_string_pretty(self)?;
+        let write = stage_file_atomic_secret(path, contents.as_bytes())?;
+        Ok(StagedUserConfig {
+            path: path.to_path_buf(),
+            write,
+        })
+    }
+
+    pub fn set_principal(&mut self, name: impl Into<String>, email: impl Into<String>) {
+        self.principal = Some(UserPrincipalConfig {
+            name: name.into(),
+            email: email.into(),
+        });
+    }
+
+    /// The configured principal as the `(name, email)` pair that identity
+    /// resolution consumes.
+    pub fn principal_pair(&self) -> Option<(&str, &str)> {
+        self.principal
+            .as_ref()
+            .map(|config| (config.name.as_str(), config.email.as_str()))
+    }
+
+    pub fn command_auto_capture_enabled(&self) -> anyhow::Result<bool> {
+        let mut mode = self.capture.auto;
+        match env::var("HEDDLE_AUTO_CAPTURE") {
+            Ok(value) if !value.trim().is_empty() => {
+                mode = parse_auto_capture_env("HEDDLE_AUTO_CAPTURE", &value)?;
+            }
+            Ok(_) | Err(env::VarError::NotPresent) => {}
+            Err(err @ env::VarError::NotUnicode(_)) => {
+                return Err(config_value_error(
+                    "HEDDLE_AUTO_CAPTURE",
+                    format!("read environment value: {err}"),
+                ));
+            }
+        }
+        Ok(matches!(mode, UserAutoCaptureMode::Command))
+    }
+
+    /// Record the CLI-selected repository start used for TLS CA discovery.
+    ///
+    /// Startup sets this from `-C` / `--repo` (or the process cwd) before
+    /// commands open a repository, so later hosted config assembly honors
+    /// the same checkout.
+    pub fn set_remote_tls_repo_start(path: PathBuf) {
+        let _ = REMOTE_TLS_REPO_START.set(path);
+    }
+
+    /// Resolve the shared custom CA bundle used by hosted and Git transports.
+    ///
+    /// `repo_start` is the CLI-selected repository path (`-C` / `--repo`).
+    /// When omitted, uses the start recorded at process startup, then the
+    /// process cwd.
+    ///
+    /// Precedence, highest first: `HEDDLE_REMOTE_TLS_CA_CERT`, user-config
+    /// `[remote] tls_ca_certificate_path`, then the same key in repository
+    /// `.heddle/config.toml` discovered from that start path.
+    pub fn remote_tls_ca_certificate_pem(
+        &self,
+        repo_start: Option<&Path>,
+    ) -> anyhow::Result<Option<String>> {
+        let cwd;
+        let start = if let Some(path) = repo_start {
+            Some(path)
+        } else if let Some(path) = REMOTE_TLS_REPO_START.get() {
+            Some(path.as_path())
+        } else {
+            cwd = env::current_dir().ok();
+            cwd.as_deref()
+        };
+        self.remote_tls_ca_certificate_pem_from(start)
+    }
+
+    fn remote_tls_ca_certificate_pem_from(
+        &self,
+        repo_start: Option<&Path>,
+    ) -> anyhow::Result<Option<String>> {
+        let mut ca_pem = self
+            .remote
+            .tls_ca_certificate_path
+            .as_ref()
+            .map(|path| read_security_config_file("remote.tls_ca_certificate_path", path))
+            .transpose()?;
+        if ca_pem.is_none()
+            && let Some(path) = discovered_repo_tls_ca_certificate_path(repo_start)?
+        {
+            ca_pem = Some(read_security_config_file(
+                "remote.tls_ca_certificate_path",
+                &path,
+            )?);
+        }
+        match env::var("HEDDLE_REMOTE_TLS_CA_CERT") {
+            Ok(path) => {
+                ca_pem = Some(read_security_config_file(
+                    "HEDDLE_REMOTE_TLS_CA_CERT",
+                    &PathBuf::from(path),
+                )?);
+            }
+            Err(env::VarError::NotPresent) => {}
+            Err(err @ env::VarError::NotUnicode(_)) => {
+                return Err(security_config_error(
+                    "HEDDLE_REMOTE_TLS_CA_CERT",
+                    format!("read environment value: {err}"),
+                ));
+            }
+        }
+        Ok(ca_pem)
+    }
+
+    /// Build the validated TLS/auth client config. The bearer token is supplied
+    /// by the caller (resolved through the single `HEDDLE_CREDENTIAL` → keystore
+    /// precedence in the client crate); this method no longer reads any token
+    /// from env or user config.
+    pub fn hosted_runtime_config(&self, token: Option<AuthToken>) -> anyhow::Result<ClientConfig> {
+        let mut config = token
+            .map(|token| ClientConfig::default().with_token(token))
+            .unwrap_or_default();
+
+        if self.remote.tls_enabled {
+            config = config.with_tls(false);
+        }
+        if self.remote.insecure {
+            config = config.with_allow_insecure(true);
+        }
+        if let Some(domain) = &self.remote.tls_domain_name {
+            config = config.with_tls_domain_name(domain.clone());
+        }
+        if let Some(pem) = self.remote_tls_ca_certificate_pem(None)? {
+            config = config.with_tls_ca_certificate_pem(pem);
+        }
+        if let Some(path) = &self.remote.auth_proof_key_pem_path {
+            let pem = read_security_config_file("remote.auth_proof_key_pem_path", path)?;
+            config = config.with_auth_proof_key_pem(pem);
+        }
+        if let (Some(key_id), Some(path)) = (
+            self.remote.iroh_descriptor_key_id.as_deref(),
+            self.remote.iroh_descriptor_public_key_path.as_deref(),
+        ) {
+            config = config.with_descriptor_trust(
+                key_id,
+                read_descriptor_public_key("remote.iroh_descriptor_public_key_path", path)?,
+            );
+        } else if self.remote.iroh_descriptor_key_id.is_some()
+            || self.remote.iroh_descriptor_public_key_path.is_some()
+        {
+            return Err(security_config_error(
+                "remote.iroh_descriptor_key_id/remote.iroh_descriptor_public_key_path",
+                "both descriptor trust fields are required".to_string(),
+            ));
+        }
+        if let Some(value) = self.remote.provider_global_concurrency {
+            config = config.with_provider_global_concurrency(value);
+        }
+        if let Some(value) = self.remote.provider_per_endpoint_concurrency {
+            config = config.with_provider_per_endpoint_concurrency(value);
+        }
+        if let Some(value) = self.remote.provider_max_inflight_bytes {
+            config = config.with_provider_max_inflight_bytes(value);
+        }
+        if let Some(value) = self.remote.provider_stall_timeout_secs {
+            config = config.with_provider_stall_timeout(value);
+        }
+
+        if env_bool("HEDDLE_REMOTE_TLS")? {
+            config = config.with_tls(false);
+        }
+        if env_bool("HEDDLE_REMOTE_INSECURE")? {
+            config = config.with_allow_insecure(true);
+        }
+        match env::var("HEDDLE_REMOTE_TLS_DOMAIN") {
+            Ok(domain) => config = config.with_tls_domain_name(domain),
+            Err(env::VarError::NotPresent) => {}
+            Err(err @ env::VarError::NotUnicode(_)) => {
+                return Err(security_config_error(
+                    "HEDDLE_REMOTE_TLS_DOMAIN",
+                    format!("read environment value: {err}"),
+                ));
+            }
+        }
+        match (
+            env::var("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID"),
+            env::var("HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY"),
+        ) {
+            (Ok(key_id), Ok(public_key)) if !key_id.is_empty() && !public_key.is_empty() => {
+                config = config.with_descriptor_trust(
+                    key_id,
+                    parse_descriptor_public_key(
+                        "HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
+                        &public_key,
+                    )?,
+                );
+            }
+            (Err(env::VarError::NotPresent), Err(env::VarError::NotPresent)) => {}
+            (Ok(_), Err(env::VarError::NotPresent))
+            | (Err(env::VarError::NotPresent), Ok(_))
+            | (Ok(_), Ok(_)) => {
+                return Err(security_config_error(
+                    "HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID/HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
+                    "both non-empty descriptor trust values are required".to_string(),
+                ));
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                return Err(security_config_error(
+                    "HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID/HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
+                    format!("read environment value: {error}"),
+                ));
+            }
+        }
+        if let Some(value) = env_positive::<usize>("HEDDLE_REMOTE_PROVIDER_GLOBAL_CONCURRENCY")? {
+            config = config.with_provider_global_concurrency(value);
+        }
+        if let Some(value) =
+            env_positive::<usize>("HEDDLE_REMOTE_PROVIDER_PER_ENDPOINT_CONCURRENCY")?
+        {
+            config = config.with_provider_per_endpoint_concurrency(value);
+        }
+        if let Some(value) = env_positive::<usize>("HEDDLE_REMOTE_PROVIDER_MAX_INFLIGHT_BYTES")? {
+            config = config.with_provider_max_inflight_bytes(value);
+        }
+        if let Some(value) = env_positive::<u64>("HEDDLE_REMOTE_PROVIDER_STALL_TIMEOUT_SECS")? {
+            config = config.with_provider_stall_timeout(value);
+        }
+        Ok(config)
+    }
+
+    pub fn worktree_status_options(
+        &self,
+        repo_config: Option<&repo::RepoConfig>,
+    ) -> WorktreeStatusOptions {
+        repo::resolve_worktree_status_options(self.worktree.fsmonitor.mode, repo_config)
+    }
+}
+
+fn parse_auto_capture_env(setting: &str, value: &str) -> anyhow::Result<UserAutoCaptureMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" | "command" | "commands" => Ok(UserAutoCaptureMode::Command),
+        "0" | "false" | "no" | "off" => Ok(UserAutoCaptureMode::Off),
+        _ => Err(config_value_error(
+            setting,
+            format!(
+                "parse auto-capture value {value:?}; expected one of off, command, true, or false"
+            ),
+        )),
+    }
+}
+
+fn invalid_output_format_value(contents: &str) -> Option<String> {
+    let value = toml::from_str::<toml::Value>(contents).ok()?;
+    let format = value
+        .get("output")
+        .and_then(|output| output.get("format"))
+        .and_then(toml::Value::as_str)?;
+    (!matches!(format, "text" | "json")).then(|| format.to_string())
+}
+
+fn read_security_config_file(setting: &str, path: &Path) -> anyhow::Result<String> {
+    fs::read_to_string(path).map_err(|err| {
+        security_config_error(
+            setting,
+            format!("read configured file {}: {err}", path.display()),
+        )
+    })
+}
+
+fn read_descriptor_public_key(setting: &str, path: &Path) -> anyhow::Result<[u8; 32]> {
+    let value = read_security_config_file(setting, path)?;
+    parse_descriptor_public_key(setting, value.trim())
+}
+
+fn parse_descriptor_public_key(setting: &str, value: &str) -> anyhow::Result<[u8; 32]> {
+    let bytes = hex::decode(value).map_err(|error| {
+        security_config_error(setting, format!("decode hex descriptor key: {error}"))
+    })?;
+    bytes.try_into().map_err(|_| {
+        security_config_error(
+            setting,
+            "descriptor key must be a 32-byte Ed25519 public key".to_string(),
+        )
+    })
+}
+
+fn env_bool(name: &str) -> anyhow::Result<bool> {
+    let value = match env::var(name) {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => return Ok(false),
+        Err(err @ env::VarError::NotUnicode(_)) => {
+            return Err(security_config_error(
+                name,
+                format!("read environment value: {err}"),
+            ));
+        }
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(security_config_error(
+            name,
+            format!(
+                "parse boolean value {value:?}; expected one of 1/0, true/false, yes/no, or on/off"
+            ),
+        )),
+    }
+}
+
+fn env_positive<T>(name: &str) -> anyhow::Result<Option<T>>
+where
+    T: std::str::FromStr + PartialEq + Default,
+    T::Err: std::fmt::Display,
+{
+    let value = match env::var(name) {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => return Ok(None),
+        Err(err @ env::VarError::NotUnicode(_)) => {
+            return Err(config_value_error(
+                name,
+                format!("read environment value: {err}"),
+            ));
+        }
+    };
+    let parsed = value.trim().parse::<T>().map_err(|error| {
+        config_value_error(name, format!("parse positive integer value: {error}"))
+    })?;
+    if parsed == T::default() {
+        return Err(config_value_error(
+            name,
+            "value must be greater than zero".to_string(),
+        ));
+    }
+    Ok(Some(parsed))
+}
+
+fn discovered_repo_tls_ca_certificate_path(
+    start: Option<&Path>,
+) -> anyhow::Result<Option<PathBuf>> {
+    let Some(start) = start else {
+        return Ok(None);
+    };
+    let Some(root) = repo::discover_heddle_root(start) else {
+        return Ok(None);
+    };
+    let config_path = root.join(".heddle/config.toml");
+    let contents = match fs::read_to_string(&config_path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(security_config_error(
+                "remote.tls_ca_certificate_path",
+                format!("read repository config {}: {err}", config_path.display()),
+            ));
+        }
+    };
+    let probe = toml::from_str::<RepoRemoteProbe>(&contents).map_err(|err| {
+        security_config_error(
+            "remote.tls_ca_certificate_path",
+            format!("parse repository config {}: {err}", config_path.display()),
+        )
+    })?;
+    let Some(path) = probe
+        .remote
+        .tls_ca_certificate_path
+        .filter(|path| !path.as_os_str().is_empty())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RepoRemoteProbe {
+    #[serde(default)]
+    remote: repo::RepoRemoteConfig,
+}
+
+fn config_value_error(setting: &str, reason: String) -> anyhow::Error {
+    anyhow::anyhow!("fatal configuration error for `{setting}`: {reason}")
+}
+
+fn security_config_error(setting: &str, reason: String) -> anyhow::Error {
+    anyhow::anyhow!(
+        "fatal TLS/auth configuration error for `{setting}`: {reason}; refusing to proceed with an ambiguous security posture"
+    )
+}
+
+fn path_missing(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        ffi::OsString,
+        fs,
+        path::PathBuf,
+        sync::MutexGuard,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use repo::{FsMonitorMode, RepoConfig};
+
+    use super::{
+        HarnessMode, HarnessTranscriptMode, HarnessTransport, UserAutoCaptureMode,
+        UserCaptureConfig, UserConfig, UserRemoteConfig,
+    };
+
+    static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const REMOTE_ENV_KEYS: &[&str] = &[
+        "HEDDLE_REMOTE_TLS",
+        "HEDDLE_REMOTE_TLS_DOMAIN",
+        "HEDDLE_REMOTE_TLS_CA_CERT",
+        "HEDDLE_REMOTE_INSECURE",
+        "HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID",
+        "HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
+        "HEDDLE_REMOTE_PROVIDER_GLOBAL_CONCURRENCY",
+        "HEDDLE_REMOTE_PROVIDER_PER_ENDPOINT_CONCURRENCY",
+        "HEDDLE_REMOTE_PROVIDER_MAX_INFLIGHT_BYTES",
+        "HEDDLE_REMOTE_PROVIDER_STALL_TIMEOUT_SECS",
+        "HEDDLE_AUTO_CAPTURE",
+    ];
+
+    struct RemoteEnvGuard {
+        _guard: MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl RemoteEnvGuard {
+        fn clean() -> Self {
+            let guard = TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let saved = REMOTE_ENV_KEYS
+                .iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect();
+            for key in REMOTE_ENV_KEYS {
+                unsafe { std::env::remove_var(key) };
+            }
+            Self {
+                _guard: guard,
+                saved,
+            }
+        }
+
+        fn set(&self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
+            unsafe { std::env::set_var(key, value) };
+        }
+    }
+
+    impl Drop for RemoteEnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                unsafe {
+                    if let Some(value) = value {
+                        std::env::set_var(key, value);
+                    } else {
+                        std::env::remove_var(key);
+                    }
+                }
+            }
+        }
+    }
+
+    fn unique_temp_path(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{}-{unique}", std::process::id()))
+    }
+
+    #[test]
+    fn user_worktree_status_options_fall_back_to_repo_config() {
+        let mut repo = RepoConfig::default();
+        repo.worktree.fsmonitor.mode = FsMonitorMode::Watchman;
+
+        let config = UserConfig::default();
+        let options = config.worktree_status_options(Some(&repo));
+
+        assert_eq!(options.fsmonitor.mode, FsMonitorMode::Watchman);
+    }
+
+    #[test]
+    fn user_worktree_status_options_default_to_off() {
+        let config = UserConfig::default();
+        let options = config.worktree_status_options(None);
+
+        assert_eq!(options.fsmonitor.mode, FsMonitorMode::Off);
+    }
+
+    #[test]
+    fn harness_config_defaults_are_magical_but_safe() {
+        let config = UserConfig::default();
+        assert_eq!(config.harness.mode, HarnessMode::Auto);
+        assert_eq!(config.harness.transport, HarnessTransport::Spool);
+        assert_eq!(config.harness.transcript, HarnessTranscriptMode::Off);
+        assert!(config.harness.auto_infer);
+        assert!(config.harness.harnesses.is_empty());
+    }
+
+    #[test]
+    fn command_auto_capture_defaults_off() {
+        let _env = RemoteEnvGuard::clean();
+
+        let config = UserConfig::default();
+
+        assert!(!config.command_auto_capture_enabled().unwrap());
+    }
+
+    #[test]
+    fn command_auto_capture_reads_user_config() {
+        let _env = RemoteEnvGuard::clean();
+        let config = UserConfig {
+            capture: UserCaptureConfig {
+                auto: UserAutoCaptureMode::Command,
+            },
+            ..UserConfig::default()
+        };
+
+        assert!(config.command_auto_capture_enabled().unwrap());
+    }
+
+    #[test]
+    fn command_auto_capture_env_overrides_user_config() {
+        let env = RemoteEnvGuard::clean();
+        env.set("HEDDLE_AUTO_CAPTURE", "off");
+        let config = UserConfig {
+            capture: UserCaptureConfig {
+                auto: UserAutoCaptureMode::Command,
+            },
+            ..UserConfig::default()
+        };
+
+        assert!(!config.command_auto_capture_enabled().unwrap());
+
+        env.set("HEDDLE_AUTO_CAPTURE", "command");
+        assert!(
+            UserConfig::default()
+                .command_auto_capture_enabled()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn user_config_toml_parses_capture_auto_command() {
+        let parsed: UserConfig = toml::from_str(
+            r#"
+                [capture]
+                auto = "command"
+            "#,
+        )
+        .expect("capture auto config should parse");
+
+        assert_eq!(parsed.capture.auto, UserAutoCaptureMode::Command);
+    }
+
+    #[test]
+    fn hosted_runtime_config_absent_security_settings_uses_defaults() {
+        let _env = RemoteEnvGuard::clean();
+        let config = UserConfig::default()
+            .hosted_runtime_config(None)
+            .expect("absent optional settings should not error");
+
+        assert!(!config.tls_enabled);
+        assert!(!config.tls_skip_verify);
+        assert!(config.tls_ca_certificate_pem.is_none());
+        assert!(config.auth_proof_key_pem.is_none());
+        assert!(config.token.is_none());
+        assert!(config.descriptor_key_id.is_none());
+        assert!(config.descriptor_public_key.is_none());
+        assert_eq!(config.provider_global_concurrency, 4);
+        assert_eq!(config.provider_per_endpoint_concurrency, 2);
+        assert_eq!(config.provider_max_inflight_bytes, 8 * 1024 * 1024);
+        assert_eq!(config.provider_stall_timeout_secs, 15);
+    }
+
+    #[test]
+    fn hosted_runtime_config_loads_provider_knobs_from_user_config_and_env() {
+        let env = RemoteEnvGuard::clean();
+        env.set("HEDDLE_REMOTE_PROVIDER_GLOBAL_CONCURRENCY", "16");
+        env.set("HEDDLE_REMOTE_PROVIDER_MAX_INFLIGHT_BYTES", "33554432");
+        let user: UserConfig = toml::from_str(
+            r#"
+                [remote]
+                provider_global_concurrency = 8
+                provider_per_endpoint_concurrency = 4
+                provider_max_inflight_bytes = 16777216
+                provider_stall_timeout_secs = 30
+            "#,
+        )
+        .unwrap();
+
+        let config = user.hosted_runtime_config(None).unwrap();
+
+        assert_eq!(config.provider_global_concurrency, 16);
+        assert_eq!(config.provider_per_endpoint_concurrency, 4);
+        assert_eq!(config.provider_max_inflight_bytes, 32 * 1024 * 1024);
+        assert_eq!(config.provider_stall_timeout_secs, 30);
+    }
+
+    #[test]
+    fn hosted_runtime_config_rejects_invalid_provider_env_knob() {
+        let env = RemoteEnvGuard::clean();
+        env.set("HEDDLE_REMOTE_PROVIDER_STALL_TIMEOUT_SECS", "0");
+
+        let error = UserConfig::default()
+            .hosted_runtime_config(None)
+            .expect_err("zero provider timeout must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("HEDDLE_REMOTE_PROVIDER_STALL_TIMEOUT_SECS")
+        );
+    }
+
+    #[test]
+    fn hosted_runtime_config_loads_descriptor_trust_from_environment() {
+        let env = RemoteEnvGuard::clean();
+        env.set("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID", "weft-current");
+        env.set(
+            "HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
+            hex::encode([17; 32]),
+        );
+
+        let config = UserConfig::default().hosted_runtime_config(None).unwrap();
+
+        assert_eq!(config.descriptor_key_id.as_deref(), Some("weft-current"));
+        assert_eq!(config.descriptor_public_key, Some([17; 32]));
+    }
+
+    #[test]
+    fn hosted_runtime_config_rejects_key_only_environment_descriptor_trust() {
+        let env = RemoteEnvGuard::clean();
+        env.set("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID", "weft-current");
+
+        let error = UserConfig::default()
+            .hosted_runtime_config(None)
+            .expect_err("partial descriptor trust must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("both non-empty descriptor trust")
+        );
+        assert!(error.to_string().contains("ambiguous security posture"));
+    }
+
+    #[test]
+    fn hosted_runtime_config_rejects_public_key_only_environment_descriptor_trust() {
+        let env = RemoteEnvGuard::clean();
+        env.set(
+            "HEDDLE_REMOTE_IROH_DESCRIPTOR_PUBLIC_KEY",
+            hex::encode([17; 32]),
+        );
+
+        let error = UserConfig::default()
+            .hosted_runtime_config(None)
+            .expect_err("partial descriptor trust must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("both non-empty descriptor trust")
+        );
+        assert!(error.to_string().contains("ambiguous security posture"));
+    }
+
+    #[test]
+    fn hosted_runtime_config_rejects_key_only_file_descriptor_trust() {
+        let _env = RemoteEnvGuard::clean();
+        let user = UserConfig {
+            remote: UserRemoteConfig {
+                iroh_descriptor_key_id: Some("weft-current".to_string()),
+                ..UserRemoteConfig::default()
+            },
+            ..UserConfig::default()
+        };
+
+        let error = user
+            .hosted_runtime_config(None)
+            .expect_err("partial descriptor trust must fail closed");
+
+        assert!(error.to_string().contains("both descriptor trust fields"));
+        assert!(error.to_string().contains("ambiguous security posture"));
+    }
+
+    #[test]
+    fn hosted_runtime_config_rejects_public_key_only_file_descriptor_trust() {
+        let _env = RemoteEnvGuard::clean();
+        let dir = unique_temp_path("heddle-user-config-partial-descriptor");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let public_key_path = dir.join("descriptor-public-key");
+        fs::write(&public_key_path, hex::encode([17; 32])).expect("write descriptor public key");
+        let user = UserConfig {
+            remote: UserRemoteConfig {
+                iroh_descriptor_public_key_path: Some(public_key_path),
+                ..UserRemoteConfig::default()
+            },
+            ..UserConfig::default()
+        };
+
+        let error = user
+            .hosted_runtime_config(None)
+            .expect_err("partial descriptor trust must fail closed");
+
+        assert!(error.to_string().contains("both descriptor trust fields"));
+        assert!(error.to_string().contains("ambiguous security posture"));
+        fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn hosted_runtime_config_valid_security_files_are_applied() {
+        let _env = RemoteEnvGuard::clean();
+        let dir = unique_temp_path("heddle-user-config-valid-security");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let ca_path = dir.join("ca.pem");
+        fs::write(&ca_path, "test ca pem").expect("write ca pem");
+        let user = UserConfig {
+            remote: UserRemoteConfig {
+                tls_ca_certificate_path: Some(ca_path),
+                ..UserRemoteConfig::default()
+            },
+            ..UserConfig::default()
+        };
+
+        let config = user
+            .hosted_runtime_config(None)
+            .expect("valid TLS/auth files should load");
+
+        assert!(config.tls_enabled);
+        assert_eq!(
+            config.tls_ca_certificate_pem.as_deref(),
+            Some("test ca pem")
+        );
+
+        fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn hosted_runtime_config_missing_tls_ca_path_fails_closed() {
+        let _env = RemoteEnvGuard::clean();
+        let missing = unique_temp_path("heddle-user-config-missing-ca").join("ca.pem");
+        let user = UserConfig {
+            remote: UserRemoteConfig {
+                tls_ca_certificate_path: Some(missing),
+                ..UserRemoteConfig::default()
+            },
+            ..UserConfig::default()
+        };
+
+        let err = user
+            .hosted_runtime_config(None)
+            .expect_err("missing configured CA path must fail closed");
+        let message = err.to_string();
+
+        assert!(message.contains("fatal TLS/auth configuration error"));
+        assert!(message.contains("remote.tls_ca_certificate_path"));
+    }
+
+    #[test]
+    fn hosted_runtime_config_missing_env_tls_ca_path_fails_closed() {
+        let env = RemoteEnvGuard::clean();
+        let missing = unique_temp_path("heddle-user-config-missing-env-ca").join("ca.pem");
+        env.set("HEDDLE_REMOTE_TLS_CA_CERT", missing);
+
+        let err = UserConfig::default()
+            .hosted_runtime_config(None)
+            .expect_err("missing env CA path must fail closed");
+        let message = err.to_string();
+
+        assert!(message.contains("fatal TLS/auth configuration error"));
+        assert!(message.contains("HEDDLE_REMOTE_TLS_CA_CERT"));
+    }
+
+    #[test]
+    fn hosted_runtime_config_invalid_env_tls_value_fails_closed() {
+        let env = RemoteEnvGuard::clean();
+        env.set("HEDDLE_REMOTE_TLS", "enabled");
+
+        let err = UserConfig::default()
+            .hosted_runtime_config(None)
+            .expect_err("invalid TLS env value must fail closed");
+        let message = err.to_string();
+
+        assert!(message.contains("fatal TLS/auth configuration error"));
+        assert!(message.contains("HEDDLE_REMOTE_TLS"));
+    }
+
+    fn write_discoverable_repo(root: &std::path::Path, remote_toml: &str) {
+        fs::create_dir_all(root.join(".heddle")).expect("create .heddle");
+        fs::write(root.join(".heddle/HEAD"), "ref: refs/heddle/heads/main\n").expect("write HEAD");
+        fs::write(
+            root.join(".heddle/config.toml"),
+            format!("[repository]\nversion = 4\nsource_authority = \"native\"\n{remote_toml}"),
+        )
+        .expect("write repo config");
+    }
+
+    #[test]
+    fn remote_tls_ca_honours_repo_config_when_user_config_is_unset() {
+        let _env = RemoteEnvGuard::clean();
+        let root = unique_temp_path("heddle-repo-tls-ca");
+        let ca_path = root.join("ca.pem");
+        fs::create_dir_all(&root).expect("create repo root");
+        fs::write(&ca_path, "repo ca pem").expect("write repo CA");
+        write_discoverable_repo(
+            &root,
+            &format!(
+                "\n[remote]\ntls_ca_certificate_path = \"{}\"\n",
+                ca_path.display()
+            ),
+        );
+
+        let pem = UserConfig::default()
+            .remote_tls_ca_certificate_pem_from(Some(&root))
+            .expect("repo CA should load");
+        assert_eq!(pem.as_deref(), Some("repo ca pem"));
+        fs::remove_dir_all(root).expect("remove temp dir");
+    }
+
+    #[test]
+    fn remote_tls_ca_user_config_overrides_repo_config() {
+        let _env = RemoteEnvGuard::clean();
+        let root = unique_temp_path("heddle-repo-tls-ca-override");
+        fs::create_dir_all(&root).expect("create repo root");
+        let repo_ca = root.join("repo-ca.pem");
+        let user_ca = root.join("user-ca.pem");
+        fs::write(&repo_ca, "repo ca pem").expect("write repo CA");
+        fs::write(&user_ca, "user ca pem").expect("write user CA");
+        write_discoverable_repo(
+            &root,
+            &format!(
+                "\n[remote]\ntls_ca_certificate_path = \"{}\"\n",
+                repo_ca.display()
+            ),
+        );
+
+        let user = UserConfig {
+            remote: UserRemoteConfig {
+                tls_ca_certificate_path: Some(user_ca),
+                ..UserRemoteConfig::default()
+            },
+            ..UserConfig::default()
+        };
+        let pem = user
+            .remote_tls_ca_certificate_pem_from(Some(&root))
+            .expect("user CA should win");
+        assert_eq!(pem.as_deref(), Some("user ca pem"));
+        fs::remove_dir_all(root).expect("remove temp dir");
+    }
+
+    #[test]
+    fn remote_tls_ca_selected_start_is_not_another_repo() {
+        let _env = RemoteEnvGuard::clean();
+        let parent = unique_temp_path("heddle-repo-tls-ca-dash-c");
+        let cwd_root = parent.join("cwd-repo");
+        let selected_root = parent.join("selected-repo");
+        fs::create_dir_all(&cwd_root).expect("create cwd repo");
+        fs::create_dir_all(&selected_root).expect("create selected repo");
+        let cwd_ca = cwd_root.join("ca.pem");
+        let selected_ca = selected_root.join("ca.pem");
+        fs::write(&cwd_ca, "cwd ca pem").expect("write cwd CA");
+        fs::write(&selected_ca, "selected ca pem").expect("write selected CA");
+        write_discoverable_repo(
+            &cwd_root,
+            &format!(
+                "\n[remote]\ntls_ca_certificate_path = \"{}\"\n",
+                cwd_ca.display()
+            ),
+        );
+        write_discoverable_repo(
+            &selected_root,
+            &format!(
+                "\n[remote]\ntls_ca_certificate_path = \"{}\"\n",
+                selected_ca.display()
+            ),
+        );
+
+        let selected = UserConfig::default()
+            .remote_tls_ca_certificate_pem(Some(&selected_root))
+            .expect("selected repo CA should load");
+        let other = UserConfig::default()
+            .remote_tls_ca_certificate_pem(Some(&cwd_root))
+            .expect("cwd repo CA should load");
+        assert_eq!(selected.as_deref(), Some("selected ca pem"));
+        assert_eq!(other.as_deref(), Some("cwd ca pem"));
+        fs::remove_dir_all(parent).expect("remove temp dir");
+    }
+
+    #[test]
+    fn remote_tls_ca_unknown_repo_remote_key_fails_closed() {
+        let _env = RemoteEnvGuard::clean();
+        let root = unique_temp_path("heddle-repo-tls-ca-unknown");
+        fs::create_dir_all(&root).expect("create repo root");
+        write_discoverable_repo(&root, "\n[remote]\ntls_insecure = true\n");
+
+        let err = UserConfig::default()
+            .remote_tls_ca_certificate_pem_from(Some(&root))
+            .expect_err("unknown repo remote keys must fail closed");
+        let message = err.to_string();
+        assert!(message.contains("fatal TLS/auth configuration error"));
+        assert!(
+            message.contains("unknown field") || message.contains("tls_insecure"),
+            "unknown remote knob must be named: {message}"
+        );
+        fs::remove_dir_all(root).expect("remove temp dir");
+    }
+}

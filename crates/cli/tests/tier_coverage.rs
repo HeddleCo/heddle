@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Every `Commands` variant must have an explicit root command contract.
 //!
-//! Help tiers now come from the command contract table, so this test
-//! enumerates every variant of `Commands` from `commands_main.rs` and
-//! asserts the root verb name is present in that table. The runtime
-//! `command_help_tier` lookup still has an advanced fallback for
-//! unknown wrappers, but existing verbs must never rely on it.
+//! Help rank and visibility come from the command contract table, so
+//! this test enumerates every variant of `Commands` from
+//! `commands_main.rs` and asserts the root verb name is present in that
+//! table. Unknown wrappers would fall through to runtime defaults;
+//! existing verbs must never rely on that.
 //!
 //! The check is text-based for the same reason
 //! [`op_id_coverage`](super::op_id_coverage) is: avoids dragging
