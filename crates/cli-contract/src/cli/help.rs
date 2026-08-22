@@ -46,7 +46,7 @@ fn ranked_help_roots(catalog: &crate::cli::commands::CommandCatalogOutput) -> Ve
             .map(|entry| entry.help_rank)
             .unwrap_or(u16::MAX)
     };
-    let mut head: Vec<&'static str> = LOCKED_EVERYDAY_VERBS.iter().copied().collect();
+    let mut head: Vec<&'static str> = LOCKED_EVERYDAY_VERBS.to_vec();
     head.sort_by_key(|verb| rank(verb));
     for verb in crate::cli::commands::ranked_visible_roots() {
         if !head.contains(&verb) {
@@ -1085,7 +1085,8 @@ mod tests {
         let help = render_help_for_authority(&cmd, &[], repo::RepositorySourceAuthority::Native);
         for verb in ["abort", "shell"] {
             assert!(
-                help.lines().any(|line| line.trim_start().starts_with(&format!("{verb}  "))),
+                help.lines()
+                    .any(|line| line.trim_start().starts_with(&format!("{verb}  "))),
                 "`{verb}` is referenced in user-facing tips but is not \
                  advertised by `heddle help`"
             );
@@ -1554,15 +1555,14 @@ mod tests {
             .filter_map(|line| {
                 let trimmed = line.trim_start();
                 let name = trimmed.split_whitespace().next()?;
-                catalog
-                    .command_by_display(name)
-                    .is_some()
-                    .then(|| name)
+                catalog.command_by_display(name).is_some().then_some(name)
             })
             .collect();
 
         for entry in &catalog.commands {
-            if entry.path.len() != 1 || entry.help_visibility == "hidden" || entry.summary.is_empty()
+            if entry.path.len() != 1
+                || entry.help_visibility == "hidden"
+                || entry.summary.is_empty()
             {
                 continue;
             }
@@ -1581,9 +1581,9 @@ mod tests {
             .filter_map(|verb| listed.iter().position(|name| name == verb))
             .collect();
         if let (Some(first_tail), Some(last_head)) = (
-            listed.iter().position(|name| {
-                !LOCKED_EVERYDAY_VERBS.contains(name)
-            }),
+            listed
+                .iter()
+                .position(|name| !LOCKED_EVERYDAY_VERBS.contains(name)),
             positions.last(),
         ) {
             assert!(

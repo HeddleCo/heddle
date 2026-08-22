@@ -1149,11 +1149,10 @@ const fn advertised_action(
 const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["abort"],
-        
-            json_discriminators(
-                documented_schemas(operator_envelope(compact_json(REF_MUTATION)), &["abort"]),
-                &[json_discriminator(Some("abort"), "output_kind", "abort")],
-            ),
+        json_discriminators(
+            documented_schemas(operator_envelope(compact_json(REF_MUTATION)), &["abort"]),
+            &[json_discriminator(Some("abort"), "output_kind", "abort")],
+        ),
     ),
     entry(
         &["adopt"],
@@ -1414,10 +1413,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
-    entry(
-        &["auth"],
-        feature_gated(user_scoped(GROUP), "client"),
-    ),
+    entry(&["auth"], feature_gated(user_scoped(GROUP), "client")),
     entry(
         &["auth", "login"],
         feature_gated(user_scoped(NETWORK_CONFIG_MUTATION_TEXT), "client"),
@@ -1506,10 +1502,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "client",
         ),
     ),
-    entry(
-        &["identity"],
-        feature_gated(user_scoped(GROUP), "client"),
-    ),
+    entry(&["identity"], feature_gated(user_scoped(GROUP), "client")),
     entry(
         &["identity", "ensure"],
         feature_gated(
@@ -1548,14 +1541,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["whoami"],
         front_door(
-            
-                feature_gated(
-                    json_discriminators(
-                        documented_schemas(READ_JSON, &["whoami"]),
-                        &[json_discriminator(Some("whoami"), "output_kind", "whoami")],
-                    ),
-                    "client",
+            feature_gated(
+                json_discriminators(
+                    documented_schemas(READ_JSON, &["whoami"]),
+                    &[json_discriminator(Some("whoami"), "output_kind", "whoami")],
                 ),
+                "client",
+            ),
             190,
         ),
     ),
@@ -1622,15 +1614,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["capture"],
         front_door(
-            
-                json_discriminators(
-                    documented_schemas(compact_json(CAPTURE), &["capture"]),
-                    &[json_discriminator(
-                        Some("capture"),
-                        "output_kind",
-                        "capture",
-                    )],
-                ),
+            json_discriminators(
+                documented_schemas(compact_json(CAPTURE), &["capture"]),
+                &[json_discriminator(
+                    Some("capture"),
+                    "output_kind",
+                    "capture",
+                )],
+            ),
             30,
         ),
     ),
@@ -1727,18 +1718,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["continue"],
         front_door(
-            
-                json_discriminators(
-                    documented_schemas(
-                        operator_envelope(compact_json(REF_MUTATION)),
-                        &["continue"],
-                    ),
-                    &[json_discriminator(
-                        Some("continue"),
-                        "output_kind",
-                        "continue",
-                    )],
-                ),
+            json_discriminators(
+                documented_schemas(operator_envelope(compact_json(REF_MUTATION)), &["continue"]),
+                &[json_discriminator(
+                    Some("continue"),
+                    "output_kind",
+                    "continue",
+                )],
+            ),
             95,
         ),
     ),
@@ -1995,41 +1982,34 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["maintenance", "oplog"], GROUP),
     entry(
         &["maintenance", "fsck"],
-        
-            documented_core_report_schema(READ_JSON, FsckReport::CONTRACT),
+        documented_core_report_schema(READ_JSON, FsckReport::CONTRACT),
     ),
-    entry(
-        &["maintenance", "fsck", "repair"],
-        GROUP,
-    ),
+    entry(&["maintenance", "fsck", "repair"], GROUP),
     entry(
         &["maintenance", "fsck", "repair", "git"],
-        
-            documented_schemas(
-                documented_core_report_schema(FSCK_GIT_REPAIR, FsckReport::CONTRACT),
-                &["maintenance fsck repair git"],
-            ),
+        documented_schemas(
+            documented_core_report_schema(FSCK_GIT_REPAIR, FsckReport::CONTRACT),
+            &["maintenance fsck repair git"],
+        ),
     ),
     entry(
         &["maintenance", "oplog", "recover"],
-        
-            json_discriminators(
-                opaque_schemas(METADATA_MUTATION_NO_OP_ID, &["maintenance oplog recover"]),
-                &[json_discriminator(
-                    Some("maintenance oplog recover"),
-                    "output_kind",
-                    "oplog_recover",
-                )],
-            ),
+        json_discriminators(
+            opaque_schemas(METADATA_MUTATION_NO_OP_ID, &["maintenance oplog recover"]),
+            &[json_discriminator(
+                Some("maintenance oplog recover"),
+                "output_kind",
+                "oplog_recover",
+            )],
+        ),
     ),
     entry(
         &["help"],
         front_door(
-            
-                json_discriminators(
-                    opaque_schemas(READ_JSON, &["help"]),
-                    &[json_discriminator(Some("help"), "kind", "command_catalog")],
-                ),
+            json_discriminators(
+                opaque_schemas(READ_JSON, &["help"]),
+                &[json_discriminator(Some("help"), "kind", "command_catalog")],
+            ),
             230,
         ),
     ),
@@ -2271,14 +2251,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["query"],
         front_door(
-            
-                json_discriminators(
-                    documented_schemas(
-                        documented_core_report_schema(READ_JSON, QueryReport::CONTRACT),
-                        QUERY_ATTRIBUTION_SCHEMA_VERBS,
-                    ),
-                    QUERY_JSON_DISCRIMINATORS,
+            json_discriminators(
+                documented_schemas(
+                    documented_core_report_schema(READ_JSON, QueryReport::CONTRACT),
+                    QUERY_ATTRIBUTION_SCHEMA_VERBS,
                 ),
+                QUERY_JSON_DISCRIMINATORS,
+            ),
             150,
         ),
     ),
@@ -2355,10 +2334,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
-    entry(
-        &["remote"],
-        surface(GROUP, "source_authority"),
-    ),
+    entry(&["remote"], surface(GROUP, "source_authority")),
     entry(
         &["remote", "list"],
         surface(
@@ -2438,11 +2414,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["revert"],
-        
-            json_discriminators(
-                documented_schemas(WORKTREE_MUTATION, &["revert"]),
-                &[json_discriminator(Some("revert"), "output_kind", "revert")],
-            ),
+        json_discriminators(
+            documented_schemas(WORKTREE_MUTATION, &["revert"]),
+            &[json_discriminator(Some("revert"), "output_kind", "revert")],
+        ),
     ),
     entry(&["review"], front_door(GROUP, 160)),
     entry(
@@ -2594,11 +2569,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["sync"],
-        
-            json_discriminators(
-                documented_schemas(operator_envelope(compact_json(REF_MUTATION)), &["sync"]),
-                &[json_discriminator(Some("sync"), "output_kind", "sync")],
-            ),
+        json_discriminators(
+            documented_schemas(operator_envelope(compact_json(REF_MUTATION)), &["sync"]),
+            &[json_discriminator(Some("sync"), "output_kind", "sync")],
+        ),
     ),
     entry(&["thread"], surface(GROUP, "native")),
     entry(
@@ -2607,15 +2581,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["thread", "expand"],
-        
-            json_discriminators(
-                documented_schemas(READ_JSON, &["thread expand"]),
-                &[json_discriminator(
-                    Some("thread expand"),
-                    "output_kind",
-                    "expand",
-                )],
-            ),
+        json_discriminators(
+            documented_schemas(READ_JSON, &["thread expand"]),
+            &[json_discriminator(
+                Some("thread expand"),
+                "output_kind",
+                "expand",
+            )],
+        ),
     ),
     entry(
         &["thread", "create"],

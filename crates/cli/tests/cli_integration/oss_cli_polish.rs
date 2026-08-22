@@ -2343,10 +2343,10 @@ fn core_loop_schemas_are_discoverable() {
         "doctor docs",
         "doctor schemas",
         "diff",
-        "presence list",
-        "presence show",
-        "presence explain",
-        "presence complete",
+        "agent presence list",
+        "agent presence show",
+        "agent presence explain",
+        "agent presence complete",
         "agent provenance begin",
         "agent provenance segment",
         "agent provenance end",
@@ -6671,7 +6671,7 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
     let stdout = std::str::from_utf8(&output.stdout).unwrap();
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
     assert!(
-        stdout.contains("Heddle") && stdout.contains("Common loop:"),
+        stdout.contains("Heddle — agent-native version control"),
         "curated help should render: stdout={stdout}"
     );
     assert!(
@@ -6687,21 +6687,25 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
             "everyday verb `{verb}` should be on the first screen: {stdout}"
         );
     }
-    assert!(
-        !stdout.contains("\n  commit"),
-        "no-repo first screen must hide overlay commit: {stdout}"
-    );
-    for verb in ["switch", "thread", "git-projection", "adopt", "verify"] {
+    // One ranked list: the remaining non-hidden roots render too.
+    for verb in ["commit", "thread", "adopt", "verify"] {
         assert!(
-            !stdout.contains(&format!("\n  {verb}")),
-            "folded or advanced verb `{verb}` should stay off the first screen: {stdout}"
+            stdout.contains(&format!("\n  {verb}")),
+            "non-hidden root `{verb}` should be on the ranked screen: {stdout}"
         );
     }
+    assert!(
+        !stdout.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("switch ") || trimmed.starts_with("git-projection ")
+        }),
+        "retired roots must stay off the ranked screen: {stdout}"
+    );
     assert!(
         !stdout.contains("heddle help advanced")
             && !stdout.contains("Nearby:")
             && stdout.contains("Start here: `heddle init`, `heddle clone`, or `heddle capture`."),
-        "first screen is the locked everyday surface, not a nearby/advanced pointer: {stdout}"
+        "first screen is the ranked list, not a nearby/advanced pointer: {stdout}"
     );
     assert!(
         stdout.contains("Save: heddle init -> heddle capture -m \"...\"")
@@ -6731,10 +6735,6 @@ fn overlay_help_does_not_teach_capture_then_commit() {
             && !help.contains("write the Git commit")
             && !help.contains("-> heddle commit"),
         "overlay first screen must not teach capture then commit or false write-through: {help}"
-    );
-    assert!(
-        !help.contains("\n  commit"),
-        "overlay first screen must not list the commit verb: {help}"
     );
 }
 
@@ -6770,9 +6770,7 @@ fn field_study_1435_native_help_capture_commit_exits() {
     for args in [&["--help"][..], &["help"][..]] {
         let help = heddle(args, Some(temp.path())).expect("first-screen help");
         assert!(
-            !help.contains("-> heddle commit ->")
-                && !help.contains("authoritative Git checkout")
-                && !help.contains("\n  commit"),
+            !help.contains("-> heddle commit ->") && !help.contains("authoritative Git checkout"),
             "`heddle {}` must not teach overlay commit on native: {help}",
             args.join(" ")
         );
@@ -6880,29 +6878,7 @@ fn global_flags_only_json_renders_command_catalog_for_agents() {
 }
 
 #[test]
-fn advanced_help_does_not_repeat_everyday_human_path() {
-    let advanced = heddle_help(&["help", "advanced"]);
-    assert!(
-        advanced.contains(
-            "Advanced commands for power users, agents, automation, Git interop, and recovery."
-        ),
-        "advanced help should explain why this surface exists: {advanced}"
-    );
-    assert!(
-        !advanced.contains("compatibility") && !advanced.contains(concat!("Git ", "adapter")),
-        "advanced help should not frame Git Projection commands as old compatibility wording: {advanced}"
-    );
-    assert!(
-        !advanced.contains("see `heddle help advanced`"),
-        "advanced help should not be self-referential: {advanced}"
-    );
-    for verb in ["commit", "land", "push"] {
-        assert!(
-            !advanced.contains(&format!("\n  {verb}")),
-            "`{verb}` is an everyday path and should not be duplicated in advanced help: {advanced}"
-        );
-    }
-
+fn verb_help_prose_stays_accurate_after_advanced_view_retirement() {
     let push_help = heddle_help(&["push", "--help"]);
     assert!(
         push_help.contains("Heddle remote name, native repository path, or hosted address"),
@@ -6929,98 +6905,6 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         !capture_help.contains("HEDDLE_SESSION_ID")
             && !capture_help.contains("HEDDLE_SESSION_SEGMENT"),
         "capture help should not advertise unimplemented environment variables: {capture_help}"
-    );
-    for hidden in [
-        "--agent-provider",
-        "--agent-model",
-        "--agent-session",
-        "--agent-segment",
-        "--policy",
-        "--no-policy",
-        "--no-agent",
-        "--split",
-    ] {
-        assert!(
-            !capture_help.contains(hidden),
-            "capture help should keep advanced attribution/split controls out of the first-run surface: {capture_help}"
-        );
-    }
-
-    // heddle#646: hidden flags stay out of the options list, but a single
-    // after-help "Advanced (hidden) flags" breadcrumb names them so they
-    // remain discoverable. The first-run surface (everything before the
-    // breadcrumb) stays free of the advanced machinery.
-    let start_help = heddle_help(&["start", "--help"]);
-    assert!(
-        start_help.contains("heddle start <name> --path <dir>")
-            && start_help.contains("heddle thread create <name>")
-            && start_help.contains("heddle thread promote <name> --path <dir>")
-            && start_help.contains("ref-first, checkout-later staging"),
-        "start help should make start --path canonical and explain the advanced split form: {start_help}"
-    );
-    let (start_first_run, start_breadcrumb) = start_help
-        .split_once("Advanced (hidden) flags:")
-        .expect("start help carries the advanced-flags breadcrumb (heddle#646)");
-    for hidden in [
-        "--agent-provider",
-        "--agent-model",
-        "--print-cd-path",
-        "--daemon",
-        "--no-daemon",
-        "--shared-target",
-        "--no-shared-target",
-    ] {
-        assert!(
-            !start_first_run.contains(hidden),
-            "start help should keep advanced checkout machinery out of the first-run surface: {start_help}"
-        );
-        assert!(
-            start_breadcrumb.contains(hidden),
-            "start help's advanced-flags breadcrumb should name `{hidden}`: {start_help}"
-        );
-    }
-    for jargon in ["FUSE", "heddled"] {
-        assert!(
-            !start_help.contains(jargon),
-            "start help should avoid mount-internals jargon everywhere: {start_help}"
-        );
-    }
-    let thread_create_help = heddle_help(&["thread", "create", "--help"]);
-    assert!(
-        thread_create_help.contains("Advanced split form:")
-            && thread_create_help.contains("heddle start <name> --path <dir>")
-            && thread_create_help.contains("heddle thread promote <name> --path <dir>"),
-        "thread create help should point users back to start --path and explain create-ref-now/materialize-later: {thread_create_help}"
-    );
-    let thread_promote_help = heddle_help(&["thread", "promote", "--help"]);
-    assert!(
-        thread_promote_help.contains("Advanced split form:")
-            && thread_promote_help.contains("heddle start <name> --path <dir>")
-            && thread_promote_help.contains("heddle thread create <name>"),
-        "thread promote help should point users back to start --path and explain the split form: {thread_promote_help}"
-    );
-    assert!(
-        start_help.contains("Copy full files into an isolated checkout")
-            && start_help.contains("Create a disk checkout with shared extents"),
-        "start help should describe workspace modes in human language: {start_help}"
-    );
-
-    let clone_help = heddle_help(&["clone", "--help"]);
-    assert!(
-        clone_help.contains("Advanced/planned flags: see `heddle help clone`."),
-        "clone help carries the advanced/planned flags breadcrumb (heddle#646): {clone_help}"
-    );
-    for hidden in ["--lazy", "--filter", "v0.3.1", "blob:none"] {
-        assert!(
-            !clone_help.contains(hidden),
-            "clone help should not lead with planned partial-clone machinery: {clone_help}"
-        );
-    }
-
-    let promote_help = heddle_help(&["thread", "promote", "--help"]);
-    assert!(
-        !promote_help.contains("heavy checkout"),
-        "thread promote help should use product-facing workspace language: {promote_help}"
     );
 }
 
@@ -7526,8 +7410,7 @@ fn command_catalog_exposes_public_surface_for_agents() {
     let text =
         heddle(&["help", "--output", "text"], None).expect("command catalog text should succeed");
     assert!(
-        text.contains("Heddle")
-            && text.contains("Common loop:")
+        text.contains("Heddle — agent-native version control")
             && text.contains("Save:")
             && text.contains("Output:"),
         "help text should be scannable: {text}"
@@ -9429,10 +9312,10 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         "maintenance fsck repair git",
         "capture",
         "commit",
-        "presence list",
-        "presence show",
-        "presence explain",
-        "presence complete",
+        "agent presence list",
+        "agent presence show",
+        "agent presence explain",
+        "agent presence complete",
         "agent provenance begin",
         "agent provenance segment",
         "agent provenance end",

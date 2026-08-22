@@ -37,10 +37,10 @@ fn heddle_with_env(
     envs: &[(&str, &str)],
 ) -> Result<String, String> {
     if let Some(cwd) = cwd {
-        cli_test_support::heddle(args, Some(cwd), envs)
+        cli_test_support::heddle_env(args, Some(cwd), envs)
     } else {
         let temp = TempDir::new().map_err(|error| error.to_string())?;
-        cli_test_support::heddle(args, Some(temp.path()), envs)
+        cli_test_support::heddle_env(args, Some(temp.path()), envs)
     }
 }
 

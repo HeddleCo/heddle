@@ -479,7 +479,13 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(
         &["agent", "timeline", "record-finish"],
-        &["agent", "timeline", "record-finish", "--tool-call", "call-1"],
+        &[
+            "agent",
+            "timeline",
+            "record-finish",
+            "--tool-call",
+            "call-1",
+        ],
     ),
     sample(
         &["agent", "timeline", "fork"],
@@ -504,10 +510,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(&["visibility", "show"], &["visibility", "show", "HEAD"]),
     sample(&["visibility", "list"], &["visibility", "list"]),
-    sample(
-        &["thread", "expand"],
-        &["thread", "expand", "HEAD"],
-    ),
+    sample(&["thread", "expand"], &["thread", "expand", "HEAD"]),
     sample(&["undo"], &["undo"]),
     sample(&["watch"], &["watch"]),
 ];

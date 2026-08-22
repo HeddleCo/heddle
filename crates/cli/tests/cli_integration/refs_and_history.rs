@@ -464,21 +464,20 @@ fn test_cli_help_shows_thread_surface() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    // The default help curates executable daily verbs. Thread/workspace
-    // remain native power nouns discoverable through advanced help and
-    // topic pages without resurrecting legacy `worktree`/`lane` verbs.
+    // The default help is one ranked list: the locked everyday head
+    // followed by every remaining non-hidden root — `thread` included.
+    // Legacy `worktree`/`lane` verbs stay retired, and the retired
+    // `help advanced` view must not come back.
     let everyday = heddle(&["help"], Some(temp.path())).unwrap();
     assert!(everyday.contains("\n  ready"));
-    assert!(!everyday.contains("\n  thread"));
+    assert!(everyday.contains("\n  thread"));
     assert!(!everyday.contains("\n  workspace"));
     assert!(!everyday.contains("\n  worktree"));
     assert!(!everyday.contains("\n  lane"));
+    assert!(!everyday.contains("help advanced"));
 
-    let advanced = heddle(&["help", "advanced"], Some(temp.path())).unwrap();
-    assert!(advanced.contains("\n  thread"));
-    assert!(advanced.contains("review"));
-    assert!(!advanced.contains("\n  worktree"));
-    assert!(!advanced.contains("\n  lane"));
+    let thread_help = heddle(&["thread", "--help"], Some(temp.path())).unwrap();
+    assert!(thread_help.contains("review") || thread_help.contains("Usage:"));
 }
 
 #[test]

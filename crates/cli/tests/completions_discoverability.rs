@@ -11,11 +11,11 @@ use tempfile::TempDir;
 mod cli_test_support;
 
 fn heddle(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
-    cli_test_support::heddle(args, cwd, &[])
+    cli_test_support::heddle_env(args, cwd, &[])
 }
 
 fn heddle_output(args: &[&str], cwd: Option<&std::path::Path>) -> Result<Output, String> {
-    cli_test_support::heddle_output(args, cwd, &[])
+    cli_test_support::heddle_output_env(args, cwd, &[])
 }
 
 /// Exact field-study command from HeddleCo/heddle#1439.

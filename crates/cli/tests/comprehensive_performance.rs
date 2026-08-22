@@ -14,7 +14,7 @@ use tempfile::TempDir;
 mod cli_test_support;
 
 fn heddle(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
-    cli_test_support::heddle(args, cwd, &[])
+    cli_test_support::heddle_env(args, cwd, &[])
 }
 
 fn status_json(path: &Path) -> Value {
