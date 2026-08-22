@@ -1,6 +1,6 @@
 use std::{io, sync::Arc, time::Duration};
 
-use cli_shared::ClientConfig;
+use config::ClientConfig;
 use rustls::{
     ClientConfig as RustlsClientConfig, RootCertStore,
     pki_types::{CertificateDer, pem::PemObject},
@@ -136,7 +136,7 @@ fn invalid_input(message: impl Into<String>) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use cli_shared::ClientConfig;
+    use config::ClientConfig;
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::header::HOST};
 
     use super::{prepare_request, tls_connector};

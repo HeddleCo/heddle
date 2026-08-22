@@ -4,7 +4,7 @@
 use std::process::{Command, Stdio};
 
 use anyhow::{Result, anyhow};
-use heddle_core::run_plan::{
+use verbs::run_plan::{
     plan_run_command_empty, run_command_required_example, run_command_required_hint,
     run_command_required_kind, run_command_required_summary, run_failure_message, transcript_token,
     transport_token,

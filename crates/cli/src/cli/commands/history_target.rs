@@ -20,7 +20,7 @@
 //! representation (e.g. when handing it to a hosted service call).
 
 use anyhow::{Result, anyhow};
-use heddle_core::status::next_action::canonical_git_import_ref_command;
+use verbs::status::next_action::canonical_git_import_ref_command;
 use objects::{
     error::HeddleError,
     object::{State, StateId},

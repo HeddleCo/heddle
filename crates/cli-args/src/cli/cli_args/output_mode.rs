@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! CLI-local parsing shape for shared output modes.
 
-use cli_shared::OutputMode;
+use config::OutputMode;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum CliOutputMode {

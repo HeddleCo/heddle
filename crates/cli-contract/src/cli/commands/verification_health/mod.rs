@@ -3,21 +3,21 @@
 //! and thin wrappers around the single core proof owner.
 //!
 //! **Do not construct Repository Verification Health/State here.** Proof
-//! construction lives in `heddle_core::status` / `heddle_core::verify`. This
+//! construction lives in `verbs::status` / `verbs::verify`. This
 //! module injects command-catalog coverage, builds refusal advice, and
 //! formats setup guidance for text/render paths.
 
 use std::{collections::BTreeSet, path::Path, sync::OnceLock};
 
-use heddle_core::status::next_action::{
+use verbs::status::next_action::{
     canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
     heddle_action as core_heddle_action, import_guidance_includes_active_branch,
     remote_tracking_next_action_for, remote_tracking_status,
 };
-pub(crate) use heddle_core::{
+pub(crate) use verbs::{
     ActionTemplate, MachineContractCoverage, MachineContractInput, PlainGitVerifyProbe,
 };
-pub use heddle_core::{
+pub use verbs::{
     RepositoryVerificationCheck, RepositoryVerificationHealth, RepositoryVerificationState,
     VerificationCheck, repository_setup_guidance, verify::serialize_empty_action_as_null,
 };
@@ -94,7 +94,7 @@ pub fn machine_contract_status(coverage: &MachineContractCoverage) -> &'static s
 /// CLI adapter: injects command-catalog Machine-Contract Proof into core's
 /// single Repository Verification State owner.
 pub fn build_repository_verification_state(repo: &Repository) -> RepositoryVerificationState {
-    match heddle_core::verify::build_repository_verification_state_with_machine_contract(
+    match verbs::verify::build_repository_verification_state_with_machine_contract(
         repo,
         &MachineContractInput::from_coverage(machine_contract_coverage()),
     ) {
@@ -123,14 +123,14 @@ pub fn build_repository_verification_state_profiled(
     let worktree_status_ms = worktree_status_start.elapsed().as_millis();
 
     let health_start = std::time::Instant::now();
-    let health = heddle_core::status::build_repository_verification_health_with_worktree_status(
+    let health = verbs::status::build_repository_verification_health_with_worktree_status(
         repo,
         &worktree_status,
     );
     let health_ms = health_start.elapsed().as_millis();
 
     let from_health_start = std::time::Instant::now();
-    let state = heddle_core::verify::build_repository_verification_state_with_worktree_status_and_machine_contract(
+    let state = verbs::verify::build_repository_verification_state_with_worktree_status_and_machine_contract(
         repo,
         health,
         &worktree_status,
@@ -154,11 +154,11 @@ pub fn build_repository_verification_state_with_worktree_status(
     repo: &Repository,
     worktree_status: &repo::Result<Option<WorktreeStatus>>,
 ) -> RepositoryVerificationState {
-    let health = heddle_core::status::build_repository_verification_health_with_worktree_status(
+    let health = verbs::status::build_repository_verification_health_with_worktree_status(
         repo,
         worktree_status,
     );
-    heddle_core::verify::build_repository_verification_state_with_worktree_status_and_machine_contract(
+    verbs::verify::build_repository_verification_state_with_worktree_status_and_machine_contract(
         repo,
         health,
         worktree_status,
@@ -169,7 +169,7 @@ pub fn build_repository_verification_state_with_worktree_status(
 /// Core-owned health proof (CLI may inspect recovery commands for doctor text).
 pub fn build_verification_health(repo: &Repository) -> RepositoryVerificationHealth {
     let worktree_status = worktree_status_for_verification(repo);
-    heddle_core::status::build_repository_verification_health_with_worktree_status(
+    verbs::status::build_repository_verification_health_with_worktree_status(
         repo,
         &worktree_status,
     )
@@ -184,7 +184,7 @@ pub(crate) fn build_verification_health_with_worktree_status(
     repo: &Repository,
     worktree_status: &repo::Result<Option<WorktreeStatus>>,
 ) -> RepositoryVerificationHealth {
-    heddle_core::status::build_repository_verification_health_with_worktree_status(
+    verbs::status::build_repository_verification_health_with_worktree_status(
         repo,
         worktree_status,
     )
@@ -749,7 +749,7 @@ pub fn build_plain_git_verification_probe(
     start: &Path,
 ) -> anyhow::Result<Option<PlainGitVerificationProbe>> {
     Ok(
-        heddle_core::verify::build_plain_git_verification_probe_with_machine_contract(
+        verbs::verify::build_plain_git_verification_probe_with_machine_contract(
             start,
             &MachineContractInput::from_coverage(machine_contract_coverage()),
         )?,

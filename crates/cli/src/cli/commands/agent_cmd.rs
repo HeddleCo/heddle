@@ -3,7 +3,7 @@
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use heddle_core::{
+use verbs::{
     AgentCaptureOptions, AgentCaptureThreadCheck, AgentReadyOptions, AgentReservationReport,
     FanoutLaneAvailability, FanoutLanePreflightBlock, FanoutNodeSpec, FanoutPlan, FanoutPlanError,
     FanoutPlanRequest, assemble_agent_reservation, assemble_agent_reservation_list,

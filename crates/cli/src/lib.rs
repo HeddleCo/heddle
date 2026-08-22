@@ -11,7 +11,6 @@ compile_error!(
 );
 
 pub(crate) mod attribution;
-pub mod bench;
 pub mod cli;
 pub mod client;
 pub mod exit;
@@ -27,11 +26,15 @@ pub mod semantic;
 pub mod ts_codegen;
 pub mod util;
 
-// Shared CLI configuration and credential contracts live in cli-shared.
-pub use cli_shared::{
+// User-config schema, credentials, transport knobs, and tracing init live in
+// the config crate. `::config` disambiguates the extern crate from the
+// module named `config` re-exported below.
+pub use ::config::{
     LogFormat, LoggingConfig, LoggingGuard, OutputMode, config, init_logging, init_logging_default,
-    is_enabled, log_operation, log_repo_event, logging, remote,
+    is_enabled, log_operation, log_repo_event, logging,
 };
+// Remote aliases and `.heddle/remotes.toml` parsing live with the repo layer.
+pub use repo::remote;
 pub use objects::{
     error::{HeddleError, HeddleError as StoreError},
     store::ObjectStore,

@@ -14,7 +14,7 @@ anyhow.workspace = true
 clap.workspace = true
 heddle-cli-args = { path = "../cli-args", version = "0.13", default-features = false }
 heddle-cli-render = { path = "../cli-render", version = "0.13", default-features = false }
-heddle-core = { path = "../core", version = "0.13", default-features = false }
+verbs = { path = "../verbs", package = "heddle-verbs", version = "0.13", default-features = false }
 heddle-git-projection = { path = "../git-projection", version = "0.13", default-features = false }
 objects = { path = "../objects", package = "heddle-objects", version = "0.13" }
 refs = { path = "../refs", package = "heddle-refs", version = "0.13" }
@@ -32,7 +32,7 @@ git-overlay = ["heddle-cli-args/git-overlay", "repo/git-overlay"]
 ingest = ["heddle-cli-args/ingest"]
 semantic = [
     "heddle-cli-args/semantic",
-    "heddle-core/semantic",
+    "verbs/semantic",
     "repo/tree-sitter-symbols",
 ]
 

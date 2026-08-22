@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
-use heddle_core::{
+use verbs::{
     CaptureSplitOptions, ThreadMoveOptions, ThreadShapingError, capture_split,
     is_manual_review_blocker, thread_move,
 };
@@ -780,7 +780,7 @@ mod tests {
     #[test]
     fn empty_path_movement_refusals_map_to_typed_advice() {
         let split = map_thread_shaping_error(ThreadShapingError::NoPathsMatched(
-            heddle_core::NoPathsMatchedDetails {
+            verbs::NoPathsMatchedDetails {
                 action: "capture split",
                 error: "No dirty paths matched the requested split prefixes",
                 unsafe_condition: "the worktree has no dirty paths under the requested prefixes",
@@ -801,7 +801,7 @@ mod tests {
         );
 
         let move_paths = map_thread_shaping_error(ThreadShapingError::NoPathsMatched(
-            heddle_core::NoPathsMatchedDetails {
+            verbs::NoPathsMatchedDetails {
                 action: "thread move",
                 error: "No captured paths matched the requested prefixes",
                 unsafe_condition: "the source thread has no captured paths under the requested prefixes",

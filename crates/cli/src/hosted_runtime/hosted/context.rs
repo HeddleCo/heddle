@@ -10,7 +10,7 @@ use api::{
     },
     signing,
 };
-use cli_shared::ClientConfig;
+use config::ClientConfig;
 use crypto::{Ed25519Signer, Signer as _};
 #[cfg(feature = "telemetry")]
 use opentelemetry::propagation::{Injector, TextMapPropagator};

@@ -87,7 +87,7 @@ fn probed_source_authority() -> repo::RepositorySourceAuthority {
 fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthority) {
     use std::fmt::Write;
 
-    use heddle_core::source_authority::{SourceAction, SourceAuthorityActions};
+    use verbs::source_authority::{SourceAction, SourceAuthorityActions};
 
     let catalog = crate::cli::commands::build_command_catalog();
     let actions = SourceAuthorityActions::new(authority);

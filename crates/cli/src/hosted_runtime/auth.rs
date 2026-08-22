@@ -8,7 +8,7 @@ use api::heddle::api::v1alpha1::{
     DeviceAuthorizationResponse, DeviceAuthorizationStatus, ExchangeDeviceAuthorizationRequest,
     IssueServiceAccountCredentialRequest, WaitForDeviceAuthorizationRequest,
 };
-use cli_shared::{UserConfig, credentials, credentials::ServerCredential};
+use config::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
 use heddle_cli_contract::cli::commands::RecoveryAdvice;
 use objects::{HeddleError, RecoveryDetails};
@@ -1180,7 +1180,7 @@ async fn connect_auth_client(server: &str) -> Result<HostedClient> {
 
 fn hosted_bootstrap_connect_error(error: impl std::fmt::Display) -> anyhow::Error {
     let message = error.to_string();
-    if cli_shared::is_tls_trust_failure(&message) {
+    if config::is_tls_trust_failure(&message) {
         anyhow::Error::new(hosted_tls_trust_advice(&message))
     } else {
         anyhow::Error::msg(message)
@@ -1188,13 +1188,13 @@ fn hosted_bootstrap_connect_error(error: impl std::fmt::Display) -> anyhow::Erro
 }
 
 fn hosted_tls_trust_advice(message: &str) -> RecoveryAdvice {
-    let annotated = cli_shared::annotate_tls_trust_failure(message);
+    let annotated = config::annotate_tls_trust_failure(message);
     RecoveryAdvice::safety_refusal(
         "hosted_tls_trust",
         annotated,
         format!(
             "Trust this server's CA with {}=/path/to/ca.pem or [remote] tls_ca_certificate_path.",
-            cli_shared::REMOTE_TLS_CA_CERT_SETTING
+            config::REMOTE_TLS_CA_CERT_SETTING
         ),
         "the hosted bootstrap HTTPS request failed because the peer certificate is not trusted",
         "retrying without a trusted CA will fail the same TLS handshake",

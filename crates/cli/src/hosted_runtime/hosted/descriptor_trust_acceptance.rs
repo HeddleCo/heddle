@@ -214,7 +214,7 @@ async fn trust_store_write_failure_prevents_iroh_and_iroh_failure_keeps_pin() {
                 || error.to_string().contains("Permission denied")
         );
         assert!(!super::descriptor_trust_path().exists());
-        assert!(!cli_shared::credentials::credentials_path().exists());
+        assert!(!config::credentials::credentials_path().exists());
         assert_eq!(server.requests(), [KEY_PATH, DESCRIPTOR_PATH]);
     })
     .await;
@@ -233,7 +233,7 @@ async fn trust_store_write_failure_prevents_iroh_and_iroh_failure_keeps_pin() {
         );
         let pin = load_automatic_pin(server.authority()).unwrap().unwrap();
         assert_eq!(pin.key_id, "dial-key");
-        assert!(!cli_shared::credentials::credentials_path().exists());
+        assert!(!config::credentials::credentials_path().exists());
         assert_eq!(server.requests(), [KEY_PATH, DESCRIPTOR_PATH]);
     })
     .await;
@@ -367,8 +367,8 @@ fn signed_descriptor(key_id: &str, signer: &Ed25519Signer) -> Vec<u8> {
     .encode_to_vec()
 }
 
-fn trusted_config(server: &TestHttpsServer) -> cli_shared::ClientConfig {
-    cli_shared::ClientConfig::default()
+fn trusted_config(server: &TestHttpsServer) -> config::ClientConfig {
+    config::ClientConfig::default()
         .with_tls_ca_certificate_pem(server.certificate_pem().to_string())
 }
 
@@ -380,7 +380,7 @@ where
     F: FnOnce(&std::path::Path) -> Fut,
     Fut: Future<Output = T>,
 {
-    let _guard = cli_shared::credentials::lock_test_env();
+    let _guard = config::credentials::lock_test_env();
     let home = tempfile::TempDir::new().unwrap();
     let previous = std::env::var_os("HEDDLE_HOME");
     unsafe {

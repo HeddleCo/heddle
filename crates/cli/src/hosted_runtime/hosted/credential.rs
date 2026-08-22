@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use cli_shared::credentials;
+use config::credentials;
 use wire::AuthToken;
 
 use super::RenewableAuthorityCredential;
@@ -188,7 +188,7 @@ mod tests {
     }
 
     fn with_isolated_env<T>(run: impl FnOnce(&std::path::Path) -> T) -> T {
-        let _guard = cli_shared::credentials::lock_test_env();
+        let _guard = config::credentials::lock_test_env();
         let home = tempfile::TempDir::new().expect("temp Heddle home");
         let previous_home = std::env::var_os("HEDDLE_HOME");
         let previous_credential = std::env::var_os("HEDDLE_CREDENTIAL");
@@ -248,9 +248,9 @@ mod tests {
     #[test]
     fn env_server_mismatch_never_falls_back_to_keystore() {
         with_isolated_env(|home| {
-            cli_shared::credentials::store_server_credential(
+            config::credentials::store_server_credential(
                 "api.target.test",
-                cli_shared::credentials::ServerCredential {
+                config::credentials::ServerCredential {
                     token: "keystore-token".to_string(),
                     subject: "human".to_string(),
                     device_id: None,
@@ -275,9 +275,9 @@ mod tests {
     #[test]
     fn unreadable_env_credential_never_falls_back_to_keystore() {
         with_isolated_env(|home| {
-            cli_shared::credentials::store_server_credential(
+            config::credentials::store_server_credential(
                 "api.target.test",
-                cli_shared::credentials::ServerCredential {
+                config::credentials::ServerCredential {
                     token: "keystore-token".to_string(),
                     subject: "human".to_string(),
                     device_id: None,

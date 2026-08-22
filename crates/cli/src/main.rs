@@ -1126,7 +1126,7 @@ fn incomplete_land_recovery_start(
         Commands::Init(args) if args.path.is_some() => Ok(None),
         Commands::Adopt(args) => {
             let cwd = std::env::current_dir()?;
-            let plan = heddle_core::plan_adopt(&heddle_core::AdoptPlanOptions {
+            let plan = verbs::plan_adopt(&verbs::AdoptPlanOptions {
                 path: args.path.clone(),
                 repo_flag: cli.repo.clone(),
                 cwd,

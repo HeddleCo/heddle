@@ -214,7 +214,7 @@ fn print_human(output: &ExpandOutput) {
 }
 
 fn short_oid(oid: &str) -> &str {
-    heddle_core::short_oid(oid)
+    verbs::short_oid(oid)
 }
 
 impl From<State> for ExpandedCaptureOutput {

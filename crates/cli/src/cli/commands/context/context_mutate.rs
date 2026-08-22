@@ -3,7 +3,7 @@
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use heddle_core::{
+use verbs::{
     ContextContentPlanError, ContextRmPlanError, count_active_annotations, next_annotation_tags,
     plan_annotation_content_source, plan_context_rm, supersede_reuses_original_scope,
     supersede_reuses_original_target,

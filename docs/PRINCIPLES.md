@@ -90,7 +90,7 @@ Claims match behavior. The `MergeOutput` schema separates `blockers`
 (non-blocking nudges when state did advance) — and the `status` field
 follows the truth: `"blocked"` flips when there are real blockers, even
 if the underlying integration engine itself completed
-([`crates/core/src/merge/mod.rs`](../crates/core/src/merge/mod.rs),
+([`crates/verbs/src/merge/mod.rs`](../crates/verbs/src/merge/mod.rs),
 [`crates/cli/src/cli/commands/operator_core.rs`](../crates/cli/src/cli/commands/operator_core.rs)).
 A merge that landed but couldn't write its git commit doesn't get to
 report `"completed"`.

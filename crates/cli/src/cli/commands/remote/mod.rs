@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use heddle_core::{
+use verbs::{
     GitOverlayPushTracking, GitRemoteConfigured, LocalTransferSummary, PushFailure, PushOutcome,
     PushPath, PushPlan, PushPlanRequest, RemotePreflightBlocker, build_push_outcome,
     first_multi_thread_push_failure, format_multi_ref_push_progress, format_push_outcome_text,
@@ -19,7 +19,7 @@ use heddle_core::{
     transport_error_message,
 };
 #[cfg(feature = "client")]
-use heddle_core::{
+use verbs::{
     HostedPushPlan, HostedPushResult, HostedPushResultFields, format_connected_to,
     format_remote_state_detail, heddle_single_push_execution_facts, hosted_spool_display_path,
     message_indicates_already_exists, multi_ref_progress_from_hosted_thread,
@@ -370,7 +370,7 @@ pub async fn cmd_push(
     #[cfg(feature = "client")]
     let network_session = if matches!(target, RemoteTarget::Network { .. }) {
         let allow_insecure =
-            insecure || cli_shared::remote_allows_insecure(&repo, remote.as_deref());
+            insecure || repo::remote::remote_allows_insecure(&repo, remote.as_deref());
         Some(
             HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?
                 .with_allow_insecure(allow_insecure),
@@ -871,7 +871,7 @@ fn resolve_push_target_with_key(
         .or_else(|| config.get("remote", Some(&remote), "url"))
         .unwrap_or(remote.as_str());
     let target = RemoteTarget::parse(spec).map_err(anyhow::Error::msg)?;
-    let key = cli_shared::remote::credential_key_from_remote_url(spec);
+    let key = repo::remote::credential_key_from_remote_url(spec);
     Ok((target, key))
 }
 
@@ -911,7 +911,7 @@ pub(super) async fn preflight_native_remote_transport(
 /// Admit a URL at `remote add` time using the same parser `push` uses.
 pub(super) async fn admit_native_remote_url(repo: &Repository, url: &str) -> Result<()> {
     preflight_native_remote_transport(repo, Some(url), "remote add").await?;
-    cli_shared::remote::parse_target_for_repository(repo, url)
+    repo::remote::parse_target_for_repository(repo, url)
         .map_err(|error| anyhow!(RecoveryAdvice::invalid_remote_url(url, &error)))?;
     Ok(())
 }
@@ -932,7 +932,7 @@ async fn discover_native_https_remote(spec: &str, action: &str) -> Result<()> {
     else {
         anyhow::bail!("native HTTPS discovery requires a network remote");
     };
-    let server_key = cli_shared::remote::credential_key_from_remote_url(spec);
+    let server_key = repo::remote::credential_key_from_remote_url(spec);
     let session = HostedSession::build(
         &UserConfig::load_default()?,
         server_key,
@@ -1037,7 +1037,7 @@ fn classify_remote_spec(
     if looks_like_git_forge_remote(&spec) {
         return Some(RemoteTransportKind::GitUrl);
     }
-    if let Ok(target) = cli_shared::remote::parse_target_for_repository(repo, &spec) {
+    if let Ok(target) = repo::remote::parse_target_for_repository(repo, &spec) {
         return Some(match target {
             RemoteTarget::Local(path) => {
                 if let Ok(target_repo) = Repository::open(&path) {
@@ -2019,7 +2019,7 @@ mod tests {
         );
     }
 
-    // Capability / push-routing pure decisions live in heddle_core::remote.
+    // Capability / push-routing pure decisions live in verbs::remote.
 
     #[cfg(feature = "client")]
     #[test]

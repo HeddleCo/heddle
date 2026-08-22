@@ -2158,23 +2158,6 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "heddle-api"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81db11fe2caea0dcc030f21cb6016fcb6a499609f543d25e5f18bff64e938f63"
-dependencies = [
- "bytes",
- "hex",
- "prost 0.14.1",
- "prost-build",
- "prost-reflect",
- "prost-types 0.14.1",
- "protoc-bin-vendored",
- "sha2 0.10.9",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "heddle-api"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e00b1fc8196016e77374bb244329fd52e40a801617190a807c7132d7bd98ace"
@@ -2234,16 +2217,14 @@ dependencies = [
  "criterion",
  "futures",
  "getrandom 0.4.3",
- "heddle-api 0.10.0",
+ "heddle-api",
  "heddle-ci-config",
  "heddle-ci-engine",
  "heddle-cli-args",
  "heddle-cli-contract",
  "heddle-cli-render",
- "heddle-cli-shared",
- "heddle-core",
+ "heddle-config",
  "heddle-crypto",
- "heddle-daemon",
  "heddle-format",
  "heddle-git-projection",
  "heddle-ingest",
@@ -2255,6 +2236,7 @@ dependencies = [
  "heddle-refs",
  "heddle-repo",
  "heddle-semantic",
+ "heddle-verbs",
  "heddle-wire",
  "heddleco-iroh",
  "hex",
@@ -2306,8 +2288,8 @@ version = "0.13.0"
 dependencies = [
  "anyhow",
  "clap",
- "heddle-api 0.10.0",
- "heddle-cli-shared",
+ "heddle-api",
+ "heddle-config",
  "heddle-objects",
  "heddle-repo",
  "weft-client-shim",
@@ -2321,11 +2303,11 @@ dependencies = [
  "clap",
  "heddle-cli-args",
  "heddle-cli-render",
- "heddle-core",
  "heddle-git-projection",
  "heddle-objects",
  "heddle-refs",
  "heddle-repo",
+ "heddle-verbs",
  "schemars",
  "serde",
  "serde_json",
@@ -2345,9 +2327,9 @@ dependencies = [
  "chrono",
  "clap",
  "heddle-cli-args",
- "heddle-core",
  "heddle-objects",
  "heddle-repo",
+ "heddle-verbs",
  "hex",
  "serde",
  "serde_json",
@@ -2356,7 +2338,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "heddle-cli-shared"
+name = "heddle-config"
 version = "0.13.0"
 dependencies = [
  "anyhow",
@@ -2377,33 +2359,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "heddle-core"
-version = "0.13.0"
-dependencies = [
- "anyhow",
- "chrono",
- "heddle-cli-shared",
- "heddle-crypto",
- "heddle-git-projection",
- "heddle-merge",
- "heddle-objects",
- "heddle-oplog",
- "heddle-refs",
- "heddle-repo",
- "heddle-semantic",
- "hex",
- "ignore",
- "rmp-serde",
- "schemars",
- "serde",
- "serde_json",
- "sley",
- "tempfile",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
 name = "heddle-crypto"
 version = "0.13.0"
 dependencies = [
@@ -2420,25 +2375,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "heddle-daemon"
-version = "0.13.0"
-dependencies = [
- "chrono",
- "heddle-crypto",
- "heddle-objects",
- "heddle-repo",
- "heddle-semantic",
- "heddle-state-review",
- "hex",
- "proptest",
- "serde",
- "serde_json",
- "serial_test",
- "tempfile",
- "tokio",
 ]
 
 [[package]]
@@ -2515,21 +2451,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "heddle-iroh-transport-experiment"
-version = "0.13.0"
-dependencies = [
- "bytes",
- "heddle-api 0.2.1",
- "heddle-objects",
- "heddle-wire",
- "heddleco-iroh",
- "prost 0.14.1",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]
@@ -2703,7 +2624,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "chrono",
- "heddle-api 0.10.0",
+ "heddle-api",
  "heddle-crypto",
  "heddle-objects",
  "heddle-oplog",
@@ -2797,6 +2718,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "heddle-verbs"
+version = "0.13.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "heddle-crypto",
+ "heddle-git-projection",
+ "heddle-merge",
+ "heddle-objects",
+ "heddle-oplog",
+ "heddle-refs",
+ "heddle-repo",
+ "heddle-semantic",
+ "heddle-state-review",
+ "hex",
+ "ignore",
+ "rmp-serde",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sley",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "heddle-wire"
 version = "0.13.0"
 dependencies = [
@@ -2820,7 +2770,7 @@ dependencies = [
  "biscuit-auth",
  "ed25519-dalek 3.0.0",
  "getrandom 0.2.17",
- "heddle-api 0.10.0",
+ "heddle-api",
  "hex",
  "prost 0.14.1",
  "serde",

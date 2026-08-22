@@ -37,7 +37,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use heddle_core::try_plan::{
+use verbs::try_plan::{
     TrySuccessMessageFacts, display_cmd, format_try_thread_name, plan_try_drop_outcome,
     try_exit_label, try_failed_message, try_success_message, try_thread_name_collision_kind,
 };
@@ -491,7 +491,7 @@ fn try_thread_name_collision_advice(thread_name: &str) -> RecoveryAdvice {
 /// hash over the cmd vector + a high-resolution timestamp. The
 /// timestamp ensures back-to-back `heddle try -- true` invocations
 /// don't collide. Hashing/time stay CLI-owned; pure format lives in
-/// `heddle_core::try_plan`.
+/// `verbs::try_plan`.
 fn default_try_name(command: &[String]) -> String {
     use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -535,7 +535,7 @@ fn emit(cli: &Cli, repo: &Repository, output: &TryOutput) -> Result<()> {
 /// `TryOutput` directly. On error we also emit a stderr warning so
 /// interactive users see what happened — automation reads
 /// `cleanup_error` from the JSON shape. Pure mapping is
-/// [`heddle_core::try_plan::plan_try_drop_outcome`]; CLI owns warn I/O.
+/// [`verbs::try_plan::plan_try_drop_outcome`]; CLI owns warn I/O.
 fn interpret_drop_result(
     thread_name: &str,
     result: Result<DropOutcome>,

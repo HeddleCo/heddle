@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use heddle_core::git_projection_io_plan::{
+use verbs::git_projection_io_plan::{
     ExportedRefSummaryFact, export_commits_summary, exported_refs_summary,
 };
 use heddle_git_projection::{

@@ -2,7 +2,7 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
 use anyhow::Result;
-use heddle_core::maintenance_plan::{MaintenanceInspectView, MaintenanceRefreshView};
+use verbs::maintenance_plan::{MaintenanceInspectView, MaintenanceRefreshView};
 use objects::store::{
     AnyStore, FsRepackOperation, RepackPolicy, RepackResourceLimits, RepackSchedule,
     RepackScheduler,

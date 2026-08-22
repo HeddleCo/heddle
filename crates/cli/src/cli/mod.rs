@@ -26,25 +26,31 @@ pub fn is_interactive_tty() -> bool {
         && std::io::stderr().is_terminal()
 }
 
-pub fn execution_context_from_cli(cli: &Cli) -> anyhow::Result<heddle_core::ExecutionContext> {
+pub fn execution_context_from_cli(cli: &Cli) -> anyhow::Result<verbs::ExecutionContext> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();
     let repo = cli.open_repo()?;
     let config = UserConfig::load_default()?;
     let verbosity = if cli.quiet {
-        heddle_core::Verbosity::Quiet
+        verbs::Verbosity::Quiet
     } else if cli.verbose > 0 {
-        heddle_core::Verbosity::Verbose
+        verbs::Verbosity::Verbose
     } else {
-        heddle_core::Verbosity::Normal
+        verbs::Verbosity::Normal
     };
-    let mut builder = heddle_core::ExecutionContext::builder()
+    let fsmonitor_mode = config.worktree_status_options(Some(repo.config())).fsmonitor.mode;
+    let mut builder = verbs::ExecutionContext::builder()
         .repo(repo)
         .start_path(start)
-        .config(config)
+        .principal_fallback(
+            config
+                .principal_pair()
+                .map(|(name, email)| (name.to_string(), email.to_string())),
+        )
+        .fsmonitor_mode(fsmonitor_mode)
         .verbosity(verbosity)
-        .progress(std::sync::Arc::new(heddle_core::NoopProgress))
-        .warnings(std::sync::Arc::new(heddle_core::NoopWarnings));
+        .progress(std::sync::Arc::new(verbs::NoopProgress))
+        .warnings(std::sync::Arc::new(verbs::NoopWarnings));
 
     if let Some(op_id) = crate::operation_id::resolve_operation_id(cli)? {
         builder = builder.op_id(op_id.to_string());

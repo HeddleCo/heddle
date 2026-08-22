@@ -420,7 +420,7 @@ pub(crate) fn print_context_get(
 /// If range is None, returns the full source.
 /// Lines are 1-indexed, inclusive.
 fn extract_scope_bytes(source: &[u8], range: Option<(u32, u32)>) -> Vec<u8> {
-    heddle_core::extract_scope_bytes(source, range)
+    verbs::extract_scope_bytes(source, range)
 }
 
 #[cfg(test)]

@@ -4,8 +4,8 @@
 use std::sync::OnceLock;
 
 use clap::{ArgAction, CommandFactory};
-pub use heddle_core::ActionTemplate;
-use heddle_core::{
+pub use verbs::ActionTemplate;
+use verbs::{
     DiffReport, FsckReport, MachineOutputKind, QueryReport, ReportContract as CoreReportContract,
     ResolveReport, StatusReport, VerifyReport,
 };

@@ -2,7 +2,7 @@
 //! Oplog command — operator-facing inspection and recovery.
 
 use anyhow::{Context, Result};
-use heddle_core::oplog_plan::{
+use verbs::oplog_plan::{
     OplogRecoverFacts, oplog_recover_detail_fields, oplog_recover_headline_from_facts,
     oplog_recover_shows_detail, plan_oplog_recover,
 };

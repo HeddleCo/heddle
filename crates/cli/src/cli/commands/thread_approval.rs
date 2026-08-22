@@ -16,7 +16,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use api::heddle::api::v1alpha1::{RepositoryRef, StateId as ApiStateId, repository_ref::Reference};
-use heddle_core::approval_plan::{
+use verbs::approval_plan::{
     EligibilitySummary, approval_recorded_message, approval_revoked_message,
     approvals_empty_message, approvals_header, eligibility_allowed_message,
     eligibility_approvals_counted_message, eligibility_blocked_message, format_unix_secs_display,

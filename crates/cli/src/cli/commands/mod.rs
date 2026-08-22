@@ -148,7 +148,6 @@ pub use integration::{
 };
 pub use log::{LogCommandOptions, cmd_log};
 pub use maintenance::cmd_maintenance;
-pub(crate) use merge::{bench_detect_renames, bench_find_merge_base, bench_three_way_merge};
 pub use operator_core::operator_emission_output_kinds;
 pub use operator_loop::{cmd_abort, cmd_continue, cmd_sync_smart};
 pub use oplog::cmd_oplog;

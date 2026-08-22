@@ -70,9 +70,8 @@ jobs:
               --gate semantic=80 \
               --gate oplog=78 \
               --gate wire=80 \
-              --gate state_review=80 \
+              --gate state-review=80 \
               --gate crypto=80 \
-              --gate daemon=80 \
               --gate ingest=80
 
       - name: Upload coverage to Codecov

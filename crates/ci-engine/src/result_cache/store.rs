@@ -11,7 +11,7 @@ use std::{
 
 use super::{
     entry::{ResultCacheEntry, ResultCacheError},
-    key::{entry_id, CacheKey},
+    key::{CacheKey, entry_id},
 };
 
 /// Lookup and seed a content-addressed result cache.

@@ -4,7 +4,7 @@
 use std::fs;
 
 use anyhow::{Context, Result, anyhow};
-use heddle_core::{
+use verbs::{
     ConflictRegionReport, ConflictResolutionReport, ResolveReport,
     contains_line_start_conflict_markers, path_is_active_conflict, unresolved_conflict_paths,
 };
@@ -324,7 +324,7 @@ fn render_conflict_region(conflict: &ConflictRegionReport) {
     render_conflict_side("theirs", &conflict.theirs);
 }
 
-fn render_conflict_side(label: &str, side: &heddle_core::ConflictSideReport) {
+fn render_conflict_side(label: &str, side: &verbs::ConflictSideReport) {
     println!(
         "    {label}: state {} blob {} lines {}..{} hunk {}",
         side.source_state,

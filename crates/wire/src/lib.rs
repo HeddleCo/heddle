@@ -32,7 +32,7 @@ pub use message_hosted::{
 pub use message_objects::{ObjectData, ObjectRequest};
 pub use message_pushpull::{PullComplete, PushComplete};
 pub use message_refs::{
-    AdvertisedRef, AdvertisedRefError, HeadInfo, RefEntry, RefFilter, RefKind, RefUpdated, RefsList,
+    AdvertisedRef, AdvertisedRefError, HeadInfo, RefEntry, RefFilter, RefKind, RefUpdated,
 };
 pub use message_status::{
     Error, ErrorCode, RemoteCursorFailure, RemoteCursorReason, RemoteDuration, RemoteFailureCode,
@@ -42,14 +42,14 @@ pub use native_pack::{
     GitPackChunkState, GrowingPackChunkReader, MAX_RECEIVED_GIT_PACK_SIZE,
     MAX_RECEIVED_PACK_INDEX_SIZE, MAX_RECEIVED_PACK_SIZE, NativePackBundle, NativePackFileBundle,
     NativePackStreamingWriter, PackChunkSpool, PackChunkState, PackFileChunkReader,
-    ReusedNativePackStats, build_native_pack, install_received_pack,
+    build_native_pack, install_received_pack,
     is_native_packable_object_type, native_pack_excluded_object_types, next_pack_chunk,
     receive_pack_chunk, reuse_native_pack_encoded_subset_in,
 };
 pub use object_availability::{ObjectAvailabilityPlan, has_object, plan_object_availability};
 pub use object_graph::{
     ObjectId, ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, StateClosureOptions,
-    StateClosureTransferObjects, enumerate_state_closure, enumerate_state_closure_plan,
+    enumerate_state_closure, enumerate_state_closure_plan,
     enumerate_state_closure_plan_with_options, enumerate_state_closure_transfer_from_boundaries,
     enumerate_state_closure_transfer_with_options, enumerate_state_closure_with_options,
     is_ancestor, missing_blobs_in_tree,

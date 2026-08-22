@@ -97,7 +97,7 @@ fn verified_descriptor(
 #[ignore = "release-only hosted endpoint close performance contract"]
 #[allow(clippy::await_holding_lock)]
 async fn hosted_endpoint_close_release_contract() {
-    let _env_guard = cli_shared::credentials::lock_test_env();
+    let _env_guard = config::credentials::lock_test_env();
     let _home = HeddleHomeEnvGuard::isolated();
     require_release_build();
     let _ = tracing_subscriber::fmt()
@@ -154,7 +154,7 @@ async fn hosted_endpoint_close_release_contract() {
     let mut close_ms = Vec::with_capacity(sample_count);
     for _ in 0..sample_count {
         let connection =
-            HostedConnection::connect_verified(&descriptor, &cli_shared::ClientConfig::default())
+            HostedConnection::connect_verified(&descriptor, &config::ClientConfig::default())
                 .await
                 .unwrap();
         let endpoint_observer = connection.endpoint.clone();
@@ -204,7 +204,7 @@ fn percentile_ms(sorted_values: &[f64], percentile: usize) -> f64 {
 async fn reachable_direct_address_keeps_the_claim_relay_online() {
     use iroh_relay::server::{RelayConfig as RelayServerConfig, Server, ServerConfig};
 
-    let _env_guard = cli_shared::credentials::lock_test_env();
+    let _env_guard = config::credentials::lock_test_env();
     let _home = HeddleHomeEnvGuard::isolated();
     let mut relay_config = ServerConfig::default();
     relay_config.relay = Some(RelayServerConfig::new((Ipv4Addr::LOCALHOST, 0)));
@@ -237,7 +237,7 @@ async fn reachable_direct_address_keeps_the_claim_relay_online() {
     });
 
     let connection =
-        HostedConnection::connect_verified(&descriptor, &cli_shared::ClientConfig::default())
+        HostedConnection::connect_verified(&descriptor, &config::ClientConfig::default())
             .await
             .unwrap();
     tokio::time::timeout(Duration::from_secs(5), connection.endpoint.online())
@@ -255,7 +255,7 @@ async fn reachable_direct_address_keeps_the_claim_relay_online() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn direct_only_descriptor_uses_the_normal_connection_path() {
-    let _env_guard = cli_shared::credentials::lock_test_env();
+    let _env_guard = config::credentials::lock_test_env();
     let _home = HeddleHomeEnvGuard::isolated();
     let server = Endpoint::builder(presets::Minimal)
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
@@ -282,7 +282,7 @@ async fn direct_only_descriptor_uses_the_normal_connection_path() {
     });
 
     let connection =
-        HostedConnection::connect_verified(&descriptor, &cli_shared::ClientConfig::default())
+        HostedConnection::connect_verified(&descriptor, &config::ClientConfig::default())
             .await
             .unwrap();
     connection.close().await;
@@ -292,7 +292,7 @@ async fn direct_only_descriptor_uses_the_normal_connection_path() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn unreachable_direct_address_falls_back_to_signed_relay() {
-    let _env_guard = cli_shared::credentials::lock_test_env();
+    let _env_guard = config::credentials::lock_test_env();
     let _home = HeddleHomeEnvGuard::isolated();
     use iroh_relay::server::{RelayConfig as RelayServerConfig, Server, ServerConfig};
 
@@ -331,7 +331,7 @@ async fn unreachable_direct_address_falls_back_to_signed_relay() {
 
     let connection = tokio::time::timeout(
         Duration::from_secs(5),
-        HostedConnection::connect_verified(&descriptor, &cli_shared::ClientConfig::default()),
+        HostedConnection::connect_verified(&descriptor, &config::ClientConfig::default()),
     )
     .await
     .expect("relay fallback should connect")
@@ -351,7 +351,7 @@ async fn unreachable_direct_address_falls_back_to_signed_relay() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn hosted_connection_uses_persisted_id_and_accepts_claim_alpn() {
-    let _env_guard = cli_shared::credentials::lock_test_env();
+    let _env_guard = config::credentials::lock_test_env();
     let _home = HeddleHomeEnvGuard::isolated();
     let server = Endpoint::builder(presets::Minimal)
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
@@ -378,7 +378,7 @@ async fn hosted_connection_uses_persisted_id_and_accepts_claim_alpn() {
     });
 
     let connection =
-        HostedConnection::connect_verified(&descriptor, &cli_shared::ClientConfig::default())
+        HostedConnection::connect_verified(&descriptor, &config::ClientConfig::default())
             .await
             .unwrap();
     let persisted = crate::hosted_runtime::agent_node_identity::load_or_create()

@@ -1,6 +1,6 @@
 //! Shared descriptor-trust resolution for every native hosted entry point.
 
-use cli_shared::ClientConfig;
+use config::ClientConfig;
 
 use super::{
     DescriptorKeyring, HostedError, Result, VerifiedEndpointDescriptor,
@@ -137,7 +137,7 @@ mod tests {
     async fn half_config_refuses_before_network_io() {
         let error = super::resolve_and_verify_endpoint_descriptor(
             "weft.example:8421",
-            &cli_shared::ClientConfig {
+            &config::ClientConfig {
                 descriptor_key_id: Some("key-1".to_string()),
                 ..Default::default()
             },

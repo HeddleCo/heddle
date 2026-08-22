@@ -7,7 +7,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use heddle_core::{
+use verbs::{
     DiffReport, LineDiff, SemanticChangeEntry, should_render_modified_pair,
     trim_added_decorations_for_display,
 };
@@ -77,7 +77,7 @@ pub(crate) fn print_diff_patch(output: &DiffReport) {
     let stdout = io::stdout();
     let lock = stdout.lock();
     let mut writer = BufWriter::new(lock);
-    let _ = heddle_core::write_diff_patch(output, &mut writer).and_then(|_| writer.flush());
+    let _ = verbs::write_diff_patch(output, &mut writer).and_then(|_| writer.flush());
 }
 
 pub(crate) fn print_diff(output: &DiffReport) {
@@ -814,7 +814,7 @@ fn semantic_path(change: &SemanticChangeEntry) -> String {
 
 #[cfg(test)]
 mod tests {
-    use heddle_core::{
+    use verbs::{
         LineDiff, SemanticChangeEntry, change_line_counts, should_render_modified_pair,
     };
 

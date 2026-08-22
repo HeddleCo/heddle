@@ -53,11 +53,11 @@ fn piped_remote_ambiguity_never_prompts_or_consumes_a_selection() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     let repo = Repository::open(temp.path()).unwrap();
-    let mut remotes = cli_shared::remote::RemoteConfig::open(&repo).unwrap();
+    let mut remotes = repo::remote::RemoteConfig::open(&repo).unwrap();
     remotes
         .add(
             "alpha",
-            cli_shared::remote::Remote {
+            repo::remote::Remote {
                 url: "file:///tmp/heddle-alpha".to_string(),
                 insecure: false,
             },
@@ -66,7 +66,7 @@ fn piped_remote_ambiguity_never_prompts_or_consumes_a_selection() {
     remotes
         .add(
             "beta",
-            cli_shared::remote::Remote {
+            repo::remote::Remote {
                 url: "file:///tmp/heddle-beta".to_string(),
                 insecure: false,
             },

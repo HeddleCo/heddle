@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use cli_shared::UserConfig;
+use config::UserConfig;
 use objects::lock::RepoLock;
 
 use super::{HostedAuthMode, HostedSession, identity_state};

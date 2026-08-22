@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Grep-gate: Repository Verification State / health proof construction is
-//! owned by `heddle-core`. CLI and other crates may inject Machine-Contract
+//! owned by `heddle-verbs`. CLI and other crates may inject Machine-Contract
 //! Proof and render advice, but must not re-implement health/state builders.
 //!
-//! Forbidden production definitions outside `crates/core/`:
+//! Forbidden production definitions outside `crates/verbs/`:
 //! - `build_repository_verification_health*`
 //! - `build_verification_health_inner`
 //! - `build_native_heddle_health`
@@ -69,8 +69,8 @@ HEDDLE_ASSERTER_SEARCH_DIRS, HEDDLE_VERIFICATION_OWNER_ALLOWLIST)"
         eprintln!(
             "\n::error::Found {failed} CLI/out-of-core repository verification proof builder \
 definition(s). Core owns Repository Verification State construction \
-(`heddle_core::status::build_repository_verification_health_*` and \
-`heddle_core::verify::build_repository_verification_state_*`). CLI modules may \
+(`verbs::status::build_repository_verification_health_*` and \
+`verbs::verify::build_repository_verification_state_*`). CLI modules may \
 inject Machine-Contract Proof and render RecoveryAdvice, but must not rebuild \
 health/state. See docs/VERIFICATION_CLEANUP_PLAN.md Track A."
         );
@@ -78,7 +78,7 @@ health/state. See docs/VERIFICATION_CLEANUP_PLAN.md Track A."
     }
 
     println!(
-        "asserter clean: no out-of-core repository verification proof builders \
+        "asserter clean: no out-of-verbs repository verification proof builders \
 ({files_scanned} file(s) scanned)",
     );
     Ok(())
@@ -110,9 +110,9 @@ fn scan_dir(dir: &Path, hits: &mut Vec<Hit>, files_scanned: &mut usize) -> Resul
 fn is_skipped_path(path: &Path) -> bool {
     let mut components = path.components().map(|c| c.as_os_str());
     let comps: Vec<_> = components.by_ref().collect();
-    // crates/core/**
+    // crates/verbs/**
     for window in comps.windows(2) {
-        if window[0] == "crates" && window[1] == "core" {
+        if window[0] == "crates" && window[1] == "verbs" {
             return true;
         }
     }

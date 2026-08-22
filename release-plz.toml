@@ -88,10 +88,6 @@ name = "heddle-mount"
 release = true
 
 [[package]]
-name = "heddle-daemon"
-release = true
-
-[[package]]
 name = "heddle-ci-config"
 release = true
 
@@ -116,11 +112,11 @@ name = "heddle-cli-contract"
 release = true
 
 [[package]]
-name = "heddle-cli-shared"
+name = "heddle-config"
 release = true
 
 [[package]]
-name = "heddle-core"
+name = "heddle-verbs"
 release = true
 
 [[package]]

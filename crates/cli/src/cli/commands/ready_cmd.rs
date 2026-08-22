@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use heddle_core::{
+use verbs::{
     ReadyDecisionInput, classify_ready_decision, has_integration_target,
     ready_freshness_summary as core_ready_freshness_summary,
     ready_integration_summary as core_ready_integration_summary,

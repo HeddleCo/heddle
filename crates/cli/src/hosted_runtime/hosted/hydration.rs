@@ -203,7 +203,7 @@ impl HydrationBridge {
                 ))
             })?;
 
-        let user_config = cli_shared::UserConfig::load_default().map_err(|err| {
+        let user_config = config::UserConfig::load_default().map_err(|err| {
             HeddleError::Config(format!("lazy hosted hydrator: load user config: {err}"))
         })?;
         // Build + validate the session config on this thread so a rejected

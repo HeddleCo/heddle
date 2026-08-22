@@ -55,7 +55,7 @@ impl HostedError {
 
 impl From<reqwest::Error> for HostedError {
     fn from(error: reqwest::Error) -> Self {
-        Self::BootstrapHttp(cli_shared::annotate_error_chain_tls_trust_failure(&error))
+        Self::BootstrapHttp(config::annotate_error_chain_tls_trust_failure(&error))
     }
 }
 

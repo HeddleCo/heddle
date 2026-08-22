@@ -17,13 +17,13 @@ use std::{
 #[cfg(feature = "client")]
 use anyhow::Context;
 use anyhow::{Result, anyhow};
-use heddle_core::{
+use verbs::{
     CloneMode, ClonePlanError, ClonePlanFacts, ClonePlanOptions, CloneRemoteSource,
     CloneThreadSelectError, UnsupportedCloneFlag, plan_clone, select_clone_checkout_thread,
     status::next_action::canonical_git_import_ref_command,
 };
 #[cfg(feature = "client")]
-use heddle_core::{
+use verbs::{
     MonorepoCloneResultSummary, MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoNodeExecution,
     MonorepoNodeExecutionStep, MonorepoNodeFacts, MonorepoNodeStepOptions,
     assemble_monorepo_clone_json_report, assemble_monorepo_clone_result_summary,
@@ -511,13 +511,13 @@ fn clone_git_overlay_path(
 
 /// Reject `--depth` / `--lazy` / `--filter` for Git-overlay clones before
 /// any filesystem or network work runs. Pure validation lives in
-/// `heddle_core::validate_clone_mode_options`; this wrapper maps errors to
+/// `verbs::validate_clone_mode_options`; this wrapper maps errors to
 /// recovery advice for the git-overlay execution path and unit tests.
 fn reject_unsupported_for_git_overlay(options: &CloneOptions) -> Result<()> {
     if options.insecure {
         return Err(anyhow!(git_overlay_clone_insecure_advice()));
     }
-    heddle_core::validate_clone_mode_options(
+    verbs::validate_clone_mode_options(
         &CloneMode::GitOverlayUrl,
         options.depth,
         options.lazy,
@@ -2100,7 +2100,7 @@ fn verify_hosted_clone(
 ///    depth-bounded edges are surfaced, never fatal.
 ///
 /// Pure planning, validation, progress labels, and result summary (steps 2–4
-/// facts) live in `heddle_core::clone_plan` and are unit-tested there. This
+/// facts) live in `verbs::clone_plan` and are unit-tested there. This
 /// function owns hosted RPC and per-node materialize I/O.
 #[cfg(feature = "client")]
 async fn clone_monorepo(
@@ -2431,7 +2431,7 @@ async fn execute_monorepo_node_steps(
 }
 
 /// Reject `--depth`/`--lazy`/`--filter` for monorepo clones. Pure validation
-/// lives in `heddle_core::validate_monorepo_clone_options`; this wrapper maps
+/// lives in `verbs::validate_monorepo_clone_options`; this wrapper maps
 /// errors for the monorepo execution path.
 #[cfg(feature = "client")]
 fn reject_unsupported_for_monorepo(options: &CloneOptions) -> Result<()> {

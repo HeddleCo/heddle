@@ -51,3 +51,5 @@ zstd = ["objects/zstd", "repo/zstd"]
 
 [dev-dependencies]
 tempfile.workspace = true
+# Test-only: the in-memory object backend never ships in the library.
+objects = { path = "../objects", package = "heddle-objects", version = "0.13", features = ["memory-backend"] }

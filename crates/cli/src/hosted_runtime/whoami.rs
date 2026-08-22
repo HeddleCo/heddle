@@ -8,11 +8,12 @@
 use anyhow::{Context, Result};
 use api::heddle::api::v1alpha1::HostedRole;
 use biscuit_auth::builder::{BlockBuilder, Term};
-use cli_shared::{
-    ResolvedPrincipal, UserConfig, principal_source_display, resolve_principal,
+use config::UserConfig;
+use crypto::Ed25519Signer;
+use verbs::{
+    ResolvedPrincipal, principal_source_display, resolve_principal,
     resolve_principal_without_repo,
 };
-use crypto::Ed25519Signer;
 use repo::Repository;
 use serde::Serialize;
 use weft_client_shim::CliContext;
@@ -162,8 +163,8 @@ fn resolve_capture_actor(ctx: &dyn CliContext) -> Result<CaptureActor> {
     let resolved = match Repository::open_existing(&start)
         .with_context(|| format!("open Heddle store at {}", start.display()))?
     {
-        Some(repo) => resolve_principal(&repo, &user_config)?,
-        None => resolve_principal_without_repo(&user_config),
+        Some(repo) => resolve_principal(&repo, user_config.principal_pair())?,
+        None => resolve_principal_without_repo(user_config.principal_pair()),
     };
     Ok(CaptureActor::from_resolved(&resolved))
 }
@@ -510,13 +511,13 @@ mod tests {
     fn without_repo_uses_user_config_when_env_unset() {
         let _guard = PrincipalEnvGuard::clear();
         let user_config = UserConfig {
-            principal: Some(cli_shared::config::UserPrincipalConfig {
+            principal: Some(config::config::UserPrincipalConfig {
                 name: "Luke".to_string(),
                 email: "luke@example.com".to_string(),
             }),
             ..UserConfig::default()
         };
-        let resolved = resolve_principal_without_repo(&user_config);
+        let resolved = resolve_principal_without_repo(user_config.principal_pair());
         assert_eq!(resolved.source, Some("user_config"));
         assert_eq!(resolved.principal.name_lossy(), "Luke");
         assert_eq!(resolved.principal.email_lossy(), "luke@example.com");

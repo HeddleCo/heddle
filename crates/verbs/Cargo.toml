@@ -1,0 +1,49 @@
+[package]
+name = "heddle-verbs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.13" }
+merge = { path = "../merge", package = "heddle-merge", version = "0.13" }
+ignore.workspace = true
+hex.workspace = true
+objects = { path = "../objects", package = "heddle-objects", version = "0.13" }
+heddle-git-projection = { path = "../git-projection", version = "0.13", default-features = false }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.13", default-features = false }
+refs = { path = "../refs", package = "heddle-refs", version = "0.13" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.13" }
+rmp-serde.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.13", optional = true }
+sley.workspace = true
+state_review = { path = "../state-review", package = "heddle-state-review", version = "0.13" }
+thiserror.workspace = true
+tracing.workspace = true
+
+[features]
+default = []
+# Forward zstd through the Git projection dependency when the workspace
+# enables compression (CLI `zstd` feature wires this).
+zstd = ["heddle-git-projection/zstd", "repo/zstd", "objects/zstd"]
+semantic = ["dep:semantic", "repo/tree-sitter-symbols"]
+semantic-extended = ["semantic", "semantic?/extended-languages"]
+
+[dev-dependencies]
+serial_test.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "verbs"

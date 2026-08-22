@@ -423,7 +423,7 @@ fn encode_counted(parts: &[&[u8]]) -> Result<Vec<u8>, CallFailure> {
 }
 
 fn claim_signer(state: &ClaimState) -> Result<Ed25519Signer, CallFailure> {
-    let store = cli_shared::credentials::load_credentials().map_err(internal_failure)?;
+    let store = config::credentials::load_credentials().map_err(internal_failure)?;
     let credential = store.servers.get(&state.server).ok_or_else(auth_failure)?;
     let metadata = headless_token_metadata(&credential.token).map_err(internal_failure)?;
     if metadata.subject != state.subject

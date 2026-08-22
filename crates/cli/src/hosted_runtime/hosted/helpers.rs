@@ -8,7 +8,7 @@ use api::heddle::api::v1alpha1::{
     TransportMode, repository_ref::Reference,
 };
 use base64::Engine as _;
-use cli_shared::ClientConfig;
+use config::ClientConfig;
 use objects::object::{ContentHash, StateAttachmentId, StateAttachmentKind, StateId};
 use wire::{ObjectId, ObjectInfo, ObjectType, ProtocolError};
 

@@ -143,9 +143,7 @@ build`. Expect to update one of them with most non-trivial PRs.
   `crates/cli/src/cli/commands/`. The constant
   `RENDER_VIOLATION_BASELINE` is a hard ceiling: removing violations is
   always safe, but adding any without lowering the constant by the
-  matching count breaks CI. The discipline (and the per-file punch list)
-  lives in
-  [crates/cli/src/cli/commands/RENDER_AUDIT.md](crates/cli/src/cli/commands/RENDER_AUDIT.md).
+  matching count breaks CI.
 - **`crates/cli/tests/tier_coverage.rs`** — enumerates every `Commands`
   enum variant and requires it to be classified as `Everyday`,
   `Advanced`, or `Hidden`. Adding a verb without claiming a tier fails
@@ -174,9 +172,7 @@ Two diagnostic verbs ride alongside the tests as part of the contract:
 `println!` and `print!` are reserved for functions named `render_*` or
 `write_*` (or inside `#[cfg(test)]`). Stderr is unrestricted — warnings
 and tips ride there. The lint is a ratchet, not a contract: the
-baseline goes down, never up. See
-[crates/cli/src/cli/commands/RENDER_AUDIT.md](crates/cli/src/cli/commands/RENDER_AUDIT.md)
-for the per-file status and which files are next on the chip list.
+baseline goes down, never up.
 
 When you add a verb's user-facing output, mirror the canonical
 pattern in `log.rs` or `diff/diff_output.rs`: build a `*Output`

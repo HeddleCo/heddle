@@ -11,11 +11,11 @@
 //!
 //! [`StartThread`] maps the whole write-path onto the merged primitive
 //! ([`repo::atomic`]) so it is all-or-nothing: apply order comes from
-//! [`heddle_core::plan_start_transaction`]'s `effects` list; each effect
+//! [`verbs::plan_start_transaction`]'s `effects` list; each effect
 //! registers its own inverse through the right combinator, and a failure
 //! anywhere rewinds every applied effect — with **precise directory rewind**
 //! — back to the exact pre-start state (effect-kind reverse order matches
-//! [`heddle_core::plan_start_cleanup`]). The structure mirrors the impl-b
+//! [`verbs::plan_start_cleanup`]). The structure mirrors the impl-b
 //! undo/redo migration:
 //!
 //!   * **Atomic single writes** (the thread-ref CAS) → [`Tx::step`]
@@ -50,7 +50,7 @@ use std::{
     rc::Rc,
 };
 
-use heddle_core::{
+use verbs::{
     CheckoutRewindPlan, CreateDirAttempt, SelfCreatedDirRewindPlan, StartEffectKind,
     StartEffectPreconditionError, StartEffectStagingFacts, TargetDirClaimKind,
     TargetDirCreateIntent, TargetLeafRefusal, TargetLeafShape, append_safe_relative_components,
@@ -83,7 +83,7 @@ use super::{
 /// Classify an `anyhow` error from a materialize/hydrate helper into the
 /// `HeddleError` the primitive's `Result` requires.
 ///
-/// Pure classification lives in [`heddle_core::classify_materialize_error`]
+/// Pure classification lives in [`verbs::classify_materialize_error`]
 /// (heddle#571); this thin adapter keeps the local `apply_error` call sites.
 fn apply_error(err: anyhow::Error) -> HeddleError {
     classify_materialize_error(err)
@@ -226,7 +226,7 @@ fn maybe_swap_target_leaf(point: TargetSwapPoint, abs_path: &Path) -> HeddleResu
 /// swap cannot redirect checkout bytes into a symlink target (heddle#356 cid
 /// 3336120590).
 ///
-/// The pure claim kind is [`TargetDirClaimKind`] in `heddle-core`; rewinds
+/// The pure claim kind is [`TargetDirClaimKind`] in `heddle-verbs`; rewinds
 /// consult [`plan_checkout_rewind`] / [`plan_self_created_dir_rewind`]. A leaf
 /// that is anything else — a symlink, a non-directory file, or a non-empty
 /// directory — is NOT representable here: `create_target_dir` refuses the start
@@ -535,7 +535,7 @@ fn clear_claimed_dir_contents(abs_path: &Path, claim: &TargetDir) -> HeddleResul
 /// The precise checkout-rewind inverse, keyed on the runtime [`TargetDir`] claim
 /// from [`create_target_dir`] (NOT a stale plan-time bool — cid 3335052857 /
 /// 3335586962). Pure action selection is
-/// [`heddle_core::plan_checkout_rewind`]; this applies the FS side:
+/// [`verbs::plan_checkout_rewind`]; this applies the FS side:
 ///   * [`CheckoutRewindPlan::ClearAndRemoveDir`] → clear contents + remove leaf
 ///   * [`CheckoutRewindPlan::ClearContentsOnly`] → clear contents, keep leaf
 ///   * [`CheckoutRewindPlan::TouchNothing`] → claim unestablished; touch nothing
@@ -686,7 +686,7 @@ fn create_target_dir(abs_path: &Path, plan_created: bool) -> HeddleResult<Target
 
 /// Inverse of the target-dir creation step: remove the worktree directory ONLY
 /// when this invocation created it. Pure action selection is
-/// [`heddle_core::plan_self_created_dir_rewind`]; this applies the FS side.
+/// [`verbs::plan_self_created_dir_rewind`]; this applies the FS side.
 /// `claim` is the runtime [`TargetDir`] signal from [`create_target_dir`], NOT
 /// a stale plan-time bool — an adopted (concurrent or user-supplied) dir, or a
 /// leaf this step never established (`None`), is never removed here. Tolerant
@@ -1150,7 +1150,7 @@ impl AtomicMutation for StartThread {
     fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<StartThreadOutput>> {
         let mut oplog: Vec<OpRecord> = Vec::new();
 
-        // Pure ordered effect list from heddle-core (`plan_start_transaction`).
+        // Pure ordered effect list from heddle-verbs (`plan_start_transaction`).
         // FS/clonefile/mount work and Tx combinators stay here; only the
         // sequence is plan-owned so cleanup order stays single-sourced with
         // `plan_start_cleanup` (reverse of this applied prefix).

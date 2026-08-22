@@ -2,7 +2,7 @@
 //! Marker commands.
 
 use anyhow::{Result, anyhow};
-use heddle_core::{
+use verbs::{
     MarkerDeleteSelector, MarkerDeleteSelectorError, marker_bulk_delete_message,
     marker_create_message, marker_delete_message, marker_list_filter_matches,
     marker_prefix_is_valid, plan_marker_delete_selector,

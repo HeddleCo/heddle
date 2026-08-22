@@ -81,6 +81,7 @@ mod repository_semantic_corpus;
 mod repository_semantic_graph_e2e_tests;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_signals;
+pub mod remote;
 mod repository_state_visibility;
 #[cfg(all(test, feature = "tree-sitter-symbols"))]
 mod repository_symbol_graph_tests;
@@ -257,5 +258,6 @@ pub use worktree_index::{DirectoryCacheEntry, IndexEntry, WorktreeIndex};
 pub use worktree_state::WorktreeState;
 pub use worktree_status_options::{
     FsMonitorConfig, FsMonitorMode, FsMonitorSettings, WorktreeStatusOptions,
+    resolve_worktree_status_options,
 };
 pub type Config = RepoConfig;

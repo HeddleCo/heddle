@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, path::Path};
 
 use anyhow::Result;
 use chrono::Utc;
-use heddle_core::{
+use verbs::{
     VerificationClaimPolicyFacts,
     raw_git_preservation_command as core_raw_git_preservation_command,
     repository_verification_allows_success_claim as core_repository_verification_allows_success_claim,
@@ -218,7 +218,7 @@ fn repository_verification_allows_success_claim(
     trust: &RepositoryVerificationState,
     policy: VerificationClaimPolicy,
 ) -> bool {
-    use heddle_core::VerificationClaimTrustFacts;
+    use verbs::VerificationClaimTrustFacts;
     core_repository_verification_allows_success_claim(
         &output.status,
         VerificationClaimTrustFacts {

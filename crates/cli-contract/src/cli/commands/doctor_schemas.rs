@@ -18,12 +18,12 @@
 //! the doc has historically suffered (renames, deletions, leaks of
 //! fields like `git_import_guidance` into per-command outputs).
 //!
-//! Pure sample/schema helpers live in `heddle_core::doctor_schemas_plan`.
+//! Pure sample/schema helpers live in `verbs::doctor_schemas_plan`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use heddle_core::doctor_schemas_plan::{
+use verbs::doctor_schemas_plan::{
     DocSample, SchemaCoverageBlockingFacts, collect_coverage_field_drifts,
     coverage_has_no_blocking_schema_gaps as coverage_gaps_clean, doctor_schemas_json_sample_span,
     documented_samples_with_bound_verbs as core_documented_samples_with_bound_verbs,

@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use biscuit_auth::builder::BlockBuilder;
-use cli_shared::{ClientConfig, UserConfig};
+use config::{ClientConfig, UserConfig};
 use crypto::{Ed25519Signer, Signer as _};
 use wire::{AuthToken, ProtocolError};
 

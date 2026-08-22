@@ -6,7 +6,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use cli_shared::ClientConfig;
+use config::ClientConfig;
 use futures::{SinkExt, StreamExt, task::AtomicWaker};
 use iroh::{
     EndpointAddr, EndpointId, TransportAddr,
@@ -430,7 +430,7 @@ fn fresh_handle() -> [u8; 16] {
 mod tests {
     use std::{io, task::Poll};
 
-    use cli_shared::ClientConfig;
+    use config::ClientConfig;
     use iroh::endpoint::transports::CustomTransport as _;
 
     use super::{

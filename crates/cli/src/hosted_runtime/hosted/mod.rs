@@ -47,7 +47,7 @@ pub use bootstrap::{
     fetch_signed_endpoint_descriptor,
 };
 pub use call::{BidirectionalRequestStream, BidirectionalStream, ServerStream, ServerStreamItem};
-use cli_shared::ClientConfig;
+use config::ClientConfig;
 pub use collaboration::{HostedDiscussion, HostedDiscussionTurn};
 use connection::HostedConnection;
 pub use context::CallContextFactory;
@@ -78,7 +78,7 @@ pub(crate) struct RenewableAuthorityCredential {
 
 impl RenewableAuthorityCredential {
     pub(super) fn from_stored(
-        credential: &cli_shared::credentials::ServerCredential,
+        credential: &config::credentials::ServerCredential,
     ) -> Option<Self> {
         let credential_id = credential.credential_id.clone()?;
         let signer = Ed25519Signer::from_pem(credential.private_key_pem.as_ref()?).ok()?;
@@ -120,7 +120,7 @@ impl RenewableAuthorityCredential {
 
     fn matches_active_client(
         &self,
-        credential: &cli_shared::credentials::ServerCredential,
+        credential: &config::credentials::ServerCredential,
         active_bearer: &[u8],
     ) -> bool {
         credential.token == self.token
@@ -255,7 +255,7 @@ impl HostedClient {
         let (Some(renewable), Some(server_key)) = (renewable, self.server_key.clone()) else {
             return;
         };
-        let credential = match cli_shared::credentials::resolve_credential_for_server(&server_key) {
+        let credential = match config::credentials::resolve_credential_for_server(&server_key) {
             Ok(Some(credential)) => credential,
             Ok(None) => return,
             Err(error) => {
@@ -264,7 +264,7 @@ impl HostedClient {
             }
         };
         if !renewable.matches_active_client(&credential, self.context.bearer_capability())
-            || !cli_shared::credentials::token_needs_rotation(&credential)
+            || !config::credentials::token_needs_rotation(&credential)
         {
             return;
         }
@@ -289,7 +289,7 @@ impl HostedClient {
                 return;
             }
         };
-        let updated = cli_shared::credentials::ServerCredential {
+        let updated = config::credentials::ServerCredential {
             token: root.token.clone(),
             subject: root.subject,
             device_id: credential.device_id,
@@ -297,7 +297,7 @@ impl HostedClient {
             private_key_pem: Some(private_key_pem),
             expires_at: Some(root.expires_at.to_rfc3339()),
         };
-        if let Err(error) = cli_shared::credentials::store_server_credential(&server_key, updated) {
+        if let Err(error) = config::credentials::store_server_credential(&server_key, updated) {
             tracing::warn!("credential rotation: failed to persist credential: {error}");
         }
         self.context.set_bearer_capability(root.token.into_bytes());

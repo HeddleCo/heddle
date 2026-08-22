@@ -12,7 +12,7 @@
 //! output makes the invariant visible to operators.
 
 use anyhow::Result;
-use heddle_core::{
+use verbs::{
     gc_plan::{
         gc_consolidated_mirror_message, gc_dry_run_messages, gc_pack_message,
         gc_preserved_redactions_message, gc_prune_loose_message, gc_pruned_git_mapping_message,

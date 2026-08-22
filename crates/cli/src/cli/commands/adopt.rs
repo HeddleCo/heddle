@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
-use heddle_core::{AdoptPlanError, AdoptPlanOptions, plan_adopt};
+use verbs::{AdoptPlanError, AdoptPlanOptions, plan_adopt};
 use objects::lock::RepositoryLockExt;
 use repo::{Repository, RepositoryCapability, RepositorySourceAuthority};
 use serde::Serialize;

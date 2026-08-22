@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use heddle_core::{CollapsePlan, plan_collapse};
+use verbs::{CollapsePlan, plan_collapse};
 use objects::object::{ChangeLineage, ChangeLineageKind, State, StateId, ThreadName};
 use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};

@@ -262,8 +262,8 @@ end_of_record
             Some("refs")
         );
         assert_eq!(
-            crate_of("crates/cli-shared/src/lib.rs").as_deref(),
-            Some("cli-shared")
+            crate_of("crates/config/src/lib.rs").as_deref(),
+            Some("config")
         );
     }
 

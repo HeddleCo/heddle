@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use heddle_core::{
+use verbs::{
     parse_reflog_line, short_oid, status::next_action::canonical_git_import_ref_command,
     summarize_paths, timeline_branch_reason as core_timeline_branch_reason,
     timeline_cursor_reason as core_timeline_cursor_reason, timeline_label as core_timeline_label,
@@ -232,8 +232,8 @@ struct ReflogEntry {
     message: String,
 }
 
-impl From<heddle_core::ReflogLine> for ReflogEntry {
-    fn from(line: heddle_core::ReflogLine) -> Self {
+impl From<verbs::ReflogLine> for ReflogEntry {
+    fn from(line: verbs::ReflogLine) -> Self {
         Self {
             source: line.source,
             reference: line.reference,
@@ -495,7 +495,7 @@ struct PlainGitLogOutput<'a> {
     storage_model: &'static str,
     states: &'a [StateEntry],
     #[serde(rename = "verification")]
-    trust: &'a heddle_core::RepositoryVerificationState,
+    trust: &'a verbs::RepositoryVerificationState,
     recommended_action: &'a str,
     recovery_commands: &'a [String],
 }

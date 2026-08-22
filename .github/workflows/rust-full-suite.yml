@@ -378,14 +378,14 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked -p heddle-cli --features telemetry --tests --bin heddle
-          cargo clippy --locked -p heddle-cli -p heddle-cli-shared \
+          cargo clippy --locked -p heddle-cli -p heddle-config \
             --features heddle-cli/telemetry --lib --bins --tests --examples -- -D warnings
           current_fd_limit=$(ulimit -n)
           if [ "$current_fd_limit" != "unlimited" ] && [ "$current_fd_limit" -lt 65536 ]; then
             ulimit -n 65536
           fi
           echo "Open-file limit: $(ulimit -n)"
-          cargo test --locked -p heddle-cli -p heddle-cli-shared \
+          cargo test --locked -p heddle-cli -p heddle-config \
             --features heddle-cli/telemetry
 
       - name: sccache stats
@@ -842,9 +842,8 @@ jobs:
               --gate semantic=80 \
               --gate oplog=78 \
               --gate wire=80 \
-              --gate state_review=80 \
+              --gate state-review=80 \
               --gate crypto=80 \
-              --gate daemon=80 \
               --gate ingest=80
 
       - name: Upload coverage to Codecov

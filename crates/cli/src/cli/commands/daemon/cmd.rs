@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use heddle_core::daemon_plan::{
+use verbs::daemon_plan::{
     daemon_health_failed_kind, daemon_materialized_thread_line, daemon_materialized_threads_header,
     daemon_not_running_status_token, daemon_running_status_token, daemon_short_tree,
     daemon_shutdown_refused_kind, daemon_status_not_running_line, daemon_status_running_line,

@@ -21,7 +21,7 @@ use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use heddle_core::retro_plan::{
+use verbs::retro_plan::{
     DEFAULT_FALLBACK_WINDOW_HOURS, MAX_OPLOG_BATCHES, agent_task_window_overlaps,
     agent_window_overlaps, choose_default_since_ts, context_annotation_in_window,
     display_free_text, duration_secs as plan_duration_secs, excerpt, is_turn_boundary_intent,
@@ -792,7 +792,7 @@ mod tests {
 
     #[test]
     fn excerpt_truncates_long_content() {
-        use heddle_core::retro_plan::EXCERPT_LEN;
+        use verbs::retro_plan::EXCERPT_LEN;
         let long = "a".repeat(EXCERPT_LEN + 50);
         let out = excerpt(&long);
         let char_count = out.chars().count();

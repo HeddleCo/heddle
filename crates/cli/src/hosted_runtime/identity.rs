@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha1::CreateAgentAccountRequest;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
-use cli_shared::{UserConfig, credentials::ServerCredential};
+use config::{UserConfig, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer as _};
 use serde::Serialize;
 use weft_client_shim::CliContext;
@@ -98,7 +98,7 @@ async fn ensure(
                 None,
                 true,
             )?;
-            let store = cli_shared::credentials::load_credentials()?;
+            let store = config::credentials::load_credentials()?;
             let derived = store.servers.get(&server).ok_or_else(|| {
                 anyhow::anyhow!("derived credential was not installed for {server}")
             })?;
@@ -172,7 +172,7 @@ fn refresh_expired_local_agent(
     {
         bail!("reminted agent capability is not bound to this node key");
     }
-    cli_shared::credentials::store_server_credential(
+    config::credentials::store_server_credential(
         server,
         ServerCredential {
             token: restricted,
@@ -239,7 +239,7 @@ async fn create_on_behalf(
     {
         bail!("client-minted agent capability is not bound to this node key");
     }
-    cli_shared::credentials::store_server_credential(
+    config::credentials::store_server_credential(
         &server,
         ServerCredential {
             token: restricted,

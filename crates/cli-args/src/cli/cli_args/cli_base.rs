@@ -85,12 +85,12 @@ pub struct Cli {
 
 impl Cli {
     /// Load and cache the process-wide user configuration.
-    pub fn user_config_or_exit() -> &'static cli_shared::UserConfig {
-        static USER_CONFIG: OnceLock<cli_shared::UserConfig> = OnceLock::new();
-        USER_CONFIG.get_or_init(|| cli_shared::UserConfig::load_default().unwrap_or_default())
+    pub fn user_config_or_exit() -> &'static config::UserConfig {
+        static USER_CONFIG: OnceLock<config::UserConfig> = OnceLock::new();
+        USER_CONFIG.get_or_init(|| config::UserConfig::load_default().unwrap_or_default())
     }
 
-    pub fn output_mode(&self) -> Option<cli_shared::OutputMode> {
+    pub fn output_mode(&self) -> Option<config::OutputMode> {
         self.output.map(Into::into)
     }
 
@@ -139,10 +139,10 @@ pub fn should_output_json(cli: &Cli, repo_config: Option<&Config>) -> bool {
 
     if let Some(output) = cli.output_mode() {
         format = match output {
-            cli_shared::OutputMode::Json | cli_shared::OutputMode::JsonCompact => {
+            config::OutputMode::Json | config::OutputMode::JsonCompact => {
                 OutputFormat::Json
             }
-            cli_shared::OutputMode::Text => OutputFormat::Text,
+            config::OutputMode::Text => OutputFormat::Text,
         };
     }
 

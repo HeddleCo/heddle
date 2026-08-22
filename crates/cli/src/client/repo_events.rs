@@ -11,7 +11,8 @@
 
 use api::heddle::api::v1alpha1::CallFailureCode;
 pub use api::heddle::api::v1alpha1::{RepoEvent, SubscribeRepoEventsRequest};
-use cli_shared::{RemoteTarget, UserConfig};
+use config::UserConfig;
+use repo::remote::RemoteTarget;
 
 pub use crate::hosted_runtime::hosted::HostedError;
 use crate::hosted_runtime::{HostedAuthMode, HostedClient, HostedSession, ServerStream};
@@ -89,7 +90,7 @@ impl RepoEventClient {
         let RemoteTarget::Network { addr, .. } = target else {
             return Err(RepoEventError::LocalServer);
         };
-        let server_key = cli_shared::remote::credential_key_from_remote_url(server);
+        let server_key = repo::remote::credential_key_from_remote_url(server);
         let user_config = UserConfig::load_default()
             .map_err(|error| RepoEventError::Configuration(error.to_string()))?;
         let session =

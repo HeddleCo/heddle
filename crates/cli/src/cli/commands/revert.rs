@@ -4,7 +4,7 @@
 use std::fs;
 
 use anyhow::{Result, anyhow};
-use heddle_core::{
+use verbs::{
     RevertMessageMode, RevertOutcome, RevertPlan, RevertSuccessFacts,
     default_revert_commit_message, no_changes_to_revert_kind, no_changes_to_revert_summary,
     plan_revert, revert_inspect_command, revert_success_message,

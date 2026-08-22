@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Result, anyhow};
 use base64::Engine as _;
 use chrono::Utc;
-use heddle_core::{
+use verbs::{
     ExplicitAgentBind, SessionAttachFacts, SessionLookupFact, SessionPolicy, TokenSidFact,
     WorktreeSessionFact, decide_session_attach, first_value_string, map_from_pairs,
     merge_string_vec, opencode_tool_name, opencode_tool_status,
@@ -797,7 +797,7 @@ fn current_state_id(repo: &Repository) -> Result<Option<StateId>> {
         .or(repo.head()?))
 }
 
-// opencode_tool_name / opencode_tool_status: heddle_core::harness_json
+// opencode_tool_name / opencode_tool_status: verbs::harness_json
 
 fn opencode_payload_metadata(event: &str, payload: &Value) -> Result<TimelineToolPayloadMetadata> {
     let tool_name = opencode_tool_name(payload);

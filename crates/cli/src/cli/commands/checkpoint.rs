@@ -2,7 +2,7 @@
 //! Internal Git-checkpoint implementation used by thread landing.
 
 use anyhow::{Result, anyhow};
-use heddle_core::{GitScope, SavePlan, SaveVerb, execute_save};
+use verbs::{GitScope, SavePlan, SaveVerb, execute_save};
 use objects::object::Attribution;
 use repo::{GitCheckpointRecord, Repository, RepositoryCapability};
 

@@ -2,7 +2,7 @@
 //! Show command.
 
 use anyhow::Result;
-use heddle_core::status::next_action::canonical_git_import_ref_command;
+use verbs::status::next_action::canonical_git_import_ref_command;
 use repo::{Repository, format_confidence};
 use serde::Serialize;
 

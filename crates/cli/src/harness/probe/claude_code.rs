@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::Result;
-use heddle_core::HarnessKind;
+use verbs::HarnessKind;
 
 use super::{
     HarnessActorProbe, HarnessAttachHints, HarnessProbeInput, HarnessProbeResult, ProbeSource,

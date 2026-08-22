@@ -11,7 +11,7 @@ use api::{
     heddle::api::v1alpha1::{EndpointDescriptor, SignedEndpointDescriptor},
     signing::endpoint_descriptor_bytes,
 };
-use cli_shared::ClientConfig;
+use config::ClientConfig;
 use crypto::Ed25519Signer;
 use iroh::{EndpointAddr, EndpointId, RelayUrl};
 use prost::Message;
@@ -414,7 +414,7 @@ fn now_unix_millis() -> Result<i64> {
 
 #[cfg(test)]
 mod tests {
-    use cli_shared::ClientConfig;
+    use config::ClientConfig;
 
     use super::{DescriptorKeyring, bootstrap_target, fetch_endpoint_descriptor};
 

@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::Result;
-use heddle_core::HarnessKind;
+use verbs::HarnessKind;
 use serde_json::Value;
 
 use super::{

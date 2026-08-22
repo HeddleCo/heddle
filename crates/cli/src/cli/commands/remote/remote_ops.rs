@@ -7,11 +7,11 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 #[cfg(feature = "client")]
-use heddle_core::{
+use verbs::{
     HostedPullResult, HostedPullResultFields, format_connected_to,
     heddle_pull_execution_facts_from_hosted, parse_hosted_pull_result, pull_tip_changed,
 };
-use heddle_core::{
+use verbs::{
     LocalTransferSummary, PullFailure, PullOutcome, PullPlan, PullPlanRequest, RemoteInfo,
     RemoteListReport, build_pull_outcome, format_pull_outcome_text, format_pulling_from,
     git_overlay_pull_execution_facts, heddle_pull_execution_facts_from_local,
@@ -19,7 +19,7 @@ use heddle_core::{
     plan_pull, pull_should_materialize, show_plain_git_remote, show_remote,
 };
 // Re-export under the historical crate-local names for sibling modules.
-pub(crate) use heddle_core::{resolve_default_remote_name, resolved_default_remote_name};
+pub(crate) use verbs::{resolve_default_remote_name, resolved_default_remote_name};
 use heddle_git_projection::credential::EmbeddingSafeCredentialProvider;
 use objects::{
     object::{StateId, ThreadName, Tree},
@@ -303,7 +303,7 @@ pub async fn cmd_pull(
                     local_thread: local_thread_name,
                     lazy: plan.lazy,
                     insecure: insecure
-                        || cli_shared::remote_allows_insecure(&repo, plan.remote.as_deref()),
+                        || repo::remote::remote_allows_insecure(&repo, plan.remote.as_deref()),
                     plan: &plan,
                     cli,
                 },

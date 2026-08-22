@@ -8,8 +8,7 @@
 //! a ratchet that lets the existing partial/text-only verbs ship while
 //! preventing new ones from regressing.
 //!
-//! Cleanup PRs lower the baseline; the discipline is documented in
-//! `crates/cli/src/cli/commands/RENDER_AUDIT.md`. When the count
+//! Cleanup PRs lower the baseline. When the count
 //! reaches zero, drop the constant and tighten this test to `== 0`.
 //!
 //! `eprintln!` is intentionally allowed everywhere — warnings and
@@ -61,7 +60,7 @@ use std::{
 // lint-exempt prefix.
 //
 // Dropped from 846 → 840 in the query facade exemplar:
-// `query.rs` now returns a `QueryReport` from `heddle_core` and routes
+// `query.rs` now returns a `QueryReport` from `verbs` and routes
 // human/JSON output through `cli/render/query.rs`.
 //
 // Re-measured from 840 → 647 when the CLI verb-contract surface moved to

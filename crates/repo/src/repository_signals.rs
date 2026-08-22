@@ -3,7 +3,7 @@
 //!
 //! Lives in its own file so the `cfg(feature = "tree-sitter-symbols")` guard
 //! sits at the module boundary rather than scattered across `repository.rs`.
-//! The actual signal modules live in `crates/state_review/`; this layer
+//! The actual signal modules live in `crates/state-review/`; this layer
 //! mediates between `Repository`'s already-built `State` and the registry,
 //! persisting any fired signals as a `RiskSignalBlob` for attachment after
 //! the immutable state is stored.

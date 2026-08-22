@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow};
-use heddle_core::semantic_plan::{HotEventKindToken, human_hot_event_kind, map_hot_event_kind};
+use verbs::semantic_plan::{HotEventKindToken, human_hot_event_kind, map_hot_event_kind};
 use semantic::analysis::{
     HotEventKind, HotSpotKey, HotSpotKeyValue, HotSpotParams, analyze_hot_spots,
 };

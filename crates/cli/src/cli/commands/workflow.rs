@@ -2,7 +2,7 @@
 use std::{cell::RefCell, collections::HashSet, fs, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use heddle_core::{
+use verbs::{
     AutoLandPolicyInput, MachineContractInput,
     auto_land_policy_blockers as core_auto_land_policy_blockers,
     integrated_land_next_action as core_integrated_land_next_action,
@@ -1745,7 +1745,7 @@ fn finish_land_git_checkpoint(
             let recovered = match merge_state {
                 Some(state) => match repo.resolve_state(state) {
                     Ok(Some(state_id)) => {
-                        heddle_core::recover_published_git_checkpoint(repo, &state_id)
+                        verbs::recover_published_git_checkpoint(repo, &state_id)
                     }
                     Ok(None) => Ok(None),
                     Err(error) => Err(error.into()),
@@ -2080,14 +2080,14 @@ fn auto_land_blocker_details(repo: &Repository, thread: &Thread) -> Vec<LandBloc
     let mut details = Vec::new();
     if policy.agent_authored
         && let Some(confidence) = policy.confidence
-        && confidence < heddle_core::AUTO_LAND_CONFIDENCE_THRESHOLD
+        && confidence < verbs::AUTO_LAND_CONFIDENCE_THRESHOLD
     {
         details.push(LandBlockerDetail {
             code: LandBlockerCode::AutoLandConfidenceBelowThreshold,
             check: LandBlockerCheck::AutoLandConfidence,
             message: format!(
                 "auto-land confidence check failed: {confidence:.2} is below the {:.2} threshold",
-                heddle_core::AUTO_LAND_CONFIDENCE_THRESHOLD
+                verbs::AUTO_LAND_CONFIDENCE_THRESHOLD
             ),
             paths: Vec::new(),
             state_context: None,
@@ -2793,7 +2793,7 @@ pub fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()> {
                 current_oid.as_deref().unwrap_or("<unborn>")
             ));
         }
-        if let Some(checkpoint) = heddle_core::recover_published_git_checkpoint(repo, &merge_state)?
+        if let Some(checkpoint) = verbs::recover_published_git_checkpoint(repo, &merge_state)?
         {
             finish_recovered_land(repo, &marker, &checkpoint.git_commit)?;
             return Ok(());
@@ -3405,7 +3405,7 @@ mod tests {
         process::Command,
     };
 
-    use heddle_core::AUTO_LAND_CONFIDENCE_RECOVERY_ACTION;
+    use verbs::AUTO_LAND_CONFIDENCE_RECOVERY_ACTION;
     use tempfile::TempDir;
 
     use super::*;

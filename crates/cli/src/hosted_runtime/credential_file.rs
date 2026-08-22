@@ -29,7 +29,7 @@ use std::{fmt, fs::File, io::Read, path::Path};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use cli_shared::credentials::ServerCredential;
+use config::credentials::ServerCredential;
 use crypto::{Ed25519Signer, Signer};
 use serde::{Deserialize, Serialize};
 

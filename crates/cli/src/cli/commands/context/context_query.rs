@@ -4,7 +4,7 @@
 use std::{collections::BTreeMap, path::Path};
 
 use anyhow::Result;
-use heddle_core::{
+use verbs::{
     annotation_status_label, audit_duplicate_count, audit_staleness_key, audit_target_key,
     filter_annotations, suggestion_tier_human_label, suggestion_tier_token,
 };
@@ -321,7 +321,7 @@ pub async fn cmd_context_check(
     for entry in &filtered_entries {
         for annotation in &entry.blob.annotations {
             // Active + optional tag only; scope filter not used by check.
-            if !heddle_core::annotation_passes_filters(annotation, None, tag.as_deref(), false) {
+            if !verbs::annotation_passes_filters(annotation, None, tag.as_deref(), false) {
                 continue;
             }
             let Some(current) = annotation.current_revision() else {

@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use heddle_core::{
+use verbs::{
     CleanWorktreeGuard, ThreadDropDisposition, ThreadDropOptions, ThreadPromoteOptions,
     ThreadRefreshOptions, ThreadRefreshPlan, format_refresh_conflict_markers,
     plan_cleanup_thread_drop, plan_thread_drop, plan_thread_promote, plan_thread_refresh,
@@ -780,7 +780,7 @@ fn persist_refresh_conflict_state(
         let base_tree = tree_for_state(thread_repo, &base_id)?;
         let our_tree = tree_for_state(thread_repo, &ours)?;
         let their_tree = tree_for_state(thread_repo, &theirs)?;
-        let payload = heddle_core::merge::build_conflict_payload(
+        let payload = verbs::merge::build_conflict_payload(
             thread_repo,
             (base_id, &base_tree),
             (ours, &our_tree),

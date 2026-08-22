@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cli_shared::{UserConfig, credentials};
+use config::{UserConfig, credentials};
 use crypto::{Ed25519Signer, Signer};
 
 use super::{CallContextFactory, HostedAuthMode, HostedSession, context::SignedCallContext};

@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use api::heddle::api::v1alpha1::ProviderSource;
-use cli_shared::ClientConfig;
+use config::ClientConfig;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode,
     endpoint::{AckFrequencyConfig, QuicTransportConfig, presets},

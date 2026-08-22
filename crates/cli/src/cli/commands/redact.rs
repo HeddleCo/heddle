@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use crypto::{Signer, load_signer, verify_payload_signature};
-use heddle_core::redaction_signature_status;
+use verbs::redaction_signature_status;
 use objects::{
     object::{
         ContentHash, LeafPolicy, Redaction, RedactionsBlob, StateId, StateSignature,

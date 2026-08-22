@@ -338,7 +338,7 @@ mod tests {
     use super::*;
 
     fn with_isolated_home<T>(test: impl FnOnce(&std::path::Path) -> T) -> T {
-        let _guard = cli_shared::credentials::lock_test_env();
+        let _guard = config::credentials::lock_test_env();
         let home = tempfile::TempDir::new().expect("temporary Heddle home");
         let previous = std::env::var_os("HEDDLE_HOME");
         unsafe {

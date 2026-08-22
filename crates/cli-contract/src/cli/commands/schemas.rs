@@ -14,7 +14,7 @@
 use std::{collections::BTreeMap, sync::OnceLock};
 
 use anyhow::{Result, anyhow};
-use heddle_core::{DiffReport, FsckReport, QueryReport, ResolveReport, StatusReport, VerifyReport};
+use verbs::{DiffReport, FsckReport, QueryReport, ResolveReport, StatusReport, VerifyReport};
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;

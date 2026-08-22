@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
-use heddle_core::{
+use verbs::{
     GitScope, MachineContractInput, SavePlan, SaveVerb, execute_save, large_capture_requires_force,
     principal_lacks_accountable_identity,
 };
@@ -329,7 +329,7 @@ pub async fn cmd_snapshot(
         println!(
             "Captured by: {} from {}",
             style::principal(&output.principal.name, &output.principal.email),
-            cli_shared::principal_source_display(&output.principal_source)
+            verbs::principal_source_display(&output.principal_source)
         );
         if let Some(agent) = &output.agent {
             println!(
@@ -983,7 +983,7 @@ fn clone_worktree_status_result(
 fn snapshot_output_from_save_report(
     repo: &Repository,
     user_config: &UserConfig,
-    report: heddle_core::SaveReport,
+    report: verbs::SaveReport,
 ) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
     let output_build_start = Instant::now();
     let previous_state_ms = report.previous_state_ms;
@@ -1003,7 +1003,7 @@ fn snapshot_output_from_save_report(
     let task_assignment_id = active_task_assignment_id(repo)?;
     let output_task_assignment_ms = task_assignment_start.elapsed().as_millis();
     let principal_start = Instant::now();
-    let principal_source = cli_shared::resolve_principal(repo, user_config)?
+    let principal_source = verbs::resolve_principal(repo, user_config.principal_pair())?
         .source
         .unwrap_or("unknown")
         .to_string();
@@ -1382,7 +1382,7 @@ pub(crate) fn resolve_attribution(
 }
 
 pub(crate) fn resolve_principal(repo: &Repository, user_config: &UserConfig) -> Result<Principal> {
-    Ok(cli_shared::resolve_principal(repo, user_config)?.principal)
+    Ok(verbs::resolve_principal(repo, user_config.principal_pair())?.principal)
 }
 
 pub(crate) fn is_placeholder_principal(principal: &Principal) -> bool {

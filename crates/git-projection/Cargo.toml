@@ -14,7 +14,7 @@ path = "src/lib.rs"
 name = "heddle_git_projection"
 
 [dependencies]
-objects = { path = "../objects", package = "heddle-objects", version = "0.13", features = ["memory-backend"] }
+objects = { path = "../objects", package = "heddle-objects", version = "0.13" }
 refs = { path = "../refs", package = "heddle-refs", version = "0.13" }
 # `default-features = false` so this crate's `zstd` feature controls the
 # cascade end-to-end (same pattern as ingest/cli).
@@ -33,6 +33,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 serial_test.workspace = true
+# Test-only: the in-memory object backend never ships in the library.
+objects = { path = "../objects", package = "heddle-objects", version = "0.13", features = ["memory-backend"] }
 
 [features]
 # This crate *is* the Git projection surface; `git-overlay` is always on so

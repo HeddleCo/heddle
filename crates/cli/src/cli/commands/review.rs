@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use daemon::local_review::{
+use verbs::review::{
     LocalReviewContext, LocalStateReview, ReviewSignal, ReviewSignalKind, ReviewSignalVisibility,
     SignReviewRequest, get_repo_signal_health,
 };

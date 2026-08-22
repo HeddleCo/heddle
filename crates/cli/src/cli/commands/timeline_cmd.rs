@@ -2,7 +2,7 @@
 //! Timeline navigation action commands.
 
 use anyhow::{Result, anyhow};
-use heddle_core::{
+use verbs::{
     timeline_cursor_reason, timeline_label,
     timeline_plan::{
         TimelinePlanError, TimelineSelection, TimelineTargetOptions, parse_branch_reason,

@@ -37,20 +37,19 @@ iroh-base = { workspace = true, optional = true }
 libc.workspace = true
 n0-watcher = { workspace = true, optional = true }
 noq-udp = { workspace = true, optional = true }
-objects = { path = "../objects", package = "heddle-objects", version = "0.13", features = ["memory-backend"] }
+objects = { path = "../objects", package = "heddle-objects", version = "0.13" }
 crypto = { path = "../crypto", package = "heddle-crypto", version = "0.13" }
-daemon = { path = "../daemon", package = "heddle-daemon", version = "0.13" }
 # `heddle-merge` is the native hunk-level text merge engine extracted from
 # `heddle-semantic` so non-semantic builds (`--no-default-features`) retain
 # text auto-merge. Always-on: the merge driver and rebase replay both call
 # into it unconditionally.
 merge = { path = "../merge", package = "heddle-merge", version = "0.13" }
 api = { package = "heddle-api", version = "0.10" }
-cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.13" }
+config = { path = "../config", package = "heddle-config", version = "0.13" }
 heddle-cli-args = { path = "../cli-args", version = "0.13", default-features = false }
 heddle-cli-contract = { path = "../cli-contract", version = "0.13", default-features = false }
 heddle-cli-render = { path = "../cli-render", version = "0.13", default-features = false }
-heddle-core = { path = "../core", version = "0.13", default-features = false }
+verbs = { path = "../verbs", package = "heddle-verbs", version = "0.13", default-features = false }
 heddle-format = { path = "../format", version = "0.13" }
 weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.13" }
 async-trait.workspace = true
@@ -195,15 +194,15 @@ semantic = [
     "dep:semantic",
     "heddle-cli-args/semantic",
     "heddle-cli-contract/semantic",
-    "heddle-core/semantic",
+    "verbs/semantic",
     "repo/tree-sitter-symbols",
 ]
-semantic-extended = ["semantic", "heddle-core/semantic-extended", "semantic?/extended-languages"]
+semantic-extended = ["semantic", "verbs/semantic-extended", "semantic?/extended-languages"]
 # `telemetry` compiles OTLP support into the CLI. It stays opt-in so the
 # default binary does not carry the exporter and HTTP/TLS dependency stack.
 # Runtime initialization remains endpoint-gated when the feature is enabled.
 telemetry = [
-    "cli-shared/telemetry",
+    "config/telemetry",
     "dep:opentelemetry",
     "dep:opentelemetry-otlp",
     "dep:opentelemetry_sdk",
@@ -219,7 +218,7 @@ zstd = [
     "repo/zstd",
     "ingest/zstd",
     "heddle-git-projection/zstd",
-    "heddle-core/zstd",
+    "verbs/zstd",
 ]
 # Wire the content-addressed mount through the CLI. Off by
 # default — each native backend pulls in a kernel-side dep that
@@ -250,6 +249,8 @@ mount = [
 criterion = "0.8"
 heddle-cli-render = { path = "../cli-render", version = "0.13", features = ["test-utils"] }
 hyper-util.workspace = true
+# Test-only: the in-memory object backend never ships in the binary.
+objects = { path = "../objects", package = "heddle-objects", version = "0.13", features = ["memory-backend"] }
 iroh-relay = { version = "=1.0.3", default-features = false, features = ["server"] }
 ntest.workspace = true
 prost-reflect.workspace = true

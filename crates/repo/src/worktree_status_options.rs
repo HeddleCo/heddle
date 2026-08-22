@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::repository::RepoConfig;
+
 /// Optional fsmonitor backend selection for worktree status hot paths.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -79,4 +81,26 @@ mod tests {
 pub struct WorktreeStatusOptions {
     /// Fsmonitor integration settings.
     pub fsmonitor: FsMonitorSettings,
+}
+
+/// Resolve worktree-status options from the user-config fsmonitor knob
+/// (when the caller has a user config), repository config, and the
+/// `HEDDLE_FSMONITOR` environment override. Precedence is environment,
+/// then user knob, then repo config, then the fail-closed default.
+pub fn resolve_worktree_status_options(
+    user_mode: Option<FsMonitorMode>,
+    repo_config: Option<&RepoConfig>,
+) -> WorktreeStatusOptions {
+    let mut mode = user_mode
+        .or_else(|| repo_config.map(|config| config.worktree.fsmonitor.mode))
+        .unwrap_or_default();
+    if let Ok(value) = std::env::var("HEDDLE_FSMONITOR")
+        && let Some(parsed) = FsMonitorMode::parse(&value)
+    {
+        mode = parsed;
+    }
+
+    WorktreeStatusOptions {
+        fsmonitor: FsMonitorSettings { mode },
+    }
 }

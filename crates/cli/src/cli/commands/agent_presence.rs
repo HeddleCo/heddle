@@ -6,11 +6,11 @@
 //! presence stored in `.heddle/actor-presence/`.
 //!
 //! List/show/spawn/done domain assembly and pure planning live in
-//! `heddle_core::actor`. This module owns implicit session resolution,
+//! `verbs::actor`. This module owns implicit session resolution,
 //! thread-ref minting, harness probing, recovery advice, and human/JSON render.
 
 use anyhow::{Result, anyhow};
-use heddle_core::{
+use verbs::{
     ActorEntryReport, ActorListReport, list_actors, mark_actor_done, plan_actor_done,
     show_actor_from_entry,
 };
@@ -646,7 +646,7 @@ fn no_active_actor_advice() -> RecoveryAdvice {
     )
 }
 
-fn print_actor_chain(chain: &[heddle_core::ActorChainEntry]) {
+fn print_actor_chain(chain: &[verbs::ActorChainEntry]) {
     if chain.len() <= 1 {
         return;
     }
