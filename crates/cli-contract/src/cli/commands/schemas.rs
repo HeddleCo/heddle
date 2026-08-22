@@ -18,8 +18,8 @@ use serde::Serialize;
 use serde_json::Value;
 use repo::{RepositoryMaintenanceRunReport, RepositoryPerformanceInspectionReport};
 use verbs::{
-    DiffReport, FsckReport, QueryReport, ResolveReport, StatusReport, ThreadMoveOutput,
-    VerifyReport,
+    DiffReport, FsckReport, QueryReport, RemoteListReport, ResolveReport, StatusReport,
+    ThreadMoveOutput, UndoListReport, VerifyReport, remote::RemoteInfo,
 };
 
 use super::{command_catalog, init_output::InitOutput};
@@ -75,7 +75,7 @@ schema_registry! {
     (&["capture"], CaptureSchema),
     (&["commit"], CommitSchema),
     (&["undo", "undo --redo", "undo --recover"], UndoSchema),
-    (&["undo --list"], UndoListSchema),
+    (&["undo --list"], UndoListReport),
     (&["ready"], ReadySchema),
     (&["land"], LandSchema),
     (&["land --threads"], LandBatchSchema),
@@ -99,8 +99,8 @@ schema_registry! {
     (&["thread marker create", "thread marker delete", "thread marker show"], ThreadMarkerOpSchema),
     (&["thread show"], ThreadShowSchema),
     (&["clone"], CloneSchema),
-    (&["remote list"], RemoteListSchema),
-    (&["remote show"], RemoteInfoSchema),
+    (&["remote list"], RemoteListReport),
+    (&["remote show"], RemoteInfo),
     (&["remote add", "remote remove", "remote set-default"], RemoteMutationSchema),
     (&["pull"], PullSchema),
     (&["push"], PushSchema),
@@ -944,15 +944,6 @@ pub struct UndoSchema {
     pub recovery_marker: Option<String>,
 }
 
-/// `heddle undo --list --output json` history view. Distinct from
-/// [`UndoSchema`] (the rewind/redo payload): the list view carries only the
-/// discriminator and the oplog batches, with none of the action/status/
-/// recovery fields a real undo emits. Mirrors `OpListOutput` in `undo.rs`.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct UndoListSchema {
-    pub output_kind: Option<String>,
-    pub batches: Vec<Value>,
-}
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReadySchema {
@@ -1463,20 +1454,7 @@ pub struct AdoptSchema {
     pub trust: RepositoryVerificationStateSchema,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RemoteListSchema {
-    pub output_kind: Option<String>,
-    pub remotes: Vec<RemoteInfoSchema>,
-}
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RemoteInfoSchema {
-    pub output_kind: Option<String>,
-    pub name: String,
-    pub url: String,
-    pub source: String,
-    pub is_default: bool,
-}
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RemoteMutationSchema {

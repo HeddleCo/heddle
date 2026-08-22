@@ -36,7 +36,7 @@ use sley::{
 };
 
 /// Machine JSON for `heddle remote list`.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RemoteListReport {
     pub output_kind: &'static str,
     pub remotes: Vec<RemoteInfo>,
@@ -47,7 +47,7 @@ pub struct RemoteListReport {
 /// Field names match the existing CLI JSON contract (`name`, `url`, `source`,
 /// `is_default`). `output_kind` is `Some("remote_show")` for show, omitted on
 /// list rows.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RemoteInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_kind: Option<&'static str>,
