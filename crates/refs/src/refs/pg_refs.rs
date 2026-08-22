@@ -16,17 +16,19 @@ use runtime_bridge::RuntimeBridge;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use super::{
-    CoreRefBackend, Head, RefBackend, RefExpectation, RefUpdate, require_user_ref_name,
-};
+use super::{CoreRefBackend, Head, RefBackend, RefExpectation, RefUpdate, require_user_ref_name};
 
 /// Reject reserved `heddle/` names before any SQL. Serve-side ListRefs/Pull
 /// gating of synthetic roots remains weft#1728; this chokepoint only stops a
 /// hosted caller persisting a *user* thread/marker in that namespace.
 fn require_user_ref_update(update: &RefUpdate) -> Result<()> {
     match update {
-        RefUpdate::Thread { name, new: Some(_), .. } => require_user_ref_name(name.as_str()),
-        RefUpdate::Marker { name, new: Some(_), .. } => require_user_ref_name(name.as_str()),
+        RefUpdate::Thread {
+            name, new: Some(_), ..
+        } => require_user_ref_name(name.as_str()),
+        RefUpdate::Marker {
+            name, new: Some(_), ..
+        } => require_user_ref_name(name.as_str()),
         RefUpdate::Head {
             new: Head::Attached { thread },
             ..

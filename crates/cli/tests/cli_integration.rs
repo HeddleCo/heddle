@@ -373,8 +373,6 @@ mod thread_default_current;
 mod timeline;
 #[path = "cli_integration/transcript_harness.rs"]
 mod transcript_harness;
-#[path = "cli_integration/try_cmd.rs"]
-mod try_cmd;
 #[path = "cli_integration/unrelated_histories_recovery.rs"]
 mod unrelated_histories_recovery;
 #[path = "cli_integration/visibility.rs"]
@@ -502,6 +500,16 @@ fn heddle_help(args: &[&str]) -> String {
             args.join(" ")
         )
     })
+}
+
+/// Look up a registered JSON Schema **in-process**, without spawning the
+/// binary. The user-facing `heddle schemas <verb>` verb was culled; the
+/// registry (`schema_for_verb`) is the library contract that remains, so
+/// schema-shape assertions read it directly.
+fn heddle_schema(verb: &str) -> Value {
+    let schema = cli::cli::commands::schema_for_verb(verb)
+        .unwrap_or_else(|| panic!("no schema registered for `{verb}`"));
+    serde_json::from_str(&schema.to_string()).expect("registered schema should be JSON")
 }
 
 fn heddle_output(args: &[&str], cwd: Option<&std::path::Path>) -> Result<Output, String> {

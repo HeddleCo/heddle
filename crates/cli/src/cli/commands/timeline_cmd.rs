@@ -2,6 +2,13 @@
 //! Timeline navigation action commands.
 
 use anyhow::{Result, anyhow};
+use objects::object::{ContentHash, StateId};
+use repo::{
+    NativeToolCallRefV1, Repository, TimelineBranchId, TimelineLabel, TimelineMaterializeStatus,
+    TimelineOperationBodyV1, TimelineOperationEnvelope, TimelineStore, TimelineToolPayloadMetadata,
+    TimelineView, ToolCallFinishedV1, ToolCallStartedV1,
+};
+use serde::Serialize;
 use verbs::{
     timeline_cursor_reason, timeline_label,
     timeline_plan::{
@@ -11,13 +18,6 @@ use verbs::{
     },
     timeline_recovery_status, timeline_tool_status,
 };
-use objects::object::{ContentHash, StateId};
-use repo::{
-    NativeToolCallRefV1, Repository, TimelineBranchId, TimelineLabel, TimelineMaterializeStatus,
-    TimelineOperationBodyV1, TimelineOperationEnvelope, TimelineStore, TimelineToolPayloadMetadata,
-    TimelineView, ToolCallFinishedV1, ToolCallStartedV1,
-};
-use serde::Serialize;
 
 use super::advice::RecoveryAdvice;
 use crate::cli::{

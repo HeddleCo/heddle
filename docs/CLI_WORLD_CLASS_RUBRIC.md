@@ -94,7 +94,7 @@ score. A global hard-gate failure blocks release.
    `heddle <command> --help`, and `heddle <command> -h` work for every public
    command path.
 8. **Schema drift fails.** Any command documented as JSON-producing must be
-   registered in `heddle schemas` and covered by schema/doc drift tests.
+   registered in the runtime schema registry and covered by schema/doc drift tests.
 9. **Non-interactive safety.** Commands used in scripts must not block on prompts
    unless explicitly interactive; interactive prompts must have a non-interactive
    equivalent.
@@ -316,7 +316,7 @@ Heddle is ready to present as a best-of-class OSS CLI only when:
 1. All hard gates pass globally.
 2. All everyday commands score A or better.
 3. No advanced public command scores below B.
-4. `docs/json-schemas.md`, `heddle schemas`, and runtime JSON agree.
+4. `docs/json-schemas.md`, the runtime schema registry, and runtime JSON agree.
 5. `heddle doctor docs --all --output json` and schema drift checks are clean.
 6. The Git-overlay matrix passes with no `git` executable on `PATH`.
 7. Every C-or-lower audit finding has an owner, issue, and release-blocking

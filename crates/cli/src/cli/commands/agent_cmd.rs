@@ -3,14 +3,6 @@
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use verbs::{
-    AgentCaptureOptions, AgentCaptureThreadCheck, AgentReadyOptions, AgentReservationReport,
-    FanoutLaneAvailability, FanoutLanePreflightBlock, FanoutNodeSpec, FanoutPlan, FanoutPlanError,
-    FanoutPlanRequest, assemble_agent_reservation, assemble_agent_reservation_list,
-    assemble_fanout_plan_report, check_agent_capture_thread, check_fanout_start_preflight,
-    fanout_child_body, fanout_parent_delegated_by, fanout_start_attach_rule, plan_agent_capture,
-    plan_agent_ready, plan_fanout, select_fanout_parent_thread,
-};
 use objects::{
     object::ThreadName,
     store::{
@@ -27,6 +19,14 @@ use repo::{
 };
 use schemars::JsonSchema;
 use serde::Serialize;
+use verbs::{
+    AgentCaptureOptions, AgentCaptureThreadCheck, AgentReadyOptions, AgentReservationReport,
+    FanoutLaneAvailability, FanoutLanePreflightBlock, FanoutNodeSpec, FanoutPlan, FanoutPlanError,
+    FanoutPlanRequest, assemble_agent_reservation, assemble_agent_reservation_list,
+    assemble_fanout_plan_report, check_agent_capture_thread, check_fanout_start_preflight,
+    fanout_child_body, fanout_parent_delegated_by, fanout_start_attach_rule, plan_agent_capture,
+    plan_agent_ready, plan_fanout, select_fanout_parent_thread,
+};
 
 use super::{
     advice::RecoveryAdvice,

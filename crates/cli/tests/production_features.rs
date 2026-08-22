@@ -343,8 +343,8 @@ mod resolve {
     #[test]
     #[timeout(15000)]
     fn resolve_schema_exposes_structured_regions_and_resolution_records() {
-        let schema = heddle(&["schemas", "resolve"], None).expect("resolve schema");
-        let schema: Value = serde_json::from_str(&schema).expect("resolve JSON Schema");
+        let schema = cli::cli::commands::schema_for_verb("resolve").expect("resolve schema");
+        let schema: Value = serde_json::from_str(&schema.to_string()).expect("resolve JSON Schema");
         let properties = &schema["properties"];
         assert_eq!(properties["conflicts"]["type"], "array", "{schema}");
         assert_eq!(properties["resolutions"]["type"], "array", "{schema}");

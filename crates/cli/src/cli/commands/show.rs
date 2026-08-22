@@ -2,9 +2,9 @@
 //! Show command.
 
 use anyhow::Result;
-use verbs::status::next_action::canonical_git_import_ref_command;
 use repo::{Repository, format_confidence};
 use serde::Serialize;
+use verbs::status::next_action::canonical_git_import_ref_command;
 
 use super::{
     action_line::{print_next_step, print_next_step_dim},

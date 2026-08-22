@@ -5,11 +5,6 @@ use std::time::Instant;
 
 use anyhow::Result;
 use chrono::Utc;
-use verbs::doctor_plan::{
-    DOCTOR_SECTION_TITLE, DOCTOR_STATE_INITIAL, DOCTOR_THREAD_DETACHED, changed_path_preview,
-    doctor_changes_summary, doctor_detached_health_status, doctor_thread_visibility_label,
-    doctor_workspace_summary,
-};
 use objects::object::Tree;
 use repo::{
     GitRemoteTrackingStatus, Repository, RepositoryOperationStatus, Thread, ThreadFreshness,
@@ -17,6 +12,11 @@ use repo::{
     is_synthetic_root,
 };
 use serde::Serialize;
+use verbs::doctor_plan::{
+    DOCTOR_SECTION_TITLE, DOCTOR_STATE_INITIAL, DOCTOR_THREAD_DETACHED, changed_path_preview,
+    doctor_changes_summary, doctor_detached_health_status, doctor_thread_visibility_label,
+    doctor_workspace_summary,
+};
 
 use super::{
     action_line::print_next_step,

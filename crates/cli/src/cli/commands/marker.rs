@@ -2,14 +2,14 @@
 //! Marker commands.
 
 use anyhow::{Result, anyhow};
+use objects::{object::MarkerName, store::ObjectStore};
+use repo::Repository;
+use serde::Serialize;
 use verbs::{
     MarkerDeleteSelector, MarkerDeleteSelectorError, marker_bulk_delete_message,
     marker_create_message, marker_delete_message, marker_list_filter_matches,
     marker_prefix_is_valid, plan_marker_delete_selector,
 };
-use objects::{object::MarkerName, store::ObjectStore};
-use repo::Repository;
-use serde::Serialize;
 
 use super::{advice::RecoveryAdvice, snapshot::ensure_current_state};
 use crate::{

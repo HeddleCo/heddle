@@ -10,8 +10,8 @@ use objects::{
     object::{Blob, ContentHash, State, StateId, Tree, TreeEntry},
     store::{InMemoryStore, ObjectStore},
     util::{
-        GitTreeNameClassification, LineDiffLimits, classify_git_tree_name, split_text_lines,
-        scratch_bytes_for_line_counts, visit_lcs_equal_runs,
+        GitTreeNameClassification, LineDiffLimits, classify_git_tree_name,
+        scratch_bytes_for_line_counts, split_text_lines, visit_lcs_equal_runs,
     },
 };
 

@@ -324,7 +324,6 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(&["remote", "show"], &["remote", "show", "origin"]),
     sample(&["resolve"], &["resolve"]),
-    sample(&["retro"], &["retro"]),
     sample(&["revert"], &["revert", "HEAD"]),
     sample(&["review", "show"], &["review", "show"]),
     sample(
@@ -345,8 +344,6 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(&["review", "next"], &["review", "next"]),
     sample(&["review", "health"], &["review", "health"]),
-    sample(&["run"], &["run", "true"]),
-    sample(&["schemas"], &["schemas"]),
     #[cfg(feature = "semantic")]
     sample(&["semantic", "diff"], &["semantic", "diff", "HEAD", "HEAD"]),
     #[cfg(feature = "semantic")]
@@ -486,7 +483,6 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(&["visibility", "show"], &["visibility", "show", "HEAD"]),
     sample(&["visibility", "list"], &["visibility", "list"]),
-    sample(&["try"], &["try", "true"]),
     sample(&["undo"], &["undo"]),
     sample(&["watch"], &["watch"]),
 ];
@@ -1727,7 +1723,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "review sign",
             "review next",
             "review health",
-            "schemas",
             // heddle#1271 exposes the stored symbol-index comparison through
             // a stable `semantic_diff` machine envelope.
             "semantic diff",

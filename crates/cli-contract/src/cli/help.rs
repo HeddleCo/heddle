@@ -587,9 +587,8 @@ default never switches under you, so scripts and humans see the same thing
 until a flag says otherwise.
 
 `--output json` emits the full machine contract: a stable `output_kind`
-discriminator, exit codes, and recovery templates. Schemas per verb:
-`heddle schemas <verb>`; the catalog of which commands emit what:
-`heddle help --output json`.
+discriminator, exit codes, and recovery templates. The per-verb schema
+catalog: `heddle help --output json`.
 
 `--output json-compact` emits only the decision-surface fields —
 `output_kind`, `status`/`coordination_status`, `blockers`, `next_action`,

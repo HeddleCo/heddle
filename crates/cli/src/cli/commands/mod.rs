@@ -10,7 +10,6 @@ mod agent_provenance;
 mod auto_capture;
 mod blame;
 mod checkpoint;
-mod child_env;
 mod ci;
 mod clone;
 mod collapse;
@@ -56,10 +55,8 @@ mod rebase;
 pub(crate) mod redact;
 mod remote;
 mod resolve;
-mod retro;
 mod revert;
 mod review;
-mod run_cmd;
 #[cfg(feature = "semantic")]
 mod semantic_cmd;
 #[cfg(feature = "semantic")]
@@ -78,7 +75,6 @@ mod thread_cmd;
 mod thread_landing;
 mod thread_shaping;
 mod timeline_cmd;
-mod try_cmd;
 mod undo;
 mod undo_apply;
 mod verify;
@@ -157,11 +153,9 @@ pub use ready_cmd::cmd_ready;
 pub use redact::cmd_redact;
 pub use remote::{cmd_pull, cmd_push, cmd_remote};
 pub use resolve::cmd_resolve;
-pub use retro::{RetroCommandOptions, cmd_retro};
 pub use revert::cmd_revert;
 pub use review::run as cmd_review;
-pub use run_cmd::cmd_run;
-pub use schemas::{cmd_schemas, documented_schema_verbs, schema_for_verb, schema_verbs};
+pub use schemas::{documented_schema_verbs, schema_for_verb, schema_verbs};
 #[cfg(feature = "semantic")]
 pub use semantic_cmd::cmd_semantic;
 pub use shell::cmd_shell;
@@ -174,7 +168,6 @@ pub use thread_shaping::{
     cmd_capture_split, cmd_thread_absorb, cmd_thread_move, cmd_thread_resolve,
 };
 pub use timeline_cmd::cmd_timeline;
-pub use try_cmd::cmd_try;
 pub use undo::{cmd_redo, cmd_undo, cmd_undo_recover};
 pub use verify::cmd_verify;
 pub use visibility::cmd_visibility;

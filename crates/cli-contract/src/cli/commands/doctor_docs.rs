@@ -21,12 +21,12 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use clap::{Command as ClapCommand, CommandFactory};
-use verbs::doctor_docs_plan::{
-    DocsInvocation, display_path, extract_invocations, looks_like_value,
-};
 use objects::worktree::should_ignore;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use verbs::doctor_docs_plan::{
+    DocsInvocation, display_path, extract_invocations, looks_like_value,
+};
 
 use super::{
     RecoveryAdvice,

@@ -7,11 +7,11 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow};
-use verbs::semantic_plan::{HotEventKindToken, human_hot_event_kind, map_hot_event_kind};
 use semantic::analysis::{
     HotEventKind, HotSpotKey, HotSpotKeyValue, HotSpotParams, analyze_hot_spots,
 };
 use serde::Serialize;
+use verbs::semantic_plan::{HotEventKindToken, human_hot_event_kind, map_hot_event_kind};
 
 use super::snapshot::ensure_current_state;
 use crate::{

@@ -3,6 +3,12 @@
 
 use anyhow::Result;
 use chrono::Utc;
+use objects::object::Tree;
+use repo::{Repository, ThreadFreshness, ThreadState};
+use serde::{
+    Serialize, Serializer,
+    ser::{Error as SerError, SerializeStruct},
+};
 use verbs::{
     ReadyDecisionInput, classify_ready_decision, has_integration_target,
     ready_freshness_summary as core_ready_freshness_summary,
@@ -12,12 +18,6 @@ use verbs::{
     ready_scoped_next_action as core_ready_scoped_next_action,
     ready_status_summary as core_ready_status_summary, ready_verification_preflight_blocks,
     status::next_action::non_empty_action,
-};
-use objects::object::Tree;
-use repo::{Repository, ThreadFreshness, ThreadState};
-use serde::{
-    Serialize, Serializer,
-    ser::{Error as SerError, SerializeStruct},
 };
 
 use super::{

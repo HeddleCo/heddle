@@ -4,10 +4,6 @@
 use std::{collections::BTreeMap, path::Path};
 
 use anyhow::Result;
-use verbs::{
-    annotation_status_label, audit_duplicate_count, audit_staleness_key, audit_target_key,
-    filter_annotations, suggestion_tier_human_label, suggestion_tier_token,
-};
 use objects::{
     object::{AnnotationStatus, ContextTarget},
     store::{ActorPresenceStore, ContextQueryEntry},
@@ -17,6 +13,10 @@ use repo::{
     staleness::{self, StalenessStatus},
 };
 use serde::Serialize;
+use verbs::{
+    annotation_status_label, audit_duplicate_count, audit_staleness_key, audit_target_key,
+    filter_annotations, suggestion_tier_human_label, suggestion_tier_token,
+};
 
 use super::{
     AnnotationHistoryOutput, AnnotationOutput, ContextListRow, RevisionOutput,

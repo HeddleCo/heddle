@@ -10,20 +10,10 @@ on.
 Schemas in this document are registered at runtime by
 `crates/cli-contract/src/cli/commands/schemas.rs`. `init` registers the
 real `InitOutput` type (no hand-written `InitSchema` mirror); remaining
-verbs still use a hand-written mirror. Generate the canonical JSON
-Schema for any verb with:
+verbs still use a hand-written mirror. The registered verb list is the
+`schema_verbs` field of the command catalog:
 
-    heddle schemas                    # list registered schema verbs
-    heddle schemas <verb>             # e.g. heddle schemas status
-    heddle schemas log --reflog       # subcommands taking --flags work too
-    heddle schemas agent ready --output text
-    heddle schemas status
-
-(Indented as plain text rather than a fenced block so the
-`heddle doctor docs` flag-checker doesn't flag `--reflog` as
-unknown — the schemas verb takes its argument as
-`trailing_var_arg`. Schema output is always JSON; trailing global
-flags such as `--output text` are ignored for lookup.)
+    heddle help --output json
 
 CI runs `heddle doctor schemas` on every PR and validates each literal
 JSON sample below against the registered schema. Drift — a sample
@@ -103,7 +93,7 @@ specifiers. Pass any of them — they all resolve to the same change ID:
 
 Verbs covered: `show`, `diff`, `revert`, `query --attribution --state`,
 `log --since`, `review show`,
-`review sign`, `discuss open|list|resolve --state`, `retro --since`.
+`review sign`, `discuss open|list|resolve --state`.
 The `heddle log --output json` `change_id` field is the canonical short form
 that downstream verbs consume.
 
@@ -3055,28 +3045,6 @@ Sync emits:
 
 ---
 
-## `heddle schemas --output json`
-
-List every runtime schema verb and the subset enforced by
-`heddle doctor schemas`.
-
-```json
-{
-  "output_kind": "schemas",
-  "schema_verbs": ["status", "verify", "try"],
-  "documented_schema_verbs": ["status", "verify", "try"]
-}
-```
-
-### Fields
-
-| Field | Type | Optionality | Semantics |
-|-------|------|-------------|-----------|
-| `schema_verbs` | array<string> | required | Every verb with a runtime JSON Schema mirror. |
-| `documented_schema_verbs` | array<string> | required | Schema verbs whose samples are checked against this document. |
-
----
-
 ## `heddle doctor --output json`
 
 Doctor is the comprehensive health report; it includes the shared
@@ -3172,35 +3140,35 @@ as one; no `help advanced`).
       "redact purge list",
       "visibility set"
     ],
-    "advanced_scope_json_commands_total": 112,
+    "advanced_scope_json_commands_total": 110,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 39,
-    "advanced_scope_mutating_commands_total": 64,
+    "advanced_scope_mutating_commands_total": 63,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 21,
-    "catalog_commands_total": 192,
-    "catalog_mutating_commands_total": 93,
-    "json_commands_total": 151,
+    "catalog_commands_total": 188,
+    "catalog_mutating_commands_total": 91,
+    "json_commands_total": 148,
     "json_commands_with_accepted_opaque_schema": 39,
-    "json_commands_with_schema": 112,
+    "json_commands_with_schema": 109,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 88,
+    "json_mutating_commands_total": 87,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 88,
+    "mutating_commands_total": 87,
     "mutating_commands_with_accepted_opaque_schema": 21,
-    "mutating_commands_with_schema": 67,
+    "mutating_commands_with_schema": 66,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 39,
     "status": "available",
-    "summary": "192 command(s), 151 JSON command(s), 93 mutating command(s), 88 mutating JSON command(s); verified everyday/agent machine surface has 39 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+    "summary": "188 command(s), 148 JSON command(s), 91 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
     "undocumented_schema_verbs_total": 0,
     "verified_scope": "everyday_and_agent",
     "verified_scope_accepted_opaque_schema_examples": [],
-    "verified_scope_json_commands_total": 39,
+    "verified_scope_json_commands_total": 38,
     "verified_scope_json_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_json_commands_with_schema": 39,
+    "verified_scope_json_commands_with_schema": 38,
     "verified_scope_json_commands_without_schema": 0,
     "verified_scope_missing_schema_examples": [],
     "verified_scope_mutating_commands_total": 24,
@@ -3229,7 +3197,7 @@ as one; no `help advanced`).
     "try"
   ],
   "status": "available",
-  "summary": "192 command(s), 151 JSON command(s), 93 mutating command(s), 88 mutating JSON command(s); verified everyday/agent machine surface has 39 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+  "summary": "188 command(s), 148 JSON command(s), 91 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -3252,32 +3220,6 @@ as one; no `help advanced`).
   "confidence": 0.91,
   "actor": {"provider": "openai", "model": "gpt-5"},
   "id": 12
-}
-```
-
----
-
-## `heddle try --output json`
-
-Run a command in an ephemeral isolated thread. A successful run leaves
-the thread ready for merge unless `--auto-merge` lands and drops it.
-Every action field is a single parseable command; discard guidance
-lives in `recovery_commands`.
-
-```json
-{
-  "status": "completed",
-  "action": "try",
-  "message": "`cargo test` succeeded; thread 'try-1234abcd' ready (state hc-sqr398dvx9ay). Run `heddle ready --thread try-1234abcd` to land.",
-  "thread": "try-1234abcd",
-  "thread_dropped": false,
-  "exit_code": 0,
-  "duration_ms": 1420,
-  "captured_state": "hc-sqr398dvx9ay",
-  "merge_state": null,
-  "next_action": "heddle ready --thread try-1234abcd",
-  "recommended_action": "heddle ready --thread try-1234abcd",
-  "recovery_commands": ["heddle thread drop try-1234abcd"]
 }
 ```
 
@@ -3581,14 +3523,6 @@ state, source blob (or `null` when absent), and BLAKE3 hunk hash. `resolutions`
 records the stable region id, resolution mode (`ours`, `theirs`, `edit`, or
 `auto`), and complete human/agent attribution written to the operation log.
 
-`heddle retro --output json` emits the same shape with bounded session data;
-`timeline_steps` is `[]` unless expanded with `--full`. `heddle retro
---full --output json` emits expanded timeline summaries:
-
-```json
-{"since": "hc-base123", "until": "hc-head456", "duration_secs": 3600, "states_captured": [{"change_id": "hc-head456", "intent": "capture parser fix", "confidence": 0.91, "agent": "codex/gpt-5", "principal": "A. Engineer <a@example.com>", "timestamp": "2026-01-01T00:00:00Z"}], "agents_active": [{"session_id": "session-123", "provider": "codex", "model": "gpt-5", "status": "active", "started_at": "2026-01-01T00:00:00Z", "completed_at": null, "tokens": {"input": 1200, "output": 800, "reasoning": 300, "tool_calls": 12}}], "agent_tasks": [{"task_id": "task-parser-fast", "title": "Tighten parser validation", "status": "in_progress", "target_thread": "feature/parser-fast", "updated_at": "2026-01-01T00:00:00Z", "completed_at": null, "coordination_discussion_id": null}], "timeline_steps": [{"thread": "feature/parser-fast", "step_id": "tls-1", "branch_id": "tlb-main", "parent_step_id": null, "tool_name": "edit", "tool_status": "succeeded", "changed": true, "payload_summary": "Edit parser validation", "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "before_state": "hc-base123", "after_state": "hc-head456", "capture_state": "hc-head456", "started_at_ms": 1770000000000, "finished_at_ms": 1770000001000}], "markers_created": [{"name": "verified-parser", "state": "hc-head456", "timestamp": "2026-01-01T00:00:00Z"}], "context_annotations": [{"path": "src/lib.rs", "scope": "file", "kind": "rationale", "content_excerpt": "Parser accepts the new token form.", "attribution": "A. Engineer <a@example.com>", "created_at": "2026-01-01T00:00:00Z"}], "verify_signals": [{"kind": "test_passed", "label": "verified: cargo test", "timestamp": "2026-01-01T00:00:00Z"}], "merges": [{"description": "Collapsed feature/parser", "timestamp": "2026-01-01T00:00:00Z"}], "undos": [{"description": "Undo capture", "timestamp": "2026-01-01T00:00:00Z"}]}
-```
-
 `heddle semantic hot --output json` emits:
 
 ```json
@@ -3620,10 +3554,10 @@ discipline; see the corresponding handler in `crates/cli/src/cli/commands/`:
 `heddle discuss`, `heddle doctor docs`,
 `heddle maintenance fsck`, `heddle init`, `heddle integration`,
 `heddle maintenance`, `heddle ready`,
-`heddle remote`, `heddle resolve`, `heddle retro`,
+`heddle remote`, `heddle resolve`,
 `heddle agent provenance`, `heddle capture`,
 `heddle thread show/start`,
-`heddle try`, `heddle undo`, `heddle watch`.
+`heddle undo`, `heddle watch`.
 
 Each of these:
 

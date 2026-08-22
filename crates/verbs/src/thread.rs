@@ -643,8 +643,7 @@ fn enrich_current_summary_with_dirty_paths(
                 Some(state) => repo.require_tree_for_worktree_status(&state.tree)?,
                 None => Tree::new(),
             };
-            let options =
-                repo::resolve_worktree_status_options(None, Some(repo.config()));
+            let options = repo::resolve_worktree_status_options(None, Some(repo.config()));
             repo.compare_worktree_cached_with_options(&baseline, &options)?
         }
     };

@@ -3,17 +3,17 @@
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use verbs::{
-    ContextContentPlanError, ContextRmPlanError, count_active_annotations, next_annotation_tags,
-    plan_annotation_content_source, plan_context_rm, supersede_reuses_original_scope,
-    supersede_reuses_original_target,
-};
 use objects::{
     lock::RepositoryLockExt,
     object::{Annotation, ContextBlob},
 };
 use repo::compute_rewrite_pct;
 use serde::Serialize;
+use verbs::{
+    ContextContentPlanError, ContextRmPlanError, count_active_annotations, next_annotation_tags,
+    plan_annotation_content_source, plan_context_rm, supersede_reuses_original_scope,
+    supersede_reuses_original_target,
+};
 
 use super::{
     compute_source_hash, context_root_for_state, parse_kind, parse_scope, put_context_attachment,

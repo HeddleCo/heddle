@@ -5,14 +5,14 @@
 //! the `mod tests` body moved into this sibling file unchanged (de-indented
 //! one level). It referenced the parent via `super::{...}` inline and continues
 //! to do so as a sibling module -- pure code movement, no logic change.
-use verbs::status::next_action::{
-    canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
-    remote_tracking_next_action,
-};
 use objects::object::ThreadName;
 use refs::Head;
 use repo::{GitRemoteTrackingStatus, Repository};
 use tempfile::TempDir;
+use verbs::status::next_action::{
+    canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
+    remote_tracking_next_action,
+};
 
 use super::{
     RepositoryVerificationState, action_template, detached_git_head_mutation_advice,

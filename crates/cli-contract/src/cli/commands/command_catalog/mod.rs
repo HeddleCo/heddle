@@ -4,13 +4,13 @@
 use std::sync::OnceLock;
 
 use clap::{ArgAction, CommandFactory};
+use schemars::JsonSchema;
+use serde::Serialize;
 pub use verbs::ActionTemplate;
 use verbs::{
     DiffReport, FsckReport, MachineOutputKind, QueryReport, ReportContract as CoreReportContract,
     ResolveReport, StatusReport, VerifyReport,
 };
-use schemars::JsonSchema;
-use serde::Serialize;
 
 #[cfg(feature = "semantic")]
 use crate::cli::SemanticCommands;
@@ -564,12 +564,6 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
-        "heddle run --thread <name> -- <cmd...>",
-        &["heddle", "run", "--thread", "<thread>", "--", "<cmd...>"],
-        &["thread", "command"],
-        false,
-    ),
-    (
         "heddle thread switch <name>",
         &["heddle", "thread", "switch", "<thread>"],
         &["thread"],
@@ -944,11 +938,6 @@ const CI_RUN: CommandContract = CommandContract {
     supports_json: true,
     json_kind: "json",
     ..EXTERNAL_WORKTREE_COMMAND
-};
-
-const EXTERNAL_WORKTREE_MUTATION: CommandContract = CommandContract {
-    external_command: true,
-    ..WORKTREE_MUTATION
 };
 
 const fn documented_schemas(
@@ -2496,10 +2485,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["retro"],
-        category(documented_schemas(READ_JSON, &["retro"]), "states"),
-    ),
-    entry(
         &["revert"],
         category(
             json_discriminators(
@@ -2552,21 +2537,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 "output_kind",
                 "review_health",
             )],
-        ),
-    ),
-    entry(&["run"], surface(EXTERNAL_WORKTREE_COMMAND, "automation")),
-    entry(
-        &["schemas"],
-        surface(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["schemas"]),
-                &[json_discriminator(
-                    Some("schemas"),
-                    "output_kind",
-                    "schemas",
-                )],
-            ),
-            "automation",
         ),
     ),
     entry(&["semantic"], category(GROUP, "states")),
@@ -3020,13 +2990,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 "output_kind",
                 "visibility_list",
             )],
-        ),
-    ),
-    entry(
-        &["try"],
-        category(
-            documented_schemas(EXTERNAL_WORKTREE_MUTATION, &["try"]),
-            "threads",
         ),
     ),
     entry(
@@ -4566,10 +4529,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             Some(DoctorCommands::Docs(_)) => vec!["doctor", "docs"],
             Some(DoctorCommands::Schemas(_)) => vec!["doctor", "schemas"],
         },
-        Commands::Schemas { .. } => vec!["schemas"],
         Commands::Start(_) => vec!["start"],
-        Commands::Try(_) => vec!["try"],
-        Commands::Run(_) => vec!["run"],
         Commands::Ci { command } => match command {
             heddle_cli_args::CiCommands::Run(_) => vec!["ci", "run"],
         },
@@ -4592,7 +4552,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Commit(_) => vec!["commit"],
         Commands::Log(_) => vec!["log"],
         Commands::Show { .. } => vec!["show"],
-        Commands::Retro(_) => vec!["retro"],
         Commands::Diff(_) => vec!["diff"],
         Commands::Discuss { command } => match command {
             DiscussCommands::Open(_) => vec!["discuss", "open"],

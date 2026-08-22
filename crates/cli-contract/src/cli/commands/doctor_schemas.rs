@@ -23,6 +23,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use serde::Serialize;
+use serde_json::Value;
+use sley::Repository as SleyRepository;
 use verbs::doctor_schemas_plan::{
     DocSample, SchemaCoverageBlockingFacts, collect_coverage_field_drifts,
     coverage_has_no_blocking_schema_gaps as coverage_gaps_clean, doctor_schemas_json_sample_span,
@@ -30,9 +33,6 @@ use verbs::doctor_schemas_plan::{
     extract_samples, sample_matches_verb_with_hints, schema_allows_additional_properties,
     schema_property_keys, top_level_keys,
 };
-use serde::Serialize;
-use serde_json::Value;
-use sley::Repository as SleyRepository;
 
 use super::{
     advice::RecoveryAdvice,
@@ -506,7 +506,7 @@ fn doctor_schemas_doc_missing_advice(repo_root: &Path) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "doctor_schemas_source_docs_missing",
         "Cannot run schema docs drift check outside a Heddle source checkout",
-        "Run this from the Heddle source checkout, pass `--repo <source-root>`, or use `heddle help --output json` and `heddle schemas status` for installed CLI introspection.",
+        "Run this from the Heddle source checkout, pass `--repo <source-root>`, or use `heddle help --output json` for installed CLI introspection.",
         format!(
             "docs/json-schemas.md was not found under {}",
             repo_root.display()
@@ -516,7 +516,6 @@ fn doctor_schemas_doc_missing_advice(repo_root: &Path) -> RecoveryAdvice {
         "heddle help --output json",
         vec![
             "heddle help --output json".to_string(),
-            "heddle schemas status".to_string(),
             "heddle doctor schemas --output json".to_string(),
         ],
     )

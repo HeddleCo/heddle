@@ -129,15 +129,6 @@ fn adopt_help_does_not_claim_dirty_git_worktree_becomes_clean() {
 }
 
 #[test]
-fn automation_discovery_aliases_accept_common_guesses() {
-    let temp = TempDir::new().unwrap();
-    let schema = heddle(&["--output", "json", "schema", "status"], Some(temp.path()))
-        .expect("schema alias should render command schema");
-    let parsed: Value = serde_json::from_str(&schema).expect("schema alias emits JSON");
-    assert_eq!(parsed["title"], "StatusSchema");
-}
-
-#[test]
 fn thread_drop_does_not_recommend_deleted_thread() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
@@ -1096,29 +1087,6 @@ fn command_catalog_exposes_agent_metadata_for_options() {
     assert_eq!(start["writes_worktree"], true);
     assert_eq!(start["side_effect_class"], "worktree_mutation");
 
-    let run = commands
-        .iter()
-        .find(|entry| entry["display"] == "run")
-        .expect("run should be cataloged");
-    assert_eq!(run["external_command"], true);
-    assert_eq!(run["may_write_worktree"], true);
-    assert_eq!(run["writes_worktree"], false);
-    assert_eq!(run["writes_heddle_refs"], false);
-    assert_eq!(run["side_effect_class"], "external_command");
-    assert_eq!(
-        run["side_effects"],
-        serde_json::json!(["may_write_worktree", "external_command"])
-    );
-
-    let try_entry = commands
-        .iter()
-        .find(|entry| entry["display"] == "try")
-        .expect("try should be cataloged");
-    assert_eq!(try_entry["external_command"], true);
-    assert_eq!(try_entry["writes_worktree"], true);
-    assert_eq!(try_entry["writes_heddle_refs"], true);
-    assert_eq!(try_entry["side_effect_class"], "worktree_mutation");
-
     let watch = commands
         .iter()
         .find(|entry| entry["display"] == "watch")
@@ -1162,7 +1130,7 @@ fn diff_json_output_matches_registered_schema_top_level() {
         "diff JSON should expose runtime state fields declared by the schema: {diff}"
     );
 
-    let schema = json_value(temp.path(), &["schemas", "diff", "--output", "json"]);
+    let schema = heddle_schema("diff");
     let properties = schema["properties"]
         .as_object()
         .expect("diff schema should expose properties");
@@ -1212,42 +1180,6 @@ fn diff_text_summarizes_binary_without_raw_control_bytes() {
             .all(|byte| !byte.is_ascii_control() || matches!(byte, b'\n' | b'\t')),
         "binary diff text should not contain terminal-hostile control bytes: {stdout:?}"
     );
-}
-
-#[test]
-fn schemas_no_arg_lists_verbs_and_ignores_trailing_global_flags() {
-    let listing = parse_exactly_one_json_value(
-        &heddle(&["schemas"], None).expect("schemas without a verb should list schema verbs"),
-    )
-    .expect("schema listing should be one JSON value");
-    assert!(
-        listing["schema_verbs"]
-            .as_array()
-            .is_some_and(|verbs| verbs.iter().any(|verb| verb == "verify")),
-        "schema listing should include registered verbs: {listing}"
-    );
-
-    let direct = parse_exactly_one_json_value(
-        &heddle(&["schemas", "log", "--reflog"], None)
-            .expect("reflog schema should be discoverable"),
-    )
-    .expect("reflog schema should parse");
-    let trailing = parse_exactly_one_json_value(
-        &heddle(
-            &[
-                "schemas",
-                "log",
-                "--reflog",
-                "--output",
-                "text",
-                "--verbose",
-            ],
-            None,
-        )
-        .expect("trailing global flags should not become part of the schema verb"),
-    )
-    .expect("reflog schema with trailing global flags should parse");
-    assert_eq!(trailing["properties"], direct["properties"]);
 }
 
 #[test]
@@ -2433,7 +2365,6 @@ fn core_loop_schemas_are_discoverable() {
         "remote add",
         "remote remove",
         "remote set-default",
-        "schemas",
         "pull",
         "push",
         "revert",
@@ -2447,15 +2378,10 @@ fn core_loop_schemas_are_discoverable() {
         "thread refresh",
         "thread drop",
         "thread show",
-        "try",
         "undo",
         "watch",
     ] {
-        let mut args = vec!["schemas"];
-        args.extend(verb.split_whitespace());
-        let json = heddle(&args, None).unwrap_or_else(|err| panic!("schema for {verb}: {err}"));
-        let parsed: Value = serde_json::from_str(&json)
-            .unwrap_or_else(|err| panic!("schema for {verb} should parse: {err}: {json}"));
+        let parsed = heddle_schema(verb);
         assert!(
             parsed.get("title").is_some(),
             "schema for {verb} should have a title: {parsed}"
@@ -2637,7 +2563,6 @@ fn core_git_overlay_json_surfaces_emit_one_machine_value() {
 
     for (label, args) in [
         ("help catalog", vec!["help", "--output", "json"]),
-        ("schemas status", vec!["schemas", "status"]),
         ("status", vec!["status", "--output", "json"]),
         ("doctor", vec!["doctor", "--output", "json"]),
         ("doctor", vec!["doctor", "--output", "json"]),
@@ -3648,11 +3573,7 @@ fn sibling_checkout_path(repo: &std::path::Path, suffix: &str) -> std::path::Pat
 }
 
 fn assert_schema_declares_runtime_top_level(verb: &[&str], runtime: &Value) {
-    let mut args = vec!["schemas"];
-    args.extend(verb.iter().copied());
-    let schema = heddle(&args, None).unwrap_or_else(|err| panic!("schema for {verb:?}: {err}"));
-    let schema: Value = serde_json::from_str(&schema)
-        .unwrap_or_else(|err| panic!("schema for {verb:?} should parse: {err}: {schema}"));
+    let schema = heddle_schema(&verb.join(" "));
     let properties = schema["properties"]
         .as_object()
         .unwrap_or_else(|| panic!("schema for {verb:?} should expose properties: {schema}"));
@@ -7101,16 +7022,6 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         !promote_help.contains("heavy checkout"),
         "thread promote help should use product-facing workspace language: {promote_help}"
     );
-
-    let try_help = heddle_help(&["try", "--help"]);
-    assert!(
-        try_help.contains("Defaults to `materialized`")
-            && try_help.contains("auto")
-            && try_help.contains("virtualized")
-            && try_help.contains("solid")
-            && !try_help.contains("Defaults to `heavy`"),
-        "try help should use current workspace mode terms: {try_help}"
-    );
 }
 
 #[test]
@@ -9273,10 +9184,9 @@ fn fsck_on_corrupt_ref_emits_integrity_hint_in_text_and_json() {
 #[test]
 fn error_envelope_schema_is_registered_and_matches_runtime_shape() {
     // The error envelope is the stderr contract for JSON-mode failures.
-    // `heddle schemas error` returns its mirror schema; the fields it
-    // declares MUST match what `print_error_with_hint` actually emits.
-    let schema = heddle(&["schemas", "error"], None).expect("heddle schemas error");
-    let parsed: serde_json::Value = serde_json::from_str(&schema).expect("schema parses");
+    // The registered mirror schema declares the fields; they MUST match
+    // what `print_error_with_hint` actually emits.
+    let parsed = heddle_schema("error");
     let props = parsed["properties"]
         .as_object()
         .expect("schema has properties");
@@ -9298,7 +9208,7 @@ fn error_envelope_schema_is_registered_and_matches_runtime_shape() {
     ] {
         assert!(
             props.contains_key(field),
-            "ErrorEnvelopeSchema must declare `{field}`: {schema}"
+            "ErrorEnvelopeSchema must declare `{field}`: {parsed}"
         );
     }
     let required: Vec<&str> = parsed["required"]
@@ -9322,7 +9232,7 @@ fn error_envelope_schema_is_registered_and_matches_runtime_shape() {
     ] {
         assert!(
             required.contains(&field),
-            "`{field}` must be required: {schema}"
+            "`{field}` must be required: {parsed}"
         );
     }
 
@@ -9379,48 +9289,6 @@ fn error_envelope_schema_is_registered_and_matches_runtime_shape() {
     assert_eq!(envelope["op_id"], op_id);
     assert!(envelope["idempotency_status"].as_str().is_some());
     assert_eq!(envelope["replayed"], false);
-}
-
-#[test]
-fn generic_json_runtime_errors_keep_nonempty_machine_envelope() {
-    let output = heddle_output(&["--output", "json", "schemas", "not-a-schema"], None)
-        .expect("invoke missing schema");
-    assert!(!output.status.success(), "missing schema should fail");
-    assert!(
-        output.stdout.is_empty(),
-        "JSON failure must not pollute stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: serde_json::Value = serde_json::from_str(stderr.trim())
-        .unwrap_or_else(|err| panic!("stderr should be JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "schema_not_registered");
-    assert!(
-        envelope["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("No JSON schema is registered")),
-        "runtime error envelope should preserve the original error: {envelope}"
-    );
-    assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| !hint.trim().is_empty()),
-        "runtime error envelope must carry a non-empty hint: {envelope}"
-    );
-    assert_eq!(
-        envelope["primary_command_template"]["argv_template"],
-        heddle_argv_json(["schemas"]),
-        "schema lookup failures should recover through schema discovery, not status: {envelope}"
-    );
-    assert!(
-        envelope["recovery_action_templates"]
-            .as_array()
-            .is_some_and(|templates| templates.iter().any(|template| {
-                template["argv_template"] == heddle_argv_json(["help", "--output", "json"])
-            })),
-        "schema lookup failures should point agents at the command catalog: {envelope}"
-    );
 }
 
 #[test]
@@ -9597,12 +9465,10 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         );
     }
     for verb in [
-        "schemas",
         "doctor",
         "doctor docs",
         "doctor schemas",
         "watch",
-        "try",
         "query --attribution",
         "maintenance fsck",
         "resolve",
@@ -9885,9 +9751,8 @@ fn doctor_schemas_outside_source_tree_points_agents_to_catalog_surfaces() {
         envelope["hint"]
             .as_str()
             .is_some_and(|hint| hint.contains("source checkout")
-                && hint.contains("heddle help --output json")
-                && hint.contains("heddle schemas status")),
-        "installed-agent hint should point to catalog/schema surfaces, not repo init: {envelope}"
+                && hint.contains("heddle help --output json")),
+        "installed-agent hint should point to catalog surfaces, not repo init: {envelope}"
     );
     assert_eq!(envelope["primary_command"], "heddle help --output json");
     assert!(
@@ -10534,23 +10399,20 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
 #[test]
 fn import_git_schema_declares_already_in_sync() {
     // heddle#147 added `already_in_sync: bool` to the JSON output of
-    // `bridge git import`. The schema contract surfaced via
-    // `heddle schemas "bridge git import"` must list the field, or
-    // automation that validates against the schema will reject the
-    // new payload shape.
-    let schema = heddle(&["schemas", "bridge git import"], None)
-        .expect("heddle schemas \"bridge git import\"");
-    let parsed: Value = serde_json::from_str(&schema).expect("schema parses");
+    // `bridge git import`. The registered schema contract must list the
+    // field, or automation that validates against the schema will reject
+    // the new payload shape.
+    let parsed = heddle_schema("bridge git import");
     let props = parsed["properties"]
         .as_object()
         .expect("schema has properties");
     assert!(
         props.contains_key("already_in_sync"),
-        "GitProjectionImportSchema must declare `already_in_sync`: {schema}"
+        "GitProjectionImportSchema must declare `already_in_sync`: {parsed}"
     );
     assert_eq!(
         props["already_in_sync"]["type"], "boolean",
-        "`already_in_sync` must be a boolean: {schema}"
+        "`already_in_sync` must be a boolean: {parsed}"
     );
 }
 

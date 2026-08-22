@@ -19,7 +19,6 @@ use verbs::{
     plan_pull, pull_should_materialize, show_plain_git_remote, show_remote,
 };
 // Re-export under the historical crate-local names for sibling modules.
-pub(crate) use verbs::{resolve_default_remote_name, resolved_default_remote_name};
 use heddle_git_projection::credential::EmbeddingSafeCredentialProvider;
 use objects::{
     object::{StateId, ThreadName, Tree},
@@ -35,6 +34,7 @@ use sley::{
         FetchOptions, PackGenerationProgress, ProgressSink as SleyProgressSink, TransferProgress,
     },
 };
+pub(crate) use verbs::{resolve_default_remote_name, resolved_default_remote_name};
 
 use super::super::{
     action_line::print_next,

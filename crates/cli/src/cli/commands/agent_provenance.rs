@@ -2,10 +2,10 @@
 //! Provider, model, and policy provenance commands.
 
 use anyhow::Result;
-use verbs::session_list_status;
 use objects::object::{Session, SessionSegment};
 use repo::SessionManager;
 use serde::Serialize;
+use verbs::session_list_status;
 
 use super::{
     advice::RecoveryAdvice,

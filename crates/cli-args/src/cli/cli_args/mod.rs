@@ -28,7 +28,6 @@ mod commands_visibility;
 mod output_mode;
 
 pub use cli_base::{Cli, should_output_json};
-pub use config::OutputMode;
 pub use command_suggestions::{format_unrecognized_suggestion, suggested_command};
 pub use commands_agent::{
     AgentCommands, AgentFanoutCommands, AgentProvenanceCommands, AgentTaskCommands,
@@ -43,13 +42,13 @@ pub use commands_args::{
     AgentTaskListArgs, AgentTaskShowArgs, AgentTaskStatusArg, AgentTaskUpdateArgs, CloneArgs,
     CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs,
     DoctorSchemasArgs, ExpandArgs, INIT_VERB, InitArgs, LandArgs, LogArgs, PullArgs, PushArgs,
-    ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SnapshotArgs, SyncArgs,
-    ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs,
-    ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs,
-    ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs,
-    TimelineArgs, TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs,
-    TimelineRecordStartArgs, TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs,
-    TimelineStatusArgs, TimelineTargetArgs, TryArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
+    ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs, ThreadAbsorbArgs,
+    ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs, ThreadCheckMergeArgs,
+    ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs,
+    ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs, TimelineArgs,
+    TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs,
+    TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs,
+    TimelineTargetArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
 };
 pub use commands_ci::{CiCommands, CiRunArgs};
 #[cfg(feature = "client")]
@@ -91,4 +90,5 @@ pub use commands_visibility::{
     VisibilityCommands, VisibilityListArgs, VisibilityPromoteArgs, VisibilitySetArgs,
     VisibilityShowArgs, VisibilityTierArg,
 };
+pub use config::OutputMode;
 pub use output_mode::CliOutputMode;

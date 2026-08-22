@@ -9,6 +9,10 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use objects::fs_atomic::write_file_atomic;
+use repo::Repository;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use verbs::integration_plan::{
     HarnessSelectionPlan, IntegrationHarnessError, IntegrationHarnessScopeError,
     IntegrationScopeError, IntegrationScopeKind, PathModeKind, classify_opencode_plugin_path_mode,
@@ -20,10 +24,6 @@ use verbs::integration_plan::{
     uninstalled_message, upgraded_message, validate_harness_scope as plan_validate_harness_scope,
     validate_install_plan as plan_validate_install_plan,
 };
-use objects::fs_atomic::write_file_atomic;
-use repo::Repository;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use super::advice::RecoveryAdvice;
 use crate::{
@@ -460,9 +460,7 @@ fn detect_path_mode(harness: &str, entry: &InstalledIntegration) -> Option<PathM
 
 /// CLI wrapper: pure classifier lives in `verbs::integration_plan`.
 fn path_mode_from_command(cmd: &str) -> PathMode {
-    PathMode::from(verbs::integration_plan::classify_command_path_mode(
-        cmd,
-    ))
+    PathMode::from(verbs::integration_plan::classify_command_path_mode(cmd))
 }
 
 /// Test/compat alias used by unit tests that call the historical name.

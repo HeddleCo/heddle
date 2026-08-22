@@ -4,14 +4,14 @@
 use std::fs;
 
 use anyhow::{Result, anyhow};
+use objects::object::{Attribution, ChangeLineage, ChangeLineageKind, FileChangeSet, Tree};
+use repo::{DiffKind, Repository};
+use serde::Serialize;
 use verbs::{
     RevertMessageMode, RevertOutcome, RevertPlan, RevertSuccessFacts,
     default_revert_commit_message, no_changes_to_revert_kind, no_changes_to_revert_summary,
     plan_revert, revert_inspect_command, revert_success_message,
 };
-use objects::object::{Attribution, ChangeLineage, ChangeLineageKind, FileChangeSet, Tree};
-use repo::{DiffKind, Repository};
-use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,

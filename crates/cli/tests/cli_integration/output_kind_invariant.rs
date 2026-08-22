@@ -57,7 +57,6 @@ const SWEPT: &[&str] = &[
     "thread show",
     "doctor docs",
     "doctor schemas",
-    "schemas",
     "bridge git import",
     "bridge git export",
     "sync git",
@@ -210,7 +209,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "integration relay",
     "integration uninstall",
     "integration upgrade",
-    "retro",
     "semantic hot",
     "session end",
     "session list",
@@ -224,7 +222,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "thread check-merge",
     "thread current",
     "thread move",
-    "try",
     "watch",
 ];
 

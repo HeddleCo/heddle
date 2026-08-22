@@ -4,11 +4,11 @@
 use std::{path::Path, time::Instant};
 
 use anyhow::{Result, anyhow};
+use repo::{Repository, discover_heddle_root};
 use verbs::{
     MachineContractInput, RepositorySetupGuidance, VerificationCheck, VerifyOptions, VerifyReport,
     repository_setup_guidance, verify as core_verify,
 };
-use repo::{Repository, discover_heddle_root};
 
 use super::{RecoveryAdvice, action_line::print_next, next_action::write_projected_command_json};
 use crate::{
