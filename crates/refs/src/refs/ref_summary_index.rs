@@ -13,7 +13,7 @@ use super::{RefManager, packed_refs::PackedRefs, parse_state_id_text, refs_stora
 
 const REF_SUMMARY_VERSION: &str = "heddle-ref-summary-v2";
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct RefSummaryIndexInspection {
     pub present: bool,
     pub valid: bool,

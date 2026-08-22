@@ -85,7 +85,9 @@ static METRIC_RECOVER_QUARANTINED: AtomicU64 = AtomicU64::new(0);
 ///
 /// Hosted / maintenance adapters scrape this; it is not a full product metrics
 /// pipeline, but it is the stable hook surface for recover/install observability.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 pub struct PackInstallMetricsSnapshot {
     pub installs_ok: u64,
     pub installs_err: u64,
