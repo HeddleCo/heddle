@@ -17,11 +17,12 @@
 //! `Discussion.opened_against_state`.
 
 use api::heddle::api::v1alpha1::{
-    AppendTurnRequest, Discussion as ProtoDiscussion, DiscussionStatusFilter,
-    ListDiscussionsByStateRequest, OpenDiscussionRequest, PathSymbolRef, StateId as ProtoStateId,
-    list_discussions_response,
+    AppendTurnRequest, ContextAnnotationKind, Discussion as ProtoDiscussion,
+    DiscussionStatusFilter, ListDiscussionsByStateRequest, OpenDiscussionRequest, PathSymbolRef,
+    ResolveDiscussionRequest, StateId as ProtoStateId, list_discussions_response,
+    resolve_discussion_request,
 };
-use objects::object::{ChangeId, StateId};
+use objects::object::{AnnotationKind, ChangeId, StateId};
 use wire::ProtocolError;
 
 use super::{HostedClient, helpers::hosted_to_protocol_error};
@@ -46,6 +47,7 @@ pub struct HostedDiscussion {
     /// Genuine 32-byte anchor `StateId` echoed by the server, when present.
     pub opened_against_state: Option<StateId>,
     pub visibility: String,
+    pub thread_ref: Option<String>,
     pub turns: Vec<HostedDiscussionTurn>,
 }
 
@@ -59,6 +61,7 @@ fn decode_discussion(proto: ProtoDiscussion) -> HostedDiscussion {
             .opened_against_state
             .and_then(|state| StateId::try_from_slice(&state.value).ok()),
         visibility: proto.visibility,
+        thread_ref: (!proto.thread_ref.is_empty()).then_some(proto.thread_ref),
         turns: proto
             .turns
             .into_iter()
@@ -106,24 +109,49 @@ impl HostedClient {
         symbol: &str,
         body: &str,
         visibility: &str,
+        thread_ref: Option<&str>,
         client_operation_id: String,
     ) -> Result<HostedDiscussion, ProtocolError> {
-        let request = OpenDiscussionRequest {
-            repo_path: super::helpers::repository_ref(repo_path),
-            state_id: change_id_state_field(change_id),
-            anchor: Some(PathSymbolRef {
-                file: file.to_string(),
-                symbol: symbol.to_string(),
-            }),
-            body: body.to_string(),
-            visibility: visibility.to_string(),
-            thread_ref: String::new(),
+        let request = open_discussion_request(
+            repo_path,
+            change_id,
+            file,
+            symbol,
+            body,
+            visibility,
+            thread_ref,
             client_operation_id,
-            thread_id: String::new(),
-        };
+        );
         let response = self
             .routes()
             .open_discussion(&request)
+            .await
+            .map_err(hosted_to_protocol_error)?;
+        Ok(decode_discussion(response))
+    }
+
+    /// Resolve a hosted discussion by creating and linking a context annotation.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resolve_discussion_into_annotation(
+        &mut self,
+        repo_path: &str,
+        discussion_id: &str,
+        kind: AnnotationKind,
+        content: &str,
+        tags: Vec<String>,
+        client_operation_id: String,
+    ) -> Result<HostedDiscussion, ProtocolError> {
+        let request = resolve_into_annotation_request(
+            repo_path,
+            discussion_id,
+            kind,
+            content,
+            tags,
+            client_operation_id,
+        );
+        let response = self
+            .routes()
+            .resolve_discussion(&request)
             .await
             .map_err(hosted_to_protocol_error)?;
         Ok(decode_discussion(response))
@@ -211,6 +239,62 @@ impl HostedClient {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn open_discussion_request(
+    repo_path: &str,
+    change_id: ChangeId,
+    file: &str,
+    symbol: &str,
+    body: &str,
+    visibility: &str,
+    thread_ref: Option<&str>,
+    client_operation_id: String,
+) -> OpenDiscussionRequest {
+    OpenDiscussionRequest {
+        repo_path: super::helpers::repository_ref(repo_path),
+        state_id: change_id_state_field(change_id),
+        anchor: Some(PathSymbolRef {
+            file: file.to_string(),
+            symbol: symbol.to_string(),
+        }),
+        body: body.to_string(),
+        visibility: visibility.to_string(),
+        thread_ref: thread_ref.unwrap_or_default().to_string(),
+        client_operation_id,
+        thread_id: String::new(),
+    }
+}
+
+fn resolve_into_annotation_request(
+    repo_path: &str,
+    discussion_id: &str,
+    kind: AnnotationKind,
+    content: &str,
+    tags: Vec<String>,
+    client_operation_id: String,
+) -> ResolveDiscussionRequest {
+    ResolveDiscussionRequest {
+        repo_path: super::helpers::repository_ref(repo_path),
+        discussion_id: discussion_id.to_string(),
+        resolution: Some(resolve_discussion_request::Resolution::IntoAnnotation(
+            resolve_discussion_request::ResolveIntoAnnotation {
+                kind: annotation_kind_to_proto(kind) as i32,
+                content: content.to_string(),
+                tags,
+            },
+        )),
+        client_operation_id,
+    }
+}
+
+fn annotation_kind_to_proto(kind: AnnotationKind) -> ContextAnnotationKind {
+    match kind {
+        AnnotationKind::Constraint => ContextAnnotationKind::Constraint,
+        AnnotationKind::Invariant => ContextAnnotationKind::Invariant,
+        AnnotationKind::Rationale => ContextAnnotationKind::Rationale,
+    }
+}
+
 fn discussion_status_filter(status: &str) -> Result<DiscussionStatusFilter, ProtocolError> {
     match status {
         "all" => Ok(DiscussionStatusFilter::Unspecified),
@@ -227,8 +311,9 @@ fn discussion_status_filter(status: &str) -> Result<DiscussionStatusFilter, Prot
 mod tests {
     use api::heddle::api::v1alpha1::{
         DiscussionTurn as ProtoTurn, PathSymbolRef, StateId as ProtoStateId,
+        resolve_discussion_request::Resolution,
     };
-    use objects::object::ChangeId;
+    use objects::object::{AnnotationKind, ChangeId};
 
     use super::*;
 
@@ -258,6 +343,42 @@ mod tests {
         let change = ChangeId::from_bytes([0x11; 16]);
         let field = change_id_state_field(change).expect("proto state wrapper");
         assert_eq!(field.value, change.as_bytes().to_vec());
+    }
+
+    #[test]
+    fn open_discussion_request_sets_thread_ref() {
+        let change = ChangeId::from_bytes([0x11; 16]);
+        let request = open_discussion_request(
+            "acme/widgets",
+            change,
+            "src/lib.rs",
+            "run",
+            "keep this stable",
+            "internal",
+            Some("refs/heads/feature/run"),
+            "open-op".to_string(),
+        );
+        assert_eq!(request.thread_ref, "refs/heads/feature/run");
+        assert_eq!(request.anchor.unwrap().file, "src/lib.rs");
+        assert_eq!(request.body, "keep this stable");
+    }
+
+    #[test]
+    fn resolve_into_annotation_request_uses_the_typed_resolution_variant() {
+        let request = resolve_into_annotation_request(
+            "acme/widgets",
+            "discussion-1",
+            AnnotationKind::Invariant,
+            "the cache key must include visibility",
+            vec!["cache".to_string(), "security".to_string()],
+            "resolve-op".to_string(),
+        );
+        let Some(Resolution::IntoAnnotation(annotation)) = request.resolution else {
+            panic!("expected ResolveIntoAnnotation request");
+        };
+        assert_eq!(annotation.kind, ContextAnnotationKind::Invariant as i32);
+        assert_eq!(annotation.content, "the cache key must include visibility");
+        assert_eq!(annotation.tags, ["cache", "security"]);
     }
 
     #[test]
@@ -291,6 +412,7 @@ mod tests {
         assert_eq!(decoded.symbol, "main");
         assert_eq!(decoded.opened_against_state, Some(state));
         assert_eq!(decoded.visibility, "team");
+        assert_eq!(decoded.thread_ref, None);
         assert_eq!(decoded.turns.len(), 1);
         assert_eq!(decoded.turns[0].author_name, "alice");
         assert_eq!(decoded.turns[0].body, "lgtm");

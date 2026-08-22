@@ -60,7 +60,7 @@ mod tests {
 
     use super::*;
     use crate::object::{
-        Attribution, ChangeId, CollaborationAnchor, CollaborationIdempotencyKey,
+        AnnotationKind, Attribution, ChangeId, CollaborationAnchor, CollaborationIdempotencyKey,
         CollaborationOperationBodyV1, CollaborationResolution, ContentHash, DiscussionRecordId,
         DiscussionTurnV1, LegacyDiscussionId, LegacyDiscussionResolutionV1, LegacySourceLocator,
         Principal, StateAttachmentId, StateId, VisibilityTier,
@@ -123,6 +123,7 @@ mod tests {
             anchor,
             visibility: VisibilityTier::default(),
             turn: turn(),
+            thread_ref: None,
         };
         let locator = LegacySourceLocator::new(
             state,
@@ -205,6 +206,16 @@ mod tests {
                 },
             ),
             golden_operation(
+                "resolve_into_annotation",
+                CollaborationOperationBodyV1::Resolve {
+                    resolution: CollaborationResolution::IntoAnnotation {
+                        annotation_kind: AnnotationKind::Rationale,
+                        content: "why".to_string(),
+                        tags: vec!["design".to_string()],
+                    },
+                },
+            ),
+            golden_operation(
                 "reopen",
                 CollaborationOperationBodyV1::Reopen {
                     reason: "r".to_string(),
@@ -282,6 +293,10 @@ mod tests {
             (
                 "resolve_annotation",
                 "9ca40f41cc72bbf6208a22f9dcbfeaa3773d1669366864b704e2251fd012bb39",
+            ),
+            (
+                "resolve_into_annotation",
+                "b3319a3a18c77c52dbf748dba14fdd06542555b7cd89b228b2938ef88888beb7",
             ),
             (
                 "reopen",

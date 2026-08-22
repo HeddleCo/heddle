@@ -8325,6 +8325,92 @@ fn discuss_resolve_by_edit_emits_resolved_state_json() {
 }
 
 #[test]
+fn discuss_open_named_flags_records_thread_ref() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/lib.rs"), "fn foo() {}\n").unwrap();
+    heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
+
+    let opened = json_value(
+        temp.path(),
+        &[
+            "discuss",
+            "open",
+            "--file",
+            "src/lib.rs",
+            "--symbol",
+            "foo",
+            "--body",
+            "Keep the thread context attached",
+            "--thread",
+            "refs/heads/feature/foo",
+        ],
+    );
+    assert_eq!(opened["output_kind"], "discuss_open");
+    assert_eq!(opened["discussion"]["thread_ref"], "refs/heads/feature/foo");
+    assert_eq!(opened["discussion"]["anchor"]["path"], "src/lib.rs");
+    assert_eq!(opened["discussion"]["anchor"]["symbol"], "foo");
+}
+
+#[test]
+fn discuss_resolve_into_annotation_records_complete_resolution() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/lib.rs"), "fn foo() {}\n").unwrap();
+    heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
+    let opened = json_value(
+        temp.path(),
+        &[
+            "discuss",
+            "open",
+            "src/lib.rs",
+            "foo",
+            "Please preserve this invariant",
+        ],
+    );
+    let discussion_id = opened["discussion"]["id"]
+        .as_str()
+        .expect("discuss open should return an id");
+
+    let resolved = json_value(
+        temp.path(),
+        &[
+            "discuss",
+            "resolve",
+            discussion_id,
+            "--into-annotation",
+            "--body",
+            "The cache key must include visibility",
+            "--kind",
+            "invariant",
+            "--tag",
+            "cache",
+            "--tag",
+            "security",
+        ],
+    );
+    assert_eq!(resolved["output_kind"], "discuss_resolve");
+    assert_eq!(
+        resolved["discussion"]["resolution"]["kind"],
+        "into_annotation"
+    );
+    assert_eq!(
+        resolved["discussion"]["resolution"]["annotation_kind"],
+        "invariant"
+    );
+    assert_eq!(
+        resolved["discussion"]["resolution"]["content"],
+        "The cache key must include visibility"
+    );
+    assert_eq!(
+        resolved["discussion"]["resolution"]["tags"],
+        serde_json::json!(["cache", "security"])
+    );
+}
+
+#[test]
 fn discuss_resolve_dismiss_requires_reason_with_typed_advice_json() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();

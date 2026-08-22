@@ -959,7 +959,13 @@ file, and symbol where the discussion began:\n\
 - `resolve <id> --mode by-edit`          with `--state` (defaults to HEAD).\n\
   Records that a subsequent edit addressed the discussion.\n\
 - `resolve <id> --mode dismiss`          requires non-empty `--reason`.\n\
+- `resolve <id> --into-annotation --body <text>` creates and links a context\n\
+  annotation; `--kind` defaults to rationale and `--tag` is repeatable.\n\
 - `reopen <id> --reason <text>`          compensates a prior resolution.\n\
+\n\
+`open` accepts either `<file> <symbol> <body>` or the equivalent named\n\
+`--file`, `--symbol`, and `--body` flags. `--thread <ref>` additionally attaches\n\
+the symbol-anchored discussion to a thread; it does not replace the anchor.\n\
 \n\
 Visibility: `--visibility public|internal|team:NAME|restricted:LABEL|private:LABEL`.\n\
 Empty visibility uses the configured discussion visibility policy.\n";

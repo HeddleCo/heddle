@@ -5,9 +5,9 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
 use objects::object::{
-    CollabOpId, CollaborationAnchor, CollaborationIdempotencyKey, CollaborationOperationBodyV1,
-    CollaborationOperationEnvelope, CollaborationResolution, DiscussionRecordId, DiscussionTurnV1,
-    MaterializedDiscussion, StateId, VisibilityTier,
+    AnnotationKind, CollabOpId, CollaborationAnchor, CollaborationIdempotencyKey,
+    CollaborationOperationBodyV1, CollaborationOperationEnvelope, CollaborationResolution,
+    DiscussionRecordId, DiscussionTurnV1, MaterializedDiscussion, StateId, VisibilityTier,
 };
 use repo::{
     CollaborationStore, CollaborationWriteDisposition, CollaborationWriteOutcome,
@@ -80,6 +80,7 @@ struct DiscussionOutput {
     title: String,
     anchor: AnchorOutput,
     visibility: String,
+    thread_ref: Option<String>,
     status: &'static str,
     resolution: Option<ResolutionOutput>,
     conflict_operation_ids: Vec<String>,
@@ -112,10 +113,23 @@ enum AnchorOutput {
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 enum ResolutionOutput {
-    AddressedByState { state_id: String },
-    AddressedByChange { change_id: String },
-    Dismissed { reason: String },
-    Annotation { annotation_id: String },
+    AddressedByState {
+        state_id: String,
+    },
+    AddressedByChange {
+        change_id: String,
+    },
+    Dismissed {
+        reason: String,
+    },
+    IntoAnnotation {
+        annotation_kind: String,
+        content: String,
+        tags: Vec<String>,
+    },
+    Annotation {
+        annotation_id: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -174,19 +188,15 @@ fn run_open(
     store: &CollaborationStore,
     args: &DiscussOpenArgs,
 ) -> Result<()> {
+    let (file, symbol, body) = open_inputs(args)?;
     let state_id = resolve_open_state(repo, args.state.as_deref())?;
     let title = args
         .title
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .or_else(|| {
-            args.body
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-        })
-        .unwrap_or(&args.symbol)
+        .or_else(|| body.lines().map(str::trim).find(|line| !line.is_empty()))
+        .unwrap_or(symbol)
         .to_string();
     let discussion_id = DiscussionRecordId::generate();
     let operation = CollaborationOperationEnvelope::new(
@@ -199,19 +209,37 @@ fn run_open(
             title,
             anchor: CollaborationAnchor::Symbol {
                 state_id,
-                path: args.file.clone(),
-                symbol: args.symbol.clone(),
+                path: file.to_string(),
+                symbol: symbol.to_string(),
             },
             visibility: parse_visibility(
                 args.visibility.as_deref(),
                 repo.resolve_capture_default_visibility(),
             )?,
-            turn: DiscussionTurnV1::new(args.body.clone())?,
+            turn: DiscussionTurnV1::new(body)?,
+            thread_ref: args.thread.clone(),
         },
     )?;
     let outcome = store.write_operation(&operation)?;
     emit_locality_notice_once(repo, AnnotationSurface::Discuss);
     emit_write(cli, "discuss_open", store, discussion_id, outcome)
+}
+
+fn open_inputs(args: &DiscussOpenArgs) -> Result<(&str, &str, &str)> {
+    match (
+        args.file.as_deref(),
+        args.symbol.as_deref(),
+        args.body.as_deref(),
+        args.file_flag.as_deref(),
+        args.symbol_flag.as_deref(),
+        args.body_flag.as_deref(),
+    ) {
+        (Some(file), Some(symbol), Some(body), None, None, None)
+        | (None, None, None, Some(file), Some(symbol), Some(body)) => Ok((file, symbol, body)),
+        _ => Err(anyhow!(
+            "discuss open requires either <FILE> <SYMBOL> <BODY> or --file <FILE> --symbol <SYMBOL> --body <BODY>"
+        )),
+    }
 }
 
 fn run_append(
@@ -238,11 +266,11 @@ fn run_resolve(
     store: &CollaborationStore,
     args: &DiscussResolveArgs,
 ) -> Result<()> {
-    let resolution = match args.mode {
-        ResolveModeArg::ByEdit => CollaborationResolution::AddressedByState {
+    let resolution = match (args.mode.as_ref(), args.into_annotation) {
+        (Some(ResolveModeArg::ByEdit), false) => CollaborationResolution::AddressedByState {
             state_id: resolve_state(repo, args.state.as_deref())?,
         },
-        ResolveModeArg::Dismiss => CollaborationResolution::Dismissed {
+        (Some(ResolveModeArg::Dismiss), false) => CollaborationResolution::Dismissed {
             reason: args
                 .reason
                 .as_deref()
@@ -251,6 +279,27 @@ fn run_resolve(
                 .ok_or_else(|| anyhow!(RecoveryAdvice::discuss_resolve_missing_dismiss_reason()))?
                 .to_string(),
         },
+        (None, true) => CollaborationResolution::IntoAnnotation {
+            annotation_kind: args
+                .kind
+                .as_deref()
+                .unwrap_or("rationale")
+                .parse::<AnnotationKind>()
+                .map_err(|error| anyhow!(error))?,
+            content: args
+                .body
+                .as_deref()
+                .map(str::trim)
+                .filter(|body| !body.is_empty())
+                .ok_or_else(|| anyhow!("--body must not be empty for --into-annotation"))?
+                .to_string(),
+            tags: args.tag.clone(),
+        },
+        _ => {
+            return Err(anyhow!(
+                "discuss resolve requires exactly one of --mode or --into-annotation"
+            ));
+        }
     };
     write_descendant(
         cli,
@@ -413,6 +462,9 @@ fn emit_show(cli: &Cli, output: &DiscussionShowOutput) -> Result<()> {
     println!("  title: {}", discussion.title);
     println!("  anchor: {}", anchor_label(&discussion.anchor));
     println!("  visibility: {}", discussion.visibility);
+    if let Some(thread_ref) = &discussion.thread_ref {
+        println!("  thread: {thread_ref}");
+    }
     println!("  heads: {}", discussion.head_operation_ids.join(", "));
     for turn in &discussion.turns {
         let actor = turn.agent.as_deref().unwrap_or(&turn.author_name);
@@ -456,6 +508,7 @@ fn to_view(store: &CollaborationStore, value: &MaterializedDiscussion) -> Result
         title: value.title.clone(),
         anchor: anchor_output(&value.anchor),
         visibility: visibility_token(&value.visibility),
+        thread_ref: value.thread_ref.clone(),
         status,
         resolution: value.resolution.as_ref().map(resolution_output),
         conflict_operation_ids: value
@@ -625,6 +678,15 @@ fn resolution_output(value: &CollaborationResolution) -> ResolutionOutput {
         }
         CollaborationResolution::Dismissed { reason } => ResolutionOutput::Dismissed {
             reason: reason.clone(),
+        },
+        CollaborationResolution::IntoAnnotation {
+            annotation_kind,
+            content,
+            tags,
+        } => ResolutionOutput::IntoAnnotation {
+            annotation_kind: annotation_kind.to_string(),
+            content: content.clone(),
+            tags: tags.clone(),
         },
         CollaborationResolution::Annotation { annotation_id } => ResolutionOutput::Annotation {
             annotation_id: annotation_id.clone(),
