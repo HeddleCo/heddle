@@ -17,6 +17,7 @@ use verbs::review::{
 use super::{
     advice::RecoveryAdvice,
     history_target::{resolve_state_id, resolve_state_id_bytes},
+    next_action::{NextActionValidationContext, write_full_command_json},
 };
 use crate::cli::{
     cli_args::{
@@ -135,10 +136,10 @@ async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
         signatures,
     };
     if should_output_json(cli, None) {
-        println!(
-            "{}",
-            serde_json::to_string(&output).context("serialize review payload")?
-        );
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["review", "show"]),
+        )?;
     } else {
         render_text(&output, args.all_signals);
     }
@@ -343,10 +344,10 @@ async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
                 "next": serde_json::Value::Null,
             }),
         };
-        println!(
-            "{}",
-            serde_json::to_string(&envelope).context("serialize review next envelope")?
-        );
+        write_full_command_json(
+            &envelope,
+            NextActionValidationContext::without_repo(&["review", "next"]),
+        )?;
     } else {
         match &next_state {
             Some(view) => {
