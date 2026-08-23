@@ -18,9 +18,9 @@ use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
 use verbs::{
-    ActionTemplate, DiffReport, FsckReport, MachineContractCoverage, QueryReport, RemoteListReport,
+    ActionTemplate, DiffReport, FsckReport, QueryReport, RemoteListReport,
     RepositoryVerificationState, ResolveReport, StatusReport, ThreadMoveOutput, UndoListReport,
-    VerificationCheck, VerifyReport, remote::RemoteInfo,
+    VerifyReport, remote::RemoteInfo,
 };
 
 use super::command_catalog;

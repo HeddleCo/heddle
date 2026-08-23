@@ -12,6 +12,7 @@ pub struct DiscussionOutput {
     pub title: String,
     pub anchor: AnchorOutput,
     pub visibility: String,
+    pub thread_ref: Option<String>,
     pub status: &'static str,
     pub resolution: Option<ResolutionOutput>,
     pub conflict_operation_ids: Vec<String>,
@@ -47,6 +48,11 @@ pub enum ResolutionOutput {
     AddressedByState { state_id: String },
     AddressedByChange { change_id: String },
     Dismissed { reason: String },
+    IntoAnnotation {
+        annotation_kind: String,
+        content: String,
+        tags: Vec<String>,
+    },
     Annotation { annotation_id: String },
 }
 

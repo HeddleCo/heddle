@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::CollaborationCodecError;
 use crate::object::{
-    Attribution, ChangeId, ContentHash, StateId, VisibilityTier,
+    AnnotationKind, Attribution, ChangeId, ContentHash, StateId, VisibilityTier,
     collaboration::{
         COLLABORATION_OPERATION_SCHEMA_VERSION, CollabOpId, CollaborationAnchor,
         CollaborationIdempotencyKey, CollaborationOperationBodyV1, CollaborationOperationEnvelope,
@@ -54,10 +54,23 @@ struct WireTurnV1 {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 enum WireResolutionV1 {
-    AddressedByState { state_id: StateId },
-    AddressedByChange { change_id: ChangeId },
-    Dismissed { reason: String },
-    Annotation { annotation_id: String },
+    AddressedByState {
+        state_id: StateId,
+    },
+    AddressedByChange {
+        change_id: ChangeId,
+    },
+    Dismissed {
+        reason: String,
+    },
+    IntoAnnotation {
+        annotation_kind: AnnotationKind,
+        content: String,
+        tags: Vec<String>,
+    },
+    Annotation {
+        annotation_id: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -77,6 +90,8 @@ enum WireBodyV1 {
         anchor: WireAnchorV1,
         visibility: VisibilityTier,
         turn: WireTurnV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_ref: Option<String>,
     },
     AppendTurn {
         turn: WireTurnV1,
@@ -202,6 +217,15 @@ impl From<CollaborationResolution> for WireResolutionV1 {
                 Self::AddressedByChange { change_id }
             }
             CollaborationResolution::Dismissed { reason } => Self::Dismissed { reason },
+            CollaborationResolution::IntoAnnotation {
+                annotation_kind,
+                content,
+                tags,
+            } => Self::IntoAnnotation {
+                annotation_kind,
+                content,
+                tags,
+            },
             CollaborationResolution::Annotation { annotation_id } => {
                 Self::Annotation { annotation_id }
             }
@@ -217,6 +241,15 @@ impl From<WireResolutionV1> for CollaborationResolution {
                 Self::AddressedByChange { change_id }
             }
             WireResolutionV1::Dismissed { reason } => Self::Dismissed { reason },
+            WireResolutionV1::IntoAnnotation {
+                annotation_kind,
+                content,
+                tags,
+            } => Self::IntoAnnotation {
+                annotation_kind,
+                content,
+                tags,
+            },
             WireResolutionV1::Annotation { annotation_id } => Self::Annotation { annotation_id },
         }
     }
@@ -260,11 +293,13 @@ impl From<CollaborationOperationBodyV1> for WireBodyV1 {
                 anchor,
                 visibility,
                 turn,
+                thread_ref,
             } => Self::Open {
                 title,
                 anchor: anchor.into(),
                 visibility,
                 turn: turn.into(),
+                thread_ref,
             },
             CollaborationOperationBodyV1::AppendTurn { turn } => {
                 Self::AppendTurn { turn: turn.into() }
@@ -311,11 +346,13 @@ impl From<WireBodyV1> for CollaborationOperationBodyV1 {
                 anchor,
                 visibility,
                 turn,
+                thread_ref,
             } => Self::Open {
                 title,
                 anchor: anchor.into(),
                 visibility,
                 turn: turn.into(),
+                thread_ref,
             },
             WireBodyV1::AppendTurn { turn } => Self::AppendTurn { turn: turn.into() },
             WireBodyV1::Resolve { resolution } => Self::Resolve {
