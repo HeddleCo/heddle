@@ -16,20 +16,15 @@ use crate::cli::{
     should_output_json, worktree_status_options,
 };
 
+// The repack wire payload lives in cli-contract so the schema registry
+// registers the real serialization type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::bridge::RepackOutput;
+
 #[derive(Serialize)]
 struct MaintenanceOutput<'a, T> {
     output_kind: &'static str,
     #[serde(flatten)]
     report: &'a T,
-}
-
-#[derive(Serialize)]
-struct RepackOutput {
-    output_kind: &'static str,
-    objects_repacked: u64,
-    bytes_repacked: u64,
-    duration_ms: u128,
-    bytes_reclaimed: u64,
 }
 
 fn render_repack(output: &RepackOutput, json: bool) -> Result<()> {

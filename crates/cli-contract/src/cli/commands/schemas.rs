@@ -23,18 +23,23 @@ use verbs::{
 };
 
 use super::command_catalog;
+use super::doctor_docs::DocsReport;
+use super::doctor_schemas::SchemaReport;
 use super::init_output::InitOutput;
 use super::wire::thread::{
     ApprovalOutput, ApprovalRevokeOutput, EligibilityOutput, ThreadAbsorbOutput,
     ThreadCleanupOutput, ThreadOpOutput, ThreadRecordOutput, ThreadResolveOutput,
 };
 use super::wire::{
-    AdoptOutput, BlameOutput, CloneOutput, CommitOutput, ExpandOutput, LandOutput, LogOutput,
-    MarkerBulkDeleteOutput, MarkerListOutput, MarkerOpOutput, MultiLandOutput,
-    OperatorCommandOutput, PullOutput, PushOutput, ReadyOutput, ReflogOutput, RemoteMutationOutput,
-    RevertOutput, ShowOutput, SnapshotOutput, SyncOutput, ThreadCaptureOutput, ThreadCurrentOutput,
-    ThreadListOutput, ThreadShowOutput, TimelineActionOutput, TimelineLogOutput,
-    TimelineRecordingOutput, TimelineStatusOutput, UndoRedoOutput,
+    AdoptOutput, BlameOutput, CloneOutput, CommitOutput, DiscussionListOutput,
+    DiscussionShowOutput, DiscussionWriteOutput, ExpandOutput, ExportGitOutput, ImportGitOutput,
+    IntegrationStatusOutput, LandOutput, LogOutput, MarkerBulkDeleteOutput, MarkerListOutput,
+    MarkerOpOutput, MultiLandOutput, OperatorCommandOutput, PullOutput, PushOutput, ReadyOutput,
+    ReflogOutput, RemoteMutationOutput, RepackOutput, RevertOutput, ReviewHealthOutput,
+    ReviewNextOutput, ReviewShowOutput, ReviewSignOutput, ShowOutput, SnapshotOutput,
+    SyncGitOutput, SyncOutput, ThreadCaptureOutput, ThreadCurrentOutput, ThreadListOutput,
+    ThreadShowOutput, TimelineActionOutput, TimelineLogOutput, TimelineRecordingOutput,
+    TimelineStatusOutput, UndoRedoOutput, WatchLineOutput,
 };
 use crate::cli::INIT_VERB;
 
@@ -127,21 +132,21 @@ schema_registry! {
     (&["agent timeline fork", "agent timeline reset", "agent timeline recover"], TimelineActionOutput),
     (&["show"], ShowOutput),
     (&["thread list"], ThreadListOutput),
-    (&["review show"], ReviewShowSchema),
-    (&["review sign"], ReviewSignSchema),
-    (&["review next"], ReviewNextSchema),
-    (&["review health"], ReviewHealthSchema),
-    (&["discuss open", "discuss append", "discuss resolve", "discuss reopen"], DiscussionWriteSchema),
-    (&["discuss show"], DiscussionShowSchema),
-    (&["discuss list"], DiscussionListSchema),
+    (&["review show"], ReviewShowOutput),
+    (&["review sign"], ReviewSignOutput),
+    (&["review next"], ReviewNextOutput),
+    (&["review health"], ReviewHealthOutput),
+    (&["discuss open", "discuss append", "discuss resolve", "discuss reopen"], DiscussionWriteOutput),
+    (&["discuss show"], DiscussionShowOutput),
+    (&["discuss list"], DiscussionListOutput),
     (&["query --attribution"], BlameOutput),
-    (&["bridge git export"], ExportGitSchema),
-    (&["bridge git import"], ImportGitSchema),
-    (&["sync git"], SyncGitSchema),
+    (&["bridge git export"], ExportGitOutput),
+    (&["bridge git import"], ImportGitOutput),
+    (&["sync git"], SyncGitOutput),
     (&["revert"], RevertOutput),
     (&["doctor"], DoctorSchema),
-    (&["doctor docs"], DoctorDocsSchema),
-    (&["doctor schemas"], DoctorSchemasSchema),
+    (&["doctor docs"], DocsReport),
+    (&["doctor schemas"], SchemaReport),
     (&["agent presence show"], AgentPresenceSingleSchema),
     (&["agent presence list"], AgentPresenceListSchema),
     (&["agent presence complete"], AgentPresenceCompleteSchema),
@@ -162,11 +167,11 @@ schema_registry! {
     (&["agent provenance begin", "agent provenance end", "agent provenance show"], AgentProvenanceEnvelopeSchema),
     (&["agent provenance segment"], AgentProvenanceSegmentEnvelopeSchema),
     (&["agent provenance list"], AgentProvenanceListSchema),
-    (&["watch"], WatchLineSchema),
-    (&["integration list", "integration doctor"], IntegrationStatusListSchema),
+    (&["watch"], WatchLineOutput),
+    (&["integration list", "integration doctor"], Vec<IntegrationStatusOutput>),
     (&["maintenance inspect"], MaintenanceInspectWire),
     (&["maintenance refresh"], MaintenanceRefreshWire),
-    (&["maintenance repack"], MaintenanceRepackSchema),
+    (&["maintenance repack"], RepackOutput),
     (&["error"], ErrorEnvelopeSchema),
 }
 
@@ -504,58 +509,6 @@ fn schema_verb_supports_op_id(verb: &str) -> bool {
 // Variants here are referenced only through the schemars derive,
 // which the dead-code lint can't see. The annotation keeps the
 // surface honest without polluting downstream warnings.
-#[allow(dead_code)]
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ThreadModeSchema {
-    Materialized,
-    Virtualized,
-    Solid,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ThreadStateSchema {
-    Draft,
-    Active,
-    Ready,
-    Blocked,
-    Merged,
-    Abandoned,
-    Promoted,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ThreadFreshnessSchema {
-    Current,
-    Stale,
-    Unknown,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ThreadImpactCategorySchema {
-    DependencyGraph,
-    BuildRuntimeConfig,
-    GeneratedOutputs,
-    RepoWideRefactor,
-    PublicApiSurface,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "kebab-case")]
-pub enum CoordinationStatusSchema {
-    Clean,
-    Ahead,
-    Diverged,
-    Blocked,
-    MergeReady,
-}
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ActorInfoSchema {
@@ -706,22 +659,6 @@ pub struct IdentityOutputSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct IntegrationStatusListSchema(pub Vec<IntegrationStatusSchema>);
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct IntegrationStatusSchema {
-    pub harness: String,
-    pub scope: String,
-    pub method: String,
-    pub status: String,
-    pub healthy: bool,
-    pub paths: Vec<String>,
-    pub capabilities: Vec<String>,
-    pub capability_paths: Vec<String>,
-    pub path_mode: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct MaintenanceRepackSchema {
     pub output_kind: String,
     pub objects_repacked: u64,
@@ -794,23 +731,6 @@ pub struct DiscussionListSchema {
 }
 
 // ---- core loop write/read helpers -----------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadApprovalSchema {
-    pub id: String,
-    pub repo_path: String,
-    pub source_thread: String,
-    pub target_thread: String,
-    pub source_state: String,
-    pub approver_user_id: String,
-    pub note: String,
-    pub approved_at: u64,
-    pub expires_at: u64,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(transparent)]
-pub struct ThreadApprovalListSchema(pub Vec<ThreadApprovalSchema>);
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct AgentPresenceSingleSchema {

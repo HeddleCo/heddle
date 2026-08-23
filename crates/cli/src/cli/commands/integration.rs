@@ -37,6 +37,10 @@ use crate::{
 
 const MANIFEST_FILE: &str = "integrations.toml";
 
+// The integration wire payload lives in cli-contract so the schema registry
+// registers the real serialization type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::bridge::IntegrationStatusOutput as IntegrationStatus;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum IntegrationScope {
@@ -156,19 +160,6 @@ struct InstalledIntegration {
 struct IntegrationManifest {
     #[serde(default)]
     integrations: Vec<InstalledIntegration>,
-}
-
-#[derive(Debug, Serialize)]
-struct IntegrationStatus {
-    harness: String,
-    scope: String,
-    method: String,
-    status: String,
-    healthy: bool,
-    paths: Vec<String>,
-    capabilities: Vec<String>,
-    capability_paths: Vec<String>,
-    path_mode: String,
 }
 
 pub fn cmd_integration(cli: &Cli, command: IntegrationCommands) -> Result<()> {

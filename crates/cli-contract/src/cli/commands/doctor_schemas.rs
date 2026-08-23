@@ -23,6 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
 use sley::Repository as SleyRepository;
@@ -43,7 +44,7 @@ use super::{
 use crate::cli::{Cli, DoctorSchemasArgs, should_output_json};
 
 /// One drift finding.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SchemaIssue {
     /// Verb the sample documents.
     pub verb: String,
@@ -55,7 +56,7 @@ pub struct SchemaIssue {
     pub detail: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SchemaReport {
     /// Stable output discriminator for JSON callers.
     pub output_kind: &'static str,
@@ -100,7 +101,7 @@ pub struct SchemaReport {
     pub doc_path: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CommandContractSchemaCoverage {
     pub status: String,
     #[serde(rename = "verified_scope")]

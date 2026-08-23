@@ -15,6 +15,8 @@
 //! private shape struct in the same file, so the schema and the serializer
 //! stay one maintenance unit.
 
+pub mod bridge;
+pub mod collab;
 pub mod core_loop;
 pub mod history;
 pub mod land;
@@ -23,6 +25,16 @@ pub mod ready;
 pub mod remote;
 pub mod thread;
 
+pub use bridge::{
+    ExportGitOutput, ExportedRefOutput, ImportGitOutput, IntegrationStatusOutput,
+    LossyImportEntryOutput, RepackOutput, SyncGitOutput,
+};
+pub use collab::{
+    AnchorOutput, DiscussionListOutput, DiscussionOutput, DiscussionShowOutput, DiscussionView,
+    DiscussionWriteOutput, HealthEntry, NextStateView, RequiredNullableNextState, ResolutionOutput,
+    ReviewHealthOutput, ReviewNextOutput, ReviewShowOutput, ReviewSignOutput, SignalView,
+    SignatureView, TurnOutput, WatchActorInfo, WatchLineOutput,
+};
 pub use core_loop::{
     CommitOutput, SnapshotAgentOutput, SnapshotOutput, SnapshotPrincipalOutput, UndoRedoOutput,
 };
