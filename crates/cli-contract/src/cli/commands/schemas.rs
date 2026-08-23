@@ -31,6 +31,10 @@ use super::wire::agent::{
     AgentFanoutOutput, AgentReservationEnvelope, AgentReservationListOutput, AgentTaskEnvelope,
     AgentTaskListOutput, SegmentEnvelope, SessionEnvelope, SessionListOutput,
 };
+use super::wire::auth::{
+    AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, IdentityOutput, ServiceTokenOutput,
+    WhoamiOutput,
+};
 use super::wire::thread::{
     ApprovalOutput, ApprovalRevokeOutput, EligibilityOutput, ThreadAbsorbOutput,
     ThreadCleanupOutput, ThreadOpOutput, ThreadRecordOutput, ThreadResolveOutput,
@@ -163,12 +167,12 @@ schema_registry! {
     (&["agent task create", "agent task show", "agent task update"], AgentTaskEnvelope),
     (&["agent task list"], AgentTaskListOutput),
     (&["agent fanout plan", "agent fanout start"], AgentFanoutOutput),
-    (&["auth logout"], AuthLogoutSchema),
-    (&["auth status"], AuthStatusSchema),
-    (&["auth trust show", "auth trust replace"], AuthTrustSchema),
-    (&["whoami"], WhoamiSchema),
-    (&["auth create-service-token"], AuthCreateServiceTokenSchema),
-    (&["identity ensure", "identity claim-link"], IdentityOutputSchema),
+    (&["auth logout"], AuthLogoutOutput),
+    (&["auth status"], AuthStatusOutput),
+    (&["auth trust show", "auth trust replace"], AuthTrustOutput),
+    (&["whoami"], WhoamiOutput),
+    (&["auth create-service-token"], ServiceTokenOutput),
+    (&["identity ensure", "identity claim-link"], IdentityOutput),
     (&["agent provenance begin", "agent provenance end", "agent provenance show"], SessionEnvelope),
     (&["agent provenance segment"], SegmentEnvelope),
     (&["agent provenance list"], SessionListOutput),
@@ -516,12 +520,6 @@ fn schema_verb_supports_op_id(verb: &str) -> bool {
 // surface honest without polluting downstream warnings.
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct ActorInfoSchema {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct GenericJsonObjectSchema {
     #[serde(flatten)]
     pub fields: BTreeMap<String, Value>,
@@ -547,136 +545,12 @@ pub struct MaintenanceRefreshWire {
     pub run: RepositoryMaintenanceRunReport,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AuthLogoutSchema {
-    pub output_kind: String,
-    pub server: String,
-    pub removed: bool,
-    pub device_identity_removed: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AuthStatusSchema {
-    pub output_kind: String,
-    pub server: String,
-    pub authenticated: bool,
-    pub proof_key_available: bool,
-    pub subject: Option<String>,
-    pub credential_id: Option<String>,
-    pub expires_at: Option<String>,
-    pub recommended_action: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AuthTrustSchema {
-    pub output_kind: String,
-    pub canonical_server: String,
-    /// `explicit` or `automatic`.
-    pub source: String,
-    pub key_id: String,
-    /// The 64-character lowercase-hex descriptor public key.
-    pub public_key: String,
-    /// SHA-256 fingerprint of the raw descriptor public key.
-    pub fingerprint: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct WhoamiCaptureActorSchema {
-    pub name: String,
-    pub email: String,
-    /// `environment`, `repository`, `git_config`, or `user_config`; null when unknown.
-    pub source: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct WhoamiSchema {
-    pub output_kind: String,
-    /// Who the next capture is attributed to. Distinct from hosted auth.
-    pub capture_actor: WhoamiCaptureActorSchema,
-    pub server: String,
-    /// A usable credential is stored locally for this server.
-    pub authenticated: bool,
-    /// The server answered `WhoAmI`; `identity` below is authoritative.
-    pub reachable: bool,
-    /// `root`, `agent`, or `service-account`; null when unauthenticated.
-    pub token_kind: Option<String>,
-    /// Resource scopes as `kind:path` (empty ⇒ full resource authority).
-    pub scopes: Vec<String>,
-    /// Intersected hosted-operation ceiling; null ⇒ full authority.
-    pub operation_ceiling: Option<Vec<String>>,
-    pub expires_at: Option<String>,
-    /// Seconds until expiry; negative when already expired.
-    pub ttl_seconds_remaining: Option<i64>,
-    /// The device proof key required to sign hosted requests is present.
-    pub proof_key_available: bool,
-    pub identity: Option<WhoamiIdentitySchema>,
-    pub recommended_action: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct WhoamiIdentitySchema {
-    pub subject: String,
-    pub actor_subject: String,
-    pub is_staff: bool,
-    pub is_service_account: bool,
-    pub is_biscuit: bool,
-    pub session_id: String,
-    pub amr: Vec<String>,
-    pub server_scope: String,
-    pub credential_id: String,
-    pub device_id: Option<String>,
-    pub agent_provider: Option<String>,
-    pub agent_model: Option<String>,
-    pub roles: Vec<WhoamiRoleSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct WhoamiRoleSchema {
-    pub resource_path: String,
-    pub resource_kind: String,
-    /// One of `reader`, `developer`, `maintainer`, `admin`, `owner`.
-    pub role: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AuthCreateServiceTokenSchema {
-    pub output_kind: String,
-    pub name: String,
-    pub namespace: String,
-    pub scope: String,
-    /// Path to the `.hcred` credential file written with mode 0600. The token
-    /// and proof key live inside this file and never appear in the contract.
-    pub credential_path: String,
-    pub expires_in_days: u32,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct IdentityOutputSchema {
-    pub output_kind: String,
-    /// `reused`, `derived`, `created_on_behalf`, or `claim_link_reissued`.
-    pub outcome: String,
-    pub server: String,
-    pub subject: String,
-    /// Stable lowercase-hex Iroh NodeId, present when a claim link is minted.
-    pub node_id: Option<String>,
-    /// Short-lived claim URL on the selected server origin, present only on deliberate mint/reissue.
-    pub claim_url: Option<String>,
-}
-
 // ---- core loop write/read helpers -----------------------------------------
 
 /// Operation banner — kept opaque because the underlying
 /// [`repo::RepositoryOperationStatus`] is a workspace type and its
 /// shape is internal. `Value` here means "any JSON object or null".
 type OpaqueObject = Option<Value>;
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RepositoryContextInfoSchema {
-    pub kind: String,
-    pub parent_repository: Option<String>,
-    pub target_thread: Option<String>,
-    pub parent_thread: Option<String>,
-}
 
 // ---- verify ---------------------------------------------------------------
 

@@ -41,6 +41,7 @@ pub struct ImportGitOutput {
     pub skipped_non_commit_refs: usize,
     pub lossy_entries: Vec<LossyImportEntryOutput>,
     pub already_in_sync: bool,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
     #[schemars(with = "Option<String>")]
     pub recommended_action: String,
     pub recommended_action_template: Option<ActionTemplate>,
@@ -72,6 +73,7 @@ pub struct SyncGitOutput {
     pub commits_imported: usize,
     pub threads_synced: usize,
     pub markers_synced: usize,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
     #[schemars(with = "Option<String>")]
     pub recommended_action: String,
     pub recommended_action_template: Option<ActionTemplate>,
@@ -106,4 +108,20 @@ pub struct RepackOutput {
     pub bytes_repacked: u64,
     pub duration_ms: u128,
     pub bytes_reclaimed: u64,
+}
+
+fn serialize_empty_action_as_null<S>(
+    action: &String,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    // "" means "no action selected"; the wire contract is null
+    // (HeddleCo/heddle#645), matching `verbs::serialize_empty_action_as_null`.
+    if action.is_empty() {
+        serializer.serialize_none()
+    } else {
+        serializer.serialize_some(action)
+    }
 }

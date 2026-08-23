@@ -16,6 +16,7 @@
 //! stay one maintenance unit.
 
 pub mod agent;
+pub mod auth;
 pub mod bridge;
 pub mod collab;
 pub mod core_loop;
@@ -32,6 +33,10 @@ pub use agent::{
     AgentReservationEnvelope, AgentReservationListOutput, AgentReservationOutput,
     AgentTaskEnvelope, AgentTaskListOutput, AgentTaskOutput, DetectedActorOutput, SegmentEnvelope,
     SegmentOutput, SessionEnvelope, SessionListOutput, SessionOutput,
+};
+pub use auth::{
+    AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, CaptureActor, IdentityOutput,
+    ServiceTokenOutput, WhoamiIdentity, WhoamiOutput, WhoamiRole,
 };
 pub use bridge::{
     ExportGitOutput, ExportedRefOutput, ImportGitOutput, IntegrationStatusOutput,
