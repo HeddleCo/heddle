@@ -85,9 +85,8 @@ pub(crate) use remote_ops::{
     resolved_default_remote_name,
 };
 
-#[allow(clippy::type_complexity)]
 /// CLI machine envelope: domain [`PushOutcome`] plus verification next-actions.
-
+#[allow(clippy::type_complexity)]
 fn push_output_from_outcome(
     outcome: PushOutcome,
     trust: RepositoryVerificationState,

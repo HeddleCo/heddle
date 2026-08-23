@@ -772,9 +772,8 @@ impl Repository {
         // The mapping file only changes when a Git Projection import or
         // bridge lands; status paths re-read it many times per process.
         // Cache the parsed map keyed by (path, mtime).
-        static CACHE: OnceLock<
-            Mutex<Option<(PathBuf, std::time::SystemTime, HashMap<String, String>)>>,
-        > = OnceLock::new();
+        type MappingCache = Mutex<Option<(PathBuf, std::time::SystemTime, HashMap<String, String>)>>;
+        static CACHE: OnceLock<MappingCache> = OnceLock::new();
 
         let path = self
             .heddle_dir

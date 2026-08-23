@@ -1178,10 +1178,15 @@ mod revert_signals_tests {
         // The self-flagged-uncertainty module fires deterministically on a
         // `self-flag:` intent line under the default signals config.
         let reverted = repo
-            .snapshot_with_attribution(
+            .snapshot_with_attribution_and_lineage(
                 Some("self-flag:[src/auth.rs:verify] not certain about edge case".to_string()),
                 None,
                 author,
+                vec![ChangeLineage {
+                    kind: ChangeLineageKind::Revert,
+                    source_change: base.change_id,
+                    source_state: base.id(),
+                }],
             )
             .unwrap();
 

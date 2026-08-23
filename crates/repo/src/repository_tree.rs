@@ -1324,6 +1324,123 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         })
     }
 }
+impl Repository {
+    pub fn ignore_patterns(&self) -> Result<Vec<String>> {
+        let mut patterns = self.config.worktree.ignore.clone();
+        // Default config includes `.heddle`, but that is a last-match
+        // pattern. Root `.heddle/` is reserved after this list is
+        // compiled — see `objects::worktree::is_reserved_worktree_path`.
+        // Reserve the operator-local courtesy-stub filename. It is a Heddle
+        // artifact written for under-tier checkouts, never tracked content.
+        // Excluding it here is the single tree-build chokepoint every capture path
+        // consults (`build_tree`, `build_tree_with_stat_cache`, and the stat-cache
+        // no-op predicate), so the stub can never be pulled into a captured thread
+        // by any of them — including a plain `snapshot`/`capture` taken from inside
+        // a withheld worktree, which does not go through the withheld-manifest guard
+        // (heddle#316). ROOT-ANCHORED (`/HEDDLE-EMBARGO.txt`): the stub is only ever
+        // written at the worktree root, so the bare filename — which gitignore
+        // matches at ANY depth — would silently drop a user's own
+        // `sub/HEDDLE-EMBARGO.txt` from capture (heddle#316 #9).
+        patterns.push(format!(
+            "/{}",
+            super::repository_thread_materialize::COURTESY_STUB_FILENAME
+        ));
+        // Root Git metadata is repository-engine state, never source content.
+        patterns.push("/.git/".to_string());
+        // Native and Git-overlay repositories share the root `.gitignore`
+        // convention. This is intentionally a plain worktree-file read: a
+        // native repository does not need `.git` metadata for these rules to
+        // apply. `.heddleignore` is appended below, so the two files form one
+        // ordered matcher rather than one shadowing the other.
+        append_ignore_file_patterns(&mut patterns, &self.root.join(".gitignore"))?;
+        // Worktree-local, never-captured excludes (heddle's analogue of
+        // `.git/info/exclude`). Lives under THIS worktree's own `.heddle/`
+        // (`root/.heddle`, which is local even for a shared-store checkout), so
+        // it is never captured. Lets `start --hydrate` ignore symlinked deps
+        // without dirtying a tracked `.heddleignore` (heddle#356 cid 3333881577).
+        // `append_ignore_file_patterns` no-ops when the file is absent — the
+        // common case for a plain repo.
+        append_ignore_file_patterns(
+            &mut patterns,
+            &self.root.join(".heddle").join("info").join("exclude"),
+        )?;
+        let path = self.root.join(".heddleignore");
+
+        if path.exists() {
+            append_ignore_file_patterns(&mut patterns, &path)?;
+        }
+
+        Ok(patterns)
+    }
+
+    /// Canonical absolute paths of *other* threads' worktrees that are
+    /// strict descendants of `walk_root`. The walker uses these to
+    /// avoid scanning a sibling thread's files into the current
+    /// thread's tree (a common shape when an agent worktree is
+    /// materialized inside the parent repo, e.g. `--path-prefix
+    /// ./agents`). Computed once per scan, not once per file.
+    ///
+    /// Returns paths that
+    ///   - are strict descendants of canonical `walk_root`, and
+    ///   - are NOT equal to `walk_root` itself (each thread can scan
+    ///     its own worktree without excluding itself).
+    ///
+    /// Threads with no recorded worktree, or worktrees that no longer
+    /// exist on disk, are skipped without error.
+    pub fn nested_thread_worktree_exclusions(&self, walk_root: &Path) -> Result<Vec<PathBuf>> {
+        let canonical_walk_root = walk_root
+            .canonicalize()
+            .unwrap_or_else(|_| walk_root.to_path_buf());
+        let manager = crate::thread_storage::ThreadManager::new(self.heddle_dir());
+        let mut exclusions: Vec<PathBuf> = Vec::new();
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        for thread in manager.list()? {
+            for candidate in [
+                Some(&thread.execution_path),
+                thread.materialized_path.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if candidate.as_os_str().is_empty() {
+                    continue;
+                }
+                let canonical = match candidate.canonicalize() {
+                    Ok(path) => path,
+                    Err(_) => continue,
+                };
+                if canonical == canonical_walk_root {
+                    continue;
+                }
+                if !canonical.starts_with(&canonical_walk_root) {
+                    continue;
+                }
+                if seen.insert(canonical.clone()) {
+                    exclusions.push(canonical);
+                }
+            }
+        }
+        Ok(exclusions)
+    }
+}
+
+fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let contents = fs::read_to_string(path)?;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // Preserve repetitions. Gitignore matching is last-match-wins, so a
+        // repeated rule after a negation can change the outcome even when the
+        // same text appeared in an earlier file.
+        patterns.push(trimmed.to_string());
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -1486,122 +1603,4 @@ mod tests {
             "nested fixture .heddle must remain capturable"
         );
     }
-}
-
-impl Repository {
-    pub fn ignore_patterns(&self) -> Result<Vec<String>> {
-        let mut patterns = self.config.worktree.ignore.clone();
-        // Default config includes `.heddle`, but that is a last-match
-        // pattern. Root `.heddle/` is reserved after this list is
-        // compiled — see `objects::worktree::is_reserved_worktree_path`.
-        // Reserve the operator-local courtesy-stub filename. It is a Heddle
-        // artifact written for under-tier checkouts, never tracked content.
-        // Excluding it here is the single tree-build chokepoint every capture path
-        // consults (`build_tree`, `build_tree_with_stat_cache`, and the stat-cache
-        // no-op predicate), so the stub can never be pulled into a captured thread
-        // by any of them — including a plain `snapshot`/`capture` taken from inside
-        // a withheld worktree, which does not go through the withheld-manifest guard
-        // (heddle#316). ROOT-ANCHORED (`/HEDDLE-EMBARGO.txt`): the stub is only ever
-        // written at the worktree root, so the bare filename — which gitignore
-        // matches at ANY depth — would silently drop a user's own
-        // `sub/HEDDLE-EMBARGO.txt` from capture (heddle#316 #9).
-        patterns.push(format!(
-            "/{}",
-            super::repository_thread_materialize::COURTESY_STUB_FILENAME
-        ));
-        // Root Git metadata is repository-engine state, never source content.
-        patterns.push("/.git/".to_string());
-        // Native and Git-overlay repositories share the root `.gitignore`
-        // convention. This is intentionally a plain worktree-file read: a
-        // native repository does not need `.git` metadata for these rules to
-        // apply. `.heddleignore` is appended below, so the two files form one
-        // ordered matcher rather than one shadowing the other.
-        append_ignore_file_patterns(&mut patterns, &self.root.join(".gitignore"))?;
-        // Worktree-local, never-captured excludes (heddle's analogue of
-        // `.git/info/exclude`). Lives under THIS worktree's own `.heddle/`
-        // (`root/.heddle`, which is local even for a shared-store checkout), so
-        // it is never captured. Lets `start --hydrate` ignore symlinked deps
-        // without dirtying a tracked `.heddleignore` (heddle#356 cid 3333881577).
-        // `append_ignore_file_patterns` no-ops when the file is absent — the
-        // common case for a plain repo.
-        append_ignore_file_patterns(
-            &mut patterns,
-            &self.root.join(".heddle").join("info").join("exclude"),
-        )?;
-        let path = self.root.join(".heddleignore");
-
-        if path.exists() {
-            append_ignore_file_patterns(&mut patterns, &path)?;
-        }
-
-        Ok(patterns)
-    }
-
-    /// Canonical absolute paths of *other* threads' worktrees that are
-    /// strict descendants of `walk_root`. The walker uses these to
-    /// avoid scanning a sibling thread's files into the current
-    /// thread's tree (a common shape when an agent worktree is
-    /// materialized inside the parent repo, e.g. `--path-prefix
-    /// ./agents`). Computed once per scan, not once per file.
-    ///
-    /// Returns paths that
-    ///   - are strict descendants of canonical `walk_root`, and
-    ///   - are NOT equal to `walk_root` itself (each thread can scan
-    ///     its own worktree without excluding itself).
-    ///
-    /// Threads with no recorded worktree, or worktrees that no longer
-    /// exist on disk, are skipped without error.
-    pub fn nested_thread_worktree_exclusions(&self, walk_root: &Path) -> Result<Vec<PathBuf>> {
-        let canonical_walk_root = walk_root
-            .canonicalize()
-            .unwrap_or_else(|_| walk_root.to_path_buf());
-        let manager = crate::thread_storage::ThreadManager::new(self.heddle_dir());
-        let mut exclusions: Vec<PathBuf> = Vec::new();
-        let mut seen: HashSet<PathBuf> = HashSet::new();
-        for thread in manager.list()? {
-            for candidate in [
-                Some(&thread.execution_path),
-                thread.materialized_path.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                if candidate.as_os_str().is_empty() {
-                    continue;
-                }
-                let canonical = match candidate.canonicalize() {
-                    Ok(path) => path,
-                    Err(_) => continue,
-                };
-                if canonical == canonical_walk_root {
-                    continue;
-                }
-                if !canonical.starts_with(&canonical_walk_root) {
-                    continue;
-                }
-                if seen.insert(canonical.clone()) {
-                    exclusions.push(canonical);
-                }
-            }
-        }
-        Ok(exclusions)
-    }
-}
-
-fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let contents = fs::read_to_string(path)?;
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        // Preserve repetitions. Gitignore matching is last-match-wins, so a
-        // repeated rule after a negation can change the outcome even when the
-        // same text appeared in an earlier file.
-        patterns.push(trimmed.to_string());
-    }
-    Ok(())
 }

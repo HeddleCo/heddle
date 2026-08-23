@@ -51,6 +51,7 @@ pub fn install_default_computer(computer: std::sync::Arc<dyn SignalComputer>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(computer);
 }
 
+#[cfg(feature = "tree-sitter-symbols")]
 pub(crate) fn effective_computer(
     instance: Option<std::sync::Arc<dyn SignalComputer>>,
 ) -> Option<std::sync::Arc<dyn SignalComputer>> {

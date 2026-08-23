@@ -516,7 +516,7 @@ impl SnapshotMutation<'_> {
             source_trees.insert(tree.hash(), &tree);
             if let Some(computer) = crate::signals::effective_computer(self.repo.signal_computer()) {
                 match computer.compute_and_persist(
-                    &self.repo,
+                    self.repo,
                     prior_state.as_ref(),
                     &state,
                     semantic_index.as_ref(),
