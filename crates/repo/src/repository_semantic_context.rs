@@ -11,8 +11,9 @@ use std::{
 use objects::{
     error::HeddleError,
     object::{
-        Blob, ContentHash, DiffKind, LeafPolicy, ObjectSource, SemanticEntryKind,
-        SemanticIndexRoot, SemanticTreeNode, State, StateId, Tree, diff_trees, resolve_tree_path,
+        AnnotationKind, AnnotationScope, AnnotationStatus, Blob, ContentHash, ContextTarget,
+        DiffKind, LeafPolicy, ObjectSource, SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode,
+        State, StateId, Tree, diff_trees, resolve_tree_path,
     },
     store::ObjectStore,
 };
@@ -20,7 +21,7 @@ use semantic::{
     SemanticParseCache,
     parser::{FunctionDef, Language},
 };
-use state_review::SemanticContext;
+use state_review::{SemanticContext, modules::invariant_adjacency::InvariantAnnotation};
 use tracing::warn;
 
 use crate::{Repository, Result};
@@ -167,12 +168,25 @@ pub(crate) fn build_semantic_context(
         &new_functions,
     );
 
+    let invariant_annotations = prior
+        .map(|p| {
+            collect_invariant_annotations(repo, p).unwrap_or_else(|err| {
+                warn!(
+                    error = %err,
+                    "semantic context: failed to load invariant annotations; invariant_adjacency module will stay quiet"
+                );
+                Vec::new()
+            })
+        })
+        .unwrap_or_default();
+
     Ok(SemanticContext {
         prior_functions,
         new_functions,
         changed_paths,
         changed_symbols,
         corpus_complete,
+        invariant_annotations,
     })
 }
 
@@ -294,6 +308,75 @@ fn blob_bytes_at_path(
         return Ok(None);
     };
     Ok(source.get_blob(&hash)?.map(|blob| blob.content().to_vec()))
+}
+
+/// Collect invariant-kind annotations from the new state's context attachment.
+///
+/// Reads the context tree attached to `new` (via the latest `Context`
+/// attachment), walks every file-target blob, and returns an
+/// `InvariantAnnotation` for each active revision whose `kind` is
+/// `Invariant` or whose `tags` contain `"enforces"`. The `anchor`
+/// is derived from the annotation's scope: File → `SignalAnchor::file`,
+/// Symbol → `SignalAnchor::symbol`, Lines → `SignalAnchor::file` (lines
+/// are advisory and not carried into the signal anchor to keep the shape
+/// stable).
+///
+/// Returns an empty `Vec` (not an error) when the state has no context
+/// attachment — that is the common case for the first capture.
+fn collect_invariant_annotations(
+    repo: &Repository,
+    new: &State,
+) -> Result<Vec<InvariantAnnotation>> {
+    use objects::object::SignalAnchor;
+
+    let context_root = match repo.inherit_parent_context(new)? {
+        Some(root) => root,
+        None => return Ok(Vec::new()),
+    };
+
+    let entries = repo.list_context_entries(&context_root, None)?;
+    let mut out = Vec::new();
+
+    for entry in entries {
+        // Only file targets carry per-symbol annotations that make sense
+        // as risk-signal anchors; state targets are advisory and skipped.
+        let path = match &entry.target {
+            ContextTarget::File { path } => path.clone(),
+            ContextTarget::State { .. } => continue,
+        };
+
+        for annotation in &entry.blob.annotations {
+            if annotation.status != AnnotationStatus::Active {
+                continue;
+            }
+            let Some(rev) = annotation.current_revision() else {
+                continue;
+            };
+            let is_invariant = matches!(rev.kind, AnnotationKind::Invariant)
+                || rev.tags.iter().any(|t| t == "enforces");
+            if !is_invariant {
+                continue;
+            }
+
+            let anchor = match &annotation.scope {
+                AnnotationScope::Symbol { name, .. } => {
+                    SignalAnchor::symbol(path.clone(), name.clone())
+                }
+                AnnotationScope::File | AnnotationScope::Lines(..) => {
+                    SignalAnchor::file(path.clone())
+                }
+            };
+
+            out.push(InvariantAnnotation {
+                anchor,
+                kind: rev.kind,
+                content: rev.content.clone(),
+                tags: rev.tags.clone(),
+            });
+        }
+    }
+
+    Ok(out)
 }
 
 #[cfg(test)]

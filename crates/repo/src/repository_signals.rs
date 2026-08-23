@@ -280,4 +280,67 @@ mod tests {
         cfg.novelty.enabled = true;
         assert!(tree_sitter_producers_enabled(&cfg));
     }
+
+    /// When a state has an invariant annotation attached to its context,
+    /// `compute_and_persist_signals` must fire an `invariant_adjacency` signal.
+    /// This was previously a permanent no-op: `ctx_annotations` returned the
+    /// hard-wired `EMPTY` static regardless of what `SemanticContext` carried.
+    #[test]
+    fn snapshot_with_invariant_annotation_persists_invariant_adjacency_signal() {
+        use chrono::Utc;
+        use objects::object::{
+            Annotation, AnnotationKind, AnnotationScope, ContextBlob,
+            ContextTarget, StateAttachment, StateAttachmentBody,
+        };
+
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("src.rs"), b"fn guarded() {}").unwrap();
+        let attribution = Attribution::human(Principal::new("Ann", "ann@example.com"));
+
+        // Take a seed snapshot so there is a prior state.
+        let seed = repo
+            .snapshot_with_attribution(Some("seed".to_string()), None, attribution.clone())
+            .unwrap();
+
+        // Attach an invariant annotation to the seed state, simulating what
+        // `heddle context` writes when an agent marks a symbol as invariant.
+        let target = ContextTarget::file("src.rs").unwrap();
+        let annotation = Annotation::new(
+            AnnotationScope::Symbol {
+                name: "guarded".to_string(),
+                resolved_lines: None,
+            },
+            AnnotationKind::Invariant,
+            "must hold across all operations".to_string(),
+            vec![],
+            "ann@example.com".to_string(),
+            0,
+            None,
+            None,
+        );
+        let blob = ContextBlob::new(vec![annotation]);
+        let context_root = repo.set_context_blob(None, &target, &blob).unwrap();
+        repo.put_state_attachment(&StateAttachment {
+            state_id: seed.id(),
+            body: StateAttachmentBody::Context(context_root),
+            attribution: attribution.clone(),
+            created_at: Utc::now(),
+            supersedes: None,
+        })
+        .unwrap();
+
+        // Take a second snapshot — this is the capture that should read the
+        // invariant annotation from the seed's context and fire the signal.
+        std::fs::write(temp.path().join("src.rs"), b"fn guarded() { changed() }").unwrap();
+        let state = repo
+            .snapshot_with_attribution(Some("change".to_string()), None, attribution)
+            .unwrap();
+
+        let modules = attached_risk_modules(&repo, &state);
+        assert!(
+            modules.iter().any(|m| m == "invariant_adjacency"),
+            "invariant_adjacency must fire when state has an invariant annotation; got {modules:?}"
+        );
+    }
 }

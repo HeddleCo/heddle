@@ -21,21 +21,12 @@ pub fn run(
     _prior: &State,
     new: &State,
     cfg: &ReviewSignalsConfig,
-    _ctx: &SemanticContext,
+    ctx: &SemanticContext,
 ) -> Vec<RiskSignal> {
     if !cfg.invariant_adjacency.enabled {
         return Vec::new();
     }
-    // Annotations live in the state's context attachment. The caller materialises
-    // them into the SemanticContext when available; we don't want this
-    // module to do I/O. For the first ship, return empty when the
-    // SemanticContext doesn't carry decoded annotations — the wrapper
-    // above (R5/R7) will populate `ctx.invariant_annotations` once that
-    // surface stabilises.
-    //
-    // The code path below is exercised by test fixtures that synthesise
-    // a SemanticContext with pre-loaded annotations.
-    let annotations = ctx_annotations(_ctx);
+    let annotations = ctx_annotations(ctx);
     let computed_at = new
         .authored_at
         .map(|dt| dt.timestamp())
@@ -63,13 +54,7 @@ pub fn run(
 }
 
 fn ctx_annotations(ctx: &SemanticContext) -> &[InvariantAnnotation] {
-    // The SemanticContext is intentionally narrow; per-module side
-    // channels go on it as fields. For now the invariant module doesn't
-    // see annotations because there's no field — callers that have the
-    // data populate a synthetic context in tests via `set_invariants`.
-    static EMPTY: Vec<InvariantAnnotation> = Vec::new();
-    let _ = ctx;
-    &EMPTY
+    &ctx.invariant_annotations
 }
 
 /// Compact representation the module operates on. Lifted from the W1
@@ -88,6 +73,8 @@ use crate::truncate_reason;
 mod tests {
     use objects::object::{Attribution, ContentHash, Principal};
 
+    use crate::{registry::SemanticContext, ReviewSignalsConfig};
+
     use super::*;
 
     fn empty_state() -> State {
@@ -98,12 +85,74 @@ mod tests {
         )
     }
 
+    fn enabled_cfg() -> ReviewSignalsConfig {
+        ReviewSignalsConfig::default()
+    }
+
+    fn ctx_with(annotations: Vec<InvariantAnnotation>) -> SemanticContext {
+        SemanticContext {
+            invariant_annotations: annotations,
+            ..SemanticContext::default()
+        }
+    }
+
+    #[test]
+    fn run_fires_when_invariant_annotation_present() {
+        let prior = empty_state();
+        let new = empty_state();
+        let ctx = ctx_with(vec![InvariantAnnotation {
+            anchor: SignalAnchor::symbol("src/lib.rs", "foo"),
+            kind: AnnotationKind::Invariant,
+            content: "must hold across operations".to_string(),
+            tags: vec![],
+        }]);
+        let signals = run(&prior, &new, &enabled_cfg(), &ctx);
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0].kind, RiskSignalKind::InvariantAdjacency);
+        assert!(signals[0].reason.contains("must hold across operations"));
+    }
+
+    #[test]
+    fn run_fires_when_enforces_tag_present() {
+        let prior = empty_state();
+        let new = empty_state();
+        let ctx = ctx_with(vec![InvariantAnnotation {
+            anchor: SignalAnchor::symbol("src/lib.rs", "foo"),
+            kind: AnnotationKind::Constraint,
+            content: "tagged as enforced".to_string(),
+            tags: vec!["enforces".to_string()],
+        }]);
+        let signals = run(&prior, &new, &enabled_cfg(), &ctx);
+        assert_eq!(signals.len(), 1);
+    }
+
+    #[test]
+    fn run_quiet_when_no_invariant_or_enforces() {
+        let prior = empty_state();
+        let new = empty_state();
+        let ctx = ctx_with(vec![InvariantAnnotation {
+            anchor: SignalAnchor::symbol("src/lib.rs", "foo"),
+            kind: AnnotationKind::Rationale,
+            content: "design decision".to_string(),
+            tags: vec!["history".to_string()],
+        }]);
+        let signals = run(&prior, &new, &enabled_cfg(), &ctx);
+        assert!(signals.is_empty());
+    }
+
+    #[test]
+    fn run_quiet_when_context_has_no_annotations() {
+        // The prior no-op: empty SemanticContext must produce no signals,
+        // and the module must stay quiet when the context carries nothing.
+        let prior = empty_state();
+        let new = empty_state();
+        let ctx = SemanticContext::default();
+        let signals = run(&prior, &new, &enabled_cfg(), &ctx);
+        assert!(signals.is_empty());
+    }
+
     #[test]
     fn fires_when_invariant_annotation_present() {
-        // Direct invocation since the public `run` walks an empty fallback
-        // until R5 wires real annotations into SemanticContext. We exercise
-        // the in-module logic via a small helper that mirrors `run`'s body
-        // with a synthetic input — proves the *fires* shape.
         let new = empty_state();
         let annotations = vec![InvariantAnnotation {
             anchor: SignalAnchor::symbol("src/lib.rs", "foo"),
