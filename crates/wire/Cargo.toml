@@ -35,6 +35,6 @@ name = "wire"
 # Circular: heddle-repo depends on heddle-wire. We keep the path-dep
 # for local testing but omit `version` so cargo strips this entry from
 # the published manifest (dev-deps without version are not packaged).
-repo = { workspace = true, features = ["git-overlay", "native", "zstd"] }
+repo = { path = "../repo", package = "heddle-repo", default-features = false, features = ["git-overlay", "native", "zstd"] }
 tempfile.workspace = true
 sley.workspace = true
