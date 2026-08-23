@@ -2,34 +2,19 @@
 //! Git-overlay commit command.
 
 use anyhow::{Result, anyhow};
-use serde::Serialize;
 
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     checkpoint::{GitCheckpointRequest, create_git_checkpoint},
-    command_catalog::ActionTemplate,
     git_overlay_txn,
+    next_action::{NextActionValidationContext, write_full_command_json},
     ready_cmd::worktree_dirty,
-    verification_health::{
-        RepositoryVerificationState, action_template, build_repository_verification_state,
-    },
+    verification_health::{action_template, build_repository_verification_state},
 };
 use crate::cli::{Cli, CommitArgs, should_output_json, style, worktree_status_options};
 
-#[derive(Serialize)]
-struct CommitOutput {
-    output_kind: &'static str,
-    action: &'static str,
-    status: &'static str,
-    state_id: String,
-    git_commit: String,
-    summary: String,
-    recommended_action: Option<String>,
-    recommended_action_template: Option<ActionTemplate>,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
+pub(crate) use heddle_cli_contract::cli::commands::wire::CommitOutput;
 
 pub fn cmd_commit(cli: &Cli, args: CommitArgs) -> Result<()> {
     let cwd;
@@ -95,7 +80,10 @@ pub fn cmd_commit(cli: &Cli, args: CommitArgs) -> Result<()> {
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        crate::cli::render::write_json_stdout(&output)?;
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["commit"]),
+        )?;
     } else {
         let verb = if already_current {
             "Already committed"

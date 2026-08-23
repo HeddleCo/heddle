@@ -20,12 +20,12 @@ use objects::{
 };
 use refs::Head;
 use repo::{
-    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, CommitGraphIndex, GitImportGuidance, GitOverlayBranchTip,
-    GitOverlayOutOfBandCommits, GitRemoteTrackingStatus, RepoConfig, Repository,
-    RepositoryCapability, RepositoryOperationStatus, Thread, ThreadFreshness, ThreadImpactCategory,
-    ThreadManager, ThreadMode, ThreadState, WorktreeCompareProfile,
-    describe_thread_advice_with_initial, discover_heddle_root, is_synthetic_root,
-    refresh_thread_freshness,
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, CommitGraphIndex,
+    GitImportGuidance, GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitRemoteTrackingStatus,
+    RepoConfig, Repository, RepositoryCapability, RepositoryOperationStatus, Thread,
+    ThreadFreshness, ThreadImpactCategory, ThreadManager, ThreadMode, ThreadState,
+    WorktreeCompareProfile, describe_thread_advice_with_initial, discover_heddle_root,
+    is_synthetic_root, refresh_thread_freshness,
 };
 use schemars::JsonSchema;
 use serde::Serialize;

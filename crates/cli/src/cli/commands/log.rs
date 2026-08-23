@@ -9,22 +9,14 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use objects::object::{
-    Agent, State, StateId, TimelineBranchReason, TimelineCursorMoveReason, TimelineLabel,
-    TimelineToolCallStatus,
-};
 use repo::{
-    ChangedPathFilters, HistoryQuery, Repository, TimelineNavigationRecoveryStatus,
-    TimelineNavigationSnapshot, TimelineNavigationStep, TimelineStore, format_confidence,
+    ChangedPathFilters, HistoryQuery, Repository, TimelineStore, format_confidence,
     is_synthetic_root,
 };
 use serde::Serialize;
 use verbs::{
     parse_reflog_line, short_oid, status::next_action::canonical_git_import_ref_command,
-    summarize_paths, timeline_branch_reason as core_timeline_branch_reason,
-    timeline_cursor_reason as core_timeline_cursor_reason, timeline_label as core_timeline_label,
-    timeline_recovery_status as core_timeline_recovery_status,
-    timeline_tool_status as core_timeline_tool_status, yes_no,
+    summarize_paths, yes_no,
 };
 
 use super::{
@@ -40,6 +32,23 @@ use super::{
 use crate::{
     cli::{Cli, should_output_json, style},
     config::UserConfig,
+};
+
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types.
+#[cfg(test)]
+pub use heddle_cli_contract::cli::commands::wire::history::{
+    TimelineActionsOutput, TimelineBranchOutput, TimelineCursorOutput, TimelineNativeOutput,
+    TimelineRecoveryOutput,
+};
+pub use heddle_cli_contract::cli::commands::wire::history::{
+    TimelineLogOutput, TimelineStepOutput,
+};
+
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
+    CollapsedEntry, LogImportGuidanceOutput, LogOutput, ReflogEntry, ReflogOutput, StateEntry,
 };
 
 #[derive(Clone, Debug)]
@@ -61,208 +70,6 @@ pub struct LogCommandOptions {
     /// excluded from the output (matches `git log --since`'s
     /// half-open semantics for time bounds).
     pub since: Option<String>,
-}
-
-#[derive(Serialize)]
-struct LogOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    repository_capability: String,
-    storage_model: String,
-    states: Vec<StateEntry>,
-    /// Carried for the human-readable renderer only. Not part of the
-    /// JSON contract: import-hint information is exposed via
-    /// `heddle status --output json` instead.
-    #[serde(skip)]
-    import_guidance: Option<LogImportGuidanceOutput>,
-    /// Init seed id for the text renderer only. Not a JSON key: the
-    /// walk still omits genesis from `states` and names the id in text.
-    #[serde(skip)]
-    omitted_genesis: Option<String>,
-}
-
-#[derive(Serialize)]
-struct LogImportGuidanceOutput {
-    current_branch: String,
-    missing_branch_count: usize,
-    missing_branches: Vec<String>,
-    recommended_command: String,
-}
-
-#[derive(Serialize)]
-struct StateEntry {
-    state_id: String,
-    content_hash: String,
-    intent: Option<String>,
-    principal: String,
-    /// Raw principal name + email so we can render a styled
-    /// `name <email>` pair (bold/dim) without re-parsing the
-    /// pre-formatted `principal` string. Skipped from JSON
-    /// serialization to keep the wire format unchanged — only the
-    /// human-readable renderer reads them.
-    #[serde(skip)]
-    principal_name: String,
-    #[serde(skip)]
-    principal_email: String,
-    agent: Option<String>,
-    confidence: Option<f32>,
-    created_at: String,
-    parents: Vec<String>,
-    git_checkpoint: Option<String>,
-    collapsed: Option<CollapsedEntry>,
-}
-
-#[derive(Serialize)]
-struct CollapsedEntry {
-    expandable: bool,
-    source_count: usize,
-}
-
-#[derive(Serialize)]
-struct ReflogOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    repository_capability: String,
-    storage_model: String,
-    entries: Vec<ReflogEntry>,
-}
-
-#[derive(Serialize)]
-struct TimelineLogOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    repository_capability: String,
-    storage_model: String,
-    thread: String,
-    cursor: TimelineCursorOutput,
-    branches: Vec<TimelineBranchOutput>,
-    steps: Vec<TimelineStepOutput>,
-    active_branch_path: Vec<String>,
-    actions: TimelineActionsOutput,
-    recovery: Option<TimelineRecoveryOutput>,
-}
-
-#[derive(Serialize)]
-struct TimelineCursorOutput {
-    branch_id: Option<String>,
-    step_id: Option<String>,
-    state: Option<String>,
-    state_full: Option<String>,
-}
-
-#[derive(Serialize)]
-struct TimelineBranchOutput {
-    branch_id: String,
-    parent_branch_id: Option<String>,
-    forked_from_step_id: Option<String>,
-    forked_from_state: Option<String>,
-    reason: Option<String>,
-    created_at_ms: Option<i64>,
-    step_ids: Vec<String>,
-    is_active: bool,
-    is_on_active_path: bool,
-}
-
-#[derive(Serialize)]
-struct TimelineStepOutput {
-    step_id: String,
-    branch_id: String,
-    parent_step_id: Option<String>,
-    native: Option<TimelineNativeOutput>,
-    tool_name: Option<String>,
-    status: Option<String>,
-    changed: Option<bool>,
-    touched_paths: Vec<String>,
-    labels: Vec<String>,
-    before_state: Option<String>,
-    after_state: Option<String>,
-    capture_state: Option<String>,
-    cursor_state: Option<String>,
-    cursor_state_full: Option<String>,
-    payload_summary: Option<String>,
-    payload_hash: Option<String>,
-    capture_oplog_batch_id: Option<u64>,
-    started_at_ms: Option<i64>,
-    finished_at_ms: Option<i64>,
-    operation_ids: Vec<String>,
-    is_current: bool,
-    is_on_active_branch_path: bool,
-    can_seek: bool,
-    can_fork: bool,
-    can_reset: bool,
-    can_materialize: bool,
-    has_boundary_warning: bool,
-}
-
-#[derive(Serialize)]
-struct TimelineNativeOutput {
-    harness: String,
-    session_id: Option<String>,
-    message_id: Option<String>,
-    tool_call_id: String,
-}
-
-#[derive(Serialize)]
-struct TimelineActionsOutput {
-    can_undo: bool,
-    can_redo: bool,
-}
-
-#[derive(Serialize)]
-struct TimelineRecoveryOutput {
-    status: String,
-    branch_id: String,
-    from_step_id: Option<String>,
-    to_step_id: Option<String>,
-    from_state: String,
-    to_state: String,
-    reason: String,
-    moved_at_ms: i64,
-    checkout_state: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct ReflogEntry {
-    source: String,
-    reference: String,
-    old_oid: String,
-    new_oid: String,
-    actor: String,
-    timestamp: Option<String>,
-    message: String,
-}
-
-impl From<verbs::ReflogLine> for ReflogEntry {
-    fn from(line: verbs::ReflogLine) -> Self {
-        Self {
-            source: line.source,
-            reference: line.reference,
-            old_oid: line.old_oid,
-            new_oid: line.new_oid,
-            actor: line.actor,
-            timestamp: line.timestamp,
-            message: line.message,
-        }
-    }
-}
-
-impl From<&State> for StateEntry {
-    fn from(state: &State) -> Self {
-        Self {
-            state_id: state.state_id.short(),
-            content_hash: state.compute_hash().short(),
-            intent: state.intent.clone(),
-            principal: state.attribution.principal.to_string(),
-            principal_name: state.attribution.principal.name_lossy().into_owned(),
-            principal_email: state.attribution.principal.email_lossy().into_owned(),
-            agent: state.attribution.agent.as_ref().map(Agent::to_string),
-            confidence: state.confidence,
-            created_at: state.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-            parents: state.parents.iter().map(StateId::short).collect(),
-            git_checkpoint: None,
-            collapsed: None,
-        }
-    }
 }
 
 pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
@@ -614,107 +421,6 @@ fn cmd_log_reflog(cli: &Cli, repo: &Repository, limit: usize, oneline: bool) -> 
     Ok(())
 }
 
-impl TimelineLogOutput {
-    fn from_snapshot(repo: &Repository, snapshot: TimelineNavigationSnapshot) -> Self {
-        Self {
-            output_kind: "timeline_log",
-            status: "completed",
-            repository_capability: repo.capability_label().to_string(),
-            storage_model: repo.storage_model_label().to_string(),
-            thread: snapshot.thread,
-            cursor: TimelineCursorOutput {
-                branch_id: snapshot.cursor.branch_id.map(|id| id.to_string()),
-                step_id: snapshot.cursor.step_id.map(|id| id.to_string()),
-                state: snapshot.cursor.state.map(|state| state.short()),
-                state_full: snapshot.cursor.state.map(|state| state.to_string_full()),
-            },
-            branches: snapshot
-                .branches
-                .into_iter()
-                .map(|branch| TimelineBranchOutput {
-                    branch_id: branch.branch_id.to_string(),
-                    parent_branch_id: branch.parent_branch_id.map(|id| id.to_string()),
-                    forked_from_step_id: branch.forked_from_step_id.map(|id| id.to_string()),
-                    forked_from_state: branch.forked_from_state.map(|state| state.short()),
-                    reason: branch.reason.as_ref().map(timeline_branch_reason),
-                    created_at_ms: branch.created_at_ms,
-                    step_ids: branch.step_ids.iter().map(ToString::to_string).collect(),
-                    is_active: branch.is_active,
-                    is_on_active_path: branch.is_on_active_path,
-                })
-                .collect(),
-            steps: snapshot
-                .steps
-                .into_iter()
-                .map(TimelineStepOutput::from_step)
-                .collect(),
-            active_branch_path: snapshot
-                .active_branch_path
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-            actions: TimelineActionsOutput {
-                can_undo: snapshot.actions.can_undo,
-                can_redo: snapshot.actions.can_redo,
-            },
-            recovery: snapshot.recovery.map(|recovery| TimelineRecoveryOutput {
-                status: timeline_recovery_status(recovery.status).to_string(),
-                branch_id: recovery.branch_id.to_string(),
-                from_step_id: recovery.from_step_id.map(|id| id.to_string()),
-                to_step_id: recovery.to_step_id.map(|id| id.to_string()),
-                from_state: recovery.from_state.short(),
-                to_state: recovery.to_state.short(),
-                reason: timeline_cursor_reason(&recovery.reason).to_string(),
-                moved_at_ms: recovery.moved_at_ms,
-                checkout_state: recovery.checkout_state.map(|state| state.short()),
-            }),
-        }
-    }
-}
-
-impl TimelineStepOutput {
-    fn from_step(step: TimelineNavigationStep) -> Self {
-        Self {
-            step_id: step.step_id.to_string(),
-            branch_id: step.branch_id.to_string(),
-            parent_step_id: step.parent_step_id.map(|id| id.to_string()),
-            native: step.native.map(|native| TimelineNativeOutput {
-                harness: native.harness,
-                session_id: native.session_id,
-                message_id: native.message_id,
-                tool_call_id: native.tool_call_id,
-            }),
-            tool_name: step.tool_name,
-            status: step.status.as_ref().map(timeline_tool_status),
-            changed: step.changed,
-            touched_paths: step.touched_paths,
-            labels: step.labels.iter().map(timeline_label).collect(),
-            before_state: step.before_state.map(|state| state.short()),
-            after_state: step.after_state.map(|state| state.short()),
-            capture_state: step.capture_state.map(|state| state.short()),
-            cursor_state: step.cursor_state.map(|state| state.short()),
-            cursor_state_full: step.cursor_state.map(|state| state.to_string_full()),
-            payload_summary: step.payload_summary,
-            payload_hash: step.payload_hash.map(|hash| hash.short()),
-            capture_oplog_batch_id: step.capture_oplog_batch_id,
-            started_at_ms: step.started_at_ms,
-            finished_at_ms: step.finished_at_ms,
-            operation_ids: step
-                .operation_ids
-                .iter()
-                .map(|id| id.to_string_full())
-                .collect(),
-            is_current: step.is_current,
-            is_on_active_branch_path: step.is_on_active_branch_path,
-            can_seek: step.can_seek,
-            can_fork: step.can_fork,
-            can_reset: step.can_reset,
-            can_materialize: step.can_materialize,
-            has_boundary_warning: step.has_boundary_warning,
-        }
-    }
-}
-
 fn write_timeline_oneline<W: std::io::Write>(
     out: &mut W,
     output: &TimelineLogOutput,
@@ -827,26 +533,6 @@ fn timeline_step_line(step: &TimelineStepOutput, verbose: bool) -> String {
             style::dim(&format!("{state} {paths}"))
         )
     }
-}
-
-fn timeline_label(label: &TimelineLabel) -> String {
-    core_timeline_label(label).to_string()
-}
-
-fn timeline_tool_status(status: &TimelineToolCallStatus) -> String {
-    core_timeline_tool_status(status).to_string()
-}
-
-fn timeline_branch_reason(reason: &TimelineBranchReason) -> String {
-    core_timeline_branch_reason(reason).to_string()
-}
-
-fn timeline_cursor_reason(reason: &TimelineCursorMoveReason) -> &'static str {
-    core_timeline_cursor_reason(reason)
-}
-
-fn timeline_recovery_status(status: TimelineNavigationRecoveryStatus) -> &'static str {
-    core_timeline_recovery_status(status)
 }
 
 fn collect_reflog_entries(root: &Path, limit: usize) -> Result<Vec<ReflogEntry>> {

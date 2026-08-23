@@ -15,9 +15,11 @@ use repo::{
     Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,
     WorktreeStatusOptions,
 };
+use schemars::JsonSchema;
 use serde::Serialize;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(rename = "ThreadMoveSchema")]
 pub struct ThreadMoveOutput {
     pub from_thread: String,
     pub to_thread: String,

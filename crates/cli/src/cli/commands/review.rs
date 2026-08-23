@@ -8,7 +8,6 @@ use objects::object::{
     Discussion, DiscussionResolution, ReviewKind, ReviewScope, StateId, SymbolAnchor,
 };
 use repo::{HistoryQuery, operation_dedup::OperationDedupStore};
-use serde::Serialize;
 use verbs::review::{
     LocalReviewContext, LocalStateReview, ReviewSignal, ReviewSignalKind, ReviewSignalVisibility,
     SignReviewRequest, get_repo_signal_health,
@@ -17,6 +16,7 @@ use verbs::review::{
 use super::{
     advice::RecoveryAdvice,
     history_target::{resolve_state_id, resolve_state_id_bytes},
+    next_action::{NextActionValidationContext, write_full_command_json},
 };
 use crate::cli::{
     cli_args::{
@@ -28,6 +28,13 @@ use crate::cli::{
 const AGENT_GLYPH: &str = "※";
 const HUMAN_GLYPH: &str = "✓";
 
+// The review wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::collab::{
+    DiscussionView, HealthEntry, NextStateView, ReviewHealthOutput, ReviewNextOutput,
+    ReviewShowOutput, ReviewSignOutput, SignalView, SignatureView,
+};
+
 pub async fn run(cli: &Cli, command: &ReviewCommands) -> Result<()> {
     match command {
         ReviewCommands::Show(args) => run_show(cli, args).await,
@@ -35,52 +42,6 @@ pub async fn run(cli: &Cli, command: &ReviewCommands) -> Result<()> {
         ReviewCommands::Next(args) => run_next(cli, args).await,
         ReviewCommands::Health(args) => run_health(cli, args).await,
     }
-}
-
-#[derive(Serialize)]
-struct ReviewShowOutput {
-    output_kind: &'static str,
-    state_id: String,
-    headline: String,
-    agent_narrative: Option<String>,
-    files_changed: u32,
-    in_budget_signals: Vec<SignalView>,
-    all_signals: Vec<SignalView>,
-    discussions: Vec<DiscussionView>,
-    signing_kinds: Vec<String>,
-    signatures: Vec<SignatureView>,
-}
-
-#[derive(Serialize)]
-struct SignalView {
-    kind: String,
-    file: String,
-    symbol: String,
-    reason: String,
-    producer: String,
-    visibility: String,
-}
-
-#[derive(Serialize)]
-struct DiscussionView {
-    id: String,
-    file: String,
-    symbol: String,
-    status: String,
-    body_changed_since_open: bool,
-    orphaned: bool,
-}
-
-#[derive(Serialize)]
-struct SignatureView {
-    actor_name: String,
-    actor_email: String,
-    kind: String,
-    glyph: &'static str,
-    is_agent: bool,
-    signed_at_secs: i64,
-    scope_kind: String,
-    scope_symbols: Vec<String>,
 }
 
 async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
@@ -135,10 +96,10 @@ async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
         signatures,
     };
     if should_output_json(cli, None) {
-        println!(
-            "{}",
-            serde_json::to_string(&output).context("serialize review payload")?
-        );
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["review", "show"]),
+        )?;
     } else {
         render_text(&output, args.all_signals);
     }
@@ -253,12 +214,12 @@ async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
     };
     let response = review.sign_state(request).await?;
     if should_output_json(cli, None) {
-        let out = serde_json::json!({
-            "output_kind": "review_sign",
-            "signature_id": response.signature_id,
-            "state_id": response.state_id.to_string_full(),
-        });
-        println!("{out}");
+        let out = ReviewSignOutput {
+            output_kind: "review_sign",
+            signature_id: response.signature_id,
+            state_id: response.state_id.to_string_full(),
+        };
+        println!("{}", serde_json::to_string(&out)?);
     } else {
         println!(
             "signed state {} as {} (signature_id {})",
@@ -331,22 +292,29 @@ async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
         // none. Keeping a single envelope shape lets agents key off
         // `output_kind` without branching on payload shape.
         let envelope = match &next_state {
-            Some(view) => serde_json::json!({
-                "output_kind": "review_next",
-                "state_id": view.state_id,
-                "headline": view.headline,
-                "existing_signatures": view.existing_signatures,
-                "next": view,
-            }),
-            None => serde_json::json!({
-                "output_kind": "review_next",
-                "next": serde_json::Value::Null,
-            }),
+            Some(view) => ReviewNextOutput {
+                output_kind: "review_next",
+                state_id: Some(view.state_id.clone()),
+                headline: Some(view.headline.clone()),
+                existing_signatures: Some(view.existing_signatures),
+                next: heddle_cli_contract::cli::commands::wire::collab::RequiredNullableNextState(
+                    Some(view.clone()),
+                ),
+            },
+            None => ReviewNextOutput {
+                output_kind: "review_next",
+                state_id: None,
+                headline: None,
+                existing_signatures: None,
+                next: heddle_cli_contract::cli::commands::wire::collab::RequiredNullableNextState(
+                    None,
+                ),
+            },
         };
-        println!(
-            "{}",
-            serde_json::to_string(&envelope).context("serialize review next envelope")?
-        );
+        write_full_command_json(
+            &envelope,
+            NextActionValidationContext::without_repo(&["review", "next"]),
+        )?;
     } else {
         match &next_state {
             Some(view) => {
@@ -366,13 +334,6 @@ async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
 
 const NEXT_SCAN_LIMIT: usize = 50;
 
-#[derive(Serialize)]
-struct NextStateView {
-    state_id: String,
-    headline: String,
-    existing_signatures: u32,
-}
-
 async fn run_health(cli: &Cli, args: &ReviewHealthArgs) -> Result<()> {
     let repo = cli.open_repo()?;
     let resp = get_repo_signal_health(&repo, args.window.unwrap_or(0))
@@ -381,20 +342,18 @@ async fn run_health(cli: &Cli, args: &ReviewHealthArgs) -> Result<()> {
         let entries: Vec<_> = resp
             .entries
             .iter()
-            .map(|e| {
-                serde_json::json!({
-                    "module_id": e.module_id,
-                    "fire_rate": e.fire_rate,
-                    "warn": e.warn,
-                })
+            .map(|e| HealthEntry {
+                module_id: e.module_id.clone(),
+                fire_rate: f64::from(e.fire_rate),
+                warn: e.warn,
             })
             .collect();
-        let out = serde_json::json!({
-            "output_kind": "review_health",
-            "entries": entries,
-            "window_states": resp.window_states,
-        });
-        println!("{out}");
+        let out = ReviewHealthOutput {
+            output_kind: "review_health",
+            entries,
+            window_states: resp.window_states as usize,
+        };
+        println!("{}", serde_json::to_string(&out)?);
     } else {
         println!("signal health (window: {} states)", resp.window_states);
         if resp.entries.is_empty() {

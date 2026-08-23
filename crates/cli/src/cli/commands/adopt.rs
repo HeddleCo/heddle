@@ -6,15 +6,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow, bail};
 use objects::lock::RepositoryLockExt;
 use repo::{Repository, RepositoryCapability, RepositorySourceAuthority};
-use serde::Serialize;
 use sley::Repository as SleyRepository;
 use verbs::{AdoptPlanError, AdoptPlanOptions, plan_adopt};
 
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    command_catalog::ActionTemplate,
     import_progress::ImportProgress,
+    next_action::{NextActionValidationContext, write_full_command_json},
     verification_health::{
         RepositoryVerificationState, build_repository_verification_state,
         build_repository_verification_state_profiled,
@@ -25,26 +24,9 @@ use crate::{
     perf::{ProfileField, emit_profile, instrumentation_enabled},
 };
 
-#[derive(Debug, Serialize)]
-struct AdoptOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    action: &'static str,
-    adopted: bool,
-    initialized: bool,
-    path: PathBuf,
-    refs: Vec<String>,
-    commits_imported: usize,
-    states_created: usize,
-    branches_synced: usize,
-    tags_synced: usize,
-    skipped_non_commit_refs: usize,
-    already_in_sync: bool,
-    recommended_action: Option<String>,
-    recommended_action_template: Option<ActionTemplate>,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
+// The wire payload lives in cli-contract so the schema registry registers
+// the real serialization type.
+pub use heddle_cli_contract::cli::commands::wire::remote::AdoptOutput;
 
 #[derive(Debug)]
 struct AdoptImportStats {
@@ -323,7 +305,10 @@ fn git_worktree_root(start: &Path) -> Result<PathBuf> {
 
 fn render_adopt(output: &AdoptOutput, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(output)?);
+        write_full_command_json(
+            output,
+            NextActionValidationContext::without_repo(&["adopt"]),
+        )?;
         return Ok(());
     }
 

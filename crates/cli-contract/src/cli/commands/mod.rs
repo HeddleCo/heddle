@@ -9,6 +9,7 @@ pub mod init_output;
 pub mod schemas;
 pub mod surface_conformance;
 pub mod verification_health;
+pub mod wire;
 
 pub use advice::RecoveryAdvice;
 pub use command_catalog::{

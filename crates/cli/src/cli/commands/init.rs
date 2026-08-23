@@ -17,6 +17,7 @@ use verbs::{
 use super::{
     RecoveryAdvice,
     action_line::print_next,
+    next_action::{NextActionValidationContext, write_full_command_json},
     recover_incomplete_land_if_present,
     snapshot::{is_placeholder_principal, placeholder_principal_warning},
     verification_health::build_repository_verification_state,
@@ -226,7 +227,10 @@ fn absolute_path(path: &std::path::Path) -> Result<PathBuf> {
 
 fn render_init(output: &InitOutput, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(output)?);
+        write_full_command_json(
+            output,
+            NextActionValidationContext::without_repo(&[INIT_VERB]),
+        )?;
     } else {
         println!("{}", output.message);
         match output.principal.as_ref() {

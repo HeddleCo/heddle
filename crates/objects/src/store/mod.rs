@@ -299,17 +299,10 @@ impl SidecarStore for AnyStore {
     fn has_state_visibility_for_state(&self, state: &StateId) -> Result<bool> {
         any_store_dispatch!(self, has_state_visibility_for_state(state))
     }
-    fn get_state_visibility_bytes_for_state(
-        &self,
-        state: &StateId,
-    ) -> Result<Option<Vec<u8>>> {
+    fn get_state_visibility_bytes_for_state(&self, state: &StateId) -> Result<Option<Vec<u8>>> {
         any_store_dispatch!(self, get_state_visibility_bytes_for_state(state))
     }
-    fn put_state_visibility_bytes_for_state(
-        &self,
-        state: &StateId,
-        bytes: &[u8],
-    ) -> Result<()> {
+    fn put_state_visibility_bytes_for_state(&self, state: &StateId, bytes: &[u8]) -> Result<()> {
         any_store_dispatch!(self, put_state_visibility_bytes_for_state(state, bytes))
     }
     fn list_states_with_visibility(&self) -> Result<Vec<StateId>> {
@@ -887,7 +880,6 @@ pub trait ObjectStore: Send + Sync {
     }
 
     fn abort_snapshot_write_batch(&self) {}
-
 }
 
 #[cfg(test)]

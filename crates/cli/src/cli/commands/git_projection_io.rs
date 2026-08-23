@@ -18,7 +18,6 @@ use ingest::{ImportOptions, LossyImportEntry};
 use objects::object::{StateId, ThreadName};
 use refs::Head;
 use repo::Repository;
-use serde::Serialize;
 use sley::remote::SilentProgress;
 use verbs::git_projection_io_plan::{
     ExportedRefSummaryFact, export_commits_summary, exported_refs_summary,
@@ -29,10 +28,7 @@ use super::{
     advice::RecoveryAdvice,
     import_progress::ImportProgress,
     next_action::{NextActionValidationContext, write_full_command_json},
-    verification_health::{
-        RepositoryVerificationState, build_repository_verification_state,
-        serialize_empty_action_as_null,
-    },
+    verification_health::build_repository_verification_state,
 };
 use crate::cli::{Cli, cli_args::GitSource, should_output_json, style};
 
@@ -43,6 +39,14 @@ struct ResolvedSource {
     path: PathBuf,
     _temp: Option<ScratchDir>,
 }
+
+// The bridge wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::bridge::{
+    ExportGitOutput, ExportedRefOutput, ImportGitOutput as GitProjectionImportOutput,
+    LossyImportEntryOutput as GitProjectionLossyImportEntryOutput,
+    SyncGitOutput as GitProjectionSyncOutput,
+};
 
 impl ResolvedSource {
     fn path(&self) -> &Path {
@@ -104,56 +108,6 @@ fn resolve_source(repo: &Repository, source: GitSource) -> Result<ResolvedSource
             })
         }
     }
-}
-
-#[derive(Serialize)]
-struct GitProjectionImportOutput {
-    output_kind: &'static str,
-    status: String,
-    action: &'static str,
-    summary: String,
-    commits_imported: usize,
-    states_created: usize,
-    branches_synced: usize,
-    tags_synced: usize,
-    skipped_non_commit_refs: usize,
-    lossy_entries: Vec<GitProjectionLossyImportEntryOutput>,
-    already_in_sync: bool,
-    #[serde(serialize_with = "serialize_empty_action_as_null")]
-    recommended_action: String,
-    recommended_action_template: Option<super::command_catalog::ActionTemplate>,
-    recovery_commands: Vec<String>,
-    #[serde(skip_serializing)]
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize)]
-struct GitProjectionLossyImportEntryOutput {
-    path: String,
-    action: String,
-    reason: String,
-    git_object: Option<String>,
-}
-
-#[derive(Serialize)]
-struct GitProjectionSyncOutput {
-    output_kind: &'static str,
-    status: String,
-    action: &'static str,
-    summary: String,
-    states_exported: usize,
-    commits_exported_total: usize,
-    commits_imported: usize,
-    threads_synced: usize,
-    markers_synced: usize,
-    #[serde(serialize_with = "serialize_empty_action_as_null")]
-    recommended_action: String,
-    recommended_action_template: Option<super::command_catalog::ActionTemplate>,
-    recovery_commands: Vec<String>,
-    #[serde(skip_serializing)]
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
 }
 
 /// Render a `branches:`/`tags:` line from exported refs (plain text core plan).
@@ -223,12 +177,14 @@ fn failed_ref_export_error(stats: &ExportStats) -> Option<anyhow::Error> {
 }
 
 /// JSON projection of exported refs: `[{"name":..,"tip":<full sha>}]`.
-fn exported_refs_json(refs: &[ExportedRef]) -> serde_json::Value {
-    serde_json::Value::Array(
-        refs.iter()
-            .map(|r| serde_json::json!({ "name": r.name, "tip": r.tip.to_string() }))
-            .collect(),
-    )
+/// JSON projection of exported refs: `[{"name":..,"tip":<full sha>}]`.
+fn exported_refs_typed(refs: &[ExportedRef]) -> Vec<ExportedRefOutput> {
+    refs.iter()
+        .map(|r| ExportedRefOutput {
+            name: r.name.clone(),
+            tip: r.tip.to_string(),
+        })
+        .collect()
 }
 
 fn render_import_git(
@@ -404,17 +360,17 @@ fn run_git_export(
         // a machine consumer is never handed a success payload for a run that
         // could not publish every ref.
         if failure.is_none() {
-            let out = serde_json::json!({
-                "output_kind": "bridge_git_export",
-                "states_exported": stats.states_exported,
-                "commits_total": stats.commits_total,
-                "threads_synced": stats.threads_synced,
-                "markers_synced": stats.markers_synced,
-                "branches": exported_refs_json(&stats.branches),
-                "tags": exported_refs_json(&stats.tags),
-                "destination": destination.display().to_string(),
-            });
-            println!("{out}");
+            let out = ExportGitOutput {
+                output_kind: "bridge_git_export",
+                states_exported: stats.states_exported as u64,
+                commits_total: stats.commits_total as u64,
+                threads_synced: stats.threads_synced as u64,
+                markers_synced: stats.markers_synced as u64,
+                branches: exported_refs_typed(&stats.branches),
+                tags: exported_refs_typed(&stats.tags),
+                destination: destination.display().to_string(),
+            };
+            println!("{}", serde_json::to_string(&out)?);
         }
     } else {
         println!(

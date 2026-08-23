@@ -30,14 +30,12 @@ use tracing::{debug, info};
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    command_catalog::ActionTemplate,
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::complete_current_thread_manual_resolution,
     thread::find_active_thread_entry,
     thread_cmd::current_thread,
     verification_health::{
-        GitOverlayMutationPreflight, RepositoryVerificationState, action_template,
-        git_overlay_mutation_preflight_advice,
+        GitOverlayMutationPreflight, action_template, git_overlay_mutation_preflight_advice,
         git_overlay_mutation_preflight_advice_with_worktree_status, machine_contract_coverage,
         plain_git_mutation_preflight_advice, unimported_git_history_advice,
     },
@@ -49,36 +47,9 @@ use crate::{
 };
 use hosted_client::attribution::clean_attribution_value;
 
-#[derive(Serialize)]
-pub(crate) struct SnapshotOutput {
-    pub output_kind: &'static str,
-    pub status: &'static str,
-    pub action: &'static str,
-    pub state_id: String,
-    pub content_hash: String,
-    pub intent: Option<String>,
-    pub confidence: Option<f32>,
-    pub task_assignment_id: Option<String>,
-    pub principal: SnapshotPrincipalOutput,
-    pub principal_source: String,
-    pub agent: Option<SnapshotAgentOutput>,
-    pub promotion_suggested: bool,
-    pub heavy_impact_paths: Vec<String>,
-    pub captured_path_count: usize,
-    pub warnings: Vec<String>,
-    /// Whether this state carries an ed25519 author signature (heddle#482).
-    /// `false` means signing degraded (no key, or an unreadable key); the
-    /// state is still captured, just unsigned — surfaced here so a degraded
-    /// signing path is never silent.
-    pub signed: bool,
-    pub message: String,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplate>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplate>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationState,
-}
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types; the compact projection stays with the CLI.
+pub(crate) use heddle_cli_contract::cli::commands::wire::{SnapshotAgentOutput, SnapshotOutput};
 
 impl super::compact::CompactProjection for SnapshotOutput {
     fn compact(&self) -> super::compact::CompactOutput {
@@ -101,45 +72,6 @@ impl super::compact::CompactProjection for SnapshotOutput {
             compact.next_action_template = template.clone();
         }
         compact
-    }
-}
-
-#[derive(Serialize)]
-pub(crate) struct SnapshotPrincipalOutput {
-    name: String,
-    email: String,
-}
-
-#[derive(Serialize)]
-pub(crate) struct SnapshotAgentOutput {
-    provider: String,
-    model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    segment_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    policy_id: Option<String>,
-}
-
-impl From<&Principal> for SnapshotPrincipalOutput {
-    fn from(principal: &Principal) -> Self {
-        Self {
-            name: principal.name_lossy().into_owned(),
-            email: principal.email_lossy().into_owned(),
-        }
-    }
-}
-
-impl From<&Agent> for SnapshotAgentOutput {
-    fn from(agent: &Agent) -> Self {
-        Self {
-            provider: agent.provider.clone(),
-            model: agent.model.clone(),
-            session_id: agent.session_id.clone(),
-            segment_id: agent.segment_id.clone(),
-            policy_id: agent.policy_id.clone(),
-        }
     }
 }
 

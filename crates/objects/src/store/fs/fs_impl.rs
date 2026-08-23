@@ -1649,7 +1649,6 @@ impl ObjectStore for FsStore {
     fn abort_snapshot_write_batch(&self) {
         self.abort_snapshot_write_batch_impl();
     }
-
 }
 
 impl SidecarStore for FsStore {

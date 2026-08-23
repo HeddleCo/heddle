@@ -6,7 +6,6 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use config::{UserConfig, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer as _};
-use serde::Serialize;
 use heddle_cli_args::CliContext;
 
 use super::{
@@ -31,17 +30,9 @@ pub(crate) enum EnsureAction {
     RequireInvite,
 }
 
-#[derive(Serialize)]
-struct IdentityOutput<'a> {
-    output_kind: &'a str,
-    outcome: &'a str,
-    server: &'a str,
-    subject: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    node_id: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    claim_url: Option<&'a str>,
-}
+// The identity wire payload lives in cli-contract so the schema registry
+// registers the real serialization type.
+use heddle_cli_contract::cli::commands::wire::auth::IdentityOutput;
 
 pub(crate) async fn cmd_identity(
     ctx: &(dyn CliContext + 'static),
@@ -378,12 +369,12 @@ fn print_identity(
         println!(
             "{}",
             serde_json::to_string(&IdentityOutput {
-                output_kind,
-                outcome,
-                server,
-                subject,
-                node_id,
-                claim_url,
+                output_kind: output_kind.to_string(),
+                outcome: outcome.to_string(),
+                server: server.to_string(),
+                subject: subject.to_string(),
+                node_id: node_id.map(str::to_string),
+                claim_url: claim_url.map(str::to_string),
             })?
         );
     } else {

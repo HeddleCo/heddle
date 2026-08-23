@@ -29,10 +29,9 @@ use verbs::daemon_plan::{
     daemon_unexpected_response_kind,
 };
 
+use super::super::next_action::{NextActionValidationContext, write_full_command_json};
 use super::client::{rpc, sweep_stale_mounts};
-use crate::cli::{
-    Cli, commands::advice::RecoveryAdvice, render::write_json_stdout, should_output_json,
-};
+use crate::cli::{Cli, commands::advice::RecoveryAdvice, should_output_json};
 
 #[derive(Debug, Serialize)]
 struct DaemonStopOutput {
@@ -129,7 +128,10 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
                     materialized_count: materialized_threads.len(),
                     materialized_threads,
                 };
-                crate::cli::render::write_json_stdout(&output)?;
+                write_full_command_json(
+                    &output,
+                    NextActionValidationContext::without_repo(&["daemon", "status"]),
+                )?;
                 return Ok(());
             } else {
                 println!(
@@ -175,7 +177,10 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
                     materialized_count: materialized_threads.len(),
                     materialized_threads,
                 };
-                crate::cli::render::write_json_stdout(&output)?;
+                write_full_command_json(
+                    &output,
+                    NextActionValidationContext::without_repo(&["daemon", "status"]),
+                )?;
                 return Ok(());
             } else {
                 println!(
@@ -260,11 +265,14 @@ pub fn cmd_daemon_stop(cli: &Cli) -> Result<()> {
         }
         None => {
             if json {
-                write_json_stdout(&DaemonStopOutput {
-                    output_kind: "daemon_stop",
-                    action: "daemon stop",
-                    status: daemon_stop_status_token(false),
-                })?;
+                write_full_command_json(
+                    &DaemonStopOutput {
+                        output_kind: "daemon_stop",
+                        action: "daemon stop",
+                        status: daemon_stop_status_token(false),
+                    },
+                    NextActionValidationContext::without_repo(&["daemon", "stop"]),
+                )?;
             } else {
                 println!("{}", daemon_stop_not_running_line());
             }
@@ -302,11 +310,14 @@ pub fn cmd_daemon_stop(cli: &Cli) -> Result<()> {
     // this is a no-op.
     sweep_stale_mounts(&repo_root);
     if json {
-        write_json_stdout(&DaemonStopOutput {
-            output_kind: "daemon_stop",
-            action: "daemon stop",
-            status: daemon_stop_status_token(true),
-        })?;
+        write_full_command_json(
+            &DaemonStopOutput {
+                output_kind: "daemon_stop",
+                action: "daemon stop",
+                status: daemon_stop_status_token(true),
+            },
+            NextActionValidationContext::without_repo(&["daemon", "stop"]),
+        )?;
     } else {
         println!("{}", daemon_stop_stopped_line());
     }

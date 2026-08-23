@@ -9,7 +9,6 @@ use objects::store::ObjectStore;
 use oplog::{OpBatch, OpRecord};
 use refs::UNDO_RECOVERY_HANDLE;
 use repo::{Repository, ThreadManager};
-use serde::Serialize;
 use verbs::{
     LiveThreadWorktree, UndoApplyPreflightError, UndoBatchSummary, UndoHistoryAction,
     UndoListReport, check_redaction_redo_supported, check_redaction_undo_safe,
@@ -24,7 +23,8 @@ use verbs::{
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    command_catalog::{ActionFields, ActionTemplate, heddle_action},
+    command_catalog::{ActionFields, heddle_action},
+    next_action::{NextActionValidationContext, write_full_command_json},
     undo_apply::{
         RedoOp, UndoOp, acquire_undo_redo_lock, preflight_redo_batches, preflight_undo_batches,
         undo_redo_transaction_id,
@@ -54,29 +54,7 @@ use crate::cli::{Cli, should_output_json, style};
 /// directly, without routing the internal handle through any user-ref resolver.
 const UNDO_RECOVERY_MARKER: &str = UNDO_RECOVERY_HANDLE;
 
-#[derive(Serialize)]
-struct UndoRedoOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    action: String,
-    message: String,
-    batches: Vec<UndoBatchSummary>,
-    next_action: Option<String>,
-    next_action_template: Option<ActionTemplate>,
-    recommended_action: Option<String>,
-    recommended_action_template: Option<ActionTemplate>,
-    /// heddle#305: the pre-undo state preserved for recovery, and the marker
-    /// pointing at it. Present only on a completed `undo`; omitted from the
-    /// wire when absent (preview / redo).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    recovery_state: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    recovery_marker: Option<String>,
-    #[serde(skip_serializing)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "verification")]
-    trust: Option<RepositoryVerificationState>,
-}
+pub(crate) use heddle_cli_contract::cli::commands::wire::UndoRedoOutput;
 
 /// Undo the given oplog batches in-process without printing command output.
 /// Used by `land` to auto-rollback integration when Git checkpoint fails.
@@ -122,7 +100,10 @@ pub fn cmd_undo(
         let output: UndoListReport = list_undo_history(&repo, depth)?;
 
         if should_output_json(cli, Some(repo.config())) {
-            println!("{}", serde_json::to_string(&output)?);
+            write_full_command_json(
+                &output,
+                NextActionValidationContext::without_repo(&["undo"]),
+            )?;
         } else {
             println!("Recent undo history (showing up to {}):", depth);
             if output.batches.is_empty() {
@@ -174,7 +155,10 @@ pub fn cmd_undo(
         };
 
         if should_output_json(cli, Some(repo.config())) {
-            println!("{}", serde_json::to_string(&output)?);
+            write_full_command_json(
+                &output,
+                NextActionValidationContext::without_repo(&["undo"]),
+            )?;
         } else {
             println!("{}", apply_plan.human_message);
             if cli.verbose > 0 {
@@ -256,7 +240,10 @@ pub fn cmd_undo(
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["undo"]),
+        )?;
     } else {
         println!(
             "{}",
@@ -339,7 +326,10 @@ pub fn cmd_undo_recover(cli: &Cli) -> Result<()> {
     };
 
     if should_output_json(cli, Some(recovered_repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["undo"]),
+        )?;
     } else {
         println!(
             "Recovered pre-undo state {} as worktree changes",
@@ -389,7 +379,10 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
         };
 
         if should_output_json(cli, Some(repo.config())) {
-            println!("{}", serde_json::to_string(&output)?);
+            write_full_command_json(
+                &output,
+                NextActionValidationContext::without_repo(&["undo"]),
+            )?;
         } else {
             println!("{}", apply_plan.human_message);
             if cli.verbose > 0 {
@@ -432,7 +425,10 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["undo"]),
+        )?;
     } else {
         println!(
             "{}",

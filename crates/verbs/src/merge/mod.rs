@@ -31,10 +31,12 @@ use objects::{
 };
 use oplog::{OpBatch, OpLogBackend, OpLogRecorder, OpRecord};
 use refs::Head;
-use repo::{ActorPresenceStatus, ActorPresenceStore, 
-    CommitGraphIndex, Repository, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
-    ThreadState, describe_thread_advice, find_merge_base, refresh_thread_freshness,
+use repo::{
+    ActorPresenceStatus, ActorPresenceStore, CommitGraphIndex, Repository, Thread, ThreadFreshness,
+    ThreadIntegrationPolicy, ThreadManager, ThreadState, describe_thread_advice, find_merge_base,
+    refresh_thread_freshness,
 };
+use schemars::JsonSchema;
 use serde::{Serialize, Serializer, ser::SerializeStruct};
 use sley::Repository as SleyRepository;
 
@@ -260,7 +262,7 @@ fn trust_state(
     )?)
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct ThreadPreviewReport {
     pub thread: String,
     pub thread_mode: String,
@@ -278,6 +280,7 @@ pub struct ThreadPreviewReport {
     // "" means "no action selected" internally; the wire contract is null
     // (HeddleCo/heddle#645) — the boundary walker rejects raw empties.
     #[serde(serialize_with = "serialize_empty_action_as_null")]
+    #[schemars(with = "Option<String>")]
     pub recommended_action: String,
     pub recommended_action_template: Option<ActionTemplate>,
     pub thread_health: String,

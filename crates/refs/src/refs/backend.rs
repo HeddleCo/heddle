@@ -3,7 +3,6 @@
 
 use std::future::Future;
 
-
 use objects::object::{MarkerName, StateId, ThreadName};
 
 use super::{Head, RefExpectation, RefUpdate};

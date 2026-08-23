@@ -29,6 +29,7 @@ refs = { path = "../refs", package = "heddle-refs", version = "0.14" }
 notify.workspace = true
 rand.workspace = true
 rmp-serde.workspace = true
+schemars.workspace = true
 rusqlite.workspace = true
 uuid.workspace = true
 semantic = { path = "../semantic", package = "heddle-semantic", version = "0.14", optional = true }

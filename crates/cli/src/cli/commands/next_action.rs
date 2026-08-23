@@ -194,6 +194,17 @@ fn next_action_command_path(argv: &[String]) -> Option<Vec<&str>> {
             .map(|subcommand| vec![command, subcommand.as_str()])
             .or_else(|| Some(vec![command]));
     }
+    // Mode flags the catalog treats as their own display paths (`undo`,
+    // `undo --list`, `undo --redo`, `undo --recover`) are distinct
+    // surfaces for self-loop purposes: `undo --hard` legitimately points
+    // at `heddle undo --recover`.
+    if command == "undo" {
+        for variant in ["--recover", "--redo", "--list"] {
+            if argv.iter().any(|token| token == variant) {
+                return Some(vec!["undo", variant]);
+            }
+        }
+    }
     Some(vec![command])
 }
 

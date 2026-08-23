@@ -70,136 +70,19 @@ use crate::{
     config::UserConfig,
 };
 
-#[derive(Serialize)]
-struct SyncOutput {
-    #[serde(flatten)]
-    operator: OperatorCommandOutput,
-    #[serde(skip_serializing)]
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-    thread: String,
-    current_state: Option<String>,
-    chosen_path: String,
-}
+// The sync/land wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::{
+    LandBlockerCheck, LandBlockerCode, LandBlockerDetail, LandBlockerStateContext, LandOutput,
+    MultiLandOutput, MultiLandPeerResult, SiblingRestackFailure, SyncOutput,
+};
 
-#[derive(Debug, Clone, Serialize)]
-struct SiblingRestackFailure {
-    thread: String,
-    message: String,
-}
-
+/// Internal accumulator for sibling restack outcomes; never serialized
+/// directly — the wire sees `LandOutput.siblings_restack*`.
 #[derive(Debug, Default)]
 struct SiblingRestackReport {
     restacked: Vec<String>,
     failed: Vec<SiblingRestackFailure>,
-}
-
-#[derive(Serialize)]
-struct LandOutput {
-    #[serde(flatten)]
-    operator: OperatorCommandOutput,
-    thread: String,
-    captured: bool,
-    checkpointed: bool,
-    git_commit: Option<String>,
-    synced: bool,
-    integrated: bool,
-    performed_steps: Vec<String>,
-    skipped_steps: Vec<String>,
-    merge_state: Option<String>,
-    blocker_details: Vec<LandBlockerDetail>,
-    #[serde(default)]
-    siblings_restacked: Vec<String>,
-    #[serde(default)]
-    siblings_restack_failed: Vec<SiblingRestackFailure>,
-    #[serde(skip_serializing)]
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-    chosen_path: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct LandBlockerDetail {
-    code: LandBlockerCode,
-    check: LandBlockerCheck,
-    message: String,
-    paths: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    state_context: Option<LandBlockerStateContext>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum LandBlockerCode {
-    ThreadStateBlocked,
-    MergeConflicts,
-    AutoLandConfidenceBelowThreshold,
-    VerificationTestsFailed,
-    ThreadStale,
-    IntegrationPreviewBlocked,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum LandBlockerCheck {
-    ThreadState,
-    MergePreview,
-    AutoLandConfidence,
-    VerificationSummary,
-    Freshness,
-    IntegrationPreview,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct LandBlockerStateContext {
-    recorded_thread_state: String,
-    recorded_state_id: Option<String>,
-    thread_tip_state_id: Option<String>,
-    integration_policy_status: Option<String>,
-    integration_policy_reason: Option<String>,
-    merge_relation: String,
-    conflict_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct MultiLandPeerResult {
-    thread: String,
-    status: String,
-    message: String,
-    captured: bool,
-    checkpointed: bool,
-    git_commit: Option<String>,
-    integrated: bool,
-    synced: bool,
-    #[serde(default)]
-    siblings_restacked: Vec<String>,
-    #[serde(default)]
-    siblings_restack_failed: Vec<SiblingRestackFailure>,
-    #[serde(default)]
-    blockers: Vec<String>,
-    blocker_details: Vec<LandBlockerDetail>,
-    #[serde(default)]
-    warnings: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    primary_command: Option<String>,
-    #[serde(default)]
-    recovery_commands: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct MultiLandOutput {
-    output_kind: &'static str,
-    status: String,
-    action: &'static str,
-    message: String,
-    threads: Vec<String>,
-    landed: Vec<String>,
-    stopped_at: Option<String>,
-    peers: Vec<MultiLandPeerResult>,
-    git_head: Option<String>,
-    recommended_action: Option<String>,
-    #[serde(rename = "verification")]
-    trust: Option<RepositoryVerificationState>,
 }
 
 impl super::compact::CompactProjection for MultiLandOutput {
@@ -3154,7 +3037,7 @@ fn emit_land_dry_run(cli: &Cli, args: &LandArgs) -> Result<()> {
     });
     dry.note("integration merges are previewed locally; no capture, sync, or merge was performed");
 
-    dry.emit(cli, Some(repo.config()))
+    dry.emit(cli, Some(repo.config()), &["land"])
 }
 
 async fn cmd_land_many(cli: &Cli, args: LandArgs) -> Result<()> {

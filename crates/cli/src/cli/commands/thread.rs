@@ -16,11 +16,10 @@ use objects::{
 use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
-    AgentUsageSummary, ActorPresence, ActorPresenceStatus, ActorPresenceStore, Repository, Thread,
-    ThreadCaptureOutcome, ThreadFreshness, ThreadId,
-    ThreadIdError, ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState,
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, Repository, Thread,
+    ThreadCaptureOutcome, ThreadFreshness, ThreadId, ThreadIdError, ThreadIntegrationPolicy,
+    ThreadManager, ThreadMode, ThreadState,
 };
-use serde::Serialize;
 use verbs::{
     AutoWorkspaceDefault, AvailableGitRef, ThreadBaseError, ThreadBaseSelection,
     ThreadCreateOptions, ThreadListOptions, ThreadPathIsolationError, ThreadPlanError,
@@ -43,12 +42,10 @@ pub use verbs::{
 use super::{
     action_line::{print_nested_next_step, print_nested_optional, print_next_step, print_optional},
     advice::RecoveryAdvice,
-    command_catalog::{ActionTemplate, recommended_action_template},
+    command_catalog::recommended_action_template,
     compact::{CompactOutput, CompactProjection},
     mount_lifecycle,
-    next_action::{
-        NextActionValidationContext, write_full_command_json, write_projected_command_json,
-    },
+    next_action::{NextActionValidationContext, write_command_json, write_full_command_json},
     operator_loop::primary_next_action_with_verification,
     snapshot::{ensure_current_state, summarize_confidence, summarize_verification},
     start_atomic,
@@ -58,7 +55,6 @@ use super::{
         build_repository_verification_state,
         build_repository_verification_state_with_worktree_status,
         git_overlay_mutation_preflight_advice, override_trust_recommended_action,
-        serialize_empty_action_as_null,
     },
     worktree_cmd::{
         helpers::{plan_worktree_target, write_isolated_checkout},
@@ -77,79 +73,12 @@ use crate::{
 
 pub(crate) const DEFAULT_AVAILABLE_GIT_REF_LIMIT: usize = 5;
 
-#[derive(Serialize)]
-struct ThreadListOutput {
-    output_kind: &'static str,
-    repository_capability: String,
-    repository_label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    repository_context: Option<crate::cli::render::RepositoryContextInfo>,
-    storage_model: String,
-    hosted_enabled: bool,
-    threads: Vec<ThreadSummary>,
-    available_git_refs: Vec<AvailableGitRef>,
-    current: Option<String>,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-    #[serde(serialize_with = "serialize_empty_action_as_null")]
-    recommended_action: String,
-    recommended_action_template: Option<ActionTemplate>,
-    recovery_commands: Vec<String>,
-    recovery_action_templates: Vec<ActionTemplate>,
-    /// Carried for the human-readable renderer only. Not part of the
-    /// JSON contract: import-hint information is exposed via
-    /// `heddle status --output json` instead.
-    #[serde(skip)]
-    import_guidance: Option<ThreadListImportGuidanceOutput>,
-}
-
-#[derive(Serialize)]
-struct ThreadListImportGuidanceOutput {
-    current_branch: String,
-    missing_branch_count: usize,
-    missing_branches: Vec<String>,
-    recommended_command: String,
-}
-
-#[derive(Serialize)]
-struct ThreadShowOutput {
-    output_kind: &'static str,
-    repository_label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    repository_context: Option<crate::cli::render::RepositoryContextInfo>,
-    #[serde(flatten)]
-    summary: ThreadSummary,
-    #[serde(serialize_with = "serialize_empty_action_as_null")]
-    next_action: String,
-    next_action_template: Option<ActionTemplate>,
-    recommended_action_template: Option<ActionTemplate>,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-    recovery_commands: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub(crate) struct ThreadOpOutput {
-    pub output_kind: &'static str,
-    pub status: &'static str,
-    pub action: &'static str,
-    pub name: String,
-    pub message: String,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplate>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplate>,
-    pub thread: Option<ThreadSummary>,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fskit_readiness: Option<mount_lifecycle::FskitReadinessReport>,
-    #[allow(dead_code)]
-    #[serde(skip_serializing)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "verification")]
-    pub trust: Option<RepositoryVerificationState>,
-}
+// The thread wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::thread::{
+    ThreadCaptureOutput, ThreadCaptureSummary, ThreadCurrentOutput, ThreadListImportGuidanceOutput,
+    ThreadListOutput, ThreadOpOutput, ThreadShowOutput,
+};
 
 impl CompactProjection for ThreadOpOutput {
     fn compact(&self) -> CompactOutput {
@@ -159,29 +88,6 @@ impl CompactProjection for ThreadOpOutput {
         compact.next_action_template = self.next_action_template.clone();
         compact
     }
-}
-
-#[derive(Serialize)]
-pub(crate) struct ThreadCaptureOutput {
-    pub state_id: String,
-    pub created_at: String,
-    pub intent: Option<String>,
-    pub confidence: Option<f32>,
-    pub agent: Option<String>,
-    pub message: String,
-    /// Per-capture file count delta vs the parent state. `None` for
-    /// captures with no parent (the bootstrap snapshot of a fresh
-    /// repo) and when the diff cannot be computed (parent state
-    /// missing from the local store).
-    pub summary: Option<ThreadCaptureSummary>,
-}
-
-#[derive(Serialize)]
-pub(crate) struct ThreadCaptureSummary {
-    pub added: usize,
-    pub modified: usize,
-    pub deleted: usize,
-    pub total: usize,
 }
 
 pub fn cmd_start(cli: &Cli, args: ThreadStartArgs) -> Result<()> {
@@ -243,7 +149,10 @@ pub(crate) fn cmd_thread_captures(
 ) -> Result<()> {
     let captures = collect_thread_captures(repo, thread, limit)?;
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&captures)?);
+        write_full_command_json(
+            &captures,
+            NextActionValidationContext::without_repo(&["thread", "captures"]),
+        )?;
         return Ok(());
     }
 
@@ -1846,14 +1755,10 @@ pub(crate) fn cmd_thread_current(cli: &Cli, repo: &Repository) -> Result<()> {
         Some(crate::cli::OutputMode::Json | crate::cli::OutputMode::JsonCompact)
     );
     if explicit_json {
-        #[derive(Serialize)]
-        struct CurrentOutput<'a> {
-            thread: &'a str,
-        }
-        println!(
-            "{}",
-            serde_json::to_string(&CurrentOutput { thread: &name })?
-        );
+        write_full_command_json(
+            &ThreadCurrentOutput { thread: name },
+            NextActionValidationContext::without_repo(&["thread", "current"]),
+        )?;
     } else {
         println!("{name}");
     }
@@ -2652,15 +2557,15 @@ pub(crate) fn cmd_thread_rename(
 
 fn render_thread_op(cli: &Cli, output: ThreadOpOutput) -> Result<()> {
     if should_output_json(cli, None) {
-        if output_is_compact(cli) {
-            let emitting = match output.output_kind {
-                "thread_start" => &["start"][..],
-                _ => &["thread"][..],
-            };
-            write_projected_command_json(cli, &output, emitting)?;
-        } else {
-            println!("{}", serde_json::to_string(&output)?);
-        }
+        let emitting: &[&str] = match output.output_kind {
+            "thread_start" => &["start"],
+            _ => &["thread"],
+        };
+        write_command_json(
+            &output,
+            output_is_compact(cli),
+            NextActionValidationContext::without_repo(emitting),
+        )?;
     } else {
         println!("{}", style::accent(&output.message));
         if let Some(thread) = &output.thread {

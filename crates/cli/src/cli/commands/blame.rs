@@ -3,6 +3,12 @@
 
 use std::{collections::HashMap, path::Path};
 
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
+    AgentInfo, BlameLine, BlameOrigin, BlameOutput, ContextSnippet, PrincipalInfo,
+};
+
 use anyhow::{Result, anyhow};
 use objects::{
     object::{
@@ -12,34 +18,18 @@ use objects::{
     store::ObjectStore,
 };
 use repo::Repository;
-use serde::Serialize;
 use verbs::{fit_author as core_fit_author, summarize_context_line};
 
 use super::{
     advice::RecoveryAdvice,
     history_target::{require_resolved_state, resolve_state_id},
+    next_action::{NextActionValidationContext, write_full_command_json},
     snapshot::ensure_current_state,
 };
 use crate::{
     cli::{Cli, should_output_json},
     config::UserConfig,
 };
-
-#[derive(Clone, Serialize)]
-struct PrincipalInfo {
-    name: String,
-    email: String,
-}
-
-#[derive(Clone, Serialize)]
-struct AgentInfo {
-    provider: String,
-    model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    policy_id: Option<String>,
-}
 
 /// Split an `Attribution` into the structured `principal` / `agent`
 /// shape used by `log` and `show`, so `query --attribution --output json` consumers
@@ -56,44 +46,6 @@ fn attribution_parts(attribution: &Attribution) -> (PrincipalInfo, Option<AgentI
         policy_id: a.policy_id.clone(),
     });
     (principal, agent)
-}
-
-#[derive(Serialize)]
-struct BlameLine {
-    line_number: usize,
-    content: String,
-    state_id: String,
-    principal: PrincipalInfo,
-    agent: Option<AgentInfo>,
-    timestamp: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    origins: Option<Vec<BlameOrigin>>,
-}
-
-#[derive(Serialize)]
-struct BlameOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    file: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    context: Vec<ContextSnippet>,
-    lines: Vec<BlameLine>,
-}
-
-#[derive(Clone, Serialize)]
-struct BlameOrigin {
-    state_id: String,
-    principal: PrincipalInfo,
-    agent: Option<AgentInfo>,
-    timestamp: String,
-}
-
-#[derive(Clone, Serialize)]
-struct ContextSnippet {
-    annotation_id: String,
-    kind: String,
-    content: String,
-    revision_count: usize,
 }
 
 #[derive(Clone)]
@@ -238,7 +190,10 @@ fn cmd_blame_with_output_kind(
             lines: output_lines,
         };
 
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["query", "--attribution"]),
+        )?;
     } else {
         if show_context && !context.is_empty() {
             println!("Applicable Context:");
@@ -308,7 +263,10 @@ fn render_unbound_overlay_blame(
         lines,
     };
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["query", "--attribution"]),
+        )?;
     } else {
         for line in &output.lines {
             let author = format!("{} <{}>", line.principal.name, line.principal.email);

@@ -163,9 +163,7 @@ pub fn decode_pull_bootstrap(
     }))
 }
 
-pub fn decode_pull_refs(
-    checkpoint: &[u8],
-) -> Result<Option<PullBootstrapRefs>, ProtocolError> {
+pub fn decode_pull_refs(checkpoint: &[u8]) -> Result<Option<PullBootstrapRefs>, ProtocolError> {
     let checkpoint = std::str::from_utf8(checkpoint)
         .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
     let Some(payload) = checkpoint

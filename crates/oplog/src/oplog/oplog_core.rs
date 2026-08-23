@@ -210,7 +210,8 @@ impl OpLog {
             return Ok(());
         }
         Err(HeddleError::InvalidObject(
-            "oplog container framing is damaged; run `heddle maintenance oplog recover`".to_string(),
+            "oplog container framing is damaged; run `heddle maintenance oplog recover`"
+                .to_string(),
         ))
     }
 

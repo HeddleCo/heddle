@@ -12,6 +12,7 @@ use objects::{
     store::{ObjectStore, pack_install_metrics_snapshot, recover_pack_install_intents},
 };
 use refs::{Head, RefSummaryIndexInspection};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use wire::{PlannedObject, StateClosureOptions, enumerate_state_closure_plan_with_options};
 
@@ -21,7 +22,7 @@ use super::{
 };
 use crate::{FsMonitorSettings, HeddleError, WorktreeIndex, WorktreeStatusOptions};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct RepositoryPerformanceInspectionReport {
     pub commit_graph: CommitGraphInspection,
     pub worktree_index: WorktreeIndexInspection,
@@ -34,7 +35,7 @@ pub struct RepositoryPerformanceInspectionReport {
     pub pull_planner_cache: PullPlannerCacheInspection,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CommitGraphInspection {
     pub present: bool,
     pub node_count: usize,
@@ -43,7 +44,7 @@ pub struct CommitGraphInspection {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct WorktreeIndexInspection {
     pub present: bool,
     pub file_entries: usize,
@@ -56,7 +57,7 @@ pub struct WorktreeIndexInspection {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ChangeMonitorInspection {
     pub backend: String,
     pub status: String,
@@ -64,7 +65,7 @@ pub struct ChangeMonitorInspection {
     pub changed_path_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct RefCountsInspection {
     pub total: usize,
     pub threads: usize,
@@ -75,7 +76,7 @@ pub struct RefCountsInspection {
     pub packed_refs_bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct PackFilesInspection {
     pub pack_count: usize,
     pub index_count: usize,
@@ -85,13 +86,13 @@ pub struct PackFilesInspection {
     pub pending_install_intents: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct PartialFetchInspection {
     pub count: usize,
     pub missing_blob_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct PullPlannerCacheInspection {
     pub status: String,
     pub present: bool,
@@ -100,7 +101,7 @@ pub struct PullPlannerCacheInspection {
     pub total_bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct RepositoryMaintenanceRunReport {
     pub rebuilt_commit_graph: bool,
     pub rebuilt_ref_summary_index: bool,

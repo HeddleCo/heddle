@@ -10,96 +10,29 @@ use api::heddle::api::v1alpha1::HostedRole;
 use biscuit_auth::builder::{BlockBuilder, Term};
 use config::UserConfig;
 use crypto::Ed25519Signer;
+use heddle_cli_args::CliContext;
 use repo::Repository;
-use serde::Serialize;
 use verbs::{
     ResolvedPrincipal, principal_source_display, resolve_principal, resolve_principal_without_repo,
 };
-use heddle_cli_args::CliContext;
 
 use super::{
     auth::{headless_token_metadata, resolve_server},
     hosted::{HostedAuthMode, HostedSession, ResolvedHostedCredential, resolve_hosted_credential},
 };
 
-#[derive(Debug, Clone, Serialize)]
-struct CaptureActor {
-    name: String,
-    email: String,
-    /// `environment`, `repository`, `git_config`, `user_config`, or null when unknown.
-    source: Option<&'static str>,
-}
+// The whoami wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+use heddle_cli_contract::cli::commands::wire::auth::{
+    CaptureActor, WhoamiIdentity, WhoamiOutput, WhoamiRole,
+};
 
-impl CaptureActor {
-    fn from_resolved(resolved: &ResolvedPrincipal) -> Self {
-        Self {
-            name: resolved.principal.name_lossy().into_owned(),
-            email: resolved.principal.email_lossy().into_owned(),
-            source: resolved.source,
-        }
+fn capture_actor_from_resolved(resolved: &ResolvedPrincipal) -> CaptureActor {
+    CaptureActor {
+        name: resolved.principal.name_lossy().into_owned(),
+        email: resolved.principal.email_lossy().into_owned(),
+        source: resolved.source,
     }
-}
-
-#[derive(Debug, Serialize)]
-struct WhoamiOutput {
-    output_kind: &'static str,
-    capture_actor: CaptureActor,
-    server: String,
-    /// A usable credential resolves for this server.
-    authenticated: bool,
-    /// Credential origin: `env:<path>`, `keystore`, or `none`.
-    source: String,
-    /// Locally verified subject, present even when the server is unreachable.
-    subject: Option<String>,
-    /// The server answered `WhoAmI` — the hosted identity below is authoritative.
-    reachable: bool,
-    /// `root` (full-authority device/human token), `agent` (an offline-derived,
-    /// attenuated delegation), or `service-account`. `None` when unauthenticated.
-    token_kind: Option<String>,
-    /// Resource scopes the delegation chain restricts this token to, as
-    /// `kind:path` (e.g. `repo:alice/api`, `namespace:alice`). Empty ⇒ full
-    /// resource authority.
-    scopes: Vec<String>,
-    /// The intersected hosted-operation ceiling from the delegation chain. `None`
-    /// ⇒ no operation allowlist (full authority, minus the mandatory deny floor).
-    operation_ceiling: Option<Vec<String>>,
-    /// Effective token expiry (RFC3339), the earliest of the authority and every
-    /// attenuation hop. `None` ⇒ no expiry recorded.
-    expires_at: Option<String>,
-    /// Seconds until `expires_at`; negative when already expired.
-    ttl_seconds_remaining: Option<i64>,
-    /// The device proof key needed to sign hosted requests is present and valid.
-    proof_key_available: bool,
-    /// Server-authoritative identity, present only when `reachable`.
-    identity: Option<WhoamiIdentity>,
-    recommended_action: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct WhoamiIdentity {
-    subject: String,
-    actor_subject: String,
-    is_staff: bool,
-    is_service_account: bool,
-    is_biscuit: bool,
-    session_id: String,
-    amr: Vec<String>,
-    /// The scope string the server records for this credential.
-    server_scope: String,
-    credential_id: String,
-    device_id: Option<String>,
-    agent_provider: Option<String>,
-    agent_model: Option<String>,
-    /// Resource roles the caller holds directly (UI gating only; the server
-    /// enforces effective, inherited roles on each RPC).
-    roles: Vec<WhoamiRole>,
-}
-
-#[derive(Debug, Serialize)]
-struct WhoamiRole {
-    resource_path: String,
-    resource_kind: String,
-    role: String,
 }
 
 /// `heddle whoami [--server <addr>]`.
@@ -165,7 +98,7 @@ fn resolve_capture_actor(ctx: &dyn CliContext) -> Result<CaptureActor> {
         Some(repo) => resolve_principal(&repo, user_config.principal_pair())?,
         None => resolve_principal_without_repo(user_config.principal_pair()),
     };
-    Ok(CaptureActor::from_resolved(&resolved))
+    Ok(capture_actor_from_resolved(&resolved))
 }
 
 fn resolve_local_whoami(
@@ -492,7 +425,7 @@ mod tests {
     use crate::hosted_runtime::hosted::CredentialSource;
 
     fn luke_actor() -> CaptureActor {
-        CaptureActor::from_resolved(&ResolvedPrincipal {
+        capture_actor_from_resolved(&ResolvedPrincipal {
             principal: Principal::new("Luke", "luke@example.com"),
             source: Some("user_config"),
         })

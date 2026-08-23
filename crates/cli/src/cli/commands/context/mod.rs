@@ -19,7 +19,9 @@ use repo::{Repository, ResolvePolicy};
 use serde::Serialize;
 
 use super::{
-    advice::RecoveryAdvice, history_target::resolve_state_id_with_policy,
+    advice::RecoveryAdvice,
+    history_target::resolve_state_id_with_policy,
+    next_action::{NextActionValidationContext, write_full_command_json},
     snapshot::ensure_current_state,
 };
 use crate::{
@@ -355,7 +357,10 @@ pub(crate) fn print_context_get(
                 .map(AnnotationOutput::from_annotation)
                 .collect(),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["context", "get"]),
+        )?;
     } else if annotations.is_empty() {
         println!("No annotations for {target_label}");
     } else {

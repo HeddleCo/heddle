@@ -10,11 +10,10 @@ use api::heddle::api::v1alpha1::{
 };
 use config::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
+use heddle_cli_args::CliContext;
 use heddle_cli_contract::cli::commands::RecoveryAdvice;
 use objects::{HeddleError, RecoveryDetails};
-use serde::Serialize;
 use sha2::{Digest, Sha256};
-use heddle_cli_args::CliContext;
 
 use super::{
     auth_requests::{AuthCommand, AuthTrustCommand},
@@ -29,57 +28,9 @@ use super::{
     },
 };
 
-/// Top-level dispatch for `heddle auth <subcommand>`. The CLI context supplies
-/// output mode and the caller-owned operation ID for hosted mutations; auth
-/// credential state itself remains global rather than repository-local.
-#[derive(Serialize)]
-struct AuthLogoutOutput {
-    output_kind: &'static str,
-    server: String,
-    removed: bool,
-    /// Whether a device signing identity recorded for this server (heddle#482)
-    /// was removed. `false` when none was linked; on a removal failure logout
-    /// errors instead of emitting this output, so a `true` here always means
-    /// the logged-out private key is no longer on disk.
-    device_identity_removed: bool,
-}
-
-#[derive(Serialize)]
-struct AuthStatusOutput {
-    output_kind: &'static str,
-    server: String,
-    authenticated: bool,
-    /// Credential origin: `env:<path>` when `HEDDLE_CREDENTIAL` is set,
-    /// `keystore` for a stored credential, `none` when unauthenticated.
-    source: String,
-    proof_key_available: bool,
-    subject: Option<String>,
-    credential_id: Option<String>,
-    expires_at: Option<String>,
-    recommended_action: Option<String>,
-}
-
-#[derive(Serialize)]
-struct AuthTrustOutput {
-    output_kind: &'static str,
-    canonical_server: String,
-    source: crate::hosted_runtime::hosted::DescriptorTrustSource,
-    key_id: String,
-    public_key: String,
-    fingerprint: String,
-}
-
-#[derive(Serialize)]
-struct ServiceTokenOutput {
-    output_kind: &'static str,
-    name: String,
-    namespace: String,
-    scope: String,
-    /// Absolute path of the `.hcred` credential file written with mode 0600.
-    /// The token and proof key never appear on stdout or in JSON.
-    credential_path: String,
-    expires_in_days: u32,
-}
+pub(crate) use heddle_cli_contract::cli::commands::wire::auth::{
+    AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, ServiceTokenOutput,
+};
 
 const DERIVED_TOKEN_SECURITY_NOTE: &str = "Derived credential has its own proof key and is operation/TTL/resource-scope-limited and enforced server-side. The token and proof key travel together inside the .hcred file; the parent device key is not exported.";
 
@@ -150,7 +101,14 @@ fn cmd_auth_trust(ctx: &dyn CliContext, command: AuthTrustCommand) -> Result<()>
                 AuthTrustOutput {
                     output_kind: "auth_trust_show",
                     canonical_server: report.canonical_server,
-                    source: report.source,
+                    source: match report.source {
+                        crate::hosted_runtime::hosted::DescriptorTrustSource::Explicit => {
+                            heddle_cli_contract::cli::commands::wire::auth::DescriptorTrustSource::Explicit
+                        }
+                        crate::hosted_runtime::hosted::DescriptorTrustSource::Automatic => {
+                            heddle_cli_contract::cli::commands::wire::auth::DescriptorTrustSource::Automatic
+                        }
+                    },
                     key_id: report.key_id,
                     public_key: report.public_key,
                     fingerprint: report.fingerprint,
@@ -184,7 +142,7 @@ fn cmd_auth_trust(ctx: &dyn CliContext, command: AuthTrustCommand) -> Result<()>
                 AuthTrustOutput {
                     output_kind: "auth_trust_replace",
                     canonical_server,
-                    source: crate::hosted_runtime::hosted::DescriptorTrustSource::Automatic,
+                    source: heddle_cli_contract::cli::commands::wire::auth::DescriptorTrustSource::Automatic,
                     key_id: record.key_id,
                     public_key: record.public_key,
                     fingerprint,
@@ -202,8 +160,8 @@ fn emit_auth_trust(ctx: &dyn CliContext, output: AuthTrustOutput) -> Result<()> 
         println!(
             "Source:                {}",
             match output.source {
-                crate::hosted_runtime::hosted::DescriptorTrustSource::Explicit => "explicit",
-                crate::hosted_runtime::hosted::DescriptorTrustSource::Automatic => "automatic",
+                heddle_cli_contract::cli::commands::wire::auth::DescriptorTrustSource::Explicit => "explicit",
+                heddle_cli_contract::cli::commands::wire::auth::DescriptorTrustSource::Automatic => "automatic",
             }
         );
         println!("Descriptor key id:     {}", output.key_id);

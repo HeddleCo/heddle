@@ -3,50 +3,25 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
+    CollapsedLandOutput, ExpandOutput, ExpandedCaptureOutput,
+};
+
 use anyhow::{Result, anyhow};
-use objects::object::{Agent, State, StateId};
+use objects::object::StateId;
 use oplog::{OpLogBackend, OpRecord};
 use repo::{Repository, format_confidence};
-use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,
     history_target::{require_resolved_state, resolve_state_id},
+    next_action::{NextActionValidationContext, write_full_command_json},
 };
 use crate::cli::{Cli, should_output_json, style};
 
 const EXPAND_OUTPUT_KIND: &str = "expand";
-
-#[derive(Serialize)]
-struct ExpandOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    requested: String,
-    collapsed: CollapsedLandOutput,
-    captures: Vec<ExpandedCaptureOutput>,
-}
-
-#[derive(Serialize)]
-struct CollapsedLandOutput {
-    state_id: String,
-    state_id_full: String,
-    git_commit: Option<String>,
-    thread: Option<String>,
-    source_count: usize,
-}
-
-#[derive(Serialize)]
-struct ExpandedCaptureOutput {
-    state_id: String,
-    state_id_full: String,
-    content_hash: String,
-    intent: Option<String>,
-    principal: String,
-    agent: Option<String>,
-    confidence: Option<f32>,
-    created_at: String,
-    parents: Vec<String>,
-}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CollapseAnnotation {
@@ -90,7 +65,10 @@ pub fn cmd_expand(cli: &Cli, reference: String) -> Result<()> {
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "expand"]),
+        )?;
     } else {
         print_human(&output);
     }
@@ -215,20 +193,4 @@ fn print_human(output: &ExpandOutput) {
 
 fn short_oid(oid: &str) -> &str {
     verbs::short_oid(oid)
-}
-
-impl From<State> for ExpandedCaptureOutput {
-    fn from(state: State) -> Self {
-        Self {
-            state_id: state.state_id.short(),
-            state_id_full: state.state_id.to_string_full(),
-            content_hash: state.compute_hash().short(),
-            intent: state.intent,
-            principal: state.attribution.principal.to_string(),
-            agent: state.attribution.agent.as_ref().map(Agent::to_string),
-            confidence: state.confidence,
-            created_at: state.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-            parents: state.parents.iter().map(StateId::short).collect(),
-        }
-    }
 }

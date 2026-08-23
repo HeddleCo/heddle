@@ -3,6 +3,7 @@
 //! mappings, worktree status, durable Git checkpoints, and remote-tracking
 //! reporting.
 
+use schemars::JsonSchema;
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
@@ -131,7 +132,7 @@ pub struct GitOverlayOutOfBandCommits {
 #[cfg(feature = "git-overlay")]
 const GIT_OVERLAY_OUT_OF_BAND_SCAN_LIMIT: usize = 1000;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GitRemoteTrackingStatus {
     pub branch: String,
     pub upstream: String,
@@ -144,6 +145,7 @@ pub struct GitRemoteTrackingStatus {
     #[serde(default, skip_serializing_if = "is_false")]
     pub upstream_is_undone_checkpoint: bool,
     pub message: String,
+    #[schemars(with = "Option<String>")]
     pub next_action: String,
 }
 

@@ -26,7 +26,6 @@ use objects::{
 };
 use refs::Head;
 use repo::{Repository, RepositoryCapability, SyncedThreadMetadata, ThreadManager};
-use serde::Serialize;
 use sley::{
     ConfigEdit, ConfigEditPlan, ConfigEditScope, HeadUpdateOptions, RefChange, ReferenceTarget,
     RemoteConfigRefusal, RemoteConfigRemove, RemoteConfigSet, Repository as SleyRepository,
@@ -40,17 +39,13 @@ use super::super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     import_progress::ImportProgress,
+    next_action::{NextActionValidationContext, write_full_command_json},
     verification_health::{
         RepositoryVerificationState, action_template, action_templates,
         build_plain_git_verification_probe, build_repository_verification_state,
     },
     worktree_safety::ensure_worktree_clean,
 };
-#[cfg(feature = "client")]
-use hosted_client::client::HostedClient;
-#[cfg(feature = "client")]
-use hosted_client::hosted_runtime::hosted::{HostedAuthMode, PullMaterialization};
-use hosted_client::client::LocalSync;
 use crate::{
     cli::{
         Cli, RemoteCommands,
@@ -60,28 +55,18 @@ use crate::{
     config::UserConfig,
     remote::{Remote, RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
-
-#[derive(Serialize)]
-struct RemoteMutationOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    action: &'static str,
-    name: String,
-    url: Option<String>,
-    default: Option<String>,
-    message: String,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
+#[cfg(feature = "client")]
+use hosted_client::client::HostedClient;
+use hosted_client::client::LocalSync;
+#[cfg(feature = "client")]
+use hosted_client::hosted_runtime::hosted::{HostedAuthMode, PullMaterialization};
 
 /// CLI machine envelope: domain [`PullOutcome`] plus repository verification.
-#[derive(Serialize)]
-struct PullOutput {
-    #[serde(flatten)]
-    outcome: PullOutcome,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
+// The wire payload lives in cli-contract so the schema registry registers
+// the real serialization type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::remote::{
+    PullOutput, RemoteMutationOutput,
+};
 
 fn heddle_pull_output_from_local(
     plan: Option<&PullPlan>,
@@ -614,7 +599,10 @@ fn pull_git_overlay(
         trust: build_repository_verification_state(repo),
     };
     if should_output_json(cli, Some(repo.config())) {
-        crate::cli::render::write_json_stdout(&output)?;
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["pull"]),
+        )?;
     } else {
         render_pull_outcome_text(&output.outcome, &output.trust);
     }
@@ -1059,7 +1047,10 @@ async fn pull_local(
             &summary,
             build_repository_verification_state(repo),
         );
-        crate::cli::render::write_json_stdout(&output)?;
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["pull"]),
+        )?;
     } else {
         let summary = LocalTransferSummary {
             state: Some(state_id.short().to_string()),
@@ -1137,8 +1128,9 @@ async fn pull_network_connected(
             },
         )
         .await?;
-    let bootstrap = hosted_client::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
-        .context("decode hosted pull bootstrap")?;
+    let bootstrap =
+        hosted_client::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
+            .context("decode hosted pull bootstrap")?;
     let bootstrap = if result.success {
         bootstrap
             .ok_or_else(|| {
@@ -1290,7 +1282,10 @@ async fn pull_network_connected(
                     &facts_fields,
                     build_repository_verification_state(repo),
                 );
-                crate::cli::render::write_json_stdout(&output)?;
+                write_full_command_json(
+                    &output,
+                    NextActionValidationContext::without_repo(&["pull"]),
+                )?;
             } else {
                 let output = heddle_pull_output_from_hosted(
                     Some(options.plan),
@@ -1662,7 +1657,10 @@ fn remotes_task_next_trust(repo: &Repository) -> RepositoryVerificationState {
 
 fn render_remote_mutation(output: RemoteMutationOutput, json: bool) -> Result<()> {
     if json {
-        crate::cli::render::write_json_stdout(&output)?;
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["remote"]),
+        )?;
     } else {
         println!(
             "{} {} {}",
@@ -1679,7 +1677,10 @@ fn render_remote_mutation(output: RemoteMutationOutput, json: bool) -> Result<()
 
 fn render_remote_list(output: &RemoteListReport, json: bool) -> Result<()> {
     if json {
-        crate::cli::render::write_json_stdout(output)?;
+        write_full_command_json(
+            output,
+            NextActionValidationContext::without_repo(&["remote"]),
+        )?;
     } else if output.remotes.is_empty() {
         println!("{}", style::dim("No remotes configured"));
         println!("{}", style::field("next", "heddle remote add <name> <url>"));
@@ -1703,7 +1704,10 @@ fn render_remote_list(output: &RemoteListReport, json: bool) -> Result<()> {
 
 fn render_remote_info(output: &RemoteInfo, json: bool) -> Result<()> {
     if json {
-        crate::cli::render::write_json_stdout(output)?;
+        write_full_command_json(
+            output,
+            NextActionValidationContext::without_repo(&["remote"]),
+        )?;
     } else {
         println!("{}", style::section("Remote"));
         println!("  {}", style::field("name", &style::bold(&output.name)));

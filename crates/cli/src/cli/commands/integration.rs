@@ -26,6 +26,7 @@ use verbs::integration_plan::{
 };
 
 use super::advice::RecoveryAdvice;
+use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::{
     cli::{
         Cli, IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs,
@@ -35,6 +36,10 @@ use crate::{
 };
 
 const MANIFEST_FILE: &str = "integrations.toml";
+
+// The integration wire payload lives in cli-contract so the schema registry
+// registers the real serialization type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::bridge::IntegrationStatusOutput as IntegrationStatus;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -157,19 +162,6 @@ struct IntegrationManifest {
     integrations: Vec<InstalledIntegration>,
 }
 
-#[derive(Debug, Serialize)]
-struct IntegrationStatus {
-    harness: String,
-    scope: String,
-    method: String,
-    status: String,
-    healthy: bool,
-    paths: Vec<String>,
-    capabilities: Vec<String>,
-    capability_paths: Vec<String>,
-    path_mode: String,
-}
-
 pub fn cmd_integration(cli: &Cli, command: IntegrationCommands) -> Result<()> {
     let repo = cli.open_repo()?;
     match command {
@@ -260,7 +252,10 @@ fn list_integrations(cli: &Cli, repo: &Repository) -> Result<()> {
         .map(|entry| integration_status(repo, &entry))
         .collect::<Result<Vec<_>>>()?;
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&statuses)?);
+        write_full_command_json(
+            &statuses,
+            NextActionValidationContext::without_repo(&["integration", "list"]),
+        )?;
     } else if statuses.is_empty() {
         println!("{}", empty_integrations_message());
     } else {
@@ -334,7 +329,10 @@ fn doctor_integrations(cli: &Cli, repo: &Repository) -> Result<()> {
         .map(|entry| integration_status(repo, entry))
         .collect::<Result<Vec<_>>>()?;
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&statuses)?);
+        write_full_command_json(
+            &statuses,
+            NextActionValidationContext::without_repo(&["integration", "list"]),
+        )?;
     } else if statuses.is_empty() {
         println!("{}", empty_integrations_message());
     } else {

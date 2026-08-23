@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Durable actor presence and work-context records.
 
+use schemars::JsonSchema;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -28,7 +29,7 @@ pub struct ContextQueryEntry {
     pub queried_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct AgentUsageSummary {
     #[serde(default)]
     pub input_tokens: Option<u64>,

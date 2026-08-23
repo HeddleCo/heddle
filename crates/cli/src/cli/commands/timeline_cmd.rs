@@ -8,7 +8,6 @@ use repo::{
     TimelineOperationBodyV1, TimelineOperationEnvelope, TimelineStore, TimelineToolPayloadMetadata,
     TimelineView, ToolCallFinishedV1, ToolCallStartedV1,
 };
-use serde::Serialize;
 use verbs::{
     timeline_cursor_reason, timeline_label,
     timeline_plan::{
@@ -20,6 +19,7 @@ use verbs::{
 };
 
 use super::advice::RecoveryAdvice;
+use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::cli::{
     Cli, TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs,
     TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs,
@@ -50,6 +50,13 @@ pub fn cmd_timeline(cli: &Cli, command: TimelineCommands) -> Result<()> {
         TimelineCommands::Recover(args) => cmd_timeline_recover(cli, &repo, &store, args),
     }
 }
+
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
+    TimelineActionOutput, TimelineRecordingOutput, TimelineStatusOutput,
+    TimelineStatusRecoveryOutput, TimelineStatusStepOutput,
+};
 
 fn cmd_timeline_status(
     cli: &Cli,
@@ -421,7 +428,10 @@ fn cmd_timeline_recover(
 
 fn print_timeline_action(cli: &Cli, repo: &Repository, output: TimelineActionOutput) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "timeline"]),
+        )?;
         return Ok(());
     }
 
@@ -477,7 +487,10 @@ fn print_timeline_action(cli: &Cli, repo: &Repository, output: TimelineActionOut
 
 fn print_timeline_status(cli: &Cli, repo: &Repository, output: TimelineStatusOutput) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "timeline"]),
+        )?;
         return Ok(());
     }
 
@@ -510,7 +523,10 @@ fn print_timeline_recording(
     output: TimelineRecordingOutput,
 ) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "timeline"]),
+        )?;
         return Ok(());
     }
 
@@ -712,97 +728,6 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or_default()
-}
-
-#[derive(Serialize)]
-struct TimelineStatusOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    thread: String,
-    cursor_branch_id: Option<String>,
-    cursor_step_id: Option<String>,
-    cursor_state: Option<String>,
-    current_step: Option<TimelineStatusStepOutput>,
-    active_branch_path: Vec<String>,
-    can_undo: bool,
-    can_redo: bool,
-    branch_count: usize,
-    step_count: usize,
-    recovery: Option<TimelineStatusRecoveryOutput>,
-}
-
-#[derive(Serialize)]
-struct TimelineStatusStepOutput {
-    step_id: String,
-    branch_id: String,
-    parent_step_id: Option<String>,
-    tool_name: Option<String>,
-    tool_status: Option<&'static str>,
-    changed: Option<bool>,
-    payload_summary: Option<String>,
-    payload_hash: Option<String>,
-    labels: Vec<&'static str>,
-    started_at_ms: Option<i64>,
-    finished_at_ms: Option<i64>,
-    can_seek: bool,
-    can_fork: bool,
-    can_reset: bool,
-    can_materialize: bool,
-    has_boundary_warning: bool,
-}
-
-#[derive(Serialize)]
-struct TimelineStatusRecoveryOutput {
-    status: &'static str,
-    branch_id: String,
-    from_step_id: Option<String>,
-    to_step_id: Option<String>,
-    from_state: String,
-    to_state: String,
-    reason: String,
-    moved_at_ms: i64,
-    checkout_state: Option<String>,
-}
-
-#[derive(Serialize)]
-struct TimelineRecordingOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    action: &'static str,
-    thread: String,
-    step_id: String,
-    branch_id: String,
-    parent_step_id: Option<String>,
-    operation_id: String,
-    before_state: Option<String>,
-    after_state: Option<String>,
-    changed: Option<bool>,
-    tool_status: Option<&'static str>,
-    payload_summary: Option<String>,
-    payload_hash: Option<String>,
-    branch_count: usize,
-    step_count: usize,
-}
-
-#[derive(Serialize)]
-struct TimelineActionOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    action: &'static str,
-    thread: String,
-    branch_id: Option<String>,
-    parent_branch_id: Option<String>,
-    from_step_id: Option<String>,
-    cursor_branch_id: Option<String>,
-    cursor_step_id: Option<String>,
-    operation_id: Option<String>,
-    recovered_operation_id: Option<String>,
-    materialized: Option<bool>,
-    materialization_status: Option<String>,
-    recovery_status: Option<String>,
-    blocker_count: usize,
-    branch_count: usize,
-    step_count: usize,
 }
 
 #[cfg(test)]

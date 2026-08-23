@@ -784,15 +784,40 @@ List recent saved states on a thread.
   "output_kind": "thread_drop",
   "status": "completed",
   "action": "thread_drop",
-  "name": "feature/parser",
   "message": "Dropped thread 'feature/parser'",
   "next_action": null,
   "next_action_template": null,
   "recommended_action": null,
   "recommended_action_template": null,
-  "thread": null,
-  "path": null,
-  "execution_path": null
+  "thread": {
+    "id": "th-01abc",
+    "thread": "feature/parser",
+    "target_thread": null,
+    "parent_thread": null,
+    "mode": "virtualized",
+    "state": "merged",
+    "base_state": "hs-01abc",
+    "base_root": "32fc0aff",
+    "current_state": "hs-02def",
+    "merged_state": null,
+    "task": null,
+    "execution_path": ".heddle/threads/feature-parser",
+    "materialized_path": null,
+    "changed_paths": [],
+    "impact_categories": [],
+    "heavy_impact_paths": [],
+    "promotion_suggested": false,
+    "freshness": "current",
+    "verification_summary": {"tests_passed": null, "tests_failed": null, "coverage_pct": null, "lint_warnings": null},
+    "confidence_summary": {"value": null, "band": null},
+    "integration_policy_result": {"status": null, "reason": null, "manual_resolution_state": null, "manually_resolved": false},
+    "created_at": "2026-08-20T10:00:00.000000Z",
+    "updated_at": "2026-08-21T09:30:00.000000Z",
+    "ephemeral": null,
+    "auto": false,
+    "shared_target_dir": null
+  },
+  "changed_path_count": 0
 }
 ```
 
@@ -1106,8 +1131,10 @@ verification.
 ```json
 {
   "output_kind": "thread_marker_delete",
-  "name": "verified-parser",
-  "state_id": null,
+  "deleted": [
+    {"name": "verified-parser", "state_id": "hc-def456"}
+  ],
+  "count": 1,
   "message": "Deleted marker 'verified-parser'"
 }
 ```

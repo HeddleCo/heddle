@@ -3,6 +3,7 @@
 //! bisect mid-flight, in either the Heddle or the Git overlay state model,
 //! and what should the user run next.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use objects::error::Result;
@@ -10,7 +11,7 @@ use objects::error::Result;
 use super::{Repository, RepositoryCapability};
 use super::overlay::resolve_git_dir;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum OperationScope {
     Git,
@@ -26,7 +27,7 @@ impl std::fmt::Display for OperationScope {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum OperationKind {
     Merge,
@@ -48,13 +49,14 @@ impl std::fmt::Display for OperationKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RepositoryOperationStatus {
     pub scope: OperationScope,
     pub kind: OperationKind,
     pub in_progress: bool,
     pub state: String,
     pub message: String,
+    #[schemars(with = "Option<String>")]
     pub next_action: String,
 }
 

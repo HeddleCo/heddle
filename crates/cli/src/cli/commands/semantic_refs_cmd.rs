@@ -8,7 +8,11 @@ use objects::object::{
 use repo::Repository;
 use serde::Serialize;
 
-use super::{history_target::resolve_state_id, snapshot::ensure_current_state};
+use super::{
+    history_target::resolve_state_id,
+    next_action::{NextActionValidationContext, write_full_command_json},
+    snapshot::ensure_current_state,
+};
 use crate::{
     cli::{Cli, should_output_json},
     config::UserConfig,
@@ -81,10 +85,10 @@ pub(super) fn cmd_semantic_refs(
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!(
-            "{}",
-            serde_json::to_string(&output).context("serializing semantic refs output")?
-        );
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["semantic", "refs"]),
+        )?;
     } else {
         render_human(&output);
     }

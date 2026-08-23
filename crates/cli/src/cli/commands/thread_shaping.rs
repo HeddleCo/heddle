@@ -16,7 +16,7 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     merge::merge_thread_into_current,
-    next_action::{NextActionValidationContext, write_command_json},
+    next_action::{NextActionValidationContext, write_command_json, write_full_command_json},
     operator_core::{OperatorAction, OperatorCommandOutput},
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
@@ -36,27 +36,16 @@ use crate::{
     config::UserConfig,
 };
 
-#[derive(Debug, Serialize)]
-pub struct ThreadResolveOutput {
-    #[serde(flatten)]
-    pub operator: OperatorCommandOutput,
-    pub thread: String,
-}
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types.
+pub use heddle_cli_contract::cli::commands::wire::thread::{
+    ThreadAbsorbOutput, ThreadResolveOutput,
+};
 
 impl super::compact::CompactProjection for ThreadResolveOutput {
     fn compact(&self) -> super::compact::CompactOutput {
         <OperatorCommandOutput as super::compact::CompactProjection>::compact(&self.operator)
     }
-}
-
-#[derive(Debug, Serialize)]
-pub struct ThreadAbsorbOutput {
-    pub thread: String,
-    pub into: String,
-    pub preview_only: bool,
-    pub conflicts: Vec<String>,
-    pub merge_state: Option<String>,
-    pub message: String,
 }
 
 pub fn cmd_capture_split(
@@ -95,7 +84,7 @@ pub fn cmd_capture_split(
         },
     )
     .map_err(map_thread_shaping_anyhow_error)?;
-    emit(cli, &output)
+    emit(cli, &["capture", "split"], &output)
 }
 
 pub fn cmd_thread_move(
@@ -135,7 +124,7 @@ pub fn cmd_thread_move(
         },
     )
     .map_err(map_thread_shaping_anyhow_error)?;
-    emit(cli, &output)
+    emit(cli, &["thread", "move"], &output)
 }
 
 pub fn cmd_thread_absorb(
@@ -193,6 +182,7 @@ pub fn cmd_thread_absorb(
     )?;
     emit(
         cli,
+        &["thread", "absorb"],
         &ThreadAbsorbOutput {
             thread: child.id,
             into: parent_id,
@@ -596,13 +586,16 @@ fn map_thread_shaping_error(err: ThreadShapingError) -> anyhow::Error {
     }
 }
 
-fn emit<T: Serialize>(cli: &Cli, output: &T) -> Result<()> {
+fn emit<T: Serialize>(cli: &Cli, emitting_command: &[&str], output: &T) -> Result<()> {
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(output)?);
+        write_full_command_json(
+            output,
+            NextActionValidationContext::without_repo(emitting_command),
+        )
     } else {
         println!("{}", serde_json::to_string_pretty(output)?);
+        Ok(())
     }
-    Ok(())
 }
 
 fn emit_thread_resolve(cli: &Cli, repo: &Repository, output: &ThreadResolveOutput) -> Result<()> {

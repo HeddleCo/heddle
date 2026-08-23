@@ -3,10 +3,13 @@
 
 use std::fs;
 
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::history::RevertOutput;
+
 use anyhow::{Result, anyhow};
 use objects::object::{Attribution, ChangeLineage, ChangeLineageKind, FileChangeSet, Tree};
 use repo::{DiffKind, Repository};
-use serde::Serialize;
 use verbs::{
     RevertMessageMode, RevertOutcome, RevertPlan, RevertSuccessFacts,
     default_revert_commit_message, no_changes_to_revert_kind, no_changes_to_revert_summary,
@@ -16,18 +19,10 @@ use verbs::{
 use super::{
     advice::RecoveryAdvice,
     history_target::{require_resolved_state, resolve_state_id},
+    next_action::{NextActionValidationContext, write_full_command_json},
     worktree_safety::ensure_worktree_clean,
 };
 use crate::cli::{Cli, should_output_json};
-
-#[derive(Serialize)]
-struct RevertOutput {
-    output_kind: &'static str,
-    state_id: Option<String>,
-    reverted_state: String,
-    files_affected: Vec<String>,
-    message: String,
-}
 
 pub fn cmd_revert(
     cli: &Cli,
@@ -97,16 +92,16 @@ pub fn cmd_revert(
             },
         );
         if json {
-            println!(
-                "{}",
-                serde_json::to_string(&RevertOutput {
+            write_full_command_json(
+                &RevertOutput {
                     output_kind: "revert",
                     state_id: None,
                     reverted_state: target_short,
                     files_affected,
                     message: success_message,
-                })?
-            );
+                },
+                NextActionValidationContext::without_repo(&["revert"]),
+            )?;
         } else {
             println!("{success_message}");
             for file in &files_affected {
@@ -145,16 +140,16 @@ pub fn cmd_revert(
     );
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&RevertOutput {
+        write_full_command_json(
+            &RevertOutput {
                 output_kind: "revert",
                 state_id: Some(new_short),
                 reverted_state: target_short,
                 files_affected,
                 message: success_message,
-            })?
-        );
+            },
+            NextActionValidationContext::without_repo(&["revert"]),
+        )?;
     } else {
         println!("{success_message}");
         for file in &files_affected {

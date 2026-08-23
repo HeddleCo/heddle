@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Thread storage and lifecycle management.
 
+use schemars::JsonSchema;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -22,7 +23,7 @@ use crate::{
     thread_record_store::FilesystemThreadRecordStore,
 };
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
 pub struct Thread {
     pub id: String,
     pub thread: String,

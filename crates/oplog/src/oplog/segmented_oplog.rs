@@ -1371,7 +1371,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("would discard 2 later segment"), "{error}");
-        assert!(error.contains("heddle maintenance oplog recover"), "{error}");
+        assert!(
+            error.contains("heddle maintenance oplog recover"),
+            "{error}"
+        );
         assert_eq!(fs::read(manifest_path(&path)).unwrap(), manifest_before);
         assert!(
             later.exists(),

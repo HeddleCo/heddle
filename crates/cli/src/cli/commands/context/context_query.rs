@@ -4,12 +4,9 @@
 use std::{collections::BTreeMap, path::Path};
 
 use anyhow::Result;
-use objects::{
-    object::{AnnotationStatus, ContextTarget},
-
-};
-use repo::{ ActorPresenceStore, ContextQueryEntry,
-    Repository, ThreadManager,
+use objects::object::{AnnotationStatus, ContextTarget};
+use repo::{
+    ActorPresenceStore, ContextQueryEntry, Repository, ThreadManager,
     staleness::{self, StalenessStatus},
 };
 use serde::Serialize;
@@ -23,6 +20,7 @@ use super::{
     context_root_for_state, parse_scope, print_context_get, resolve_state, resolve_state_id,
     target_label,
 };
+use crate::cli::commands::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::cli::{
     Cli,
     commands::{
@@ -168,7 +166,10 @@ pub async fn cmd_context_list(
             "output_kind": "context_list",
             "items": items,
         });
-        println!("{}", serde_json::to_string(&envelope)?);
+        write_full_command_json(
+            &envelope,
+            NextActionValidationContext::without_repo(&["context", "list"]),
+        )?;
     } else if entries.is_empty() {
         println!("No context annotations.");
     } else {
@@ -238,7 +239,10 @@ pub async fn cmd_context_history(
     };
 
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["context", "history"]),
+        )?;
     } else {
         println!("{} {}", output.target_kind, output.target);
         println!("annotation: {}", output.annotation_id);
@@ -421,7 +425,10 @@ pub async fn cmd_context_suggest(cli: &Cli, r#ref: Option<String>, limit: usize)
             "output_kind": "context_suggest",
             "items": items,
         });
-        println!("{}", serde_json::to_string(&envelope)?);
+        write_full_command_json(
+            &envelope,
+            NextActionValidationContext::without_repo(&["context", "suggest"]),
+        )?;
     } else if suggestions.is_empty() {
         println!("No low-noise context suggestions right now.");
     } else {
