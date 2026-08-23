@@ -419,8 +419,6 @@ mod tests {
     use opentelemetry_sdk::trace::SdkTracerProvider;
     use serde::Deserialize;
     #[cfg(feature = "telemetry")]
-    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
-    #[cfg(feature = "telemetry")]
     use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;

@@ -5,7 +5,7 @@ use repo::Repository as HeddleRepository;
 use sley::{
     CommitObject, EntryKind, GitObjectType, GitTime, ObjectFormat, ObjectId, RefPrecondition,
     Repository as SleyRepository, Signature, TagObject, TreeEditor,
-    plumbing::{sley_core::ByteString, sley_object::EncodedObject},
+    plumbing::{sley_core::BString, sley_object::EncodedObject},
 };
 
 use super::*;
@@ -27,8 +27,8 @@ fn write_commit(repo: &SleyRepository, message: &str) -> ObjectId {
     tree.upsert("hello.txt", EntryKind::Blob, blob);
     let tree_oid = repo.write_tree(tree).expect("write tree");
     let signature = Signature {
-        name: ByteString::new(b"Test".to_vec()),
-        email: ByteString::new(b"test@example.com".to_vec()),
+        name: BString::new(b"Test".to_vec()),
+        email: BString::new(b"test@example.com".to_vec()),
         time: GitTime::new(1_700_000_000, 0),
         raw: b"Test <test@example.com> 1700000000 +0000".to_vec(),
     };
@@ -51,8 +51,8 @@ fn write_annotated_tag(repo: &SleyRepository, name: &str, target: ObjectId) -> O
         name: name.as_bytes().to_vec(),
         tagger: Some(
             Signature {
-                name: ByteString::new(b"Test".to_vec()),
-                email: ByteString::new(b"test@example.com".to_vec()),
+                name: BString::new(b"Test".to_vec()),
+                email: BString::new(b"test@example.com".to_vec()),
                 time: GitTime::new(1_700_000_001, 0),
                 raw: b"Test <test@example.com> 1700000001 +0000".to_vec(),
             }

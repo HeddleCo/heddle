@@ -1392,7 +1392,15 @@ fn render_status_changes(output: &StatusOutput) {
         }
     }
     if !has_changes && output.trust.verified {
-        println!("{}", style::dim("Nothing to capture, worktree clean"));
+        let clean_summary = if output.repository_capability == "git-overlay" {
+            // Git-overlay status describes the source checkout. Capture is a
+            // separate Heddle provenance step, so native capture vocabulary on
+            // this clean Git surface is both redundant and misleading.
+            "Git worktree clean"
+        } else {
+            "Nothing to capture, worktree clean"
+        };
+        println!("{}", style::dim(clean_summary));
     } else if !has_changes && output.trust.worktree_state == "not_checked" {
         let message = if output.trust.status == "git_branch_advanced" {
             "Nothing to capture in the worktree; import the external Git branch tip before comparing Heddle state"

@@ -26,6 +26,7 @@ use super::*;
 #[test]
 fn test_thread_create_then_child_start() {
     let main = setup_repo("main.rs", "fn main() {}");
+    let child_checkout = TempDir::new().unwrap();
 
     heddle(&["thread", "create", "modulo-race"], Some(main.path())).unwrap();
 
@@ -35,6 +36,8 @@ fn test_thread_create_then_child_start() {
             "json",
             "start",
             "modulo-race/task",
+            "--path",
+            child_checkout.path().to_str().unwrap(),
             "--parent-thread",
             "modulo-race",
             "--task",
@@ -152,6 +155,7 @@ fn test_thread_create_then_show_via_record() {
 #[test]
 fn test_thread_create_then_switch_then_capture_then_child_start() {
     let main = setup_repo("main.rs", "fn main() {}");
+    let child_checkout = TempDir::new().unwrap();
     let parent = "feature/parent";
 
     heddle(&["thread", "create", parent], Some(main.path())).unwrap();
@@ -173,6 +177,8 @@ fn test_thread_create_then_switch_then_capture_then_child_start() {
             "json",
             "start",
             "feature/parent/task",
+            "--path",
+            child_checkout.path().to_str().unwrap(),
             "--parent-thread",
             parent,
             "--task",

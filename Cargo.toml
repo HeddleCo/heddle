@@ -62,8 +62,8 @@ fs2 = "0.4.3"
 fastembed = { version = "=5.17.4", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
 futures = "0.3"
 getrandom = { version = "0.4", features = ["sys_rng"] }
-sley = { version = "0.7.0", features = ["mmap", "fast-sha1"] }
-sley-transport = "0.7.0"
+sley = { version = "0.8.0", features = ["mmap", "fast-sha1"] }
+sley-transport = "0.8.0"
 hex = "0.4"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 ignore = "0.4"

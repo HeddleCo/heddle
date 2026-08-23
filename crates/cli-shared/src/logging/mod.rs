@@ -539,11 +539,7 @@ fn init_otel(_logging: &LoggingConfig) -> TelemetryInit {
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "telemetry")]
-    use opentelemetry::trace::TracerProvider as _;
-    #[cfg(feature = "telemetry")]
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SimpleSpanProcessor};
-    #[cfg(feature = "telemetry")]
-    use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
 

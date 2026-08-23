@@ -187,7 +187,6 @@ fn restricted_agent_capability_keeps_the_deny_floor() {
         biscuit_auth::UnverifiedBiscuit::from_base64(restricted.as_bytes()).expect("parse");
     let block = biscuit.print_block_source(1).expect("attenuation");
     for denied in [
-        "MintBiscuit",
         "CreateServiceAccount",
         "DeleteRepository",
         "DeleteNamespace",

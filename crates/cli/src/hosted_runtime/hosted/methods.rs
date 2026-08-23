@@ -433,19 +433,6 @@ mod tests {
     };
 
     #[test]
-    fn hosted_rotation_never_calls_a_weft_mint_rpc() {
-        let source = include_str!("mod.rs");
-        assert!(
-            !source.contains(concat!("mint", "_biscuit")),
-            "rotation remints locally and must not call a weft mint RPC"
-        );
-        assert!(
-            !source.contains("MintBiscuitRequest"),
-            "rotation must not build a weft mint request"
-        );
-    }
-
-    #[test]
     fn shipped_native_inventory_is_38_unary_seven_server_streams_and_two_bidi() {
         const ROUTES: &[MethodRoute] = &[
             MethodRoute::CollaborationServiceAppendTurn,

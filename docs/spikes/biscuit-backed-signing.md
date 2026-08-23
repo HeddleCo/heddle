@@ -65,7 +65,7 @@ but it appears in exactly one crate — the **client** — and only ever in the
   appends a new block… the new block's signature chains off the parent's keys…
   The CLI never holds the server's signing key."*
 - `crates/cli/src/hosted_runtime/hosted/mod.rs:305` — the actual biscuit is obtained via
-  the `mint_biscuit` RPC; the **server** holds the root key and mints.
+  the legacy server-side credential minting route; the **server** holds the root key and mints.
 
 So the biscuit *signing* key (the root `KeyPair`) is **not available locally** at
 capture/commit time. A design that tried to "sign the state with the biscuit key"

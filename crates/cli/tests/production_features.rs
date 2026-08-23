@@ -957,7 +957,13 @@ mod gc {
             heddle(&["log", "--oneline", "--output", "text"], Some(temp.path())).unwrap();
         let state_ids: Vec<&str> = log_before
             .lines()
-            .filter_map(|line| line.split_whitespace().next())
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                match fields.next()? {
+                    "genesis" => fields.next(),
+                    state_id => Some(state_id),
+                }
+            })
             .collect();
         assert!(state_ids.len() >= 5, "should have at least 5 states");
 
