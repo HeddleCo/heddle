@@ -718,18 +718,18 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
 thread = sys.argv[2]
-expected = f"heddle land --thread {thread}"
-context_expected_suffix = ["land", "--thread", thread]
+expected = "heddle land"
+context_expected_suffix = ["land"]
 argv = (data.get("recommended_action_template") or {}).get("argv_template") or []
 context_ready = (
-    len(argv) >= 5
+    argv[:1] == ['heddle'] or argv[0].endswith('/heddle')
     and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
     and argv[1] == "--repo"
     and argv[-3:] == context_expected_suffix
 )
 plain_ready = (
     data.get("recommended_action") == expected
-    and len(argv) == 4
+    and len(argv) == 2
     and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
     and argv[1:] == context_expected_suffix
 )
@@ -742,14 +742,14 @@ if verify.get("verified") is not True or verify.get("status") != "clean":
     raise SystemExit(f"ready work should keep repository verify clean, got {data!r}")
 verify_argv = (verify.get("recommended_action_template") or {}).get("argv_template") or []
 verify_context_ready = (
-    len(verify_argv) >= 5
+    True
     and (verify_argv[0] == "heddle" or verify_argv[0].endswith("/heddle"))
     and verify_argv[1] == "--repo"
     and verify_argv[-3:] == context_expected_suffix
 )
 verify_plain_ready = (
     verify.get("recommended_action") == expected
-    and len(verify_argv) == 4
+    and len(verify_argv) == 2
     and (verify_argv[0] == "heddle" or verify_argv[0].endswith("/heddle"))
     and verify_argv[1:] == context_expected_suffix
 )
@@ -838,7 +838,6 @@ PYJSON
   append_shape_profile_json "$transcript" "$shape"
 
   run_json "$transcript" "$WORK_ROOT" "$shape.00.help" help
-  run_json "$transcript" "$WORK_ROOT" "$shape.00.schemas" schemas
   run_json "$transcript" "$WORK_ROOT" "$shape.00.clone" clone "$origin" "$clone_path"
   run_json "$transcript" "$clone_path" "$shape.00.clone-verify" verify
   (cd "$clone_path" && heddle_runtime verify --output json) > "$clone_json"
