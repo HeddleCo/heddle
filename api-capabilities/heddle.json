@@ -444,7 +444,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "begin_web_authn_authentication"
             }
           ],
@@ -529,7 +529,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/auth.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/auth.rs",
               "contains": "create_device_authorization"
             }
           ],
@@ -539,7 +539,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/auth.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/auth.rs",
               "contains": ".create_device_authorization("
             }
           ],
@@ -554,7 +554,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/auth.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/auth.rs",
               "contains": "create_service_account"
             }
           ],
@@ -564,7 +564,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/auth.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/auth.rs",
               "contains": ".create_service_account("
             }
           ],
@@ -594,7 +594,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/auth.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/auth.rs",
               "contains": "exchange_device_authorization"
             }
           ],
@@ -604,7 +604,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/auth.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/auth.rs",
               "contains": ".exchange_device_authorization("
             }
           ],
@@ -704,7 +704,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/auth.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/auth.rs",
               "contains": "issue_service_account_credential"
             }
           ],
@@ -714,7 +714,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/auth.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/auth.rs",
               "contains": ".issue_service_account_credential("
             }
           ],
@@ -1059,7 +1059,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/auth.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/auth.rs",
               "contains": "wait_for_device_authorization"
             }
           ],
@@ -1069,7 +1069,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/auth.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/auth.rs",
               "contains": ".wait_for_device_authorization("
             }
           ],
@@ -1305,7 +1305,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "create_grant"
             }
           ],
@@ -1326,7 +1326,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "create_invitation"
             }
           ],
@@ -1378,7 +1378,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "create_spool"
             }
           ],
@@ -1420,7 +1420,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "delete_grant"
             }
           ],
@@ -1441,7 +1441,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "delete_namespace"
             }
           ],
@@ -1462,7 +1462,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "delete_repository"
             }
           ],
@@ -1530,7 +1530,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "get_current_user_spool"
             }
           ],
@@ -1572,7 +1572,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "grant_support_access"
             }
           ],
@@ -1642,7 +1642,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "list_grants"
             }
           ],
@@ -1712,7 +1712,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "list_spools"
             }
           ],
@@ -1733,7 +1733,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "list_support_access_grants"
             }
           ],
@@ -1771,7 +1771,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "resolve_monorepo"
             }
           ],
@@ -1830,7 +1830,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "revoke_support_access"
             }
           ],
@@ -1885,7 +1885,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "update_grant"
             }
           ],
@@ -1906,7 +1906,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "update_namespace"
             }
           ],
@@ -1927,7 +1927,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "update_repository"
             }
           ],
@@ -1997,7 +1997,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/sync.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/sync.rs",
               "contains": "list_refs"
             }
           ],
@@ -2018,7 +2018,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/sync.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/sync.rs",
               "contains": "pull"
             }
           ],
@@ -2043,7 +2043,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/sync.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/sync.rs",
               "contains": "push"
             }
           ],
@@ -2068,7 +2068,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/sync.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/sync.rs",
               "contains": "update_ref"
             }
           ],
@@ -2089,7 +2089,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/content.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/content.rs",
               "contains": "get_blame"
             }
           ],
@@ -2110,7 +2110,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/sync.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/sync.rs",
               "contains": "get_blob"
             }
           ],
@@ -2131,7 +2131,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/content.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/content.rs",
               "contains": "get_compare"
             }
           ],
@@ -2152,7 +2152,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/content.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/content.rs",
               "contains": "get_context_history"
             }
           ],
@@ -2275,7 +2275,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/content.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/content.rs",
               "contains": "list_context"
             }
           ],
@@ -2296,7 +2296,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/content.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/content.rs",
               "contains": "list_context_suggestions"
             }
           ],
@@ -2351,7 +2351,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/content.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/content.rs",
               "contains": "revise_context"
             }
           ],
@@ -2372,7 +2372,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/content.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/content.rs",
               "contains": "set_context"
             }
           ],
@@ -2410,7 +2410,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/content.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/content.rs",
               "contains": "supersede_context"
             }
           ],
@@ -2590,7 +2590,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "approve_thread"
             }
           ],
@@ -2615,7 +2615,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "check_merge_eligibility"
             }
           ],
@@ -2757,7 +2757,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "list_thread_approvals"
             }
           ],
@@ -2850,7 +2850,7 @@
           "status": "shipped",
           "evidence": [
             {
-              "path": "crates/cli/src/hosted_runtime/hosted/user.rs",
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "revoke_approval"
             }
           ],

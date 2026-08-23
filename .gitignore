@@ -13,3 +13,4 @@ publish-0.2.0.log
 # coverage report (never commit)
 lcov.info
 *.lcov
+api-capabilities/__pycache__/
