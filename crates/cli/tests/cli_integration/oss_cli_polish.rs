@@ -10754,6 +10754,48 @@ fn exit_codes_surface_in_json_catalog() {
     );
 }
 
+/// `docs/exit-codes.md` § Coverage must name exactly the commands whose
+/// `CommandContract.exit_codes` is non-empty (heddle#1392). Keeps the
+/// hand-written coverage list from drifting from the catalog again.
+#[test]
+fn exit_codes_coverage_doc_lists_catalogued_commands() {
+    let doc = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/exit-codes.md"
+    ))
+    .expect("docs/exit-codes.md should exist");
+
+    let catalog = cli::cli::commands::build_command_catalog();
+    let mut swept: Vec<&str> = catalog
+        .commands
+        .iter()
+        .filter(|c| !c.exit_codes.is_empty())
+        .map(|c| c.display.as_str())
+        .collect();
+    swept.sort();
+
+    // Extract the bullet list between the `## Coverage` heading and the
+    // following blank-line-then-prose paragraph.
+    let coverage = doc
+        .split("## Coverage")
+        .nth(1)
+        .expect("Coverage section exists");
+    let listed: Vec<String> = coverage
+        .lines()
+        .filter_map(|line| line.strip_prefix("- `"))
+        .map(|line| line.trim_end_matches('`').to_string())
+        .collect();
+
+    let mut listed_sorted = listed.clone();
+    listed_sorted.sort();
+
+    assert_eq!(
+        listed_sorted, swept,
+        "docs/exit-codes.md § Coverage drifts from CommandContract.exit_codes; \
+         update the list to match `heddle help --output json`"
+    );
+}
+
 /// `heddle log`, `show`, and `status` default text views must
 /// lead with command data — not the `Repository:` mode preamble, which is
 /// noise on every read (heddle#275). `-v` keeps the preamble for

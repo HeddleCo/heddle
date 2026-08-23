@@ -73,10 +73,16 @@ declared discriminators, `exit_codes`) are stable for that minor.
 ## Coverage
 
 Today, only a representative subset of commands has populated
-`exit_codes`:
+`exit_codes` — exactly eight entries in the command catalog:
 
-- `init`, `verify`, `push`, `pull`, `commit`, `merge`, `status`
-- `import git`, `fsck repair git`, `sync git`
+- `init`, `status`, `verify`, `commit`
+- `pull`, `push`
+- `bridge git import`, `sync git`
+
+This list mirrors the catalog (`CommandContract.exit_codes`, exposed per
+command by `heddle help --output json`); the
+`exit_codes_declared_have_doc_entry` lint below keeps every declared code
+present in the table above.
 
 Commands not yet swept implicitly contract to `0` on success and an
 unspecified non-zero on failure — currently always mapped through
