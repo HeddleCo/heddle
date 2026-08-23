@@ -560,6 +560,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
         &[
             "--output",
             "json",
+            "agent",
             "presence",
             "complete",
             "--session",
@@ -855,7 +856,10 @@ fn land_auto_captures_and_merges_clean_thread() {
     let envelope: Value = serde_json::from_str(stderr.trim())
         .unwrap_or_else(|err| panic!("actor show failure should be JSON: {err}: {stderr}"));
     assert_eq!(envelope["kind"], "no_active_actor");
-    assert_eq!(envelope["primary_command"], "heddle presence list");
+    assert_eq!(
+        envelope["primary_command"],
+        "heddle agent presence list"
+    );
     assert!(
         envelope["hint"]
             .as_str()
@@ -1172,12 +1176,21 @@ fn delegate_creates_child_threads_with_parent_relationship() {
 
     for child in ["parser", "tests"] {
         let child_name = format!("feature/orchestrator/{child}");
+        // `start` requires an explicit empty checkout directory.
+        let child_path = std::env::temp_dir().join(format!(
+            "heddle-e2e-{}-{child}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&child_path);
+        fs::create_dir_all(&child_path).unwrap();
         heddle(
             &[
                 "--output",
                 "json",
                 "start",
                 &child_name,
+                "--path",
+                child_path.to_str().unwrap(),
                 "--parent-thread",
                 "feature/orchestrator",
                 "--task",
@@ -1774,12 +1787,19 @@ fn thread_absorb_merges_child_thread_into_parent_workspace() {
     .unwrap();
     let parent_path = std::path::PathBuf::from(parent_started["execution_path"].as_str().unwrap());
     let child_name = "feature/orchestrator/parser".to_string();
+    // `start` requires an explicit empty checkout directory.
+    let child_checkout =
+        std::env::temp_dir().join(format!("heddle-e2e-{}-absorb-parser", std::process::id()));
+    let _ = fs::remove_dir_all(&child_checkout);
+    fs::create_dir_all(&child_checkout).unwrap();
     heddle(
         &[
             "--output",
             "json",
             "start",
             &child_name,
+            "--path",
+            child_checkout.to_str().unwrap(),
             "--parent-thread",
             "feature/orchestrator",
             "--task",

@@ -71,7 +71,21 @@ pub fn probe_current_process_harness(
     current_model: Option<String>,
     current_policy: Option<String>,
 ) -> Result<HarnessProbeResult> {
-    let env_hints = harness_env_hints();
+    // Ambient model identity (CLAUDE_MODEL, OPENAI_MODEL, …) must not
+    // fabricate attribution on its own. It is trusted only when a session
+    // anchor proves the harness — a live codex thread in this process's
+    // environment — mirroring `inherited_harness_hint` plus that anchor.
+    let codex_anchored = std::env::var("CODEX_THREAD_ID")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let env_hints: BTreeMap<String, String> = harness_env_hints()
+        .into_iter()
+        .filter(|(key, _)| {
+            inherited_harness_hint(key)
+                || (codex_anchored
+                    && matches!(key.as_str(), "OPENAI_MODEL" | "OPENAI_REASONING_EFFORT"))
+        })
+        .collect();
     let probe_metadata = codex_session_probe_metadata(&env_hints);
     probe_harness_actor(&HarnessProbeInput {
         argv: detected_harness_argv().or_else(|| Some(std::env::args().collect())),

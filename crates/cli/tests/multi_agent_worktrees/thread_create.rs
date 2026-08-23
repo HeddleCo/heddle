@@ -19,6 +19,18 @@ use serde_json::Value;
 
 use super::*;
 
+/// An empty, uniquely-named checkout directory for `start --path`
+/// (a relative path would resolve next to the shared target dir).
+fn child_dir(label: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "heddle-thread-create-{}-{label}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 /// The original repro: `thread create` followed by child `start` should
 /// not fail with "Thread '<name>' not found". Before the fix, the
 /// missing Thread record left child creation (which routes through
@@ -35,6 +47,8 @@ fn test_thread_create_then_child_start() {
             "json",
             "start",
             "modulo-race/task",
+            "--path",
+            child_dir("child-start").to_str().unwrap(),
             "--parent-thread",
             "modulo-race",
             "--task",
@@ -173,6 +187,8 @@ fn test_thread_create_then_switch_then_capture_then_child_start() {
             "json",
             "start",
             "feature/parent/task",
+            "--path",
+            child_dir("child-start-switched").to_str().unwrap(),
             "--parent-thread",
             parent,
             "--task",
