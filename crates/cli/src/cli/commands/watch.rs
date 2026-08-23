@@ -955,7 +955,7 @@ mod tests {
             state_id: Some(cid),
             intent: Some("feat(modulo): error-returning impl".into()),
             confidence: Some(0.92),
-            actor: Some(ActorInfo {
+            actor: Some(WatchActorInfo {
                 provider: "anthropic".into(),
                 model: "claude-sonnet-4-5".into(),
             }),
