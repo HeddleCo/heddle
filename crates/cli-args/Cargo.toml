@@ -13,10 +13,10 @@ categories.workspace = true
 anyhow.workspace = true
 api = { package = "heddle-api", version = "0.15.0" }
 clap.workspace = true
-cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.15" }
-objects = { path = "../objects", package = "heddle-objects", version = "0.15" }
-repo = { path = "../repo", package = "heddle-repo", version = "0.15", default-features = false, features = ["git-overlay", "native"] }
-weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.15" }
+cli-shared.workspace = true
+objects.workspace = true
+repo = { workspace = true, features = ["git-overlay", "native"] }
+weft-client-shim.workspace = true
 
 [features]
 default = []

@@ -12,13 +12,13 @@ categories.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-heddle-cli-args = { path = "../cli-args", version = "0.15", default-features = false }
-heddle-cli-render = { path = "../cli-render", version = "0.15", default-features = false }
-heddle-core = { path = "../core", version = "0.15", default-features = false }
-heddle-git-projection = { path = "../git-projection", version = "0.15", default-features = false }
-objects = { path = "../objects", package = "heddle-objects", version = "0.15" }
-refs = { path = "../refs", package = "heddle-refs", version = "0.15" }
-repo = { path = "../repo", package = "heddle-repo", version = "0.15", default-features = false }
+heddle-cli-args.workspace = true
+heddle-cli-render.workspace = true
+heddle-core.workspace = true
+heddle-git-projection.workspace = true
+objects.workspace = true
+refs.workspace = true
+repo.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

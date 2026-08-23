@@ -13,12 +13,12 @@ categories.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 hex.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.15" }
+objects.workspace = true
 opentelemetry = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
-wire = { path = "../wire", package = "heddle-wire", version = "0.15", default-features = false }
-repo = { path = "../repo", package = "heddle-repo", version = "0.15", default-features = false, features = ["git-overlay", "native"] }
+wire.workspace = true
+repo = { workspace = true, features = ["git-overlay", "native"] }
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
