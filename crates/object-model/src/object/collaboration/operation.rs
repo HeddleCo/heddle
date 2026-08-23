@@ -6,7 +6,7 @@ use super::{
     CollabOpId, CollaborationCodecError, CollaborationIdempotencyKey, DiscussionRecordId,
     LegacyDiscussionId, LegacySourceLocator,
 };
-use crate::object::{Attribution, ChangeId, ContentHash, StateId, VisibilityTier};
+use crate::object::{AnnotationKind, Attribution, ChangeId, ContentHash, StateId, VisibilityTier};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -59,10 +59,23 @@ impl DiscussionTurnV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CollaborationResolution {
-    AddressedByState { state_id: StateId },
-    AddressedByChange { change_id: ChangeId },
-    Dismissed { reason: String },
-    Annotation { annotation_id: String },
+    AddressedByState {
+        state_id: StateId,
+    },
+    AddressedByChange {
+        change_id: ChangeId,
+    },
+    Dismissed {
+        reason: String,
+    },
+    IntoAnnotation {
+        annotation_kind: AnnotationKind,
+        content: String,
+        tags: Vec<String>,
+    },
+    Annotation {
+        annotation_id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +95,7 @@ pub enum CollaborationOperationBodyV1 {
         anchor: CollaborationAnchor,
         visibility: VisibilityTier,
         turn: DiscussionTurnV1,
+        thread_ref: Option<String>,
     },
     AppendTurn {
         turn: DiscussionTurnV1,
@@ -126,10 +140,14 @@ impl CollaborationOperationBodyV1 {
                 title,
                 anchor,
                 turn,
+                thread_ref,
                 ..
             } => {
                 require_text(title, "discussion title")?;
                 validate_anchor(anchor)?;
+                if let Some(thread_ref) = thread_ref {
+                    require_text(thread_ref, "discussion thread ref")?;
+                }
                 turn.validate()
             }
             Self::AppendTurn { turn } => turn.validate(),
@@ -272,6 +290,9 @@ fn validate_anchor(anchor: &CollaborationAnchor) -> Result<(), CollaborationCode
 fn validate_resolution(value: &CollaborationResolution) -> Result<(), CollaborationCodecError> {
     match value {
         CollaborationResolution::Dismissed { reason } => require_text(reason, "dismiss reason"),
+        CollaborationResolution::IntoAnnotation { content, .. } => {
+            require_text(content, "annotation content")
+        }
         CollaborationResolution::Annotation { annotation_id } => {
             require_text(annotation_id, "annotation id")
         }

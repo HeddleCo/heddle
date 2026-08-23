@@ -1142,6 +1142,7 @@ pub struct DiscussionSchema {
     pub title: String,
     pub anchor: DiscussionAnchorSchema,
     pub visibility: String,
+    pub thread_ref: Option<String>,
     pub status: String,
     pub resolution: Option<DiscussionResolutionSchema>,
     pub conflict_operation_ids: Vec<String>,
@@ -1171,6 +1172,9 @@ pub struct DiscussionResolutionSchema {
     pub state_id: Option<String>,
     pub change_id: Option<String>,
     pub reason: Option<String>,
+    pub annotation_kind: Option<String>,
+    pub content: Option<String>,
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

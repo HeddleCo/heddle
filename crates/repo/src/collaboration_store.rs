@@ -448,6 +448,7 @@ mod tests {
                 anchor: CollaborationAnchor::Repository,
                 visibility: VisibilityTier::default(),
                 turn: DiscussionTurnV1::new("first").unwrap(),
+                thread_ref: None,
             },
         )
         .unwrap()

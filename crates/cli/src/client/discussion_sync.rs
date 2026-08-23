@@ -32,6 +32,9 @@
 //! Push sends only turns that are self-authored AND unlinked; pull materializes
 //! only server ordinals not yet linked. Client operation ids are derived from
 //! the stable turn id, so a retry replays instead of conflicting.
+//! Resolve-into-annotation operations use the same durable mirror: their
+//! request identity is derived from the complete resolution payload and is
+//! recorded only after `ResolveDiscussion` succeeds.
 //!
 //! ## Reconciliation is author-aware, never body-alone
 //!
@@ -58,7 +61,7 @@
 //! leaves durable writes without their mapping.
 //!
 //! Scope: discussions only; `context`/`review` share the same seam (not built).
-//! `resolve`/`reopen` are not yet mirrored (turns only).
+//! By-edit, dismiss, and reopen state are not yet mirrored.
 
 #![cfg(feature = "client")]
 
@@ -114,6 +117,10 @@ struct MirrorEntry {
     /// Turns known to exist on BOTH sides, each carrying its identity on both.
     #[serde(default)]
     links: Vec<TurnLink>,
+    /// Client operation id of the resolve-into-annotation request known to
+    /// exist on both sides.
+    #[serde(default)]
+    resolved_into_annotation_operation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +182,18 @@ fn append_op_id(repo_path: &str, server_id: &str, turn_id: &str) -> String {
         format!("append:{repo_path}:{server_id}:{turn_id}").as_bytes(),
     )
     .to_string()
+}
+
+fn resolve_into_annotation_op_id(
+    repo_path: &str,
+    server_id: &str,
+    kind: objects::object::AnnotationKind,
+    content: &str,
+    tags: &[String],
+) -> Result<String> {
+    let identity = serde_json::to_vec(&(repo_path, server_id, kind.as_str(), content, tags))
+        .context("encode resolve-into-annotation operation identity")?;
+    Ok(uuid::Uuid::new_v5(&OP_NAMESPACE, &identity).to_string())
 }
 
 fn now_ms() -> i64 {
@@ -350,12 +369,11 @@ async fn push_one(
             crate::cli::style::warn_marker(),
         );
     }
-    if candidates.is_empty() {
-        return Ok(false);
-    }
-
-    match entry_index {
+    let (index, server_id, mut changed) = match entry_index {
         None => {
+            if candidates.is_empty() {
+                return Ok(false);
+            }
             let (open_turn_id, open_body) = candidates[0].clone();
             let hosted = client
                 .open_discussion(
@@ -365,6 +383,7 @@ async fn push_one(
                     symbol,
                     &open_body,
                     &visibility,
+                    discussion.thread_ref.as_deref(),
                     open_op_id(repo_path, local_id),
                 )
                 .await
@@ -378,6 +397,7 @@ async fn push_one(
                     local_turn_id: open_turn_id,
                     server_ordinal: 0,
                 }],
+                resolved_into_annotation_operation_id: None,
             });
             let index = repo_mirror.discussions.len() - 1;
             for (turn_id, body) in &candidates[1..] {
@@ -398,7 +418,7 @@ async fn push_one(
                     hosted.turns.len().saturating_sub(1),
                 );
             }
-            Ok(true)
+            (index, server_id, true)
         }
         Some(index) => {
             let server_id = mirror.repos[repo_path].discussions[index].server_id.clone();
@@ -420,9 +440,61 @@ async fn push_one(
                     hosted.turns.len().saturating_sub(1),
                 );
             }
-            Ok(true)
+            (index, server_id, !candidates.is_empty())
         }
+    };
+
+    if push_into_annotation_resolution(client, repo_path, mirror, index, &server_id, discussion)
+        .await?
+    {
+        changed = true;
     }
+    Ok(changed)
+}
+
+async fn push_into_annotation_resolution(
+    client: &mut HostedClient,
+    repo_path: &str,
+    mirror: &mut HostedMirror,
+    index: usize,
+    server_id: &str,
+    discussion: &MaterializedDiscussion,
+) -> Result<bool> {
+    let Some(objects::object::CollaborationResolution::IntoAnnotation {
+        annotation_kind,
+        content,
+        tags,
+    }) = &discussion.resolution
+    else {
+        return Ok(false);
+    };
+    let operation_id =
+        resolve_into_annotation_op_id(repo_path, server_id, *annotation_kind, content, tags)?;
+    if mirror.repos[repo_path].discussions[index]
+        .resolved_into_annotation_operation_id
+        .as_deref()
+        == Some(&operation_id)
+    {
+        return Ok(false);
+    }
+    client
+        .resolve_discussion_into_annotation(
+            repo_path,
+            server_id,
+            *annotation_kind,
+            content,
+            tags.clone(),
+            operation_id.clone(),
+        )
+        .await
+        .with_context(|| format!("resolve hosted discussion {server_id} into annotation"))?;
+    let entry = mirror
+        .repos
+        .get_mut(repo_path)
+        .and_then(|repo_mirror| repo_mirror.discussions.get_mut(index))
+        .ok_or_else(|| anyhow!("hosted discussion mirror entry disappeared during resolution"))?;
+    entry.resolved_into_annotation_operation_id = Some(operation_id);
+    Ok(true)
 }
 
 /// Fetch hosted discussions for the repository head and materialize any turns we
@@ -513,6 +585,7 @@ fn hosted_discussion_from_bootstrap(discussion: Discussion) -> HostedDiscussion 
         symbol: discussion.anchor.symbol,
         opened_against_state: Some(discussion.opened_against_state),
         visibility: discussion.visibility.as_str().to_string(),
+        thread_ref: discussion.thread_ref,
         turns: discussion
             .turns
             .into_iter()
@@ -568,6 +641,7 @@ fn pull_one(
                     anchor,
                     visibility,
                     turn: turn_body(first)?,
+                    thread_ref: discussion.thread_ref.clone(),
                 },
             )?;
             // Record the mapping immediately so a mid-materialization failure
@@ -580,6 +654,7 @@ fn pull_one(
                     local_turn_id: turn_identity(&open_op, 0),
                     server_ordinal: 0,
                 }],
+                resolved_into_annotation_operation_id: None,
             });
             let index = repo_mirror.discussions.len() - 1;
 
@@ -779,11 +854,11 @@ fn parse_visibility_token(token: &str) -> VisibilityTier {
 #[cfg(test)]
 mod tests {
     use objects::object::{
-        Attribution, CollaborationAnchor, CollaborationIdempotencyKey,
-        CollaborationOperationBodyV1, CollaborationOperationEnvelope, ContentHash, Discussion,
-        DiscussionRecordId, DiscussionResolution, DiscussionTurn, DiscussionTurnV1,
-        LegacyDiscussionId, LegacyDiscussionResolutionV1, LegacySourceLocator, Principal,
-        StateAttachmentId, StateId, SymbolAnchor, VisibilityTier,
+        AnnotationKind, Attribution, CollaborationAnchor, CollaborationIdempotencyKey,
+        CollaborationOperationBodyV1, CollaborationOperationEnvelope, CollaborationResolution,
+        ContentHash, Discussion, DiscussionRecordId, DiscussionResolution, DiscussionTurn,
+        DiscussionTurnV1, LegacyDiscussionId, LegacyDiscussionResolutionV1, LegacySourceLocator,
+        Principal, StateAttachmentId, StateId, SymbolAnchor, VisibilityTier,
     };
     use tempfile::TempDir;
 
@@ -946,6 +1021,7 @@ mod tests {
                 },
                 visibility: VisibilityTier::Internal,
                 turn: DiscussionTurnV1::new("hi").unwrap(),
+                thread_ref: None,
             },
         )
         .unwrap();
@@ -1013,7 +1089,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_discussion_opens_then_appends_only_unlinked_self_turns() {
+    async fn push_discussion_opens_appends_and_resolves_into_annotation() {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -1043,6 +1119,7 @@ mod tests {
                 },
                 visibility: VisibilityTier::Internal,
                 turn: DiscussionTurnV1::new("first turn").unwrap(),
+                thread_ref: Some("refs/heads/feature/run".to_string()),
             },
         )
         .unwrap();
@@ -1054,11 +1131,11 @@ mod tests {
             1
         );
 
-        write_local_operation(
+        let append = write_local_operation(
             &store,
             discussion_id,
             vec![open],
-            author,
+            author.clone(),
             1_700_000_001_000,
             CollaborationOperationBodyV1::AppendTurn {
                 turn: DiscussionTurnV1::new("second turn").unwrap(),
@@ -1070,6 +1147,35 @@ mod tests {
                 .await
                 .unwrap(),
             1
+        );
+
+        write_local_operation(
+            &store,
+            discussion_id,
+            vec![append],
+            author,
+            1_700_000_002_000,
+            CollaborationOperationBodyV1::Resolve {
+                resolution: CollaborationResolution::IntoAnnotation {
+                    annotation_kind: AnnotationKind::Invariant,
+                    content: "the cache key includes visibility".to_string(),
+                    tags: vec!["cache".to_string()],
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            push_discussions(&repo, &mut client, "acme/widgets")
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            push_discussions(&repo, &mut client, "acme/widgets")
+                .await
+                .unwrap(),
+            0,
+            "a mirrored resolution must not be sent again"
         );
 
         client.close().await;

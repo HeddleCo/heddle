@@ -341,6 +341,13 @@ impl HostedRoutes<'_> {
         AppendTurnRequest,
         Discussion
     );
+    unary_method!(
+        resolve_discussion,
+        "CollaborationService",
+        "ResolveDiscussion",
+        ResolveDiscussionRequest,
+        Discussion
+    );
     server_stream_method!(
         list_discussions_by_state,
         "CollaborationService",

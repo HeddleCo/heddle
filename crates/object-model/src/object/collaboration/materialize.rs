@@ -97,6 +97,7 @@ pub struct MaterializedDiscussion {
     pub title: String,
     pub anchor: CollaborationAnchor,
     pub visibility: VisibilityTier,
+    pub thread_ref: Option<String>,
     pub turns: Vec<(CollabOpId, DiscussionTurnV1)>,
     pub resolution: Option<CollaborationResolution>,
     pub conflict_operations: BTreeSet<CollabOpId>,
@@ -191,16 +192,18 @@ fn materialize_discussion(
     }
     let root_id = roots[0];
     let root = &all[&root_id].operation.body;
-    let (title, anchor, visibility, root_turns, base_resolution) = match root {
+    let (title, anchor, visibility, thread_ref, root_turns, base_resolution) = match root {
         CollaborationOperationBodyV1::Open {
             title,
             anchor,
             visibility,
             turn,
+            thread_ref,
         } => (
             title.clone(),
             anchor.clone(),
             visibility.clone(),
+            thread_ref.clone(),
             vec![turn.clone()],
             None,
         ),
@@ -215,6 +218,7 @@ fn materialize_discussion(
             title.clone(),
             anchor.clone(),
             visibility.clone(),
+            None,
             turns.clone(),
             legacy_resolution(resolution),
         ),
@@ -291,6 +295,7 @@ fn materialize_discussion(
         title,
         anchor,
         visibility,
+        thread_ref,
         turns,
         resolution,
         conflict_operations: conflicts,
@@ -415,6 +420,7 @@ mod tests {
                 anchor: CollaborationAnchor::Repository,
                 visibility: VisibilityTier::default(),
                 turn: DiscussionTurnV1::new("first").unwrap(),
+                thread_ref: None,
             },
         )
     }
