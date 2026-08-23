@@ -19,7 +19,6 @@ use api::heddle::api::v1alpha1::{RepositoryRef, StateId as ApiStateId, repositor
 use heddle_cli_args::CliContext as _;
 use objects::object::ThreadName;
 use repo::Repository;
-use serde::Serialize;
 use verbs::approval_plan::{
     EligibilitySummary, approval_recorded_message, approval_revoked_message,
     approvals_empty_message, approvals_header, eligibility_allowed_message,
@@ -43,18 +42,11 @@ use crate::{
 };
 use hosted_client::client::{HostedAuthMode, HostedClient};
 
-#[derive(Serialize)]
-struct ApprovalOutput {
-    id: String,
-    repo_path: String,
-    source_thread: String,
-    target_thread: String,
-    source_state: String,
-    approver_user_id: String,
-    note: String,
-    approved_at: u64,
-    expires_at: u64,
-}
+// The approval wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::thread::{
+    ApprovalOutput, ApprovalRevokeOutput, EligibilityOutput, UnmetOutput,
+};
 
 fn ts_secs(ts: &Option<prost_types::Timestamp>) -> u64 {
     timestamp_secs_u64(ts.as_ref().map(|t| t.seconds))
@@ -72,30 +64,6 @@ fn api_state_id_string(state_id: &Option<ApiStateId>) -> String {
         .as_ref()
         .map(|state_id| state_id_bytes_to_string(&state_id.value))
         .unwrap_or_default()
-}
-
-#[derive(Serialize)]
-struct UnmetOutput {
-    policy_id: String,
-    kind: String,
-    group_id: String,
-    reason: String,
-    needed: u32,
-    have: u32,
-}
-
-#[derive(Serialize)]
-struct EligibilityOutput {
-    allowed: bool,
-    unmet: Vec<UnmetOutput>,
-    valid_approvals: Vec<ApprovalOutput>,
-}
-
-#[derive(Serialize)]
-struct ApprovalRevokeOutput {
-    output_kind: &'static str,
-    id: String,
-    deleted: bool,
 }
 
 /// Resolve the named remote and its repo_path. Errors if the remote

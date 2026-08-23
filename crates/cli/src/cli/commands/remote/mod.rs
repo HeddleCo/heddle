@@ -16,7 +16,6 @@ use heddle_git_projection::{
 };
 use objects::object::ThreadName;
 use repo::{Repository, RepositoryCapability};
-use serde::Serialize;
 use sley::{
     ConfigEdit, ConfigEditPlan, FullName, RefPrecondition, RemoteConfigSet,
     Repository as SleyRepository,
@@ -49,7 +48,7 @@ use super::action_line::print_next;
 use super::{
     advice::RecoveryAdvice,
     auto_capture::{AutoCaptureTrigger, auto_capture_command_boundary},
-    command_catalog::{ActionFields, ActionTemplate},
+    command_catalog::ActionFields,
     dry_run::{DryRunPlan, RefUpdatePreview},
     next_action::{NextActionValidationContext, write_full_command_json},
     snapshot::ensure_current_state,

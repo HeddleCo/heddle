@@ -2228,6 +2228,7 @@ dependencies = [
  "heddle-repo",
  "heddle-verbs",
  "hex",
+ "schemars",
  "serde",
  "serde_json",
  "serial_test",

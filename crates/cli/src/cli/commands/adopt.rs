@@ -6,14 +6,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow, bail};
 use objects::lock::RepositoryLockExt;
 use repo::{Repository, RepositoryCapability, RepositorySourceAuthority};
-use serde::Serialize;
 use sley::Repository as SleyRepository;
 use verbs::{AdoptPlanError, AdoptPlanOptions, plan_adopt};
 
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    command_catalog::ActionTemplate,
     import_progress::ImportProgress,
     next_action::{NextActionValidationContext, write_full_command_json},
     verification_health::{
@@ -25,7 +23,6 @@ use crate::{
     cli::{AdoptArgs, Cli, should_output_json, style},
     perf::{ProfileField, emit_profile, instrumentation_enabled},
 };
-
 
 // The wire payload lives in cli-contract so the schema registry registers
 // the real serialization type.

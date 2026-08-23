@@ -43,6 +43,7 @@ mod repository_ref_mutation;
 mod repository_resolve;
 #[path = "repository_signing.rs"]
 mod repository_signing;
+use schemars::JsonSchema;
 use std::{
     collections::BTreeSet,
     fs,
@@ -149,7 +150,7 @@ pub enum RepositoryCapability {
     NativeHeddle,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum OperationScope {
     Git,
@@ -165,7 +166,7 @@ impl std::fmt::Display for OperationScope {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum OperationKind {
     Merge,
@@ -187,13 +188,14 @@ impl std::fmt::Display for OperationKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RepositoryOperationStatus {
     pub scope: OperationScope,
     pub kind: OperationKind,
     pub in_progress: bool,
     pub state: String,
     pub message: String,
+    #[schemars(with = "Option<String>")]
     pub next_action: String,
 }
 

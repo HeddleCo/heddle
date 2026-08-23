@@ -26,7 +26,6 @@ use objects::{
 };
 use refs::Head;
 use repo::{Repository, RepositoryCapability, SyncedThreadMetadata, ThreadManager};
-use serde::Serialize;
 use sley::{
     ConfigEdit, ConfigEditPlan, ConfigEditScope, HeadUpdateOptions, RefChange, ReferenceTarget,
     RemoteConfigRefusal, RemoteConfigRemove, RemoteConfigSet, Repository as SleyRepository,
@@ -62,12 +61,12 @@ use hosted_client::client::LocalSync;
 #[cfg(feature = "client")]
 use hosted_client::hosted_runtime::hosted::{HostedAuthMode, PullMaterialization};
 
-
 /// CLI machine envelope: domain [`PullOutcome`] plus repository verification.
-
 // The wire payload lives in cli-contract so the schema registry registers
 // the real serialization type.
-pub(crate) use heddle_cli_contract::cli::commands::wire::remote::{PullOutput, RemoteMutationOutput};
+pub(crate) use heddle_cli_contract::cli::commands::wire::remote::{
+    PullOutput, RemoteMutationOutput,
+};
 
 fn heddle_pull_output_from_local(
     plan: Option<&PullPlan>,

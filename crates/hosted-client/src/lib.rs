@@ -5,8 +5,8 @@
 //! against a weft server. `heddle-api` protos remain the only shared seam with
 //! weft/tapestry; this crate owns the client side of that contract.
 
-pub mod attribution;
 pub mod attachments;
+pub mod attribution;
 pub mod client;
 #[cfg(feature = "client")]
 pub mod extensions;

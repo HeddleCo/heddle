@@ -21,6 +21,7 @@ hex.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.14" }
 repo = { path = "../repo", package = "heddle-repo", version = "0.14", default-features = false, features = ["git-overlay", "native"] }
 serde.workspace = true
+schemars.workspace = true
 serde_json.workspace = true
 
 [features]

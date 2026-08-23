@@ -5,13 +5,15 @@ use anyhow::{Result, anyhow};
 use objects::{object::MarkerName, store::ObjectStore};
 use repo::Repository;
 use verbs::{
-    marker_bulk_delete_message, marker_create_message, marker_delete_message,
-    marker_list_filter_matches, marker_prefix_is_valid, plan_marker_delete_selector,
-    MarkerDeleteSelector, MarkerDeleteSelectorError,
+    MarkerDeleteSelector, MarkerDeleteSelectorError, marker_bulk_delete_message,
+    marker_create_message, marker_delete_message, marker_list_filter_matches,
+    marker_prefix_is_valid, plan_marker_delete_selector,
 };
 // The wire payloads live in cli-contract so the schema registry registers
 // the real serialization types.
-pub(crate) use heddle_cli_contract::cli::commands::wire::history::{MarkerListOutput, MarkerEntry, MarkerOpOutput, MarkerBulkDeleteOutput};
+pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
+    MarkerBulkDeleteOutput, MarkerEntry, MarkerListOutput, MarkerOpOutput,
+};
 
 use super::{
     advice::RecoveryAdvice,
@@ -22,10 +24,6 @@ use crate::{
     cli::{Cli, ThreadMarkerCommands, should_output_json},
     config::UserConfig,
 };
-
-
-
-
 
 pub fn cmd_thread_marker(
     cli: &Cli,

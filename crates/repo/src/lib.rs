@@ -133,6 +133,14 @@ pub(crate) use worktree::{
 pub use worktree::{git_worktree_status, worktree_index, worktree_status_options, worktree_walk};
 
 // Re-export commonly used types from underlying crates.
+pub use actor_presence::{
+    ActorChainNode, ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
+    ContextQueryEntry, generate_actor_session_id,
+};
+pub use agent_task::{
+    AGENT_TASK_SCHEMA_VERSION, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
+    generate_agent_task_id, validate_task_id,
+};
 pub use ci_runner_trust::{CiRunnerTrustEntry, CiRunnerTrustSet};
 pub use collaboration_migration::{
     LegacyDiscussionMigrationBlocker, LegacyDiscussionMigrationItem, LegacyDiscussionMigrationPlan,
@@ -174,14 +182,6 @@ pub use objects::{
 };
 #[cfg(feature = "async-source")]
 pub use repository::query_history_async;
-pub use actor_presence::{
-    ActorChainNode, ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
-    ContextQueryEntry, generate_actor_session_id,
-};
-pub use agent_task::{
-    AGENT_TASK_SCHEMA_VERSION, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
-    generate_agent_task_id, validate_task_id,
-};
 pub use repository::{
     BlobHydrator, ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters,
     CheckoutMaterialization, CommitGraphIndex, CommitGraphInspection, ContextSuggestion,

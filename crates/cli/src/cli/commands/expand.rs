@@ -6,12 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 // The wire payloads live in cli-contract so the schema registry registers
 // the real serialization types.
 pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
-    CollapsedLandOutput, ExpandedCaptureOutput, ExpandOutput,
+    CollapsedLandOutput, ExpandOutput, ExpandedCaptureOutput,
 };
 
-
-use objects::object::StateId;
 use anyhow::{Result, anyhow};
+use objects::object::StateId;
 use oplog::{OpLogBackend, OpRecord};
 use repo::{Repository, format_confidence};
 
@@ -23,9 +22,6 @@ use super::{
 use crate::cli::{Cli, should_output_json, style};
 
 const EXPAND_OUTPUT_KIND: &str = "expand";
-
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CollapseAnnotation {
@@ -198,4 +194,3 @@ fn print_human(output: &ExpandOutput) {
 fn short_oid(oid: &str) -> &str {
     verbs::short_oid(oid)
 }
-

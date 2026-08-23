@@ -7,8 +7,8 @@
 //! directly below the serializer — change them together.
 
 use schemars::{JsonSchema, Schema, SchemaGenerator};
-use serde::{Serialize, Serializer, ser::SerializeStruct};
 use serde::ser::Error as SerError;
+use serde::{Serialize, Serializer, ser::SerializeStruct};
 use verbs::{
     ActionTemplate, RepositoryVerificationState, ThreadPreviewReport,
     ready_freshness_summary as core_ready_freshness_summary,
@@ -59,7 +59,8 @@ impl ReadyOutput {
         let (capture_status, capture_reason) = self.capture_status();
         let checks = ready_checks_summary(self);
         let integration = core_ready_integration_summary(&self.report.merge_relation);
-        let freshness = core_ready_freshness_summary(&self.report.merge_relation, &self.report.freshness);
+        let freshness =
+            core_ready_freshness_summary(&self.report.merge_relation, &self.report.freshness);
         let merge_type = core_ready_merge_type_summary(&self.report.merge_relation);
         let impact = if self.report.impact_categories.is_empty() {
             "none".to_string()

@@ -953,7 +953,10 @@ fn missing_blob(hash: ContentHash) -> HeddleError {
     }
 }
 
-fn blob_has_purge_evidence(store: &(impl ObjectStore + SidecarStore), hash: &ContentHash) -> Result<bool> {
+fn blob_has_purge_evidence(
+    store: &(impl ObjectStore + SidecarStore),
+    hash: &ContentHash,
+) -> Result<bool> {
     let Some(bytes) = store.get_redactions_bytes_for_blob(hash)? else {
         return Ok(false);
     };

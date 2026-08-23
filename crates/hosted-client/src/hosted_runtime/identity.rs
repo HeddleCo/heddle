@@ -6,8 +6,8 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use config::{UserConfig, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer as _};
-use serde::Serialize;
 use heddle_cli_args::CliContext;
+use serde::Serialize;
 
 use super::{
     HostedAuthMode, HostedSession, agent_node_identity,

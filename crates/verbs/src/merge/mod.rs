@@ -31,11 +31,12 @@ use objects::{
 };
 use oplog::{OpBatch, OpLogBackend, OpLogRecorder, OpRecord};
 use refs::Head;
-use schemars::JsonSchema;
-use repo::{ActorPresenceStatus, ActorPresenceStore, 
-    CommitGraphIndex, Repository, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
-    ThreadState, describe_thread_advice, find_merge_base, refresh_thread_freshness,
+use repo::{
+    ActorPresenceStatus, ActorPresenceStore, CommitGraphIndex, Repository, Thread, ThreadFreshness,
+    ThreadIntegrationPolicy, ThreadManager, ThreadState, describe_thread_advice, find_merge_base,
+    refresh_thread_freshness,
 };
+use schemars::JsonSchema;
 use serde::{Serialize, Serializer, ser::SerializeStruct};
 use sley::Repository as SleyRepository;
 

@@ -13,10 +13,10 @@
 
 use std::{collections::BTreeMap, sync::OnceLock};
 
+use repo::{RepositoryMaintenanceRunReport, RepositoryPerformanceInspectionReport};
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
-use repo::{RepositoryMaintenanceRunReport, RepositoryPerformanceInspectionReport};
 use verbs::{
     DiffReport, FsckReport, QueryReport, RemoteListReport, ResolveReport, StatusReport,
     ThreadMoveOutput, UndoListReport, VerifyReport, remote::RemoteInfo,
@@ -24,13 +24,17 @@ use verbs::{
 
 use super::command_catalog;
 use super::init_output::InitOutput;
+use super::wire::thread::{
+    ApprovalOutput, ApprovalRevokeOutput, EligibilityOutput, ThreadAbsorbOutput,
+    ThreadCleanupOutput, ThreadOpOutput, ThreadRecordOutput, ThreadResolveOutput,
+};
 use super::wire::{
     AdoptOutput, BlameOutput, CloneOutput, CommitOutput, ExpandOutput, LandOutput, LogOutput,
     MarkerBulkDeleteOutput, MarkerListOutput, MarkerOpOutput, MultiLandOutput,
-    OperatorCommandOutput, PullOutput, PushOutput, ReadyOutput,
-    ReflogOutput, RemoteMutationOutput, RevertOutput, ShowOutput, SnapshotOutput, SyncOutput,
-    TimelineActionOutput,
-    TimelineLogOutput, TimelineRecordingOutput, TimelineStatusOutput, UndoRedoOutput,
+    OperatorCommandOutput, PullOutput, PushOutput, ReadyOutput, ReflogOutput, RemoteMutationOutput,
+    RevertOutput, ShowOutput, SnapshotOutput, SyncOutput, ThreadCaptureOutput, ThreadCurrentOutput,
+    ThreadListOutput, ThreadShowOutput, TimelineActionOutput, TimelineLogOutput,
+    TimelineRecordingOutput, TimelineStatusOutput, UndoRedoOutput,
 };
 use crate::cli::INIT_VERB;
 
@@ -90,24 +94,24 @@ schema_registry! {
     (&["land --threads"], MultiLandOutput),
     (&["sync"], SyncOutput),
     (&["continue", "abort"], OperatorCommandOutput),
-    (&["start"], ThreadStartSchema),
-    (&["thread create", "thread switch", "thread rename"], ThreadStartSchema),
-    (&["thread current"], ThreadCurrentSchema),
-    (&["thread captures"], ThreadCapturesSchema),
-    (&["thread refresh", "thread drop"], ThreadCommandSchema),
-    (&["thread promote"], ThreadCommandSchema),
+    (&["start"], ThreadOpOutput),
+    (&["thread create", "thread switch", "thread rename"], ThreadOpOutput),
+    (&["thread current"], ThreadCurrentOutput),
+    (&["thread captures"], Vec<ThreadCaptureOutput>),
+    (&["thread refresh", "thread drop"], ThreadRecordOutput),
+    (&["thread promote"], ThreadRecordOutput),
     (&["thread move"], ThreadMoveOutput),
-    (&["thread absorb"], ThreadAbsorbSchema),
-    (&["thread resolve"], ThreadResolveSchema),
-    (&["thread approve"], ThreadApprovalSchema),
-    (&["thread approvals"], ThreadApprovalListSchema),
-    (&["thread revoke-approval"], ThreadRevokeApprovalSchema),
-    (&["thread check-merge"], ThreadMergeEligibilitySchema),
-    (&["thread cleanup"], ThreadCleanupSchema),
+    (&["thread absorb"], ThreadAbsorbOutput),
+    (&["thread resolve"], ThreadResolveOutput),
+    (&["thread approve"], ApprovalOutput),
+    (&["thread approvals"], Vec<ApprovalOutput>),
+    (&["thread revoke-approval"], ApprovalRevokeOutput),
+    (&["thread check-merge"], EligibilityOutput),
+    (&["thread cleanup"], ThreadCleanupOutput),
     (&["thread marker list"], MarkerListOutput),
     (&["thread marker create", "thread marker show"], MarkerOpOutput),
     (&["thread marker delete"], MarkerBulkDeleteOutput),
-    (&["thread show"], ThreadShowSchema),
+    (&["thread show"], ThreadShowOutput),
     (&["clone"], CloneOutput),
     (&["remote list"], RemoteListReport),
     (&["remote show"], RemoteInfo),
@@ -122,7 +126,7 @@ schema_registry! {
     (&["agent timeline record-start", "agent timeline record-finish"], TimelineRecordingOutput),
     (&["agent timeline fork", "agent timeline reset", "agent timeline recover"], TimelineActionOutput),
     (&["show"], ShowOutput),
-    (&["thread list"], ThreadListSchema),
+    (&["thread list"], ThreadListOutput),
     (&["review show"], ReviewShowSchema),
     (&["review sign"], ReviewSignSchema),
     (&["review next"], ReviewNextSchema),
@@ -717,16 +721,6 @@ pub struct IntegrationStatusSchema {
     pub path_mode: String,
 }
 
-
-
-
-
-
-
-
-
-
-
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct MaintenanceRepackSchema {
     pub output_kind: String,
@@ -735,8 +729,6 @@ pub struct MaintenanceRepackSchema {
     pub duration_ms: u128,
     pub bytes_reclaimed: u64,
 }
-
-
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DiscussionSchema {
@@ -803,95 +795,6 @@ pub struct DiscussionListSchema {
 
 // ---- core loop write/read helpers -----------------------------------------
 
-
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadStartSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub action: Option<String>,
-    pub name: String,
-    pub message: String,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub thread: Option<ThreadSummarySchema>,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
-    pub fskit_readiness: Option<FsKitReadinessSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct FsKitReadinessSchema {
-    pub state: String,
-    pub backend: String,
-    pub action: String,
-    pub settings_url: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadCurrentSchema {
-    pub thread: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(transparent)]
-pub struct ThreadCapturesSchema(pub Vec<ThreadCaptureEntrySchema>);
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadCaptureEntrySchema {
-    pub state_id: String,
-    pub created_at: String,
-    pub intent: Option<String>,
-    pub confidence: Option<f32>,
-    pub agent: Option<String>,
-    pub message: String,
-    pub summary: Option<ThreadCaptureSummarySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadCaptureSummarySchema {
-    pub added: usize,
-    pub modified: usize,
-    pub deleted: usize,
-    pub total: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadCommandSchema {
-    pub output_kind: String,
-    pub status: String,
-    pub action: String,
-    pub name: String,
-    pub message: String,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub thread: Option<ThreadSummarySchema>,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
-}
-
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadAbsorbSchema {
-    pub thread: String,
-    pub into: String,
-    pub preview_only: bool,
-    pub conflicts: Vec<String>,
-    pub merge_state: Option<String>,
-    pub message: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadResolveSchema {
-    #[serde(flatten)]
-    pub operator: OperatorCommandOutput,
-    pub thread: String,
-}
-
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ThreadApprovalSchema {
     pub id: String,
@@ -908,162 +811,6 @@ pub struct ThreadApprovalSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(transparent)]
 pub struct ThreadApprovalListSchema(pub Vec<ThreadApprovalSchema>);
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadRevokeApprovalSchema {
-    pub output_kind: String,
-    pub deleted: bool,
-    pub id: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadMergeEligibilitySchema {
-    pub allowed: bool,
-    pub unmet: Vec<ThreadMergeRequirementSchema>,
-    pub valid_approvals: Vec<ThreadApprovalSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadMergeRequirementSchema {
-    pub policy_id: String,
-    pub kind: String,
-    pub group_id: String,
-    pub reason: String,
-    pub needed: u32,
-    pub have: u32,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadCleanupSchema {
-    #[serde(flatten)]
-    pub operator: OperatorCommandOutput,
-    pub dry_run: bool,
-    pub merged: Vec<ThreadDroppedSchema>,
-    pub auto: Vec<ThreadDroppedSchema>,
-    pub abandoned: Vec<ThreadDroppedSchema>,
-    pub reclaimed_bytes: u64,
-    pub would_reclaim_bytes: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skipped: Vec<ThreadCleanupSkippedSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadDroppedSchema {
-    pub thread: String,
-    pub id: String,
-    pub reason: String,
-    pub age_seconds: i64,
-    pub bytes: u64,
-    pub execution_path: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadCleanupSkippedSchema {
-    pub thread: String,
-    pub id: String,
-    pub reason: String,
-    pub note: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadShowSchema {
-    pub output_kind: Option<String>,
-    pub repository_label: String,
-    pub repository_context: Option<RepositoryContextInfoSchema>,
-    #[serde(flatten)]
-    pub summary: ThreadSummarySchema,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-    pub recovery_commands: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadSummarySchema {
-    pub name: String,
-    pub operation: OpaqueObject,
-    pub remote_tracking: OpaqueObject,
-    pub base_state: Option<String>,
-    pub base_root: Option<String>,
-    pub current_state: Option<String>,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heddle_session_id: Option<String>,
-    pub actor: Option<ActorInfoSchema>,
-    pub harness: Option<String>,
-    pub thinking_level: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_actor_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_parent_actor_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe_source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe_confidence: Option<f32>,
-    pub usage_summary: OpaqueObject,
-    pub last_progress_at: Option<String>,
-    pub last_activity_at: Option<String>,
-    pub report_flush_state: Option<String>,
-    pub attach_reason: Option<String>,
-    pub thread_mode: Option<ThreadModeSchema>,
-    pub thread_state: Option<ThreadStateSchema>,
-    pub freshness: Option<ThreadFreshnessSchema>,
-    pub visibility: String,
-    pub target_thread: Option<String>,
-    pub parent_thread: Option<String>,
-    pub child_threads: Vec<String>,
-    pub sibling_threads: Vec<String>,
-    pub stack_depth: usize,
-    pub stale_from_parent: bool,
-    pub task: Option<String>,
-    pub task_assignment_id: Option<String>,
-    pub task_summary: Option<ThreadTaskSummarySchema>,
-    pub changed_paths: Vec<String>,
-    pub promotion_suggested: bool,
-    pub impact_categories: Vec<ThreadImpactCategorySchema>,
-    pub heavy_impact_paths: Vec<String>,
-    pub verification_summary: Value,
-    pub confidence_summary: Value,
-    pub integration_policy_result: Value,
-    pub coordination_status: CoordinationStatusSchema,
-    pub is_current: bool,
-    pub is_isolated: bool,
-    pub thread_health: String,
-    pub blockers: Vec<String>,
-    // Runtime `ThreadSummary.recommended_action` is a `String` serialized
-    // through `serialize_empty_action_as_null`, so the wire value is
-    // `string | null` (HeddleCo/heddle#645 presence contract).
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub git_branch_tip: Option<String>,
-    pub history_imported: bool,
-    pub auto: bool,
-    pub shared_target_dir: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadTaskSummarySchema {
-    pub task_id: String,
-    pub title: String,
-    pub status: String,
-    pub target_thread: String,
-    pub updated_at: String,
-    pub completed_at: Option<String>,
-    pub coordination_discussion_id: Option<String>,
-}
-
-
-
-
-
-
-
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct AgentPresenceSingleSchema {
@@ -1348,16 +1095,6 @@ pub struct SessionSegmentSchema {
     pub policy_id: Option<String>,
 }
 
-
-
-
-
-
-
-
-
-
-
 /// Operation banner — kept opaque because the underlying
 /// [`repo::RepositoryOperationStatus`] is a workspace type and its
 /// shape is internal. `Value` here means "any JSON object or null".
@@ -1490,33 +1227,6 @@ pub struct ActionTemplateSchema {
 // ---- show -----------------------------------------------------------------
 
 // ---- thread list ----------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadListSchema {
-    pub output_kind: Option<String>,
-    pub repository_capability: String,
-    pub repository_label: String,
-    pub repository_context: Option<RepositoryContextInfoSchema>,
-    pub storage_model: String,
-    pub hosted_enabled: bool,
-    pub threads: Vec<ThreadSummarySchema>,
-    pub available_git_refs: Vec<AvailableGitRefSchema>,
-    pub current: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub recovery_commands: Vec<String>,
-    pub recovery_action_templates: Vec<ActionTemplateSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AvailableGitRefSchema {
-    pub name: String,
-    pub git_commit: String,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-}
 
 // ---- review ---------------------------------------------------------------
 
@@ -2559,8 +2269,7 @@ mod tests {
             "state",
             "objects",
         ] {
-            let property =
-                property_schema(&schema, conditional);
+            let property = property_schema(&schema, conditional);
             assert!(
                 !required_fields(&schema).contains(&conditional),
                 "`{conditional}` is emitted only when present and must stay optional: {property}"

@@ -10,12 +10,12 @@ use api::heddle::api::v1alpha1::HostedRole;
 use biscuit_auth::builder::{BlockBuilder, Term};
 use config::UserConfig;
 use crypto::Ed25519Signer;
+use heddle_cli_args::CliContext;
 use repo::Repository;
 use serde::Serialize;
 use verbs::{
     ResolvedPrincipal, principal_source_display, resolve_principal, resolve_principal_without_repo,
 };
-use heddle_cli_args::CliContext;
 
 use super::{
     auth::{headless_token_metadata, resolve_server},

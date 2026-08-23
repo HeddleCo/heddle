@@ -36,27 +36,16 @@ use crate::{
     config::UserConfig,
 };
 
-#[derive(Debug, Serialize)]
-pub struct ThreadResolveOutput {
-    #[serde(flatten)]
-    pub operator: OperatorCommandOutput,
-    pub thread: String,
-}
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types.
+pub use heddle_cli_contract::cli::commands::wire::thread::{
+    ThreadAbsorbOutput, ThreadResolveOutput,
+};
 
 impl super::compact::CompactProjection for ThreadResolveOutput {
     fn compact(&self) -> super::compact::CompactOutput {
         <OperatorCommandOutput as super::compact::CompactProjection>::compact(&self.operator)
     }
-}
-
-#[derive(Debug, Serialize)]
-pub struct ThreadAbsorbOutput {
-    pub thread: String,
-    pub into: String,
-    pub preview_only: bool,
-    pub conflicts: Vec<String>,
-    pub merge_state: Option<String>,
-    pub message: String,
 }
 
 pub fn cmd_capture_split(

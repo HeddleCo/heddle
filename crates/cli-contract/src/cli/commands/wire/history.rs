@@ -3,9 +3,9 @@
 //! reflog/timeline, `thread expand`, markers, blame, revert).
 
 use repo::Repository;
+use repo::{TimelineNavigationSnapshot, TimelineNavigationStep};
 use schemars::JsonSchema;
 use serde::Serialize;
-use repo::{TimelineNavigationSnapshot, TimelineNavigationStep};
 
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "ThreadMarkerListSchema")]
@@ -216,10 +216,18 @@ impl From<objects::object::State> for ExpandedCaptureOutput {
             content_hash: state.compute_hash().short(),
             intent: state.intent,
             principal: state.attribution.principal.to_string(),
-            agent: state.attribution.agent.as_ref().map(objects::object::Agent::to_string),
+            agent: state
+                .attribution
+                .agent
+                .as_ref()
+                .map(objects::object::Agent::to_string),
             confidence: state.confidence,
             created_at: state.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-            parents: state.parents.iter().map(objects::object::StateId::short).collect(),
+            parents: state
+                .parents
+                .iter()
+                .map(objects::object::StateId::short)
+                .collect(),
         }
     }
 }
@@ -338,7 +346,11 @@ impl From<&objects::object::State> for StateEntry {
                 .map(objects::object::Agent::to_string),
             confidence: state.confidence,
             created_at: state.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-            parents: state.parents.iter().map(objects::object::StateId::short).collect(),
+            parents: state
+                .parents
+                .iter()
+                .map(objects::object::StateId::short)
+                .collect(),
             git_checkpoint: None,
             collapsed: None,
         }
@@ -463,7 +475,10 @@ impl TimelineLogOutput {
                     parent_branch_id: branch.parent_branch_id.map(|id| id.to_string()),
                     forked_from_step_id: branch.forked_from_step_id.map(|id| id.to_string()),
                     forked_from_state: branch.forked_from_state.map(|state| state.short()),
-                    reason: branch.reason.as_ref().map(|r| verbs::timeline_branch_reason(r).to_string()),
+                    reason: branch
+                        .reason
+                        .as_ref()
+                        .map(|r| verbs::timeline_branch_reason(r).to_string()),
                     created_at_ms: branch.created_at_ms,
                     step_ids: branch.step_ids.iter().map(ToString::to_string).collect(),
                     is_active: branch.is_active,
@@ -512,10 +527,17 @@ impl TimelineStepOutput {
                 tool_call_id: native.tool_call_id,
             }),
             tool_name: step.tool_name,
-            status: step.status.as_ref().map(|st| verbs::timeline_tool_status(st).to_string()),
+            status: step
+                .status
+                .as_ref()
+                .map(|st| verbs::timeline_tool_status(st).to_string()),
             changed: step.changed,
             touched_paths: step.touched_paths,
-            labels: step.labels.iter().map(|l| verbs::timeline_label(l).to_string()).collect(),
+            labels: step
+                .labels
+                .iter()
+                .map(|l| verbs::timeline_label(l).to_string())
+                .collect(),
             before_state: step.before_state.map(|state| state.short()),
             after_state: step.after_state.map(|state| state.short()),
             capture_state: step.capture_state.map(|state| state.short()),

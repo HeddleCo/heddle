@@ -14,7 +14,10 @@ use repo::{
     is_synthetic_root,
 };
 use serde::Serialize;
-use verbs::{parse_reflog_line, short_oid, status::next_action::canonical_git_import_ref_command, summarize_paths, yes_no};
+use verbs::{
+    parse_reflog_line, short_oid, status::next_action::canonical_git_import_ref_command,
+    summarize_paths, yes_no,
+};
 
 use super::{
     action_line::{format_next_step_dim, print_next_step},
@@ -33,11 +36,15 @@ use crate::{
 
 // The wire payloads live in cli-contract so the schema registry registers
 // the real serialization types.
-pub use heddle_cli_contract::cli::commands::wire::history::{TimelineLogOutput, TimelineStepOutput};
+pub use heddle_cli_contract::cli::commands::wire::history::{
+    TimelineLogOutput, TimelineStepOutput,
+};
 
 // The wire payloads live in cli-contract so the schema registry registers
 // the real serialization types.
-pub(crate) use heddle_cli_contract::cli::commands::wire::history::{LogOutput, LogImportGuidanceOutput, StateEntry, CollapsedEntry, ReflogOutput, ReflogEntry};
+pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
+    CollapsedEntry, LogImportGuidanceOutput, LogOutput, ReflogEntry, ReflogOutput, StateEntry,
+};
 
 #[derive(Clone, Debug)]
 pub struct LogCommandOptions {
@@ -59,19 +66,6 @@ pub struct LogCommandOptions {
     /// half-open semantics for time bounds).
     pub since: Option<String>,
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
     let cwd = std::env::current_dir()?;
@@ -422,7 +416,6 @@ fn cmd_log_reflog(cli: &Cli, repo: &Repository, limit: usize, oneline: bool) -> 
     Ok(())
 }
 
-
 fn write_timeline_oneline<W: std::io::Write>(
     out: &mut W,
     output: &TimelineLogOutput,
@@ -536,11 +529,6 @@ fn timeline_step_line(step: &TimelineStepOutput, verbose: bool) -> String {
         )
     }
 }
-
-
-
-
-
 
 fn collect_reflog_entries(root: &Path, limit: usize) -> Result<Vec<ReflogEntry>> {
     let mut entries = Vec::new();

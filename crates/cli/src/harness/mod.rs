@@ -21,9 +21,9 @@ use objects::{
 };
 use refs::Head;
 use repo::{
-    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
-    Repository, SessionManager, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
-    ThreadMode, ThreadState, TimelineStore, TimelineView,
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, Repository,
+    SessionManager, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager, ThreadMode,
+    ThreadState, TimelineStore, TimelineView,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -65,9 +65,7 @@ use crate::{
 
 /// Provider/model hint from the wrapping harness, in the shape the hosted
 /// client's attribution resolver consumes (installed at startup).
-pub fn current_process_harness_hint(
-    repo: &Repository,
-) -> (Option<String>, Option<String>) {
+pub fn current_process_harness_hint(repo: &Repository) -> (Option<String>, Option<String>) {
     let probe = probe_current_process_harness(repo, None, None, None).ok();
     (
         probe.as_ref().and_then(|probe| probe.provider.clone()),

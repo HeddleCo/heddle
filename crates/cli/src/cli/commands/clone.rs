@@ -33,7 +33,6 @@ use objects::{
 use repo::{BlobHydrator, Repository};
 #[cfg(feature = "client")]
 use repo::{RepositorySourceAuthority, clone_intent::CloneIntent};
-use serde::Serialize;
 #[cfg(feature = "client")]
 use sley::plumbing::sley_worktree;
 use sley::{
@@ -106,7 +105,6 @@ struct CloneOptions {
     #[cfg_attr(not(feature = "client"), allow(dead_code))]
     insecure: bool,
 }
-
 
 struct GitOverlayCloneOutputInput {
     remote: String,

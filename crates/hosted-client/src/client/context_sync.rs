@@ -1420,10 +1420,9 @@ mod tests {
         let head_state = repo.store().get_state(&state).unwrap().unwrap();
         let target = ContextTarget::file("lib.rs").unwrap();
         let user_config = config::UserConfig::load_default().unwrap_or_default();
-        let self_attribution =
-            crate::attribution::resolve_attribution(&repo, &user_config)
-                .unwrap()
-                .to_string();
+        let self_attribution = crate::attribution::resolve_attribution(&repo, &user_config)
+            .unwrap()
+            .to_string();
         let annotation = Annotation::new(
             AnnotationScope::File,
             AnnotationKind::Constraint,

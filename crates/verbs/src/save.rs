@@ -642,9 +642,7 @@ fn create_heddle_state(repo: &Repository, plan: &SavePlan) -> Result<CreatedStat
     // register the concrete computer here, at the single choke point
     // every capture flows through. Unregistered repos (other binaries,
     // tests) keep the historical feature-off shape.
-    repo.set_signal_computer(std::sync::Arc::new(
-        state_review::CaptureSignalComputer,
-    ));
+    repo.set_signal_computer(std::sync::Arc::new(state_review::CaptureSignalComputer));
     let hook_manager = HookManager::new(repo);
     let hook_ctx = HookContext::new(repo);
 

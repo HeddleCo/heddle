@@ -8,10 +8,9 @@ use verbs::status::next_action::canonical_git_import_ref_command;
 // The wire payloads live in cli-contract so the schema registry registers
 // the real serialization types.
 pub use heddle_cli_contract::cli::commands::wire::history::{
-    ShowAgentInfo as AgentInfo, ShowImportGuidanceOutput, ShowOutput, ShowPrincipalInfo
-    as PrincipalInfo, ShowVerificationInfo as VerificationInfo,
+    ShowAgentInfo as AgentInfo, ShowImportGuidanceOutput, ShowOutput,
+    ShowPrincipalInfo as PrincipalInfo, ShowVerificationInfo as VerificationInfo,
 };
-
 
 use super::{
     action_line::{print_next_step, print_next_step_dim},
@@ -24,11 +23,6 @@ use crate::{
     cli::{Cli, should_output_json, style},
     config::UserConfig,
 };
-
-
-
-
-
 
 pub fn cmd_show(cli: &Cli, state_spec: Option<String>) -> Result<()> {
     cmd_show_with_output_kind(cli, state_spec, "show")

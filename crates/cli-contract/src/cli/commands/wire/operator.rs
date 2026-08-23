@@ -218,10 +218,7 @@ impl OperatorCommandOutput {
         state.serialize_field("next_action", &next_action)?;
         state.serialize_field("next_action_template", &next_action_template)?;
         state.serialize_field("recommended_action", &recommended_action)?;
-        state.serialize_field(
-            "recommended_action_template",
-            &recommended_action_template,
-        )?;
+        state.serialize_field("recommended_action_template", &recommended_action_template)?;
         state.end()
     }
 }
@@ -343,9 +340,8 @@ mod tests {
             next_action: Some("heddle resolve --list".to_string()),
             recommended_action: None,
         };
-        let emitted =
-            serde_json::to_value(output.envelope_for_command(OperatorAction::Continue))
-                .expect("envelope serializes");
+        let emitted = serde_json::to_value(output.envelope_for_command(OperatorAction::Continue))
+            .expect("envelope serializes");
         let schema = serde_json::to_value(schemars::schema_for!(OperatorCommandShape))
             .expect("shape schema serializes");
         let declared = schema_property_keys(&schema);

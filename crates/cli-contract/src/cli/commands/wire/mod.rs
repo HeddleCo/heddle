@@ -16,27 +16,38 @@
 //! stay one maintenance unit.
 
 pub mod core_loop;
-pub mod land;
 pub mod history;
-pub mod remote;
+pub mod land;
 pub mod operator;
 pub mod ready;
+pub mod remote;
+pub mod thread;
 
+pub use core_loop::{
+    CommitOutput, SnapshotAgentOutput, SnapshotOutput, SnapshotPrincipalOutput, UndoRedoOutput,
+};
+pub use history::{
+    BlameLine, BlameOrigin, BlameOutput, CollapsedLandOutput, ContextSnippet, ExpandOutput,
+    ExpandedCaptureOutput, LogImportGuidanceOutput, LogOutput, MarkerBulkDeleteOutput, MarkerEntry,
+    MarkerListOutput, MarkerOpOutput, PrincipalInfo, ReflogEntry, ReflogOutput, RevertOutput,
+    ShowAgentInfo, ShowImportGuidanceOutput, ShowOutput, ShowPrincipalInfo, ShowVerificationInfo,
+    StateEntry, TimelineActionOutput, TimelineLogOutput, TimelineRecordingOutput,
+    TimelineStatusOutput,
+};
 pub use land::{
     LandBlockerCheck, LandBlockerCode, LandBlockerDetail, LandBlockerStateContext, LandOutput,
     MultiLandOutput, MultiLandPeerResult, SiblingRestackFailure, SyncOutput,
 };
-pub use history::{
-    BlameLine, BlameOrigin, BlameOutput, CollapsedLandOutput, ContextSnippet,
-    ExpandedCaptureOutput, ExpandOutput, LogImportGuidanceOutput, LogOutput, MarkerBulkDeleteOutput,
-    MarkerEntry, MarkerListOutput, MarkerOpOutput, PrincipalInfo, ReflogEntry, ReflogOutput,
-    RevertOutput, ShowAgentInfo, ShowImportGuidanceOutput, ShowOutput, ShowPrincipalInfo,
-    ShowVerificationInfo, StateEntry, TimelineActionOutput, TimelineLogOutput,
-    TimelineRecordingOutput, TimelineStatusOutput,
-};
-pub use remote::{AdoptOutput, CloneOutput, PullOutput, PushOutput, RemoteMutationOutput};
-pub use core_loop::{CommitOutput, SnapshotAgentOutput, SnapshotOutput, SnapshotPrincipalOutput, UndoRedoOutput};
 pub use operator::{
     OperatorAction, OperatorCommandEnvelope, OperatorCommandOutput, VerificationClaimPolicy,
 };
-pub use ready::{ReadyChecksSummary, ReadyOutput, ReadyReadinessSummary, ready_blocked_by_missing_intent};
+pub use ready::{
+    ReadyChecksSummary, ReadyOutput, ReadyReadinessSummary, ready_blocked_by_missing_intent,
+};
+pub use remote::{AdoptOutput, CloneOutput, PullOutput, PushOutput, RemoteMutationOutput};
+pub use thread::{
+    ApprovalOutput, ApprovalRevokeOutput, DroppedThread, EligibilityOutput, FskitReadinessReport,
+    SkippedThread, ThreadAbsorbOutput, ThreadCaptureOutput, ThreadCaptureSummary,
+    ThreadCleanupOutput, ThreadCurrentOutput, ThreadListImportGuidanceOutput, ThreadListOutput,
+    ThreadOpOutput, ThreadRecordOutput, ThreadResolveOutput, ThreadShowOutput, UnmetOutput,
+};

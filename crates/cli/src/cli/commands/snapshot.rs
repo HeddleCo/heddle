@@ -34,8 +34,7 @@ use super::{
     thread::find_active_thread_entry,
     thread_cmd::current_thread,
     verification_health::{
-        GitOverlayMutationPreflight, action_template,
-        git_overlay_mutation_preflight_advice,
+        GitOverlayMutationPreflight, action_template, git_overlay_mutation_preflight_advice,
         git_overlay_mutation_preflight_advice_with_worktree_status, machine_contract_coverage,
         plain_git_mutation_preflight_advice, unimported_git_history_advice,
     },

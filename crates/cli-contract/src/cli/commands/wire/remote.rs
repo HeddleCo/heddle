@@ -6,9 +6,7 @@ use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::Serialize;
-use verbs::{
-    ActionTemplate, PullOutcome, PushOutcome, RepositoryVerificationState,
-};
+use verbs::{ActionTemplate, PullOutcome, PushOutcome, RepositoryVerificationState};
 
 /// JSON payload for `heddle clone`. One struct for both transports: the
 /// transport-specific facts are optional fields, omitted when absent.

@@ -10,6 +10,7 @@
 //! path; the two share underlying repo primitives but not the same
 //! report shape.
 
+use schemars::JsonSchema;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
@@ -17,10 +18,7 @@ use std::{
 
 use anyhow::Result;
 use chrono::Utc;
-use objects::{
-    object::Tree,
-    worktree::WorktreeStatus,
-};
+use objects::{object::Tree, worktree::WorktreeStatus};
 use repo::{
     ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStore,
     AgentUsageSummary, GitOverlayBranchTip, GitRemoteTrackingStatus, Repository,
@@ -87,7 +85,7 @@ pub struct ThreadListReport {
 /// One thread row for list/show machine output.
 ///
 /// Field names match the historical CLI `ThreadSummary` JSON contract.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ThreadListEntry {
     pub name: String,
     pub operation: Option<RepositoryOperationStatus>,
@@ -143,6 +141,7 @@ pub struct ThreadListEntry {
     pub thread_health: String,
     pub blockers: Vec<String>,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
+    #[schemars(with = "Option<String>")]
     pub recommended_action: String,
     pub recommended_action_template: Option<ActionTemplate>,
     pub git_branch_tip: Option<String>,
@@ -160,17 +159,18 @@ pub struct ThreadListEntry {
 pub type ThreadSummary = ThreadListEntry;
 
 /// Git-only branch tip that is not yet a Heddle thread tip.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct AvailableGitRef {
     pub name: String,
     pub git_commit: String,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
+    #[schemars(with = "Option<String>")]
     pub recommended_action: String,
     pub recommended_action_template: Option<ActionTemplate>,
 }
 
 /// Actor attribution nested on a thread list entry.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, JsonSchema)]
 pub struct ThreadActorInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
@@ -179,7 +179,7 @@ pub struct ThreadActorInfo {
 }
 
 /// Assigned agent task nested on a thread list entry.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, JsonSchema)]
 pub struct ThreadTaskSummary {
     pub task_id: String,
     pub title: String,

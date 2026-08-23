@@ -53,7 +53,10 @@ pub fn cmd_timeline(cli: &Cli, command: TimelineCommands) -> Result<()> {
 
 // The wire payloads live in cli-contract so the schema registry registers
 // the real serialization types.
-pub(crate) use heddle_cli_contract::cli::commands::wire::history::{TimelineStatusOutput, TimelineStatusStepOutput, TimelineStatusRecoveryOutput, TimelineRecordingOutput, TimelineActionOutput};
+pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
+    TimelineActionOutput, TimelineRecordingOutput, TimelineStatusOutput,
+    TimelineStatusRecoveryOutput, TimelineStatusStepOutput,
+};
 
 fn cmd_timeline_status(
     cli: &Cli,
@@ -726,11 +729,6 @@ fn now_ms() -> i64 {
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or_default()
 }
-
-
-
-
-
 
 #[cfg(test)]
 mod tests {

@@ -8,8 +8,8 @@ use repo::{Repository, ThreadFreshness, ThreadState};
 use verbs::{
     ReadyDecisionInput, classify_ready_decision, has_integration_target,
     ready_report_recommended_action as core_ready_report_recommended_action,
-    ready_scoped_next_action as core_ready_scoped_next_action,
-    ready_verification_preflight_blocks, status::next_action::non_empty_action,
+    ready_scoped_next_action as core_ready_scoped_next_action, ready_verification_preflight_blocks,
+    status::next_action::non_empty_action,
 };
 
 use super::{
@@ -42,10 +42,10 @@ use crate::{
 
 // The ready wire payload lives in cli-contract so the schema registry
 // registers the real serialization type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::ready_blocked_by_missing_intent;
 pub(crate) use heddle_cli_contract::cli::commands::wire::{
     ReadyChecksSummary, ReadyOutput, ReadyReadinessSummary,
 };
-pub(crate) use heddle_cli_contract::cli::commands::wire::ready_blocked_by_missing_intent;
 
 pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     let cwd = std::env::current_dir()?;
@@ -528,7 +528,6 @@ fn write_ready_output_inner(
     fail_if_blocked_operator_status(&output.operator.status)
 }
 
-
 fn write_trust_blocked_setup(recommended_action: Option<&str>) {
     println!();
     println!("{}", style::section("Setup needed"));
@@ -752,11 +751,6 @@ fn write_preview_report(output: &ReadyOutput, recommended_action: Option<&str>) 
         print_next(recommended_action);
     }
 }
-
-
-
-
-
 
 fn ready_capture_label(summary: &ReadyReadinessSummary) -> String {
     match (

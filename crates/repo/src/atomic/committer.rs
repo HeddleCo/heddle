@@ -9,10 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use objects::{
-    error::Result,
-    object::Principal,
-};
+use objects::{error::Result, object::Principal};
 use oplog::{OpLog, OpLogBackend, OpRecord};
 use refs::RefCommitter;
 

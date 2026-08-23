@@ -18,19 +18,9 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
-use serde::Serialize;
 
-/// Machine-readable FSKit readiness detail surfaced by `heddle start
-/// --workspace virtualized --output json` on macOS when the CLI took an
-/// FSKit-specific decision.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct FskitReadinessReport {
-    pub state: &'static str,
-    pub backend: &'static str,
-    pub action: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub settings_url: Option<&'static str>,
-}
+// The FSKit readiness payload lives in cli-contract beside the start wire type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::thread::FskitReadinessReport;
 
 pub(crate) struct SpawnedMount {
     pub owner: VirtualizedMountOwner,

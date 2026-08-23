@@ -9,7 +9,6 @@ pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
     AgentInfo, BlameLine, BlameOrigin, BlameOutput, ContextSnippet, PrincipalInfo,
 };
 
-
 use anyhow::{Result, anyhow};
 use objects::{
     object::{
@@ -32,8 +31,6 @@ use crate::{
     config::UserConfig,
 };
 
-
-
 /// Split an `Attribution` into the structured `principal` / `agent`
 /// shape used by `log` and `show`, so `query --attribution --output json` consumers
 /// never have to string-parse `"Name <email> (via provider/model)"`.
@@ -50,10 +47,6 @@ fn attribution_parts(attribution: &Attribution) -> (PrincipalInfo, Option<AgentI
     });
     (principal, agent)
 }
-
-
-
-
 
 #[derive(Clone)]
 struct LineInfo {

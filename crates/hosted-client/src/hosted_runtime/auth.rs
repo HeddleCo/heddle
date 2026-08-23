@@ -10,11 +10,11 @@ use api::heddle::api::v1alpha1::{
 };
 use config::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
+use heddle_cli_args::CliContext;
 use heddle_cli_contract::cli::commands::RecoveryAdvice;
 use objects::{HeddleError, RecoveryDetails};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use heddle_cli_args::CliContext;
 
 use super::{
     auth_requests::{AuthCommand, AuthTrustCommand},

@@ -14,6 +14,7 @@
 
 use anyhow::Result;
 use repo::{Repository, Thread, ThreadManager};
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use heddle_cli_args::{Cli, should_output_json};
@@ -69,7 +70,7 @@ pub fn repository_mode_label(capability: &str, storage_model: &str) -> String {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct RepositoryContextInfo {
     pub kind: String,
     pub parent_repository: Option<String>,
