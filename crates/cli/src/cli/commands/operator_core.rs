@@ -494,7 +494,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::cli::commands::verification_health::{VerificationCheck, machine_contract_coverage};
+    use verbs::{RepositoryVerificationState, VerificationCheck};
+    #[allow(unused_imports)]
+    use crate::cli::commands::verification_health::machine_contract_coverage;
 
     // heddle#464 close-the-class (paths): a conflict path can contain spaces.
     // `continue` builds `recommended_action = heddle resolve <path>`, a VALIDATED

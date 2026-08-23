@@ -36,9 +36,12 @@ use crate::{
 
 // The wire payloads live in cli-contract so the schema registry registers
 // the real serialization types.
+#[cfg(test)]
 pub use heddle_cli_contract::cli::commands::wire::history::{
-    TimelineLogOutput, TimelineStepOutput,
+    TimelineActionsOutput, TimelineBranchOutput, TimelineCursorOutput, TimelineNativeOutput,
+    TimelineRecoveryOutput,
 };
+pub use heddle_cli_contract::cli::commands::wire::history::{TimelineLogOutput, TimelineStepOutput};
 
 // The wire payloads live in cli-contract so the schema registry registers
 // the real serialization types.
