@@ -45,18 +45,16 @@ fn every_commands_variant_has_explicit_root_contract() {
 
     let mut missing = Vec::new();
     for variant in &variants {
-        if cfg!(not(feature = "client"))
-            && matches!(
-                variant.as_str(),
-                // `Auth` and `Whoami` are the client-gated top-level roots;
-                // `Ci` is the ci-feature-gated root. Their contract entries
-                // carry `feature_gated(...)`, so
-                // `command_contract_root_commands()` omits them in builds
-                // without the feature even though the enum source (read as
-                // text) still lists the variant.
-                "Auth" | "Whoami" | "Ci" | "Support" | "Prove" | "Spool"
-            )
-        {
+        // Feature-gated roots: their contract entries carry
+        // `feature_gated(...)`, so `command_contract_root_commands()`
+        // omits them in builds without the feature even though the enum
+        // source (read as text) still lists the variant.
+        let gated_off = match variant.as_str() {
+            "Auth" | "Whoami" => cfg!(not(feature = "client")),
+            "Ci" => cfg!(not(feature = "ci")),
+            _ => false,
+        };
+        if gated_off {
             continue;
         }
         let kebab = variant_to_verb(variant);
