@@ -27,9 +27,11 @@ pub use land::{
 };
 pub use history::{
     BlameLine, BlameOrigin, BlameOutput, CollapsedLandOutput, ContextSnippet,
-    ExpandedCaptureOutput, ExpandOutput, MarkerBulkDeleteOutput, MarkerEntry, MarkerListOutput,
-    MarkerOpOutput, PrincipalInfo, RevertOutput, ShowAgentInfo, ShowImportGuidanceOutput,
-    ShowOutput, ShowPrincipalInfo, ShowVerificationInfo,
+    ExpandedCaptureOutput, ExpandOutput, LogImportGuidanceOutput, LogOutput, MarkerBulkDeleteOutput,
+    MarkerEntry, MarkerListOutput, MarkerOpOutput, PrincipalInfo, ReflogEntry, ReflogOutput,
+    RevertOutput, ShowAgentInfo, ShowImportGuidanceOutput, ShowOutput, ShowPrincipalInfo,
+    ShowVerificationInfo, StateEntry, TimelineActionOutput, TimelineLogOutput,
+    TimelineRecordingOutput, TimelineStatusOutput,
 };
 pub use core_loop::{CommitOutput, SnapshotAgentOutput, SnapshotOutput, SnapshotPrincipalOutput, UndoRedoOutput};
 pub use operator::{
