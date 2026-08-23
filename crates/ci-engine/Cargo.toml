@@ -9,8 +9,8 @@ repository.workspace = true
 
 [dependencies]
 blake3.workspace = true
-ci-config = { path = "../ci-config", package = "heddle-ci-config", version = "0.14" }
-crypto = { path = "../crypto", package = "heddle-crypto", version = "0.14" }
+ci-config = { path = "../ci-config", package = "heddle-ci-config", version = "0.15" }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.15" }
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

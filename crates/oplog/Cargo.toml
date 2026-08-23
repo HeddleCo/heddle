@@ -11,13 +11,13 @@ categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
-heddle-schema = { path = "../schema", version = "0.14" }
-heddle-perf-contract = { path = "../perf-contract", version = "0.14" }
-objects = { path = "../objects", package = "heddle-objects", version = "0.14" }
+heddle-schema = { path = "../schema", version = "0.15" }
+heddle-perf-contract = { path = "../perf-contract", version = "0.15" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.15" }
 rmp-serde.workspace = true
 serde.workspace = true
 
-runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.14", optional = true }
+runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.15", optional = true }
 serde_json = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }

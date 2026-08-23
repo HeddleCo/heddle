@@ -25,8 +25,8 @@ biscuit-auth = { workspace = true, optional = true }
 blake3.workspace = true
 bytes = { workspace = true, optional = true }
 chrono.workspace = true
-ci-config = { path = "../ci-config", package = "heddle-ci-config", version = "0.14" }
-ci-engine = { path = "../ci-engine", package = "heddle-ci-engine", version = "0.14" }
+ci-config = { path = "../ci-config", package = "heddle-ci-config", version = "0.15" }
+ci-engine = { path = "../ci-engine", package = "heddle-ci-engine", version = "0.15" }
 clap.workspace = true
 clap_complete.workspace = true
 futures.workspace = true
@@ -37,35 +37,35 @@ iroh-base = { workspace = true, optional = true }
 libc.workspace = true
 n0-watcher = { workspace = true, optional = true }
 noq-udp = { workspace = true, optional = true }
-objects = { path = "../objects", package = "heddle-objects", version = "0.14", features = ["memory-backend"] }
-crypto = { path = "../crypto", package = "heddle-crypto", version = "0.14" }
-daemon = { path = "../daemon", package = "heddle-daemon", version = "0.14" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.15", features = ["memory-backend"] }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.15" }
+daemon = { path = "../daemon", package = "heddle-daemon", version = "0.15" }
 # `heddle-merge` is the native hunk-level text merge engine extracted from
 # `heddle-semantic` so non-semantic builds (`--no-default-features`) retain
 # text auto-merge. Always-on: the merge driver and rebase replay both call
 # into it unconditionally.
-merge = { path = "../merge", package = "heddle-merge", version = "0.14" }
+merge = { path = "../merge", package = "heddle-merge", version = "0.15" }
 api = { package = "heddle-api", version = "0.15.0" }
-cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.14" }
-heddle-cli-args = { path = "../cli-args", version = "0.14", default-features = false }
-heddle-cli-contract = { path = "../cli-contract", version = "0.14", default-features = false }
-heddle-cli-render = { path = "../cli-render", version = "0.14", default-features = false }
-heddle-core = { path = "../core", version = "0.14", default-features = false }
-heddle-format = { path = "../format", version = "0.14" }
-weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.14" }
+cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.15" }
+heddle-cli-args = { path = "../cli-args", version = "0.15", default-features = false }
+heddle-cli-contract = { path = "../cli-contract", version = "0.15", default-features = false }
+heddle-cli-render = { path = "../cli-render", version = "0.15", default-features = false }
+heddle-core = { path = "../core", version = "0.15", default-features = false }
+heddle-format = { path = "../format", version = "0.15" }
+weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.15" }
 async-trait.workspace = true
 # `default-features = false` here matches the pattern used for
 # repo below: this crate's `zstd` feature controls the cascade
 # end-to-end. Without these breaks, every dep's own default-on `zstd`
 # would re-enable compression even when the user explicitly built
 # with `--no-default-features`.
-ingest = { path = "../ingest", package = "heddle-ingest", version = "0.14", default-features = false }
-heddle-git-projection = { path = "../git-projection", version = "0.14", default-features = false }
-oplog = { path = "../oplog", package = "heddle-oplog", version = "0.14" }
-wire = { path = "../wire", package = "heddle-wire", version = "0.14", default-features = false }
-refs = { path = "../refs", package = "heddle-refs", version = "0.14" }
-repo = { path = "../repo", package = "heddle-repo", version = "0.14", default-features = false }
-semantic = { path = "../semantic", package = "heddle-semantic", version = "0.14", optional = true }
+ingest = { path = "../ingest", package = "heddle-ingest", version = "0.15", default-features = false }
+heddle-git-projection = { path = "../git-projection", version = "0.15", default-features = false }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.15" }
+wire = { path = "../wire", package = "heddle-wire", version = "0.15", default-features = false }
+refs = { path = "../refs", package = "heddle-refs", version = "0.15" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.15", default-features = false }
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.15", optional = true }
 notify.workspace = true
 opentelemetry = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
@@ -78,7 +78,7 @@ rmp-serde.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-heddle-perf-contract = { path = "../perf-contract", version = "0.14" }
+heddle-perf-contract = { path = "../perf-contract", version = "0.15" }
 sha2.workspace = true
 sley.workspace = true
 tempfile.workspace = true
@@ -107,13 +107,13 @@ webpki-roots = { workspace = true, optional = true }
 # propagate the right per-OS backend without any one platform
 # being forced to drag in another platform's kernel bindings.
 [target.'cfg(target_os = "linux")'.dependencies]
-mount = { path = "../mount", package = "heddle-mount", version = "0.14", optional = true }
+mount = { path = "../mount", package = "heddle-mount", version = "0.15", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-mount = { path = "../mount", package = "heddle-mount", version = "0.14", optional = true }
+mount = { path = "../mount", package = "heddle-mount", version = "0.15", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-mount = { path = "../mount", package = "heddle-mount", version = "0.14", optional = true }
+mount = { path = "../mount", package = "heddle-mount", version = "0.15", optional = true }
 
 [features]
 # The default `heddle` build ships the full workflow: local
@@ -248,7 +248,7 @@ mount = [
 
 [dev-dependencies]
 criterion = "0.8"
-heddle-cli-render = { path = "../cli-render", version = "0.14", features = ["test-utils"] }
+heddle-cli-render = { path = "../cli-render", version = "0.15", features = ["test-utils"] }
 hyper-util.workspace = true
 iroh-relay = { version = "=1.0.3", default-features = false, features = ["server"] }
 ntest.workspace = true

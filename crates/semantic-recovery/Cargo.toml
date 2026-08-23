@@ -12,7 +12,7 @@ categories.workspace = true
 [dependencies]
 blake3.workspace = true
 fastembed.workspace = true
-heddle-fs-prims = { path = "../fs-prims", version = "0.14" }
+heddle-fs-prims = { path = "../fs-prims", version = "0.15" }
 rmp-serde.workspace = true
 serde.workspace = true
 sha2.workspace = true
