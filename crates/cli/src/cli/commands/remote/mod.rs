@@ -76,6 +76,10 @@ use hosted_client::client::{HostedAuthMode, HostedSession};
 
 mod remote_ops;
 
+// The wire payload lives in cli-contract so the schema registry registers
+// the real serialization type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::remote::PushOutput;
+
 pub use remote_ops::{cmd_pull, cmd_remote};
 pub(crate) use remote_ops::{
     pull_current_git_overlay_authoritative, resolve_default_remote_name,
@@ -84,17 +88,6 @@ pub(crate) use remote_ops::{
 
 #[allow(clippy::type_complexity)]
 /// CLI machine envelope: domain [`PushOutcome`] plus verification next-actions.
-#[derive(Debug, Clone, Serialize)]
-struct PushOutput {
-    #[serde(flatten)]
-    outcome: PushOutcome,
-    next_action: Option<String>,
-    next_action_template: Option<ActionTemplate>,
-    recommended_action: Option<String>,
-    recommended_action_template: Option<ActionTemplate>,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
 
 fn push_output_from_outcome(
     outcome: PushOutcome,

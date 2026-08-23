@@ -62,27 +62,12 @@ use hosted_client::client::LocalSync;
 #[cfg(feature = "client")]
 use hosted_client::hosted_runtime::hosted::{HostedAuthMode, PullMaterialization};
 
-#[derive(Serialize)]
-struct RemoteMutationOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    action: &'static str,
-    name: String,
-    url: Option<String>,
-    default: Option<String>,
-    message: String,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
 
 /// CLI machine envelope: domain [`PullOutcome`] plus repository verification.
-#[derive(Serialize)]
-struct PullOutput {
-    #[serde(flatten)]
-    outcome: PullOutcome,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
+
+// The wire payload lives in cli-contract so the schema registry registers
+// the real serialization type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::remote::{PullOutput, RemoteMutationOutput};
 
 fn heddle_pull_output_from_local(
     plan: Option<&PullPlan>,

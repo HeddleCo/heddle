@@ -81,6 +81,10 @@ use hosted_client::hosted_runtime::hosted::{HostedClient, HostedRefEntry, PullMa
 /// payload. Referenced by the command catalog and the catalog/runtime
 /// invariant test to keep the runtime emission and the advertised
 /// discriminator from drifting apart.
+// The wire payload lives in cli-contract so the schema registry registers
+// the real serialization type.
+pub use heddle_cli_contract::cli::commands::wire::remote::CloneOutput;
+
 pub const CLONE_OUTPUT_KIND: &str = "clone";
 
 /// `output_kind` value carried by the *preliminary* JSON record emitted
@@ -103,32 +107,6 @@ struct CloneOptions {
     insecure: bool,
 }
 
-#[derive(Serialize)]
-struct CloneOutput {
-    output_kind: &'static str,
-    action: &'static str,
-    status: &'static str,
-    success: bool,
-    cloned: bool,
-    transport: &'static str,
-    remote: String,
-    local: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    repository_capability: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    commits_imported: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    states_created: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    objects: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    state: Option<String>,
-    #[serde(rename = "verification")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    trust: Option<RepositoryVerificationState>,
-}
 
 struct GitOverlayCloneOutputInput {
     remote: String,

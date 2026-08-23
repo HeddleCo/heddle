@@ -26,26 +26,10 @@ use crate::{
     perf::{ProfileField, emit_profile, instrumentation_enabled},
 };
 
-#[derive(Debug, Serialize)]
-struct AdoptOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    action: &'static str,
-    adopted: bool,
-    initialized: bool,
-    path: PathBuf,
-    refs: Vec<String>,
-    commits_imported: usize,
-    states_created: usize,
-    branches_synced: usize,
-    tags_synced: usize,
-    skipped_non_commit_refs: usize,
-    already_in_sync: bool,
-    recommended_action: Option<String>,
-    recommended_action_template: Option<ActionTemplate>,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
+
+// The wire payload lives in cli-contract so the schema registry registers
+// the real serialization type.
+pub use heddle_cli_contract::cli::commands::wire::remote::AdoptOutput;
 
 #[derive(Debug)]
 struct AdoptImportStats {

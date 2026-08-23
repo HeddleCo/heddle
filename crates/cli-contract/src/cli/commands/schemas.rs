@@ -25,9 +25,11 @@ use verbs::{
 use super::command_catalog;
 use super::init_output::InitOutput;
 use super::wire::{
-    BlameOutput, CommitOutput, ExpandOutput, LandOutput, LogOutput, MarkerBulkDeleteOutput,
-    MarkerListOutput, MarkerOpOutput, MultiLandOutput, OperatorCommandOutput, ReadyOutput,
-    ReflogOutput, RevertOutput, ShowOutput, SnapshotOutput, SyncOutput, TimelineActionOutput,
+    AdoptOutput, BlameOutput, CloneOutput, CommitOutput, ExpandOutput, LandOutput, LogOutput,
+    MarkerBulkDeleteOutput, MarkerListOutput, MarkerOpOutput, MultiLandOutput,
+    OperatorCommandOutput, PullOutput, PushOutput, ReadyOutput,
+    ReflogOutput, RemoteMutationOutput, RevertOutput, ShowOutput, SnapshotOutput, SyncOutput,
+    TimelineActionOutput,
     TimelineLogOutput, TimelineRecordingOutput, TimelineStatusOutput, UndoRedoOutput,
 };
 use crate::cli::INIT_VERB;
@@ -78,7 +80,7 @@ fn report_contract_schema_verbs() -> &'static [&'static str] {
 schema_registry! {
     (&["maintenance fsck repair git"], FsckReport),
     (&[INIT_VERB], InitOutput),
-    (&["adopt"], AdoptSchema),
+    (&["adopt"], AdoptOutput),
     (&["capture"], SnapshotOutput),
     (&["commit"], CommitOutput),
     (&["undo", "undo --redo", "undo --recover"], UndoRedoOutput),
@@ -106,12 +108,12 @@ schema_registry! {
     (&["thread marker create", "thread marker show"], MarkerOpOutput),
     (&["thread marker delete"], MarkerBulkDeleteOutput),
     (&["thread show"], ThreadShowSchema),
-    (&["clone"], CloneSchema),
+    (&["clone"], CloneOutput),
     (&["remote list"], RemoteListReport),
     (&["remote show"], RemoteInfo),
-    (&["remote add", "remote remove", "remote set-default"], RemoteMutationSchema),
-    (&["pull"], PullSchema),
-    (&["push"], PushSchema),
+    (&["remote add", "remote remove", "remote set-default"], RemoteMutationOutput),
+    (&["pull"], PullOutput),
+    (&["push"], PushOutput),
     (&["thread expand"], ExpandOutput),
     (&["log"], LogOutput),
     (&["log --reflog"], ReflogOutput),
@@ -1056,82 +1058,12 @@ pub struct ThreadTaskSummarySchema {
     pub coordination_discussion_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(untagged)]
-#[allow(dead_code)]
-pub enum CloneSchema {
-    Git(CloneGitSchema),
-    Heddle(CloneHeddleSchema),
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CloneGitSchema {
-    pub output_kind: String,
-    pub action: String,
-    pub status: String,
-    pub success: bool,
-    pub cloned: bool,
-    pub transport: GitTransportSchema,
-    pub remote: String,
-    pub local: String,
-    pub branch: String,
-    pub repository_capability: String,
-    pub commits_imported: usize,
-    pub states_created: usize,
-    pub verification: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CloneHeddleSchema {
-    pub output_kind: String,
-    pub action: String,
-    pub status: String,
-    pub success: bool,
-    pub cloned: bool,
-    pub transport: HeddleTransportSchema,
-    pub remote: String,
-    pub local: String,
-    pub branch: String,
-    pub repository_capability: String,
-    pub objects: Option<usize>,
-    pub state: Option<String>,
-    pub verification: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AdoptSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub action: Option<String>,
-    pub adopted: bool,
-    pub initialized: bool,
-    pub path: String,
-    pub refs: Vec<String>,
-    pub commits_imported: usize,
-    pub states_created: usize,
-    pub branches_synced: usize,
-    pub tags_synced: usize,
-    pub skipped_non_commit_refs: usize,
-    pub already_in_sync: bool,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
 
 
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RemoteMutationSchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: String,
-    pub name: String,
-    pub url: Option<String>,
-    pub default: Option<String>,
-    pub message: String,
-    pub verification: RepositoryVerificationStateSchema,
-}
+
+
+
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct AgentPresenceSingleSchema {
@@ -1416,137 +1348,15 @@ pub struct SessionSegmentSchema {
     pub policy_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(untagged)]
-#[allow(dead_code)]
-pub enum PullSchema {
-    Git(PullGitSchema),
-    Heddle(PullHeddleSchema),
-}
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct PullGitSchema {
-    pub output_kind: String,
-    pub action: String,
-    pub status: String,
-    pub pulled: bool,
-    pub changed: bool,
-    pub success: bool,
-    pub transport: GitTransportSchema,
-    pub remote: String,
-    pub branch: String,
-    pub old_git_head: Option<String>,
-    pub new_git_head: String,
-    pub old_state: Option<String>,
-    pub new_state: String,
-    pub states_created: usize,
-    pub commits_seen: usize,
-    pub commits_seen_scope: String,
-    pub materialized_checkout: bool,
-    pub changed_path_count: usize,
-    pub changed_paths: Vec<String>,
-    pub verification: RepositoryVerificationStateSchema,
-}
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct PullHeddleSchema {
-    pub output_kind: String,
-    pub action: String,
-    pub status: String,
-    pub pulled: bool,
-    pub changed: bool,
-    pub success: bool,
-    pub transport: HeddleTransportSchema,
-    pub remote: String,
-    pub thread: String,
-    pub state: Option<String>,
-    pub objects: Option<usize>,
-    pub verification: RepositoryVerificationStateSchema,
-}
 
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(untagged)]
-#[allow(dead_code)]
-pub enum PushSchema {
-    Git(PushGitSchema),
-    Heddle(PushHeddleSchema),
-}
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct PushGitSchema {
-    pub output_kind: String,
-    pub action: String,
-    pub status: String,
-    pub pushed: bool,
-    pub changed: bool,
-    pub success: bool,
-    pub transport: GitTransportSchema,
-    pub remote: String,
-    pub push_scope: String,
-    pub ref_scope: String,
-    pub refs_written: Vec<String>,
-    pub git_tracking_remote: Option<String>,
-    pub git_remote_configured: Option<GitRemoteConfiguredSchema>,
-    pub git_upstream_configured: Option<GitUpstreamConfiguredSchema>,
-    pub tags_included: bool,
-    pub force: bool,
-    pub force_discard_warning: Option<String>,
-    pub thread: Option<String>,
-    pub next_action: NullableStringSchema,
-    pub next_action_template: NullableActionTemplateSchema,
-    pub recommended_action: NullableStringSchema,
-    pub recommended_action_template: NullableActionTemplateSchema,
-    pub verification: RepositoryVerificationStateSchema,
-}
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct PushHeddleSchema {
-    pub output_kind: String,
-    pub action: String,
-    pub status: String,
-    pub pushed: bool,
-    pub changed: bool,
-    pub success: bool,
-    pub transport: HeddleTransportSchema,
-    pub remote: Option<String>,
-    pub push_scope: Option<String>,
-    pub refs_written: Option<Vec<String>>,
-    pub force: Option<bool>,
-    pub thread: Option<String>,
-    pub state: Option<String>,
-    pub objects: Option<usize>,
-    pub next_action: NullableStringSchema,
-    pub next_action_template: NullableActionTemplateSchema,
-    pub recommended_action: NullableStringSchema,
-    pub recommended_action_template: NullableActionTemplateSchema,
-    pub verification: RepositoryVerificationStateSchema,
-}
 
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-#[allow(dead_code)]
-pub enum GitTransportSchema {
-    Git,
-}
 
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-#[allow(dead_code)]
-pub enum HeddleTransportSchema {
-    Heddle,
-}
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitRemoteConfiguredSchema {
-    pub name: String,
-    pub url: String,
-}
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitUpstreamConfiguredSchema {
-    pub branch: String,
-    pub remote: String,
-}
 
 /// Operation banner — kept opaque because the underlying
 /// [`repo::RepositoryOperationStatus`] is a workspace type and its
@@ -2706,87 +2516,58 @@ mod tests {
     #[test]
     fn push_schema_requires_stable_runtime_fields() {
         let schema = schema_for_verb("push").expect("push schema");
-        let variants = schema
-            .get("anyOf")
-            .and_then(Value::as_array)
-            .expect("push schema has transport variants")
-            .iter()
-            .map(|variant| {
-                let reference = variant.get("$ref").and_then(Value::as_str).or_else(|| {
-                    variant
-                        .get("allOf")
-                        .and_then(Value::as_array)
-                        .and_then(|parts| {
-                            parts
-                                .iter()
-                                .find_map(|part| part.get("$ref").and_then(Value::as_str))
-                        })
-                });
-                reference
-                    .map(|reference| resolve_schema_ref(&schema, reference))
-                    .unwrap_or(variant)
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(variants.len(), 2, "Git and Heddle push variants");
-
-        for variant in &variants {
-            let required = required_fields(variant);
-            for stable_field in [
-                "output_kind",
-                "action",
-                "status",
-                "pushed",
-                "changed",
-                "success",
-                "transport",
-                "next_action",
-                "next_action_template",
-                "recommended_action",
-                "recommended_action_template",
-                "verification",
-            ] {
-                assert!(
-                    required.contains(&stable_field),
-                    "every push variant must require `{stable_field}`: {variant}"
-                );
-            }
-        }
-
-        let git_required = variants
-            .iter()
-            .map(|variant| required_fields(variant))
-            .find(|required| required.contains(&"ref_scope"))
-            .expect("Git push variant");
-        for git_field in [
-            "remote",
-            "push_scope",
-            "refs_written",
-            "tags_included",
-            "force",
+        // The registered type is the real single-struct envelope: both
+        // transports serialize one object whose optional facts are omitted.
+        // The envelope always emits the action fields too, but they are
+        // `Option` on the registered struct, so schemars leaves them optional
+        // (nullable properties) rather than required.
+        for stable_field in [
+            "next_action",
+            "next_action_template",
+            "recommended_action",
+            "recommended_action_template",
         ] {
+            let property = property_schema(&schema, stable_field);
             assert!(
-                git_required.contains(&git_field),
-                "Git push requires `{git_field}`"
+                property.is_object(),
+                "push must still describe `{stable_field}`: {property}"
             );
         }
-
-        let heddle_required = variants
-            .iter()
-            .map(|variant| required_fields(variant))
-            .find(|required| !required.contains(&"ref_scope"))
-            .expect("Heddle push variant");
+        for stable_field in [
+            "output_kind",
+            "action",
+            "status",
+            "pushed",
+            "changed",
+            "success",
+            "transport",
+            "verification",
+        ] {
+            assert!(
+                required_fields(&schema).contains(&stable_field),
+                "push must require `{stable_field}`: {schema}"
+            );
+        }
         for conditional in [
             "remote",
             "push_scope",
+            "ref_scope",
             "refs_written",
+            "tags_included",
             "force",
             "thread",
             "state",
             "objects",
         ] {
+            let property =
+                property_schema(&schema, conditional);
             assert!(
-                !heddle_required.contains(&conditional),
-                "Heddle push conditionally omits `{conditional}`"
+                !required_fields(&schema).contains(&conditional),
+                "`{conditional}` is emitted only when present and must stay optional: {property}"
+            );
+            assert!(
+                property.is_object(),
+                "push must still describe `{conditional}`: {property}"
             );
         }
     }

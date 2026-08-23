@@ -18,6 +18,7 @@
 pub mod core_loop;
 pub mod land;
 pub mod history;
+pub mod remote;
 pub mod operator;
 pub mod ready;
 
@@ -33,6 +34,7 @@ pub use history::{
     ShowVerificationInfo, StateEntry, TimelineActionOutput, TimelineLogOutput,
     TimelineRecordingOutput, TimelineStatusOutput,
 };
+pub use remote::{AdoptOutput, CloneOutput, PullOutput, PushOutput, RemoteMutationOutput};
 pub use core_loop::{CommitOutput, SnapshotAgentOutput, SnapshotOutput, SnapshotPrincipalOutput, UndoRedoOutput};
 pub use operator::{
     OperatorAction, OperatorCommandEnvelope, OperatorCommandOutput, VerificationClaimPolicy,

@@ -644,14 +644,14 @@ pub const FORCE_DISCARD_WARNING: &str = "remote refs may be moved back to match 
 pub const COMMITS_SEEN_SCOPE: &str = "branches_and_heddle_notes";
 
 /// Git remote name/url pair for machine JSON (`git_remote_configured`).
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct GitRemoteConfigured {
     pub name: String,
     pub url: String,
 }
 
 /// Upstream branch binding for machine JSON (`git_upstream_configured`).
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct GitUpstreamConfigured {
     pub branch: String,
     pub remote: String,
@@ -669,7 +669,7 @@ pub struct GitOverlayPushTracking {
 ///
 /// Field names match the CLI `heddle push --output json` contract. CLI may
 /// flatten this and attach verification-derived `next_action*` fields.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct PushOutcome {
     pub output_kind: &'static str,
     pub action: &'static str,
@@ -713,7 +713,7 @@ pub struct PushOutcome {
 /// Machine JSON body for a successful pull.
 ///
 /// Field names match the CLI `heddle pull --output json` contract.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct PullOutcome {
     pub output_kind: &'static str,
     pub action: &'static str,
