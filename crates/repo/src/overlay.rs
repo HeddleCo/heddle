@@ -24,7 +24,7 @@ use refs::Head;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use sley::{
-    ObjectId as SleyObjectId, Reference as SleyReference, ReferenceTarget as SleyRefTarget,
+    ObjectId as SleyObjectId, ReferenceTarget as SleyRefTarget,
     Repository as SleyRepository,
 };
 
@@ -212,7 +212,13 @@ impl Repository {
         };
 
         let local_ref_name = GitRefName::branch_full_name(&branch);
-        if git_find_reference(&git, &local_ref_name)?.is_some()
+        if git
+            .reference_exists(&local_ref_name)
+            .map_err(|error| {
+                HeddleError::Config(format!(
+                    "failed to inspect Git reference '{local_ref_name}': {error}"
+                ))
+            })?
             && let Some(tracking_name) = git_configured_tracking_ref(&git, &branch)?
             && let Some(upstream_head) = git_resolve_oid(&git, &tracking_name)?
         {
@@ -1062,11 +1068,7 @@ impl Repository {
             SleyRefTarget::Direct(oid) => *oid,
             SleyRefTarget::Symbolic(_) => return Ok(None),
         };
-        let target = match sley::plumbing::sley_rev::peel_to_commit(
-            git_repo.objects().as_ref(),
-            git_repo.object_format(),
-            &target,
-        ) {
+        let target = match git_repo.peel_to_commit_oid(target) {
             Ok(target) => target,
             Err(_) => return Ok(None),
         };
@@ -1354,12 +1356,6 @@ fn git_remote_names(root: &Path) -> Result<Vec<String>> {
                 .collect()
         })
         .map_err(|error| HeddleError::Config(error.to_string()))
-}
-
-fn git_find_reference(repo: &SleyRepository, name: &str) -> Result<Option<SleyReference>> {
-    repo.find_reference(name).map_err(|error| {
-        HeddleError::Config(format!("failed to inspect Git reference '{name}': {error}"))
-    })
 }
 
 fn git_resolve_oid(repo: &SleyRepository, rev: &str) -> Result<Option<SleyObjectId>> {

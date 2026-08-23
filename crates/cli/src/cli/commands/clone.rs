@@ -717,7 +717,7 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
         ))
     })?;
     let branch_ref = format!("refs/heads/{branch}");
-    let reference = git_repo.find_reference(&branch_ref).map_err(|err| {
+    let reference = git_repo.require_reference(&branch_ref).map_err(|err| {
         anyhow!(clone_verification_failed_advice(
             format!("clone verification failed: selected Git branch '{branch}' is missing: {err}"),
             format!("Git ref '{branch_ref}' is missing after Git-overlay clone"),
@@ -725,14 +725,6 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
             canonical_git_import_ref_command(branch),
         ))
     })?;
-    let Some(reference) = reference else {
-        return Err(anyhow!(clone_verification_failed_advice(
-            format!("clone verification failed: selected Git branch '{branch}' is missing"),
-            format!("Git ref '{branch_ref}' is missing after Git-overlay clone"),
-            "Git status would report upstream tracking for a branch whose local ref is absent",
-            canonical_git_import_ref_command(branch),
-        )));
-    };
     let target = reference.peeled_oid(&git_repo).map_err(|err| {
         anyhow!(clone_verification_failed_advice(
             format!(

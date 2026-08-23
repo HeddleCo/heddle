@@ -171,10 +171,7 @@ fn mapping_tmp_path(repo: &Repository) -> PathBuf {
 }
 
 fn open_git_repo(path: &Path) -> std::result::Result<SleyRepository, String> {
-    match SleyRepository::discover(path) {
-        Ok(repo) => Ok(repo),
-        Err(_) => SleyRepository::open(path).map_err(|err| err.to_string()),
-    }
+    SleyRepository::open_exact_bare(path).map_err(|err| err.to_string())
 }
 
 fn build_existing_mapping(
