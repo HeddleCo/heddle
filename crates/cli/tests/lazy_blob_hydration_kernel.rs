@@ -35,7 +35,7 @@ use sley::{
     CommitObject, EntryKind, GitObjectType, GitTime, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository, Signature,
     plumbing::{
-        sley_core::ByteString as GitByteString, sley_object::EncodedObject, sley_refs::ReflogEntry,
+        sley_core::BString as GitByteString, sley_object::EncodedObject, sley_refs::ReflogEntry,
     },
 };
 use tempfile::TempDir;

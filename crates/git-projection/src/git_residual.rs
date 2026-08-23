@@ -759,7 +759,7 @@ fn object_type_from_tag(tag: u8) -> GitProjectionResult<GitObjectType> {
 mod tests {
     use sley::{
         CommitObject, EntryKind, GitTime, Repository as SleyRepository, Signature, TreeEditor,
-        plumbing::{sley_core::ByteString, sley_object::EncodedObject},
+        plumbing::{sley_core::BString, sley_object::EncodedObject},
     };
 
     use super::*;
@@ -861,8 +861,8 @@ committer A <a@e> 1 +0000\n\
         message: &str,
     ) -> ObjectId {
         let signature = Signature {
-            name: ByteString::new(b"Residual Test".to_vec()),
-            email: ByteString::new(b"residual@heddle.test".to_vec()),
+            name: BString::new(b"Residual Test".to_vec()),
+            email: BString::new(b"residual@heddle.test".to_vec()),
             time: GitTime::new(0, 0),
             raw: b"Residual Test <residual@heddle.test> 0 +0000".to_vec(),
         };

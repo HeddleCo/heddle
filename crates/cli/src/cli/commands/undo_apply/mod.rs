@@ -28,7 +28,7 @@ use repo::{
 use sley::{
     DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions, IndexWriteOptions, ObjectId,
     RefPrecondition, ReferenceTarget, Repository as SleyRepository, Signature,
-    plumbing::sley_core::ByteString as GitByteString,
+    plumbing::sley_core::BString as GitByteString,
 };
 
 use super::{advice::RecoveryAdvice, thread_cmd::thread_not_found_advice};

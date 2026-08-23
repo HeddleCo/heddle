@@ -28,7 +28,7 @@ use sley::{
     BString as GitBString, DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions, Index,
     IndexEntry, IndexWriteOptions, ObjectFormat, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository, Signature,
-    plumbing::sley_core::ByteString as GitByteString,
+    plumbing::sley_core::BString as GitByteString,
     remote::{
         CredentialProvider, FetchOptions, LsRemoteFilter, NoCredentials, ProgressSink,
         PushActionPlan, PushCommand, PushOptions, SilentProgress,

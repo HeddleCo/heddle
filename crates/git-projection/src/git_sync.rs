@@ -428,7 +428,7 @@ fn git_projection_identity() -> Vec<u8> {
 mod tests {
     use sley::{
         CommitObject, GitObjectType, GitTime, Signature, TreeEditor,
-        plumbing::{sley_core::ByteString, sley_object::EncodedObject},
+        plumbing::{sley_core::BString, sley_object::EncodedObject},
     };
     use tempfile::TempDir;
 
@@ -438,8 +438,8 @@ mod tests {
         let time = GitTime::new(0, 0);
         let raw = format!("Heddle Test <heddle@test> 0 {}", time.offset_token()).into_bytes();
         Signature {
-            name: ByteString::new(b"Heddle Test".to_vec()),
-            email: ByteString::new(b"heddle@test".to_vec()),
+            name: BString::new(b"Heddle Test".to_vec()),
+            email: BString::new(b"heddle@test".to_vec()),
             time,
             raw,
         }

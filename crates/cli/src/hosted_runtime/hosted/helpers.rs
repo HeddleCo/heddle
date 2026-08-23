@@ -394,6 +394,11 @@ fn remote_failure_detail(
             rule: value.rule,
             human_verification_can_override: value.human_verification_can_override,
         },
+        Some(Context::Stream(value)) => remote_stream_failure(*value),
+        Some(Context::Unknown(value)) => wire::RemoteFailureDetail::Unknown {
+            type_url: value.type_url,
+            value: value.value,
+        },
         Some(Context::HumanVerification(_))
         | Some(Context::AmbiguousChangeId(_))
         | Some(Context::Signup(_))
@@ -401,6 +406,24 @@ fn remote_failure_detail(
             type_url: "type.googleapis.com/heddle.api.v1alpha1.ErrorDetail".to_string(),
             value: encoded,
         },
+    }
+}
+
+fn remote_stream_failure(
+    value: api::heddle::api::v1alpha1::StreamFailure,
+) -> wire::RemoteFailureDetail {
+    use api::heddle::api::v1alpha1::{CallFailureCode, error_detail::Context};
+
+    let (retry_after, cursor) = match value.error.and_then(|detail| detail.context) {
+        Some(Context::Retry(retry)) => (retry.retry_after.map(remote_duration), None),
+        Some(Context::Cursor(cursor)) => (None, Some(remote_cursor(cursor))),
+        _ => (None, None),
+    };
+    wire::RemoteFailureDetail::Stream {
+        code: remote_failure_code(CallFailureCode::try_from(value.code).unwrap_or_default()),
+        message: value.message,
+        retry_after,
+        cursor,
     }
 }
 
@@ -841,8 +864,8 @@ mod tests {
     #[test]
     fn remote_failure_detail_maps_every_context_variant() {
         use api::heddle::api::v1alpha1::{
-            CapabilityRequirement, ConflictDetail, CursorFailure, ErrorDetail, ErrorReason,
-            PolicyDenial, RetryAdvice, error_detail,
+            CallFailureCode, CapabilityRequirement, ConflictDetail, CursorFailure, ErrorDetail,
+            ErrorReason, PolicyDenial, RetryAdvice, StreamFailure, UnknownDetail, error_detail,
         };
 
         let retry = remote_failure_detail(ErrorDetail {
@@ -913,13 +936,59 @@ mod tests {
             wire::RemoteFailureDetail::PolicyDenial { .. }
         ));
 
+        let stream = remote_failure_detail(ErrorDetail {
+            reason: ErrorReason::Unspecified as i32,
+            resource: String::new(),
+            field: String::new(),
+            context: Some(error_detail::Context::Stream(Box::new(StreamFailure {
+                code: CallFailureCode::Unavailable as i32,
+                message: "interrupted".into(),
+                error: Some(Box::new(ErrorDetail {
+                    reason: ErrorReason::Unspecified as i32,
+                    resource: String::new(),
+                    field: String::new(),
+                    context: Some(error_detail::Context::Retry(RetryAdvice {
+                        retry_after: Some(prost_types::Duration {
+                            seconds: 2,
+                            nanos: 0,
+                        }),
+                    })),
+                })),
+            }))),
+        });
+        assert!(matches!(
+            stream,
+            wire::RemoteFailureDetail::Stream {
+                code: wire::RemoteFailureCode::Unavailable,
+                retry_after: Some(wire::RemoteDuration { seconds: 2, .. }),
+                ..
+            }
+        ));
+
         let unknown = remote_failure_detail(ErrorDetail {
+            reason: ErrorReason::Unspecified as i32,
+            resource: String::new(),
+            field: String::new(),
+            context: Some(error_detail::Context::Unknown(UnknownDetail {
+                type_url: "type.googleapis.com/example.FutureDetail".into(),
+                value: vec![1, 2, 3],
+            })),
+        });
+        assert_eq!(
+            unknown,
+            wire::RemoteFailureDetail::Unknown {
+                type_url: "type.googleapis.com/example.FutureDetail".into(),
+                value: vec![1, 2, 3],
+            }
+        );
+
+        let absent = remote_failure_detail(ErrorDetail {
             reason: ErrorReason::Unspecified as i32,
             resource: String::new(),
             field: String::new(),
             context: None,
         });
-        assert!(matches!(unknown, wire::RemoteFailureDetail::Unknown { .. }));
+        assert!(matches!(absent, wire::RemoteFailureDetail::Unknown { .. }));
     }
 
     #[test]

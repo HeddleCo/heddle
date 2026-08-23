@@ -17,7 +17,7 @@
 //! `Discussion.opened_against_state`.
 
 use api::heddle::api::v1alpha1::{
-    AppendTurnRequest, ContextAnnotationKind, Discussion as ProtoDiscussion,
+    AppendTurnRequest, ContextAnnotationKind, Discussion as ProtoDiscussion, DiscussionSeverity,
     DiscussionStatusFilter, ListDiscussionsByStateRequest, OpenDiscussionRequest, PathSymbolRef,
     ResolveDiscussionRequest, StateId as ProtoStateId, list_discussions_response,
     resolve_discussion_request,
@@ -262,6 +262,7 @@ fn open_discussion_request(
         thread_ref: thread_ref.unwrap_or_default().to_string(),
         client_operation_id,
         thread_id: String::new(),
+        severity: DiscussionSeverity::Unspecified as i32,
     }
 }
 
@@ -361,6 +362,7 @@ mod tests {
         assert_eq!(request.thread_ref, "refs/heads/feature/run");
         assert_eq!(request.anchor.unwrap().file, "src/lib.rs");
         assert_eq!(request.body, "keep this stable");
+        assert_eq!(request.severity, DiscussionSeverity::Unspecified as i32);
     }
 
     #[test]

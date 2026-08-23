@@ -73,12 +73,6 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
         AgentAuthOperationDisposition::Denied,
     ),
     ("WhoAmI", AgentAuthOperationDisposition::ReviewedSafe),
-    // The hosted handler still requires the billing service account's
-    // billing:write right; an attached derived bearer cannot create it.
-    (
-        "RecordSubscription",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
     (
         "IntrospectCredential",
         AgentAuthOperationDisposition::ReviewedSafe,
@@ -99,6 +93,18 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
         "RegisterGitHubInstallation",
         AgentAuthOperationDisposition::Denied,
     ),
+    // Starting an App-installation ceremony can bind external authority to
+    // the caller, so a derived agent cannot mint its setup challenge.
+    (
+        "MintGitHubAppSetupChallenge",
+        AgentAuthOperationDisposition::Denied,
+    ),
+    // Installation repository discovery is a caller-bound read and does not
+    // register an installation or import a repository.
+    (
+        "ListInstallationRepositories",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
     (
         "VerifySignupEmail",
         AgentAuthOperationDisposition::ReviewedSafe,
@@ -110,6 +116,12 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
     // Creating an invite spends the authenticated member's allowance, so a
     // derived agent must not issue invitations on the parent's behalf.
     ("CreateSignupInvite", AgentAuthOperationDisposition::Denied),
+    // The server derives the owner from the caller and returns no claimer
+    // identity, making invite listing a caller-bound read.
+    (
+        "ListSignupInvites",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
     // Invite claim registers a client-minted signup root; derived agents
     // must not consume invite codes on behalf of a parent principal.
     ("ClaimSignupInvite", AgentAuthOperationDisposition::Denied),
@@ -155,9 +167,6 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
     ("RevokeSession", AgentAuthOperationDisposition::Denied),
     ("RequestHeldName", AgentAuthOperationDisposition::Denied),
     ("ResolveHandle", AgentAuthOperationDisposition::ReviewedSafe),
-    // Clients mint every root locally. The RPC remains on the shared
-    // descriptor until Weft removes it; a derived bearer cannot mint.
-    ("MintBiscuit", AgentAuthOperationDisposition::Denied),
     // Presence currently re-mints an authority token instead of preserving
     // the caller's complete attenuation chain, so agents must not invoke it.
     ("IssuePresenceToken", AgentAuthOperationDisposition::Denied),
