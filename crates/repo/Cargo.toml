@@ -91,7 +91,7 @@ async-source = ["objects/async-source"]
 
 [dev-dependencies]
 hex.workspace = true
-objects = { workspace = true, features = ["async-source", "memory-backend"] }
+objects = { path = "../objects", package = "heddle-objects", features = ["async-source", "memory-backend"] }
 proptest.workspace = true
 tempfile.workspace = true
 

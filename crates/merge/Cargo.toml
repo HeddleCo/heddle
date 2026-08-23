@@ -22,4 +22,4 @@ sley.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-objects = { workspace = true, features = ["memory-backend"] }
+objects = { path = "../objects", package = "heddle-objects", features = ["memory-backend"] }

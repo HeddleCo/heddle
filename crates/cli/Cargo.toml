@@ -248,7 +248,7 @@ mount = [
 
 [dev-dependencies]
 criterion = "0.8"
-heddle-cli-render = { workspace = true, features = ["test-utils"] }
+heddle-cli-render = { path = "../cli-render", default-features = false, features = ["test-utils"] }
 hyper-util.workspace = true
 iroh-relay = { version = "=1.0.3", default-features = false, features = ["server"] }
 ntest.workspace = true
