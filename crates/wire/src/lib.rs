@@ -138,7 +138,16 @@ impl From<rmp_serde::decode::Error> for ProtocolError {
 
 impl From<objects::error::HeddleError> for ProtocolError {
     fn from(e: objects::error::HeddleError) -> Self {
-        ProtocolError::Remote(e.to_string())
+        match &e {
+            // Missing objects must surface as NotFound, not degrade to a
+            // generic server error via the blanket Remote arm below.
+            objects::error::HeddleError::NotFound(_)
+            | objects::error::HeddleError::StateNotFound(_)
+            | objects::error::HeddleError::MissingObject { .. } => {
+                ProtocolError::ObjectNotFound(e.to_string())
+            }
+            _ => ProtocolError::Remote(e.to_string()),
+        }
     }
 }
 
@@ -216,6 +225,34 @@ mod tests {
     use std::io;
 
     use super::{ErrorCode, ProtocolError, RemoteFailureCode};
+
+    #[test]
+    fn missing_object_errors_surface_as_not_found() {
+        use objects::error::HeddleError;
+
+        let cases = vec![
+            HeddleError::NotFound("blob missing".to_string()),
+            HeddleError::StateNotFound(objects::object::StateId::from_content_hash(
+                objects::object::ContentHash::compute(b"missing"),
+            )),
+            HeddleError::MissingObject {
+                object_type: "tree".to_string(),
+                id: "abc123".to_string(),
+            },
+        ];
+        for err in cases {
+            let protocol_error = ProtocolError::from(err);
+            assert_eq!(
+                protocol_error.error_code(),
+                ErrorCode::NotFound,
+                "missing-object errors must surface as NotFound, got {protocol_error:?}"
+            );
+            assert!(
+                !matches!(protocol_error, ProtocolError::Remote(_)),
+                "missing-object errors must not degrade to Remote/Server"
+            );
+        }
+    }
 
     #[test]
     fn protocol_error_public_mapping_is_stable() {
