@@ -48,12 +48,13 @@ fn every_commands_variant_has_explicit_root_contract() {
         if cfg!(not(feature = "client"))
             && matches!(
                 variant.as_str(),
-                // `Auth` and `Whoami` are the client-gated top-level roots:
-                // their contract entries are `feature_gated(..., "client")`, so
-                // `command_contract_root_commands()` omits them in a no-client
-                // build even though the enum source (read as text) still lists
-                // the variant.
-                "Auth" | "Whoami" | "Support" | "Prove" | "Spool"
+                // `Auth` and `Whoami` are the client-gated top-level roots;
+                // `Ci` is the ci-feature-gated root. Their contract entries
+                // carry `feature_gated(...)`, so
+                // `command_contract_root_commands()` omits them in builds
+                // without the feature even though the enum source (read as
+                // text) still lists the variant.
+                "Auth" | "Whoami" | "Ci" | "Support" | "Prove" | "Spool"
             )
         {
             continue;
