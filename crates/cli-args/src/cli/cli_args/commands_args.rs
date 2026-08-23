@@ -327,16 +327,16 @@ pub enum TimelineCommands {
     /// Fork a timeline branch from a step or native harness tool call.
     #[command(after_help = "\
 Examples:
-  heddle timeline fork --step tls-abc --branch tlb-experiment
-  heddle timeline fork --tool-call call_123 --session ses_456 --branch tlb-alt
+  heddle agent timeline fork --step tls-abc --branch tlb-experiment
+  heddle agent timeline fork --tool-call call_123 --session ses_456 --branch tlb-alt
 ")]
     Fork(TimelineForkArgs),
 
     /// Reset the logical timeline cursor, optionally materializing checkout files.
     #[command(after_help = "\
 Examples:
-  heddle timeline reset --step tls-abc
-  heddle timeline reset --tool-call call_123 --materialize
+  heddle agent timeline reset --step tls-abc
+  heddle agent timeline reset --tool-call call_123 --materialize
 ")]
     Reset(TimelineResetArgs),
 
@@ -388,7 +388,7 @@ pub struct TimelineTargetArgs {
     pub current: bool,
 }
 
-/// Arguments for `heddle timeline fork`.
+/// Arguments for `heddle agent timeline fork`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct TimelineForkArgs {
     #[command(flatten)]
@@ -403,7 +403,7 @@ pub struct TimelineForkArgs {
     pub reason: String,
 }
 
-/// Arguments for `heddle timeline reset`.
+/// Arguments for `heddle agent timeline reset`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct TimelineResetArgs {
     #[command(flatten)]
