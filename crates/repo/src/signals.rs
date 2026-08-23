@@ -37,3 +37,27 @@ pub trait SignalComputer: Send + Sync {
         source_trees: Option<&HashMap<ContentHash, &Tree>>,
     ) -> Result<Option<ContentHash>>;
 }
+
+/// Process-wide fallback computer. Entry-point binaries install the
+/// concrete implementation once (instead of per-repository), so every
+/// snapshot path — capture, commit, revert, undo, expand — computes
+/// signals exactly like the pre-registration base behavior.
+static GLOBAL_DEFAULT: std::sync::RwLock<Option<std::sync::Arc<dyn SignalComputer>>> =
+    std::sync::RwLock::new(None);
+
+pub fn install_default_computer(computer: std::sync::Arc<dyn SignalComputer>) {
+    *GLOBAL_DEFAULT
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(computer);
+}
+
+pub(crate) fn effective_computer(
+    instance: Option<std::sync::Arc<dyn SignalComputer>>,
+) -> Option<std::sync::Arc<dyn SignalComputer>> {
+    instance.or_else(|| {
+        GLOBAL_DEFAULT
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    })
+}

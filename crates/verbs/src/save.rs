@@ -639,10 +639,17 @@ struct CreatedState {
 
 fn create_heddle_state(repo: &Repository, plan: &SavePlan) -> Result<CreatedState> {
     // Review signals are computed at capture time (locked decision):
-    // register the concrete computer here, at the single choke point
-    // every capture flows through. Unregistered repos (other binaries,
-    // tests) keep the historical feature-off shape.
-    repo.set_signal_computer(std::sync::Arc::new(state_review::CaptureSignalComputer));
+    // Review signals are computed at capture time (locked decision):
+    // install the concrete computer once process-wide so every snapshot
+    // path — capture, commit, revert, undo, expand — computes signals,
+    // matching base behavior. Per-repository registration here let
+    // direct snapshot callers (revert) silently skip signals.
+    static SIGNALS: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    SIGNALS.get_or_init(|| {
+        repo::signals::install_default_computer(std::sync::Arc::new(
+            state_review::CaptureSignalComputer,
+        ));
+    });
     let hook_manager = HookManager::new(repo);
     let hook_ctx = HookContext::new(repo);
 
@@ -1129,5 +1136,60 @@ mod tests {
         assert!(commit_scope_text("staged_index").contains("staged Git index"));
         assert!(staged_commit_summary("ok", 1, 2).contains("left 2 unstaged/untracked"));
         assert_eq!(staged_commit_summary("ok", 1, 0), "ok");
+    }
+}
+
+#[cfg(test)]
+mod revert_signals_tests {
+    use objects::object::{Attribution, ChangeLineage, ChangeLineageKind, Principal, StateAttachmentBody};
+    use repo::{Repository, StateAttachmentKind};
+
+    /// Regression: revert snapshots directly through
+    /// `snapshot_with_attribution_and_lineage`, bypassing the save verb's
+    /// registration. Signals must come from the process-wide default so a
+    /// revert-created state carries the same risk-signal attachment a
+    /// capture-created state gets.
+    #[test]
+    fn revert_created_state_carries_risk_signals() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+
+        // First snapshot: no signals expected (nothing installed yet —
+        // this mirrors any binary that never captured).
+        let author = Attribution::human(Principal::new("Test", "test@example.com"));
+        let base = repo
+            .snapshot_with_attribution_and_lineage(Some("base".into()), None, author.clone(), vec![])
+            .unwrap();
+        assert!(
+            repo.latest_state_attachment(&base.id(), StateAttachmentKind::RiskSignals)
+                .unwrap()
+                .is_none(),
+            "pre-install snapshot must stay signal-free"
+        );
+
+        // Give the revert something to change, as a real revert does.
+        std::fs::write(temp.path().join("hello.rs"), "fn foo() -> i32 { 1 }\n").unwrap();
+
+        // Install the default computer (save/revert do this on first use).
+        repo::signals::install_default_computer(std::sync::Arc::new(
+            state_review::CaptureSignalComputer,
+        ));
+
+        // The self-flagged-uncertainty module fires deterministically on a
+        // `self-flag:` intent line under the default signals config.
+        let reverted = repo
+            .snapshot_with_attribution(
+                Some("self-flag:[src/auth.rs:verify] not certain about edge case".to_string()),
+                None,
+                author,
+            )
+            .unwrap();
+
+        let body = repo
+            .latest_state_attachment(&reverted.id(), StateAttachmentKind::RiskSignals)
+            .unwrap()
+            .expect("revert-created state must carry a risk-signals attachment")
+            .body;
+        assert!(matches!(body, StateAttachmentBody::RiskSignals(_)));
     }
 }

@@ -91,7 +91,6 @@ env:
     heddle-wire
     heddle-repo
     heddle-config
-    weft-client-shim
     heddle-ingest
     heddle-git-projection
     heddle-verbs
@@ -101,6 +100,8 @@ env:
     heddle-cli-args
     heddle-cli-render
     heddle-cli-contract
+    heddle-hosted-client
+    heddle-agent-relay
     heddle-cli
     heddle-devtools
 

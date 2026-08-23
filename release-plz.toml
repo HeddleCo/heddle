@@ -125,3 +125,7 @@ release = true
 [[package]]
 name = "heddle-hosted-client"
 release = true
+
+[[package]]
+name = "heddle-agent-relay"
+release = true
