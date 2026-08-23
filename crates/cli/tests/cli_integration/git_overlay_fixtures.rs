@@ -73,10 +73,14 @@ impl GitOverlayFixture {
         assert_eq!(_ready["status"], "completed");
         assert_eq!(_ready["verification"]["verified"], true);
         assert_eq!(_ready["verification"]["status"], "clean");
+        // Ready runs inside the thread checkout, so the current contract
+        // (next_action_contract::ready_from_isolated_checkout_recommends_bare_land)
+        // recommends bare `heddle land` with no selectors.
         let recommended_action = _ready["recommended_action"].as_str().unwrap_or("");
+        assert_eq!(recommended_action, "heddle land", "{_ready}");
         assert!(
-            recommended_action.contains(&format!("land --thread {thread}")),
-            "ready helper should preserve the first-transition land action: {_ready}"
+            !recommended_action.contains("--thread") && !recommended_action.contains("--repo"),
+            "current-checkout land must not emit selectors: {_ready}"
         );
         self.ready_thread = Some((thread.to_string(), thread_path));
         self
