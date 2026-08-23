@@ -18,8 +18,9 @@ use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
 use verbs::{
-    DiffReport, FsckReport, QueryReport, RemoteListReport, ResolveReport, StatusReport,
-    ThreadMoveOutput, UndoListReport, VerifyReport, remote::RemoteInfo,
+    ActionTemplate, DiffReport, FsckReport, MachineContractCoverage, QueryReport, RemoteListReport,
+    RepositoryVerificationState, ResolveReport, StatusReport, ThreadMoveOutput, UndoListReport,
+    VerificationCheck, VerifyReport, remote::RemoteInfo,
 };
 
 use super::command_catalog;
@@ -554,120 +555,6 @@ type OpaqueObject = Option<Value>;
 
 // ---- verify ---------------------------------------------------------------
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RepositoryVerificationStateSchema {
-    #[serde(rename = "verified")]
-    pub verified: bool,
-    pub status: String,
-    pub repository_mode: String,
-    pub heddle_initialized: bool,
-    pub git_branch: Option<String>,
-    pub heddle_thread: Option<String>,
-    pub worktree_dirty: bool,
-    pub worktree_state: String,
-    pub import_state: String,
-    pub mapping_state: String,
-    pub remote_drift: String,
-    pub active_operation: Option<String>,
-    pub default_remote: Option<String>,
-    pub clone_verification: String,
-    pub machine_contract: String,
-    pub machine_contract_coverage: MachineContractCoverageSchema,
-    pub workflow_status: String,
-    pub workflow_summary: String,
-    pub summary: String,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub recovery_commands: Vec<String>,
-    pub recovery_action_templates: Vec<ActionTemplateSchema>,
-    pub checks: Vec<VerificationCheckSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct MachineContractCoverageSchema {
-    pub status: String,
-    #[serde(rename = "verified_scope")]
-    pub verified_scope: String,
-    pub advanced_scope: String,
-    pub summary: String,
-    pub catalog_commands_total: usize,
-    pub catalog_mutating_commands_total: usize,
-    pub json_commands_total: usize,
-    pub json_mutating_commands_total: usize,
-    pub json_commands_with_schema: usize,
-    pub json_commands_with_accepted_opaque_schema: usize,
-    pub json_commands_without_schema: usize,
-    #[serde(rename = "verified_scope_json_commands_total")]
-    pub verified_scope_json_commands_total: usize,
-    #[serde(rename = "verified_scope_json_commands_with_schema")]
-    pub verified_scope_json_commands_with_schema: usize,
-    #[serde(rename = "verified_scope_json_commands_with_accepted_opaque_schema")]
-    pub verified_scope_json_commands_with_accepted_opaque_schema: usize,
-    #[serde(rename = "verified_scope_json_commands_without_schema")]
-    pub verified_scope_json_commands_without_schema: usize,
-    pub advanced_scope_json_commands_total: usize,
-    pub advanced_scope_json_commands_with_accepted_opaque_schema: usize,
-    pub mutating_commands_total: usize,
-    pub mutating_commands_with_schema: usize,
-    pub mutating_commands_with_accepted_opaque_schema: usize,
-    pub mutating_commands_without_schema: usize,
-    #[serde(rename = "verified_scope_mutating_commands_total")]
-    pub verified_scope_mutating_commands_total: usize,
-    #[serde(rename = "verified_scope_mutating_commands_with_schema")]
-    pub verified_scope_mutating_commands_with_schema: usize,
-    #[serde(rename = "verified_scope_mutating_commands_with_accepted_opaque_schema")]
-    pub verified_scope_mutating_commands_with_accepted_opaque_schema: usize,
-    #[serde(rename = "verified_scope_mutating_commands_without_schema")]
-    pub verified_scope_mutating_commands_without_schema: usize,
-    pub advanced_scope_mutating_commands_total: usize,
-    pub advanced_scope_mutating_commands_with_accepted_opaque_schema: usize,
-    pub schema_verbs_total: usize,
-    pub documented_schema_verbs_total: usize,
-    pub undocumented_schema_verbs_total: usize,
-    pub opaque_schema_verbs_total: usize,
-    pub accepted_opaque_schema_verbs_total: usize,
-    pub unaccepted_opaque_schema_verbs_total: usize,
-    pub supports_op_id_total: usize,
-    pub jsonl_commands_total: usize,
-    pub missing_schema_examples: Vec<String>,
-    pub missing_mutating_schema_examples: Vec<String>,
-    #[serde(rename = "verified_scope_missing_schema_examples")]
-    pub verified_scope_missing_schema_examples: Vec<String>,
-    #[serde(rename = "verified_scope_accepted_opaque_schema_examples")]
-    pub verified_scope_accepted_opaque_schema_examples: Vec<String>,
-    pub advanced_scope_accepted_opaque_schema_examples: Vec<String>,
-    pub accepted_opaque_schema_examples: Vec<String>,
-    pub unaccepted_opaque_schema_examples: Vec<String>,
-    pub undocumented_schema_examples: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct VerificationCheckSchema {
-    pub name: String,
-    pub status: String,
-    pub clean: bool,
-    pub summary: String,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub recovery_commands: Vec<String>,
-    pub recovery_action_templates: Vec<ActionTemplateSchema>,
-    pub details: std::collections::BTreeMap<String, String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ActionTemplateSchema {
-    pub action: String,
-    pub argv_template: Vec<String>,
-    pub required_inputs: Vec<String>,
-    /// Whether an agent may replace placeholders in `argv_template`.
-    ///
-    /// When `agent_may_fill` is false, treat `action` and `argv_template` as
-    /// display-only: do not substitute `<name>`/`<url>` placeholders. Surface
-    /// the template to a human or discard it. Substituting and running it will
-    /// pass literal `<name>` to Heddle and fail.
-    pub agent_may_fill: bool,
-}
-
 // ---- show -----------------------------------------------------------------
 
 // ---- thread list ----------------------------------------------------------
@@ -690,7 +577,7 @@ pub struct DoctorSchema {
     pub storage_model: String,
     pub hosted_enabled: bool,
     #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
+    pub trust: RepositoryVerificationState,
     pub operation: OpaqueObject,
     pub remote_tracking: OpaqueObject,
     pub thread: Option<Value>,
@@ -699,7 +586,7 @@ pub struct DoctorSchema {
     pub workspace: Value,
     pub health: Value,
     pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
+    pub recommended_action_template: Option<ActionTemplate>,
     pub recovery_commands: Vec<String>,
     pub profile: Option<Value>,
 }
@@ -750,16 +637,16 @@ pub struct ErrorEnvelopeSchema {
     pub would_change: String,
     pub preserved: String,
     pub primary_command: String,
-    pub primary_command_template: NullableActionTemplateSchema,
+    pub primary_command_template: NullableActionTemplate,
     pub recovery_commands: Vec<String>,
-    pub recovery_action_templates: Vec<ActionTemplateSchema>,
+    pub recovery_action_templates: Vec<ActionTemplate>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(untagged)]
 #[allow(dead_code)]
-pub enum NullableActionTemplateSchema {
-    Template(ActionTemplateSchema),
+pub enum NullableActionTemplate {
+    Template(ActionTemplate),
     Null(()),
 }
 
@@ -1192,9 +1079,9 @@ mod tests {
             .or_else(|| schema.get("definitions"))
             .and_then(|defs| {
                 defs.get("ActionTemplate")
-                    .or_else(|| defs.get("ActionTemplateSchema"))
+                    .or_else(|| defs.get("ActionTemplate"))
             })
-            .expect("verify schema includes ActionTemplateSchema definition");
+            .expect("verify schema includes ActionTemplate definition");
         let description = property_schema(action_template, "agent_may_fill")
             .get("description")
             .and_then(Value::as_str)
