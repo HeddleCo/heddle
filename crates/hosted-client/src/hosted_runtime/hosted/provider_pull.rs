@@ -1455,7 +1455,7 @@ impl ProviderStreamReader {
         }
         match self.next_frame().await? {
             OwnedProviderFrame::Message(message) => Ok(message),
-            OwnedProviderFrame::Failure(failure) => Err(ProtocolError::Remote(failure.message)),
+            OwnedProviderFrame::Failure(failure) => Err(hosted_to_protocol_error(failure.into())),
             OwnedProviderFrame::RawBody(_) => Err(ProtocolError::InvalidState(
                 "provider sent a raw body where control was required".to_string(),
             )),

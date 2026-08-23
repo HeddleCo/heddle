@@ -110,6 +110,12 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
     // Creating an invite spends the authenticated member's allowance, so a
     // derived agent must not issue invitations on the parent's behalf.
     ("CreateSignupInvite", AgentAuthOperationDisposition::Denied),
+    // Owner-view invite listing is a read bound to the calling principal's
+    // account set, like ListServiceAccounts.
+    (
+        "ListSignupInvites",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
     // Invite claim registers a client-minted signup root; derived agents
     // must not consume invite codes on behalf of a parent principal.
     ("ClaimSignupInvite", AgentAuthOperationDisposition::Denied),

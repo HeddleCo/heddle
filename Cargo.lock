@@ -2103,6 +2103,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "heddle-api"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b73897e5aa882d05c2506cbe69239fb92b72b30b9074a96949fca97c2a826556"
+dependencies = [
+ "blake3",
+ "bytes",
+ "hex",
+ "prost 0.14.1",
+ "prost-build",
+ "prost-reflect",
+ "prost-types 0.14.1",
+ "protoc-bin-vendored",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "heddle-ci-config"
 version = "0.14.0"
 dependencies = [
@@ -2145,7 +2163,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "heddle-agent-relay",
- "heddle-api",
+ "heddle-api 0.14.0",
  "heddle-ci-config",
  "heddle-ci-engine",
  "heddle-cli-args",
@@ -2209,7 +2227,7 @@ version = "0.14.0"
 dependencies = [
  "anyhow",
  "clap",
- "heddle-api",
+ "heddle-api 0.14.0",
  "heddle-config",
  "heddle-objects",
  "heddle-repo",
@@ -2365,7 +2383,7 @@ dependencies = [
  "chrono",
  "futures",
  "getrandom 0.4.3",
- "heddle-api",
+ "heddle-api 0.14.0",
  "heddle-cli-args",
  "heddle-cli-contract",
  "heddle-cli-render",
@@ -2599,7 +2617,7 @@ dependencies = [
  "base32",
  "blake3",
  "chrono",
- "heddle-api",
+ "heddle-api 0.14.0",
  "heddle-crypto",
  "heddle-objects",
  "heddle-oplog",
@@ -2731,7 +2749,7 @@ dependencies = [
  "biscuit-auth",
  "ed25519-dalek 3.0.0",
  "getrandom 0.2.17",
- "heddle-api",
+ "heddle-api 0.12.0",
  "hex",
  "prost 0.14.1",
  "serde",

@@ -39,7 +39,7 @@ crypto = { path = "../crypto", package = "heddle-crypto", version = "0.14" }
 # text auto-merge. Always-on: the merge driver and rebase replay both call
 # into it unconditionally.
 merge = { path = "../merge", package = "heddle-merge", version = "0.14" }
-api = { package = "heddle-api", version = "0.12" }
+api = { package = "heddle-api", version = "0.14" }
 config = { path = "../config", package = "heddle-config", version = "0.14" }
 hosted-client = { path = "../hosted-client", package = "heddle-hosted-client", version = "0.14", default-features = false }
 heddle-cli-args = { path = "../cli-args", version = "0.14", default-features = false }

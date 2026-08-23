@@ -12,7 +12,7 @@ categories.workspace = true
 [dependencies]
 anyhow.workspace = true
 base32.workspace = true
-api = { package = "heddle-api", version = "0.12" }
+api = { package = "heddle-api", version = "0.14" }
 blake3.workspace = true
 chrono.workspace = true
 hex.workspace = true
