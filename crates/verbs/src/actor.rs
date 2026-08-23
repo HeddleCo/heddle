@@ -18,13 +18,14 @@ use repo::{
     ActorChainNode, ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
     Repository,
 };
+use schemars::JsonSchema;
 use serde::Serialize;
 
 /// Machine JSON for `heddle presence list` domain fields (stable field names).
 ///
 /// CLI may wrap this with a `verification` envelope; domain fields here match
 /// the public `actor_list` contract (`output_kind`, `actors`, `active_only`).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ActorListReport {
     pub output_kind: &'static str,
     pub actors: Vec<ActorEntryReport>,
@@ -35,7 +36,7 @@ pub struct ActorListReport {
 ///
 /// Domain portion only — CLI supplies `output_kind` and `verification` when
 /// rendering machine output.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ActorShowReport {
     pub actor: ActorEntryReport,
 }
@@ -44,7 +45,7 @@ pub struct ActorShowReport {
 ///
 /// Field names match the existing CLI contract (`session_id`, `thread`,
 /// `status`, `actor_chain`, …).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ActorEntryReport {
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -91,7 +92,7 @@ pub struct ActorEntryReport {
 }
 
 /// One hop in an actor ancestry chain for machine JSON.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, JsonSchema)]
 pub struct ActorChainEntry {
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -21,7 +21,6 @@ use verbs::{
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    command_catalog::ActionTemplate,
     next_action::{NextActionValidationContext, write_full_command_json},
     thread::find_thread_summary,
     verification_health::{
@@ -30,38 +29,12 @@ use super::{
 };
 use crate::cli::{Cli, should_output_json};
 
-#[derive(Serialize)]
-struct ActorSingleOutput {
-    output_kind: &'static str,
-    presence: ActorEntryReport,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize)]
-struct ActorListOutput {
-    output_kind: &'static str,
-    presence: Vec<ActorEntryReport>,
-    active_only: bool,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize)]
-struct ActorDoneOutput {
-    output_kind: &'static str,
-    session_id: String,
-    status: &'static str,
-    thread: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    coordination_status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    recommended_action: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    recommended_action_template: Option<ActionTemplate>,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
+// The presence wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::agent::{
+    ActorDoneOutput, ActorEnvironmentOutput, ActorExplainDetectedOutput, ActorListOutput,
+    ActorSingleOutput, DetectedActorOutput,
+};
 
 #[derive(Serialize)]
 struct ActorExplainOutput {
@@ -89,64 +62,6 @@ struct ActorExplainOutput {
     winning_rule: Option<String>,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize)]
-struct ActorExplainDetectedOutput {
-    output_kind: &'static str,
-    attached: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    active_presence: Option<serde_json::Value>,
-    reason: &'static str,
-    repository: String,
-    detected: DetectedActorOutput,
-    environment: ActorEnvironmentOutput,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    recommended_action: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    recommended_action_template: Option<ActionTemplate>,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize)]
-struct DetectedActorOutput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    harness: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking_level: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    policy: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    native_actor_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    native_parent_actor_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    native_instance_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    probe_source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    probe_confidence: Option<f32>,
-}
-
-#[derive(Serialize)]
-struct ActorEnvironmentOutput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent_provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent_model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent_policy: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    principal_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    principal_email: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    signals: Vec<String>,
 }
 
 pub async fn list(cli: &Cli, active_only: bool) -> Result<()> {

@@ -26,6 +26,11 @@ use super::command_catalog;
 use super::doctor_docs::DocsReport;
 use super::doctor_schemas::SchemaReport;
 use super::init_output::InitOutput;
+use super::wire::agent::{
+    ActorDoneOutput, ActorExplainDetectedOutput, ActorListOutput, ActorSingleOutput,
+    AgentFanoutOutput, AgentReservationEnvelope, AgentReservationListOutput, AgentTaskEnvelope,
+    AgentTaskListOutput, SegmentEnvelope, SessionEnvelope, SessionListOutput,
+};
 use super::wire::thread::{
     ApprovalOutput, ApprovalRevokeOutput, EligibilityOutput, ThreadAbsorbOutput,
     ThreadCleanupOutput, ThreadOpOutput, ThreadRecordOutput, ThreadResolveOutput,
@@ -147,26 +152,26 @@ schema_registry! {
     (&["doctor"], DoctorSchema),
     (&["doctor docs"], DocsReport),
     (&["doctor schemas"], SchemaReport),
-    (&["agent presence show"], AgentPresenceSingleSchema),
-    (&["agent presence list"], AgentPresenceListSchema),
-    (&["agent presence complete"], AgentPresenceCompleteSchema),
-    (&["agent presence explain"], AgentPresenceExplainSchema),
-    (&["agent reserve", "agent heartbeat", "agent release"], AgentReservationEnvelopeSchema),
+    (&["agent presence show"], ActorSingleOutput),
+    (&["agent presence list"], ActorListOutput),
+    (&["agent presence complete"], ActorDoneOutput),
+    (&["agent presence explain"], ActorExplainDetectedOutput),
+    (&["agent reserve", "agent heartbeat", "agent release"], AgentReservationEnvelope),
     (&["agent capture"], SnapshotOutput),
     (&["agent ready"], ReadyOutput),
-    (&["agent list"], AgentReservationListSchema),
-    (&["agent task create", "agent task show", "agent task update"], AgentTaskEnvelopeSchema),
-    (&["agent task list"], AgentTaskListSchema),
-    (&["agent fanout plan", "agent fanout start"], AgentFanoutSchema),
+    (&["agent list"], AgentReservationListOutput),
+    (&["agent task create", "agent task show", "agent task update"], AgentTaskEnvelope),
+    (&["agent task list"], AgentTaskListOutput),
+    (&["agent fanout plan", "agent fanout start"], AgentFanoutOutput),
     (&["auth logout"], AuthLogoutSchema),
     (&["auth status"], AuthStatusSchema),
     (&["auth trust show", "auth trust replace"], AuthTrustSchema),
     (&["whoami"], WhoamiSchema),
     (&["auth create-service-token"], AuthCreateServiceTokenSchema),
     (&["identity ensure", "identity claim-link"], IdentityOutputSchema),
-    (&["agent provenance begin", "agent provenance end", "agent provenance show"], AgentProvenanceEnvelopeSchema),
-    (&["agent provenance segment"], AgentProvenanceSegmentEnvelopeSchema),
-    (&["agent provenance list"], AgentProvenanceListSchema),
+    (&["agent provenance begin", "agent provenance end", "agent provenance show"], SessionEnvelope),
+    (&["agent provenance segment"], SegmentEnvelope),
+    (&["agent provenance list"], SessionListOutput),
     (&["watch"], WatchLineOutput),
     (&["integration list", "integration doctor"], Vec<IntegrationStatusOutput>),
     (&["maintenance inspect"], MaintenanceInspectWire),
@@ -658,298 +663,7 @@ pub struct IdentityOutputSchema {
     pub claim_url: Option<String>,
 }
 
-
-
-
-
-
-
-
-
 // ---- core loop write/read helpers -----------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentPresenceSingleSchema {
-    pub output_kind: String,
-    pub presence: ActorEntrySchema,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentPresenceListSchema {
-    pub output_kind: String,
-    pub presence: Vec<ActorEntrySchema>,
-    pub active_only: bool,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentPresenceCompleteSchema {
-    pub output_kind: String,
-    pub session_id: String,
-    pub status: String,
-    pub thread: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coordination_status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommended_action: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentPresenceExplainSchema {
-    pub output_kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attached: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_presence: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repository: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detected: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommended_action: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heddle_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_instance_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_actor_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_parent_actor_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_instance_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe_source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe_confidence: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attach_reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attach_precedence: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub winning_rule: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ActorEntrySchema {
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_instance_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_actor_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_parent_actor_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_instance_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heddle_session_id: Option<String>,
-    pub thread: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread_id: Option<String>,
-    pub base_state: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_level: Option<String>,
-    pub usage_summary: Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_progress_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub report_flush_state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attach_reason: Option<String>,
-    pub attach_precedence: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub winning_attach_rule: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe_source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe_confidence: Option<f32>,
-    pub status: String,
-    pub started_at: String,
-    pub actor_chain: Vec<ActorChainEntrySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ActorChainEntrySchema {
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_actor_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_parent_actor_key: Option<String>,
-    pub thread: String,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentReservationEnvelopeSchema {
-    pub reservation: AgentReservationSchema,
-    pub token: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentReservationListSchema {
-    pub reservations: Vec<AgentReservationSchema>,
-    pub alive_only: bool,
-    pub thread: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentReservationSchema {
-    pub lease_id: String,
-    pub actor_session_id: Option<String>,
-    pub thread: String,
-    pub anchor_state: Option<String>,
-    pub anchor_root: Option<String>,
-    pub task_assignment_id: Option<String>,
-    pub status: String,
-    pub path: Option<String>,
-    pub heartbeat_at: String,
-    pub lease_expires_at: String,
-    pub liveness: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentTaskEnvelopeSchema {
-    pub output_kind: String,
-    pub task: AgentTaskSchema,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentTaskListSchema {
-    pub output_kind: String,
-    pub tasks: Vec<AgentTaskSchema>,
-    pub thread: Option<String>,
-    pub status: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentTaskSchema {
-    pub schema_version: u32,
-    pub task_id: String,
-    pub title: String,
-    pub body: String,
-    pub status: String,
-    pub target_thread: String,
-    pub base_state: Option<String>,
-    pub base_root: Option<String>,
-    pub parent_task_id: Option<String>,
-    pub coordination_discussion_id: Option<String>,
-    pub allow_offline: bool,
-    pub delegated_by: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub completed_at: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentFanoutSchema {
-    pub output_kind: String,
-    pub title: String,
-    pub parent_thread: String,
-    pub base_state: String,
-    pub base_root: String,
-    pub coordination_discussion_id: Option<String>,
-    pub parent_task: Option<AgentTaskSchema>,
-    pub lanes: Vec<AgentFanoutLaneSchema>,
-    pub commands: Vec<AgentFanoutCommandSchema>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentFanoutLaneSchema {
-    pub thread: String,
-    pub path: String,
-    pub title: String,
-    pub task: Option<AgentTaskSchema>,
-    pub session_id: Option<String>,
-    pub status: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentFanoutCommandSchema {
-    pub lane_thread: String,
-    pub command: String,
-    pub argv: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentProvenanceEnvelopeSchema {
-    pub session: SessionEntrySchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentProvenanceSegmentEnvelopeSchema {
-    pub segment: SessionSegmentSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentProvenanceListSchema {
-    pub sessions: Vec<SessionEntrySchema>,
-    pub active_only: bool,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SessionEntrySchema {
-    pub id: String,
-    pub principal: String,
-    pub created_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ended_at: Option<String>,
-    pub active: bool,
-    pub segments: Vec<SessionSegmentSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SessionSegmentSchema {
-    pub id: String,
-    pub provider: String,
-    pub model: String,
-    pub started_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy_id: Option<String>,
-}
 
 /// Operation banner — kept opaque because the underlying
 /// [`repo::RepositoryOperationStatus`] is a workspace type and its
@@ -1086,27 +800,9 @@ pub struct ActionTemplateSchema {
 
 // ---- review ---------------------------------------------------------------
 
-
-
-
-
-
-
-
 // ---- command/schema introspection ----------------------------------------
 
-
-
-
-
-
-
 // ---- git projection ops -----------------------------------------------------------
-
-
-
-
-
 
 // ---- git overlay diagnostics ---------------------------------------------
 

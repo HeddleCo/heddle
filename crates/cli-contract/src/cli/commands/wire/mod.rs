@@ -15,6 +15,7 @@
 //! private shape struct in the same file, so the schema and the serializer
 //! stay one maintenance unit.
 
+pub mod agent;
 pub mod bridge;
 pub mod collab;
 pub mod core_loop;
@@ -25,6 +26,13 @@ pub mod ready;
 pub mod remote;
 pub mod thread;
 
+pub use agent::{
+    ActorDoneOutput, ActorEnvironmentOutput, ActorExplainDetectedOutput, ActorListOutput,
+    ActorSingleOutput, AgentFanoutCommandOutput, AgentFanoutLaneOutput, AgentFanoutOutput,
+    AgentReservationEnvelope, AgentReservationListOutput, AgentReservationOutput,
+    AgentTaskEnvelope, AgentTaskListOutput, AgentTaskOutput, DetectedActorOutput, SegmentEnvelope,
+    SegmentOutput, SessionEnvelope, SessionListOutput, SessionOutput,
+};
 pub use bridge::{
     ExportGitOutput, ExportedRefOutput, ImportGitOutput, IntegrationStatusOutput,
     LossyImportEntryOutput, RepackOutput, SyncGitOutput,
