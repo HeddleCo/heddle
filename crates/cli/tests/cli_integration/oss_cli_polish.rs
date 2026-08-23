@@ -10774,16 +10774,27 @@ fn exit_codes_coverage_doc_lists_catalogued_commands() {
         .collect();
     swept.sort();
 
-    // Extract the bullet list between the `## Coverage` heading and the
-    // following blank-line-then-prose paragraph.
+    // Extract the bullet list under the `## Coverage` heading; a single
+    // bullet may name several commands (`a`, `b`).
     let coverage = doc
         .split("## Coverage")
         .nth(1)
         .expect("Coverage section exists");
     let listed: Vec<String> = coverage
         .lines()
-        .filter_map(|line| line.strip_prefix("- `"))
-        .map(|line| line.trim_end_matches('`').to_string())
+        .skip_while(|line| !line.starts_with("- `"))
+        .take_while(|line| line.starts_with("- `"))
+        .flat_map(|line| {
+            line.split("`, `")
+                .map(|part| {
+                    part.trim()
+                        .trim_start_matches("- `")
+                        .trim_matches('`')
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|part| !part.is_empty())
         .collect();
 
     let mut listed_sorted = listed.clone();
