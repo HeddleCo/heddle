@@ -44,6 +44,35 @@ struct AuthLogoutOutput {
     device_identity_removed: bool,
 }
 
+/// JSON contract for `auth login` (heddle#1392): the two commands most
+/// likely scripted on a fresh machine must honor the global
+/// `--output json` contract like every other catalogued verb.
+#[derive(Serialize)]
+struct AuthLoginOutput {
+    output_kind: &'static str,
+    server: String,
+    authenticated: bool,
+    subject: String,
+    credential_id: Option<String>,
+    expires_at: Option<String>,
+}
+
+/// JSON contract for `auth derive-agent` (heddle#1392). Token and proof
+/// key material never appears here — only identifiers, ceilings, and the
+/// optional `.hcred` path.
+#[derive(Serialize)]
+struct AuthDeriveAgentOutput {
+    output_kind: &'static str,
+    server: String,
+    agent_id: String,
+    expires_at: Option<String>,
+    template: Option<String>,
+    allowed_operations: Vec<String>,
+    scopes: Vec<String>,
+    /// Absolute path of the written `<name>.hcred` file when `--out` was
+    /// given; `null` when the child was installed into the keystore.
+    credential_path: Option<String>,
+}
 #[derive(Serialize)]
 struct AuthStatusOutput {
     output_kind: &'static str,
@@ -96,12 +125,26 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
         } => match credential {
             Some(credential) => {
                 let subject = install_credential_file(&credential)?;
-                println!("Authenticated as {subject}. Credentials saved.");
+                if ctx.should_output_json(None) {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "output_kind": "auth_login",
+                            "server": resolve_server(server.as_deref())?,
+                            "authenticated": true,
+                            "subject": subject,
+                            "credential_id": null,
+                            "expires_at": null,
+                        })
+                    );
+                } else {
+                    println!("Authenticated as {subject}. Credentials saved.");
+                }
                 Ok(())
             }
             None => {
                 let server = resolve_server(server.as_deref())?;
-                cmd_auth_login(&server, open_browser).await
+                cmd_auth_login(ctx, &server, open_browser).await
             }
         },
         AuthCommand::Logout { server } => cmd_auth_logout(ctx, server.as_deref()),
@@ -116,6 +159,7 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
             template,
             out,
         } => cmd_auth_derive_agent(
+            ctx,
             &server,
             agent_id,
             ttl_secs,
@@ -217,6 +261,7 @@ fn emit_auth_trust(ctx: &dyn CliContext, output: AuthTrustOutput) -> Result<()> 
 /// it as the active credential or write a portable token + child-key bundle.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_auth_derive_agent(
+    ctx: &dyn CliContext,
     server: &str,
     agent_id: Option<String>,
     ttl_secs: u64,
@@ -329,6 +374,25 @@ pub(crate) fn cmd_auth_derive_agent(
             provenance: Some(provenance),
         };
         credential_file::write_credential_file(out, &verified)?;
+        if ctx.should_output_json(None) {
+            println!(
+                "{}",
+                serde_json::to_string(&AuthDeriveAgentOutput {
+                    output_kind: "auth_derive_agent",
+                    server: server.to_string(),
+                    agent_id: agent_id.clone(),
+                    expires_at: Some(expires_at.to_rfc3339()),
+                    template: template.map(|t| t.as_str().to_string()),
+                    allowed_operations: allowed_operations.clone(),
+                    scopes: declared_scopes
+                        .iter()
+                        .map(|(kind, path)| format!("{kind}:{path}"))
+                        .collect(),
+                    credential_path: Some(out.display().to_string()),
+                })?
+            );
+            return Ok(());
+        }
         println!("Agent credential {agent_id} written to {}.", out.display());
         println!("Parent source: {}", parent.source.label());
         if let Some(template) = template {
@@ -355,6 +419,25 @@ pub(crate) fn cmd_auth_derive_agent(
         },
     )?;
 
+    if ctx.should_output_json(None) {
+        println!(
+            "{}",
+            serde_json::to_string(&AuthDeriveAgentOutput {
+                output_kind: "auth_derive_agent",
+                server: server.to_string(),
+                agent_id,
+                expires_at: Some(expires_at.to_rfc3339()),
+                template: template.map(|t| t.as_str().to_string()),
+                allowed_operations: allowed_operations.clone(),
+                scopes: declared_scopes
+                    .iter()
+                    .map(|(kind, path)| format!("{kind}:{path}"))
+                    .collect(),
+                credential_path: None,
+            })?
+        );
+        return Ok(());
+    }
     if !quiet {
         println!("Derived and installed agent token {agent_id} for {server}.");
         println!("Parent source: {}", parent.source.label());
@@ -657,7 +740,7 @@ pub(crate) fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetada
 }
 
 /// Authenticate via device authorization flow.
-async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
+async fn cmd_auth_login(ctx: &dyn CliContext, server: &str, open_browser: bool) -> Result<()> {
     // 1. Generate Ed25519 keypair for device binding.
     let signer = Ed25519Signer::generate()
         .map_err(|e| anyhow::anyhow!("failed to generate keypair: {e}"))?;
@@ -772,6 +855,21 @@ async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
     if let Err(error) = repo::identity::link_device_key(&public_key_bytes, &private_key_pem, server)
     {
         tracing::warn!(%error, "could not record device signing identity; captures will use the per-repo local key");
+    }
+
+    if ctx.should_output_json(None) {
+        println!(
+            "{}",
+            serde_json::to_string(&AuthLoginOutput {
+                output_kind: "auth_login",
+                server: server.to_string(),
+                authenticated: true,
+                subject: root.subject.clone(),
+                credential_id: root.credential_id.clone(),
+                expires_at: Some(root.expires_at.to_rfc3339()),
+            })?
+        );
+        return Ok(());
     }
 
     println!();
@@ -1893,6 +1991,7 @@ mod tests {
             credentials::store_server_credential(server, parent).expect("store parent");
 
             cmd_auth_derive_agent(
+                &TextCtx,
                 server,
                 Some("agent-parent".to_string()),
                 3600,
@@ -1942,6 +2041,7 @@ mod tests {
             );
 
             cmd_auth_derive_agent(
+                &TextCtx,
                 server,
                 Some("agent-child".to_string()),
                 600,
@@ -1981,6 +2081,7 @@ mod tests {
             );
 
             let error = cmd_auth_derive_agent(
+                &TextCtx,
                 server,
                 Some("agent-widening".to_string()),
                 300,
@@ -2004,6 +2105,7 @@ mod tests {
             let out = repo::identity::heddle_home_dir().join("agent-export.hcred");
 
             cmd_auth_derive_agent(
+                &TextCtx,
                 server,
                 Some("agent-export".to_string()),
                 3600,
@@ -2052,6 +2154,7 @@ mod tests {
             );
 
             let error = cmd_auth_derive_agent(
+                &TextCtx,
                 server,
                 Some("agent-export-again".to_string()),
                 3600,

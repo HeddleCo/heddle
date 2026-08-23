@@ -5,6 +5,12 @@ superseded-by: ADR 0046
 
 # Workflow Command Vocabulary
 
+> **Status note (2026-08, heddle#1392):** although this file is marked
+> superseded, its prose still names `checkpoint` as a "public Git-facing
+> milestone primitive". That is wrong: ADR 0046 (accepted) forbids exposing
+> `checkpoint` and no such public verb exists in the command catalog. The
+> everyday save is `capture`; `commit` is the narrow Git Overlay boundary.
+
 This decision preferred `commit` as the everyday human save, with `capture`
 as an advanced granular savepoint. Shipped CLI and ADR 0046 / ADR 0047 made
 `capture` the save boundary. `commit` is the Git Overlay write to `.git`;
