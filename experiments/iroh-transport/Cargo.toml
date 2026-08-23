@@ -11,11 +11,11 @@ publish = false
 api = { package = "heddle-api", version = "0.2.1" }
 bytes.workspace = true
 iroh.workspace = true
-objects = { path = "../../crates/objects", package = "heddle-objects" }
+objects.workspace = true
 prost.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-wire = { path = "../../crates/wire", package = "heddle-wire" }
+wire = { workspace = true, features = ["zstd"] }
 
 [dev-dependencies]
 tempfile.workspace = true
