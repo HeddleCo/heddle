@@ -16,7 +16,7 @@ name = "hosted_client"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-api = { package = "heddle-api", version = "0.12", optional = true }
+api = { package = "heddle-api", version = "0.14", optional = true }
 base64.workspace = true
 biscuit-auth = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }

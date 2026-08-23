@@ -394,6 +394,27 @@ fn remote_failure_detail(
             rule: value.rule,
             human_verification_can_override: value.human_verification_can_override,
         },
+        Some(Context::Stream(value)) => {
+            let hint = value
+                .error
+                .as_deref()
+                .and_then(|error| error.context.as_ref());
+            let (retry_after, cursor) = match hint {
+                Some(Context::Retry(advice)) => (advice.retry_after.map(remote_duration), None),
+                Some(Context::Cursor(cursor)) => (None, Some(remote_cursor(cursor.clone()))),
+                _ => (None, None),
+            };
+            wire::RemoteFailureDetail::Stream {
+                code: remote_failure_code(value.code()),
+                message: value.message,
+                retry_after,
+                cursor,
+            }
+        }
+        Some(Context::Unknown(value)) => wire::RemoteFailureDetail::Unknown {
+            type_url: value.type_url,
+            value: value.value,
+        },
         Some(Context::HumanVerification(_))
         | Some(Context::AmbiguousChangeId(_))
         | Some(Context::Signup(_))
@@ -511,6 +532,7 @@ pub(super) fn hosted_role_proto_to_string(role: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use api::heddle::api::v1alpha1::{CallFailure, CallFailureCode, StreamFailure};
 
     #[test]
     fn grant_repository_targets_preserve_both_reference_variants() {
@@ -1049,5 +1071,236 @@ mod tests {
         };
         let descriptor = to_proto_object_info(&info);
         assert_eq!(descriptor_id(&descriptor), descriptor_id_from_info(&info));
+    }
+
+    /// Push a `CallFailure` through heddle's unary wire path: framing encode,
+    /// framing decode, `HostedError`, then the typed detail conversion.
+    fn decoded_failure_details(failure: &CallFailure) -> Vec<wire::RemoteFailureDetail> {
+        use api::framing::{decode_response_frame, encode_failure_response};
+
+        let encoded = encode_failure_response(failure).expect("encode failure frame");
+        let api::framing::ResponseFrame::Failure(decoded) =
+            decode_response_frame(&encoded).expect("decode failure frame")
+        else {
+            panic!("expected a failure frame");
+        };
+        match hosted_to_protocol_error(decoded.into()) {
+            ProtocolError::RemoteFailure { details, .. } => details,
+            other => panic!("expected remote failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_known_failure_detail_arm_survives_heddles_wire_path() {
+        use api::heddle::api::v1alpha1::{
+            CapabilityRequirement, ConflictDetail, CursorFailure, ErrorDetail, ErrorReason,
+            PolicyDenial, RetryAdvice, UnknownDetail, cursor_failure, error_detail,
+        };
+        use prost::Message as _;
+
+        let detail = |context| ErrorDetail {
+            reason: ErrorReason::Unspecified as i32,
+            resource: String::new(),
+            field: String::new(),
+            context: Some(context),
+        };
+        let failure = |context| CallFailure {
+            code: CallFailureCode::FailedPrecondition as i32,
+            message: "call failed".to_string(),
+            error: Some(detail(context)),
+        };
+
+        let retry = failure(error_detail::Context::Retry(RetryAdvice {
+            retry_after: Some(prost_types::Duration {
+                seconds: 3,
+                nanos: 0,
+            }),
+        }));
+        assert_eq!(
+            decoded_failure_details(&retry),
+            vec![wire::RemoteFailureDetail::Retry {
+                retry_after: Some(wire::RemoteDuration {
+                    seconds: 3,
+                    nanos: 0
+                }),
+            }]
+        );
+
+        let conflict = failure(error_detail::Context::Conflict(ConflictDetail {
+            resource: "refs/heads/main".to_string(),
+            expected_version: "old".to_string(),
+            actual_version: "new".to_string(),
+        }));
+        assert_eq!(
+            decoded_failure_details(&conflict),
+            vec![wire::RemoteFailureDetail::Conflict {
+                resource: "refs/heads/main".to_string(),
+                expected_version: "old".to_string(),
+                actual_version: "new".to_string(),
+            }]
+        );
+
+        let cursor = failure(error_detail::Context::Cursor(CursorFailure {
+            reason: cursor_failure::Reason::Stale as i32,
+            expired_at: None,
+            restart_cursor: "page-42".to_string(),
+        }));
+        assert_eq!(
+            decoded_failure_details(&cursor),
+            vec![wire::RemoteFailureDetail::Cursor(
+                wire::RemoteCursorFailure {
+                    reason: wire::RemoteCursorReason::Stale,
+                    expired_at: None,
+                    restart_cursor: "page-42".to_string(),
+                }
+            )]
+        );
+
+        let capability = failure(error_detail::Context::Capability(CapabilityRequirement {
+            capabilities: vec!["repo.pull".to_string()],
+            ..Default::default()
+        }));
+        assert_eq!(
+            decoded_failure_details(&capability),
+            vec![wire::RemoteFailureDetail::CapabilityRequirement {
+                capabilities: vec!["repo.pull".to_string()],
+            }]
+        );
+
+        let policy = failure(error_detail::Context::Policy(PolicyDenial {
+            policy_id: "retention".to_string(),
+            rule: "no-purge".to_string(),
+            human_verification_can_override: false,
+            ..Default::default()
+        }));
+        assert_eq!(
+            decoded_failure_details(&policy),
+            vec![wire::RemoteFailureDetail::PolicyDenial {
+                policy_id: "retention".to_string(),
+                rule: "no-purge".to_string(),
+                human_verification_can_override: false,
+            }]
+        );
+
+        // An arm from a newer contract version passes through losslessly and
+        // its opaque payload still decodes into the original typed message.
+        let future_arm = StreamFailure {
+            code: CallFailureCode::Internal as i32,
+            message: "from the future".to_string(),
+            error: None,
+        };
+        let unknown = failure(error_detail::Context::Unknown(UnknownDetail {
+            type_url: "type.googleapis.com/heddle.api.v1alpha1.StreamFailure".to_string(),
+            value: future_arm.encode_to_vec(),
+        }));
+        let details = decoded_failure_details(&unknown);
+        let wire::RemoteFailureDetail::Unknown { type_url, value } = &details[0] else {
+            panic!("unknown arm must stay unknown, got {:?}", details[0]);
+        };
+        assert_eq!(details.len(), 1);
+        assert_eq!(
+            type_url,
+            "type.googleapis.com/heddle.api.v1alpha1.StreamFailure"
+        );
+        assert_eq!(
+            &StreamFailure::decode(value.as_slice()).expect("recovered typed payload"),
+            &future_arm
+        );
+    }
+
+    #[test]
+    fn stream_failure_round_trips_with_nested_resume_hints() {
+        use api::framing::{StreamFrame, decode_stream_frame, encode_stream_failure};
+        use api::heddle::api::v1alpha1::{
+            CursorFailure, ErrorDetail, ErrorReason, RetryAdvice, cursor_failure, error_detail,
+        };
+
+        let hint = |context| ErrorDetail {
+            reason: ErrorReason::Transient as i32,
+            resource: String::new(),
+            field: String::new(),
+            context: Some(context),
+        };
+        let stream_failure = |hint_context| CallFailure {
+            code: CallFailureCode::Unavailable as i32,
+            message: "pull stream aborted".to_string(),
+            error: Some(ErrorDetail {
+                reason: ErrorReason::Transient as i32,
+                resource: String::new(),
+                field: String::new(),
+                context: Some(error_detail::Context::Stream(Box::new(StreamFailure {
+                    code: CallFailureCode::Internal as i32,
+                    message: "pack writer reset".to_string(),
+                    error: Some(Box::new(hint(hint_context))),
+                }))),
+            }),
+        };
+
+        let encoded =
+            encode_stream_failure(&stream_failure(error_detail::Context::Retry(RetryAdvice {
+                retry_after: Some(prost_types::Duration {
+                    seconds: 3,
+                    nanos: 0,
+                }),
+            })))
+            .expect("encode stream failure");
+        let Some((StreamFrame::Failure(decoded), _)) =
+            decode_stream_frame(&encoded).expect("decode stream frame")
+        else {
+            panic!("expected a stream failure frame");
+        };
+        let ProtocolError::RemoteFailure {
+            code,
+            message,
+            details,
+        } = hosted_to_protocol_error(decoded.into())
+        else {
+            panic!("expected remote failure");
+        };
+        assert_eq!(code, wire::RemoteFailureCode::Unavailable);
+        assert_eq!(message, "pull stream aborted");
+        assert_eq!(
+            details,
+            vec![wire::RemoteFailureDetail::Stream {
+                code: wire::RemoteFailureCode::Internal,
+                message: "pack writer reset".to_string(),
+                retry_after: Some(wire::RemoteDuration {
+                    seconds: 3,
+                    nanos: 0
+                }),
+                cursor: None,
+            }]
+        );
+
+        let encoded = encode_stream_failure(&stream_failure(error_detail::Context::Cursor(
+            CursorFailure {
+                reason: cursor_failure::Reason::Stale as i32,
+                expired_at: None,
+                restart_cursor: "page-42".to_string(),
+            },
+        )))
+        .expect("encode stream failure");
+        let Some((StreamFrame::Failure(decoded), _)) =
+            decode_stream_frame(&encoded).expect("decode stream frame")
+        else {
+            panic!("expected a stream failure frame");
+        };
+        let ProtocolError::RemoteFailure { details, .. } = hosted_to_protocol_error(decoded.into())
+        else {
+            panic!("expected remote failure");
+        };
+        assert_eq!(
+            details,
+            vec![wire::RemoteFailureDetail::Stream {
+                code: wire::RemoteFailureCode::Internal,
+                message: "pack writer reset".to_string(),
+                retry_after: None,
+                cursor: Some(wire::RemoteCursorFailure {
+                    reason: wire::RemoteCursorReason::Stale,
+                    expired_at: None,
+                    restart_cursor: "page-42".to_string(),
+                }),
+            }]
+        );
     }
 }
