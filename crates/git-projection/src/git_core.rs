@@ -12,14 +12,14 @@ use std::{
 
 use objects::{
     error::HeddleError,
-    object::{ContentHash, FileMode, Principal, StateId, StateIdParseError, ThreadName, Tree},
+    object::{
+        AudienceTier, ContentHash, FileMode, Principal, StateId, StateIdParseError, ThreadName,
+        Tree,
+    },
     store::ObjectStore,
 };
 use refs::Head;
-use repo::{
-    AudienceTier, GitCheckpointIntent, GitCheckpointIntentPhase, GitRefName,
-    Repository as HeddleRepository,
-};
+use repo::{GitCheckpointIntent, GitCheckpointIntentPhase, GitRefName, Repository as HeddleRepository};
 pub use repo::{
     GitRefContentNamespace as RefNamespace, GitRefKind, ParsedGitRef,
     REMOTE_NAME_FOR_LOCAL_GIT_REPO, is_reserved_git_remote_name,
@@ -1090,7 +1090,7 @@ impl<'a> GitProjection<'a> {
                 .map_err(|e| {
                     GitProjectionError::Git(format!("resolve visibility for {state_id}: {e:#}"))
                 })?;
-            if repo::visible(&tier, &repo::AudienceTier::Public)
+            if objects::object::visible(&tier, &AudienceTier::Public)
                 && super::git_notes::read_note(git_repo, git_oid)?.is_none()
                 && let Some(state) = self.heddle_repo.store().get_state(&state_id)?
             {
