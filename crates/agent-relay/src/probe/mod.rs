@@ -16,7 +16,7 @@ pub(crate) use codex::{CodexProbe, codex_session_probe_metadata};
 pub(crate) use opencode::OpenCodeProbe;
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct HarnessProbeInput {
+pub struct HarnessProbeInput {
     pub argv: Option<Vec<String>>,
     pub env_hints: BTreeMap<String, String>,
     pub explicit_harness: Option<String>,
@@ -33,12 +33,12 @@ pub(crate) struct HarnessProbeInput {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct HarnessAttachHints {
+pub struct HarnessAttachHints {
     pub root_actor: bool,
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct HarnessProbeResult {
+pub struct HarnessProbeResult {
     pub harness: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
