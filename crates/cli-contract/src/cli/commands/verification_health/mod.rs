@@ -794,7 +794,20 @@ fn build_machine_contract_coverage() -> MachineContractCoverage {
     let mut advanced_scope_accepted_opaque_schema_examples = Vec::new();
     let mut accepted_opaque_schema_examples = Vec::new();
 
+    // Commands behind non-default feature gates (`ci` until its
+    // constitutional promotion) stay out of the machine-contract
+    // coverage snapshot: docs/json-schemas.md bakes ONE published set of
+    // numbers, and a ci-enabled build must not drift it.
+    const NON_DEFAULT_GATED_ROOTS: &[&str] = &["ci"];
+
+    let mut catalog_commands_total = 0usize;
     for command in &commands {
+        if command.path.first().is_some_and(|root| {
+            NON_DEFAULT_GATED_ROOTS.contains(&root.as_str())
+        }) {
+            continue;
+        }
+        catalog_commands_total += 1;
         let is_verified_scope = machine_contract_verified_scope(command);
         let has_concrete_schema = command
             .schema_verbs
@@ -980,7 +993,7 @@ fn build_machine_contract_coverage() -> MachineContractCoverage {
         verified_scope: "everyday_and_agent".to_string(),
         advanced_scope: "advanced_internal_admin".to_string(),
         summary,
-        catalog_commands_total: commands.len(),
+        catalog_commands_total,
         catalog_mutating_commands_total,
         json_commands_total,
         json_mutating_commands_total: mutating_commands_total,
