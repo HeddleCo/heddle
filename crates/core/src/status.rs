@@ -15,18 +15,18 @@ use chrono::Utc;
 use objects::{
     HeddleError,
     error::Result,
-    object::{Principal, State, ThreadName, Tree},
+    object::{Principal, State, StateAttachmentBody, ThreadName, Tree},
     store::{ActorPresence, ActorPresenceStatus, ActorPresenceStore},
     worktree::{WorktreeStatus, build_worktree_ignore},
 };
 use refs::Head;
 use repo::{
-    AgentUsageSummary, CommitGraphIndex, GitImportGuidance, GitOverlayBranchTip,
-    GitOverlayOutOfBandCommits, GitRemoteTrackingStatus, RepoConfig, Repository,
-    RepositoryCapability, RepositoryOperationStatus, Thread, ThreadFreshness, ThreadImpactCategory,
-    ThreadManager, ThreadMode, ThreadState, WorktreeCompareProfile,
-    describe_thread_advice_with_initial, discover_heddle_root, is_synthetic_root,
-    refresh_thread_freshness,
+    AgentUsageSummary, CollaborationStore, CommitGraphIndex, GitImportGuidance,
+    GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitRemoteTrackingStatus, RepoConfig,
+    Repository, RepositoryCapability, RepositoryOperationStatus, StateAttachmentKind, Thread,
+    ThreadFreshness, ThreadImpactCategory, ThreadManager, ThreadMode, ThreadState,
+    WorktreeCompareProfile, describe_thread_advice_with_initial, discover_heddle_root,
+    is_synthetic_root, refresh_thread_freshness,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -208,6 +208,13 @@ pub struct StatusReport {
     pub submodules: Vec<SubmoduleInfo>,
     #[serde(default)]
     pub materialized_threads: Vec<MaterializedThreadInfo>,
+    /// Existing context surface, per heddle#1152 criterion 2: a cold reader
+    /// (or a resumed agent) should learn from `status` alone that pinned
+    /// context exists in this repository. Zero counts are still reported so
+    /// "none" is distinguishable from "unknown".
+    pub open_discussion_count: usize,
+    pub resolved_discussion_count: usize,
+    pub annotation_count: usize,
     #[serde(skip)]
     #[schemars(skip)]
     pub profile: StatusProfile,
@@ -2186,6 +2193,10 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
     let worktree_status_ms =
         native_worktree_status_ms + worktree_status_start.elapsed().as_millis();
 
+    // Context counts ride along on the short path too: `heddle status
+    // --short` is the prompt/resume surface and must still reveal existing
+    // context (heddle#1152 criterion 2).
+    let context_counts = repository_context_counts(repo);
     if opts.detail.short_path() {
         return Ok(build_short_path_report(ShortPathInputs {
             repo,
@@ -2413,6 +2424,9 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
         changes,
         submodules,
         materialized_threads,
+        open_discussion_count: context_counts.0,
+        resolved_discussion_count: context_counts.1,
+        annotation_count: context_counts.2,
         profile: StatusProfile::default(),
     };
     let late_state_ms = late_state_start.elapsed().as_millis();
@@ -2472,6 +2486,7 @@ fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
         .with_verification(&input.trust),
     );
     let worktree_clean = input.changes.is_empty();
+    let context_counts = repository_context_counts(input.repo);
     let recommended_action =
         first_save_recommendation(input.repo, input.current_state, worktree_clean)
             .unwrap_or(recommended_action);
@@ -2559,6 +2574,9 @@ fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
         changes: input.changes,
         submodules: Vec::new(),
         materialized_threads: assess_materialized_threads(input.repo),
+        open_discussion_count: context_counts.0,
+        resolved_discussion_count: context_counts.1,
+        annotation_count: context_counts.2,
         profile: input.profile,
     }
 }
@@ -3125,6 +3143,54 @@ fn fast_remote_health_for_pair(
 
 fn sley_error(err: sley::GitError) -> HeddleError {
     HeddleError::Config(err.to_string())
+}
+
+/// Existing-context counts for `heddle status` (heddle#1152 criterion 2).
+///
+/// Reads the collaboration store for open/resolved discussion counts and the
+/// current state's context attachment for the active annotation count. Any
+/// read failure degrades to zeros rather than failing `status`: surfacing
+/// context is an advisory, never a blocker. A repository with no state yet
+/// still reports its discussions.
+pub fn repository_context_counts(repo: &Repository) -> (usize, usize, usize) {
+    let mut open = 0usize;
+    let mut resolved = 0usize;
+    let mut annotations = 0usize;
+
+    if let Ok(store) = CollaborationStore::open(repo.heddle_dir())
+        && let Ok(collaboration) = store.materialize()
+    {
+        for discussion in collaboration.discussions.values() {
+            if discussion.resolution.is_some() {
+                resolved += 1;
+            } else {
+                open += 1;
+            }
+        }
+    }
+
+    if let Ok(Some(state)) = repo.current_state_for_worktree_status()
+        && let Ok(Some(attachment)) =
+            repo.latest_state_attachment(&state.state_id, StateAttachmentKind::Context)
+        && let StateAttachmentBody::Context(context_root) = attachment.body
+        && let Ok(entries) = repo.list_context_entries(&context_root, None)
+    {
+        annotations = entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .blob
+                    .annotations
+                    .iter()
+                    .filter(|annotation| {
+                        annotation.status == objects::object::AnnotationStatus::Active
+                    })
+                    .count()
+            })
+            .sum();
+    }
+
+    (open, resolved, annotations)
 }
 
 pub fn assess_materialized_threads(repo: &Repository) -> Vec<MaterializedThreadInfo> {
