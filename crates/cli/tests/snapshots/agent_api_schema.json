@@ -25,7 +25,7 @@
   },
   "AgentFanoutLaneOutput": {
     "$defs": {
-      "AgentTaskOutput": {
+      "AgentTaskSchema": {
         "properties": {
           "allow_offline": {
             "type": "boolean"
@@ -130,7 +130,7 @@
       "task": {
         "anyOf": [
           {
-            "$ref": "#/$defs/AgentTaskOutput"
+            "$ref": "#/$defs/AgentTaskSchema"
           },
           {
             "type": "null"
@@ -236,7 +236,7 @@
           "task": {
             "anyOf": [
               {
-                "$ref": "#/$defs/AgentTaskOutput"
+                "$ref": "#/$defs/AgentTaskSchema"
               },
               {
                 "type": "null"
@@ -264,7 +264,7 @@
         ],
         "type": "object"
       },
-      "AgentTaskOutput": {
+      "AgentTaskSchema": {
         "properties": {
           "allow_offline": {
             "type": "boolean"
@@ -831,7 +831,7 @@
       "parent_task": {
         "anyOf": [
           {
-            "$ref": "#/$defs/AgentTaskOutput"
+            "$ref": "#/$defs/AgentTaskSchema"
           },
           {
             "type": "null"
@@ -858,7 +858,7 @@
       "commands",
       "verification"
     ],
-    "title": "AgentFanoutOutput",
+    "title": "AgentFanoutSchema",
     "type": "object"
   },
   "AgentReservationEnvelope": {
@@ -893,7 +893,7 @@
         ],
         "type": "object"
       },
-      "AgentReservationOutput": {
+      "AgentReservationSchema": {
         "properties": {
           "actor_session_id": {
             "type": [
@@ -1411,7 +1411,7 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
       "reservation": {
-        "$ref": "#/$defs/AgentReservationOutput"
+        "$ref": "#/$defs/AgentReservationSchema"
       },
       "token": {
         "type": [
@@ -1427,7 +1427,7 @@
       "reservation",
       "verification"
     ],
-    "title": "AgentReservationEnvelope",
+    "title": "AgentReservationEnvelopeSchema",
     "type": "object"
   },
   "AgentReservationListOutput": {
@@ -1462,7 +1462,7 @@
         ],
         "type": "object"
       },
-      "AgentReservationOutput": {
+      "AgentReservationSchema": {
         "properties": {
           "actor_session_id": {
             "type": [
@@ -1984,7 +1984,7 @@
       },
       "reservations": {
         "items": {
-          "$ref": "#/$defs/AgentReservationOutput"
+          "$ref": "#/$defs/AgentReservationSchema"
         },
         "type": "array"
       },
@@ -2003,7 +2003,7 @@
       "alive_only",
       "verification"
     ],
-    "title": "AgentReservationListOutput",
+    "title": "AgentReservationListSchema",
     "type": "object"
   },
   "AgentReservationOutput": {
@@ -2066,7 +2066,7 @@
       "lease_expires_at",
       "liveness"
     ],
-    "title": "AgentReservationOutput",
+    "title": "AgentReservationSchema",
     "type": "object"
   },
   "AgentTaskEnvelope": {
@@ -2101,7 +2101,7 @@
         ],
         "type": "object"
       },
-      "AgentTaskOutput": {
+      "AgentTaskSchema": {
         "properties": {
           "allow_offline": {
             "type": "boolean"
@@ -2642,7 +2642,7 @@
         "type": "string"
       },
       "task": {
-        "$ref": "#/$defs/AgentTaskOutput"
+        "$ref": "#/$defs/AgentTaskSchema"
       },
       "verification": {
         "$ref": "#/$defs/RepositoryVerificationState"
@@ -2653,7 +2653,7 @@
       "task",
       "verification"
     ],
-    "title": "AgentTaskEnvelope",
+    "title": "AgentTaskEnvelopeSchema",
     "type": "object"
   },
   "AgentTaskListOutput": {
@@ -2688,7 +2688,7 @@
         ],
         "type": "object"
       },
-      "AgentTaskOutput": {
+      "AgentTaskSchema": {
         "properties": {
           "allow_offline": {
             "type": "boolean"
@@ -3236,7 +3236,7 @@
       },
       "tasks": {
         "items": {
-          "$ref": "#/$defs/AgentTaskOutput"
+          "$ref": "#/$defs/AgentTaskSchema"
         },
         "type": "array"
       },
@@ -3255,7 +3255,7 @@
       "tasks",
       "verification"
     ],
-    "title": "AgentTaskListOutput",
+    "title": "AgentTaskListSchema",
     "type": "object"
   },
   "AgentTaskOutput": {
@@ -3338,7 +3338,7 @@
       "created_at",
       "updated_at"
     ],
-    "title": "AgentTaskOutput",
+    "title": "AgentTaskSchema",
     "type": "object"
   }
 }
