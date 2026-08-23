@@ -370,7 +370,9 @@ jobs:
           cargo check --locked -p heddle-cli --no-default-features --features git-overlay,client,semantic,zstd
           cargo check --locked -p heddle-cli --no-default-features --features native,semantic,zstd
           # `ci` is non-default; compile the gated surface explicitly.
-          cargo check --locked -p heddle-cli --no-default-features --features ci
+          # `ci` alone carries no storage backend (git-overlay/native are
+          # required), so pair it with one.
+          cargo check --locked -p heddle-cli --no-default-features --features git-overlay,ci
           cargo check --locked -p heddle-cli --features ci
 
       - name: CI feature tests
@@ -485,7 +487,7 @@ jobs:
       - name: CLI fault-injection tests
         if: needs.changes.outputs.cli_fault == 'true'
         run: |
-          cargo test --locked -p heddle-cli --test cli_integration fault_injection:: \
+          cargo test --locked -p heddle-cli --test cli_basics fault_injection:: \
             -- --ignored --test-threads=1 --nocapture
 
       - name: Timeline materialization crash tests
