@@ -915,10 +915,13 @@ export interface DiscussionListSchema {
 
 export interface DiscussionResolutionSchema {
   annotation_id?: string | null;
+  annotation_kind?: string | null;
   change_id?: string | null;
+  content?: string | null;
   kind: string;
   reason?: string | null;
   state_id?: string | null;
+  tags?: string[] | null;
 }
 
 export interface DiscussionSchema {
@@ -929,6 +932,7 @@ export interface DiscussionSchema {
   id: string;
   resolution?: DiscussionResolutionSchema | null;
   status: string;
+  thread_ref?: string | null;
   title: string;
   turns: DiscussionTurnSchema[];
   visibility: string;

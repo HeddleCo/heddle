@@ -1163,14 +1163,18 @@ fn delegate_creates_child_threads_with_parent_relationship() {
     let parent_thread =
         std::path::PathBuf::from(parent_started["execution_path"].as_str().unwrap());
 
+    let mut child_checkouts = Vec::new();
     for child in ["parser", "tests"] {
         let child_name = format!("feature/orchestrator/{child}");
+        let child_checkout = TempDir::new().unwrap();
         heddle(
             &[
                 "--output",
                 "json",
                 "start",
                 &child_name,
+                "--path",
+                child_checkout.path().to_str().unwrap(),
                 "--parent-thread",
                 "feature/orchestrator",
                 "--task",
@@ -1179,6 +1183,7 @@ fn delegate_creates_child_threads_with_parent_relationship() {
             Some(&parent_thread),
         )
         .unwrap();
+        child_checkouts.push(child_checkout);
     }
     let delegated = serde_json::json!({
         "delegated": [
@@ -1767,12 +1772,15 @@ fn thread_absorb_merges_child_thread_into_parent_workspace() {
     .unwrap();
     let parent_path = std::path::PathBuf::from(parent_started["execution_path"].as_str().unwrap());
     let child_name = "feature/orchestrator/parser".to_string();
+    let child_checkout = TempDir::new().unwrap();
     heddle(
         &[
             "--output",
             "json",
             "start",
             &child_name,
+            "--path",
+            child_checkout.path().to_str().unwrap(),
             "--parent-thread",
             "feature/orchestrator",
             "--task",

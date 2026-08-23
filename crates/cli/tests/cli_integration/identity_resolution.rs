@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 use tempfile::TempDir;
@@ -141,6 +141,8 @@ fn heddle_home_isolates_concurrent_user_configs() {
             "a@example.test",
         ],
     )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
     .spawn()
     .expect("spawn init a");
     let child_b = isolated_command(
@@ -155,6 +157,8 @@ fn heddle_home_isolates_concurrent_user_configs() {
             "b@example.test",
         ],
     )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
     .spawn()
     .expect("spawn init b");
 
@@ -187,27 +191,43 @@ fn heddle_home_isolates_concurrent_user_configs() {
         &native_a,
         &shared_home,
         &home_a,
-        &["capture", "-m", "isolated capture a"],
+        &["--output", "json", "capture", "-m", "isolated capture a"],
     )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
     .spawn()
     .expect("spawn capture a");
     let capture_b = isolated_command(
         &native_b,
         &shared_home,
         &home_b,
-        &["capture", "-m", "isolated capture b"],
+        &["--output", "json", "capture", "-m", "isolated capture b"],
     )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
     .spawn()
     .expect("spawn capture b");
     let capture_output_a = capture_a.wait_with_output().expect("wait capture a");
     let capture_output_b = capture_b.wait_with_output().expect("wait capture b");
     assert_success(&capture_output_a, "capture a");
     assert_success(&capture_output_b, "capture b");
-    assert!(home_a.join("session").is_dir());
-    assert!(home_b.join("session").is_dir());
+    let capture_json_a: serde_json::Value =
+        serde_json::from_slice(&capture_output_a.stdout).expect("capture a JSON");
+    let capture_json_b: serde_json::Value =
+        serde_json::from_slice(&capture_output_b.stdout).expect("capture b JSON");
+    assert_eq!(capture_json_a["principal"]["name"], "Agent A");
+    assert_eq!(capture_json_a["principal"]["email"], "a@example.test");
+    assert_eq!(capture_json_a["principal_source"], "user_config");
+    assert_eq!(capture_json_b["principal"]["name"], "Agent B");
+    assert_eq!(capture_json_b["principal"]["email"], "b@example.test");
+    assert_eq!(capture_json_b["principal_source"], "user_config");
+    assert!(
+        !home_a.join("session").exists() && !home_b.join("session").exists(),
+        "native capture is the save boundary and must not write the Git Overlay checkpoint-tip marker"
+    );
     assert!(
         !shared_home.join(".heddle/session").exists(),
-        "session state must not fall back to the shared HOME"
+        "native capture must not write tip session state under the shared HOME"
     );
 }
 
