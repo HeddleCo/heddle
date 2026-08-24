@@ -955,8 +955,12 @@ mod gc {
         // Collect state IDs before gc
         let log_before =
             heddle(&["log", "--oneline", "--output", "text"], Some(temp.path())).unwrap();
+        // Only `hs-*` leading tokens are state ids; trailing note lines
+        // (e.g. the genesis-omitted hint) are prose.
         let state_ids: Vec<&str> = log_before
             .lines()
+            .map(|line| line.trim())
+            .filter(|line| line.starts_with("hs-"))
             .filter_map(|line| line.split_whitespace().next())
             .collect();
         assert!(state_ids.len() >= 5, "should have at least 5 states");
