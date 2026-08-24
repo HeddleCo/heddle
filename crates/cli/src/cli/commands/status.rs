@@ -752,6 +752,7 @@ fn render_long_status(output: &StatusOutput, verbose: bool) {
     render_status_operation(output);
     render_status_thread(output, verbose);
     render_status_details(output, verbose);
+    render_status_context(output);
     render_status_advice(output);
     render_status_changes(output);
     render_status_submodules(output);
@@ -1177,6 +1178,35 @@ fn status_workspace_label(output: &StatusOutput, mode: &ThreadMode) -> &'static 
         ThreadMode::Materialized => "attached checkout",
         ThreadMode::Solid => "isolated checkout",
         ThreadMode::Virtualized => "virtual checkout",
+    }
+}
+
+/// Existing pinned context, per heddle#1152 criterion 2: a cold reader should
+/// learn from `status` alone that annotations and discussions exist. Silent
+/// when the repository has none — the same "no news is good news" shape as
+/// the materialized-thread advisory.
+fn render_status_context(output: &StatusOutput) {
+    if output.annotation_count == 0 && output.open_discussion_count == 0 {
+        return;
+    }
+    println!();
+    println!("{}", style::bold("Context"));
+    if output.annotation_count > 0 {
+        println!(
+            "Annotations: {} active — heddle context list",
+            style::bold(&output.annotation_count.to_string())
+        );
+    }
+    if output.open_discussion_count > 0 {
+        println!(
+            "Discussions: {} open{} — heddle discuss list",
+            style::bold(&output.open_discussion_count.to_string()),
+            if output.resolved_discussion_count > 0 {
+                format!(", {} resolved", output.resolved_discussion_count)
+            } else {
+                String::new()
+            }
+        );
     }
 }
 
