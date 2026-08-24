@@ -146,7 +146,8 @@ fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthori
          or `heddle help <topic>` for a topic page (e.g. `git-concepts`, \
          `git-overlay`, \
          `threads`, `daemon`, `signals`, `git-projection`, `operation-ids`, \
-         `remotes`, `output-formats`, `ignore`/`heddleignore`, `git-dependencies`)."
+         `remotes`, `output-formats`, `ignore`/`heddleignore`, `git-dependencies`, \
+         `agent-flags`)."
     );
 }
 

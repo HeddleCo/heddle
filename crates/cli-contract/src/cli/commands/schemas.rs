@@ -140,6 +140,7 @@ schema_registry! {
     (&["agent fanout plan", "agent fanout start"], AgentFanoutSchema),
     (&["auth logout"], AuthLogoutSchema),
     (&["auth status"], AuthStatusSchema),
+    (&["context check"], ContextCheckSchema),
     (&["auth trust show", "auth trust replace"], AuthTrustSchema),
     (&["whoami"], WhoamiSchema),
     (&["auth create-service-token"], AuthCreateServiceTokenSchema),
@@ -715,6 +716,49 @@ pub struct AuthStatusSchema {
     pub credential_id: Option<String>,
     pub expires_at: Option<String>,
     pub recommended_action: Option<String>,
+}
+
+/// One stale annotation reported by `context check`. `reason` is the
+/// machine name of the [`StalenessStatus`](repo::staleness::StalenessStatus)
+/// variant that made the annotation stale.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ContextCheckIssueSchema {
+    /// Target label: either a path or `state:<id>`.
+    pub target: String,
+    /// Annotation scope token (e.g. `line`, `symbol`, `file`).
+    pub scope: String,
+    /// Why the annotation is stale. One of `source_changed`,
+    /// `symbol_missing`, or `file_missing` — the shipped
+    /// `StalenessStatus` enum minus the non-stale variants.
+    pub reason: ContextCheckStalenessReason,
+    pub annotation_id: String,
+    /// First 80 characters of the annotation's current content.
+    pub content: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub enum ContextCheckStalenessReason {
+    /// The annotated source changed since the annotation was captured.
+    SourceChanged,
+    /// The symbol the annotation anchors no longer resolves.
+    SymbolMissing,
+    /// The annotated file no longer exists on disk.
+    FileMissing,
+}
+
+/// Payload-complete schema for `heddle context check --output json`
+/// (heddle#1392): pins the counters and the `StalenessStatus`-derived
+/// `reason` enum so doc claims are machine-checkable via
+/// `heddle doctor schemas`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ContextCheckSchema {
+    pub output_kind: String,
+    /// Annotations examined after active/tag filtering.
+    pub annotations: u32,
+    pub fresh: u32,
+    pub stale: u32,
+    pub unknown: u32,
+    pub issues: Vec<ContextCheckIssueSchema>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
