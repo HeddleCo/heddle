@@ -394,23 +394,7 @@ fn remote_failure_detail(
             rule: value.rule,
             human_verification_can_override: value.human_verification_can_override,
         },
-        Some(Context::Stream(value)) => {
-            let hint = value
-                .error
-                .as_deref()
-                .and_then(|error| error.context.as_ref());
-            let (retry_after, cursor) = match hint {
-                Some(Context::Retry(advice)) => (advice.retry_after.map(remote_duration), None),
-                Some(Context::Cursor(cursor)) => (None, Some(remote_cursor(cursor.clone()))),
-                _ => (None, None),
-            };
-            wire::RemoteFailureDetail::Stream {
-                code: remote_failure_code(value.code()),
-                message: value.message,
-                retry_after,
-                cursor,
-            }
-        }
+        Some(Context::Stream(value)) => remote_stream_failure(*value),
         Some(Context::Unknown(value)) => wire::RemoteFailureDetail::Unknown {
             type_url: value.type_url,
             value: value.value,
@@ -424,6 +408,25 @@ fn remote_failure_detail(
         },
     }
 }
+
+fn remote_stream_failure(
+    value: api::heddle::api::v1alpha1::StreamFailure,
+) -> wire::RemoteFailureDetail {
+    use api::heddle::api::v1alpha1::{CallFailureCode, error_detail::Context};
+
+    let (retry_after, cursor) = match value.error.and_then(|detail| detail.context) {
+        Some(Context::Retry(retry)) => (retry.retry_after.map(remote_duration), None),
+        Some(Context::Cursor(cursor)) => (None, Some(remote_cursor(cursor))),
+        _ => (None, None),
+    };
+    wire::RemoteFailureDetail::Stream {
+        code: remote_failure_code(CallFailureCode::try_from(value.code).unwrap_or_default()),
+        message: value.message,
+        retry_after,
+        cursor,
+    }
+}
+
 
 pub(super) fn repository_ref(path: &str) -> Option<RepositoryRef> {
     Some(RepositoryRef {

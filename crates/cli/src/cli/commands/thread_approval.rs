@@ -277,6 +277,9 @@ pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Re
             {
                 api::heddle::api::v1alpha1::UnmetRequirementKind::FlatRole => "flat_role",
                 api::heddle::api::v1alpha1::UnmetRequirementKind::Group => "group",
+                api::heddle::api::v1alpha1::UnmetRequirementKind::OpenDiscussion => {
+                    "open_discussion"
+                }
                 api::heddle::api::v1alpha1::UnmetRequirementKind::Unspecified => "unspecified",
             }
             .to_string(),

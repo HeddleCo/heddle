@@ -12,28 +12,28 @@ categories.workspace = true
 [dependencies]
 anyhow.workspace = true
 base32.workspace = true
-api = { package = "heddle-api", version = "0.14" }
+api = { package = "heddle-api", version = "0.15.0" }
 blake3.workspace = true
 chrono.workspace = true
 hex.workspace = true
 heddleco-capability-verifier = "0.4"
 ignore.workspace = true
-heddle-perf-contract = { path = "../perf-contract", version = "0.14" }
+heddle-perf-contract = { path = "../perf-contract", version = "0.15.0" }
 libc.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.14" }
-crypto = { path = "../crypto", package = "heddle-crypto", version = "0.14" }
-oplog = { path = "../oplog", package = "heddle-oplog", version = "0.14" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.15.0" }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.15.0" }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.15.0" }
 prost.workspace = true
-wire = { path = "../wire", package = "heddle-wire", version = "0.14", default-features = false }
-refs = { path = "../refs", package = "heddle-refs", version = "0.14" }
+wire = { path = "../wire", package = "heddle-wire", version = "0.15.0", default-features = false }
+refs = { path = "../refs", package = "heddle-refs", version = "0.15.0" }
 notify.workspace = true
 rand.workspace = true
 rmp-serde.workspace = true
 schemars.workspace = true
 rusqlite.workspace = true
 uuid.workspace = true
-semantic = { path = "../semantic", package = "heddle-semantic", version = "0.14", optional = true }
-semantic-recovery = { path = "../semantic-recovery", package = "heddle-semantic-recovery", version = "0.14", optional = true }
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.15.0", optional = true }
+semantic-recovery = { path = "../semantic-recovery", package = "heddle-semantic-recovery", version = "0.15.0", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -93,7 +93,7 @@ async-source = ["objects/async-source"]
 
 [dev-dependencies]
 hex.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.14", features = ["async-source", "memory-backend"] }
+objects = { path = "../objects", package = "heddle-objects", version = "0.15.0", features = ["async-source", "memory-backend"] }
 proptest.workspace = true
 tempfile.workspace = true
 

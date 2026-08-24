@@ -3,7 +3,9 @@
 
 use std::path::Path;
 
-use verbs::{recovery_scope_checkout, status::next_action::thread_flag_args};
+use verbs::{
+    recovery_scope_checkout, repository_presentation, status::next_action::thread_flag_args,
+};
 
 use super::command_catalog::heddle_action;
 pub(crate) use super::command_catalog::{land_local_command, merge_preview_command};
@@ -75,6 +77,17 @@ fn land_action_for_selected_checkout(
 }
 
 fn checkout_is_thread(repo: &repo::Repository, thread_id: &str) -> bool {
+    // A Heddle-managed checkout forked from a Git-overlay repository has a
+    // local native HEAD naming the source thread, but landing still targets
+    // the shared Git-overlay parent. Treating that local HEAD like a
+    // self-contained native checkout strips the source identity and turns the
+    // first ready breadcrumb into ambiguous `heddle land` (heddle#1548).
+    if repository_presentation(repo, None, None)
+        .context
+        .is_some_and(|context| context.kind == "git-overlay-isolated-checkout")
+    {
+        return false;
+    }
     super::thread_cmd::current_thread(repo)
         .ok()
         .flatten()

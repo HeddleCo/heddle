@@ -1564,8 +1564,8 @@ fn state_to_signature(state: &objects::object::State) -> Signature {
     raw.extend_from_slice(seconds.to_string().as_bytes());
     raw.extend_from_slice(b" +0000");
     Signature {
-        name: sley::plumbing::sley_core::ByteString::new(principal.name.clone()),
-        email: sley::plumbing::sley_core::ByteString::new(principal.email.clone()),
+        name: sley::plumbing::sley_core::BString::new(principal.name.clone()),
+        email: sley::plumbing::sley_core::BString::new(principal.email.clone()),
         time: sley::GitTime::new(seconds, 0),
         raw,
     }

@@ -18,48 +18,48 @@ exclude = [
 ]
 
 [dependencies]
-agent-relay = { path = "../agent-relay", package = "heddle-agent-relay", version = "0.14", default-features = false }
+agent-relay = { path = "../agent-relay", package = "heddle-agent-relay", version = "0.15.0", default-features = false }
 anyhow.workspace = true
 base64.workspace = true
 getrandom.workspace = true
 blake3.workspace = true
 chrono.workspace = true
-ci-config = { path = "../ci-config", package = "heddle-ci-config", version = "0.14", optional = true }
-ci-engine = { path = "../ci-engine", package = "heddle-ci-engine", version = "0.14", optional = true }
+ci-config = { path = "../ci-config", package = "heddle-ci-config", version = "0.15.0", optional = true }
+ci-engine = { path = "../ci-engine", package = "heddle-ci-engine", version = "0.15.0", optional = true }
 clap.workspace = true
 clap_complete.workspace = true
 futures.workspace = true
 hex.workspace = true
 ignore.workspace = true
 libc.workspace = true
-objects = { path = "../objects", package = "heddle-objects", version = "0.14" }
-crypto = { path = "../crypto", package = "heddle-crypto", version = "0.14" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.15.0" }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.15.0" }
 # `heddle-merge` is the native hunk-level text merge engine extracted from
 # `heddle-semantic` so non-semantic builds (`--no-default-features`) retain
 # text auto-merge. Always-on: the merge driver and rebase replay both call
 # into it unconditionally.
-merge = { path = "../merge", package = "heddle-merge", version = "0.14" }
-api = { package = "heddle-api", version = "0.14" }
-config = { path = "../config", package = "heddle-config", version = "0.14" }
-hosted-client = { path = "../hosted-client", package = "heddle-hosted-client", version = "0.14", default-features = false }
-heddle-cli-args = { path = "../cli-args", version = "0.14", default-features = false }
-heddle-cli-contract = { path = "../cli-contract", version = "0.14", default-features = false }
-heddle-cli-render = { path = "../cli-render", version = "0.14", default-features = false }
-verbs = { path = "../verbs", package = "heddle-verbs", version = "0.14", default-features = false }
-heddle-format = { path = "../format", version = "0.14" }
+merge = { path = "../merge", package = "heddle-merge", version = "0.15.0" }
+api = { package = "heddle-api", version = "0.15.0" }
+config = { path = "../config", package = "heddle-config", version = "0.15.0" }
+hosted-client = { path = "../hosted-client", package = "heddle-hosted-client", version = "0.15.0", default-features = false }
+heddle-cli-args = { path = "../cli-args", version = "0.15.0", default-features = false }
+heddle-cli-contract = { path = "../cli-contract", version = "0.15.0", default-features = false }
+heddle-cli-render = { path = "../cli-render", version = "0.15.0", default-features = false }
+verbs = { path = "../verbs", package = "heddle-verbs", version = "0.15.0", default-features = false }
+heddle-format = { path = "../format", version = "0.15.0" }
 async-trait.workspace = true
 # `default-features = false` here matches the pattern used for
 # repo below: this crate's `zstd` feature controls the cascade
 # end-to-end. Without these breaks, every dep's own default-on `zstd`
 # would re-enable compression even when the user explicitly built
 # with `--no-default-features`.
-ingest = { path = "../ingest", package = "heddle-ingest", version = "0.14", default-features = false }
-heddle-git-projection = { path = "../git-projection", version = "0.14", default-features = false }
-oplog = { path = "../oplog", package = "heddle-oplog", version = "0.14" }
-wire = { path = "../wire", package = "heddle-wire", version = "0.14", default-features = false }
-refs = { path = "../refs", package = "heddle-refs", version = "0.14" }
-repo = { path = "../repo", package = "heddle-repo", version = "0.14", default-features = false }
-semantic = { path = "../semantic", package = "heddle-semantic", version = "0.14", optional = true }
+ingest = { path = "../ingest", package = "heddle-ingest", version = "0.15.0", default-features = false }
+heddle-git-projection = { path = "../git-projection", version = "0.15.0", default-features = false }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.15.0" }
+wire = { path = "../wire", package = "heddle-wire", version = "0.15.0", default-features = false }
+refs = { path = "../refs", package = "heddle-refs", version = "0.15.0" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.15.0", default-features = false }
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.15.0", optional = true }
 notify.workspace = true
 opentelemetry = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
@@ -70,7 +70,7 @@ rmp-serde.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-heddle-perf-contract = { path = "../perf-contract", version = "0.14" }
+heddle-perf-contract = { path = "../perf-contract", version = "0.15.0" }
 sha2.workspace = true
 sley.workspace = true
 tempfile.workspace = true
@@ -97,13 +97,13 @@ walkdir.workspace = true
 # propagate the right per-OS backend without any one platform
 # being forced to drag in another platform's kernel bindings.
 [target.'cfg(target_os = "linux")'.dependencies]
-mount = { path = "../mount", package = "heddle-mount", version = "0.14", optional = true }
+mount = { path = "../mount", package = "heddle-mount", version = "0.15.0", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-mount = { path = "../mount", package = "heddle-mount", version = "0.14", optional = true }
+mount = { path = "../mount", package = "heddle-mount", version = "0.15.0", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-mount = { path = "../mount", package = "heddle-mount", version = "0.14", optional = true }
+mount = { path = "../mount", package = "heddle-mount", version = "0.15.0", optional = true }
 
 [features]
 # The default `heddle` build ships the full workflow: local
@@ -248,10 +248,10 @@ mount = [
 biscuit-auth.workspace = true
 iroh.workspace = true
 criterion = "0.8"
-heddle-cli-render = { path = "../cli-render", version = "0.14", features = ["test-utils"] }
+heddle-cli-render = { path = "../cli-render", version = "0.15.0", features = ["test-utils"] }
 hyper-util.workspace = true
 # Test-only: the in-memory object backend never ships in the binary.
-objects = { path = "../objects", package = "heddle-objects", version = "0.14", features = ["memory-backend"] }
+objects = { path = "../objects", package = "heddle-objects", version = "0.15.0", features = ["memory-backend"] }
 iroh-relay = { version = "=1.0.3", default-features = false, features = ["server"] }
 ntest.workspace = true
 prost-reflect.workspace = true

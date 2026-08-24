@@ -10,10 +10,10 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-objects = { path = "../objects", package = "heddle-objects", version = "0.14" }
-repo = { path = "../repo", package = "heddle-repo", version = "0.14", features = ["tree-sitter-symbols"] }
+objects = { path = "../objects", package = "heddle-objects", version = "0.15.0" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.15.0", features = ["tree-sitter-symbols"] }
 tracing.workspace = true
-semantic = { path = "../semantic", package = "heddle-semantic", version = "0.14" }
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.15.0" }
 serde.workspace = true
 
 [lib]

@@ -79,7 +79,9 @@ mod repository_semantic_context;
 pub mod signals;
 pub use repository::{PatternDeviationToml, ReviewConfig, ReviewSignalsToml};
 #[cfg(feature = "tree-sitter-symbols")]
-pub use repository_semantic_context::{CaptureSemanticContext, build_semantic_context};
+pub use repository_semantic_context::{
+    CaptureInvariantAnnotation, CaptureSemanticContext, build_semantic_context,
+};
 #[cfg(feature = "tree-sitter-symbols")]
 pub use repository_semantic_corpus::CORPUS_FILE_BUDGET;
 #[cfg(feature = "tree-sitter-symbols")]

@@ -1810,7 +1810,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["context", "check"],
         json_discriminators(
-            opaque_schemas(READ_JSON, &["context check"]),
+            documented_schemas(READ_JSON, &["context check"]),
             &[json_discriminator(
                 Some("context check"),
                 "output_kind",

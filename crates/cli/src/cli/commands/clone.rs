@@ -1518,6 +1518,10 @@ impl<'a> CloneDestinationCleanup<'a> {
     fn disarm(&mut self) {
         self.armed = false;
     }
+
+    fn arm(&mut self) {
+        self.armed = true;
+    }
 }
 
 #[cfg(feature = "client")]
@@ -1605,6 +1609,23 @@ async fn clone_network_connected(
     }
 
     let mut cleanup = CloneDestinationCleanup::new(local_path);
+    // API 0.15 carries a pre-PullReady stream failure as a real terminal
+    // failure instead of letting it decode as a server frame. Persist the
+    // recovery authority once the hosted connection is established so that a
+    // disconnect before folded refs arrive remains resumable. PullReady later
+    // replaces this provisional record with the advertised HEAD before any
+    // repository data is initialized.
+    let provisional_intent = CloneIntent {
+        origin: hosted_clone_origin_url(&endpoint_spec, repo_path),
+        endpoint: endpoint_spec.clone(),
+        repository: repo_path.to_string(),
+        thread: thread.clone(),
+        advertised_head: None,
+        depth,
+        lazy,
+    };
+    provisional_intent.create(local_path)?;
+    cleanup.disarm();
     let mut durability = None;
     let materialization = if lazy {
         PullMaterialization::Lazy
@@ -1631,15 +1652,13 @@ async fn clone_network_connected(
                             "server does not advertise folded clone refs".to_string(),
                         )
                     })?;
-                let intent = CloneIntent {
-                    origin: hosted_clone_origin_url(&endpoint_spec, repo_path),
-                    endpoint: endpoint_spec.clone(),
-                    repository: repo_path.to_string(),
-                    thread: thread.clone(),
-                    advertised_head: refs.head_thread.clone(),
-                    depth,
-                    lazy,
-                };
+                let mut intent = provisional_intent.clone();
+                intent.advertised_head = refs.head_thread.clone();
+                // An advertised-ref semantic refusal (for example an unknown
+                // requested thread) is not a resumable transport interruption:
+                // restore the original destination-cleanup contract until the
+                // validated intent has replaced the provisional one.
+                cleanup.arm();
                 let (_, track_name) = create_hosted_clone_intent_after_thread_select(
                     local_path,
                     intent,

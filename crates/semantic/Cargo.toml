@@ -29,8 +29,8 @@ lang-zig = ["dep:tree-sitter-zig"]
 
 [dependencies]
 anyhow.workspace = true
-merge = { path = "../merge", package = "heddle-merge", version = "0.14" }
-objects = { path = "../objects", package = "heddle-objects", version = "0.14" }
+merge = { path = "../merge", package = "heddle-merge", version = "0.15.0" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.15.0" }
 thiserror.workspace = true
 tree-sitter.workspace = true
 tree-sitter-c = { workspace = true, optional = true }
@@ -46,7 +46,7 @@ tree-sitter-zig = { workspace = true, optional = true }
 [dev-dependencies]
 criterion = "0.8"
 # Test-only: the in-memory object backend never ships in the library.
-objects = { path = "../objects", package = "heddle-objects", version = "0.14", features = ["memory-backend"] }
+objects = { path = "../objects", package = "heddle-objects", version = "0.15.0", features = ["memory-backend"] }
 pprof = { version = "0.15", default-features = false, features = ["flamegraph"] }
 
 [[bench]]

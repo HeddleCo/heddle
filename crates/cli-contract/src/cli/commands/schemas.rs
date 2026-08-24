@@ -170,6 +170,7 @@ schema_registry! {
     (&["agent fanout plan", "agent fanout start"], AgentFanoutOutput),
     (&["auth logout"], AuthLogoutOutput),
     (&["auth status"], AuthStatusOutput),
+    (&["context check"], ContextCheckSchema),
     (&["auth trust show", "auth trust replace"], AuthTrustOutput),
     (&["whoami"], WhoamiOutput),
     (&["auth create-service-token"], ServiceTokenOutput),
@@ -544,6 +545,39 @@ pub struct MaintenanceRefreshWire {
     pub output_kind: String,
     #[serde(flatten)]
     pub run: RepositoryMaintenanceRunReport,
+}
+
+/// One stale annotation reported by `context check`. `reason` is the
+/// machine name of the staleness result that made the annotation stale.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ContextCheckIssueSchema {
+    /// Target label: either a path or `state:<id>`.
+    pub target: String,
+    /// Annotation scope token (for example `line`, `symbol`, or `file`).
+    pub scope: String,
+    pub reason: ContextCheckStalenessReason,
+    pub annotation_id: String,
+    /// First 80 characters of the annotation's current content.
+    pub content: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub enum ContextCheckStalenessReason {
+    SourceChanged,
+    SymbolMissing,
+    FileMissing,
+}
+
+/// Payload-complete schema for `heddle context check --output json`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ContextCheckSchema {
+    pub output_kind: String,
+    /// Annotations examined after active/tag filtering.
+    pub annotations: u32,
+    pub fresh: u32,
+    pub stale: u32,
+    pub unknown: u32,
+    pub issues: Vec<ContextCheckIssueSchema>,
 }
 
 // ---- core loop write/read helpers -----------------------------------------

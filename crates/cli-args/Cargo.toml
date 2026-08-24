@@ -11,11 +11,11 @@ categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-api = { package = "heddle-api", version = "0.14" }
+api = { package = "heddle-api", version = "0.15.0" }
 clap.workspace = true
-config = { path = "../config", package = "heddle-config", version = "0.14" }
-objects = { path = "../objects", package = "heddle-objects", version = "0.14" }
-repo = { path = "../repo", package = "heddle-repo", version = "0.14", default-features = false, features = ["git-overlay", "native"] }
+config = { path = "../config", package = "heddle-config", version = "0.15.0" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.15.0" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.15.0", default-features = false, features = ["git-overlay", "native"] }
 
 [features]
 default = []

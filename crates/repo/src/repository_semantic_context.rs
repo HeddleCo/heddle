@@ -11,8 +11,9 @@ use std::{
 use objects::{
     error::HeddleError,
     object::{
-        Blob, ContentHash, DiffKind, LeafPolicy, ObjectSource, SemanticEntryKind,
-        SemanticIndexRoot, SemanticTreeNode, State, StateId, Tree, diff_trees, resolve_tree_path,
+        AnnotationKind, AnnotationScope, AnnotationStatus, Blob, ContentHash, ContextTarget,
+        DiffKind, LeafPolicy, ObjectSource, SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode,
+        SignalAnchor, State, StateId, Tree, diff_trees, resolve_tree_path,
     },
     store::ObjectStore,
 };
@@ -72,6 +73,18 @@ pub struct CaptureSemanticContext {
     pub changed_paths: BTreeSet<PathBuf>,
     pub changed_symbols: BTreeSet<(PathBuf, String)>,
     pub corpus_complete: bool,
+    pub invariant_annotations: Vec<CaptureInvariantAnnotation>,
+}
+
+/// Storage-neutral invariant annotation carried across the `repo` signal
+/// seam. `repo` owns extraction while `state-review` owns scoring, avoiding a
+/// dependency cycle between the two crates.
+#[derive(Debug, Clone)]
+pub struct CaptureInvariantAnnotation {
+    pub anchor: SignalAnchor,
+    pub kind: AnnotationKind,
+    pub content: String,
+    pub tags: Vec<String>,
 }
 
 /// Build the capture-time context for signal computation.
@@ -177,6 +190,17 @@ pub fn build_semantic_context(
         &prior_functions,
         &new_functions,
     );
+    let invariant_annotations = prior
+        .map(|state| {
+            collect_invariant_annotations(repo, state).unwrap_or_else(|err| {
+                warn!(
+                    error = %err,
+                    "semantic context: failed to load invariant annotations; invariant_adjacency module will stay quiet"
+                );
+                Vec::new()
+            })
+        })
+        .unwrap_or_default();
 
     Ok(CaptureSemanticContext {
         prior_functions,
@@ -184,6 +208,7 @@ pub fn build_semantic_context(
         changed_paths,
         changed_symbols,
         corpus_complete,
+        invariant_annotations,
     })
 }
 
@@ -305,4 +330,55 @@ fn blob_bytes_at_path(
         return Ok(None);
     };
     Ok(source.get_blob(&hash)?.map(|blob| blob.content().to_vec()))
+}
+
+/// Collect active invariant annotations from the prior state's context.
+///
+/// File and line scopes use a file anchor; symbol scopes retain the symbol.
+/// State-target annotations are advisory and do not participate in adjacency
+/// scoring.
+fn collect_invariant_annotations(
+    repo: &Repository,
+    prior: &State,
+) -> Result<Vec<CaptureInvariantAnnotation>> {
+    let Some(context_root) = repo.inherit_parent_context(prior)? else {
+        return Ok(Vec::new());
+    };
+    let mut annotations = Vec::new();
+
+    for entry in repo.list_context_entries(&context_root, None)? {
+        let path = match &entry.target {
+            ContextTarget::File { path } => path.clone(),
+            ContextTarget::State { .. } => continue,
+        };
+        for annotation in &entry.blob.annotations {
+            if annotation.status != AnnotationStatus::Active {
+                continue;
+            }
+            let Some(revision) = annotation.current_revision() else {
+                continue;
+            };
+            if !matches!(revision.kind, AnnotationKind::Invariant)
+                && !revision.tags.iter().any(|tag| tag == "enforces")
+            {
+                continue;
+            }
+            let anchor = match &annotation.scope {
+                AnnotationScope::Symbol { name, .. } => {
+                    SignalAnchor::symbol(path.clone(), name.clone())
+                }
+                AnnotationScope::File | AnnotationScope::Lines(..) => {
+                    SignalAnchor::file(path.clone())
+                }
+            };
+            annotations.push(CaptureInvariantAnnotation {
+                anchor,
+                kind: revision.kind,
+                content: revision.content.clone(),
+                tags: revision.tags.clone(),
+            });
+        }
+    }
+
+    Ok(annotations)
 }

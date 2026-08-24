@@ -80,6 +80,7 @@ async fn ensure(
         }
         EnsureAction::Derive => {
             cmd_auth_derive_agent(
+                ctx,
                 &server,
                 None,
                 DEFAULT_AGENT_TTL_SECS,

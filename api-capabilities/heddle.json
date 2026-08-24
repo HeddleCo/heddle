@@ -372,6 +372,23 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.CollaborationService/ListDiscussionsByStates",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.CollaborationService/OpenDiscussion",
       "layers": {
         "client": {
@@ -508,7 +525,52 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.IdentityService/ClaimNextDropCode",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/ClaimSignupInvite",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.IdentityService/CompleteRecovery",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/CreateAgentAccount",
       "layers": {
         "client": {
           "status": "planned",
@@ -568,6 +630,36 @@
               "contains": ".create_service_account("
             }
           ],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/CreateSignupInvite",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/ListSignupInvites",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
           "follow_up": null
         }
       }
@@ -823,24 +915,67 @@
       }
     },
     {
-      "rpc": "heddle.api.v1alpha1.IdentityService/MintBiscuit",
+      "rpc": "heddle.api.v1alpha1.IdentityService/MintGitHubAppSetupChallenge",
       "layers": {
         "client": {
-          "status": "intentionally-unsupported",
+          "status": "planned",
           "evidence": [],
-          "follow_up": null,
-          "reason": "Clients mint every biscuit root locally. Weft only registers the public key."
+          "follow_up": null
         },
         "cli": {
-          "status": "intentionally-unsupported",
+          "status": "planned",
           "evidence": [],
-          "follow_up": null,
-          "reason": "Clients mint every biscuit root locally. Weft only registers the public key."
+          "follow_up": null
         }
       }
     },
     {
-      "rpc": "heddle.api.v1alpha1.IdentityService/RecordSubscription",
+      "rpc": "heddle.api.v1alpha1.IdentityService/PromoteAgentAccount",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/ProvisionAgentRootedAccount",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/ListInstallationRepositories",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/RegisterGitHubInstallation",
       "layers": {
         "client": {
           "status": "planned",
@@ -868,6 +1003,21 @@
           "evidence": [],
           "follow_up": null,
           "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/RemainingDropCodes",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
         }
       }
     },
@@ -1163,6 +1313,21 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.OperationService/GetRemoteLink",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.OperationService/ListOperations",
       "layers": {
         "client": {
@@ -1176,6 +1341,21 @@
           "evidence": [],
           "follow_up": null,
           "reason": "The descriptor marks OperationService planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OperationService/SetRemoteLink",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
         }
       }
     },
@@ -1227,6 +1407,141 @@
           "evidence": [],
           "follow_up": null,
           "reason": "The descriptor marks OperationService planned."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OwnerAuthorizationService/BeginAgentOwnerClaim",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OwnerAuthorizationService/BootstrapOwnerRoot",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OwnerAuthorizationService/ChangeOwnerRecoveryPolicy",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OwnerAuthorizationService/ClaimAgentOwner",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OwnerAuthorizationService/GetCurrentOwnerKeyring",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OwnerAuthorizationService/RecoverOwnerKey",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OwnerAuthorizationService/RotateOwnerKey",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OwnerAuthorizationService/SubmitOwnerAuthorization",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.OwnerAuthorizationService/TransferResourceOwnership",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
         }
       }
     },
@@ -1337,37 +1652,6 @@
           "evidence": [],
           "follow_up": null,
           "reason": "No Heddle CLI surface is shipped for this canonical RPC."
-        }
-      }
-    },
-    {
-      "rpc": "heddle.api.v1alpha1.RegistryService/CreateNamespace",
-      "layers": {
-        "client": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null
-        },
-        "cli": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
-        }
-      }
-    },
-    {
-      "rpc": "heddle.api.v1alpha1.RegistryService/CreateRepository",
-      "layers": {
-        "client": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null
-        },
-        "cli": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null
         }
       }
     },
@@ -1509,21 +1793,6 @@
       }
     },
     {
-      "rpc": "heddle.api.v1alpha1.RegistryService/GetCurrentUserNamespace",
-      "layers": {
-        "client": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null
-        },
-        "cli": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null
-        }
-      }
-    },
-    {
       "rpc": "heddle.api.v1alpha1.RegistryService/GetCurrentUserSpool",
       "layers": {
         "client": {
@@ -1636,6 +1905,21 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.RegistryService/ListExploreMetadata",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.RegistryService/ListGrants",
       "layers": {
         "client": {
@@ -1687,21 +1971,6 @@
           "evidence": [],
           "follow_up": null,
           "reason": "No Heddle CLI surface is shipped for this canonical RPC."
-        }
-      }
-    },
-    {
-      "rpc": "heddle.api.v1alpha1.RegistryService/ListExploreMetadata",
-      "layers": {
-        "client": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null
-        },
-        "cli": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null
         }
       }
     },
@@ -2328,6 +2597,23 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/ListStateAttachments",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.RepositoryService/ListStates",
       "layers": {
         "client": {
@@ -2341,6 +2627,23 @@
           "evidence": [],
           "follow_up": null,
           "reason": "The similarly named CLI surface reads local repository state rather than this hosted RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.RepositoryService/ListThreadHistories",
+      "layers": {
+        "client": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle hosted-client mapping is shipped."
+        },
+        "cli": {
+          "status": "intentionally-unsupported",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
         }
       }
     },
@@ -2730,6 +3033,21 @@
           "evidence": [],
           "follow_up": null,
           "reason": "The similarly named CLI surface reads local repository state rather than this hosted RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.WorkflowService/LandStack",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
         }
       }
     },
