@@ -100,9 +100,8 @@ pub use serde_json::Value;
 pub use sley::{
     CommitObject, EntryKind, GitObjectType, GitTime, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository, Signature, TagObject,
-    plumbing::{
-        sley_core::ByteString as GitByteString, sley_object::EncodedObject, sley_refs::ReflogEntry,
-    },
+    plumbing::{sley_object::EncodedObject, sley_refs::ReflogEntry},
+    BString as GitByteString,
 };
 pub use tempfile::TempDir;
 

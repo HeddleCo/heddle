@@ -372,11 +372,8 @@ fn presence_show_multi_match_next_is_not_help_catalog() {
             .unwrap();
     }
 
-    let output = heddle_output(
-        &["--output", "json", "agent", "presence", "show"],
-        Some(repo.path()),
-    )
-    .expect("presence show should spawn");
+    let output = heddle_output(&["--output", "json", "agent", "presence", "show"], Some(repo.path()))
+        .expect("presence show should spawn");
     assert!(
         !output.status.success(),
         "multi-match presence show must fail closed"

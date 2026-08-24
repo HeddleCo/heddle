@@ -384,21 +384,21 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
 thread = sys.argv[2]
-expected = "heddle land"
-context_expected_suffix = ["land"]
+expected = f"heddle land --thread {thread}"
+context_expected_suffix = ["land", "--thread", thread]
 verify = data.get("verification", data)
 if verify.get("verified") is not True or verify.get("status") != "clean":
     raise SystemExit(f"ready work should keep repository verify clean, got {data!r}")
 argv = (verify.get("recommended_action_template") or {}).get("argv_template") or []
 context_ready = (
-    argv[:1] == ['heddle'] or argv[0].endswith('/heddle')
+    len(argv) >= 5
     and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
     and argv[1] == "--repo"
     and argv[-3:] == context_expected_suffix
 )
 plain_ready = (
     verify.get("recommended_action") == expected
-    and len(argv) == 2
+    and len(argv) == 4
     and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
     and argv[1:] == context_expected_suffix
 )
@@ -427,8 +427,8 @@ assert_transcript_claims() {
     "saved: local Git commit recorded" \
     "merge type:" \
     "landed: on parent" \
-    "Next: heddle push" \
-    "Next step: heddle land" \
+    "Next: heddle --repo" \
+    "Next step: heddle land --thread feature-" \
     "hs-" \
     "Workspace: verified" \
     "Nothing to do. Workspace verified."; do

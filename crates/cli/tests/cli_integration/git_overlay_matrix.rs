@@ -1444,7 +1444,8 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         ready["recommended_action"]
             .as_str()
             .is_some_and(
-                |action| action == "heddle land" && !action.contains("--no-push")
+                |action| action.contains("land --thread feature/ready-verify")
+                    && !action.contains("--no-push")
             ),
         "ready should expose the direct land action: {ready}"
     );
