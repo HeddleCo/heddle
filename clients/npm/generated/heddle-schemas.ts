@@ -3373,7 +3373,7 @@ export interface WatchLineSchema {
 export interface WhoamiCaptureActorSchema {
   email: string;
   name: string;
-  /** `environment`, `repository`, `git_config`, or null when unknown. */
+  /** `environment`, `repository`, `git_config`, `user_config`, or null when unknown. */
   source?: string | null;
 }
 
