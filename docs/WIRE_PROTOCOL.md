@@ -7,7 +7,7 @@
 The current hosted contract is owned by `HeddleCo/api` and uses generated
 protobuf messages (Prost in Rust). The `heddle-wire` crate retains native object
 transfer, graph-planning, pack, and failure-projection primitives, but legacy
-envelopes such as `ListRefs`, `RefsList`, `RefFilter`, `WantObjects`, and
+envelopes such as `ListRefs` (streamed), `RefFilter`, `WantObjects`, and
 `UpdateRef` have been removed. Any remaining Weft imports of those names must be
 migrated in the coordinated clean cut before the incompatible Heddle crate is
 published.
@@ -59,11 +59,15 @@ Hosted admin authorization is server-side and combines:
 
 ## Reference Advertisement
 
-`ListRefs -> RefsList` returns:
+`ListRefs` streams `ListRefsResponse` frames:
 
-- `head`: `Attached { thread }` or `Detached { state }`
-- `head_state`: resolved `ChangeId` if HEAD currently points to an existing state
-- `refs`: thread + marker entries
+- `item`: one `RefEntry` per thread/marker ref
+- `page_end`: `head_thread` (+ stable `head_thread_id`) as `Attached`, or
+  `head_state` (`ChangeId`) when HEAD is detached; `next_page_token` is
+  empty on the final frame
+
+The pre-streaming aggregate `RefsList` envelope is retired; consumers
+must read the streamed form.
 
 ## Object Transfer
 

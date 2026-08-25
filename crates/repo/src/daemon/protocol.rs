@@ -6,14 +6,14 @@
 //! shipped on for ~6 months, deliberately kept that way so we don't
 //! have to reason about half-read messages or framing under restart.
 
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::{
     io::{BufRead, BufReader, Write},
     net::{Shutdown, TcpStream},
     path::Path,
     time::Duration,
 };
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
 
 use objects::error::HeddleError;
 use serde::{Serialize, de::DeserializeOwned};
@@ -173,7 +173,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn peer_uid_mismatch_is_rejected_before_mount_reply_is_trusted() {
-        use std::{io::Write, os::unix::net::UnixListener, path::PathBuf, thread};
+        use std::{io::{ BufRead, Write}, os::unix::net::UnixListener, path::PathBuf, thread};
 
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let path = tmp.path().join("heddled.sock");
@@ -181,6 +181,14 @@ mod tests {
         let server = thread::spawn(move || {
             for _ in 0..2 {
                 if let Ok((mut stream, _)) = listener.accept() {
+                    // Drain the request line before replying: replying and
+                    // dropping without reading races the client's write into
+                    // EPIPE, which would mask the peer-uid behavior under
+                    // test with a transport error.
+                    let mut line = String::new();
+                    if std::io::BufReader::new(&stream).read_line(&mut line).is_err() {
+                        continue;
+                    }
                     let reply = MountDaemonResponse::Mount {
                         version: MOUNT_PROTOCOL_VERSION,
                         ok: true,

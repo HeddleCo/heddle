@@ -5,10 +5,10 @@ use std::collections::HashSet;
 
 use objects::{
     error::HeddleError,
-    object::{AnnotatedTag, ContentHash, MarkerName, State, StateId, ThreadName, TreeEntryTarget},
+    object::{AnnotatedTag, AudienceTier, ContentHash, MarkerName, State, StateId, ThreadName, TreeEntryTarget, visible},
     store::ObjectStore,
 };
-use repo::{AudienceTier, Repository as HeddleRepository, visible};
+use repo::Repository as HeddleRepository;
 use sley::{
     CommitObject, EntryKind, GitObjectType, ObjectId, ReferenceTarget,
     Repository as SleyRepository, Signature, plumbing::sley_object::EncodedObject,

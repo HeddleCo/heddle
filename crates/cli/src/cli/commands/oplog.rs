@@ -2,14 +2,15 @@
 //! Oplog command — operator-facing inspection and recovery.
 
 use anyhow::{Context, Result};
-use heddle_core::oplog_plan::{
-    OplogRecoverFacts, oplog_recover_detail_fields, oplog_recover_headline_from_facts,
-    oplog_recover_shows_detail, plan_oplog_recover,
-};
 use oplog::OplogRecoveryReport;
 use repo::Repository;
 use serde::Serialize;
+use verbs::oplog_plan::{
+    OplogRecoverFacts, oplog_recover_detail_fields, oplog_recover_headline_from_facts,
+    oplog_recover_shows_detail, plan_oplog_recover,
+};
 
+use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::cli::{Cli, OplogCommands, should_output_json, style};
 
 pub fn cmd_oplog(cli: &Cli, command: OplogCommands) -> Result<()> {
@@ -114,7 +115,10 @@ fn cmd_oplog_recover(cli: &Cli) -> Result<()> {
     let report = repo.oplog().recover()?;
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&RecoverOutput::from(&report))?);
+        write_full_command_json(
+            &RecoverOutput::from(&report),
+            NextActionValidationContext::without_repo(&["maintenance", "oplog", "recover"]),
+        )?;
         return Ok(());
     }
 

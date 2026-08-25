@@ -4,11 +4,11 @@
 use std::{path::Path, time::Instant};
 
 use anyhow::{Result, anyhow};
-use heddle_core::{
+use repo::{Repository, discover_heddle_root};
+use verbs::{
     MachineContractInput, RepositorySetupGuidance, VerificationCheck, VerifyOptions, VerifyReport,
     repository_setup_guidance, verify as core_verify,
 };
-use repo::{Repository, discover_heddle_root};
 
 use super::{RecoveryAdvice, action_line::print_next, next_action::write_projected_command_json};
 use crate::{
@@ -85,7 +85,7 @@ pub fn cmd_verify(cli: &Cli, verbose: bool, provenance: bool) -> Result<()> {
 }
 
 struct VerifyExecutionPrep {
-    ctx: heddle_core::ExecutionContext,
+    ctx: verbs::ExecutionContext,
     repo_config: Option<repo::RepoConfig>,
     /// Wall time spent opening a Heddle repository in this shell (0 when open
     /// was deferred to core, e.g. plain-Git observe).
@@ -95,18 +95,23 @@ struct VerifyExecutionPrep {
 fn verify_execution_context_from_cli(cli: &Cli, start: &Path) -> Result<VerifyExecutionPrep> {
     let config = UserConfig::load_default()?;
     let verbosity = if cli.quiet {
-        heddle_core::Verbosity::Quiet
+        verbs::Verbosity::Quiet
     } else if cli.verbose > 0 {
-        heddle_core::Verbosity::Verbose
+        verbs::Verbosity::Verbose
     } else {
-        heddle_core::Verbosity::Normal
+        verbs::Verbosity::Normal
     };
-    let mut builder = heddle_core::ExecutionContext::builder()
+    let mut builder = verbs::ExecutionContext::builder()
         .start_path(start.to_path_buf())
-        .config(config.clone())
+        .principal_fallback(
+            config
+                .principal_pair()
+                .map(|(name, email)| (name.to_string(), email.to_string())),
+        )
+        .fsmonitor_mode(config.worktree_status_options(None).fsmonitor.mode)
         .verbosity(verbosity)
-        .progress(std::sync::Arc::new(heddle_core::NoopProgress))
-        .warnings(std::sync::Arc::new(heddle_core::NoopWarnings));
+        .progress(std::sync::Arc::new(verbs::NoopProgress))
+        .warnings(std::sync::Arc::new(verbs::NoopWarnings));
 
     if let Some(op_id) = crate::operation_id::resolve_operation_id(cli)? {
         builder = builder.op_id(op_id.to_string());
@@ -129,7 +134,8 @@ fn verify_execution_context_from_cli(cli: &Cli, start: &Path) -> Result<VerifyEx
                     .mode;
                 let repo = repo.with_fsmonitor_mode(mode);
                 let repo_config = repo.config().clone();
-                (builder.repo(repo), Some(repo_config), repo_open_ms)
+                let builder = builder.fsmonitor_mode(mode).repo(repo);
+                (builder, Some(repo_config), repo_open_ms)
             }
             Err(_) => (builder, None, 0),
         }
@@ -500,7 +506,7 @@ fn verify_failed_advice(output: &VerifyReport) -> RecoveryAdvice {
     advice
 }
 
-fn provenance_registry_failed_advice(report: &heddle_core::ProvenanceReport) -> RecoveryAdvice {
+fn provenance_registry_failed_advice(report: &verbs::ProvenanceReport) -> RecoveryAdvice {
     let primary_command = "heddle verify --provenance".to_string();
     RecoveryAdvice::safety_refusal(
         "provenance_registry_verify_failed",

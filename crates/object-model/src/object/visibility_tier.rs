@@ -3,9 +3,10 @@
 //!
 //! [`VisibilityTier`] is the single content-side visibility vocabulary used
 //! across annotations, discussions, and per-state commit visibility. The
-//! *reader's* tier (who is asking) is `repo::AudienceTier`; this enum is the
+//! *reader's* tier (who is asking) is [`AudienceTier`]; this enum is the
 //! *content's* tier (who the content is for). The who-sees-what mapping
-//! between the two lives in `repo::visibility::visible`.
+//! between the two lives in [`visible`](super::visible), beside both
+//! vocabularies.
 //!
 //! `Public` is the default — it matches the pre-unification behavior where
 //! every annotation was effectively public, so legacy data on disk decodes
@@ -31,8 +32,8 @@ pub enum VisibilityTier {
     /// otherwise all-seeing `Internal` audience — except the one holder of
     /// the matching `Restricted(scope_label)`. Used for embargoed per-state
     /// commit visibility, where even internal callers must not see the
-    /// content. The who-sees-what arm lives in `repo::visibility::visible`,
-    /// placed above the `(_, Internal) => true` arm so the embargo holds.
+    /// content. The who-sees-what arm lives in `visible`, placed above the
+    /// `(_, Internal) => true` arm so the embargo holds.
     Private {
         scope_label: String,
     },

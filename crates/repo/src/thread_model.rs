@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+use schemars::JsonSchema;
 use std::path::PathBuf;
 
+use crate::actor_presence::AgentUsageSummary;
 use chrono::{DateTime, Utc};
-use objects::store::AgentUsageSummary;
 use serde::{Deserialize, Serialize};
 
 /// A validated thread id. Construction from user- or externally-supplied
@@ -169,7 +170,7 @@ fn suggest_thread_id(value: &str) -> String {
 /// `"lightweight"` (clonefile) / `"materialized"` (full-copy) names
 /// will fail to deserialize and require a re-export — intentional;
 /// silently degrading isolation modes is the wrong default.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadMode {
     Materialized,
@@ -187,7 +188,7 @@ impl std::fmt::Display for ThreadMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadState {
     Draft,
@@ -213,7 +214,7 @@ impl std::fmt::Display for ThreadState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadFreshness {
     Current,
@@ -231,7 +232,7 @@ impl std::fmt::Display for ThreadFreshness {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadImpactCategory {
     DependencyGraph,
@@ -253,7 +254,7 @@ impl std::fmt::Display for ThreadImpactCategory {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfidenceBand {
     Low,
@@ -271,7 +272,7 @@ impl std::fmt::Display for ConfidenceBand {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ThreadVerificationSummary {
     #[serde(default)]
     pub tests_passed: Option<bool>,
@@ -283,7 +284,7 @@ pub struct ThreadVerificationSummary {
     pub lint_warnings: Option<u32>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ThreadConfidenceSummary {
     #[serde(default)]
     pub value: Option<f32>,
@@ -291,7 +292,7 @@ pub struct ThreadConfidenceSummary {
     pub band: Option<ConfidenceBand>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ThreadIntegrationPolicy {
     #[serde(default)]
     pub status: Option<String>,
@@ -379,7 +380,7 @@ pub struct ThreadRecord {
 /// crowd `heddle log` or the thread workspace. If not promoted before
 /// `ttl_seconds` elapses, the thread auto-collapses on the next read-side
 /// sweep (`heddle status`, `heddle log`, `heddle thread list`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EphemeralMarker {
     /// Time-to-live, in seconds, measured from [`ThreadRecord::created_at`].
     pub ttl_seconds: u32,

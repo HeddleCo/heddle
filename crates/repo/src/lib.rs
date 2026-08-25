@@ -17,6 +17,8 @@ pub(crate) fn test_state_id() -> objects::object::StateId {
     objects::object::StateId::from_bytes(bytes)
 }
 
+pub mod actor_presence;
+pub mod agent_task;
 pub mod atomic;
 mod ci_runner_trust;
 pub mod clone_intent;
@@ -28,9 +30,7 @@ mod discussion_anchor_travel;
 #[cfg(feature = "tree-sitter-symbols")]
 mod discussion_snapshot_travel;
 mod ephemeral_thread;
-mod fsmonitor;
 mod git_ref_name;
-pub mod git_worktree_status;
 mod grant_audience;
 mod hooks;
 pub mod identity;
@@ -73,14 +73,21 @@ mod repository_symbol_graph_frontier;
 mod repository_symbol_graph_load;
 mod repository_symbol_graph_query;
 pub use repository_symbol_graph_query::ResolvedSemanticEdgeSet;
+pub mod remote;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_semantic_context;
+pub mod signals;
+pub use repository::{PatternDeviationToml, ReviewConfig, ReviewSignalsToml};
+#[cfg(feature = "tree-sitter-symbols")]
+pub use repository_semantic_context::{
+    CaptureInvariantAnnotation, CaptureSemanticContext, build_semantic_context,
+};
+#[cfg(feature = "tree-sitter-symbols")]
+pub use repository_semantic_corpus::CORPUS_FILE_BUDGET;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_semantic_corpus;
 #[cfg(all(test, feature = "tree-sitter-symbols"))]
 mod repository_semantic_graph_e2e_tests;
-#[cfg(feature = "tree-sitter-symbols")]
-mod repository_signals;
 mod repository_state_visibility;
 #[cfg(all(test, feature = "tree-sitter-symbols"))]
 mod repository_symbol_graph_tests;
@@ -95,7 +102,6 @@ mod session_storage;
 pub mod snapshot_metadata;
 pub mod staleness;
 mod stash;
-mod stat_signature;
 /// Re-export of the symbol resolver. The implementation lives in
 /// `crates/semantic/src/symbol_resolver.rs` so anchor-travel code in
 /// `objects`-adjacent modules can use it without depending on `repo`.
@@ -119,14 +125,18 @@ mod timeline_pack;
 mod timeline_store;
 mod timeline_view;
 pub mod visibility;
-mod worktree_ignore;
-pub mod worktree_index;
-mod worktree_state;
-mod worktree_status_options;
 
-pub mod worktree_walk;
-
+#[path = "worktree/mod.rs"]
+pub mod worktree;
 // Re-export commonly used types from underlying crates.
+pub use actor_presence::{
+    ActorChainNode, ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
+    ContextQueryEntry, generate_actor_session_id,
+};
+pub use agent_task::{
+    AGENT_TASK_SCHEMA_VERSION, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
+    generate_agent_task_id, validate_task_id,
+};
 pub use ci_runner_trust::{CiRunnerTrustEntry, CiRunnerTrustSet};
 pub use collaboration_migration::{
     LegacyDiscussionMigrationBlocker, LegacyDiscussionMigrationItem, LegacyDiscussionMigrationPlan,
@@ -150,12 +160,12 @@ pub use git_ref_name::{
 pub use grant_audience::{GrantRole, audience_tier_for_grant};
 pub use hooks::{Hook, HookContext, HookManager, HookResponse};
 pub use merge_state::{MergeState, MergeStateManager};
-pub use objects::blame::{
-    BlameFrontierGroup, BlameFrontierRecord, BlameLineMap, BlamePreparation, BlameSliceAdvance,
-    BlameSliceError, BlameSliceLimits, OriginRange, advance_file_blame_slice, blame_file,
-    finalize_file_provenance, origin_from_state, prepare_file_blame,
-};
 pub use objects::{
+    blame::{
+        BlameFrontierGroup, BlameFrontierRecord, BlameLineMap, BlamePreparation, BlameSliceAdvance,
+        BlameSliceError, BlameSliceLimits, OriginRange, advance_file_blame_slice, blame_file,
+        finalize_file_provenance, origin_from_state, prepare_file_blame,
+    },
     error::{HeddleError as StoreError, HeddleError, Result},
     object::{
         BranchCreatedV1, CursorMovedV1, NativeToolCallRefV1, TIMELINE_OPERATION_SCHEMA_VERSION,
@@ -164,12 +174,7 @@ pub use objects::{
         TimelineOperationIdParseError, TimelineOperationKind, TimelineStepId,
         TimelineToolCallStatus, TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
     },
-    store::{
-        AgentUsageSummary, FsStore, ObjectStore, ShallowInfo,
-        actor_presence::{
-            ActorPresence, ActorPresenceStatus, ActorPresenceStore, generate_actor_session_id,
-        },
-    },
+    store::{FsStore, ObjectStore, ShallowInfo},
 };
 #[cfg(feature = "async-source")]
 pub use repository::query_history_async;
@@ -191,7 +196,9 @@ pub use repository::{
     is_major_rewrite, is_synthetic_root, open_git_repository_at_root, query_history_from_source,
 };
 #[cfg(feature = "git-overlay")]
-pub use repository::{GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitOverlayShortStatus};
+pub use repository::{
+    GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitOverlayShortStatus, GitOverlayTagTip,
+};
 #[cfg(feature = "async-source")]
 pub use repository::{find_merge_base_async, is_ancestor_async};
 pub use repository_key_binding::AuthorshipVerification;
@@ -253,9 +260,15 @@ pub use visibility::{
     AudienceParseError, AudienceTier, ScopeDropCounts, filter_for_audience,
     filter_for_audience_with_drops, visible,
 };
+pub(crate) use worktree::{
+    fsmonitor, stat_signature, status_tracked_refresh, status_untracked_scan, worktree_ignore,
+    worktree_state,
+};
+pub use worktree::{git_worktree_status, worktree_index, worktree_status_options, worktree_walk};
 pub use worktree_index::{DirectoryCacheEntry, IndexEntry, WorktreeIndex};
 pub use worktree_state::WorktreeState;
 pub use worktree_status_options::{
     FsMonitorConfig, FsMonitorMode, FsMonitorSettings, WorktreeStatusOptions,
+    resolve_worktree_status_options,
 };
 pub type Config = RepoConfig;

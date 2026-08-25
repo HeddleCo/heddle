@@ -10,7 +10,7 @@ mod agent_provenance;
 mod auto_capture;
 mod blame;
 mod checkpoint;
-mod child_env;
+#[cfg(feature = "ci")]
 mod ci;
 mod clone;
 mod collapse;
@@ -56,10 +56,8 @@ mod rebase;
 pub(crate) mod redact;
 mod remote;
 mod resolve;
-mod retro;
 mod revert;
 mod review;
-mod run_cmd;
 #[cfg(feature = "semantic")]
 mod semantic_cmd;
 #[cfg(feature = "semantic")]
@@ -78,7 +76,6 @@ mod thread_cmd;
 mod thread_landing;
 mod thread_shaping;
 mod timeline_cmd;
-mod try_cmd;
 mod undo;
 mod undo_apply;
 mod verify;
@@ -95,6 +92,7 @@ pub use agent_cmd::{
     agent_api_schema, cmd_agent_capture, cmd_agent_heartbeat, cmd_agent_list, cmd_agent_ready,
     cmd_agent_release, cmd_agent_reserve,
 };
+#[cfg(feature = "ci")]
 pub use ci::cmd_ci;
 #[cfg(feature = "client")]
 pub use clone::recover_interrupted_clone;
@@ -104,13 +102,12 @@ pub use clone::{
 };
 pub use collapse::cmd_collapse;
 pub use command_catalog::{
-    CommandCatalogOutput, CommandRuntimeContract, advanced_help_groups, build_command_catalog,
-    command_canonical_command, command_contract_root_commands, command_help_tier,
-    command_help_visibility, command_path, command_persists_op_id, command_runtime_contract,
-    command_runtime_contract_for_command, command_supports_json_for_command,
-    command_supports_op_id, command_supports_op_id_for_command, command_surface,
-    command_uses_bootstrap_op_id_store, observe_only_root_commands, operator_envelope_verbs,
-    root_commands_for_advanced_help, root_commands_for_help_visibility,
+    CommandCatalogOutput, CommandRuntimeContract, build_command_catalog, command_canonical_command,
+    command_contract_root_commands, command_help_visibility, command_path, command_persists_op_id,
+    command_runtime_contract, command_runtime_contract_for_command,
+    command_supports_json_for_command, command_supports_op_id, command_supports_op_id_for_command,
+    command_surface, command_uses_bootstrap_op_id_store, observe_only_root_commands,
+    operator_envelope_verbs, ranked_visible_roots, root_commands_for_help_visibility,
 };
 pub use commit::cmd_commit;
 pub use completion::{cmd_complete, cmd_completion, cmd_completions};
@@ -148,7 +145,6 @@ pub use integration::{
 };
 pub use log::{LogCommandOptions, cmd_log};
 pub use maintenance::cmd_maintenance;
-pub(crate) use merge::{bench_detect_renames, bench_find_merge_base, bench_three_way_merge};
 pub use operator_core::operator_emission_output_kinds;
 pub use operator_loop::{cmd_abort, cmd_continue, cmd_sync_smart};
 pub use oplog::cmd_oplog;
@@ -158,11 +154,9 @@ pub use ready_cmd::cmd_ready;
 pub use redact::cmd_redact;
 pub use remote::{cmd_pull, cmd_push, cmd_remote};
 pub use resolve::cmd_resolve;
-pub use retro::{RetroCommandOptions, cmd_retro};
 pub use revert::cmd_revert;
 pub use review::run as cmd_review;
-pub use run_cmd::cmd_run;
-pub use schemas::{cmd_schemas, documented_schema_verbs, schema_for_verb, schema_verbs};
+pub use schemas::{documented_schema_verbs, schema_for_verb, schema_verbs};
 #[cfg(feature = "semantic")]
 pub use semantic_cmd::cmd_semantic;
 pub use shell::cmd_shell;
@@ -175,12 +169,8 @@ pub use thread_shaping::{
     cmd_capture_split, cmd_thread_absorb, cmd_thread_move, cmd_thread_resolve,
 };
 pub use timeline_cmd::cmd_timeline;
-pub use try_cmd::cmd_try;
 pub use undo::{cmd_redo, cmd_undo, cmd_undo_recover};
 pub use verify::cmd_verify;
 pub use visibility::cmd_visibility;
 pub use watch::cmd_watch;
 pub use workflow::{cmd_land, cmd_sync, recover_incomplete_land_if_present};
-
-#[cfg(feature = "client")]
-pub(crate) use crate::hosted_runtime::cmd_auth;

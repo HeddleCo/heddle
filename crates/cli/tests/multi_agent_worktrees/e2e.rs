@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::{ActorPresenceStore, WriterLeaseStore};
+use objects::store::WriterLeaseStore;
+use repo::ActorPresenceStore;
 
 use super::*;
 
@@ -542,8 +543,11 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
         Some("heddle land --thread feature/native-cli")
     );
 
-    let actor_list_json = heddle(&["--output", "json", "presence", "list"], Some(main.path()))
-        .expect("actor list should succeed");
+    let actor_list_json = heddle(
+        &["--output", "json", "agent", "presence", "list"],
+        Some(main.path()),
+    )
+    .expect("actor list should succeed");
     let actor_list: Value = serde_json::from_str(&actor_list_json).unwrap();
     let actor_session = actor_list["presence"]
         .as_array()
@@ -556,6 +560,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
         &[
             "--output",
             "json",
+            "agent",
             "presence",
             "complete",
             "--session",
@@ -838,8 +843,11 @@ fn land_auto_captures_and_merges_clean_thread() {
         "auto_integrated"
     );
 
-    let actor_show = heddle_output(&["--output", "json", "presence", "show"], Some(main.path()))
-        .expect("invoke actor show after land");
+    let actor_show = heddle_output(
+        &["--output", "json", "agent", "presence", "show"],
+        Some(main.path()),
+    )
+    .expect("invoke actor show after land");
     assert!(
         !actor_show.status.success(),
         "actor show should not select the merged actor implicitly after land"
@@ -848,7 +856,10 @@ fn land_auto_captures_and_merges_clean_thread() {
     let envelope: Value = serde_json::from_str(stderr.trim())
         .unwrap_or_else(|err| panic!("actor show failure should be JSON: {err}: {stderr}"));
     assert_eq!(envelope["kind"], "no_active_actor");
-    assert_eq!(envelope["primary_command"], "heddle presence list");
+    assert_eq!(
+        envelope["primary_command"],
+        "heddle agent presence list"
+    );
     assert!(
         envelope["hint"]
             .as_str()
@@ -1163,10 +1174,15 @@ fn delegate_creates_child_threads_with_parent_relationship() {
     let parent_thread =
         std::path::PathBuf::from(parent_started["execution_path"].as_str().unwrap());
 
-    let mut child_checkouts = Vec::new();
     for child in ["parser", "tests"] {
         let child_name = format!("feature/orchestrator/{child}");
-        let child_checkout = TempDir::new().unwrap();
+        // `start` requires an explicit empty checkout directory.
+        let child_path = std::env::temp_dir().join(format!(
+            "heddle-e2e-{}-{child}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&child_path);
+        fs::create_dir_all(&child_path).unwrap();
         heddle(
             &[
                 "--output",
@@ -1174,7 +1190,7 @@ fn delegate_creates_child_threads_with_parent_relationship() {
                 "start",
                 &child_name,
                 "--path",
-                child_checkout.path().to_str().unwrap(),
+                child_path.to_str().unwrap(),
                 "--parent-thread",
                 "feature/orchestrator",
                 "--task",
@@ -1183,7 +1199,6 @@ fn delegate_creates_child_threads_with_parent_relationship() {
             Some(&parent_thread),
         )
         .unwrap();
-        child_checkouts.push(child_checkout);
     }
     let delegated = serde_json::json!({
         "delegated": [
@@ -1772,7 +1787,11 @@ fn thread_absorb_merges_child_thread_into_parent_workspace() {
     .unwrap();
     let parent_path = std::path::PathBuf::from(parent_started["execution_path"].as_str().unwrap());
     let child_name = "feature/orchestrator/parser".to_string();
-    let child_checkout = TempDir::new().unwrap();
+    // `start` requires an explicit empty checkout directory.
+    let child_checkout =
+        std::env::temp_dir().join(format!("heddle-e2e-{}-absorb-parser", std::process::id()));
+    let _ = fs::remove_dir_all(&child_checkout);
+    fs::create_dir_all(&child_checkout).unwrap();
     heddle(
         &[
             "--output",
@@ -1780,7 +1799,7 @@ fn thread_absorb_merges_child_thread_into_parent_workspace() {
             "start",
             &child_name,
             "--path",
-            child_checkout.path().to_str().unwrap(),
+            child_checkout.to_str().unwrap(),
             "--parent-thread",
             "feature/orchestrator",
             "--task",

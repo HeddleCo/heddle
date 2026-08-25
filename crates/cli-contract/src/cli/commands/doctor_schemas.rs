@@ -18,21 +18,22 @@
 //! the doc has historically suffered (renames, deletions, leaks of
 //! fields like `git_import_guidance` into per-command outputs).
 //!
-//! Pure sample/schema helpers live in `heddle_core::doctor_schemas_plan`.
+//! Pure sample/schema helpers live in `verbs::doctor_schemas_plan`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use heddle_core::doctor_schemas_plan::{
+use schemars::JsonSchema;
+use serde::Serialize;
+use serde_json::Value;
+use sley::Repository as SleyRepository;
+use verbs::doctor_schemas_plan::{
     DocSample, SchemaCoverageBlockingFacts, collect_coverage_field_drifts,
     coverage_has_no_blocking_schema_gaps as coverage_gaps_clean, doctor_schemas_json_sample_span,
     documented_samples_with_bound_verbs as core_documented_samples_with_bound_verbs,
     extract_samples, sample_matches_verb_with_hints, schema_allows_additional_properties,
     schema_property_keys, top_level_keys,
 };
-use serde::Serialize;
-use serde_json::Value;
-use sley::Repository as SleyRepository;
 
 use super::{
     advice::RecoveryAdvice,
@@ -43,7 +44,7 @@ use super::{
 use crate::cli::{Cli, DoctorSchemasArgs, should_output_json};
 
 /// One drift finding.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SchemaIssue {
     /// Verb the sample documents.
     pub verb: String,
@@ -55,7 +56,7 @@ pub struct SchemaIssue {
     pub detail: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SchemaReport {
     /// Stable output discriminator for JSON callers.
     pub output_kind: &'static str,
@@ -100,7 +101,7 @@ pub struct SchemaReport {
     pub doc_path: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CommandContractSchemaCoverage {
     pub status: String,
     #[serde(rename = "verified_scope")]
@@ -506,7 +507,7 @@ fn doctor_schemas_doc_missing_advice(repo_root: &Path) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "doctor_schemas_source_docs_missing",
         "Cannot run schema docs drift check outside a Heddle source checkout",
-        "Run this from the Heddle source checkout, pass `--repo <source-root>`, or use `heddle help --output json` and `heddle schemas status` for installed CLI introspection.",
+        "Run this from the Heddle source checkout, pass `--repo <source-root>`, or use `heddle help --output json` for installed CLI introspection.",
         format!(
             "docs/json-schemas.md was not found under {}",
             repo_root.display()
@@ -516,7 +517,6 @@ fn doctor_schemas_doc_missing_advice(repo_root: &Path) -> RecoveryAdvice {
         "heddle help --output json",
         vec![
             "heddle help --output json".to_string(),
-            "heddle schemas status".to_string(),
             "heddle doctor schemas --output json".to_string(),
         ],
     )

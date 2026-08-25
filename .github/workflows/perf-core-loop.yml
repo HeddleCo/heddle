@@ -59,7 +59,7 @@ jobs:
             cargo build --locked --release -p heddle-cli \
               --bin heddle --bin heddle-fsmonitor-worker 2>&1 | tee release-compile.txt
           /usr/bin/time -f 'release_test_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
-            cargo test --locked --release -p heddle-cli --test cli_integration \
+            cargo test --locked --release -p heddle-cli --test cli_basics \
               --no-run 2>&1 | tee -a release-compile.txt
           /usr/bin/time -f 'release_history_test_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
             cargo test --locked --release -p heddle-repo --lib \
@@ -71,8 +71,8 @@ jobs:
       - name: Enforce instant core-loop contract
         run: |
           set -o pipefail
-          cargo test --locked --release -p heddle-cli --test cli_integration \
-            core_loop_release_contract -- --ignored --nocapture 2>&1 | tee core-loop-contract.txt
+          cargo test --locked --release -p heddle-cli --test cli_basics \
+            perf_core_loop::core_loop_release_contract -- --ignored --nocapture 2>&1 | tee core-loop-contract.txt
 
       - name: Enforce bounded-history contract
         run: |
@@ -85,7 +85,7 @@ jobs:
         run: |
           set -o pipefail
           HEDDLE_PROFILE=1 cargo test --locked --release -p heddle-cli \
-            --test cli_integration adopt_no_eager_mirror_release_contract \
+            --test cli_basics perf_adopt::adopt_no_eager_mirror_release_contract \
             -- --ignored --nocapture 2>&1 | tee adopt-contract.txt
 
       - name: Enforce hosted endpoint close contract

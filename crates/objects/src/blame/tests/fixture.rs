@@ -46,9 +46,7 @@ pub(super) fn put_state_with_files(
             TreeEntry::file((*name).to_string(), blob_hash, false).unwrap()
         })
         .collect();
-    let tree_hash = store
-        .put_tree(&Tree::from_entries(entries))
-        .unwrap();
+    let tree_hash = store.put_tree(&Tree::from_entries(entries)).unwrap();
     let state = State::new(
         tree_hash,
         parents,

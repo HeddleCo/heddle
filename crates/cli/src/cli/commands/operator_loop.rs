@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::Result;
-use heddle_core::status::next_action::{NextActionInput, effective_next_action, non_empty_action};
 use repo::{GitImportGuidance, GitRemoteTrackingStatus, RepositoryOperationStatus};
+use verbs::status::next_action::{NextActionInput, effective_next_action, non_empty_action};
 
 use super::{
     action_line::print_next_step,

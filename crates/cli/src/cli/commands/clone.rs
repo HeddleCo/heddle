@@ -17,19 +17,6 @@ use std::{
 #[cfg(feature = "client")]
 use anyhow::Context;
 use anyhow::{Result, anyhow};
-use heddle_core::{
-    CloneMode, ClonePlanError, ClonePlanFacts, ClonePlanOptions, CloneRemoteSource,
-    CloneThreadSelectError, UnsupportedCloneFlag, plan_clone, select_clone_checkout_thread,
-    status::next_action::canonical_git_import_ref_command,
-};
-#[cfg(feature = "client")]
-use heddle_core::{
-    MonorepoCloneResultSummary, MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoNodeExecution,
-    MonorepoNodeExecutionStep, MonorepoNodeFacts, MonorepoNodeStepOptions,
-    assemble_monorepo_clone_json_report, assemble_monorepo_clone_result_summary,
-    monorepo_execution_progress, monorepo_rel_display, plan_monorepo_clone,
-    plan_monorepo_execution, validate_monorepo_clone_options, validate_monorepo_execution,
-};
 use heddle_git_projection::git_core::{
     clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference, write_head_symref,
 };
@@ -46,7 +33,6 @@ use objects::{
 use repo::{BlobHydrator, Repository};
 #[cfg(feature = "client")]
 use repo::{RepositorySourceAuthority, clone_intent::CloneIntent};
-use serde::Serialize;
 #[cfg(feature = "client")]
 use sley::plumbing::sley_worktree;
 use sley::{
@@ -55,14 +41,26 @@ use sley::{
     plumbing::sley_core::redact_url_for_display,
     remote::{ProgressSink as SleyProgressSink, TransferProgress},
 };
+use verbs::{
+    CloneMode, ClonePlanError, ClonePlanFacts, ClonePlanOptions, CloneRemoteSource,
+    CloneThreadSelectError, UnsupportedCloneFlag, plan_clone, select_clone_checkout_thread,
+    status::next_action::canonical_git_import_ref_command,
+};
+#[cfg(feature = "client")]
+use verbs::{
+    MonorepoCloneResultSummary, MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoNodeExecution,
+    MonorepoNodeExecutionStep, MonorepoNodeFacts, MonorepoNodeStepOptions,
+    assemble_monorepo_clone_json_report, assemble_monorepo_clone_result_summary,
+    monorepo_execution_progress, monorepo_rel_display, plan_monorepo_clone,
+    plan_monorepo_execution, validate_monorepo_clone_options, validate_monorepo_execution,
+};
 
 use super::{
     advice::RecoveryAdvice,
     import_progress::ImportProgress,
+    next_action::{NextActionValidationContext, write_full_command_json},
     verification_health::{RepositoryVerificationState, build_repository_verification_state},
 };
-#[cfg(feature = "client")]
-use crate::hosted_runtime::hosted::{HostedClient, HostedRefEntry, PullMaterialization};
 #[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;
 use crate::{
@@ -71,15 +69,21 @@ use crate::{
         progress_render::{TerminalSink, finish_line, format_transfer_bytes},
         should_output_json, style,
     },
-    client::LocalSync,
     perf::{ProfileField, emit_profile},
     remote::{Remote, RemoteConfig, RemoteTarget},
 };
+use hosted_client::client::LocalSync;
+#[cfg(feature = "client")]
+use hosted_client::hosted_runtime::hosted::{HostedClient, HostedRefEntry, PullMaterialization};
 
 /// `output_kind` value carried by the final `heddle clone --output json`
 /// payload. Referenced by the command catalog and the catalog/runtime
 /// invariant test to keep the runtime emission and the advertised
 /// discriminator from drifting apart.
+// The wire payload lives in cli-contract so the schema registry registers
+// the real serialization type.
+pub use heddle_cli_contract::cli::commands::wire::remote::CloneOutput;
+
 pub const CLONE_OUTPUT_KIND: &str = "clone";
 
 /// `output_kind` value carried by the *preliminary* JSON record emitted
@@ -100,33 +104,6 @@ struct CloneOptions {
     /// (`clone_local` explicitly discards it via `insecure: _`).
     #[cfg_attr(not(feature = "client"), allow(dead_code))]
     insecure: bool,
-}
-
-#[derive(Serialize)]
-struct CloneOutput {
-    output_kind: &'static str,
-    action: &'static str,
-    status: &'static str,
-    success: bool,
-    cloned: bool,
-    transport: &'static str,
-    remote: String,
-    local: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    repository_capability: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    commits_imported: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    states_created: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    objects: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    state: Option<String>,
-    #[serde(rename = "verification")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    trust: Option<RepositoryVerificationState>,
 }
 
 struct GitOverlayCloneOutputInput {
@@ -511,13 +488,13 @@ fn clone_git_overlay_path(
 
 /// Reject `--depth` / `--lazy` / `--filter` for Git-overlay clones before
 /// any filesystem or network work runs. Pure validation lives in
-/// `heddle_core::validate_clone_mode_options`; this wrapper maps errors to
+/// `verbs::validate_clone_mode_options`; this wrapper maps errors to
 /// recovery advice for the git-overlay execution path and unit tests.
 fn reject_unsupported_for_git_overlay(options: &CloneOptions) -> Result<()> {
     if options.insecure {
         return Err(anyhow!(git_overlay_clone_insecure_advice()));
     }
-    heddle_core::validate_clone_mode_options(
+    verbs::validate_clone_mode_options(
         &CloneMode::GitOverlayUrl,
         options.depth,
         options.lazy,
@@ -668,7 +645,10 @@ fn render_finished_git_overlay_clone(
             states_created: finished.states_created,
             trust: finished.trust,
         });
-        crate::cli::render::write_json_stdout(&output)?;
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["clone"]),
+        )?;
     } else {
         let repo_name = clone_repo_name_from_label(&finished.remote);
         for line in
@@ -717,7 +697,7 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
         ))
     })?;
     let branch_ref = format!("refs/heads/{branch}");
-    let reference = git_repo.find_reference(&branch_ref).map_err(|err| {
+    let reference = git_repo.require_reference(&branch_ref).map_err(|err| {
         anyhow!(clone_verification_failed_advice(
             format!("clone verification failed: selected Git branch '{branch}' is missing: {err}"),
             format!("Git ref '{branch_ref}' is missing after Git-overlay clone"),
@@ -725,14 +705,6 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
             canonical_git_import_ref_command(branch),
         ))
     })?;
-    let Some(reference) = reference else {
-        return Err(anyhow!(clone_verification_failed_advice(
-            format!("clone verification failed: selected Git branch '{branch}' is missing"),
-            format!("Git ref '{branch_ref}' is missing after Git-overlay clone"),
-            "Git status would report upstream tracking for a branch whose local ref is absent",
-            canonical_git_import_ref_command(branch),
-        )));
-    };
     let target = reference.peeled_oid(&git_repo).map_err(|err| {
         anyhow!(clone_verification_failed_advice(
             format!(
@@ -1252,7 +1224,10 @@ async fn clone_local(
             Some(state_id.to_string()),
             Some(build_repository_verification_state(&local_repo)),
         );
-        crate::cli::render::write_json_stdout(&output)?;
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["clone"]),
+        )?;
     } else {
         let depth_info = depth.map(|d| format!(" (depth {})", d)).unwrap_or_default();
         println!(
@@ -1568,10 +1543,8 @@ async fn clone_network(
     server_key: Option<String>,
     endpoint_spec: String,
 ) -> Result<()> {
-    use crate::{
-        client::{HostedAuthMode, HostedSession},
-        config::UserConfig,
-    };
+    use crate::config::UserConfig;
+    use hosted_client::client::{HostedAuthMode, HostedSession};
 
     let user_config = UserConfig::load_default()?;
     // On every network-connecting command, TLS/auth config validation
@@ -1673,7 +1646,7 @@ async fn clone_network_connected(
                     .as_ref()
                     .map(|transfer| transfer.checkpoint.as_slice())
                     .unwrap_or_default();
-                let refs = crate::hosted_runtime::hosted::decode_pull_refs(checkpoint)?
+                let refs = hosted_client::hosted_runtime::hosted::decode_pull_refs(checkpoint)?
                     .ok_or_else(|| {
                         wire::ProtocolError::InvalidState(
                             "server does not advertise folded clone refs".to_string(),
@@ -1757,16 +1730,17 @@ async fn clone_network_connected(
             )
             .await?;
 
-        let bootstrap = crate::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
-            .context("decode hosted clone bootstrap")?
-            .ok_or_else(|| {
-                anyhow!(RecoveryAdvice::network_clone_failed(
-                    "hosted response is missing required folded metadata",
-                    local_path,
-                ))
-            })?
-            .resolve(&local_repo, Some(final_state))
-            .context("resolve hosted clone bootstrap")?;
+        let bootstrap =
+            hosted_client::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
+                .context("decode hosted clone bootstrap")?
+                .ok_or_else(|| {
+                    anyhow!(RecoveryAdvice::network_clone_failed(
+                        "hosted response is missing required folded metadata",
+                        local_path,
+                    ))
+                })?
+                .resolve(&local_repo, Some(final_state))
+                .context("resolve hosted clone bootstrap")?;
 
         if lazy {
             use repo::lazy_hydrator::LazyHydratorConfig;
@@ -1785,7 +1759,7 @@ async fn clone_network_connected(
         // hosted CollaborationService discussions for the cloned head into the
         // local op-log so `discuss list` / `discuss show` see them. Best-effort:
         // a fetch hiccup warns rather than failing an otherwise-good clone.
-        match crate::client::discussion_sync::pull_discussions(
+        match hosted_client::client::discussion_sync::pull_discussions(
             &local_repo,
             client,
             repo_path,
@@ -1804,7 +1778,7 @@ async fn clone_network_connected(
         // Read path for hosted context annotations (heddle context): materialize
         // the hosted head's annotations into the local Context attachment so
         // `context list` sees them. Best-effort, mirroring discussions.
-        match crate::client::context_sync::pull_context(
+        match hosted_client::client::context_sync::pull_context(
             &local_repo,
             client,
             repo_path,
@@ -1869,7 +1843,10 @@ async fn clone_network_connected(
                 Some(final_state.to_string()),
                 Some(build_repository_verification_state(&local_repo)),
             );
-            crate::cli::render::write_json_stdout(&output)?;
+            write_full_command_json(
+                &output,
+                NextActionValidationContext::without_repo(&["clone"]),
+            )?;
         } else {
             let depth_info = depth.map(|d| format!(" (depth {})", d)).unwrap_or_default();
             println!(
@@ -1900,10 +1877,8 @@ async fn clone_network_connected(
 
 #[cfg(feature = "client")]
 pub async fn recover_interrupted_clone(cli: &Cli, start: &Path) -> Result<bool> {
-    use crate::{
-        client::{HostedAuthMode, HostedSession},
-        config::UserConfig,
-    };
+    use crate::config::UserConfig;
+    use hosted_client::client::{HostedAuthMode, HostedSession};
 
     let Some(root) = repo::clone_intent::find_clone_intent_root(start) else {
         return Ok(false);
@@ -2015,15 +1990,16 @@ async fn recover_interrupted_clone_connected(
         .save(repo.heddle_dir())?;
     }
     configure_hosted_clone_origin(&repo, &intent.endpoint, &intent.repository)?;
-    let bootstrap = crate::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)?
-        .ok_or_else(|| {
-            anyhow!(RecoveryAdvice::network_clone_failed(
-                "hosted response is missing required folded metadata",
-                root,
-            ))
-        })?
-        .resolve(&repo, Some(final_state))?;
-    if let Err(error) = crate::client::discussion_sync::pull_discussions(
+    let bootstrap =
+        hosted_client::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)?
+            .ok_or_else(|| {
+                anyhow!(RecoveryAdvice::network_clone_failed(
+                    "hosted response is missing required folded metadata",
+                    root,
+                ))
+            })?
+            .resolve(&repo, Some(final_state))?;
+    if let Err(error) = hosted_client::client::discussion_sync::pull_discussions(
         &repo,
         client,
         &intent.repository,
@@ -2036,7 +2012,7 @@ async fn recover_interrupted_clone_connected(
             style::warn_marker()
         );
     }
-    if let Err(error) = crate::client::context_sync::pull_context(
+    if let Err(error) = hosted_client::client::context_sync::pull_context(
         &repo,
         client,
         &intent.repository,
@@ -2119,7 +2095,7 @@ fn verify_hosted_clone(
 ///    depth-bounded edges are surfaced, never fatal.
 ///
 /// Pure planning, validation, progress labels, and result summary (steps 2–4
-/// facts) live in `heddle_core::clone_plan` and are unit-tested there. This
+/// facts) live in `verbs::clone_plan` and are unit-tested there. This
 /// function owns hosted RPC and per-node materialize I/O.
 #[cfg(feature = "client")]
 async fn clone_monorepo(
@@ -2131,10 +2107,8 @@ async fn clone_monorepo(
     server_key: Option<String>,
     endpoint_spec: String,
 ) -> Result<()> {
-    use crate::{
-        client::{HostedAuthMode, HostedSession},
-        config::UserConfig,
-    };
+    use crate::config::UserConfig;
+    use hosted_client::client::{HostedAuthMode, HostedSession};
 
     // Monorepo clone materializes each node at a resolved state; the shallow /
     // lazy / partial knobs don't compose with the multi-spool walk in this
@@ -2231,7 +2205,10 @@ async fn clone_monorepo_connected(
     // Report the outcome, including every withheld child edge.
     if json_output {
         let output = monorepo_clone_output_json(local_path, &summary);
-        crate::cli::render::write_json_stdout(&output)?;
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["clone"]),
+        )?;
     } else {
         // Counts/copy from pure summary; CLI owns markers and bold root.
         let unit = if summary.placed_count == 1 {
@@ -2450,7 +2427,7 @@ async fn execute_monorepo_node_steps(
 }
 
 /// Reject `--depth`/`--lazy`/`--filter` for monorepo clones. Pure validation
-/// lives in `heddle_core::validate_monorepo_clone_options`; this wrapper maps
+/// lives in `verbs::validate_monorepo_clone_options`; this wrapper maps
 /// errors for the monorepo execution path.
 #[cfg(feature = "client")]
 fn reject_unsupported_for_monorepo(options: &CloneOptions) -> Result<()> {

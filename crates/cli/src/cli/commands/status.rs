@@ -10,13 +10,6 @@ use std::{
 use anyhow::Result;
 #[cfg(feature = "client")]
 use futures::{SinkExt, StreamExt};
-use heddle_core::{
-    ChangesInfo, CoordinationStatus, FastShortStatusReport, GitIndexPlan as CoreGitIndexPlan,
-    MachineContractInput, MaterializedThreadInfo, PlainGitStatusReport, StatusDetail,
-    StatusOptions, StatusReport as StatusOutput, changes_paths, coordination_label,
-    fast_short_status_report, human_thread_health, plain_git_status_report, status as core_status,
-    status_combined_verdict,
-};
 use repo::{
     RepoConfig, Repository, ThreadFreshness, ThreadMode, ThreadState, WorktreeCompareProfile,
     discover_heddle_root,
@@ -32,6 +25,13 @@ use tokio_tungstenite::tungstenite::{
     client::IntoClientRequest, http::header::AUTHORIZATION, protocol::Message,
 };
 use tracing::debug;
+use verbs::{
+    ChangesInfo, CoordinationStatus, FastShortStatusReport, GitIndexPlan as CoreGitIndexPlan,
+    MachineContractInput, MaterializedThreadInfo, PlainGitStatusReport, StatusDetail,
+    StatusOptions, StatusReport as StatusOutput, changes_paths, coordination_label,
+    fast_short_status_report, human_thread_health, plain_git_status_report, status as core_status,
+    status_combined_verdict,
+};
 
 use super::{
     action_line::print_command,
@@ -324,11 +324,20 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
         StatusDetail::DefaultText
     };
     let status_options = worktree_status_options(Some(&repo_config));
-    let user_config = cli_shared::UserConfig::load_default()?;
-    let ctx = heddle_core::ExecutionContext::builder()
+    let user_config = config::UserConfig::load_default()?;
+    let fsmonitor_mode = user_config
+        .worktree_status_options(Some(&repo_config))
+        .fsmonitor
+        .mode;
+    let ctx = verbs::ExecutionContext::builder()
         .start_path(start.clone())
         .repo(repo)
-        .config(user_config)
+        .principal_fallback(
+            user_config
+                .principal_pair()
+                .map(|(name, email)| (name.to_string(), email.to_string())),
+        )
+        .fsmonitor_mode(fsmonitor_mode)
         .build();
     let mut output = core_status(
         &ctx,
@@ -1395,7 +1404,7 @@ fn git_setup_line(output: &StatusOutput) -> Option<String> {
 
 #[cfg(test)]
 fn assess_materialized_threads(repo: &Repository) -> Vec<MaterializedThreadInfo> {
-    heddle_core::assess_materialized_threads(repo)
+    verbs::assess_materialized_threads(repo)
 }
 
 fn render_status_changes(output: &StatusOutput) {
@@ -1575,7 +1584,7 @@ impl HostedPresenceWatch {
             return None;
         }
 
-        let token = crate::client::resolve_hosted_credential(Some(upstream))
+        let token = hosted_client::client::resolve_hosted_credential(Some(upstream))
             .ok()?
             .token?;
         let mut request = normalize_presence_ws_url(upstream)
@@ -1586,9 +1595,9 @@ impl HostedPresenceWatch {
         request
             .headers_mut()
             .insert(AUTHORIZATION, auth.parse().ok()?);
-        let user_config = cli_shared::UserConfig::load_default().ok()?;
+        let user_config = config::UserConfig::load_default().ok()?;
         let client_config = user_config.hosted_runtime_config(None).ok()?;
-        let (mut stream, _) = crate::client::connect_websocket(request, &client_config)
+        let (mut stream, _) = hosted_client::client::connect_websocket(request, &client_config)
             .await
             .ok()?;
         let hello = serde_json::to_string(&PresenceClientFrame::Hello {
@@ -1686,13 +1695,13 @@ mod tests {
     use std::fs;
 
     use clap::Parser as _;
-    use heddle_core::{
-        ActorInfo, ChangesInfo, PlainGitStatusReport, RepositoryVerificationState,
-        repository_mode_label,
-    };
     use repo::{AgentUsageSummary, Repository, ThreadMode};
     use serde_json::Value;
     use tempfile::TempDir;
+    use verbs::{
+        ActorInfo, ChangesInfo, PlainGitStatusReport, RepositoryVerificationState,
+        repository_mode_label,
+    };
 
     use super::{
         MaterializedThreadInfo, assess_materialized_threads, build_status_output,
@@ -1780,7 +1789,7 @@ mod tests {
             "Git branch checkout"
         );
 
-        output.repository_context = Some(heddle_core::RepositoryContextInfo {
+        output.repository_context = Some(verbs::RepositoryContextInfo {
             kind: "git-overlay-isolated-checkout".into(),
             parent_repository: None,
             target_thread: None,
@@ -1955,7 +1964,7 @@ mod tests {
 
     /// Action-field presence contract (HeddleCo/heddle#645): empty
     /// `recommended_action` serializes as `null` via core's
-    /// `PlainGitStatusReport` (assembly + serde live in heddle-core).
+    /// `PlainGitStatusReport` (assembly + serde live in heddle-verbs).
     #[test]
     fn plain_git_status_serializes_empty_recommended_action_as_null() {
         let machine_contract_coverage =

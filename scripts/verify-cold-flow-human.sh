@@ -445,7 +445,6 @@ assert_transcript_claims() {
     "RUN: heddle capture -m" \
     "RUN: heddle checkpoint -m" \
     "Then: heddle land --thread" \
-    "Nothing to capture" \
     "Last 5 captures" \
     "Captures on" \
     "materialized" \

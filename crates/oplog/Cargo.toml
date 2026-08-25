@@ -11,16 +11,12 @@ categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
-heddle-schema.workspace = true
-heddle-perf-contract.workspace = true
-objects.workspace = true
+heddle-object-model = { path = "../object-model", version = "0.15.0" }
+heddle-perf-contract = { path = "../perf-contract", version = "0.15.0" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.15.0" }
 rmp-serde.workspace = true
 serde.workspace = true
 
-runtime-bridge = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
-sqlx = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
 uuid.workspace = true
 
 [dev-dependencies]
@@ -31,7 +27,6 @@ tempfile.workspace = true
 
 [features]
 bench = []
-postgres = ["dep:serde_json", "dep:sqlx", "dep:tokio", "dep:runtime-bridge"]
 
 [lib]
 path = "src/lib.rs"

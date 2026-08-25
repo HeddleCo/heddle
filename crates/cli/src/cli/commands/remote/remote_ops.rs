@@ -7,11 +7,11 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 #[cfg(feature = "client")]
-use heddle_core::{
+use verbs::{
     HostedPullResult, HostedPullResultFields, format_connected_to,
     heddle_pull_execution_facts_from_hosted, parse_hosted_pull_result, pull_tip_changed,
 };
-use heddle_core::{
+use verbs::{
     LocalTransferSummary, PullFailure, PullOutcome, PullPlan, PullPlanRequest, RemoteInfo,
     RemoteListReport, build_pull_outcome, format_pull_outcome_text, format_pulling_from,
     git_overlay_pull_execution_facts, heddle_pull_execution_facts_from_local,
@@ -19,7 +19,6 @@ use heddle_core::{
     plan_pull, pull_should_materialize, show_plain_git_remote, show_remote,
 };
 // Re-export under the historical crate-local names for sibling modules.
-pub(crate) use heddle_core::{resolve_default_remote_name, resolved_default_remote_name};
 use heddle_git_projection::credential::EmbeddingSafeCredentialProvider;
 use objects::{
     object::{StateId, ThreadName, Tree},
@@ -27,7 +26,6 @@ use objects::{
 };
 use refs::Head;
 use repo::{Repository, RepositoryCapability, SyncedThreadMetadata, ThreadManager};
-use serde::Serialize;
 use sley::{
     ConfigEdit, ConfigEditPlan, ConfigEditScope, HeadUpdateOptions, RefChange, ReferenceTarget,
     RemoteConfigRefusal, RemoteConfigRemove, RemoteConfigSet, Repository as SleyRepository,
@@ -35,53 +33,40 @@ use sley::{
         FetchOptions, PackGenerationProgress, ProgressSink as SleyProgressSink, TransferProgress,
     },
 };
+pub(crate) use verbs::{resolve_default_remote_name, resolved_default_remote_name};
 
 use super::super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     import_progress::ImportProgress,
+    next_action::{NextActionValidationContext, write_full_command_json},
     verification_health::{
         RepositoryVerificationState, action_template, action_templates,
         build_plain_git_verification_probe, build_repository_verification_state,
     },
     worktree_safety::ensure_worktree_clean,
 };
-#[cfg(feature = "client")]
-use crate::client::HostedClient;
-#[cfg(feature = "client")]
-use crate::hosted_runtime::hosted::{HostedAuthMode, PullMaterialization};
 use crate::{
     cli::{
         Cli, RemoteCommands,
         progress_render::{finish_line, format_transfer_bytes, progress_for},
         should_output_json, style,
     },
-    client::LocalSync,
     config::UserConfig,
     remote::{Remote, RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
-
-#[derive(Serialize)]
-struct RemoteMutationOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    action: &'static str,
-    name: String,
-    url: Option<String>,
-    default: Option<String>,
-    message: String,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
+#[cfg(feature = "client")]
+use hosted_client::client::HostedClient;
+use hosted_client::client::LocalSync;
+#[cfg(feature = "client")]
+use hosted_client::hosted_runtime::hosted::{HostedAuthMode, PullMaterialization};
 
 /// CLI machine envelope: domain [`PullOutcome`] plus repository verification.
-#[derive(Serialize)]
-struct PullOutput {
-    #[serde(flatten)]
-    outcome: PullOutcome,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
+// The wire payload lives in cli-contract so the schema registry registers
+// the real serialization type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::remote::{
+    PullOutput, RemoteMutationOutput,
+};
 
 fn heddle_pull_output_from_local(
     plan: Option<&PullPlan>,
@@ -303,7 +288,7 @@ pub async fn cmd_pull(
                     local_thread: local_thread_name,
                     lazy: plan.lazy,
                     insecure: insecure
-                        || cli_shared::remote_allows_insecure(&repo, plan.remote.as_deref()),
+                        || repo::remote::remote_allows_insecure(&repo, plan.remote.as_deref()),
                     plan: &plan,
                     cli,
                 },
@@ -614,7 +599,10 @@ fn pull_git_overlay(
         trust: build_repository_verification_state(repo),
     };
     if should_output_json(cli, Some(repo.config())) {
-        crate::cli::render::write_json_stdout(&output)?;
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["pull"]),
+        )?;
     } else {
         render_pull_outcome_text(&output.outcome, &output.trust);
     }
@@ -1059,7 +1047,10 @@ async fn pull_local(
             &summary,
             build_repository_verification_state(repo),
         );
-        crate::cli::render::write_json_stdout(&output)?;
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["pull"]),
+        )?;
     } else {
         let summary = LocalTransferSummary {
             state: Some(state_id.short().to_string()),
@@ -1101,7 +1092,7 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
         options.insecure,
     )
     .await?
-    .with_human_signature_callback(crate::client::cli_human_signature_callback());
+    .with_human_signature_callback(hosted_client::client::cli_human_signature_callback());
     let result = pull_network_connected(repo, &mut client, repo_path, options).await;
     client.close().await;
     result
@@ -1137,8 +1128,9 @@ async fn pull_network_connected(
             },
         )
         .await?;
-    let bootstrap = crate::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
-        .context("decode hosted pull bootstrap")?;
+    let bootstrap =
+        hosted_client::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
+            .context("decode hosted pull bootstrap")?;
     let bootstrap = if result.success {
         bootstrap
             .ok_or_else(|| {
@@ -1224,7 +1216,7 @@ async fn pull_network_connected(
             // new hosted CollaborationService discussions/turns for the pulled
             // head into the local op-log. Best-effort — a fetch hiccup warns
             // rather than failing the pull.
-            match crate::client::discussion_sync::pull_discussions(
+            match hosted_client::client::discussion_sync::pull_discussions(
                 repo,
                 client,
                 repo_path,
@@ -1250,7 +1242,7 @@ async fn pull_network_connected(
                 }
             }
             // Read path for hosted context annotations — same seam as discussions.
-            match crate::client::context_sync::pull_context(
+            match hosted_client::client::context_sync::pull_context(
                 repo,
                 client,
                 repo_path,
@@ -1290,7 +1282,10 @@ async fn pull_network_connected(
                     &facts_fields,
                     build_repository_verification_state(repo),
                 );
-                crate::cli::render::write_json_stdout(&output)?;
+                write_full_command_json(
+                    &output,
+                    NextActionValidationContext::without_repo(&["pull"]),
+                )?;
             } else {
                 let output = heddle_pull_output_from_hosted(
                     Some(options.plan),
@@ -1662,7 +1657,10 @@ fn remotes_task_next_trust(repo: &Repository) -> RepositoryVerificationState {
 
 fn render_remote_mutation(output: RemoteMutationOutput, json: bool) -> Result<()> {
     if json {
-        crate::cli::render::write_json_stdout(&output)?;
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["remote"]),
+        )?;
     } else {
         println!(
             "{} {} {}",
@@ -1679,7 +1677,10 @@ fn render_remote_mutation(output: RemoteMutationOutput, json: bool) -> Result<()
 
 fn render_remote_list(output: &RemoteListReport, json: bool) -> Result<()> {
     if json {
-        crate::cli::render::write_json_stdout(output)?;
+        write_full_command_json(
+            output,
+            NextActionValidationContext::without_repo(&["remote"]),
+        )?;
     } else if output.remotes.is_empty() {
         println!("{}", style::dim("No remotes configured"));
         println!("{}", style::field("next", "heddle remote add <name> <url>"));
@@ -1703,7 +1704,10 @@ fn render_remote_list(output: &RemoteListReport, json: bool) -> Result<()> {
 
 fn render_remote_info(output: &RemoteInfo, json: bool) -> Result<()> {
     if json {
-        crate::cli::render::write_json_stdout(output)?;
+        write_full_command_json(
+            output,
+            NextActionValidationContext::without_repo(&["remote"]),
+        )?;
     } else {
         println!("{}", style::section("Remote"));
         println!("  {}", style::field("name", &style::bold(&output.name)));

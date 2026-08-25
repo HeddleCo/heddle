@@ -105,7 +105,7 @@ coverage:
         flags:
           - rust
         paths:
-          - crates/state_review/
+          - crates/state-review/
 
       crypto:
         target: 80%
@@ -115,13 +115,6 @@ coverage:
         paths:
           - crates/crypto/
 
-      daemon:
-        target: 80%
-        threshold: 0%
-        flags:
-          - rust
-        paths:
-          - crates/daemon/
 
       ingest:
         target: 80%
@@ -191,15 +184,11 @@ component_management:
     - component_id: state_review
       name: state_review
       paths:
-        - crates/state_review/**
+        - crates/state-review/**
     - component_id: crypto
       name: crypto
       paths:
         - crates/crypto/**
-    - component_id: daemon
-      name: daemon
-      paths:
-        - crates/daemon/**
     - component_id: ingest
       name: ingest
       paths:

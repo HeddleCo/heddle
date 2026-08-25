@@ -17,7 +17,7 @@ use tempfile::TempDir;
 mod cli_test_support;
 
 fn heddle(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
-    cli_test_support::heddle(args, cwd, &[])
+    cli_test_support::heddle_env(args, cwd, &[])
 }
 
 fn heddle_with_env(
@@ -25,7 +25,7 @@ fn heddle_with_env(
     cwd: Option<&std::path::Path>,
     envs: &[(&str, &str)],
 ) -> Result<String, String> {
-    cli_test_support::heddle(args, cwd, envs)
+    cli_test_support::heddle_env(args, cwd, envs)
 }
 
 fn status_json(path: &std::path::Path) -> Value {
@@ -343,8 +343,8 @@ mod resolve {
     #[test]
     #[timeout(15000)]
     fn resolve_schema_exposes_structured_regions_and_resolution_records() {
-        let schema = heddle(&["schemas", "resolve"], None).expect("resolve schema");
-        let schema: Value = serde_json::from_str(&schema).expect("resolve JSON Schema");
+        let schema = cli::cli::commands::schema_for_verb("resolve").expect("resolve schema");
+        let schema: Value = serde_json::from_str(&schema.to_string()).expect("resolve JSON Schema");
         let properties = &schema["properties"];
         assert_eq!(properties["conflicts"]["type"], "array", "{schema}");
         assert_eq!(properties["resolutions"]["type"], "array", "{schema}");
@@ -847,6 +847,7 @@ mod blame {
 
         heddle(
             &[
+                "thread",
                 "collapse",
                 &first.to_string_full(),
                 &head.state_id.to_string_full(),
@@ -955,15 +956,13 @@ mod gc {
         // Collect state IDs before gc
         let log_before =
             heddle(&["log", "--oneline", "--output", "text"], Some(temp.path())).unwrap();
+        // Only `hs-*` leading tokens are state ids; trailing note lines
+        // (e.g. the genesis-omitted hint) are prose.
         let state_ids: Vec<&str> = log_before
             .lines()
-            .filter_map(|line| {
-                let mut fields = line.split_whitespace();
-                match fields.next()? {
-                    "genesis" => fields.next(),
-                    state_id => Some(state_id),
-                }
-            })
+            .map(|line| line.trim())
+            .filter(|line| line.starts_with("hs-"))
+            .filter_map(|line| line.split_whitespace().next())
             .collect();
         assert!(state_ids.len() >= 5, "should have at least 5 states");
 

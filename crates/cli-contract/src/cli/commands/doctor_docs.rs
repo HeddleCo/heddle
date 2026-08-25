@@ -12,7 +12,7 @@
 //! docs --all --output json` into CI on every PR to catch doc drift.
 //!
 //! Pure invocation extraction/tokenization lives in
-//! `heddle_core::doctor_docs_plan`.
+//! `verbs::doctor_docs_plan`.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -21,12 +21,13 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use clap::{Command as ClapCommand, CommandFactory};
-use heddle_core::doctor_docs_plan::{
-    DocsInvocation, display_path, extract_invocations, looks_like_value,
-};
 use objects::worktree::should_ignore;
+use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use verbs::doctor_docs_plan::{
+    DocsInvocation, display_path, extract_invocations, looks_like_value,
+};
 
 use super::{
     RecoveryAdvice,
@@ -39,7 +40,7 @@ use super::{
 use crate::cli::{Cli, DoctorDocsArgs, should_output_json};
 
 /// One drift finding.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DocsIssue {
     pub file: String,
     pub line: usize,
@@ -51,7 +52,7 @@ pub struct DocsIssue {
 }
 
 /// Categories of drift the checker can detect.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueKind {
     /// The top-level verb (e.g. `heddle foo`) is not in the CLI.
@@ -80,7 +81,7 @@ pub enum IssueKind {
 }
 
 /// Aggregate output for the verb (human and JSON share this shape).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DocsReport {
     pub output_kind: &'static str,
     pub status: &'static str,

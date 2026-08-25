@@ -330,7 +330,7 @@ time the worker is running.
 | `heddle capture` (mount-bound) | fuse-worker (per-mount socket; CLI looks up via daemon's registry) |
 | `heddle land` | two-step: (1) `FuseWorkerService.Capture` on fuse-worker → CAS hash; (2) daemon's `Ship` RPC with that hash for the network push |
 | Mount status (`heddle status` mount fields) | fuse-worker (per-mount socket); daemon aggregates if multi-mount |
-| `heddle agent serve` and any agent-loop RPC | daemon |
+| `heddle daemon serve` and any agent-loop RPC | daemon |
 | `heddle log` / `heddle review` / state-review RPCs | daemon |
 | `heddle daemon stop` | daemon (which then reaps every fuse-worker) |
 

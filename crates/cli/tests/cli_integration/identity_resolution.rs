@@ -180,10 +180,15 @@ fn heddle_home_isolates_concurrent_user_configs() {
 
     let native_a = temp.path().join("native-a");
     let native_b = temp.path().join("native-b");
-    repo::Repository::init_default(&native_a).expect("native repo a");
-    repo::Repository::init_default(&native_b).expect("native repo b");
+    // Git first, then bootstrap the Heddle sidecar: the
+    // CheckpointAfterCapture tip (which writes the session marker under
+    // HEDDLE_HOME) fires in Git Overlay captures only.
+    fs::create_dir_all(&native_a).expect("repo a directory");
+    fs::create_dir_all(&native_b).expect("repo b directory");
     super::git_hermetic(&["init"], &native_a);
     super::git_hermetic(&["init"], &native_b);
+    repo::Repository::bootstrap_git_overlay(&native_a).expect("overlay repo a");
+    repo::Repository::bootstrap_git_overlay(&native_b).expect("overlay repo b");
     fs::write(native_a.join("a.txt"), "a\n").expect("worktree a");
     fs::write(native_b.join("b.txt"), "b\n").expect("worktree b");
 

@@ -18,7 +18,7 @@ chrono.workspace = true
 # when they explicitly built with `--no-default-features`. Default-on
 # preserves the historical behavior; downstream can disable with
 # `--no-default-features` cleanly.
-objects.workspace = true
+objects = { path = "../objects", package = "heddle-objects", version = "0.15.0" }
 rmp-serde.workspace = true
 serde.workspace = true
 thiserror.workspace = true
@@ -32,9 +32,5 @@ path = "src/lib.rs"
 
 name = "wire"
 [dev-dependencies]
-# Circular: heddle-repo depends on heddle-wire. We keep the path-dep
-# for local testing but omit `version` so cargo strips this entry from
-# the published manifest (dev-deps without version are not packaged).
-repo = { path = "../repo", package = "heddle-repo", default-features = false, features = ["git-overlay", "native", "zstd"] }
 tempfile.workspace = true
 sley.workspace = true

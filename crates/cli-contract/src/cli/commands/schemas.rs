@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `heddle schemas <verb>` — runtime introspection for CLI JSON output shapes.
+//! JSON Schema registry for `--output json` verb payloads.
 //!
 //! This module owns the JSON Schema registry for `--output json`
 //! verbs. Schema *membership* comes from the active command catalog.
@@ -13,14 +13,48 @@
 
 use std::{collections::BTreeMap, sync::OnceLock};
 
-use anyhow::{Result, anyhow};
-use heddle_core::{DiffReport, FsckReport, QueryReport, ResolveReport, StatusReport, VerifyReport};
+use repo::{RepositoryMaintenanceRunReport, RepositoryPerformanceInspectionReport};
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
+use verbs::{
+    ActionTemplate, DiffReport, FsckReport, QueryReport, RemoteListReport,
+    RepositoryVerificationState, ResolveReport, StatusReport, ThreadMoveOutput, UndoListReport,
+    VerifyReport, remote::RemoteInfo,
+};
 
-use super::{RecoveryAdvice, command_catalog, init_output::InitOutput};
-use crate::cli::{Cli, INIT_VERB, should_output_json};
+use super::{
+    command_catalog,
+    doctor_docs::DocsReport,
+    doctor_schemas::SchemaReport,
+    init_output::InitOutput,
+    wire::{
+        AdoptOutput, BlameOutput, CloneOutput, CommitOutput, DiscussionListOutput,
+        DiscussionShowOutput, DiscussionWriteOutput, ExpandOutput, ExportGitOutput,
+        ImportGitOutput, IntegrationStatusOutput, LandOutput, LogOutput, MarkerBulkDeleteOutput,
+        MarkerListOutput, MarkerOpOutput, MultiLandOutput, OperatorCommandOutput, PullOutput,
+        PushOutput, ReadyOutput, ReflogOutput, RemoteMutationOutput, RepackOutput, RevertOutput,
+        ReviewHealthOutput, ReviewNextOutput, ReviewShowOutput, ReviewSignOutput, ShowOutput,
+        SnapshotOutput, SyncGitOutput, SyncOutput, ThreadCaptureOutput, ThreadCurrentOutput,
+        ThreadListOutput, ThreadShowOutput, TimelineActionOutput, TimelineLogOutput,
+        TimelineRecordingOutput, TimelineStatusOutput, UndoRedoOutput, WatchLineOutput,
+        agent::{
+            ActorDoneOutput, ActorExplainDetectedOutput, ActorListOutput, ActorSingleOutput,
+            AgentFanoutOutput, AgentReservationEnvelope, AgentReservationListOutput,
+            AgentTaskEnvelope, AgentTaskListOutput, SegmentEnvelope, SessionEnvelope,
+            SessionListOutput,
+        },
+        auth::{
+            AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, IdentityOutput,
+            ServiceTokenOutput, WhoamiOutput,
+        },
+        thread::{
+            ApprovalOutput, ApprovalRevokeOutput, EligibilityOutput, ThreadAbsorbOutput,
+            ThreadCleanupOutput, ThreadOpOutput, ThreadRecordOutput, ThreadResolveOutput,
+        },
+    },
+};
+use crate::cli::INIT_VERB;
 
 static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
 static DOCUMENTED_SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -68,92 +102,90 @@ fn report_contract_schema_verbs() -> &'static [&'static str] {
 schema_registry! {
     (&["maintenance fsck repair git"], FsckReport),
     (&[INIT_VERB], InitOutput),
-    (&["adopt"], AdoptSchema),
-    (&["capture"], CaptureSchema),
-    (&["commit"], CommitSchema),
-    (&["undo", "undo --redo", "undo --recover"], UndoSchema),
-    (&["undo --list"], UndoListSchema),
-    (&["ready"], ReadySchema),
-    (&["land"], LandSchema),
-    (&["land --threads"], LandBatchSchema),
-    (&["sync"], SyncSchema),
-    (&["continue", "abort"], OperatorCommandSchema),
-    (&["start"], ThreadStartSchema),
-    (&["thread create", "thread switch", "thread rename"], ThreadStartSchema),
-    (&["thread current"], ThreadCurrentSchema),
-    (&["thread captures"], ThreadCapturesSchema),
-    (&["thread refresh", "thread drop"], ThreadCommandSchema),
-    (&["thread promote"], ThreadCommandSchema),
-    (&["thread move"], ThreadMoveSchema),
-    (&["thread absorb"], ThreadAbsorbSchema),
-    (&["thread resolve"], ThreadResolveSchema),
-    (&["thread approve"], ThreadApprovalSchema),
-    (&["thread approvals"], ThreadApprovalListSchema),
-    (&["thread revoke-approval"], ThreadRevokeApprovalSchema),
-    (&["thread check-merge"], ThreadMergeEligibilitySchema),
-    (&["thread cleanup"], ThreadCleanupSchema),
-    (&["thread marker list"], ThreadMarkerListSchema),
-    (&["thread marker create", "thread marker delete", "thread marker show"], ThreadMarkerOpSchema),
-    (&["thread show"], ThreadShowSchema),
-    (&["clone"], CloneSchema),
-    (&["remote list"], RemoteListSchema),
-    (&["remote show"], RemoteInfoSchema),
-    (&["remote add", "remote remove", "remote set-default"], RemoteMutationSchema),
-    (&["pull"], PullSchema),
-    (&["push"], PushSchema),
-    (&["expand"], ExpandSchema),
-    (&["log"], LogSchema),
-    (&["log --reflog"], LogReflogSchema),
-    (&["log --timeline"], TimelineLogSchema),
-    (&["timeline status"], TimelineStatusSchema),
-    (&["timeline record-start", "timeline record-finish"], TimelineRecordingSchema),
-    (&["timeline fork", "timeline reset", "timeline recover"], TimelineActionSchema),
-    (&["show"], ShowSchema),
-    (&["thread list"], ThreadListSchema),
-    (&["schemas"], SchemasListSchema),
-    (&["review show"], ReviewShowSchema),
-    (&["review sign"], ReviewSignSchema),
-    (&["review next"], ReviewNextSchema),
-    (&["review health"], ReviewHealthSchema),
-    (&["retro"], RetroSchema),
-    (&["discuss open", "discuss append", "discuss resolve", "discuss reopen"], DiscussionWriteSchema),
-    (&["discuss show"], DiscussionShowSchema),
-    (&["discuss list"], DiscussionListSchema),
-    (&["query --attribution"], BlameSchema),
-    (&["bridge git export"], ExportGitSchema),
-    (&["bridge git import"], ImportGitSchema),
-    (&["sync git"], SyncGitSchema),
-    (&["revert"], RevertSchema),
+    (&["adopt"], AdoptOutput),
+    (&["capture"], SnapshotOutput),
+    (&["commit"], CommitOutput),
+    (&["undo", "undo --redo", "undo --recover"], UndoRedoOutput),
+    (&["undo --list"], UndoListReport),
+    (&["ready"], ReadyOutput),
+    (&["land"], LandOutput),
+    (&["land --threads"], MultiLandOutput),
+    (&["sync"], SyncOutput),
+    (&["continue", "abort"], OperatorCommandOutput),
+    (&["start"], ThreadOpOutput),
+    (&["thread create", "thread switch", "thread rename"], ThreadOpOutput),
+    (&["thread current"], ThreadCurrentOutput),
+    (&["thread captures"], Vec<ThreadCaptureOutput>),
+    (&["thread refresh", "thread drop"], ThreadRecordOutput),
+    (&["thread promote"], ThreadRecordOutput),
+    (&["thread move"], ThreadMoveOutput),
+    (&["thread absorb"], ThreadAbsorbOutput),
+    (&["thread resolve"], ThreadResolveOutput),
+    (&["thread approve"], ApprovalOutput),
+    (&["thread approvals"], Vec<ApprovalOutput>),
+    (&["thread revoke-approval"], ApprovalRevokeOutput),
+    (&["thread check-merge"], EligibilityOutput),
+    (&["thread cleanup"], ThreadCleanupOutput),
+    (&["thread marker list"], MarkerListOutput),
+    (&["thread marker create", "thread marker show"], MarkerOpOutput),
+    (&["thread marker delete"], MarkerBulkDeleteOutput),
+    (&["thread show"], ThreadShowOutput),
+    (&["clone"], CloneOutput),
+    (&["remote list"], RemoteListReport),
+    (&["remote show"], RemoteInfo),
+    (&["remote add", "remote remove", "remote set-default"], RemoteMutationOutput),
+    (&["pull"], PullOutput),
+    (&["push"], PushOutput),
+    (&["thread expand"], ExpandOutput),
+    (&["log"], LogOutput),
+    (&["log --reflog"], ReflogOutput),
+    (&["log --timeline"], TimelineLogOutput),
+    (&["agent timeline status"], TimelineStatusOutput),
+    (&["agent timeline record-start", "agent timeline record-finish"], TimelineRecordingOutput),
+    (&["agent timeline fork", "agent timeline reset", "agent timeline recover"], TimelineActionOutput),
+    (&["show"], ShowOutput),
+    (&["thread list"], ThreadListOutput),
+    (&["review show"], ReviewShowOutput),
+    (&["review sign"], ReviewSignOutput),
+    (&["review next"], ReviewNextOutput),
+    (&["review health"], ReviewHealthOutput),
+    (&["discuss open", "discuss append", "discuss resolve", "discuss reopen"], DiscussionWriteOutput),
+    (&["discuss show"], DiscussionShowOutput),
+    (&["discuss list"], DiscussionListOutput),
+    (&["query --attribution"], BlameOutput),
+    (&["bridge git export"], ExportGitOutput),
+    (&["bridge git import"], ImportGitOutput),
+    (&["sync git"], SyncGitOutput),
+    (&["revert"], RevertOutput),
     (&["doctor"], DoctorSchema),
-    (&["doctor docs"], DoctorDocsSchema),
-    (&["doctor schemas"], DoctorSchemasSchema),
-    (&["presence show"], AgentPresenceSingleSchema),
-    (&["presence list"], AgentPresenceListSchema),
-    (&["presence complete"], AgentPresenceCompleteSchema),
-    (&["presence explain"], AgentPresenceExplainSchema),
-    (&["agent reserve", "agent heartbeat", "agent release"], AgentReservationEnvelopeSchema),
-    (&["agent capture"], CaptureSchema),
-    (&["agent ready"], ReadySchema),
-    (&["agent list"], AgentReservationListSchema),
-    (&["agent task create", "agent task show", "agent task update"], AgentTaskEnvelopeSchema),
-    (&["agent task list"], AgentTaskListSchema),
-    (&["agent fanout plan", "agent fanout start"], AgentFanoutSchema),
-    (&["auth logout"], AuthLogoutSchema),
-    (&["auth status"], AuthStatusSchema),
+    (&["doctor docs"], DocsReport),
+    (&["doctor schemas"], SchemaReport),
+    (&["agent presence show"], ActorSingleOutput),
+    (&["agent presence list"], ActorListOutput),
+    (&["agent presence complete"], ActorDoneOutput),
+    (&["agent presence explain"], ActorExplainDetectedOutput),
+    (&["agent reserve", "agent heartbeat", "agent release"], AgentReservationEnvelope),
+    (&["agent capture"], SnapshotOutput),
+    (&["agent ready"], ReadyOutput),
+    (&["agent list"], AgentReservationListOutput),
+    (&["agent task create", "agent task show", "agent task update"], AgentTaskEnvelope),
+    (&["agent task list"], AgentTaskListOutput),
+    (&["agent fanout plan", "agent fanout start"], AgentFanoutOutput),
+    (&["auth logout"], AuthLogoutOutput),
+    (&["auth status"], AuthStatusOutput),
     (&["context check"], ContextCheckSchema),
-    (&["auth trust show", "auth trust replace"], AuthTrustSchema),
-    (&["whoami"], WhoamiSchema),
-    (&["auth create-service-token"], AuthCreateServiceTokenSchema),
-    (&["identity ensure", "identity claim-link"], IdentityOutputSchema),
-    (&["agent provenance begin", "agent provenance end", "agent provenance show"], AgentProvenanceEnvelopeSchema),
-    (&["agent provenance segment"], AgentProvenanceSegmentEnvelopeSchema),
-    (&["agent provenance list"], AgentProvenanceListSchema),
-    (&["watch"], WatchLineSchema),
-    (&["integration list", "integration doctor"], IntegrationStatusListSchema),
-    (&["try"], TrySchema),
-    (&["maintenance inspect"], MaintenanceInspectSchema),
-    (&["maintenance refresh"], MaintenanceRefreshSchema),
-    (&["maintenance repack"], MaintenanceRepackSchema),
+    (&["auth trust show", "auth trust replace"], AuthTrustOutput),
+    (&["whoami"], WhoamiOutput),
+    (&["auth create-service-token"], ServiceTokenOutput),
+    (&["identity ensure", "identity claim-link"], IdentityOutput),
+    (&["agent provenance begin", "agent provenance end", "agent provenance show"], SessionEnvelope),
+    (&["agent provenance segment"], SegmentEnvelope),
+    (&["agent provenance list"], SessionListOutput),
+    (&["watch"], WatchLineOutput),
+    (&["integration list", "integration doctor"], Vec<IntegrationStatusOutput>),
+    (&["maintenance inspect"], MaintenanceInspectWire),
+    (&["maintenance refresh"], MaintenanceRefreshWire),
+    (&["maintenance repack"], RepackOutput),
     (&["error"], ErrorEnvelopeSchema),
 }
 
@@ -476,148 +508,6 @@ fn schema_verb_supports_op_id(verb: &str) -> bool {
         .is_some_and(|contract| contract.supports_op_id)
 }
 
-/// Public entrypoint for `heddle schemas [<verb>]`.
-///
-/// `verb_parts` are the raw trailing tokens after `schemas`.
-/// Lookup is a flat string match after filtering global flags that
-/// clap cannot see because the schema command intentionally accepts
-/// literal command flags like `--preview` and `--reflog`.
-pub fn cmd_schemas(cli: &Cli, verb_parts: &[String]) -> Result<()> {
-    let verb_parts = normalize_schema_verb_parts(verb_parts)?;
-    if verb_parts.is_empty() {
-        let out = serde_json::json!({
-            "output_kind": "schemas",
-            "status": "completed",
-            "schema_verbs": schema_verbs(),
-            "documented_schema_verbs": documented_schema_verbs(),
-        });
-        return render_schema_json(&out);
-    }
-
-    let verb = verb_parts.join(" ");
-    let schema = schema_for_verb(&verb)
-        .ok_or_else(|| anyhow!(schema_not_registered_advice(&verb, schema_verbs())))?;
-
-    // `heddle schemas` always emits machine-readable JSON.
-    let _json = should_output_json(cli, None);
-    render_schema_json(&schema)
-}
-
-fn render_schema_json(value: &serde_json::Value) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(value)?);
-    Ok(())
-}
-
-fn schema_not_registered_advice(verb: &str, known_verbs: &[&str]) -> RecoveryAdvice {
-    let matches = suggested_schema_verbs(verb, known_verbs);
-    let primary_command = matches
-        .first()
-        .map(|matched| format!("heddle schemas {matched}"))
-        .unwrap_or_else(|| "heddle schemas".to_string());
-    let hint = if matches.is_empty() {
-        "Run `heddle schemas` to list schema-backed verbs, or inspect the command catalog with `heddle help --output json`.".to_string()
-    } else {
-        format!(
-            "`{verb}` is not exact; available schema verb{}: {}.",
-            if matches.len() == 1 { "" } else { "s" },
-            matches
-                .iter()
-                .map(|matched| format!("`{matched}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    let mut recovery_commands = Vec::new();
-    push_unique_command(&mut recovery_commands, primary_command.clone());
-    push_unique_command(&mut recovery_commands, "heddle schemas".to_string());
-    push_unique_command(
-        &mut recovery_commands,
-        "heddle help --output json".to_string(),
-    );
-    for matched in matches.iter().skip(1) {
-        push_unique_command(&mut recovery_commands, format!("heddle schemas {matched}"));
-    }
-
-    RecoveryAdvice::safety_refusal(
-        "schema_not_registered",
-        format!("No JSON schema is registered for `{verb}`"),
-        hint,
-        format!("`{verb}` is not in the runtime schema registry"),
-        "schema lookup does not change repository state; retrying the same unknown verb will fail until a schema is registered",
-        "no repository objects, refs, metadata, or worktree files were changed",
-        primary_command,
-        recovery_commands,
-    )
-}
-
-fn suggested_schema_verbs<'a>(verb: &str, known_verbs: &'a [&'a str]) -> Vec<&'a str> {
-    let exactish = matching_schema_verbs(verb, known_verbs);
-    if !exactish.is_empty() {
-        return exactish;
-    }
-
-    let normalized = verb.trim();
-    if normalized.is_empty() {
-        return Vec::new();
-    }
-    let bare = command_catalog::schema_verb_without_flags(normalized);
-    if bare.is_empty() {
-        return Vec::new();
-    }
-
-    known_verbs
-        .iter()
-        .copied()
-        .filter(|known| {
-            known.starts_with(normalized)
-                || command_catalog::schema_verb_without_flags(known).starts_with(&bare)
-        })
-        .take(5)
-        .collect()
-}
-
-fn push_unique_command(commands: &mut Vec<String>, command: String) {
-    if !commands.iter().any(|existing| existing == &command) {
-        commands.push(command);
-    }
-}
-
-fn matching_schema_verbs<'a>(verb: &str, known_verbs: &'a [&'a str]) -> Vec<&'a str> {
-    let normalized = verb.trim();
-    if normalized.is_empty() {
-        return Vec::new();
-    }
-    let bare = command_catalog::schema_verb_without_flags(normalized);
-    let prefix = format!("{bare} ");
-    known_verbs
-        .iter()
-        .copied()
-        .filter(|known| {
-            *known != normalized
-                && (*known == bare
-                    || known.starts_with(&prefix)
-                    || command_catalog::schema_verb_without_flags(known) == bare)
-        })
-        .collect()
-}
-
-fn normalize_schema_verb_parts(parts: &[String]) -> Result<Vec<String>> {
-    let mut normalized = Vec::new();
-    let mut iter = parts.iter();
-    while let Some(part) = iter.next() {
-        match part.as_str() {
-            "--no-color" | "-q" | "--quiet" | "-v" | "--verbose" => {}
-            "--output" | "--repo" => {
-                iter.next()
-                    .ok_or_else(|| anyhow!("missing value for `{part}`"))?;
-            }
-            _ if part.starts_with("--output=") || part.starts_with("--repo=") => {}
-            _ => normalized.push(part.clone()),
-        }
-    }
-    Ok(normalized)
-}
-
 // ---------------------------------------------------------------------------
 // Mirror types
 // ---------------------------------------------------------------------------
@@ -633,64 +523,6 @@ fn normalize_schema_verb_parts(parts: &[String]) -> Result<Vec<String>> {
 // Variants here are referenced only through the schemars derive,
 // which the dead-code lint can't see. The annotation keeps the
 // surface honest without polluting downstream warnings.
-#[allow(dead_code)]
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ThreadModeSchema {
-    Materialized,
-    Virtualized,
-    Solid,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ThreadStateSchema {
-    Draft,
-    Active,
-    Ready,
-    Blocked,
-    Merged,
-    Abandoned,
-    Promoted,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ThreadFreshnessSchema {
-    Current,
-    Stale,
-    Unknown,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ThreadImpactCategorySchema {
-    DependencyGraph,
-    BuildRuntimeConfig,
-    GeneratedOutputs,
-    RepoWideRefactor,
-    PublicApiSurface,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "kebab-case")]
-pub enum CoordinationStatusSchema {
-    Clean,
-    Ahead,
-    Diverged,
-    Blocked,
-    MergeReady,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ActorInfoSchema {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-}
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct GenericJsonObjectSchema {
@@ -698,38 +530,34 @@ pub struct GenericJsonObjectSchema {
     pub fields: BTreeMap<String, Value>,
 }
 
+/// Wire envelope for `maintenance inspect`: `output_kind` beside the real
+/// [`RepositoryPerformanceInspectionReport`] payload (InitOutput precedent).
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct AuthLogoutSchema {
+#[schemars(rename = "MaintenanceInspectSchema")]
+pub struct MaintenanceInspectWire {
     pub output_kind: String,
-    pub server: String,
-    pub removed: bool,
-    pub device_identity_removed: bool,
+    #[serde(flatten)]
+    pub report: RepositoryPerformanceInspectionReport,
 }
 
+/// Wire envelope for `maintenance refresh`: `output_kind` beside the real
+/// [`RepositoryMaintenanceRunReport`] payload.
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct AuthStatusSchema {
+#[schemars(rename = "MaintenanceRefreshSchema")]
+pub struct MaintenanceRefreshWire {
     pub output_kind: String,
-    pub server: String,
-    pub authenticated: bool,
-    pub proof_key_available: bool,
-    pub subject: Option<String>,
-    pub credential_id: Option<String>,
-    pub expires_at: Option<String>,
-    pub recommended_action: Option<String>,
+    #[serde(flatten)]
+    pub run: RepositoryMaintenanceRunReport,
 }
 
 /// One stale annotation reported by `context check`. `reason` is the
-/// machine name of the [`StalenessStatus`](repo::staleness::StalenessStatus)
-/// variant that made the annotation stale.
+/// machine name of the staleness result that made the annotation stale.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ContextCheckIssueSchema {
     /// Target label: either a path or `state:<id>`.
     pub target: String,
-    /// Annotation scope token (e.g. `line`, `symbol`, `file`).
+    /// Annotation scope token (for example `line`, `symbol`, or `file`).
     pub scope: String,
-    /// Why the annotation is stale. One of `source_changed`,
-    /// `symbol_missing`, or `file_missing` — the shipped
-    /// `StalenessStatus` enum minus the non-stale variants.
     pub reason: ContextCheckStalenessReason,
     pub annotation_id: String,
     /// First 80 characters of the annotation's current content.
@@ -738,18 +566,12 @@ pub struct ContextCheckIssueSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub enum ContextCheckStalenessReason {
-    /// The annotated source changed since the annotation was captured.
     SourceChanged,
-    /// The symbol the annotation anchors no longer resolves.
     SymbolMissing,
-    /// The annotated file no longer exists on disk.
     FileMissing,
 }
 
-/// Payload-complete schema for `heddle context check --output json`
-/// (heddle#1392): pins the counters and the `StalenessStatus`-derived
-/// `reason` enum so doc claims are machine-checkable via
-/// `heddle doctor schemas`.
+/// Payload-complete schema for `heddle context check --output json`.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ContextCheckSchema {
     pub output_kind: String,
@@ -761,2310 +583,24 @@ pub struct ContextCheckSchema {
     pub issues: Vec<ContextCheckIssueSchema>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AuthTrustSchema {
-    pub output_kind: String,
-    pub canonical_server: String,
-    /// `explicit` or `automatic`.
-    pub source: String,
-    pub key_id: String,
-    /// The 64-character lowercase-hex descriptor public key.
-    pub public_key: String,
-    /// SHA-256 fingerprint of the raw descriptor public key.
-    pub fingerprint: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct WhoamiCaptureActorSchema {
-    pub name: String,
-    pub email: String,
-    /// `environment`, `repository`, `git_config`, or `user_config`; null when unknown.
-    pub source: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct WhoamiSchema {
-    pub output_kind: String,
-    /// Who the next capture is attributed to. Distinct from hosted auth.
-    pub capture_actor: WhoamiCaptureActorSchema,
-    pub server: String,
-    /// A usable credential is stored locally for this server.
-    pub authenticated: bool,
-    /// The server answered `WhoAmI`; `identity` below is authoritative.
-    pub reachable: bool,
-    /// `root`, `agent`, or `service-account`; null when unauthenticated.
-    pub token_kind: Option<String>,
-    /// Resource scopes as `kind:path` (empty ⇒ full resource authority).
-    pub scopes: Vec<String>,
-    /// Intersected hosted-operation ceiling; null ⇒ full authority.
-    pub operation_ceiling: Option<Vec<String>>,
-    pub expires_at: Option<String>,
-    /// Seconds until expiry; negative when already expired.
-    pub ttl_seconds_remaining: Option<i64>,
-    /// The device proof key required to sign hosted requests is present.
-    pub proof_key_available: bool,
-    pub identity: Option<WhoamiIdentitySchema>,
-    pub recommended_action: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct WhoamiIdentitySchema {
-    pub subject: String,
-    pub actor_subject: String,
-    pub is_staff: bool,
-    pub is_service_account: bool,
-    pub is_biscuit: bool,
-    pub session_id: String,
-    pub amr: Vec<String>,
-    pub server_scope: String,
-    pub credential_id: String,
-    pub device_id: Option<String>,
-    pub agent_provider: Option<String>,
-    pub agent_model: Option<String>,
-    pub roles: Vec<WhoamiRoleSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct WhoamiRoleSchema {
-    pub resource_path: String,
-    pub resource_kind: String,
-    /// One of `reader`, `developer`, `maintainer`, `admin`, `owner`.
-    pub role: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AuthCreateServiceTokenSchema {
-    pub output_kind: String,
-    pub name: String,
-    pub namespace: String,
-    pub scope: String,
-    /// Path to the `.hcred` credential file written with mode 0600. The token
-    /// and proof key live inside this file and never appear in the contract.
-    pub credential_path: String,
-    pub expires_in_days: u32,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct IdentityOutputSchema {
-    pub output_kind: String,
-    /// `reused`, `derived`, `created_on_behalf`, or `claim_link_reissued`.
-    pub outcome: String,
-    pub server: String,
-    pub subject: String,
-    /// Stable lowercase-hex Iroh NodeId, present when a claim link is minted.
-    pub node_id: Option<String>,
-    /// Short-lived claim URL on the selected server origin, present only on deliberate mint/reissue.
-    pub claim_url: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct IntegrationStatusListSchema(pub Vec<IntegrationStatusSchema>);
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct IntegrationStatusSchema {
-    pub harness: String,
-    pub scope: String,
-    pub method: String,
-    pub status: String,
-    pub healthy: bool,
-    pub paths: Vec<String>,
-    pub capabilities: Vec<String>,
-    pub capability_paths: Vec<String>,
-    pub path_mode: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct MaintenanceInspectSchema {
-    pub output_kind: String,
-    pub commit_graph: CommitGraphInspectionSchema,
-    pub worktree_index: WorktreeIndexInspectionSchema,
-    pub change_monitor: ChangeMonitorInspectionSchema,
-    pub refs: RefCountsInspectionSchema,
-    pub ref_summary_index: RefSummaryIndexInspectionSchema,
-    pub pack_files: PackFilesInspectionSchema,
-    pub partial_fetch: PartialFetchInspectionSchema,
-    pub pull_planner_cache: PullPlannerCacheInspectionSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CommitGraphInspectionSchema {
-    pub present: bool,
-    pub node_count: usize,
-    pub bloom_covered_nodes: usize,
-    pub bytes: u64,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct WorktreeIndexInspectionSchema {
-    pub present: bool,
-    pub file_entries: usize,
-    pub directory_entries: usize,
-    pub untracked_directory_entries: usize,
-    pub snapshot_bytes: u64,
-    pub journal_bytes: u64,
-    pub journal_ops: usize,
-    pub journal_replay_ms: u128,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ChangeMonitorInspectionSchema {
-    pub backend: String,
-    pub status: String,
-    pub reason: Option<String>,
-    pub changed_path_count: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RefCountsInspectionSchema {
-    pub total: usize,
-    pub threads: usize,
-    pub markers: usize,
-    pub remotes: usize,
-    pub remote_threads: usize,
-    pub packed_refs_present: bool,
-    pub packed_refs_bytes: u64,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RefSummaryIndexInspectionSchema {
-    pub present: bool,
-    pub valid: bool,
-    pub bytes: u64,
-    pub threads: usize,
-    pub markers: usize,
-    pub remotes: usize,
-    pub remote_threads: usize,
-    pub packed_threads: usize,
-    pub packed_markers: usize,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct PackFilesInspectionSchema {
-    pub pack_count: usize,
-    pub index_count: usize,
-    pub unpaired_pack_count: usize,
-    pub pending_install_intents: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct PartialFetchInspectionSchema {
-    pub count: usize,
-    pub missing_blob_count: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct PullPlannerCacheInspectionSchema {
-    pub status: String,
-    pub present: bool,
-    pub manifest_count: usize,
-    pub planner_entry_count: usize,
-    pub total_bytes: u64,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct MaintenanceRefreshSchema {
-    pub output_kind: String,
-    pub rebuilt_commit_graph: bool,
-    pub rebuilt_ref_summary_index: bool,
-    pub rebuilt_worktree_index: bool,
-    pub refreshed_change_monitor: bool,
-    pub rebuilt_pull_planner_cache: bool,
-    pub pruned_pull_planner_entries: usize,
-    pub pack_install_intents_recovered_completed: u64,
-    pub pack_install_intents_aborted: u64,
-    pub pack_install_intents_skipped_in_progress: u64,
-    pub pack_install_intents_quarantined: u64,
-    pub pack_install_metrics: PackInstallMetricsSchema,
-    pub unpaired_packs_pruned: u64,
-    pub unpaired_pack_bytes_freed: u64,
-    pub report: MaintenanceInspectReportSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct MaintenanceRepackSchema {
-    pub output_kind: String,
-    pub objects_repacked: u64,
-    pub bytes_repacked: u64,
-    pub duration_ms: u128,
-    pub bytes_reclaimed: u64,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct PackInstallMetricsSchema {
-    pub installs_ok: u64,
-    pub installs_err: u64,
-    pub recover_completed: u64,
-    pub recover_aborted: u64,
-    pub recover_skipped_in_progress: u64,
-    pub recover_quarantined: u64,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct MaintenanceInspectReportSchema {
-    pub commit_graph: CommitGraphInspectionSchema,
-    pub worktree_index: WorktreeIndexInspectionSchema,
-    pub change_monitor: ChangeMonitorInspectionSchema,
-    pub refs: RefCountsInspectionSchema,
-    pub ref_summary_index: RefSummaryIndexInspectionSchema,
-    pub pack_files: PackFilesInspectionSchema,
-    pub partial_fetch: PartialFetchInspectionSchema,
-    pub pull_planner_cache: PullPlannerCacheInspectionSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BlameSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub file: String,
-    pub context: Vec<BlameContextSnippetSchema>,
-    pub lines: Vec<BlameLineSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BlameLineSchema {
-    pub line_number: usize,
-    pub content: String,
-    pub state_id: String,
-    pub principal: BlamePrincipalSchema,
-    pub agent: Option<BlameAgentSchema>,
-    pub timestamp: String,
-    pub origins: Option<Vec<BlameOriginSchema>>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BlameOriginSchema {
-    pub state_id: String,
-    pub principal: BlamePrincipalSchema,
-    pub agent: Option<BlameAgentSchema>,
-    pub timestamp: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BlamePrincipalSchema {
-    pub name: String,
-    pub email: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BlameAgentSchema {
-    pub provider: String,
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy_id: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BlameContextSnippetSchema {
-    pub annotation_id: String,
-    pub kind: String,
-    pub content: String,
-    pub revision_count: usize,
-}
-
-#[allow(dead_code, clippy::large_enum_variant)]
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(untagged)]
-pub enum InspectSchema {
-    #[allow(dead_code)]
-    State(ShowSchema),
-    #[allow(dead_code)]
-    Thread(ThreadShowSchema),
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroSchema {
-    pub since: Option<String>,
-    pub until: Option<String>,
-    pub duration_secs: Option<i64>,
-    pub states_captured: Vec<RetroStateEntrySchema>,
-    pub agents_active: Vec<RetroAgentEntrySchema>,
-    pub agent_tasks: Vec<RetroAgentTaskEntrySchema>,
-    pub timeline_steps: Vec<RetroTimelineStepEntrySchema>,
-    pub markers_created: Vec<RetroMarkerEntrySchema>,
-    pub context_annotations: Vec<RetroContextAnnotationEntrySchema>,
-    pub verify_signals: Vec<RetroVerifySignalSchema>,
-    pub merges: Vec<RetroOperationEntrySchema>,
-    pub undos: Vec<RetroOperationEntrySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroStateEntrySchema {
-    pub state_id: String,
-    pub intent: Option<String>,
-    pub confidence: Option<f32>,
-    pub agent: Option<String>,
-    pub principal: String,
-    pub timestamp: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroAgentEntrySchema {
-    pub session_id: String,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub status: String,
-    pub started_at: String,
-    pub completed_at: Option<String>,
-    pub tokens: RetroAgentTokensSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroAgentTokensSchema {
-    pub input: Option<u64>,
-    pub output: Option<u64>,
-    pub reasoning: Option<u64>,
-    pub tool_calls: Option<u32>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroAgentTaskEntrySchema {
-    pub task_id: String,
-    pub title: String,
-    pub status: String,
-    pub target_thread: String,
-    pub updated_at: String,
-    pub completed_at: Option<String>,
-    pub coordination_discussion_id: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroTimelineStepEntrySchema {
-    pub thread: String,
-    pub step_id: String,
-    pub branch_id: String,
-    pub parent_step_id: Option<String>,
-    pub tool_name: Option<String>,
-    pub tool_status: Option<String>,
-    pub changed: Option<bool>,
-    pub payload_summary: Option<String>,
-    pub payload_hash: Option<String>,
-    pub before_state: Option<String>,
-    pub after_state: Option<String>,
-    pub capture_state: Option<String>,
-    pub started_at_ms: Option<i64>,
-    pub finished_at_ms: Option<i64>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroMarkerEntrySchema {
-    pub name: String,
-    pub state: String,
-    pub timestamp: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroContextAnnotationEntrySchema {
-    pub path: String,
-    pub scope: String,
-    pub kind: String,
-    pub content_excerpt: String,
-    pub attribution: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroVerifySignalSchema {
-    pub kind: String,
-    pub label: String,
-    pub timestamp: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RetroOperationEntrySchema {
-    pub description: String,
-    pub timestamp: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DiscussionSchema {
-    pub id: String,
-    pub title: String,
-    pub anchor: DiscussionAnchorSchema,
-    pub visibility: String,
-    pub thread_ref: Option<String>,
-    pub status: String,
-    pub resolution: Option<DiscussionResolutionSchema>,
-    pub conflict_operation_ids: Vec<String>,
-    pub head_operation_ids: Vec<String>,
-    pub display_head_operation_id: String,
-    pub turns: Vec<DiscussionTurnSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DiscussionWriteSchema {
-    pub output_kind: String,
-    pub operation_id: String,
-    pub disposition: String,
-    pub discussion: DiscussionSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DiscussionShowSchema {
-    pub output_kind: String,
-    pub discussion: DiscussionSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DiscussionResolutionSchema {
-    pub kind: String,
-    pub annotation_id: Option<String>,
-    pub state_id: Option<String>,
-    pub change_id: Option<String>,
-    pub reason: Option<String>,
-    pub annotation_kind: Option<String>,
-    pub content: Option<String>,
-    pub tags: Option<Vec<String>>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DiscussionAnchorSchema {
-    pub kind: String,
-    pub state_id: Option<String>,
-    pub change_id: Option<String>,
-    pub path: Option<String>,
-    pub symbol: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DiscussionTurnSchema {
-    pub operation_id: String,
-    pub author_name: String,
-    pub author_email: String,
-    pub agent: Option<String>,
-    pub occurred_at_ms: i64,
-    pub body: String,
-    pub content_hash: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DiscussionListSchema {
-    pub output_kind: String,
-    pub discussions: Vec<DiscussionSchema>,
-}
-
 // ---- core loop write/read helpers -----------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CaptureSchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: String,
-    pub state_id: String,
-    pub content_hash: String,
-    pub intent: Option<String>,
-    pub confidence: Option<f32>,
-    pub task_assignment_id: Option<String>,
-    pub principal: CommitPrincipalSchema,
-    pub principal_source: String,
-    pub agent: Option<CommitAgentSchema>,
-    pub promotion_suggested: bool,
-    pub heavy_impact_paths: Vec<String>,
-    pub captured_path_count: usize,
-    pub warnings: Vec<String>,
-    pub signed: bool,
-    pub message: String,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CommitPrincipalSchema {
-    pub name: String,
-    pub email: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CommitAgentSchema {
-    pub provider: String,
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub segment_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy_id: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CommitSchema {
-    pub output_kind: String,
-    pub action: String,
-    pub status: String,
-    pub state_id: String,
-    pub git_commit: String,
-    pub summary: String,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub verification: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct OperatorCommandSchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: String,
-    pub message: String,
-    pub blockers: Vec<String>,
-    pub warnings: Vec<String>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct UndoSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub action: String,
-    pub message: String,
-    pub batches: Vec<Value>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    /// The checkout-local state preserved for recovery, and its internal
-    /// handle. Present on completed undo and recovery operations.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_marker: Option<String>,
-}
-
-/// `heddle undo --list --output json` history view. Distinct from
-/// [`UndoSchema`] (the rewind/redo payload): the list view carries only the
-/// discriminator and the oplog batches, with none of the action/status/
-/// recovery fields a real undo emits. Mirrors `OpListOutput` in `undo.rs`.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct UndoListSchema {
-    pub output_kind: Option<String>,
-    pub batches: Vec<Value>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ReadySchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: String,
-    pub message: String,
-    pub blockers: Vec<String>,
-    pub warnings: Vec<String>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub captured: bool,
-    pub captured_state: Option<String>,
-    pub capture_status: String,
-    pub capture_reason: String,
-    pub thread_state: Option<String>,
-    pub readiness: ReadyReadinessSchema,
-    pub report: Value,
-    #[serde(rename = "verification")]
-    pub verification: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ReadyReadinessSchema {
-    pub status: String,
-    pub captured: bool,
-    pub captured_state: Option<String>,
-    pub capture_status: String,
-    pub capture_reason: String,
-    pub checks: ReadyChecksSchema,
-    pub integration: String,
-    pub freshness: String,
-    pub merge_type: String,
-    pub changed_path_count: usize,
-    pub changed_paths: Vec<String>,
-    pub conflict_count: usize,
-    pub conflicts: Vec<String>,
-    pub impact: String,
-    pub impact_categories: Vec<String>,
-    pub blockers: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ReadyChecksSchema {
-    pub status: String,
-    pub reason: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SyncSchema {
-    #[serde(flatten)]
-    pub operator: OperatorCommandSchema,
-    pub thread: Option<String>,
-    pub current_state: Option<String>,
-    pub chosen_path: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct LandSchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: String,
-    pub message: String,
-    pub blockers: Option<Vec<String>>,
-    pub warnings: Option<Vec<String>>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub thread: String,
-    pub captured: bool,
-    pub checkpointed: bool,
-    pub git_commit: Option<String>,
-    pub synced: bool,
-    pub integrated: bool,
-    pub performed_steps: Vec<String>,
-    pub skipped_steps: Vec<String>,
-    pub merge_state: Option<String>,
-    pub blocker_details: Vec<LandBlockerDetailSchema>,
-    pub chosen_path: String,
-    pub siblings_restacked: Vec<String>,
-    pub siblings_restack_failed: Vec<SiblingRestackFailureSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct LandBlockerDetailSchema {
-    /// Stable condition code for machine branching.
-    pub code: LandBlockerCodeSchema,
-    /// Eligibility check that produced the blocker.
-    pub check: LandBlockerCheckSchema,
-    /// Human explanation of the observed condition.
-    pub message: String,
-    /// Concrete affected paths; empty for non-path conditions.
-    pub paths: Vec<String>,
-    pub state_context: Option<LandBlockerStateContextSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum LandBlockerCodeSchema {
-    ThreadStateBlocked,
-    MergeConflicts,
-    AutoLandConfidenceBelowThreshold,
-    VerificationTestsFailed,
-    ThreadStale,
-    IntegrationPreviewBlocked,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum LandBlockerCheckSchema {
-    ThreadState,
-    MergePreview,
-    AutoLandConfidence,
-    VerificationSummary,
-    Freshness,
-    IntegrationPreview,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct LandBlockerStateContextSchema {
-    pub recorded_thread_state: String,
-    pub recorded_state_id: Option<String>,
-    pub thread_tip_state_id: Option<String>,
-    pub integration_policy_status: Option<String>,
-    pub integration_policy_reason: Option<String>,
-    pub merge_relation: String,
-    pub conflict_count: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SiblingRestackFailureSchema {
-    pub thread: String,
-    pub message: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct LandBatchPeerSchema {
-    pub thread: String,
-    pub status: String,
-    pub message: String,
-    pub captured: bool,
-    pub checkpointed: bool,
-    pub git_commit: Option<String>,
-    pub integrated: bool,
-    pub synced: bool,
-    pub siblings_restacked: Vec<String>,
-    pub siblings_restack_failed: Vec<SiblingRestackFailureSchema>,
-    pub blockers: Vec<String>,
-    pub blocker_details: Vec<LandBlockerDetailSchema>,
-    pub warnings: Vec<String>,
-    pub primary_command: Option<String>,
-    pub recovery_commands: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct LandBatchSchema {
-    pub output_kind: String,
-    pub status: String,
-    pub action: String,
-    pub message: String,
-    pub threads: Vec<String>,
-    pub landed: Vec<String>,
-    pub stopped_at: Option<String>,
-    pub peers: Vec<LandBatchPeerSchema>,
-    pub git_head: Option<String>,
-    pub recommended_action: Option<String>,
-    pub verification: Option<RepositoryVerificationStateSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadStartSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub action: Option<String>,
-    pub name: String,
-    pub message: String,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub thread: Option<ThreadSummarySchema>,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
-    pub fskit_readiness: Option<FsKitReadinessSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct FsKitReadinessSchema {
-    pub state: String,
-    pub backend: String,
-    pub action: String,
-    pub settings_url: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadCurrentSchema {
-    pub thread: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(transparent)]
-pub struct ThreadCapturesSchema(pub Vec<ThreadCaptureEntrySchema>);
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadCaptureEntrySchema {
-    pub state_id: String,
-    pub created_at: String,
-    pub intent: Option<String>,
-    pub confidence: Option<f32>,
-    pub agent: Option<String>,
-    pub message: String,
-    pub summary: Option<ThreadCaptureSummarySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadCaptureSummarySchema {
-    pub added: usize,
-    pub modified: usize,
-    pub deleted: usize,
-    pub total: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadCommandSchema {
-    pub output_kind: String,
-    pub status: String,
-    pub action: String,
-    pub name: String,
-    pub message: String,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub thread: Option<ThreadSummarySchema>,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadMoveSchema {
-    pub from_thread: String,
-    pub to_thread: String,
-    pub moved_paths: Vec<String>,
-    pub source_state_id: Option<String>,
-    pub target_state_id: String,
-    pub message: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadAbsorbSchema {
-    pub thread: String,
-    pub into: String,
-    pub preview_only: bool,
-    pub conflicts: Vec<String>,
-    pub merge_state: Option<String>,
-    pub message: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadResolveSchema {
-    #[serde(flatten)]
-    pub operator: OperatorCommandSchema,
-    pub thread: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadApprovalSchema {
-    pub id: String,
-    pub repo_path: String,
-    pub source_thread: String,
-    pub target_thread: String,
-    pub source_state: String,
-    pub approver_user_id: String,
-    pub note: String,
-    pub approved_at: u64,
-    pub expires_at: u64,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(transparent)]
-pub struct ThreadApprovalListSchema(pub Vec<ThreadApprovalSchema>);
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadRevokeApprovalSchema {
-    pub output_kind: String,
-    pub deleted: bool,
-    pub id: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadMergeEligibilitySchema {
-    pub allowed: bool,
-    pub unmet: Vec<ThreadMergeRequirementSchema>,
-    pub valid_approvals: Vec<ThreadApprovalSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadMergeRequirementSchema {
-    pub policy_id: String,
-    pub kind: String,
-    pub group_id: String,
-    pub reason: String,
-    pub needed: u32,
-    pub have: u32,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadCleanupSchema {
-    #[serde(flatten)]
-    pub operator: OperatorCommandSchema,
-    pub dry_run: bool,
-    pub merged: Vec<ThreadDroppedSchema>,
-    pub auto: Vec<ThreadDroppedSchema>,
-    pub abandoned: Vec<ThreadDroppedSchema>,
-    pub reclaimed_bytes: u64,
-    pub would_reclaim_bytes: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skipped: Vec<ThreadCleanupSkippedSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadDroppedSchema {
-    pub thread: String,
-    pub id: String,
-    pub reason: String,
-    pub age_seconds: i64,
-    pub bytes: u64,
-    pub execution_path: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadCleanupSkippedSchema {
-    pub thread: String,
-    pub id: String,
-    pub reason: String,
-    pub note: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadMarkerListSchema {
-    pub output_kind: String,
-    pub markers: Vec<ThreadMarkerEntrySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadMarkerEntrySchema {
-    pub name: String,
-    pub state_id: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadMarkerOpSchema {
-    pub output_kind: String,
-    pub name: Option<String>,
-    pub state_id: Option<String>,
-    pub deleted: Option<Vec<ThreadMarkerEntrySchema>>,
-    pub count: Option<usize>,
-    pub message: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadShowSchema {
-    pub output_kind: Option<String>,
-    pub repository_label: String,
-    pub repository_context: Option<RepositoryContextInfoSchema>,
-    #[serde(flatten)]
-    pub summary: ThreadSummarySchema,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-    pub recovery_commands: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadSummarySchema {
-    pub name: String,
-    pub operation: OpaqueObject,
-    pub remote_tracking: OpaqueObject,
-    pub base_state: Option<String>,
-    pub base_root: Option<String>,
-    pub current_state: Option<String>,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heddle_session_id: Option<String>,
-    pub actor: Option<ActorInfoSchema>,
-    pub harness: Option<String>,
-    pub thinking_level: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_actor_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_parent_actor_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe_source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe_confidence: Option<f32>,
-    pub usage_summary: OpaqueObject,
-    pub last_progress_at: Option<String>,
-    pub last_activity_at: Option<String>,
-    pub report_flush_state: Option<String>,
-    pub attach_reason: Option<String>,
-    pub thread_mode: Option<ThreadModeSchema>,
-    pub thread_state: Option<ThreadStateSchema>,
-    pub freshness: Option<ThreadFreshnessSchema>,
-    pub visibility: String,
-    pub target_thread: Option<String>,
-    pub parent_thread: Option<String>,
-    pub child_threads: Vec<String>,
-    pub sibling_threads: Vec<String>,
-    pub stack_depth: usize,
-    pub stale_from_parent: bool,
-    pub task: Option<String>,
-    pub task_assignment_id: Option<String>,
-    pub task_summary: Option<ThreadTaskSummarySchema>,
-    pub changed_paths: Vec<String>,
-    pub promotion_suggested: bool,
-    pub impact_categories: Vec<ThreadImpactCategorySchema>,
-    pub heavy_impact_paths: Vec<String>,
-    pub verification_summary: Value,
-    pub confidence_summary: Value,
-    pub integration_policy_result: Value,
-    pub coordination_status: CoordinationStatusSchema,
-    pub is_current: bool,
-    pub is_isolated: bool,
-    pub thread_health: String,
-    pub blockers: Vec<String>,
-    // Runtime `ThreadSummary.recommended_action` is a `String` serialized
-    // through `serialize_empty_action_as_null`, so the wire value is
-    // `string | null` (HeddleCo/heddle#645 presence contract).
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub git_branch_tip: Option<String>,
-    pub history_imported: bool,
-    pub auto: bool,
-    pub shared_target_dir: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadTaskSummarySchema {
-    pub task_id: String,
-    pub title: String,
-    pub status: String,
-    pub target_thread: String,
-    pub updated_at: String,
-    pub completed_at: Option<String>,
-    pub coordination_discussion_id: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(untagged)]
-#[allow(dead_code)]
-pub enum CloneSchema {
-    Git(CloneGitSchema),
-    Heddle(CloneHeddleSchema),
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CloneGitSchema {
-    pub output_kind: String,
-    pub action: String,
-    pub status: String,
-    pub success: bool,
-    pub cloned: bool,
-    pub transport: GitTransportSchema,
-    pub remote: String,
-    pub local: String,
-    pub branch: String,
-    pub repository_capability: String,
-    pub commits_imported: usize,
-    pub states_created: usize,
-    pub verification: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CloneHeddleSchema {
-    pub output_kind: String,
-    pub action: String,
-    pub status: String,
-    pub success: bool,
-    pub cloned: bool,
-    pub transport: HeddleTransportSchema,
-    pub remote: String,
-    pub local: String,
-    pub branch: String,
-    pub repository_capability: String,
-    pub objects: Option<usize>,
-    pub state: Option<String>,
-    pub verification: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AdoptSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub action: Option<String>,
-    pub adopted: bool,
-    pub initialized: bool,
-    pub path: String,
-    pub refs: Vec<String>,
-    pub commits_imported: usize,
-    pub states_created: usize,
-    pub branches_synced: usize,
-    pub tags_synced: usize,
-    pub skipped_non_commit_refs: usize,
-    pub already_in_sync: bool,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RemoteListSchema {
-    pub output_kind: Option<String>,
-    pub remotes: Vec<RemoteInfoSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RemoteInfoSchema {
-    pub output_kind: Option<String>,
-    pub name: String,
-    pub url: String,
-    pub source: String,
-    pub is_default: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RemoteMutationSchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: String,
-    pub name: String,
-    pub url: Option<String>,
-    pub default: Option<String>,
-    pub message: String,
-    pub verification: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentPresenceSingleSchema {
-    pub output_kind: String,
-    pub presence: ActorEntrySchema,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentPresenceListSchema {
-    pub output_kind: String,
-    pub presence: Vec<ActorEntrySchema>,
-    pub active_only: bool,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentPresenceCompleteSchema {
-    pub output_kind: String,
-    pub session_id: String,
-    pub status: String,
-    pub thread: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coordination_status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommended_action: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentPresenceExplainSchema {
-    pub output_kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attached: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_presence: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repository: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detected: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommended_action: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heddle_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_instance_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_actor_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_parent_actor_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_instance_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe_source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe_confidence: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attach_reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attach_precedence: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub winning_rule: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ActorEntrySchema {
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_instance_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_actor_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_parent_actor_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_instance_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heddle_session_id: Option<String>,
-    pub thread: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread_id: Option<String>,
-    pub base_state: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking_level: Option<String>,
-    pub usage_summary: Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_progress_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub report_flush_state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attach_reason: Option<String>,
-    pub attach_precedence: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub winning_attach_rule: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe_source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe_confidence: Option<f32>,
-    pub status: String,
-    pub started_at: String,
-    pub actor_chain: Vec<ActorChainEntrySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ActorChainEntrySchema {
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_actor_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_parent_actor_key: Option<String>,
-    pub thread: String,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentReservationEnvelopeSchema {
-    pub reservation: AgentReservationSchema,
-    pub token: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentReservationListSchema {
-    pub reservations: Vec<AgentReservationSchema>,
-    pub alive_only: bool,
-    pub thread: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentReservationSchema {
-    pub lease_id: String,
-    pub actor_session_id: Option<String>,
-    pub thread: String,
-    pub anchor_state: Option<String>,
-    pub anchor_root: Option<String>,
-    pub task_assignment_id: Option<String>,
-    pub status: String,
-    pub path: Option<String>,
-    pub heartbeat_at: String,
-    pub lease_expires_at: String,
-    pub liveness: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentTaskEnvelopeSchema {
-    pub output_kind: String,
-    pub task: AgentTaskSchema,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentTaskListSchema {
-    pub output_kind: String,
-    pub tasks: Vec<AgentTaskSchema>,
-    pub thread: Option<String>,
-    pub status: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentTaskSchema {
-    pub schema_version: u32,
-    pub task_id: String,
-    pub title: String,
-    pub body: String,
-    pub status: String,
-    pub target_thread: String,
-    pub base_state: Option<String>,
-    pub base_root: Option<String>,
-    pub parent_task_id: Option<String>,
-    pub coordination_discussion_id: Option<String>,
-    pub allow_offline: bool,
-    pub delegated_by: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub completed_at: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentFanoutSchema {
-    pub output_kind: String,
-    pub title: String,
-    pub parent_thread: String,
-    pub base_state: String,
-    pub base_root: String,
-    pub coordination_discussion_id: Option<String>,
-    pub parent_task: Option<AgentTaskSchema>,
-    pub lanes: Vec<AgentFanoutLaneSchema>,
-    pub commands: Vec<AgentFanoutCommandSchema>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentFanoutLaneSchema {
-    pub thread: String,
-    pub path: String,
-    pub title: String,
-    pub task: Option<AgentTaskSchema>,
-    pub session_id: Option<String>,
-    pub status: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentFanoutCommandSchema {
-    pub lane_thread: String,
-    pub command: String,
-    pub argv: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentProvenanceEnvelopeSchema {
-    pub session: SessionEntrySchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentProvenanceSegmentEnvelopeSchema {
-    pub segment: SessionSegmentSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AgentProvenanceListSchema {
-    pub sessions: Vec<SessionEntrySchema>,
-    pub active_only: bool,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SessionEntrySchema {
-    pub id: String,
-    pub principal: String,
-    pub created_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ended_at: Option<String>,
-    pub active: bool,
-    pub segments: Vec<SessionSegmentSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SessionSegmentSchema {
-    pub id: String,
-    pub provider: String,
-    pub model: String,
-    pub started_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy_id: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(untagged)]
-#[allow(dead_code)]
-pub enum PullSchema {
-    Git(PullGitSchema),
-    Heddle(PullHeddleSchema),
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct PullGitSchema {
-    pub output_kind: String,
-    pub action: String,
-    pub status: String,
-    pub pulled: bool,
-    pub changed: bool,
-    pub success: bool,
-    pub transport: GitTransportSchema,
-    pub remote: String,
-    pub branch: String,
-    pub old_git_head: Option<String>,
-    pub new_git_head: String,
-    pub old_state: Option<String>,
-    pub new_state: String,
-    pub states_created: usize,
-    pub commits_seen: usize,
-    pub commits_seen_scope: String,
-    pub materialized_checkout: bool,
-    pub changed_path_count: usize,
-    pub changed_paths: Vec<String>,
-    pub verification: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct PullHeddleSchema {
-    pub output_kind: String,
-    pub action: String,
-    pub status: String,
-    pub pulled: bool,
-    pub changed: bool,
-    pub success: bool,
-    pub transport: HeddleTransportSchema,
-    pub remote: String,
-    pub thread: String,
-    pub state: Option<String>,
-    pub objects: Option<usize>,
-    pub verification: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(untagged)]
-#[allow(dead_code)]
-pub enum PushSchema {
-    Git(PushGitSchema),
-    Heddle(PushHeddleSchema),
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct PushGitSchema {
-    pub output_kind: String,
-    pub action: String,
-    pub status: String,
-    pub pushed: bool,
-    pub changed: bool,
-    pub success: bool,
-    pub transport: GitTransportSchema,
-    pub remote: String,
-    pub push_scope: String,
-    pub ref_scope: String,
-    pub refs_written: Vec<String>,
-    pub git_tracking_remote: Option<String>,
-    pub git_remote_configured: Option<GitRemoteConfiguredSchema>,
-    pub git_upstream_configured: Option<GitUpstreamConfiguredSchema>,
-    pub tags_included: bool,
-    pub force: bool,
-    pub force_discard_warning: Option<String>,
-    pub thread: Option<String>,
-    pub next_action: NullableStringSchema,
-    pub next_action_template: NullableActionTemplateSchema,
-    pub recommended_action: NullableStringSchema,
-    pub recommended_action_template: NullableActionTemplateSchema,
-    pub verification: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct PushHeddleSchema {
-    pub output_kind: String,
-    pub action: String,
-    pub status: String,
-    pub pushed: bool,
-    pub changed: bool,
-    pub success: bool,
-    pub transport: HeddleTransportSchema,
-    pub remote: Option<String>,
-    pub push_scope: Option<String>,
-    pub refs_written: Option<Vec<String>>,
-    pub force: Option<bool>,
-    pub thread: Option<String>,
-    pub state: Option<String>,
-    pub objects: Option<usize>,
-    pub next_action: NullableStringSchema,
-    pub next_action_template: NullableActionTemplateSchema,
-    pub recommended_action: NullableStringSchema,
-    pub recommended_action_template: NullableActionTemplateSchema,
-    pub verification: RepositoryVerificationStateSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-#[allow(dead_code)]
-pub enum GitTransportSchema {
-    Git,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-#[allow(dead_code)]
-pub enum HeddleTransportSchema {
-    Heddle,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitRemoteConfiguredSchema {
-    pub name: String,
-    pub url: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct GitUpstreamConfiguredSchema {
-    pub branch: String,
-    pub remote: String,
-}
 
 /// Operation banner — kept opaque because the underlying
 /// [`repo::RepositoryOperationStatus`] is a workspace type and its
 /// shape is internal. `Value` here means "any JSON object or null".
 type OpaqueObject = Option<Value>;
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RepositoryContextInfoSchema {
-    pub kind: String,
-    pub parent_repository: Option<String>,
-    pub target_thread: Option<String>,
-    pub parent_thread: Option<String>,
-}
-
 // ---- verify ---------------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RepositoryVerificationStateSchema {
-    #[serde(rename = "verified")]
-    pub verified: bool,
-    pub status: String,
-    pub repository_mode: String,
-    pub heddle_initialized: bool,
-    pub git_branch: Option<String>,
-    pub heddle_thread: Option<String>,
-    pub worktree_dirty: bool,
-    pub worktree_state: String,
-    pub import_state: String,
-    pub mapping_state: String,
-    pub remote_drift: String,
-    pub active_operation: Option<String>,
-    pub default_remote: Option<String>,
-    pub clone_verification: String,
-    pub machine_contract: String,
-    pub machine_contract_coverage: MachineContractCoverageSchema,
-    pub workflow_status: String,
-    pub workflow_summary: String,
-    pub summary: String,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub recovery_commands: Vec<String>,
-    pub recovery_action_templates: Vec<ActionTemplateSchema>,
-    pub checks: Vec<VerificationCheckSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct MachineContractCoverageSchema {
-    pub status: String,
-    #[serde(rename = "verified_scope")]
-    pub verified_scope: String,
-    pub advanced_scope: String,
-    pub summary: String,
-    pub catalog_commands_total: usize,
-    pub catalog_mutating_commands_total: usize,
-    pub json_commands_total: usize,
-    pub json_mutating_commands_total: usize,
-    pub json_commands_with_schema: usize,
-    pub json_commands_with_accepted_opaque_schema: usize,
-    pub json_commands_without_schema: usize,
-    #[serde(rename = "verified_scope_json_commands_total")]
-    pub verified_scope_json_commands_total: usize,
-    #[serde(rename = "verified_scope_json_commands_with_schema")]
-    pub verified_scope_json_commands_with_schema: usize,
-    #[serde(rename = "verified_scope_json_commands_with_accepted_opaque_schema")]
-    pub verified_scope_json_commands_with_accepted_opaque_schema: usize,
-    #[serde(rename = "verified_scope_json_commands_without_schema")]
-    pub verified_scope_json_commands_without_schema: usize,
-    pub advanced_scope_json_commands_total: usize,
-    pub advanced_scope_json_commands_with_accepted_opaque_schema: usize,
-    pub mutating_commands_total: usize,
-    pub mutating_commands_with_schema: usize,
-    pub mutating_commands_with_accepted_opaque_schema: usize,
-    pub mutating_commands_without_schema: usize,
-    #[serde(rename = "verified_scope_mutating_commands_total")]
-    pub verified_scope_mutating_commands_total: usize,
-    #[serde(rename = "verified_scope_mutating_commands_with_schema")]
-    pub verified_scope_mutating_commands_with_schema: usize,
-    #[serde(rename = "verified_scope_mutating_commands_with_accepted_opaque_schema")]
-    pub verified_scope_mutating_commands_with_accepted_opaque_schema: usize,
-    #[serde(rename = "verified_scope_mutating_commands_without_schema")]
-    pub verified_scope_mutating_commands_without_schema: usize,
-    pub advanced_scope_mutating_commands_total: usize,
-    pub advanced_scope_mutating_commands_with_accepted_opaque_schema: usize,
-    pub schema_verbs_total: usize,
-    pub documented_schema_verbs_total: usize,
-    pub undocumented_schema_verbs_total: usize,
-    pub opaque_schema_verbs_total: usize,
-    pub accepted_opaque_schema_verbs_total: usize,
-    pub unaccepted_opaque_schema_verbs_total: usize,
-    pub supports_op_id_total: usize,
-    pub jsonl_commands_total: usize,
-    pub missing_schema_examples: Vec<String>,
-    pub missing_mutating_schema_examples: Vec<String>,
-    #[serde(rename = "verified_scope_missing_schema_examples")]
-    pub verified_scope_missing_schema_examples: Vec<String>,
-    #[serde(rename = "verified_scope_accepted_opaque_schema_examples")]
-    pub verified_scope_accepted_opaque_schema_examples: Vec<String>,
-    pub advanced_scope_accepted_opaque_schema_examples: Vec<String>,
-    pub accepted_opaque_schema_examples: Vec<String>,
-    pub unaccepted_opaque_schema_examples: Vec<String>,
-    pub undocumented_schema_examples: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct VerificationCheckSchema {
-    pub name: String,
-    pub status: String,
-    pub clean: bool,
-    pub summary: String,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub recovery_commands: Vec<String>,
-    pub recovery_action_templates: Vec<ActionTemplateSchema>,
-    pub details: std::collections::BTreeMap<String, String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ActionTemplateSchema {
-    pub action: String,
-    pub argv_template: Vec<String>,
-    pub required_inputs: Vec<String>,
-    /// Whether an agent may replace placeholders in `argv_template`.
-    ///
-    /// When `agent_may_fill` is false, treat `action` and `argv_template` as
-    /// display-only: do not substitute `<name>`/`<url>` placeholders. Surface
-    /// the template to a human or discard it. Substituting and running it will
-    /// pass literal `<name>` to Heddle and fail.
-    pub agent_may_fill: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct LogSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub repository_capability: String,
-    pub storage_model: String,
-    pub states: Vec<StateEntrySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct StateEntrySchema {
-    pub state_id: String,
-    pub content_hash: String,
-    pub intent: Option<String>,
-    pub principal: String,
-    pub agent: Option<String>,
-    pub confidence: Option<f32>,
-    pub created_at: String,
-    pub parents: Vec<String>,
-    pub git_checkpoint: Option<String>,
-    pub collapsed: Option<CollapsedEntrySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CollapsedEntrySchema {
-    pub expandable: bool,
-    pub source_count: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TimelineLogSchema {
-    pub output_kind: String,
-    pub status: String,
-    pub repository_capability: String,
-    pub storage_model: String,
-    pub thread: String,
-    pub cursor: TimelineCursorSchema,
-    pub branches: Vec<TimelineBranchSchema>,
-    pub steps: Vec<TimelineStepSchema>,
-    pub active_branch_path: Vec<String>,
-    pub actions: TimelineActionsSchema,
-    pub recovery: Option<TimelineRecoverySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TimelineCursorSchema {
-    pub branch_id: Option<String>,
-    pub step_id: Option<String>,
-    pub state: Option<String>,
-    pub state_full: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TimelineBranchSchema {
-    pub branch_id: String,
-    pub parent_branch_id: Option<String>,
-    pub forked_from_step_id: Option<String>,
-    pub forked_from_state: Option<String>,
-    pub reason: Option<String>,
-    pub created_at_ms: Option<i64>,
-    pub step_ids: Vec<String>,
-    pub is_active: bool,
-    pub is_on_active_path: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TimelineStepSchema {
-    pub step_id: String,
-    pub branch_id: String,
-    pub parent_step_id: Option<String>,
-    pub native: Option<TimelineNativeSchema>,
-    pub tool_name: Option<String>,
-    pub status: Option<String>,
-    pub changed: Option<bool>,
-    pub touched_paths: Vec<String>,
-    pub labels: Vec<String>,
-    pub before_state: Option<String>,
-    pub after_state: Option<String>,
-    pub capture_state: Option<String>,
-    pub cursor_state: Option<String>,
-    pub cursor_state_full: Option<String>,
-    pub payload_summary: Option<String>,
-    pub payload_hash: Option<String>,
-    pub capture_oplog_batch_id: Option<u64>,
-    pub started_at_ms: Option<i64>,
-    pub finished_at_ms: Option<i64>,
-    pub operation_ids: Vec<String>,
-    pub is_current: bool,
-    pub is_on_active_branch_path: bool,
-    pub can_seek: bool,
-    pub can_fork: bool,
-    pub can_reset: bool,
-    pub can_materialize: bool,
-    pub has_boundary_warning: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TimelineNativeSchema {
-    pub harness: String,
-    pub session_id: Option<String>,
-    pub message_id: Option<String>,
-    pub tool_call_id: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TimelineActionsSchema {
-    pub can_undo: bool,
-    pub can_redo: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TimelineRecoverySchema {
-    pub status: String,
-    pub branch_id: String,
-    pub from_step_id: Option<String>,
-    pub to_step_id: Option<String>,
-    pub from_state: String,
-    pub to_state: String,
-    pub reason: String,
-    pub moved_at_ms: i64,
-    pub checkout_state: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TimelineStatusSchema {
-    pub output_kind: String,
-    pub status: String,
-    pub thread: String,
-    pub cursor_branch_id: Option<String>,
-    pub cursor_step_id: Option<String>,
-    pub cursor_state: Option<String>,
-    pub current_step: Option<TimelineStatusStepSchema>,
-    pub active_branch_path: Vec<String>,
-    pub can_undo: bool,
-    pub can_redo: bool,
-    pub branch_count: usize,
-    pub step_count: usize,
-    pub recovery: Option<TimelineStatusRecoverySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TimelineStatusStepSchema {
-    pub step_id: String,
-    pub branch_id: String,
-    pub parent_step_id: Option<String>,
-    pub tool_name: Option<String>,
-    pub tool_status: Option<String>,
-    pub changed: Option<bool>,
-    pub payload_summary: Option<String>,
-    pub payload_hash: Option<String>,
-    pub labels: Vec<String>,
-    pub started_at_ms: Option<i64>,
-    pub finished_at_ms: Option<i64>,
-    pub can_seek: bool,
-    pub can_fork: bool,
-    pub can_reset: bool,
-    pub can_materialize: bool,
-    pub has_boundary_warning: bool,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TimelineStatusRecoverySchema {
-    pub status: String,
-    pub branch_id: String,
-    pub from_step_id: Option<String>,
-    pub to_step_id: Option<String>,
-    pub from_state: String,
-    pub to_state: String,
-    pub reason: String,
-    pub moved_at_ms: i64,
-    pub checkout_state: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TimelineRecordingSchema {
-    pub output_kind: String,
-    pub status: String,
-    pub action: String,
-    pub thread: String,
-    pub step_id: String,
-    pub branch_id: String,
-    pub parent_step_id: Option<String>,
-    pub operation_id: String,
-    pub before_state: Option<String>,
-    pub after_state: Option<String>,
-    pub changed: Option<bool>,
-    pub tool_status: Option<String>,
-    pub payload_summary: Option<String>,
-    pub payload_hash: Option<String>,
-    pub branch_count: usize,
-    pub step_count: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TimelineActionSchema {
-    pub output_kind: String,
-    pub status: String,
-    pub action: String,
-    pub thread: String,
-    pub branch_id: Option<String>,
-    pub parent_branch_id: Option<String>,
-    pub from_step_id: Option<String>,
-    pub cursor_branch_id: Option<String>,
-    pub cursor_step_id: Option<String>,
-    pub operation_id: Option<String>,
-    pub recovered_operation_id: Option<String>,
-    pub materialized: Option<bool>,
-    pub materialization_status: Option<String>,
-    pub recovery_status: Option<String>,
-    pub blocker_count: usize,
-    pub branch_count: usize,
-    pub step_count: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ExpandSchema {
-    pub output_kind: String,
-    pub status: String,
-    pub requested: String,
-    pub collapsed: ExpandedCollapseSchema,
-    pub captures: Vec<ExpandedCaptureSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ExpandedCollapseSchema {
-    pub state_id: String,
-    pub state_id_full: String,
-    pub git_commit: Option<String>,
-    pub thread: Option<String>,
-    pub source_count: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ExpandedCaptureSchema {
-    pub state_id: String,
-    pub state_id_full: String,
-    pub content_hash: String,
-    pub intent: Option<String>,
-    pub principal: String,
-    pub agent: Option<String>,
-    pub confidence: Option<f32>,
-    pub created_at: String,
-    pub parents: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct LogReflogSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub repository_capability: String,
-    pub storage_model: String,
-    pub entries: Vec<ReflogEntrySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ReflogEntrySchema {
-    pub source: String,
-    pub reference: String,
-    pub old_oid: String,
-    pub new_oid: String,
-    pub actor: String,
-    pub timestamp: Option<String>,
-    pub message: String,
-}
 
 // ---- show -----------------------------------------------------------------
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ShowSchema {
-    pub output_kind: String,
-    pub repository_capability: String,
-    pub storage_model: String,
-    pub state_id: String,
-    pub state_id_full: String,
-    pub content_hash: String,
-    pub tree: String,
-    pub parents: Vec<String>,
-    pub intent: Option<String>,
-    pub confidence: Option<f32>,
-    pub principal: ShowPrincipalSchema,
-    pub agent: Option<ShowAgentSchema>,
-    pub created_at: String,
-    pub status: String,
-    pub verification: OpaqueObject,
-    pub git_checkpoint: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ShowPrincipalSchema {
-    pub name: String,
-    pub email: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ShowAgentSchema {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy_id: Option<String>,
-}
-
 // ---- thread list ----------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ThreadListSchema {
-    pub output_kind: Option<String>,
-    pub repository_capability: String,
-    pub repository_label: String,
-    pub repository_context: Option<RepositoryContextInfoSchema>,
-    pub storage_model: String,
-    pub hosted_enabled: bool,
-    pub threads: Vec<ThreadSummarySchema>,
-    pub available_git_refs: Vec<AvailableGitRefSchema>,
-    pub current: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub recovery_commands: Vec<String>,
-    pub recovery_action_templates: Vec<ActionTemplateSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AvailableGitRefSchema {
-    pub name: String,
-    pub git_commit: String,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-}
 
 // ---- review ---------------------------------------------------------------
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ReviewShowSchema {
-    pub output_kind: String,
-    pub state_id: String,
-    pub headline: String,
-    pub agent_narrative: Option<String>,
-    pub files_changed: usize,
-    pub in_budget_signals: Vec<Value>,
-    pub all_signals: Vec<Value>,
-    pub discussions: Vec<Value>,
-    pub signing_kinds: Vec<String>,
-    pub signatures: Vec<Value>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ReviewSignSchema {
-    pub output_kind: String,
-    pub signature_id: String,
-    pub state_id: String,
-}
-
-/// `heddle review next --output json` emits a stable envelope keyed by
-/// `output_kind: "review_next"`. When the scan window holds a pending
-/// review, the pending state's view is flattened alongside `output_kind`
-/// (`state_id`, `headline`, `existing_signatures`) and the same view is
-/// echoed under `next`. When no pending review is found, only
-/// `output_kind` and `next: null` are emitted — there is no top-level
-/// `null`. Mirrors the envelope built in `review::run_next`.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ReviewNextSchema {
-    pub output_kind: String,
-    pub state_id: Option<String>,
-    pub headline: Option<String>,
-    pub existing_signatures: Option<u32>,
-    pub next: RequiredNullableNextState,
-}
-
-/// `next` is ALWAYS present in the runtime envelope — either the pending
-/// review state or an explicit JSON `null`. Modeling it as
-/// `Option<ReviewNextStateSchema>` directly would let schemars drop the
-/// field from the schema's `required` set, advertising a shape the command
-/// never emits. This wrapper keeps the value nullable (its schema delegates
-/// to `Option`'s nullable form) while reporting `_schemars_private_is_option
-/// == false`, so the derive marks `next` required (heddle#272 Codex r7).
-#[derive(Debug, Serialize)]
-#[serde(transparent)]
-pub struct RequiredNullableNextState(pub Option<ReviewNextStateSchema>);
-
-impl JsonSchema for RequiredNullableNextState {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("RequiredNullableNextState")
-    }
-
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        <Option<ReviewNextStateSchema> as JsonSchema>::json_schema(generator)
-    }
-}
-
-/// The pending review state echoed under `review next`'s `next` field.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ReviewNextStateSchema {
-    pub state_id: String,
-    pub headline: String,
-    pub existing_signatures: u32,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ReviewHealthSchema {
-    pub output_kind: String,
-    pub entries: Vec<ReviewHealthEntrySchema>,
-    pub window_states: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ReviewHealthEntrySchema {
-    pub module_id: String,
-    pub fire_rate: f64,
-    pub warn: bool,
-}
-
 // ---- command/schema introspection ----------------------------------------
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SchemasListSchema {
-    pub output_kind: Option<String>,
-    pub status: Option<String>,
-    pub schema_verbs: Vec<String>,
-    pub documented_schema_verbs: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DoctorDocsSchema {
-    pub output_kind: String,
-    pub status: String,
-    #[serde(rename = "verified")]
-    pub verified: bool,
-    pub recommended_action: Option<String>,
-    pub files_scanned: usize,
-    pub issues: Vec<DoctorDocsIssueSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DoctorDocsIssueSchema {
-    pub file: String,
-    pub line: usize,
-    pub invocation: String,
-    pub kind: String,
-    pub detail: String,
-    pub suggestion: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DoctorSchemasSchema {
-    pub output_kind: String,
-    pub status: String,
-    #[serde(rename = "verified")]
-    pub verified: bool,
-    pub summary: String,
-    pub recommended_action: Option<String>,
-    pub recovery_commands: Vec<String>,
-    pub registered_verbs: Vec<String>,
-    pub documented_verbs: Vec<String>,
-    pub undocumented_verbs: Vec<String>,
-    pub unmatched_verbs: Vec<String>,
-    pub passing_verbs: Vec<String>,
-    pub issues: Vec<DoctorSchemaIssueSchema>,
-    pub command_contract_schema_coverage: CommandContractSchemaCoverageSchema,
-    pub doc_path: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DoctorSchemaIssueSchema {
-    pub verb: String,
-    pub line: usize,
-    pub unknown_key: String,
-    pub detail: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CommandContractSchemaCoverageSchema {
-    pub status: String,
-    #[serde(rename = "verified_scope")]
-    pub verified_scope: String,
-    pub advanced_scope: String,
-    pub summary: String,
-    pub catalog_commands_total: usize,
-    pub catalog_mutating_commands_total: usize,
-    pub json_commands_total: usize,
-    pub json_mutating_commands_total: usize,
-    pub json_commands_with_schema: usize,
-    pub json_commands_with_accepted_opaque_schema: usize,
-    pub json_commands_without_schema: usize,
-    #[serde(rename = "verified_scope_json_commands_total")]
-    pub verified_scope_json_commands_total: usize,
-    #[serde(rename = "verified_scope_json_commands_with_schema")]
-    pub verified_scope_json_commands_with_schema: usize,
-    #[serde(rename = "verified_scope_json_commands_with_accepted_opaque_schema")]
-    pub verified_scope_json_commands_with_accepted_opaque_schema: usize,
-    #[serde(rename = "verified_scope_json_commands_without_schema")]
-    pub verified_scope_json_commands_without_schema: usize,
-    pub advanced_scope_json_commands_total: usize,
-    pub advanced_scope_json_commands_with_accepted_opaque_schema: usize,
-    pub mutating_commands_total: usize,
-    pub mutating_commands_with_schema: usize,
-    pub mutating_commands_with_accepted_opaque_schema: usize,
-    pub mutating_commands_without_schema: usize,
-    #[serde(rename = "verified_scope_mutating_commands_total")]
-    pub verified_scope_mutating_commands_total: usize,
-    #[serde(rename = "verified_scope_mutating_commands_with_schema")]
-    pub verified_scope_mutating_commands_with_schema: usize,
-    #[serde(rename = "verified_scope_mutating_commands_with_accepted_opaque_schema")]
-    pub verified_scope_mutating_commands_with_accepted_opaque_schema: usize,
-    #[serde(rename = "verified_scope_mutating_commands_without_schema")]
-    pub verified_scope_mutating_commands_without_schema: usize,
-    pub advanced_scope_mutating_commands_total: usize,
-    pub advanced_scope_mutating_commands_with_accepted_opaque_schema: usize,
-    pub undocumented_schema_verbs_total: usize,
-    pub opaque_schema_verbs_total: usize,
-    pub accepted_opaque_schema_verbs_total: usize,
-    pub unaccepted_opaque_schema_verbs_total: usize,
-    pub missing_schema_examples: Vec<String>,
-    pub missing_mutating_schema_examples: Vec<String>,
-    #[serde(rename = "verified_scope_missing_schema_examples")]
-    pub verified_scope_missing_schema_examples: Vec<String>,
-    #[serde(rename = "verified_scope_accepted_opaque_schema_examples")]
-    pub verified_scope_accepted_opaque_schema_examples: Vec<String>,
-    pub advanced_scope_accepted_opaque_schema_examples: Vec<String>,
-    pub accepted_opaque_schema_examples: Vec<String>,
-    pub unaccepted_opaque_schema_examples: Vec<String>,
-    pub undocumented_schema_examples: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct WatchLineSchema {
-    pub ts: String,
-    pub thread: Option<String>,
-    pub kind: String,
-    pub state_id: Option<String>,
-    pub intent: Option<String>,
-    pub confidence: Option<f32>,
-    pub actor: Option<ActorInfoSchema>,
-    pub id: u64,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TrySchema {
-    pub status: String,
-    pub action: String,
-    pub message: String,
-    pub thread: String,
-    pub thread_dropped: bool,
-    pub cleanup_error: Option<String>,
-    pub exit_code: Option<i32>,
-    pub duration_ms: u128,
-    pub captured_state: Option<String>,
-    pub merge_state: Option<String>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub recovery_commands: Vec<String>,
-    pub recovery_action_templates: Vec<ActionTemplateSchema>,
-}
-
 // ---- git projection ops -----------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ExportedRefSchema {
-    pub name: String,
-    pub tip: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ExportGitSchema {
-    pub output_kind: Option<String>,
-    pub states_exported: u64,
-    pub commits_total: u64,
-    pub threads_synced: u64,
-    pub markers_synced: u64,
-    pub branches: Vec<ExportedRefSchema>,
-    pub tags: Vec<ExportedRefSchema>,
-    pub destination: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct ImportGitSchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: Option<String>,
-    pub summary: String,
-    pub commits_imported: u64,
-    pub states_created: u64,
-    pub branches_synced: u64,
-    pub tags_synced: u64,
-    pub skipped_non_commit_refs: u64,
-    pub lossy_entries: Vec<LossyImportEntrySchema>,
-    pub already_in_sync: bool,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub recovery_commands: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct LossyImportEntrySchema {
-    pub path: String,
-    pub action: String,
-    pub reason: String,
-    pub git_object: Option<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SyncGitSchema {
-    pub output_kind: Option<String>,
-    pub status: String,
-    pub action: Option<String>,
-    pub summary: String,
-    pub states_exported: u64,
-    pub commits_exported_total: u64,
-    pub commits_imported: u64,
-    pub threads_synced: u64,
-    pub markers_synced: u64,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub recovery_commands: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RevertSchema {
-    pub output_kind: String,
-    pub state_id: Option<String>,
-    pub reverted_state: String,
-    pub files_affected: Vec<String>,
-    pub message: String,
-}
 
 // ---- git overlay diagnostics ---------------------------------------------
 
@@ -3078,7 +614,7 @@ pub struct DoctorSchema {
     pub storage_model: String,
     pub hosted_enabled: bool,
     #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
+    pub trust: RepositoryVerificationState,
     pub operation: OpaqueObject,
     pub remote_tracking: OpaqueObject,
     pub thread: Option<Value>,
@@ -3087,7 +623,7 @@ pub struct DoctorSchema {
     pub workspace: Value,
     pub health: Value,
     pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
+    pub recommended_action_template: Option<ActionTemplate>,
     pub recovery_commands: Vec<String>,
     pub profile: Option<Value>,
 }
@@ -3138,16 +674,16 @@ pub struct ErrorEnvelopeSchema {
     pub would_change: String,
     pub preserved: String,
     pub primary_command: String,
-    pub primary_command_template: NullableActionTemplateSchema,
+    pub primary_command_template: NullableActionTemplate,
     pub recovery_commands: Vec<String>,
-    pub recovery_action_templates: Vec<ActionTemplateSchema>,
+    pub recovery_action_templates: Vec<ActionTemplate>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(untagged)]
 #[allow(dead_code)]
-pub enum NullableActionTemplateSchema {
-    Template(ActionTemplateSchema),
+pub enum NullableActionTemplate {
+    Template(ActionTemplate),
     Null(()),
 }
 
@@ -3377,7 +913,7 @@ mod tests {
     ///
     /// heddle#272 r6 (Codex P2): `schema_for_verb` injects the
     /// discriminator from the catalog after deriving the struct schema,
-    /// so `heddle schemas <verb>` already surfaces `output_kind`. That
+    /// so every emitted payload already surfaces `output_kind`. That
     /// injection masks the fact that the Rust mirror struct (e.g.
     /// `DiffSchema`) never declares the field. The mirror
     /// is the source of truth a reader greps; it must be honest about the
@@ -3417,7 +953,7 @@ mod tests {
             missing.is_empty(),
             "Documented swept schema structs missing the `output_kind` property. Add \
              `pub output_kind: String` to each mirror struct so it matches the runtime \
-             emission (the catalog injection masks this at the `heddle schemas` layer, \
+             emission (the catalog injection masks this at the emission layer, \
              but the struct must be honest):\n  - {}",
             missing.join("\n  - ")
         );
@@ -3474,7 +1010,7 @@ mod tests {
 
         assert_eq!(
             catalog_verbs, listed_verbs,
-            "`heddle help --output json` command schema verbs must match `heddle schemas` except for the cross-cutting JSON error envelope"
+            "`heddle help --output json` command schema verbs must match the registered schema registry except for the cross-cutting JSON error envelope"
         );
     }
 
@@ -3580,9 +1116,9 @@ mod tests {
             .or_else(|| schema.get("definitions"))
             .and_then(|defs| {
                 defs.get("ActionTemplate")
-                    .or_else(|| defs.get("ActionTemplateSchema"))
+                    .or_else(|| defs.get("ActionTemplate"))
             })
-            .expect("verify schema includes ActionTemplateSchema definition");
+            .expect("verify schema includes ActionTemplate definition");
         let description = property_schema(action_template, "agent_may_fill")
             .get("description")
             .and_then(Value::as_str)
@@ -3804,87 +1340,57 @@ mod tests {
     #[test]
     fn push_schema_requires_stable_runtime_fields() {
         let schema = schema_for_verb("push").expect("push schema");
-        let variants = schema
-            .get("anyOf")
-            .and_then(Value::as_array)
-            .expect("push schema has transport variants")
-            .iter()
-            .map(|variant| {
-                let reference = variant.get("$ref").and_then(Value::as_str).or_else(|| {
-                    variant
-                        .get("allOf")
-                        .and_then(Value::as_array)
-                        .and_then(|parts| {
-                            parts
-                                .iter()
-                                .find_map(|part| part.get("$ref").and_then(Value::as_str))
-                        })
-                });
-                reference
-                    .map(|reference| resolve_schema_ref(&schema, reference))
-                    .unwrap_or(variant)
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(variants.len(), 2, "Git and Heddle push variants");
-
-        for variant in &variants {
-            let required = required_fields(variant);
-            for stable_field in [
-                "output_kind",
-                "action",
-                "status",
-                "pushed",
-                "changed",
-                "success",
-                "transport",
-                "next_action",
-                "next_action_template",
-                "recommended_action",
-                "recommended_action_template",
-                "verification",
-            ] {
-                assert!(
-                    required.contains(&stable_field),
-                    "every push variant must require `{stable_field}`: {variant}"
-                );
-            }
-        }
-
-        let git_required = variants
-            .iter()
-            .map(|variant| required_fields(variant))
-            .find(|required| required.contains(&"ref_scope"))
-            .expect("Git push variant");
-        for git_field in [
-            "remote",
-            "push_scope",
-            "refs_written",
-            "tags_included",
-            "force",
+        // The registered type is the real single-struct envelope: both
+        // transports serialize one object whose optional facts are omitted.
+        // The envelope always emits the action fields too, but they are
+        // `Option` on the registered struct, so schemars leaves them optional
+        // (nullable properties) rather than required.
+        for stable_field in [
+            "next_action",
+            "next_action_template",
+            "recommended_action",
+            "recommended_action_template",
         ] {
+            let property = property_schema(&schema, stable_field);
             assert!(
-                git_required.contains(&git_field),
-                "Git push requires `{git_field}`"
+                property.is_object(),
+                "push must still describe `{stable_field}`: {property}"
             );
         }
-
-        let heddle_required = variants
-            .iter()
-            .map(|variant| required_fields(variant))
-            .find(|required| !required.contains(&"ref_scope"))
-            .expect("Heddle push variant");
+        for stable_field in [
+            "output_kind",
+            "action",
+            "status",
+            "pushed",
+            "changed",
+            "success",
+            "transport",
+            "verification",
+        ] {
+            assert!(
+                required_fields(&schema).contains(&stable_field),
+                "push must require `{stable_field}`: {schema}"
+            );
+        }
         for conditional in [
             "remote",
             "push_scope",
+            "ref_scope",
             "refs_written",
+            "tags_included",
             "force",
             "thread",
             "state",
             "objects",
         ] {
+            let property = property_schema(&schema, conditional);
             assert!(
-                !heddle_required.contains(&conditional),
-                "Heddle push conditionally omits `{conditional}`"
+                !required_fields(&schema).contains(&conditional),
+                "`{conditional}` is emitted only when present and must stay optional: {property}"
+            );
+            assert!(
+                property.is_object(),
+                "push must still describe `{conditional}`: {property}"
             );
         }
     }
@@ -3954,7 +1460,6 @@ mod tests {
         for verb in [
             "maintenance fsck",
             "resolve",
-            "retro",
             "discuss open",
             "discuss append",
             "discuss resolve",

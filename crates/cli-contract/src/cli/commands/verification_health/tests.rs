@@ -5,14 +5,14 @@
 //! the `mod tests` body moved into this sibling file unchanged (de-indented
 //! one level). It referenced the parent via `super::{...}` inline and continues
 //! to do so as a sibling module -- pure code movement, no logic change.
-use heddle_core::status::next_action::{
-    canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
-    remote_tracking_next_action,
-};
 use objects::object::ThreadName;
 use refs::Head;
 use repo::{GitRemoteTrackingStatus, Repository};
 use tempfile::TempDir;
+use verbs::status::next_action::{
+    canonical_git_import_ref_command, canonical_git_repair_ref_preview_command,
+    remote_tracking_next_action,
+};
 
 use super::{
     RepositoryVerificationState, action_template, detached_git_head_mutation_advice,
@@ -386,29 +386,28 @@ fn plain_git_worktree_status_preserves_staged_removal_alongside_untracked() {
 #[test]
 fn machine_contract_coverage_counts_the_same_rows_as_command_catalog() {
     let catalog = build_command_catalog();
+    // Coverage excludes the non-default gated surface (`ci`) — mirror that.
+    let not_feature_gated =
+        |command: &&crate::cli::commands::command_catalog::CommandCatalogEntry| {
+            command.path.first().map(String::as_str) != Some("ci")
+        };
+    let catalog_commands = catalog.commands.iter().filter(not_feature_gated).count();
     let catalog_json = catalog
         .commands
         .iter()
+        .filter(not_feature_gated)
         .filter(|command| command.supports_json)
-        .count();
-    let catalog_op_id = catalog
-        .commands
-        .iter()
-        .filter(|command| command.supports_op_id)
-        .count();
-    let catalog_jsonl = catalog
-        .commands
-        .iter()
-        .filter(|command| command.json_kind == "jsonl" || command.json_kind == "json_or_jsonl")
         .count();
     let catalog_mutating = catalog
         .commands
         .iter()
+        .filter(not_feature_gated)
         .filter(|command| command.mutates)
         .count();
     let json_with_schema = catalog
         .commands
         .iter()
+        .filter(not_feature_gated)
         .filter(|command| {
             command.supports_json
                 && command.schema_verbs.iter().any(|verb| {
@@ -419,11 +418,23 @@ fn machine_contract_coverage_counts_the_same_rows_as_command_catalog() {
     let mutating_json = catalog
         .commands
         .iter()
+        .filter(not_feature_gated)
         .filter(|command| command.supports_json && command.mutates)
         .count();
-
+    let catalog_op_id = catalog
+        .commands
+        .iter()
+        .filter(not_feature_gated)
+        .filter(|command| command.supports_op_id)
+        .count();
+    let catalog_jsonl = catalog
+        .commands
+        .iter()
+        .filter(not_feature_gated)
+        .filter(|command| command.json_kind == "jsonl" || command.json_kind == "json_or_jsonl")
+        .count();
     let coverage = machine_contract_coverage();
-    assert_eq!(coverage.catalog_commands_total, catalog.commands.len());
+    assert_eq!(coverage.catalog_commands_total, catalog_commands);
     assert_eq!(coverage.catalog_mutating_commands_total, catalog_mutating);
     assert_eq!(coverage.json_commands_total, catalog_json);
     assert_eq!(coverage.json_mutating_commands_total, mutating_json);

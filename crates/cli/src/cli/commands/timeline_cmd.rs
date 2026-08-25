@@ -2,7 +2,13 @@
 //! Timeline navigation action commands.
 
 use anyhow::{Result, anyhow};
-use heddle_core::{
+use objects::object::{ContentHash, StateId};
+use repo::{
+    NativeToolCallRefV1, Repository, TimelineBranchId, TimelineLabel, TimelineMaterializeStatus,
+    TimelineOperationBodyV1, TimelineOperationEnvelope, TimelineStore, TimelineToolPayloadMetadata,
+    TimelineView, ToolCallFinishedV1, ToolCallStartedV1,
+};
+use verbs::{
     timeline_cursor_reason, timeline_label,
     timeline_plan::{
         TimelinePlanError, TimelineSelection, TimelineTargetOptions, parse_branch_reason,
@@ -11,26 +17,21 @@ use heddle_core::{
     },
     timeline_recovery_status, timeline_tool_status,
 };
-use objects::object::{ContentHash, StateId};
-use repo::{
-    NativeToolCallRefV1, Repository, TimelineBranchId, TimelineLabel, TimelineMaterializeStatus,
-    TimelineOperationBodyV1, TimelineOperationEnvelope, TimelineStore, TimelineToolPayloadMetadata,
-    TimelineView, ToolCallFinishedV1, ToolCallStartedV1,
-};
-use serde::Serialize;
 
 use super::advice::RecoveryAdvice;
+use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::cli::{
-    Cli, TimelineArgs, TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs,
-    TimelineRecordStartArgs, TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs,
-    TimelineStatusArgs, TimelineTargetArgs, should_output_json, style,
+    Cli, TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs,
+    TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs,
+    TimelineTargetArgs, should_output_json, style,
 };
 
-const TIMELINE_RESET_CURRENT_COMMAND: &str = "heddle timeline reset --thread <thread> --current";
+const TIMELINE_RESET_CURRENT_COMMAND: &str =
+    "heddle agent timeline reset --thread <thread> --current";
 const TIMELINE_TOOL_CALL_COMMAND: &str =
-    "heddle timeline reset --thread <thread> --tool-call <tool-call-id> --harness opencode";
+    "heddle agent timeline reset --thread <thread> --tool-call <tool-call-id> --harness opencode";
 
-pub fn cmd_timeline(cli: &Cli, args: TimelineArgs) -> Result<()> {
+pub fn cmd_timeline(cli: &Cli, command: TimelineCommands) -> Result<()> {
     let start = cli
         .repo
         .clone()
@@ -38,7 +39,7 @@ pub fn cmd_timeline(cli: &Cli, args: TimelineArgs) -> Result<()> {
     let repo = Repository::open(start)?;
     let store = TimelineStore::open(repo.heddle_dir())?;
 
-    match args.command {
+    match command {
         TimelineCommands::Status(args) => cmd_timeline_status(cli, &repo, &store, args),
         TimelineCommands::RecordStart(args) => cmd_timeline_record_start(cli, &repo, &store, args),
         TimelineCommands::RecordFinish(args) => {
@@ -49,6 +50,13 @@ pub fn cmd_timeline(cli: &Cli, args: TimelineArgs) -> Result<()> {
         TimelineCommands::Recover(args) => cmd_timeline_recover(cli, &repo, &store, args),
     }
 }
+
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
+    TimelineActionOutput, TimelineRecordingOutput, TimelineStatusOutput,
+    TimelineStatusRecoveryOutput, TimelineStatusStepOutput,
+};
 
 fn cmd_timeline_status(
     cli: &Cli,
@@ -61,7 +69,7 @@ fn cmd_timeline_status(
             "timeline_thread_required",
             "--thread",
             "timeline status",
-            "heddle timeline status --thread <thread>",
+            "heddle agent timeline status --thread <thread>",
         )));
     }
     let snapshot = repo.timeline_navigation_snapshot(store, &args.thread)?;
@@ -420,7 +428,10 @@ fn cmd_timeline_recover(
 
 fn print_timeline_action(cli: &Cli, repo: &Repository, output: TimelineActionOutput) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "timeline"]),
+        )?;
         return Ok(());
     }
 
@@ -476,7 +487,10 @@ fn print_timeline_action(cli: &Cli, repo: &Repository, output: TimelineActionOut
 
 fn print_timeline_status(cli: &Cli, repo: &Repository, output: TimelineStatusOutput) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "timeline"]),
+        )?;
         return Ok(());
     }
 
@@ -509,7 +523,10 @@ fn print_timeline_recording(
     output: TimelineRecordingOutput,
 ) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "timeline"]),
+        )?;
         return Ok(());
     }
 
@@ -528,7 +545,7 @@ fn native_tool_ref(args: &TimelineRecordToolArgs) -> Result<NativeToolCallRefV1>
             "timeline_thread_required",
             "--thread",
             "timeline recording",
-            "heddle timeline record-start --thread <thread> --tool-call <id>",
+            "heddle agent timeline record-start --thread <thread> --tool-call <id>",
         )));
     }
     if args.harness.trim().is_empty() {
@@ -536,7 +553,7 @@ fn native_tool_ref(args: &TimelineRecordToolArgs) -> Result<NativeToolCallRefV1>
             "timeline_record_harness_required",
             "--harness",
             "timeline recording",
-            "heddle timeline record-start --harness opencode --tool-call <id>",
+            "heddle agent timeline record-start --harness opencode --tool-call <id>",
         )));
     }
     if args.tool_call.trim().is_empty() {
@@ -544,7 +561,7 @@ fn native_tool_ref(args: &TimelineRecordToolArgs) -> Result<NativeToolCallRefV1>
             "timeline_record_tool_call_required",
             "--tool-call",
             "timeline recording",
-            "heddle timeline record-start --tool-call <id>",
+            "heddle agent timeline record-start --tool-call <id>",
         )));
     }
     Ok(NativeToolCallRefV1 {
@@ -618,7 +635,7 @@ fn parse_payload_hash(value: &str) -> Result<ContentHash> {
             "--payload-hash",
             value,
             "a 64-character hex content hash",
-            "heddle timeline record-start --tool-call <id> --payload-hash <hex>",
+            "heddle agent timeline record-start --tool-call <id> --payload-hash <hex>",
         ))
     })
 }
@@ -660,7 +677,7 @@ fn map_timeline_plan_error(err: TimelinePlanError) -> anyhow::Error {
                 "--status",
                 &raw,
                 "succeeded, failed, or cancelled",
-                "heddle timeline record-finish --tool-call <id> --status succeeded",
+                "heddle agent timeline record-finish --tool-call <id> --status succeeded",
             ))
         }
         TimelinePlanError::InvalidBranchReason { raw } => {
@@ -669,7 +686,7 @@ fn map_timeline_plan_error(err: TimelinePlanError) -> anyhow::Error {
                 "--reason",
                 &raw,
                 "explicit-fork, edit-from-rewound-cursor, retry, or fan-out",
-                "heddle timeline fork --thread <thread> --current --reason explicit-fork",
+                "heddle agent timeline fork --thread <thread> --current --reason explicit-fork",
             ))
         }
         TimelinePlanError::InvalidMaterializeMode { raw } => {
@@ -678,7 +695,7 @@ fn map_timeline_plan_error(err: TimelinePlanError) -> anyhow::Error {
                 "--mode",
                 &raw,
                 "fail-if-dirty or capture-current-then-seek",
-                "heddle timeline reset --thread <thread> --current --mode fail-if-dirty",
+                "heddle agent timeline reset --thread <thread> --current --mode fail-if-dirty",
             ))
         }
         TimelinePlanError::ThreadRequired => anyhow!(RecoveryAdvice::missing_option(
@@ -711,97 +728,6 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or_default()
-}
-
-#[derive(Serialize)]
-struct TimelineStatusOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    thread: String,
-    cursor_branch_id: Option<String>,
-    cursor_step_id: Option<String>,
-    cursor_state: Option<String>,
-    current_step: Option<TimelineStatusStepOutput>,
-    active_branch_path: Vec<String>,
-    can_undo: bool,
-    can_redo: bool,
-    branch_count: usize,
-    step_count: usize,
-    recovery: Option<TimelineStatusRecoveryOutput>,
-}
-
-#[derive(Serialize)]
-struct TimelineStatusStepOutput {
-    step_id: String,
-    branch_id: String,
-    parent_step_id: Option<String>,
-    tool_name: Option<String>,
-    tool_status: Option<&'static str>,
-    changed: Option<bool>,
-    payload_summary: Option<String>,
-    payload_hash: Option<String>,
-    labels: Vec<&'static str>,
-    started_at_ms: Option<i64>,
-    finished_at_ms: Option<i64>,
-    can_seek: bool,
-    can_fork: bool,
-    can_reset: bool,
-    can_materialize: bool,
-    has_boundary_warning: bool,
-}
-
-#[derive(Serialize)]
-struct TimelineStatusRecoveryOutput {
-    status: &'static str,
-    branch_id: String,
-    from_step_id: Option<String>,
-    to_step_id: Option<String>,
-    from_state: String,
-    to_state: String,
-    reason: String,
-    moved_at_ms: i64,
-    checkout_state: Option<String>,
-}
-
-#[derive(Serialize)]
-struct TimelineRecordingOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    action: &'static str,
-    thread: String,
-    step_id: String,
-    branch_id: String,
-    parent_step_id: Option<String>,
-    operation_id: String,
-    before_state: Option<String>,
-    after_state: Option<String>,
-    changed: Option<bool>,
-    tool_status: Option<&'static str>,
-    payload_summary: Option<String>,
-    payload_hash: Option<String>,
-    branch_count: usize,
-    step_count: usize,
-}
-
-#[derive(Serialize)]
-struct TimelineActionOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    action: &'static str,
-    thread: String,
-    branch_id: Option<String>,
-    parent_branch_id: Option<String>,
-    from_step_id: Option<String>,
-    cursor_branch_id: Option<String>,
-    cursor_step_id: Option<String>,
-    operation_id: Option<String>,
-    recovered_operation_id: Option<String>,
-    materialized: Option<bool>,
-    materialization_status: Option<String>,
-    recovery_status: Option<String>,
-    blocker_count: usize,
-    branch_count: usize,
-    step_count: usize,
 }
 
 #[cfg(test)]

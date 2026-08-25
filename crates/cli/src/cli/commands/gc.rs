@@ -12,7 +12,15 @@
 //! output makes the invariant visible to operators.
 
 use anyhow::Result;
-use heddle_core::{
+#[cfg(feature = "git-overlay")]
+use heddle_git_projection::GitProjection;
+use objects::store::{
+    ObjectStore, PackInstallMetricsSnapshot, pack_install_metrics_snapshot,
+    recover_pack_install_intents,
+};
+use repo::TimelineStore;
+use serde::Serialize;
+use verbs::{
     gc_plan::{
         gc_consolidated_mirror_message, gc_dry_run_messages, gc_pack_message,
         gc_preserved_redactions_message, gc_prune_loose_message, gc_pruned_git_mapping_message,
@@ -20,16 +28,9 @@ use heddle_core::{
     },
     maintenance_plan::{pack_install_recover_line, unpaired_packs_pruned_line},
 };
-#[cfg(feature = "git-overlay")]
-use heddle_git_projection::GitProjection;
-use objects::store::{
-    AnyStore, ObjectStore, PackInstallMetricsSnapshot, pack_install_metrics_snapshot,
-    recover_pack_install_intents,
-};
-use repo::TimelineStore;
-use serde::Serialize;
 
-use crate::cli::{Cli, render::write_json_stdout, should_output_json};
+use super::next_action::{NextActionValidationContext, write_full_command_json};
+use crate::cli::{Cli, should_output_json};
 
 #[derive(Serialize, Default)]
 struct GcOutput {
@@ -204,9 +205,7 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
                 pack_install_recover_line(recover.completed, recover.aborted)
             );
         }
-        let (unpaired_removed, unpaired_bytes) = match repo.store() {
-            AnyStore::Fs(fs) => fs.prune_unpaired_packs()?,
-        };
+        let (unpaired_removed, unpaired_bytes) = repo.store().prune_unpaired_packs()?;
         summary.unpaired_packs_pruned = unpaired_removed;
         if !json {
             println!(
@@ -255,7 +254,10 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
     }
 
     if json {
-        write_json_stdout(&summary)?;
+        write_full_command_json(
+            &summary,
+            NextActionValidationContext::without_repo(&["maintenance", "gc"]),
+        )?;
     }
     Ok(())
 }

@@ -8,32 +8,31 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use heddle_core::{
+use objects::{
+    fs_ops::remove_path_recursively,
+    object::{Blob, StateId, ThreadName},
+    store::{ObjectStore, WriterLeaseStatus, WriterLeaseStore},
+};
+use oplog::{OpLogRecorder, OpRecord, ThreadUpdateSnapshots};
+use refs::{Head, RefExpectation, RefUpdate};
+use repo::{
+    ActorPresenceStore, Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode,
+    ThreadState, describe_thread_advice,
+};
+use tokio::time::{Duration, sleep};
+use verbs::{
     CleanWorktreeGuard, ThreadDropDisposition, ThreadDropOptions, ThreadPromoteOptions,
     ThreadRefreshOptions, ThreadRefreshPlan, format_refresh_conflict_markers,
     plan_cleanup_thread_drop, plan_thread_drop, plan_thread_promote, plan_thread_refresh,
     promote_confirm_in_place_removal, should_materialize_refresh_conflict_markers,
 };
-use objects::{
-    fs_ops::remove_path_recursively,
-    object::{Blob, StateId, ThreadName},
-    store::{ActorPresenceStore, ObjectStore, WriterLeaseStatus, WriterLeaseStore},
-};
-use oplog::{OpLogRecorder, OpRecord, ThreadUpdateSnapshots};
-use refs::{Head, RefExpectation, RefUpdate};
-use repo::{
-    Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,
-    describe_thread_advice,
-};
-use serde::Serialize;
-use tokio::time::{Duration, sleep};
 
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     marker::cmd_thread_marker,
     mount_lifecycle,
-    next_action::normalized_action,
+    next_action::{NextActionValidationContext, normalized_action, write_full_command_json},
     operator_core::{OperatorAction, OperatorCommandOutput},
     operator_loop::primary_next_action,
     thread::{
@@ -48,13 +47,7 @@ use super::{
 };
 use crate::cli::{Cli, ThreadCleanupArgs, ThreadCommands, should_output_json, style};
 
-#[derive(Serialize)]
-struct ThreadOutput {
-    #[serde(flatten)]
-    operator: OperatorCommandOutput,
-    thread: Thread,
-    changed_path_count: usize,
-}
+use heddle_cli_contract::cli::commands::wire::thread::ThreadRecordOutput as ThreadOutput;
 
 pub(crate) struct ThreadRefState {
     pub state: StateId,
@@ -67,6 +60,12 @@ pub(crate) struct ThreadUpdateBefore {
     pub manager_snapshot: Option<Vec<u8>>,
     pub manager_records: Vec<Thread>,
 }
+
+// The cleanup wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::thread::{
+    DroppedThread, SkippedThread, ThreadCleanupOutput,
+};
 
 pub(crate) fn thread_manager(repo: &Repository) -> ThreadManager {
     ThreadManager::new(repo.heddle_dir())
@@ -503,6 +502,13 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
         | ThreadCommands::CheckMerge(_) => Err(anyhow!(
             "rebuild cli with --features client to use thread approvals"
         )),
+        ThreadCommands::Collapse(args) => super::collapse::cmd_collapse(
+            cli,
+            args.states.clone(),
+            args.into.clone(),
+            args.confidence,
+        ),
+        ThreadCommands::Expand(args) => super::expand::cmd_expand(cli, args.reference.clone()),
     }
 }
 
@@ -780,7 +786,7 @@ fn persist_refresh_conflict_state(
         let base_tree = tree_for_state(thread_repo, &base_id)?;
         let our_tree = tree_for_state(thread_repo, &ours)?;
         let their_tree = tree_for_state(thread_repo, &theirs)?;
-        let payload = heddle_core::merge::build_conflict_payload(
+        let payload = verbs::merge::build_conflict_payload(
             thread_repo,
             (base_id, &base_tree),
             (ours, &our_tree),
@@ -1408,8 +1414,8 @@ pub(crate) enum DropOutcome {
 }
 
 /// Tear down an active thread without printing. Used by `cmd_thread_drop`
-/// (which then prints) and by `heddle try` (which embeds the drop
-/// inside its own output). The tear-down sequence is identical to the
+/// (which then prints) and by the silent drop path shared with thread
+/// teardown helpers. The tear-down sequence is identical to the
 /// public verb: unmount → remove checkout → mark Abandoned → strip
 /// agent registry entries → optionally delete the ref.
 pub(crate) fn drop_thread_silent(
@@ -1607,63 +1613,6 @@ fn default_materialized_thread_path(repo: &Repository, thread_id: &str) -> PathB
 }
 
 // --- thread cleanup -------------------------------------------------
-
-#[derive(Debug, Clone, Serialize)]
-struct ThreadCleanupOutput {
-    #[serde(flatten)]
-    operator: OperatorCommandOutput,
-    /// Whether the run was a dry run (no on-disk changes performed).
-    dry_run: bool,
-    /// Threads dropped (or that would be dropped, in dry-run) because
-    /// their lifecycle state is `merged`.
-    merged: Vec<DroppedThread>,
-    /// Threads dropped (or that would be dropped, in dry-run) because
-    /// they are auto-created and stale per `--older-than`.
-    auto: Vec<DroppedThread>,
-    /// Abandoned threads cleaned (or that would be cleaned, in dry-run)
-    /// because operational residue remains.
-    abandoned: Vec<DroppedThread>,
-    /// Total bytes reclaimed from removing thread checkouts. Always
-    /// `0` in dry-run mode — see `would_reclaim_bytes` for the
-    /// estimate. This split prevents automation that reads
-    /// `reclaimed_bytes` from misinterpreting a dry-run estimate as
-    /// actually-reclaimed bytes.
-    reclaimed_bytes: u64,
-    /// Estimated bytes that *would* be reclaimed if the run were
-    /// applied. Mirrors `reclaimed_bytes` in non-dry-run mode and
-    /// surfaces the projected reclaim in dry-run mode.
-    would_reclaim_bytes: u64,
-    /// Threads that matched the cleanup criteria but were skipped
-    /// (e.g. the active thread the user is currently inside). Empty
-    /// in the common case.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    skipped: Vec<SkippedThread>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct DroppedThread {
-    thread: String,
-    id: String,
-    reason: &'static str,
-    age_seconds: i64,
-    /// Bytes the thread checkout occupied on disk before removal.
-    /// `0` when no execution path existed (e.g. lightweight thread
-    /// with the checkout already pruned).
-    bytes: u64,
-    execution_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SkippedThread {
-    thread: String,
-    id: String,
-    /// Stable reason code so automation can branch on it. Currently
-    /// only `active` is emitted.
-    reason: &'static str,
-    /// Human-readable note explaining the skip — e.g. why dropping
-    /// the active thread would leave the user in a deleted directory.
-    note: String,
-}
 
 /// Parse a duration spec accepted by `--older-than`. Recognizes the
 /// suffixes `s`, `m`, `h`, `d`, `w` (lowercase) and a bare integer
@@ -2064,7 +2013,10 @@ fn cmd_thread_cleanup(cli: &Cli, repo: &Repository, args: ThreadCleanupArgs) -> 
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "cleanup"]),
+        )?;
     } else {
         println!("{}", summary_message);
         if total_dropped == 0 {

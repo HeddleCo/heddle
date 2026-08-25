@@ -9,21 +9,21 @@ pub mod init_output;
 pub mod schemas;
 pub mod surface_conformance;
 pub mod verification_health;
+pub mod wire;
 
 pub use advice::RecoveryAdvice;
 pub use command_catalog::{
-    CommandCatalogOutput, CommandRuntimeContract, advanced_help_groups, build_command_catalog,
-    command_canonical_command, command_contract_root_commands, command_help_tier,
-    command_help_visibility, command_path, command_persists_op_id, command_runtime_contract,
-    command_runtime_contract_for_command, command_supports_json_for_command,
-    command_supports_op_id, command_supports_op_id_for_command, command_surface,
-    command_uses_bootstrap_op_id_store, observe_only_root_commands, operator_envelope_verbs,
-    root_commands_for_advanced_help, root_commands_for_help_visibility,
+    CommandCatalogOutput, CommandRuntimeContract, build_command_catalog, command_canonical_command,
+    command_contract_root_commands, command_help_visibility, command_path, command_persists_op_id,
+    command_runtime_contract, command_runtime_contract_for_command,
+    command_supports_json_for_command, command_supports_op_id, command_supports_op_id_for_command,
+    command_surface, command_uses_bootstrap_op_id_store, observe_only_root_commands,
+    operator_envelope_verbs, ranked_visible_roots, root_commands_for_help_visibility,
 };
 pub use doctor_docs::cmd_doctor_docs;
 pub use doctor_schemas::{cmd_doctor_schemas, documented_samples_with_bound_verbs};
 pub use init_output::{InitOutput, InitPrincipalOutput};
-pub use schemas::{cmd_schemas, documented_schema_verbs, schema_for_verb, schema_verbs};
+pub use schemas::{documented_schema_verbs, schema_for_verb, schema_verbs};
 pub use surface_conformance::{
     APPROVED_NON_EVERYDAY_ROOT_COMMANDS, APPROVED_ROOT_ALIASES, CANONICAL_ROOT_COMMANDS,
     CommandSurfaceViolation, command_surface_violations, is_approved_root_command,

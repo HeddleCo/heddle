@@ -210,7 +210,8 @@ impl OpLog {
             return Ok(());
         }
         Err(HeddleError::InvalidObject(
-            "oplog container framing is damaged; run `heddle oplog recover`".to_string(),
+            "oplog container framing is damaged; run `heddle maintenance oplog recover`"
+                .to_string(),
         ))
     }
 
@@ -406,7 +407,7 @@ impl OpLog {
     /// Explicitly run the truncation-salvage path on this repository's oplog and
     /// report what was salvaged.
     ///
-    /// This is the operator entrypoint behind `heddle oplog recover`. It runs
+    /// This is the operator entrypoint behind `heddle maintenance oplog recover`. It runs
     /// footer-guided recovery first, then forward-greedy recovery, quarantines
     /// the damaged original to `.corrupt`, writes the `.oplog.recovery` sidecar,
     /// and rebuilds the selected container. Unlike automatic validation, this

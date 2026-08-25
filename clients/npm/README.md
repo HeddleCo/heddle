@@ -142,8 +142,7 @@ HEDDLE_BIN=./bin/heddle npm test   # also runs the real-binary smoke test
 ## Regenerating
 
 The types come straight from `crates/cli-contract/src/cli/commands/schemas.rs` via the
-runtime introspection the CLI already ships (`heddle schemas <verb>`,
-`heddle help --output json`):
+runtime introspection the CLI already ships (`heddle help --output json`):
 
 ```sh
 scripts/gen-ts-types.sh

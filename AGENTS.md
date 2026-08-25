@@ -53,7 +53,7 @@ A test that hardcodes the return value you wanted is not a test of intent.
 
 - `crates/cli` — verbs, help, output
 - `crates/cli-args` — clap surface; if it's not here, the user can't type it
-- `crates/core`, `crates/objects`, `crates/ingest` — the store and history
+- `crates/verbs`, `crates/objects`, `crates/ingest` — the store and history
 - `crates/repo` — working tree / checkout
 - sley — Git engine (separate repo)
 - heddle-api — proto (separate repo)

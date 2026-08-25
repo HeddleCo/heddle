@@ -3,37 +3,38 @@
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use heddle_core::{
-    AgentCaptureOptions, AgentCaptureThreadCheck, AgentReadyOptions, AgentReservationReport,
-    FanoutLaneAvailability, FanoutLanePreflightBlock, FanoutNodeSpec, FanoutPlan, FanoutPlanError,
-    FanoutPlanRequest, assemble_agent_reservation, assemble_agent_reservation_list,
-    assemble_fanout_plan_report, check_agent_capture_thread, check_fanout_start_preflight,
-    fanout_child_body, fanout_parent_delegated_by, fanout_start_attach_rule, plan_agent_capture,
-    plan_agent_ready, plan_fanout, select_fanout_parent_thread,
-};
 use objects::{
     object::ThreadName,
     store::{
-        ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStatus,
-        AgentTaskStore, AgentUsageSummary, ObjectStore, WriterLease, WriterLeaseAuthOutcome,
-        WriterLeaseDraft, WriterLeaseReserveOutcome, WriterLeaseStatus, WriterLeaseStore,
-        current_boot_id, validate_task_id,
+        ObjectStore, WriterLease, WriterLeaseAuthOutcome, WriterLeaseDraft,
+        WriterLeaseReserveOutcome, WriterLeaseStatus, WriterLeaseStore, current_boot_id,
     },
 };
 use refs::{Head, RefExpectation};
 use repo::{
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStatus,
+    AgentTaskStore, AgentUsageSummary, validate_task_id,
+};
+use repo::{
     Repository, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadId,
     ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState, ThreadVerificationSummary,
 };
-use schemars::JsonSchema;
-use serde::Serialize;
+use verbs::{
+    AgentCaptureOptions, AgentCaptureThreadCheck, AgentReadyOptions, FanoutLaneAvailability,
+    FanoutLanePreflightBlock, FanoutNodeSpec, FanoutPlan, FanoutPlanError, FanoutPlanRequest,
+    assemble_agent_reservation_list, assemble_fanout_plan_report, check_agent_capture_thread,
+    check_fanout_start_preflight, fanout_child_body, fanout_parent_delegated_by,
+    fanout_start_attach_rule, plan_agent_capture, plan_agent_ready, plan_fanout,
+    select_fanout_parent_thread,
+};
 
 use super::{
     advice::RecoveryAdvice,
+    next_action::{NextActionValidationContext, write_full_command_json},
     thread::thread_name_invalid_advice,
     verification_health::{
-        GitOverlayMutationPreflight, RepositoryVerificationState,
-        build_repository_verification_state, git_overlay_mutation_preflight_advice,
+        GitOverlayMutationPreflight, build_repository_verification_state,
+        git_overlay_mutation_preflight_advice,
     },
     worktree_cmd::helpers::plan_worktree_target,
     worktree_safety::ensure_worktree_clean,
@@ -49,156 +50,13 @@ use crate::cli::{
     should_output_json,
 };
 
-#[derive(Serialize, JsonSchema)]
-pub struct AgentReservationOutput {
-    pub lease_id: String,
-    pub actor_session_id: Option<String>,
-    pub thread: String,
-    pub anchor_state: Option<String>,
-    pub anchor_root: Option<String>,
-    pub task_assignment_id: Option<String>,
-    pub status: String,
-    pub path: Option<String>,
-    pub heartbeat_at: String,
-    pub lease_expires_at: String,
-    pub liveness: String,
-}
-
-#[derive(Serialize, JsonSchema)]
-pub(crate) struct AgentReservationEnvelope {
-    pub reservation: AgentReservationOutput,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize, JsonSchema)]
-pub(crate) struct AgentReservationListOutput {
-    pub reservations: Vec<AgentReservationOutput>,
-    pub alive_only: bool,
-    pub thread: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize, JsonSchema)]
-pub(crate) struct AgentTaskEnvelope {
-    pub output_kind: &'static str,
-    pub task: AgentTaskOutput,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize, JsonSchema)]
-pub(crate) struct AgentTaskListOutput {
-    pub output_kind: &'static str,
-    pub tasks: Vec<AgentTaskOutput>,
-    pub thread: Option<String>,
-    pub status: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize, JsonSchema)]
-pub(crate) struct AgentTaskOutput {
-    pub schema_version: u32,
-    pub task_id: String,
-    pub title: String,
-    pub body: String,
-    pub status: String,
-    pub target_thread: String,
-    pub base_state: Option<String>,
-    pub base_root: Option<String>,
-    pub parent_task_id: Option<String>,
-    pub coordination_discussion_id: Option<String>,
-    pub allow_offline: bool,
-    pub delegated_by: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub completed_at: Option<String>,
-}
-
-#[derive(Serialize, JsonSchema)]
-pub(crate) struct AgentFanoutOutput {
-    pub output_kind: &'static str,
-    pub title: String,
-    pub parent_thread: String,
-    pub base_state: String,
-    pub base_root: String,
-    pub coordination_discussion_id: Option<String>,
-    pub parent_task: Option<AgentTaskOutput>,
-    pub lanes: Vec<AgentFanoutLaneOutput>,
-    pub commands: Vec<AgentFanoutCommandOutput>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize, JsonSchema)]
-pub(crate) struct AgentFanoutLaneOutput {
-    pub thread: String,
-    pub path: String,
-    pub title: String,
-    pub task: Option<AgentTaskOutput>,
-    pub session_id: Option<String>,
-    pub lease_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
-    pub status: String,
-}
-
-#[derive(Serialize, JsonSchema)]
-pub(crate) struct AgentFanoutCommandOutput {
-    pub lane_thread: String,
-    pub command: String,
-    pub argv: Vec<String>,
-}
-
-impl From<&WriterLease> for AgentReservationOutput {
-    fn from(lease: &WriterLease) -> Self {
-        AgentReservationOutput::from(assemble_agent_reservation(lease))
-    }
-}
-
-impl From<AgentReservationReport> for AgentReservationOutput {
-    fn from(report: AgentReservationReport) -> Self {
-        Self {
-            lease_id: report.lease_id,
-            actor_session_id: report.actor_session_id,
-            thread: report.thread,
-            anchor_state: report.anchor_state,
-            anchor_root: report.anchor_root,
-            task_assignment_id: report.task_assignment_id,
-            status: report.status,
-            path: report.path,
-            heartbeat_at: report.heartbeat_at,
-            lease_expires_at: report.lease_expires_at,
-            liveness: report.liveness,
-        }
-    }
-}
-
-impl From<&AgentTaskRecord> for AgentTaskOutput {
-    fn from(task: &AgentTaskRecord) -> Self {
-        Self {
-            schema_version: task.schema_version,
-            task_id: task.task_id.clone(),
-            title: task.title.clone(),
-            body: task.body.clone(),
-            status: task.status.to_string(),
-            target_thread: task.target_thread.clone(),
-            base_state: task.base_state.clone(),
-            base_root: task.base_root.clone(),
-            parent_task_id: task.parent_task_id.clone(),
-            coordination_discussion_id: task.coordination_discussion_id.clone(),
-            allow_offline: task.allow_offline,
-            delegated_by: task.delegated_by.clone(),
-            created_at: task.created_at.to_rfc3339(),
-            updated_at: task.updated_at.to_rfc3339(),
-            completed_at: task.completed_at.map(|time| time.to_rfc3339()),
-        }
-    }
-}
+// The agent wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::agent::{
+    AgentFanoutCommandOutput, AgentFanoutLaneOutput, AgentFanoutOutput, AgentReservationEnvelope,
+    AgentReservationListOutput, AgentReservationOutput, AgentTaskEnvelope, AgentTaskListOutput,
+    AgentTaskOutput,
+};
 
 fn live_owner_conflict_advice(
     thread: &str,
@@ -400,13 +258,13 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
         &repo,
         std::env::var("HEDDLE_AGENT_PROVIDER")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
         std::env::var("HEDDLE_AGENT_MODEL")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
         std::env::var("HEDDLE_AGENT_POLICY")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
     )?;
     let presence_store = ActorPresenceStore::new(repo.heddle_dir());
     let task_assignment_id = task_record.as_ref().map(|task| task.task_id.clone());
@@ -1090,7 +948,10 @@ fn build_fanout_start_output(
 
 fn render_agent_fanout_output(output: AgentFanoutOutput, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "fanout"]),
+        )?;
         return Ok(());
     }
     println!(
@@ -1129,7 +990,10 @@ fn render_agent_fanout_output(output: AgentFanoutOutput, json: bool) -> Result<(
 
 fn render_agent_list(output: AgentReservationListOutput, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "list"]),
+        )?;
         return Ok(());
     }
     let entries = output.reservations;
@@ -1174,7 +1038,10 @@ fn render_agent_task_envelope(
         trust: build_repository_verification_state(repo),
     };
     if json {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "task"]),
+        )?;
         return Ok(());
     }
     println!(
@@ -1198,7 +1065,10 @@ fn render_agent_task_envelope(
 
 fn render_agent_task_list(output: AgentTaskListOutput, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "task"]),
+        )?;
         return Ok(());
     }
     if output.tasks.is_empty() {
@@ -1235,11 +1105,10 @@ fn render_agent_reservation_envelope(
     lease: &WriterLease,
     token: Option<String>,
 ) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string(&reservation_envelope(repo, lease, token))?
-    );
-    Ok(())
+    write_full_command_json(
+        &reservation_envelope(repo, lease, token),
+        NextActionValidationContext::without_repo(&["agent"]),
+    )
 }
 
 fn writer_lease_advice(kind: &'static str, lease_id: &str, error: String) -> RecoveryAdvice {

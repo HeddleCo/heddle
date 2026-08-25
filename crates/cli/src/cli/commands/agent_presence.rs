@@ -6,22 +6,22 @@
 //! presence stored in `.heddle/actor-presence/`.
 //!
 //! List/show/spawn/done domain assembly and pure planning live in
-//! `heddle_core::actor`. This module owns implicit session resolution,
+//! `verbs::actor`. This module owns implicit session resolution,
 //! thread-ref minting, harness probing, recovery advice, and human/JSON render.
 
 use anyhow::{Result, anyhow};
-use heddle_core::{
+use repo::Repository;
+use repo::{ActorPresence, ActorPresenceStore};
+use serde::Serialize;
+use verbs::{
     ActorEntryReport, ActorListReport, list_actors, mark_actor_done, plan_actor_done,
     show_actor_from_entry,
 };
-use objects::store::{ActorPresence, ActorPresenceStore};
-use repo::Repository;
-use serde::Serialize;
 
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    command_catalog::ActionTemplate,
+    next_action::{NextActionValidationContext, write_full_command_json},
     thread::find_thread_summary,
     verification_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
@@ -29,38 +29,12 @@ use super::{
 };
 use crate::cli::{Cli, should_output_json};
 
-#[derive(Serialize)]
-struct ActorSingleOutput {
-    output_kind: &'static str,
-    presence: ActorEntryReport,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize)]
-struct ActorListOutput {
-    output_kind: &'static str,
-    presence: Vec<ActorEntryReport>,
-    active_only: bool,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize)]
-struct ActorDoneOutput {
-    output_kind: &'static str,
-    session_id: String,
-    status: &'static str,
-    thread: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    coordination_status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    recommended_action: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    recommended_action_template: Option<ActionTemplate>,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
+// The presence wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::agent::{
+    ActorDoneOutput, ActorEnvironmentOutput, ActorExplainDetectedOutput, ActorListOutput,
+    ActorSingleOutput, DetectedActorOutput,
+};
 
 #[derive(Serialize)]
 struct ActorExplainOutput {
@@ -90,64 +64,6 @@ struct ActorExplainOutput {
     trust: RepositoryVerificationState,
 }
 
-#[derive(Serialize)]
-struct ActorExplainDetectedOutput {
-    output_kind: &'static str,
-    attached: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    active_presence: Option<serde_json::Value>,
-    reason: &'static str,
-    repository: String,
-    detected: DetectedActorOutput,
-    environment: ActorEnvironmentOutput,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    recommended_action: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    recommended_action_template: Option<ActionTemplate>,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize)]
-struct DetectedActorOutput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    harness: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking_level: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    policy: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    native_actor_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    native_parent_actor_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    native_instance_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    probe_source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    probe_confidence: Option<f32>,
-}
-
-#[derive(Serialize)]
-struct ActorEnvironmentOutput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent_provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent_model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent_policy: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    principal_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    principal_email: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    signals: Vec<String>,
-}
-
 pub async fn list(cli: &Cli, active_only: bool) -> Result<()> {
     let repo = cli.open_repo()?;
     let report = list_actors(&repo, active_only)?;
@@ -159,7 +75,10 @@ pub async fn list(cli: &Cli, active_only: bool) -> Result<()> {
             active_only: report.active_only,
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "presence", "list"]),
+        )?;
     } else {
         render_actor_list(&report);
     }
@@ -174,7 +93,7 @@ pub async fn show(cli: &Cli, session_id: Option<String>) -> Result<()> {
         &repo,
         &registry,
         session_id.as_deref(),
-        "heddle presence show <session>",
+        "heddle agent presence show <session>",
     )?;
     let show = show_actor_from_entry(&registry, &entry)?;
 
@@ -184,7 +103,10 @@ pub async fn show(cli: &Cli, session_id: Option<String>) -> Result<()> {
             presence: show.actor,
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "presence", "show"]),
+        )?;
     } else {
         render_actor_show(&show.actor);
     }
@@ -281,7 +203,7 @@ pub async fn complete(cli: &Cli, session_id: Option<String>) -> Result<()> {
         &repo,
         &registry,
         session_id.as_deref(),
-        "heddle presence complete --session <session>",
+        "heddle agent presence complete --session <session>",
     )?;
     let plan = plan_actor_done(&entry);
     mark_actor_done(&registry, &plan.session_id)?;
@@ -304,7 +226,10 @@ pub async fn complete(cli: &Cli, session_id: Option<String>) -> Result<()> {
             recommended_action_template,
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "presence", "complete"]),
+        )?;
     } else {
         println!("Agent presence '{}' marked as complete.", plan.session_id);
         if let Some(thread) = summary {
@@ -333,7 +258,7 @@ pub async fn explain(cli: &Cli, session_id: Option<String>) -> Result<()> {
         &repo,
         &registry,
         session_id.as_deref(),
-        "heddle presence explain <session>",
+        "heddle agent presence explain <session>",
     ) {
         Ok(entry) => entry,
         Err(err) if session_id.is_none() && is_no_active_actor_error(&err) => {
@@ -363,7 +288,10 @@ pub async fn explain(cli: &Cli, session_id: Option<String>) -> Result<()> {
             winning_rule: entry.winning_attach_rule,
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "presence", "explain"]),
+        )?;
     } else {
         println!("Agent presence: {}", entry.session_id);
         println!("Thread: {}", entry.thread);
@@ -408,13 +336,13 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
         repo,
         std::env::var("HEDDLE_AGENT_PROVIDER")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
         std::env::var("HEDDLE_AGENT_MODEL")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
         std::env::var("HEDDLE_AGENT_POLICY")
             .ok()
-            .and_then(crate::attribution::clean_attribution_value),
+            .and_then(hosted_client::attribution::clean_attribution_value),
     )?;
     let env_signals = actor_identity_env_signals();
     let current_lane = repo.current_lane()?;
@@ -454,7 +382,10 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
             recommended_action_template: next_action_template,
             trust: build_repository_verification_state(repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "presence", "show"]),
+        )?;
     } else {
         println!("Agent presence: none attached");
         println!("Repository: {}", repo.root().display());
@@ -637,16 +568,16 @@ fn no_active_actor_advice() -> RecoveryAdvice {
         "no active actor registry entry matches the current thread or checkout path",
         "choosing a completed actor implicitly could show the wrong session",
         "no actor registry entries, refs, repository objects, or worktree files were changed",
-        "heddle presence list",
+        "heddle agent presence list",
         vec![
-            "heddle presence list".to_string(),
-            "heddle presence explain".to_string(),
-            "heddle presence show <session>".to_string(),
+            "heddle agent presence list".to_string(),
+            "heddle agent presence explain".to_string(),
+            "heddle agent presence show <session>".to_string(),
         ],
     )
 }
 
-fn print_actor_chain(chain: &[heddle_core::ActorChainEntry]) {
+fn print_actor_chain(chain: &[verbs::ActorChainEntry]) {
     if chain.len() <= 1 {
         return;
     }

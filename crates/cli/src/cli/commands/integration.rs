@@ -9,7 +9,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use heddle_core::integration_plan::{
+use objects::fs_atomic::write_file_atomic;
+use repo::Repository;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use verbs::integration_plan::{
     HarnessSelectionPlan, IntegrationHarnessError, IntegrationHarnessScopeError,
     IntegrationScopeError, IntegrationScopeKind, PathModeKind, classify_opencode_plugin_path_mode,
     claude_settings_has_relay, codex_config_has_relay, doctor_status_line, drifted_status_token,
@@ -20,12 +24,9 @@ use heddle_core::integration_plan::{
     uninstalled_message, upgraded_message, validate_harness_scope as plan_validate_harness_scope,
     validate_install_plan as plan_validate_install_plan,
 };
-use objects::fs_atomic::write_file_atomic;
-use repo::Repository;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use super::advice::RecoveryAdvice;
+use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::{
     cli::{
         Cli, IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs,
@@ -35,6 +36,10 @@ use crate::{
 };
 
 const MANIFEST_FILE: &str = "integrations.toml";
+
+// The integration wire payload lives in cli-contract so the schema registry
+// registers the real serialization type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::bridge::IntegrationStatusOutput as IntegrationStatus;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -157,19 +162,6 @@ struct IntegrationManifest {
     integrations: Vec<InstalledIntegration>,
 }
 
-#[derive(Debug, Serialize)]
-struct IntegrationStatus {
-    harness: String,
-    scope: String,
-    method: String,
-    status: String,
-    healthy: bool,
-    paths: Vec<String>,
-    capabilities: Vec<String>,
-    capability_paths: Vec<String>,
-    path_mode: String,
-}
-
 pub fn cmd_integration(cli: &Cli, command: IntegrationCommands) -> Result<()> {
     let repo = cli.open_repo()?;
     match command {
@@ -260,7 +252,10 @@ fn list_integrations(cli: &Cli, repo: &Repository) -> Result<()> {
         .map(|entry| integration_status(repo, &entry))
         .collect::<Result<Vec<_>>>()?;
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&statuses)?);
+        write_full_command_json(
+            &statuses,
+            NextActionValidationContext::without_repo(&["integration", "list"]),
+        )?;
     } else if statuses.is_empty() {
         println!("{}", empty_integrations_message());
     } else {
@@ -334,7 +329,10 @@ fn doctor_integrations(cli: &Cli, repo: &Repository) -> Result<()> {
         .map(|entry| integration_status(repo, entry))
         .collect::<Result<Vec<_>>>()?;
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&statuses)?);
+        write_full_command_json(
+            &statuses,
+            NextActionValidationContext::without_repo(&["integration", "list"]),
+        )?;
     } else if statuses.is_empty() {
         println!("{}", empty_integrations_message());
     } else {
@@ -458,11 +456,9 @@ fn detect_path_mode(harness: &str, entry: &InstalledIntegration) -> Option<PathM
     }
 }
 
-/// CLI wrapper: pure classifier lives in `heddle_core::integration_plan`.
+/// CLI wrapper: pure classifier lives in `verbs::integration_plan`.
 fn path_mode_from_command(cmd: &str) -> PathMode {
-    PathMode::from(heddle_core::integration_plan::classify_command_path_mode(
-        cmd,
-    ))
+    PathMode::from(verbs::integration_plan::classify_command_path_mode(cmd))
 }
 
 /// Test/compat alias used by unit tests that call the historical name.

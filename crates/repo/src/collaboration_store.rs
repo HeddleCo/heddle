@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 const INDEX_VERSION: u16 = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CollaborationWriteDisposition {
     Created,

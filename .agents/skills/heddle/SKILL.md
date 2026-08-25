@@ -76,8 +76,9 @@ current checkout. Run it from the specific isolated checkout you want to rewind.
 
 ## The machine contract
 
-Source of truth: `heddle help output-formats`, `heddle schemas`,
-`heddle help --output json`, and [`docs/json-schemas.md`](../../../docs/json-schemas.md).
+Source of truth: `heddle help output-formats`,
+`heddle help --output json`, and [`docs/json-schemas.md`](../../../docs/json-schemas.md)
+(drift-checked by `heddle doctor schemas`).
 
 - **`--output text`** (default, always — no TTY/pipe auto-detection). Human-only.
 - **`--output json`** emits the full contract: a stable **`output_kind`**
@@ -86,8 +87,9 @@ Source of truth: `heddle help output-formats`, `heddle schemas`,
   `status`/`coordination_status`, `blockers`, `next_action`, `changed_paths`,
   `conflicts` — same `output_kind`, fewer tokens.
 
-**Per-verb JSON Schemas:** `heddle schemas <verb>` prints the JSON Schema; the
-list of schema-bearing verbs is `heddle schemas` (no arg). The `output_kind`
+**Per-verb JSON Schemas:** every schema-bearing verb's JSON Schema lives in
+[`docs/json-schemas.md`](../../../docs/json-schemas.md) (`heddle doctor schemas`
+fails when it drifts from the registered schemas). The `output_kind`
 field is the discriminator you switch on.
 
 **Command catalog / side-effect catalog:** `heddle help --output json` returns

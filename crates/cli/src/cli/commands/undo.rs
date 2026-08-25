@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Undo and redo commands.
 //!
-//! Domain list/planning lives in [`heddle_core::undo`]; this module owns lock
+//! Domain list/planning lives in [`verbs::undo`]; this module owns lock
 //! acquisition, apply, text/json render, and mutation-side RecoveryAdvice.
 
 use anyhow::{Result, anyhow};
-use heddle_core::{
+use objects::store::ObjectStore;
+use oplog::{OpBatch, OpRecord};
+use refs::UNDO_RECOVERY_HANDLE;
+use repo::{Repository, ThreadManager};
+use verbs::{
     LiveThreadWorktree, UndoApplyPreflightError, UndoBatchSummary, UndoHistoryAction,
     UndoListReport, check_redaction_redo_supported, check_redaction_undo_safe,
     check_states_reachable, check_thread_worktree_undo_safe, collect_redaction_undo_facts,
@@ -15,16 +19,12 @@ use heddle_core::{
     list_undo_history, live_materialized_path_blocks_undo, plan_redo_batches, plan_undo_apply,
     plan_undo_batches, summarize_batch, validate_undo_list_preview_modes,
 };
-use objects::store::ObjectStore;
-use oplog::{OpBatch, OpRecord};
-use refs::UNDO_RECOVERY_HANDLE;
-use repo::{Repository, ThreadManager};
-use serde::Serialize;
 
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
-    command_catalog::{ActionFields, ActionTemplate, heddle_action},
+    command_catalog::{ActionFields, heddle_action},
+    next_action::{NextActionValidationContext, write_full_command_json},
     undo_apply::{
         RedoOp, UndoOp, acquire_undo_redo_lock, preflight_redo_batches, preflight_undo_batches,
         undo_redo_transaction_id,
@@ -54,29 +54,7 @@ use crate::cli::{Cli, should_output_json, style};
 /// directly, without routing the internal handle through any user-ref resolver.
 const UNDO_RECOVERY_MARKER: &str = UNDO_RECOVERY_HANDLE;
 
-#[derive(Serialize)]
-struct UndoRedoOutput {
-    output_kind: &'static str,
-    status: &'static str,
-    action: String,
-    message: String,
-    batches: Vec<UndoBatchSummary>,
-    next_action: Option<String>,
-    next_action_template: Option<ActionTemplate>,
-    recommended_action: Option<String>,
-    recommended_action_template: Option<ActionTemplate>,
-    /// heddle#305: the pre-undo state preserved for recovery, and the marker
-    /// pointing at it. Present only on a completed `undo`; omitted from the
-    /// wire when absent (preview / redo).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    recovery_state: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    recovery_marker: Option<String>,
-    #[serde(skip_serializing)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "verification")]
-    trust: Option<RepositoryVerificationState>,
-}
+pub(crate) use heddle_cli_contract::cli::commands::wire::UndoRedoOutput;
 
 /// Undo the given oplog batches in-process without printing command output.
 /// Used by `land` to auto-rollback integration when Git checkpoint fails.
@@ -118,11 +96,14 @@ pub fn cmd_undo(
 
     if list {
         // Domain filtering (user batches, checkout scope, depth before markers)
-        // lives in heddle_core::list_undo_history (heddle#355 cid 3330867777).
+        // lives in verbs::list_undo_history (heddle#355 cid 3330867777).
         let output: UndoListReport = list_undo_history(&repo, depth)?;
 
         if should_output_json(cli, Some(repo.config())) {
-            println!("{}", serde_json::to_string(&output)?);
+            write_full_command_json(
+                &output,
+                NextActionValidationContext::without_repo(&["undo"]),
+            )?;
         } else {
             println!("Recent undo history (showing up to {}):", depth);
             if output.batches.is_empty() {
@@ -149,7 +130,7 @@ pub fn cmd_undo(
     // Run safety pre-flights before the `--preview` short-circuit so
     // preview output is honest about refusals. Preview must not
     // advertise "Would undo …" for a chain the real command would
-    // reject. Pure decision logic lives in heddle_core::undo; this
+    // reject. Pure decision logic lives in verbs::undo; this
     // layer supplies FS/store facts and maps typed refusals to advice.
     ensure_redaction_undo_safe(&repo, &selected.batches, allow_redact_undo)?;
     ensure_thread_worktree_undo_safe(&repo, &selected.batches)?;
@@ -174,7 +155,10 @@ pub fn cmd_undo(
         };
 
         if should_output_json(cli, Some(repo.config())) {
-            println!("{}", serde_json::to_string(&output)?);
+            write_full_command_json(
+                &output,
+                NextActionValidationContext::without_repo(&["undo"]),
+            )?;
         } else {
             println!("{}", apply_plan.human_message);
             if cli.verbose > 0 {
@@ -244,7 +228,7 @@ pub fn cmd_undo(
         output_kind: "undo",
         status: "completed",
         action: "undo".to_string(),
-        message: heddle_core::machine_undo_redo_message(UndoHistoryAction::Undo, count, false),
+        message: verbs::machine_undo_redo_message(UndoHistoryAction::Undo, count, false),
         batches: updated_batches.iter().map(summarize_batch).collect(),
         next_action: recovery_action.action,
         next_action_template: recovery_action.template,
@@ -256,7 +240,10 @@ pub fn cmd_undo(
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["undo"]),
+        )?;
     } else {
         println!(
             "{}",
@@ -339,7 +326,10 @@ pub fn cmd_undo_recover(cli: &Cli) -> Result<()> {
     };
 
     if should_output_json(cli, Some(recovered_repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["undo"]),
+        )?;
     } else {
         println!(
             "Recovered pre-undo state {} as worktree changes",
@@ -389,7 +379,10 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
         };
 
         if should_output_json(cli, Some(repo.config())) {
-            println!("{}", serde_json::to_string(&output)?);
+            write_full_command_json(
+                &output,
+                NextActionValidationContext::without_repo(&["undo"]),
+            )?;
         } else {
             println!("{}", apply_plan.human_message);
             if cli.verbose > 0 {
@@ -420,7 +413,7 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
         output_kind: "redo",
         status: "completed",
         action: "redo".to_string(),
-        message: heddle_core::machine_undo_redo_message(UndoHistoryAction::Redo, count, false),
+        message: verbs::machine_undo_redo_message(UndoHistoryAction::Redo, count, false),
         batches: updated_batches.iter().map(summarize_batch).collect(),
         next_action: recommended_action.action.clone(),
         next_action_template: recommended_action.template.clone(),
@@ -432,7 +425,10 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["undo"]),
+        )?;
     } else {
         println!(
             "{}",
@@ -612,7 +608,7 @@ fn ensure_no_active_operation(repo: &Repository, action: &str) -> Result<()> {
 
 /// Walk every batch we're about to undo and verify that each state the
 /// inverse would restore is still present in the object store. Domain
-/// collection + refusal kind live in heddle-core; store lookup stays here.
+/// collection + refusal kind live in heddle-verbs; store lookup stays here.
 fn ensure_undo_states_reachable(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
     let mut missing = Vec::new();
     for required in collect_undo_required_states(batches) {

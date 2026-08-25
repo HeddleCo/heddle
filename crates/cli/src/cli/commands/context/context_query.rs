@@ -4,25 +4,23 @@
 use std::{collections::BTreeMap, path::Path};
 
 use anyhow::Result;
-use heddle_core::{
-    annotation_status_label, audit_duplicate_count, audit_staleness_key, audit_target_key,
-    filter_annotations, suggestion_tier_human_label, suggestion_tier_token,
-};
-use objects::{
-    object::{AnnotationStatus, ContextTarget},
-    store::{ActorPresenceStore, ContextQueryEntry},
-};
+use objects::object::{AnnotationStatus, ContextTarget};
 use repo::{
-    Repository, ThreadManager,
+    ActorPresenceStore, ContextQueryEntry, Repository, ThreadManager,
     staleness::{self, StalenessStatus},
 };
 use serde::Serialize;
+use verbs::{
+    annotation_status_label, audit_duplicate_count, audit_staleness_key, audit_target_key,
+    filter_annotations, suggestion_tier_human_label, suggestion_tier_token,
+};
 
 use super::{
     AnnotationHistoryOutput, AnnotationOutput, ContextListRow, RevisionOutput,
     context_root_for_state, parse_scope, print_context_get, resolve_state, resolve_state_id,
     target_label,
 };
+use crate::cli::commands::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::cli::{
     Cli,
     commands::{
@@ -168,7 +166,10 @@ pub async fn cmd_context_list(
             "output_kind": "context_list",
             "items": items,
         });
-        println!("{}", serde_json::to_string(&envelope)?);
+        write_full_command_json(
+            &envelope,
+            NextActionValidationContext::without_repo(&["context", "list"]),
+        )?;
     } else if entries.is_empty() {
         println!("No context annotations.");
     } else {
@@ -238,7 +239,10 @@ pub async fn cmd_context_history(
     };
 
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["context", "history"]),
+        )?;
     } else {
         println!("{} {}", output.target_kind, output.target);
         println!("annotation: {}", output.annotation_id);
@@ -321,7 +325,7 @@ pub async fn cmd_context_check(
     for entry in &filtered_entries {
         for annotation in &entry.blob.annotations {
             // Active + optional tag only; scope filter not used by check.
-            if !heddle_core::annotation_passes_filters(annotation, None, tag.as_deref(), false) {
+            if !verbs::annotation_passes_filters(annotation, None, tag.as_deref(), false) {
                 continue;
             }
             let Some(current) = annotation.current_revision() else {
@@ -421,7 +425,10 @@ pub async fn cmd_context_suggest(cli: &Cli, r#ref: Option<String>, limit: usize)
             "output_kind": "context_suggest",
             "items": items,
         });
-        println!("{}", serde_json::to_string(&envelope)?);
+        write_full_command_json(
+            &envelope,
+            NextActionValidationContext::without_repo(&["context", "suggest"]),
+        )?;
     } else if suggestions.is_empty() {
         println!("No low-noise context suggestions right now.");
     } else {
@@ -533,7 +540,7 @@ fn log_context_query_if_agent_session(
                 .ok()
                 .flatten()?;
             registry.list().ok()?.into_iter().find(|entry| {
-                entry.status == objects::store::ActorPresenceStatus::Active
+                entry.status == repo::ActorPresenceStatus::Active
                     && entry.thread_id.as_deref() == Some(thread.id.as_str())
             })
         });

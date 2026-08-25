@@ -156,7 +156,7 @@ required = true
 [[jobs]]
 id = "lib-core"
 kind = "cargo-test"
-package = "heddle-core"
+package = "heddle-verbs"
 oracle = false
 perf_eligible = false
 platforms = ["any"]

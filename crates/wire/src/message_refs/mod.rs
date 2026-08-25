@@ -92,14 +92,6 @@ pub enum HeadInfo {
     Detached { state: StateId },
 }
 
-/// Published repository-ref listing response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RefsList {
-    pub head: HeadInfo,
-    pub head_state: Option<StateId>,
-    pub refs: Vec<RefEntry>,
-}
-
 /// One advertised repository ref.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefEntry {

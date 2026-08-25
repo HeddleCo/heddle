@@ -2,51 +2,28 @@
 //! Marker commands.
 
 use anyhow::{Result, anyhow};
-use heddle_core::{
+use objects::{object::MarkerName, store::ObjectStore};
+use repo::Repository;
+use verbs::{
     MarkerDeleteSelector, MarkerDeleteSelectorError, marker_bulk_delete_message,
     marker_create_message, marker_delete_message, marker_list_filter_matches,
     marker_prefix_is_valid, plan_marker_delete_selector,
 };
-use objects::{object::MarkerName, store::ObjectStore};
-use repo::Repository;
-use serde::Serialize;
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
+    MarkerBulkDeleteOutput, MarkerEntry, MarkerListOutput, MarkerOpOutput,
+};
 
-use super::{advice::RecoveryAdvice, snapshot::ensure_current_state};
+use super::{
+    advice::RecoveryAdvice,
+    next_action::{NextActionValidationContext, write_full_command_json},
+    snapshot::ensure_current_state,
+};
 use crate::{
     cli::{Cli, ThreadMarkerCommands, should_output_json},
     config::UserConfig,
 };
-
-#[derive(Serialize)]
-struct MarkerListOutput {
-    output_kind: &'static str,
-    markers: Vec<MarkerEntry>,
-}
-
-#[derive(Serialize)]
-struct MarkerEntry {
-    name: String,
-    /// Short change-id of the state the marker points at.
-    state_id: String,
-}
-
-#[derive(Serialize)]
-struct MarkerOpOutput {
-    output_kind: &'static str,
-    name: String,
-    /// Short change-id of the state the marker pointed at after the op.
-    /// `None` for ops that delete the marker.
-    state_id: Option<String>,
-    message: String,
-}
-
-#[derive(Serialize)]
-struct MarkerBulkDeleteOutput {
-    output_kind: &'static str,
-    deleted: Vec<MarkerEntry>,
-    count: usize,
-    message: String,
-}
 
 pub fn cmd_thread_marker(
     cli: &Cli,
@@ -98,7 +75,10 @@ fn cmd_marker_list(cli: &Cli, repo: &Repository, filter: Option<String>) -> Resu
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "marker"]),
+        )?;
     } else {
         for entry in &output.markers {
             println!("{} -> {}", entry.name, entry.state_id);
@@ -132,7 +112,10 @@ fn cmd_marker_create(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "marker"]),
+        )?;
     } else {
         println!("{}", output.message);
     }
@@ -153,7 +136,10 @@ fn cmd_marker_delete(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "marker"]),
+        )?;
     } else {
         println!("{}", output.message);
     }
@@ -194,7 +180,10 @@ fn cmd_marker_delete_prefix(cli: &Cli, repo: &Repository, prefix: String) -> Res
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "marker"]),
+        )?;
     } else {
         println!("{}", output.message);
         for entry in &output.deleted {
@@ -274,7 +263,10 @@ fn cmd_marker_show(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "marker"]),
+        )?;
     } else {
         println!("Marker: {}", name);
         println!("State: {}", state_id.short());

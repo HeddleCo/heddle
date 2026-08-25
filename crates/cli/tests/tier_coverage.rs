@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Every `Commands` variant must have an explicit root command contract.
 //!
-//! Help tiers now come from the command contract table, so this test
-//! enumerates every variant of `Commands` from `commands_main.rs` and
-//! asserts the root verb name is present in that table. The runtime
-//! `command_help_tier` lookup still has an advanced fallback for
-//! unknown wrappers, but existing verbs must never rely on it.
+//! Help rank and visibility come from the command contract table, so
+//! this test enumerates every variant of `Commands` from
+//! `commands_main.rs` and asserts the root verb name is present in that
+//! table. Unknown wrappers would fall through to runtime defaults;
+//! existing verbs must never rely on that.
 //!
 //! The check is text-based for the same reason
 //! [`op_id_coverage`](super::op_id_coverage) is: avoids dragging
@@ -45,17 +45,16 @@ fn every_commands_variant_has_explicit_root_contract() {
 
     let mut missing = Vec::new();
     for variant in &variants {
-        if cfg!(not(feature = "client"))
-            && matches!(
-                variant.as_str(),
-                // `Auth` and `Whoami` are the client-gated top-level roots:
-                // their contract entries are `feature_gated(..., "client")`, so
-                // `command_contract_root_commands()` omits them in a no-client
-                // build even though the enum source (read as text) still lists
-                // the variant.
-                "Auth" | "Whoami" | "Support" | "Prove" | "Spool"
-            )
-        {
+        // Feature-gated roots: their contract entries carry
+        // `feature_gated(...)`, so `command_contract_root_commands()`
+        // omits them in builds without the feature even though the enum
+        // source (read as text) still lists the variant.
+        let gated_off = match variant.as_str() {
+            "Auth" | "Whoami" => cfg!(not(feature = "client")),
+            "Ci" => cfg!(not(feature = "ci")),
+            _ => false,
+        };
+        if gated_off {
             continue;
         }
         let kebab = variant_to_verb(variant);

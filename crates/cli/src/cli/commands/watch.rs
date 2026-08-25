@@ -44,11 +44,6 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, SecondsFormat, Utc};
-use heddle_core::watch_plan::{
-    DEFAULT_POLL_INTERVAL_MS, MAX_TAIL_WINDOW, WatchFilterPlanError, WatchNotifyClass,
-    WatchSincePlanError, is_relevant_watch_event, plan_watch_filter, plan_watch_since_cutoff,
-    watch_passes_filter,
-};
 use notify::{
     Config as NotifyConfig, Error as NotifyError, ErrorKind as NotifyErrorKind, Event, EventKind,
     PollWatcher, RecommendedWatcher, RecursiveMode, Watcher,
@@ -56,7 +51,11 @@ use notify::{
 use objects::{object::StateId, store::ObjectStore};
 use oplog::{OpEntry, OpLog, OpLogBackend, OpRecord, RecordedHead};
 use repo::Repository;
-use serde::Serialize;
+use verbs::watch_plan::{
+    DEFAULT_POLL_INTERVAL_MS, MAX_TAIL_WINDOW, WatchFilterPlanError, WatchNotifyClass,
+    WatchSincePlanError, is_relevant_watch_event, plan_watch_filter, plan_watch_since_cutoff,
+    watch_passes_filter,
+};
 
 use super::{advice::RecoveryAdvice, command_runtime_contract};
 use crate::cli::{
@@ -455,14 +454,18 @@ fn annotate_entry(entry: OpEntry, repo: &Repository) -> EmittedEntry {
 fn state_lookup(
     repo: &Repository,
     state_id: &StateId,
-) -> (Option<String>, Option<f32>, Option<ActorInfo>) {
+) -> (Option<String>, Option<f32>, Option<WatchActorInfo>) {
     let Ok(Some(state)) = repo.store().get_state(state_id) else {
         return (None, None, None);
     };
-    let actor = state.attribution.agent.as_ref().map(|agent| ActorInfo {
-        provider: agent.provider.clone(),
-        model: agent.model.clone(),
-    });
+    let actor = state
+        .attribution
+        .agent
+        .as_ref()
+        .map(|agent| WatchActorInfo {
+            provider: agent.provider.clone(),
+            model: agent.model.clone(),
+        });
     (state.intent.clone(), state.confidence, actor)
 }
 
@@ -564,33 +567,14 @@ struct EmittedEntry {
     state_id: Option<StateId>,
     intent: Option<String>,
     confidence: Option<f32>,
-    actor: Option<ActorInfo>,
+    actor: Option<WatchActorInfo>,
 }
 
-/// JSON-mode view of an actor (agent provider/model). Mirrors the
-/// shape rendered by `heddle status --output json` so consumers can join
-/// `watch` events with `status` outputs without renaming fields.
-#[derive(Clone, Debug, Serialize)]
-struct ActorInfo {
-    provider: String,
-    model: String,
-}
-
-/// JSON-mode line schema. One line per emitted oplog entry.
-/// Field names are snake_case to match the rest of Heddle's JSON
-/// surfaces (status, log).
-#[derive(Serialize)]
-struct WatchLineJson<'a> {
-    ts: String,
-    thread: Option<&'a str>,
-    kind: &'a str,
-    state_id: Option<String>,
-    intent: Option<&'a str>,
-    confidence: Option<f32>,
-    actor: Option<&'a ActorInfo>,
-    /// Numeric oplog id, useful for downstream cursor tracking.
-    id: u64,
-}
+// The watch wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::collab::{
+    WatchActorInfo, WatchLineOutput,
+};
 
 /// Holds the (immutable) render decision (text vs JSON) plus the
 /// parsed `--filter` set.
@@ -617,19 +601,19 @@ impl Renderer {
         // `merge` is a UX alias the operator can pass — it matches
         // ThreadUpdate (the wire-level kind for both ordinary
         // captures-on-thread and merges into a target). Matching
-        // lives in `heddle_core::watch_plan`.
+        // lives in `verbs::watch_plan`.
         watch_passes_filter(self.filter.as_deref(), entry.kind.as_str())
     }
 
     fn render_json(&self, e: &EmittedEntry) -> String {
-        let view = WatchLineJson {
+        let view = WatchLineOutput {
             ts: e.entry.timestamp.to_rfc3339_opts(SecondsFormat::Secs, true),
-            thread: e.thread.as_deref(),
-            kind: e.kind.as_str(),
+            thread: e.thread.clone(),
+            kind: e.kind.clone(),
             state_id: e.state_id.as_ref().map(|id| id.to_string_full()),
-            intent: e.intent.as_deref(),
+            intent: e.intent.clone(),
             confidence: e.confidence,
-            actor: e.actor.as_ref(),
+            actor: e.actor.clone(),
             id: e.entry.id,
         };
         serde_json::to_string(&view).unwrap_or_else(|err| {
@@ -971,7 +955,7 @@ mod tests {
             state_id: Some(cid),
             intent: Some("feat(modulo): error-returning impl".into()),
             confidence: Some(0.92),
-            actor: Some(ActorInfo {
+            actor: Some(WatchActorInfo {
                 provider: "anthropic".into(),
                 model: "claude-sonnet-4-5".into(),
             }),

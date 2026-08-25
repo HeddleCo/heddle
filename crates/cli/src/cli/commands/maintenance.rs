@@ -2,18 +2,23 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
 use anyhow::Result;
-use heddle_core::maintenance_plan::{MaintenanceInspectView, MaintenanceRefreshView};
 use objects::store::{
     AnyStore, FsRepackOperation, RepackPolicy, RepackResourceLimits, RepackSchedule,
     RepackScheduler,
 };
 use serde::Serialize;
+use verbs::maintenance_plan::{MaintenanceInspectView, MaintenanceRefreshView};
 
+use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::cli::{
     Cli, FsckCommands, FsckRepairCommands, MaintenanceCommands,
-    commands::{cmd_fsck, cmd_fsck_repair_git, cmd_gc},
+    commands::{cmd_fsck, cmd_fsck_repair_git, cmd_gc, cmd_oplog},
     should_output_json, worktree_status_options,
 };
+
+// The repack wire payload lives in cli-contract so the schema registry
+// registers the real serialization type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::bridge::RepackOutput;
 
 #[derive(Serialize)]
 struct MaintenanceOutput<'a, T> {
@@ -22,18 +27,12 @@ struct MaintenanceOutput<'a, T> {
     report: &'a T,
 }
 
-#[derive(Serialize)]
-struct RepackOutput {
-    output_kind: &'static str,
-    objects_repacked: u64,
-    bytes_repacked: u64,
-    duration_ms: u128,
-    bytes_reclaimed: u64,
-}
-
 fn render_repack(output: &RepackOutput, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(output)?);
+        write_full_command_json(
+            output,
+            NextActionValidationContext::without_repo(&["maintenance", "repack"]),
+        )?;
     } else {
         println!(
             "Repacked {} objects ({} bytes) in {} ms; reclaimed {} bytes",
@@ -47,6 +46,13 @@ fn render_repack(output: &RepackOutput, json: bool) -> Result<()> {
 }
 
 pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
+    // Oplog recovery must run through its own non-validating repository
+    // open: a torn oplog is exactly what it repairs, so the ordinary
+    // (validating) open below would refuse before the handler ever runs.
+    if let MaintenanceCommands::Oplog { command } = &command {
+        return cmd_oplog(cli, command.clone());
+    }
+
     let repo = cli.open_repo()?;
     let options = worktree_status_options(Some(repo.config()));
 
@@ -64,13 +70,13 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
         MaintenanceCommands::Inspect => {
             let report = repo.inspect_performance_with_options(&options)?;
             if should_output_json(cli, Some(repo.config())) {
-                println!(
-                    "{}",
-                    serde_json::to_string(&MaintenanceOutput {
+                write_full_command_json(
+                    &MaintenanceOutput {
                         output_kind: "maintenance_inspect",
                         report: &report,
-                    })?
-                );
+                    },
+                    NextActionValidationContext::without_repo(&["maintenance", "inspect"]),
+                )?;
             } else {
                 let view = MaintenanceInspectView {
                     commit_graph_present: report.commit_graph.present,
@@ -111,13 +117,13 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
         MaintenanceCommands::Refresh => {
             let run = repo.run_maintenance_with_options(&options)?;
             if should_output_json(cli, Some(repo.config())) {
-                println!(
-                    "{}",
-                    serde_json::to_string(&MaintenanceOutput {
+                write_full_command_json(
+                    &MaintenanceOutput {
                         output_kind: "maintenance_refresh",
                         report: &run,
-                    })?
-                );
+                    },
+                    NextActionValidationContext::without_repo(&["maintenance", "refresh"]),
+                )?;
             } else {
                 let view = MaintenanceRefreshView {
                     rebuilt_commit_graph: run.rebuilt_commit_graph,
@@ -174,6 +180,8 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
         } => {
             return cmd_gc(cli, prune, aggressive, dry_run);
         }
+        // Handled above, before the validating repository open.
+        MaintenanceCommands::Oplog { .. } => {}
     }
 
     Ok(())

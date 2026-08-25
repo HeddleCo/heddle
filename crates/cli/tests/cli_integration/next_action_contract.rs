@@ -331,9 +331,7 @@ fn ready_via_repo_flag_quotes_shell_metacharacters() {
 #[test]
 fn presence_show_multi_match_next_is_not_help_catalog() {
     use chrono::Utc;
-    use objects::store::{
-        ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
-    };
+    use repo::{ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary};
 
     let repo = setup_native_repo();
     let opened = Repository::open(repo.path()).unwrap();
@@ -374,7 +372,7 @@ fn presence_show_multi_match_next_is_not_help_catalog() {
             .unwrap();
     }
 
-    let output = heddle_output(&["--output", "json", "presence", "show"], Some(repo.path()))
+    let output = heddle_output(&["--output", "json", "agent", "presence", "show"], Some(repo.path()))
         .expect("presence show should spawn");
     assert!(
         !output.status.success(),
@@ -391,7 +389,7 @@ fn presence_show_multi_match_next_is_not_help_catalog() {
     .unwrap_or_else(|err| panic!("JSON envelope: {err}\n{stderr}"));
     assert_eq!(envelope["kind"], "ambiguous_actor_selection", "{envelope}");
     assert_eq!(
-        envelope["primary_command"], "heddle presence show <session>",
+        envelope["primary_command"], "heddle agent presence show <session>",
         "{envelope}"
     );
     assert_ne!(

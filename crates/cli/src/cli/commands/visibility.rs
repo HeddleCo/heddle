@@ -11,12 +11,13 @@
 
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use heddle_core::visibility_tier_label;
 use objects::object::{StateVisibility, VisibilityTier};
 use repo::{Repository, VisibilityCommitKind};
 use serde::Serialize;
+use verbs::visibility_tier_label;
 
 use super::history_target::resolve_state_id as resolve_state;
+use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::cli::{
     Cli, VisibilityCommands, VisibilityListArgs, VisibilityPromoteArgs, VisibilitySetArgs,
     VisibilityShowArgs, should_output_json,
@@ -187,7 +188,10 @@ fn cmd_visibility_show(cli: &Cli, repo: &Repository, args: VisibilityShowArgs) -
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["visibility", "show"]),
+        )?;
     } else {
         println!("state {}", output.state);
         match &output.label {
@@ -255,7 +259,10 @@ fn cmd_visibility_list(cli: &Cli, repo: &Repository, _args: VisibilityListArgs) 
     };
 
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&payload)?);
+        write_full_command_json(
+            &payload,
+            NextActionValidationContext::without_repo(&["visibility", "list"]),
+        )?;
     } else if count == 0 {
         println!("no non-public states in repo");
     } else {
@@ -277,7 +284,10 @@ fn emit_mutation(
     verb: &str,
 ) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(output)?);
+        write_full_command_json(
+            output,
+            NextActionValidationContext::without_repo(&["visibility"]),
+        )?;
     } else {
         match &output.label {
             Some(label) => println!(

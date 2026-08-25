@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Compact projections for command outputs defined outside this module.
 
-use heddle_core::{DiffReport, VerifyReport};
+use verbs::{DiffReport, VerifyReport};
 
 use super::compact::{CompactOutput, CompactProjection};
 use super::next_action::normalized_action;

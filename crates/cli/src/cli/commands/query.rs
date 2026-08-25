@@ -3,7 +3,7 @@
 
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
-use heddle_core::{QueryRequest, query};
+use verbs::{QueryRequest, query};
 
 use crate::cli::{
     cli_args::{Cli, QueryArgs},

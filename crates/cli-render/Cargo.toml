@@ -15,12 +15,13 @@ anstyle = "1"
 anyhow.workspace = true
 blake3.workspace = true
 chrono.workspace = true
-heddle-cli-args.workspace = true
-heddle-core.workspace = true
+heddle-cli-args = { path = "../cli-args", version = "0.15.0", default-features = false }
+verbs = { path = "../verbs", package = "heddle-verbs", version = "0.15.0", default-features = false }
 hex.workspace = true
-objects.workspace = true
-repo = { workspace = true, features = ["git-overlay", "native"] }
+objects = { path = "../objects", package = "heddle-objects", version = "0.15.0" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.15.0", default-features = false, features = ["git-overlay", "native"] }
 serde.workspace = true
+schemars.workspace = true
 serde_json.workspace = true
 
 [features]

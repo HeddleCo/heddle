@@ -12,7 +12,7 @@ use super::commands_args::{
     AgentPresenceShowArgs, AgentProvenanceBeginArgs, AgentProvenanceEndArgs,
     AgentProvenanceListArgs, AgentProvenanceSegmentArgs, AgentProvenanceShowArgs, AgentReadyArgs,
     AgentReleaseArgs, AgentReserveArgs, AgentTaskCreateArgs, AgentTaskListArgs, AgentTaskShowArgs,
-    AgentTaskUpdateArgs,
+    AgentTaskUpdateArgs, TimelineCommands,
 };
 
 #[derive(Clone, Debug, Subcommand)]
@@ -52,6 +52,17 @@ pub enum AgentCommands {
     /// Record provider, model, and policy provenance across an agent run.
     #[command(subcommand)]
     Provenance(AgentProvenanceCommands),
+
+    /// Inspect attribution and work context for local agents.
+    ///
+    /// Presence records explain who is acting; `agent reserve` grants
+    /// writer authority.
+    #[command(subcommand)]
+    Presence(PresenceCommands),
+
+    /// Navigate, fork, reset, and recover agent tool-call timelines.
+    #[command(subcommand)]
+    Timeline(TimelineCommands),
 }
 
 #[derive(Clone, Debug, Subcommand)]

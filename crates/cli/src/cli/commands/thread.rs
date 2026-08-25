@@ -8,7 +8,19 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use heddle_core::{
+use objects::{
+    object::{State, StateId, ThreadName, Tree},
+    store::{ObjectStore, WriterLeaseStatus, WriterLeaseStore},
+    worktree::WorktreeStatus,
+};
+use oplog::OpRecord;
+use refs::{Head, RefExpectation, RefUpdate};
+use repo::{
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, Repository, Thread,
+    ThreadCaptureOutcome, ThreadFreshness, ThreadId, ThreadIdError, ThreadIntegrationPolicy,
+    ThreadManager, ThreadMode, ThreadState,
+};
+use verbs::{
     AutoWorkspaceDefault, AvailableGitRef, ThreadBaseError, ThreadBaseSelection,
     ThreadCreateOptions, ThreadListOptions, ThreadPathIsolationError, ThreadPlanError,
     ThreadStartOptions, WorkspaceModeRequest, active_reservation_blocks_start,
@@ -22,35 +34,18 @@ use heddle_core::{
         thread_recovery_action_is_primary as shared_thread_recovery_action_is_primary,
     },
 };
-pub use heddle_core::{
+pub use verbs::{
     CoordinationStatus, ThreadActorInfo, ThreadSummary, collect_thread_summaries,
     find_thread_summary, thread_is_available_git_ref, thread_is_imported_git_ref,
 };
-use objects::{
-    object::{State, StateId, ThreadName, Tree},
-    store::{
-        ActorPresence, ActorPresenceStatus, ActorPresenceStore, ObjectStore, WriterLeaseStatus,
-        WriterLeaseStore,
-    },
-    worktree::WorktreeStatus,
-};
-use oplog::OpRecord;
-use refs::{Head, RefExpectation, RefUpdate};
-use repo::{
-    AgentUsageSummary, Repository, Thread, ThreadCaptureOutcome, ThreadFreshness, ThreadId,
-    ThreadIdError, ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState,
-};
-use serde::Serialize;
 
 use super::{
     action_line::{print_nested_next_step, print_nested_optional, print_next_step, print_optional},
     advice::RecoveryAdvice,
-    command_catalog::{ActionTemplate, recommended_action_template},
+    command_catalog::recommended_action_template,
     compact::{CompactOutput, CompactProjection},
     mount_lifecycle,
-    next_action::{
-        NextActionValidationContext, write_full_command_json, write_projected_command_json,
-    },
+    next_action::{NextActionValidationContext, write_command_json, write_full_command_json},
     operator_loop::primary_next_action_with_verification,
     snapshot::{ensure_current_state, summarize_confidence, summarize_verification},
     start_atomic,
@@ -60,7 +55,6 @@ use super::{
         build_repository_verification_state,
         build_repository_verification_state_with_worktree_status,
         git_overlay_mutation_preflight_advice, override_trust_recommended_action,
-        serialize_empty_action_as_null,
     },
     worktree_cmd::{
         helpers::{plan_worktree_target, write_isolated_checkout},
@@ -79,79 +73,12 @@ use crate::{
 
 pub(crate) const DEFAULT_AVAILABLE_GIT_REF_LIMIT: usize = 5;
 
-#[derive(Serialize)]
-struct ThreadListOutput {
-    output_kind: &'static str,
-    repository_capability: String,
-    repository_label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    repository_context: Option<crate::cli::render::RepositoryContextInfo>,
-    storage_model: String,
-    hosted_enabled: bool,
-    threads: Vec<ThreadSummary>,
-    available_git_refs: Vec<AvailableGitRef>,
-    current: Option<String>,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-    #[serde(serialize_with = "serialize_empty_action_as_null")]
-    recommended_action: String,
-    recommended_action_template: Option<ActionTemplate>,
-    recovery_commands: Vec<String>,
-    recovery_action_templates: Vec<ActionTemplate>,
-    /// Carried for the human-readable renderer only. Not part of the
-    /// JSON contract: import-hint information is exposed via
-    /// `heddle status --output json` instead.
-    #[serde(skip)]
-    import_guidance: Option<ThreadListImportGuidanceOutput>,
-}
-
-#[derive(Serialize)]
-struct ThreadListImportGuidanceOutput {
-    current_branch: String,
-    missing_branch_count: usize,
-    missing_branches: Vec<String>,
-    recommended_command: String,
-}
-
-#[derive(Serialize)]
-struct ThreadShowOutput {
-    output_kind: &'static str,
-    repository_label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    repository_context: Option<crate::cli::render::RepositoryContextInfo>,
-    #[serde(flatten)]
-    summary: ThreadSummary,
-    #[serde(serialize_with = "serialize_empty_action_as_null")]
-    next_action: String,
-    next_action_template: Option<ActionTemplate>,
-    recommended_action_template: Option<ActionTemplate>,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-    recovery_commands: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub(crate) struct ThreadOpOutput {
-    pub output_kind: &'static str,
-    pub status: &'static str,
-    pub action: &'static str,
-    pub name: String,
-    pub message: String,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplate>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplate>,
-    pub thread: Option<ThreadSummary>,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fskit_readiness: Option<mount_lifecycle::FskitReadinessReport>,
-    #[allow(dead_code)]
-    #[serde(skip_serializing)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "verification")]
-    pub trust: Option<RepositoryVerificationState>,
-}
+// The thread wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::thread::{
+    ThreadCaptureOutput, ThreadCaptureSummary, ThreadCurrentOutput, ThreadListImportGuidanceOutput,
+    ThreadListOutput, ThreadOpOutput, ThreadShowOutput,
+};
 
 impl CompactProjection for ThreadOpOutput {
     fn compact(&self) -> CompactOutput {
@@ -161,29 +88,6 @@ impl CompactProjection for ThreadOpOutput {
         compact.next_action_template = self.next_action_template.clone();
         compact
     }
-}
-
-#[derive(Serialize)]
-pub(crate) struct ThreadCaptureOutput {
-    pub state_id: String,
-    pub created_at: String,
-    pub intent: Option<String>,
-    pub confidence: Option<f32>,
-    pub agent: Option<String>,
-    pub message: String,
-    /// Per-capture file count delta vs the parent state. `None` for
-    /// captures with no parent (the bootstrap snapshot of a fresh
-    /// repo) and when the diff cannot be computed (parent state
-    /// missing from the local store).
-    pub summary: Option<ThreadCaptureSummary>,
-}
-
-#[derive(Serialize)]
-pub(crate) struct ThreadCaptureSummary {
-    pub added: usize,
-    pub modified: usize,
-    pub deleted: usize,
-    pub total: usize,
 }
 
 pub fn cmd_start(cli: &Cli, args: ThreadStartArgs) -> Result<()> {
@@ -245,7 +149,10 @@ pub(crate) fn cmd_thread_captures(
 ) -> Result<()> {
     let captures = collect_thread_captures(repo, thread, limit)?;
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&captures)?);
+        write_full_command_json(
+            &captures,
+            NextActionValidationContext::without_repo(&["thread", "captures"]),
+        )?;
         return Ok(());
     }
 
@@ -395,12 +302,7 @@ pub(crate) fn contextual_thread_action(
     target_thread: Option<&str>,
     action: &str,
 ) -> String {
-    heddle_core::status::next_action::contextual_thread_action(
-        repo,
-        thread_id,
-        target_thread,
-        action,
-    )
+    verbs::status::next_action::contextual_thread_action(repo, thread_id, target_thread, action)
 }
 
 pub(crate) fn thread_recovery_action_is_primary(
@@ -966,7 +868,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // a name that isn't a safe single shell token here so a thread id with a
     // space or shell metacharacter can never be persisted — and so every
     // downstream breadcrumb can interpolate it bare. (heddle#464 close-the-class.)
-    // Pure preflight lives in heddle-core; materialization stays below.
+    // Pure preflight lives in heddle-verbs; materialization stays below.
     plan_thread_start(&thread_start_options_from_args(&args))
         .map_err(|ThreadPlanError::InvalidName(err)| anyhow!(thread_name_invalid_advice(&err)))?;
 
@@ -1000,7 +902,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     }
 
     let existing_thread_state = repo.refs().get_thread(&ThreadName::new(&args.name))?;
-    // Resolve I/O facts, then apply pure base-selection rules from heddle-core.
+    // Resolve I/O facts, then apply pure base-selection rules from heddle-verbs.
     let requested_from = match args.from.as_deref() {
         Some(spec) => Some(repo.resolve_state(spec)?.ok_or_else(|| {
             anyhow!(RecoveryAdvice::thread_referenced_state_missing(
@@ -1040,7 +942,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // they know why their disk usage will be higher than the design-
     // doc promises. Fires once per `thread start` invocation, goes
     // to stderr so JSON consumers on stdout are unaffected.
-    // Pure warn decision lives in heddle-core; CLI still owns the message.
+    // Pure warn decision lives in heddle-verbs; CLI still owns the message.
     if should_warn_materialized_without_reflink(
         args.workspace == Some(WorkspaceModeArg::Materialized),
         objects::fs_clone::filesystem_supports_reflink(repo.root()),
@@ -1109,7 +1011,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // the new checkout's `target/` to a workspace-shared dir so
     // parallel threads don't multiply cargo target trees on disk.
     //
-    // Pure redirect / advisory decisions live in heddle-core. We resolve
+    // Pure redirect / advisory decisions live in heddle-verbs. We resolve
     // the shared dir *before* materialization so the heads-up advisory
     // below can reflect what would have happened, and we apply the
     // redirect *after* materialization (only the cargo config.toml
@@ -1129,23 +1031,21 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     let shared_target_decision =
         plan_shared_target_redirect(wants_shared_target, &thread_mode, is_rust_workspace);
     let shared_target_dir_path: Option<PathBuf> = match shared_target_decision {
-        heddle_core::SharedTargetRedirectDecision::Apply => {
-            Some(shared_target::shared_target_dir(repo)?)
-        }
-        heddle_core::SharedTargetRedirectDecision::SkipNonRustWorkspace => {
+        verbs::SharedTargetRedirectDecision::Apply => Some(shared_target::shared_target_dir(repo)?),
+        verbs::SharedTargetRedirectDecision::SkipNonRustWorkspace => {
             tracing::debug!(
                 repo = %repo.root().display(),
                 "--shared-target requested in a non-Rust repo (no top-level Cargo.toml); skipping"
             );
             None
         }
-        heddle_core::SharedTargetRedirectDecision::NotApplicable => None,
+        verbs::SharedTargetRedirectDecision::NotApplicable => None,
     };
 
     // Heads-up advisory: when starting a second-or-later materialized
     // thread in a Rust workspace without `--shared-target`, nudge the
     // user toward the flag. Doesn't fail the start; just stderr.
-    // Pure gate (requested + mode) lives in heddle-core; rust/busy I/O
+    // Pure gate (requested + mode) lives in heddle-verbs; rust/busy I/O
     // stays in shared_target so the pre-start population is counted once.
     if should_advise_shared_target(
         wants_shared_target,
@@ -1232,7 +1132,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // the single commit point. See `start_atomic::StartThread`.
     //
     // Pure step sequence / hydrate / shared-target flags come from
-    // heddle-core; the transaction still owns FS clonefile/copy and mounts.
+    // heddle-verbs; the transaction still owns FS clonefile/copy and mounts.
     let mount_ownership = mount_lifecycle::MountOwnership::from_flags(args.daemon, args.no_daemon);
     // `scope` + `transaction_id` were resolved above the commit-detection gate.
     let materialize_plan = plan_thread_materialize(
@@ -1565,7 +1465,7 @@ fn thread_anchor_mismatch_advice(
 }
 
 fn resolve_thread_mode(repo: &Repository, args: &ThreadStartArgs) -> ThreadMode {
-    // Pure mode planning in heddle-core; CLI only loads config + probes the FS.
+    // Pure mode planning in heddle-verbs; CLI only loads config + probes the FS.
     // Explicit modes win as-is (including materialized without reflinks —
     // honesty messaging stays here). Auto uses config defaults and may
     // downgrade materialized → solid when the host lacks reflinks.
@@ -1657,7 +1557,7 @@ pub(crate) fn cmd_thread_create(
     // name that isn't a safe single shell token before any ref/record is
     // persisted, so `heddle thread create` can't slip an unsafe id past the
     // early-reject layer. (heddle#464 close-the-class.) Pure preflight is
-    // owned by heddle-core; CLI still performs ref/record materialization.
+    // owned by heddle-verbs; CLI still performs ref/record materialization.
     let create_plan = plan_thread_create(&ThreadCreateOptions {
         name: name.clone(),
         ephemeral,
@@ -1855,14 +1755,10 @@ pub(crate) fn cmd_thread_current(cli: &Cli, repo: &Repository) -> Result<()> {
         Some(crate::cli::OutputMode::Json | crate::cli::OutputMode::JsonCompact)
     );
     if explicit_json {
-        #[derive(Serialize)]
-        struct CurrentOutput<'a> {
-            thread: &'a str,
-        }
-        println!(
-            "{}",
-            serde_json::to_string(&CurrentOutput { thread: &name })?
-        );
+        write_full_command_json(
+            &ThreadCurrentOutput { thread: name },
+            NextActionValidationContext::without_repo(&["thread", "current"]),
+        )?;
     } else {
         println!("{name}");
     }
@@ -2661,15 +2557,15 @@ pub(crate) fn cmd_thread_rename(
 
 fn render_thread_op(cli: &Cli, output: ThreadOpOutput) -> Result<()> {
     if should_output_json(cli, None) {
-        if output_is_compact(cli) {
-            let emitting = match output.output_kind {
-                "thread_start" => &["start"][..],
-                _ => &["thread"][..],
-            };
-            write_projected_command_json(cli, &output, emitting)?;
-        } else {
-            println!("{}", serde_json::to_string(&output)?);
-        }
+        let emitting: &[&str] = match output.output_kind {
+            "thread_start" => &["start"],
+            _ => &["thread"],
+        };
+        write_command_json(
+            &output,
+            output_is_compact(cli),
+            NextActionValidationContext::without_repo(emitting),
+        )?;
     } else {
         println!("{}", style::accent(&output.message));
         if let Some(thread) = &output.thread {
@@ -2785,7 +2681,7 @@ fn default_thread_path(repo: &Repository, name: &str) -> PathBuf {
 /// would surface as nested unsaved work in the parent repo's status.
 ///
 /// Normalization is CLI-owned (FS canonicalize); the containment decision
-/// is pure and lives in [`heddle_core::check_explicit_path_isolation`].
+/// is pure and lives in [`verbs::check_explicit_path_isolation`].
 fn ensure_explicit_start_path_outside_tracked_tree(
     repo: &Repository,
     name: &str,

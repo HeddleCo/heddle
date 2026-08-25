@@ -367,7 +367,7 @@ fn typed_recovery_commands(kind: &str) -> Vec<String> {
         "repository_not_found" => &["heddle init"],
         "state_not_found" => &["heddle log"],
         // Merge-orchestration refusals raised from core as typed
-        // `RecoveryDetails` (crates/core/src/merge/advice.rs). Before this
+        // `RecoveryDetails` (crates/verbs/src/merge/advice.rs). Before this
         // mapping they all degraded to `heddle help --output json` in the
         // machine envelope, losing the specific recovery path the human
         // hint already documents (HeddleCo/heddle#981 regression). Commands
@@ -809,12 +809,12 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
             "heddle thread list",
         );
     }
-    if cli_shared::is_tls_trust_failure(&top) {
+    if config::is_tls_trust_failure(&top) {
         return ErrorClassification::known(
             "hosted_tls_trust",
             format!(
                 "Trust this server's CA with {}=/path/to/ca.pem or [remote] tls_ca_certificate_path.",
-                cli_shared::REMOTE_TLS_CA_CERT_SETTING
+                config::REMOTE_TLS_CA_CERT_SETTING
             ),
             "the hosted bootstrap HTTPS request failed because the peer certificate is not trusted",
             "retrying without a trusted CA will fail the same TLS handshake",

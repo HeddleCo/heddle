@@ -11,15 +11,17 @@ use objects::{
     error::HeddleError,
     object::{
         Annotation, AnnotationKind, AnnotationScope, AnnotationStatus, ContentHash, ContextTarget,
-        State, StateAttachment, StateAttachmentBody, Tree,
+        State,
     },
     store::ObjectStore,
 };
-use repo::{Repository, ResolvePolicy, StateAttachmentKind};
+use repo::{Repository, ResolvePolicy};
 use serde::Serialize;
 
 use super::{
-    advice::RecoveryAdvice, history_target::resolve_state_id_with_policy,
+    advice::RecoveryAdvice,
+    history_target::resolve_state_id_with_policy,
+    next_action::{NextActionValidationContext, write_full_command_json},
     snapshot::ensure_current_state,
 };
 use crate::{
@@ -335,43 +337,9 @@ pub(crate) fn compute_source_hash(
     ))
 }
 
-pub(crate) fn context_root_for_state(
-    repo: &Repository,
-    state: &State,
-) -> Result<Option<ContentHash>> {
-    Ok(repo
-        .latest_state_attachment(&state.state_id, StateAttachmentKind::Context)?
-        .and_then(|attachment| match attachment.body {
-            StateAttachmentBody::Context(root) => Some(root),
-            _ => None,
-        }))
-}
-
-pub(crate) fn put_context_attachment(
-    repo: &Repository,
-    state: &State,
-    new_context_root: Option<ContentHash>,
-) -> Result<ContentHash> {
-    let root = match new_context_root {
-        Some(root) => root,
-        None => repo.store().put_tree(&Tree::new())?,
-    };
-    let prior = repo.latest_state_attachment(&state.state_id, StateAttachmentKind::Context)?;
-    let user_config = UserConfig::load_default()?;
-    let attribution = crate::cli::commands::snapshot::resolve_attribution(repo, &user_config)?;
-    let created_at = prior
-        .as_ref()
-        .map(|attachment| attachment.created_at + chrono::Duration::nanoseconds(1))
-        .map_or_else(chrono::Utc::now, |minimum| minimum.max(chrono::Utc::now()));
-    repo.put_state_attachment(&StateAttachment {
-        state_id: state.state_id,
-        body: StateAttachmentBody::Context(root),
-        attribution,
-        created_at,
-        supersedes: prior.map(|attachment| attachment.id()),
-    })?;
-    Ok(root)
-}
+// Context attachment helpers live in `hosted-client` so the hosted context
+// sync and the CLI verbs share one implementation.
+pub(crate) use hosted_client::attachments::{context_root_for_state, put_context_attachment};
 
 pub(crate) fn print_context_get(
     cli: &Cli,
@@ -389,7 +357,10 @@ pub(crate) fn print_context_get(
                 .map(AnnotationOutput::from_annotation)
                 .collect(),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["context", "get"]),
+        )?;
     } else if annotations.is_empty() {
         println!("No annotations for {target_label}");
     } else {
@@ -420,12 +391,14 @@ pub(crate) fn print_context_get(
 /// If range is None, returns the full source.
 /// Lines are 1-indexed, inclusive.
 fn extract_scope_bytes(source: &[u8], range: Option<(u32, u32)>) -> Vec<u8> {
-    heddle_core::extract_scope_bytes(source, range)
+    verbs::extract_scope_bytes(source, range)
 }
 
 #[cfg(test)]
 mod tests {
     use objects::object::Tree;
+
+    use repo::StateAttachmentKind;
 
     use super::*;
 

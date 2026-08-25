@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Deterministic sampling of cache hits for fail-closed re-execution.
 
-use super::key::{entry_id_bytes, CacheKey};
+use super::key::{CacheKey, entry_id_bytes};
 
 /// Policy for re-running a sampled fraction of cache hits.
 ///

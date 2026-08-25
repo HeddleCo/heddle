@@ -838,7 +838,6 @@ PYJSON
   append_shape_profile_json "$transcript" "$shape"
 
   run_json "$transcript" "$WORK_ROOT" "$shape.00.help" help
-  run_json "$transcript" "$WORK_ROOT" "$shape.00.schemas" schemas
   run_json "$transcript" "$WORK_ROOT" "$shape.00.clone" clone "$origin" "$clone_path"
   run_json "$transcript" "$clone_path" "$shape.00.clone-verify" verify
   (cd "$clone_path" && heddle_runtime verify --output json) > "$clone_json"

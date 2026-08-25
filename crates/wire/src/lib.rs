@@ -12,12 +12,9 @@ mod message_pushpull;
 mod message_refs;
 mod message_status;
 mod native_pack;
-mod object_availability;
-mod object_graph;
 mod object_transfer;
 mod provider_pack;
 mod semantic_graph;
-mod transfer_plan;
 
 pub use auth_token::AuthToken;
 pub use key_binding::{
@@ -32,7 +29,7 @@ pub use message_hosted::{
 pub use message_objects::{ObjectData, ObjectRequest};
 pub use message_pushpull::{PullComplete, PushComplete};
 pub use message_refs::{
-    AdvertisedRef, AdvertisedRefError, HeadInfo, RefEntry, RefFilter, RefKind, RefUpdated, RefsList,
+    AdvertisedRef, AdvertisedRefError, HeadInfo, RefEntry, RefFilter, RefKind, RefUpdated,
 };
 pub use message_status::{
     Error, ErrorCode, RemoteCursorFailure, RemoteCursorReason, RemoteDuration, RemoteFailureCode,
@@ -42,17 +39,9 @@ pub use native_pack::{
     GitPackChunkState, GrowingPackChunkReader, MAX_RECEIVED_GIT_PACK_SIZE,
     MAX_RECEIVED_PACK_INDEX_SIZE, MAX_RECEIVED_PACK_SIZE, NativePackBundle, NativePackFileBundle,
     NativePackStreamingWriter, PackChunkSpool, PackChunkState, PackFileChunkReader,
-    ReusedNativePackStats, build_native_pack, install_received_pack,
-    is_native_packable_object_type, native_pack_excluded_object_types, next_pack_chunk,
-    receive_pack_chunk, reuse_native_pack_encoded_subset_in,
-};
-pub use object_availability::{ObjectAvailabilityPlan, has_object, plan_object_availability};
-pub use object_graph::{
-    ObjectId, ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, StateClosureOptions,
-    StateClosureTransferObjects, enumerate_state_closure, enumerate_state_closure_plan,
-    enumerate_state_closure_plan_with_options, enumerate_state_closure_transfer_from_boundaries,
-    enumerate_state_closure_transfer_with_options, enumerate_state_closure_with_options,
-    is_ancestor, missing_blobs_in_tree,
+    build_native_pack, install_received_pack, is_native_packable_object_type,
+    native_pack_excluded_object_types, next_pack_chunk, receive_pack_chunk,
+    reuse_native_pack_encoded_subset_in,
 };
 pub use object_transfer::{
     MAX_PULL_FRAME_MESSAGE_SIZE, MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
@@ -60,15 +49,20 @@ pub use object_transfer::{
     check_received_transfer_blob_size, chunk_bounds, chunk_count, chunk_offset, load_object_data,
     load_requested_object, store_received_object,
 };
+pub use objects::transfer::{
+    GitLaneTransferIntent, ObjectAvailabilityPlan, ObjectId, ObjectInfo, ObjectType,
+    ObjectTypeBucket, PlannedObject, RepositoryTransferPlan, StateClosureOptions,
+    TransferPartitions, TransferPlanStats, enumerate_state_closure, enumerate_state_closure_plan,
+    enumerate_state_closure_plan_with_options, enumerate_state_closure_transfer_from_boundaries,
+    enumerate_state_closure_transfer_with_options, enumerate_state_closure_with_options,
+    has_object, is_ancestor, missing_blobs_in_tree, plan_object_availability,
+};
 pub use provider_pack::{
     CompletedProviderPack, ProviderPackBundle, ProviderPackExtent, ProviderPackIndexEntry,
     ProviderPackManifest, ProviderPackSpool, ProviderPackWriter, assemble_provider_pack,
 };
 pub use semantic_graph::{
     SemanticGraphQueryKind, SemanticGraphQueryRequest, SemanticGraphQueryResponse, SemanticGraphRef,
-};
-pub use transfer_plan::{
-    GitLaneTransferIntent, RepositoryTransferPlan, TransferPartitions, TransferPlanStats,
 };
 
 /// Default port for Heddle protocol.
@@ -144,7 +138,16 @@ impl From<rmp_serde::decode::Error> for ProtocolError {
 
 impl From<objects::error::HeddleError> for ProtocolError {
     fn from(e: objects::error::HeddleError) -> Self {
-        ProtocolError::Remote(e.to_string())
+        match &e {
+            // Missing objects must surface as NotFound, not degrade to a
+            // generic server error via the blanket Remote arm below.
+            objects::error::HeddleError::NotFound(_)
+            | objects::error::HeddleError::StateNotFound(_)
+            | objects::error::HeddleError::MissingObject { .. } => {
+                ProtocolError::ObjectNotFound(e.to_string())
+            }
+            _ => ProtocolError::Remote(e.to_string()),
+        }
     }
 }
 
@@ -222,6 +225,34 @@ mod tests {
     use std::io;
 
     use super::{ErrorCode, ProtocolError, RemoteFailureCode};
+
+    #[test]
+    fn missing_object_errors_surface_as_not_found() {
+        use objects::error::HeddleError;
+
+        let cases = vec![
+            HeddleError::NotFound("blob missing".to_string()),
+            HeddleError::StateNotFound(objects::object::StateId::from_content_hash(
+                objects::object::ContentHash::compute(b"missing"),
+            )),
+            HeddleError::MissingObject {
+                object_type: "tree".to_string(),
+                id: "abc123".to_string(),
+            },
+        ];
+        for err in cases {
+            let protocol_error = ProtocolError::from(err);
+            assert_eq!(
+                protocol_error.error_code(),
+                ErrorCode::NotFound,
+                "missing-object errors must surface as NotFound, got {protocol_error:?}"
+            );
+            assert!(
+                !matches!(protocol_error, ProtocolError::Remote(_)),
+                "missing-object errors must not degrade to Remote/Server"
+            );
+        }
+    }
 
     #[test]
     fn protocol_error_public_mapping_is_stable() {

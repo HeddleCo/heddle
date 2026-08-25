@@ -4,15 +4,16 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use heddle_core::{CollapsePlan, plan_collapse};
 use objects::object::{ChangeLineage, ChangeLineageKind, State, StateId, ThreadName};
 use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
 use serde::Serialize;
+use verbs::{CollapsePlan, plan_collapse};
 
 use super::{
     advice::RecoveryAdvice,
     history_target::{require_resolved_state, resolve_state_id},
+    next_action::{NextActionValidationContext, write_full_command_json},
 };
 use crate::{
     cli::{Cli, commands::snapshot::resolve_attribution, should_output_json},
@@ -100,7 +101,10 @@ pub fn cmd_collapse(
     };
 
     if json {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["thread", "collapse"]),
+        )?;
     } else {
         println!(
             "{} in {:.1}s",
@@ -207,14 +211,14 @@ fn collapse_requires_states_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "collapse_states_required",
         "No states specified to collapse",
-        "List recent states with `heddle log`, then rerun `heddle collapse <state> --into <intent>` with at least one source state.",
+        "List recent states with `heddle log`, then rerun `heddle thread collapse <state> --into <intent>` with at least one source state.",
         "collapse was invoked without any source state ids",
         "collapsing without source states would have to guess which history range should be replaced",
         "no collapsed state was written; HEAD, refs, oplog, and worktree files were left unchanged",
         "heddle log",
         vec![
             "heddle log".to_string(),
-            "heddle collapse <state> --into <intent>".to_string(),
+            "heddle thread collapse <state> --into <intent>".to_string(),
         ],
     )
 }
@@ -229,7 +233,7 @@ mod tests {
 
         assert_eq!(advice.kind, "collapse_states_required");
         assert_eq!(advice.primary_command, "heddle log");
-        assert!(advice.primary_hint().contains("heddle collapse"));
+        assert!(advice.primary_hint().contains("heddle thread collapse"));
         assert!(advice.unsafe_condition.contains("without any source"));
         assert!(advice.would_change.contains("guess"));
         assert!(advice.preserved.contains("HEAD"));

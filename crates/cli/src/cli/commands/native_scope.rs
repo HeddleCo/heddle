@@ -36,6 +36,7 @@ use serde::Serialize;
 use sley::Repository as SleyRepository;
 
 use super::action_line::print_command;
+use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::cli::{Cli, should_output_json, style};
 
 /// Which annotation surface is asking. Drives wording only; both surfaces
@@ -209,12 +210,22 @@ pub(crate) fn report_absent_store(
         records,
         first_step: surface.first_step(),
     };
-    render_absent_store(cli, &output)
+    render_absent_store(cli, surface, &output)
 }
 
-fn render_absent_store(cli: &Cli, output: &AbsentStoreOutput) -> Result<()> {
+fn render_absent_store(
+    cli: &Cli,
+    surface: AnnotationSurface,
+    output: &AbsentStoreOutput,
+) -> Result<()> {
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(output)?);
+        write_full_command_json(
+            output,
+            NextActionValidationContext::without_repo(match surface {
+                AnnotationSurface::Context => &["context"],
+                AnnotationSurface::Discuss => &["discuss"],
+            }),
+        )?;
         return Ok(());
     }
 

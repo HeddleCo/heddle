@@ -13,7 +13,7 @@ use objects::{
     object::{
         AnnotationKind, AnnotationScope, AnnotationStatus, Blob, ContentHash, ContextTarget,
         DiffKind, LeafPolicy, ObjectSource, SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode,
-        State, StateId, Tree, diff_trees, resolve_tree_path,
+        SignalAnchor, State, StateId, Tree, diff_trees, resolve_tree_path,
     },
     store::ObjectStore,
 };
@@ -21,7 +21,6 @@ use semantic::{
     SemanticParseCache,
     parser::{FunctionDef, Language},
 };
-use state_review::{SemanticContext, modules::invariant_adjacency::InvariantAnnotation};
 use tracing::warn;
 
 use crate::{Repository, Result};
@@ -64,15 +63,39 @@ impl<S: ObjectStore> ObjectSource for OverlaySource<'_, S> {
     }
 }
 
-/// Build the capture-time context for `run_all`.
-pub(crate) fn build_semantic_context(
+/// Capture-side semantic context handed to a registered
+/// [`SignalComputer`](crate::signals::SignalComputer). Field-for-field
+/// the same shape `state-review` assembles into its registry input.
+#[derive(Debug)]
+pub struct CaptureSemanticContext {
+    pub prior_functions: BTreeMap<PathBuf, Vec<FunctionDef>>,
+    pub new_functions: BTreeMap<PathBuf, Vec<FunctionDef>>,
+    pub changed_paths: BTreeSet<PathBuf>,
+    pub changed_symbols: BTreeSet<(PathBuf, String)>,
+    pub corpus_complete: bool,
+    pub invariant_annotations: Vec<CaptureInvariantAnnotation>,
+}
+
+/// Storage-neutral invariant annotation carried across the `repo` signal
+/// seam. `repo` owns extraction while `state-review` owns scoring, avoiding a
+/// dependency cycle between the two crates.
+#[derive(Debug, Clone)]
+pub struct CaptureInvariantAnnotation {
+    pub anchor: SignalAnchor,
+    pub kind: AnnotationKind,
+    pub content: String,
+    pub tags: Vec<String>,
+}
+
+/// Build the capture-time context for signal computation.
+pub fn build_semantic_context(
     repo: &Repository,
     prior: Option<&State>,
     new: &State,
     new_index: Option<&ContentHash>,
     source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
     source_trees: Option<&HashMap<ContentHash, &Tree>>,
-) -> Result<SemanticContext> {
+) -> Result<CaptureSemanticContext> {
     let overlay = OverlaySource {
         store: repo.store(),
         blobs: source_blobs,
@@ -167,10 +190,9 @@ pub(crate) fn build_semantic_context(
         &prior_functions,
         &new_functions,
     );
-
     let invariant_annotations = prior
-        .map(|p| {
-            collect_invariant_annotations(repo, p).unwrap_or_else(|err| {
+        .map(|state| {
+            collect_invariant_annotations(repo, state).unwrap_or_else(|err| {
                 warn!(
                     error = %err,
                     "semantic context: failed to load invariant annotations; invariant_adjacency module will stay quiet"
@@ -180,7 +202,7 @@ pub(crate) fn build_semantic_context(
         })
         .unwrap_or_default();
 
-    Ok(SemanticContext {
+    Ok(CaptureSemanticContext {
         prior_functions,
         new_functions,
         changed_paths,
@@ -310,54 +332,37 @@ fn blob_bytes_at_path(
     Ok(source.get_blob(&hash)?.map(|blob| blob.content().to_vec()))
 }
 
-/// Collect invariant-kind annotations from the new state's context attachment.
+/// Collect active invariant annotations from the prior state's context.
 ///
-/// Reads the context tree attached to `new` (via the latest `Context`
-/// attachment), walks every file-target blob, and returns an
-/// `InvariantAnnotation` for each active revision whose `kind` is
-/// `Invariant` or whose `tags` contain `"enforces"`. The `anchor`
-/// is derived from the annotation's scope: File → `SignalAnchor::file`,
-/// Symbol → `SignalAnchor::symbol`, Lines → `SignalAnchor::file` (lines
-/// are advisory and not carried into the signal anchor to keep the shape
-/// stable).
-///
-/// Returns an empty `Vec` (not an error) when the state has no context
-/// attachment — that is the common case for the first capture.
+/// File and line scopes use a file anchor; symbol scopes retain the symbol.
+/// State-target annotations are advisory and do not participate in adjacency
+/// scoring.
 fn collect_invariant_annotations(
     repo: &Repository,
-    new: &State,
-) -> Result<Vec<InvariantAnnotation>> {
-    use objects::object::SignalAnchor;
-
-    let context_root = match repo.inherit_parent_context(new)? {
-        Some(root) => root,
-        None => return Ok(Vec::new()),
+    prior: &State,
+) -> Result<Vec<CaptureInvariantAnnotation>> {
+    let Some(context_root) = repo.inherit_parent_context(prior)? else {
+        return Ok(Vec::new());
     };
+    let mut annotations = Vec::new();
 
-    let entries = repo.list_context_entries(&context_root, None)?;
-    let mut out = Vec::new();
-
-    for entry in entries {
-        // Only file targets carry per-symbol annotations that make sense
-        // as risk-signal anchors; state targets are advisory and skipped.
+    for entry in repo.list_context_entries(&context_root, None)? {
         let path = match &entry.target {
             ContextTarget::File { path } => path.clone(),
             ContextTarget::State { .. } => continue,
         };
-
         for annotation in &entry.blob.annotations {
             if annotation.status != AnnotationStatus::Active {
                 continue;
             }
-            let Some(rev) = annotation.current_revision() else {
+            let Some(revision) = annotation.current_revision() else {
                 continue;
             };
-            let is_invariant = matches!(rev.kind, AnnotationKind::Invariant)
-                || rev.tags.iter().any(|t| t == "enforces");
-            if !is_invariant {
+            if !matches!(revision.kind, AnnotationKind::Invariant)
+                && !revision.tags.iter().any(|tag| tag == "enforces")
+            {
                 continue;
             }
-
             let anchor = match &annotation.scope {
                 AnnotationScope::Symbol { name, .. } => {
                     SignalAnchor::symbol(path.clone(), name.clone())
@@ -366,19 +371,14 @@ fn collect_invariant_annotations(
                     SignalAnchor::file(path.clone())
                 }
             };
-
-            out.push(InvariantAnnotation {
+            annotations.push(CaptureInvariantAnnotation {
                 anchor,
-                kind: rev.kind,
-                content: rev.content.clone(),
-                tags: rev.tags.clone(),
+                kind: revision.kind,
+                content: revision.content.clone(),
+                tags: revision.tags.clone(),
             });
         }
     }
 
-    Ok(out)
+    Ok(annotations)
 }
-
-#[cfg(test)]
-#[path = "repository_semantic_context_tests.rs"]
-mod tests;

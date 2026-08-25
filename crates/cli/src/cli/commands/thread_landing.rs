@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use heddle_core::{
+use verbs::{
     recovery_scope_checkout, repository_presentation, status::next_action::thread_flag_args,
 };
 
@@ -221,7 +221,7 @@ mod tests {
             });
         }
 
-        let expandable = heddle_core::quote_recommended_action_arg("/tmp/work-$(whoami)");
+        let expandable = verbs::quote_recommended_action_arg("/tmp/work-$(whoami)");
         assert_eq!(
             expandable, "\"/tmp/work-$(whoami)\"",
             "the rejected helper still double-quotes `$()` — that is the P1"

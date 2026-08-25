@@ -8,6 +8,7 @@ mod action_id;
 mod action_operation;
 mod action_struct;
 mod annotated_tag;
+mod audience_tier;
 mod blob;
 pub mod collaboration;
 mod diff;
@@ -158,4 +159,5 @@ pub use tree_path::{
     LeafPolicy, ResolvedTreeTarget, TreePathResolveError, resolve_tree_path, split_path,
 };
 pub use tree_walk::{TreeIntegrityEvent, walk_tree_integrity};
+pub use audience_tier::{AudienceParseError, AudienceTier, visible};
 pub use visibility_tier::VisibilityTier;

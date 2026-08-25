@@ -4,16 +4,16 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
-use heddle_core::{
+use objects::worktree::WorktreeStatus;
+use repo::{Config, Repository, RepositoryCapability, discover_heddle_root};
+use verbs::{
     DiffOptions, DiffReport, PlainGitDiffProbe, diff as core_diff, diff_worktree_status,
     plain_git_head_diff,
 };
-use objects::worktree::WorktreeStatus;
-use repo::{Config, Repository, RepositoryCapability, discover_heddle_root};
 
 use super::{
     super::{
-        next_action::write_projected_command_json,
+        next_action::{NextActionValidationContext, write_command_json},
         verification_health::{
             build_plain_git_verification_probe, build_repository_verification_state,
             plain_git_setup_advice, trust_visible_worktree_status,
@@ -155,10 +155,19 @@ pub fn cmd_diff(
     }
 
     let config = UserConfig::load_default().unwrap_or_default();
-    let ctx = heddle_core::ExecutionContext::builder()
+    let fsmonitor_mode = config
+        .worktree_status_options(Some(repo.config()))
+        .fsmonitor
+        .mode;
+    let ctx = verbs::ExecutionContext::builder()
         .repo(repo)
         .start_path(start.to_path_buf())
-        .config(config)
+        .principal_fallback(
+            config
+                .principal_pair()
+                .map(|(name, email)| (name.to_string(), email.to_string())),
+        )
+        .fsmonitor_mode(fsmonitor_mode)
         .build();
     let report = core_diff(&ctx, options)?;
     render_diff_report(
@@ -208,11 +217,11 @@ fn render_diff_report(
     patch: bool,
 ) -> Result<()> {
     if should_output_json(cli, config) {
-        if output_is_compact(cli) {
-            write_projected_command_json(cli, report, &["diff"])?;
-        } else {
-            println!("{}", serde_json::to_string(report)?);
-        }
+        write_command_json(
+            report,
+            output_is_compact(cli),
+            NextActionValidationContext::without_repo(&["diff"]),
+        )?;
     } else if name_only {
         for change in &report.changes {
             println!("{}", change.path);

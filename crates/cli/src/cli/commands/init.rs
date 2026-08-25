@@ -5,18 +5,19 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{Result, bail};
 use heddle_cli_contract::cli::commands::{InitOutput, InitPrincipalOutput};
-use heddle_core::{
+use objects::object::Principal;
+use repo::{Repository, RepositoryCapability, open_git_repository_at_root};
+use tracing::{debug, info};
+use verbs::{
     InitPrincipalPlan, OnboardingFacts, OnboardingMode,
     init_side_effects as core_init_side_effects, plan_repository_onboarding, resolve_absolute_path,
     select_init_principal,
 };
-use objects::object::Principal;
-use repo::{Repository, RepositoryCapability, open_git_repository_at_root};
-use tracing::{debug, info};
 
 use super::{
     RecoveryAdvice,
     action_line::print_next,
+    next_action::{NextActionValidationContext, write_full_command_json},
     recover_incomplete_land_if_present,
     snapshot::{is_placeholder_principal, placeholder_principal_warning},
     verification_health::build_repository_verification_state,
@@ -226,7 +227,10 @@ fn absolute_path(path: &std::path::Path) -> Result<PathBuf> {
 
 fn render_init(output: &InitOutput, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(output)?);
+        write_full_command_json(
+            output,
+            NextActionValidationContext::without_repo(&[INIT_VERB]),
+        )?;
     } else {
         println!("{}", output.message);
         match output.principal.as_ref() {
@@ -234,7 +238,7 @@ fn render_init(output: &InitOutput, json: bool) -> Result<()> {
                 let source = output
                     .principal_source
                     .as_deref()
-                    .map(cli_shared::principal_source_display)
+                    .map(verbs::principal_source_display)
                     .map(|source| format!(" from {source}"))
                     .unwrap_or_default();
                 println!(
@@ -284,7 +288,7 @@ fn init_principal_status(
     repo: &Repository,
     user_config: &UserConfig,
 ) -> Result<InitPrincipalStatus> {
-    let resolved = cli_shared::resolve_principal(repo, user_config)?;
+    let resolved = verbs::resolve_principal(repo, user_config.principal_pair())?;
     let candidates = resolved
         .source
         .map(|source| vec![(source, resolved.principal)])

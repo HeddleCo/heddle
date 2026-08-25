@@ -475,7 +475,7 @@ publication pipeline.
 
 The Rust `heddle-api@0.2.1` crate is published on crates.io. Heddle consumes it
 as a registry dependency, so every workspace crate in the explicit publish set
-is eligible for the normal release-plz pipeline. `heddle-cli-shared` owns the
+is eligible for the normal release-plz pipeline. `heddle-config` owns the
 published CLI configuration and credential-store contract used by external
 operator tooling; the native hosted transport remains internal to
 `heddle-cli`.

@@ -2,88 +2,21 @@
 //! Provider, model, and policy provenance commands.
 
 use anyhow::Result;
-use heddle_core::session_list_status;
-use objects::object::{Session, SessionSegment};
 use repo::SessionManager;
-use serde::Serialize;
+use verbs::session_list_status;
 
 use super::{
     advice::RecoveryAdvice,
-    verification_health::{RepositoryVerificationState, build_repository_verification_state},
+    next_action::{NextActionValidationContext, write_full_command_json},
+    verification_health::build_repository_verification_state,
 };
 use crate::cli::{Cli, should_output_json};
 
-#[derive(Serialize)]
-struct SessionOutput {
-    id: String,
-    principal: String,
-    created_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    ended_at: Option<String>,
-    active: bool,
-    segments: Vec<SegmentOutput>,
-}
-
-#[derive(Serialize)]
-struct SegmentOutput {
-    id: String,
-    provider: String,
-    model: String,
-    started_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    policy_id: Option<String>,
-}
-
-#[derive(Serialize)]
-struct SessionEnvelope {
-    session: SessionOutput,
-    #[allow(dead_code)]
-    #[serde(skip_serializing)]
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize)]
-struct SegmentEnvelope {
-    segment: SegmentOutput,
-    #[allow(dead_code)]
-    #[serde(skip_serializing)]
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
-
-#[derive(Serialize)]
-struct SessionListOutput {
-    sessions: Vec<SessionOutput>,
-    active_only: bool,
-    #[serde(rename = "verification")]
-    trust: RepositoryVerificationState,
-}
-
-impl From<&Session> for SessionOutput {
-    fn from(session: &Session) -> Self {
-        Self {
-            id: session.id.clone(),
-            principal: session.principal.to_string(),
-            created_at: session.created_at.to_rfc3339(),
-            ended_at: session.ended_at.map(|t| t.to_rfc3339()),
-            active: session.is_active(),
-            segments: session.segments.iter().map(SegmentOutput::from).collect(),
-        }
-    }
-}
-
-impl From<&SessionSegment> for SegmentOutput {
-    fn from(segment: &SessionSegment) -> Self {
-        Self {
-            id: segment.id.clone(),
-            provider: segment.provider.clone(),
-            model: segment.model.clone(),
-            started_at: segment.started_at.to_rfc3339(),
-            policy_id: segment.policy_id.clone(),
-        }
-    }
-}
+// The provenance wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::agent::{
+    SegmentEnvelope, SegmentOutput, SessionEnvelope, SessionListOutput, SessionOutput,
+};
 
 pub async fn begin(
     cli: &Cli,
@@ -102,7 +35,10 @@ pub async fn begin(
             session: SessionOutput::from(&session),
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "provenance", "begin"]),
+        )?;
     } else {
         println!("Session: {}", session.id);
         let segment = session.current_segment().unwrap();
@@ -136,7 +72,10 @@ pub async fn segment(
             segment: SegmentOutput::from(&segment),
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "provenance", "end"]),
+        )?;
     } else {
         println!("Segment: {}", segment.id);
     }
@@ -155,7 +94,10 @@ pub async fn end(cli: &Cli, session_id: Option<String>) -> Result<()> {
             session: SessionOutput::from(&session),
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "provenance", "segment"]),
+        )?;
     } else {
         println!("Session ended: {}", session.id);
     }
@@ -187,7 +129,10 @@ pub async fn show(cli: &Cli, session_id: Option<String>) -> Result<()> {
             session: SessionOutput::from(&session),
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "provenance", "show"]),
+        )?;
     } else {
         println!("Session: {}", session.id);
         println!("Principal: {}", session.principal);
@@ -231,7 +176,10 @@ pub async fn list(cli: &Cli, active_only: bool) -> Result<()> {
             active_only,
             trust: build_repository_verification_state(&repo),
         };
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["agent", "provenance", "list"]),
+        )?;
     } else {
         if sessions.is_empty() {
             println!("No sessions found.");

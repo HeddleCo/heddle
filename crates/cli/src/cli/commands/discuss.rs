@@ -13,7 +13,6 @@ use repo::{
     CollaborationStore, CollaborationWriteDisposition, CollaborationWriteOutcome,
     RepositoryCapability, migrate_legacy_discussions_once,
 };
-use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,
@@ -23,7 +22,9 @@ use super::{
         AnnotationStore, AnnotationSurface, emit_locality_notice_once, open_annotation_store,
         report_absent_store,
     },
-    next_action::write_projected_command_json,
+    next_action::{
+        NextActionValidationContext, write_full_command_json, write_projected_command_json,
+    },
     snapshot::ensure_current_state,
 };
 use crate::{
@@ -35,6 +36,13 @@ use crate::{
         should_output_json,
     },
     config::UserConfig,
+};
+
+// The discussion wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::collab::{
+    AnchorOutput, DiscussionListOutput, DiscussionOutput, DiscussionShowOutput,
+    DiscussionWriteOutput, ResolutionOutput, TurnOutput,
 };
 
 pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
@@ -74,83 +82,6 @@ pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
     }
 }
 
-#[derive(Serialize)]
-struct DiscussionOutput {
-    id: String,
-    title: String,
-    anchor: AnchorOutput,
-    visibility: String,
-    thread_ref: Option<String>,
-    status: &'static str,
-    resolution: Option<ResolutionOutput>,
-    conflict_operation_ids: Vec<String>,
-    head_operation_ids: Vec<String>,
-    display_head_operation_id: String,
-    turns: Vec<TurnOutput>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-enum AnchorOutput {
-    Repository,
-    State {
-        state_id: String,
-    },
-    Change {
-        change_id: String,
-    },
-    Path {
-        state_id: String,
-        path: String,
-    },
-    Symbol {
-        state_id: String,
-        path: String,
-        symbol: String,
-    },
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-enum ResolutionOutput {
-    AddressedByState {
-        state_id: String,
-    },
-    AddressedByChange {
-        change_id: String,
-    },
-    Dismissed {
-        reason: String,
-    },
-    IntoAnnotation {
-        annotation_kind: String,
-        content: String,
-        tags: Vec<String>,
-    },
-    Annotation {
-        annotation_id: String,
-    },
-}
-
-#[derive(Serialize)]
-struct TurnOutput {
-    operation_id: String,
-    author_name: String,
-    author_email: String,
-    agent: Option<String>,
-    occurred_at_ms: i64,
-    body: String,
-    content_hash: String,
-}
-
-#[derive(Serialize)]
-struct DiscussionWriteOutput {
-    output_kind: &'static str,
-    operation_id: String,
-    disposition: CollaborationWriteDisposition,
-    discussion: DiscussionOutput,
-}
-
 impl CompactProjection for DiscussionWriteOutput {
     fn compact(&self) -> CompactOutput {
         let mut compact = CompactOutput::new(self.output_kind);
@@ -161,18 +92,6 @@ impl CompactProjection for DiscussionWriteOutput {
         });
         compact
     }
-}
-
-#[derive(Serialize)]
-struct DiscussionShowOutput {
-    output_kind: &'static str,
-    discussion: DiscussionOutput,
-}
-
-#[derive(Serialize)]
-struct DiscussionListOutput {
-    output_kind: &'static str,
-    discussions: Vec<DiscussionOutput>,
 }
 
 fn open_store(repo: &repo::Repository) -> Result<CollaborationStore> {
@@ -389,7 +308,10 @@ fn run_list(
         discussions,
     };
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_full_command_json(
+            &output,
+            NextActionValidationContext::without_repo(&["discuss", "list"]),
+        )?;
     } else if output.discussions.is_empty() {
         println!("(no discussions)");
     } else {
@@ -454,7 +376,10 @@ fn emit_write(
 
 fn emit_show(cli: &Cli, output: &DiscussionShowOutput) -> Result<()> {
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(output)?);
+        write_full_command_json(
+            output,
+            NextActionValidationContext::without_repo(&["discuss", "show"]),
+        )?;
         return Ok(());
     }
     let discussion = &output.discussion;
