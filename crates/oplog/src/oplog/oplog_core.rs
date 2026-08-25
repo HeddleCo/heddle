@@ -4,7 +4,7 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     thread::JoinHandle,
 };
 
@@ -105,10 +105,35 @@ impl OpLog {
         // write lock in the worker: another writer cannot validate against the
         // old view while this committed batch is being materialized.
         let committed_tip = entries.last().map_or(index.head_id(), |entry| entry.id);
+        let (handoff_tx, handoff_rx) = mpsc::sync_channel(0);
         let view = std::thread::spawn(move || {
-            let _lock = _lock;
+            let mut lock = _lock;
+            let handoff = lock.handoff_to_current_thread().map_err(|error| {
+                HeddleError::Config(format!(
+                    "failed to hand off reconstructible oplog lock: {error}"
+                ))
+            });
+            let notice = match &handoff {
+                Ok(()) => Ok(()),
+                Err(error) => Err(error.to_string()),
+            };
+            let _ = handoff_tx.send(notice);
+            handoff?;
             index.append_entries_reconstructible(&entries)
         });
+        match handoff_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                let _ = view.join();
+                return Err(HeddleError::Config(error));
+            }
+            Err(error) => {
+                let _ = view.join();
+                return Err(HeddleError::Config(format!(
+                    "reconstructible oplog lock handoff worker stopped early: {error}"
+                )));
+            }
+        }
         *self.pending_reconstructible_view.lock_or_poisoned() = Some(view);
         *self.cached.lock_or_poisoned() = None;
         Ok(ReconstructibleCommitOutcome::Committed(

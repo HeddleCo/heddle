@@ -3,7 +3,8 @@
 //! The capture actor is who the next capture is attributed to
 //! (`user_config`, `init --principal-*`, environment). Hosted auth is
 //! whether this machine has a server credential. These are different
-//! objects. `identity ensure` does not set the local actor.
+//! objects. `heddle auth login` does not set the local actor. `whoami`
+//! only reads; it never attaches a credential.
 
 use anyhow::{Context, Result};
 use api::heddle::api::v1alpha1::HostedRole;
@@ -11,6 +12,11 @@ use biscuit_auth::builder::{BlockBuilder, Term};
 use config::UserConfig;
 use crypto::Ed25519Signer;
 use heddle_cli_args::CliContext;
+// The whoami wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+use heddle_cli_contract::cli::commands::wire::auth::{
+    CaptureActor, WhoamiIdentity, WhoamiOutput, WhoamiRole,
+};
 use repo::Repository;
 use verbs::{
     ResolvedPrincipal, principal_source_display, resolve_principal, resolve_principal_without_repo,
@@ -19,12 +25,6 @@ use verbs::{
 use super::{
     auth::{headless_token_metadata, resolve_server},
     hosted::{HostedAuthMode, HostedSession, ResolvedHostedCredential, resolve_hosted_credential},
-};
-
-// The whoami wire payloads live in cli-contract so the schema registry
-// registers the real serialization types.
-use heddle_cli_contract::cli::commands::wire::auth::{
-    CaptureActor, WhoamiIdentity, WhoamiOutput, WhoamiRole,
 };
 
 fn capture_actor_from_resolved(resolved: &ResolvedPrincipal) -> CaptureActor {

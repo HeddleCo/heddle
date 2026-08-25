@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Hosted command dispatch.
 //!
-//! The CLI's `auth`, `identity`, and `whoami` verbs delegate through the
+//! The CLI's `auth` and `whoami` verbs delegate through the
 //! [`HostedExtensions`] surface; [`EnabledHostedExtensions`] is the in-repo
 //! implementation backed by this crate's hosted runtime. Arguments are the
 //! concrete clap types from `heddle-cli-args` — no downcasts.
@@ -10,14 +10,11 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use heddle_cli_args::{
-    AgentTemplateArg, AuthCommands, AuthTrustCommands, CliContext, IdentityCommands,
-};
+use heddle_cli_args::{AgentTemplateArg, AuthCommands, AuthTrustCommands, CliContext};
 
 use crate::hosted_runtime::{
     auth_requests::{AuthCommand, AuthTrustCommand},
     device_flow::AgentTemplate,
-    identity::cmd_identity,
     whoami::cmd_whoami,
 };
 
@@ -27,15 +24,8 @@ pub trait HostedExtensions: Send + Sync {
     /// service account issuance.
     async fn auth(&self, ctx: &(dyn CliContext + 'static), command: AuthCommands) -> Result<()>;
 
-    /// `heddle identity <subcommand>` — reuse-first machine identity and the
-    /// data-only browser claim endpoint.
-    async fn identity(
-        &self,
-        ctx: &(dyn CliContext + 'static),
-        command: IdentityCommands,
-    ) -> Result<()>;
-
-    /// `heddle whoami` — resolve and report the acting identity.
+    /// `heddle whoami` — resolve and report the acting identity without
+    /// attaching or replacing a credential.
     async fn whoami(&self, ctx: &(dyn CliContext + 'static), server: Option<String>) -> Result<()>;
 }
 
@@ -51,14 +41,6 @@ impl HostedExtensions for EnabledHostedExtensions {
     async fn whoami(&self, ctx: &(dyn CliContext + 'static), server: Option<String>) -> Result<()> {
         cmd_whoami(ctx, server).await
     }
-
-    async fn identity(
-        &self,
-        ctx: &(dyn CliContext + 'static),
-        command: IdentityCommands,
-    ) -> Result<()> {
-        cmd_identity(ctx, command).await
-    }
 }
 
 fn auth_command(command: AuthCommands) -> AuthCommand {
@@ -66,10 +48,12 @@ fn auth_command(command: AuthCommands) -> AuthCommand {
         AuthCommands::Login {
             server,
             open_browser,
+            invite,
             credential,
         } => AuthCommand::Login {
             server,
             open_browser,
+            invite,
             credential,
         },
         AuthCommands::Logout { server } => AuthCommand::Logout { server },

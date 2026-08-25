@@ -72,6 +72,29 @@ pub(crate) fn probe_harness_actor(input: &HarnessProbeInput) -> Result<HarnessPr
     {
         return probe.probe(input);
     }
+
+    // Environment markers belong to this process and are stronger than an
+    // argv match found in a parent process. Keep the historical priority when
+    // multiple markers were inherited, but do not let a distant Codex parent
+    // mask a child command explicitly launched by another harness.
+    let env_probe: Option<&dyn HarnessActorProbe> = if input.env_hints.contains_key("CODEX_SANDBOX")
+        || input.env_hints.contains_key("CODEX_THREAD_ID")
+        || input.env_hints.contains_key("CODEX_CI")
+    {
+        Some(&CodexProbe)
+    } else if input.env_hints.contains_key("OPENCODE_CLIENT") {
+        Some(&OpenCodeProbe)
+    } else if input.env_hints.contains_key("CLAUDECODE")
+        || input.env_hints.contains_key("CLAUDE_CODE")
+    {
+        Some(&ClaudeCodeProbe)
+    } else {
+        None
+    };
+    if let Some(probe) = env_probe {
+        return probe.probe(input);
+    }
+
     let probes: [&dyn HarnessActorProbe; 3] = [&CodexProbe, &OpenCodeProbe, &ClaudeCodeProbe];
     if let Some(probe) = probes.into_iter().find(|probe| probe.matches(input)) {
         return probe.probe(input);
@@ -277,6 +300,42 @@ mod tests {
         assert_eq!(result.harness.as_deref(), Some("claude-code"));
         assert_eq!(result.provider.as_deref(), Some("openai"));
         assert_eq!(result.model.as_deref(), Some("gpt-5-codex"));
+    }
+
+    #[test]
+    fn claude_env_marker_wins_over_codex_parent_argv() {
+        let result = probe_harness_actor(&HarnessProbeInput {
+            argv: Some(vec!["/usr/bin/codex".to_string()]),
+            env_hints: BTreeMap::from([
+                ("CLAUDECODE".to_string(), "1".to_string()),
+                ("CLAUDE_MODEL".to_string(), "claude-fable-5".to_string()),
+            ]),
+            repo_root: "/tmp/repo".to_string(),
+            ..HarnessProbeInput::default()
+        })
+        .expect("probe should succeed");
+
+        assert_eq!(result.harness.as_deref(), Some("claude-code"));
+        assert_eq!(result.provider.as_deref(), Some("anthropic"));
+        assert_eq!(result.model.as_deref(), Some("claude-fable-5"));
+    }
+
+    #[test]
+    fn codex_thread_marker_wins_over_ambient_claude_marker() {
+        let result = probe_harness_actor(&HarnessProbeInput {
+            env_hints: BTreeMap::from([
+                ("CODEX_THREAD_ID".to_string(), "thread-123".to_string()),
+                ("CODEX_MODEL".to_string(), "gpt-5.3-codex".to_string()),
+                ("CLAUDECODE".to_string(), "1".to_string()),
+            ]),
+            repo_root: "/tmp/repo".to_string(),
+            ..HarnessProbeInput::default()
+        })
+        .expect("probe should succeed");
+
+        assert_eq!(result.harness.as_deref(), Some("codex"));
+        assert_eq!(result.provider.as_deref(), Some("openai"));
+        assert_eq!(result.model.as_deref(), Some("gpt-5.3-codex"));
     }
 
     #[test]

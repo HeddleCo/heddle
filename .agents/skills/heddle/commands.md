@@ -133,11 +133,8 @@ ranked by `heddle help` order.
 | `heddle auth status` | ro | y | - | Show current authentication status |
 | `heddle auth trust show` | ro | y | - | Show the descriptor trust controlling a server connection |
 | `heddle auth trust replace` | mut | y | - | Atomically replace an automatic descriptor trust pin |
-| `heddle auth derive-agent` | mut | - | - | Derive a scoped, short-lived agent token offline |
-| `heddle auth create-service-token` | mut | y | - | Create a service token for CI/scripts, scoped to a namespace |
-| `heddle identity ensure` | mut | y | explicit_replay | Ensure this machine has an agent identity, reusing an account first |
-| `heddle identity claim-link` | mut | y | - | Reissue the short-lived browser claim link for an unclaimed identity |
-| `heddle identity serve` | mut | - | - | Keep the Iroh claim endpoint online for an outstanding link |
+| `heddle auth derive-agent` | mut | - | - | Derive a scoped, short-lived agent token offline. Advanced: not a first-screen noun |
+| `heddle auth create-service-token` | mut | y | - | Create a service token for CI/scripts, scoped to a namespace. Advanced: not a first-screen noun |
 | `heddle context set` | mut | y | explicit_replay | Attach a context annotation to a file, symbol, line range, or state |
 | `heddle context get` | ro | y | - | Show current context annotations for a file or state target |
 | `heddle context list` | ro | y | - | List all active context targets |

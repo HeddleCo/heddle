@@ -12,6 +12,8 @@ use verbs::{
     ResolveReport, StatusReport, VerifyReport,
 };
 
+#[cfg(feature = "client")]
+use crate::cli::AuthCommands;
 #[cfg(feature = "semantic")]
 use crate::cli::SemanticCommands;
 #[cfg(feature = "git-overlay")]
@@ -27,8 +29,6 @@ use crate::cli::{
     },
     render::shell_quote,
 };
-#[cfg(feature = "client")]
-use crate::cli::{AuthCommands, IdentityCommands};
 #[cfg(feature = "git-overlay")]
 use crate::cli::{BridgeCommands, BridgeGitCommands};
 
@@ -422,6 +422,7 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle thread switch <branch>",
     "heddle ready --thread <thread>",
     "heddle land --thread <thread>",
+    "heddle auth login --invite <code>",
 ];
 
 const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
@@ -685,6 +686,12 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         &["branch"],
         false,
     ),
+    (
+        "heddle auth login --invite <code>",
+        &["heddle", "auth", "login", "--invite", "<code>"],
+        &["code"],
+        true,
+    ),
 ];
 
 const READ_JSON: CommandContract = CommandContract {
@@ -793,16 +800,6 @@ const NETWORK_METADATA_MUTATION_NO_OP_ID: CommandContract = CommandContract {
 const CONFIG_MUTATION_NO_OP_ID: CommandContract = CommandContract {
     supports_op_id: false,
     ..CONFIG_MUTATION
-};
-
-const NETWORK_CONFIG_MUTATION: CommandContract = CommandContract {
-    network_io: true,
-    ..CONFIG_MUTATION
-};
-
-const NETWORK_CONFIG_MUTATION_NO_OP_ID: CommandContract = CommandContract {
-    network_io: true,
-    ..CONFIG_MUTATION_NO_OP_ID
 };
 
 const CONFIG_MUTATION_TEXT: CommandContract = CommandContract {
@@ -1508,42 +1505,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ),
             "client",
         ),
-    ),
-    entry(&["identity"], feature_gated(user_scoped(GROUP), "client")),
-    entry(
-        &["identity", "ensure"],
-        feature_gated(
-            json_discriminators(
-                documented_schemas(user_scoped(NETWORK_CONFIG_MUTATION), &["identity ensure"]),
-                &[json_discriminator(
-                    Some("identity ensure"),
-                    "output_kind",
-                    "identity_ensure",
-                )],
-            ),
-            "client",
-        ),
-    ),
-    entry(
-        &["identity", "claim-link"],
-        feature_gated(
-            json_discriminators(
-                documented_schemas(
-                    user_scoped(NETWORK_CONFIG_MUTATION_NO_OP_ID),
-                    &["identity claim-link"],
-                ),
-                &[json_discriminator(
-                    Some("identity claim-link"),
-                    "output_kind",
-                    "identity_claim_link",
-                )],
-            ),
-            "client",
-        ),
-    ),
-    entry(
-        &["identity", "serve"],
-        feature_gated(user_scoped(NETWORK_CONFIG_MUTATION_TEXT), "client"),
     ),
     entry(
         &["whoami"],
@@ -3054,7 +3015,7 @@ fn walk_commands(
 
 /// Append catalog entries for `feature_gated` contracts whose clap
 /// subcommand is compiled out of THIS build (e.g. the `client`-gated
-/// `auth`/`identity`/`whoami` surfaces in a default `cargo install`).
+/// `auth`/`whoami` surfaces in a default `cargo install`).
 ///
 /// `walk_commands` only sees the live clap tree, so without this the
 /// hosted verbs would be missing from the catalog `commands` list even
@@ -3726,7 +3687,7 @@ fn active_command_contract_entries() -> &'static [&'static CommandContractEntry]
 /// The contracts advertised to agents: every [`active_command_contract_entries`]
 /// entry (present in the compiled clap tree) PLUS any `feature_gated` contract
 /// whose clap subcommand is compiled out of this build. The hosted surfaces
-/// (`auth`, `identity`, `whoami`) are `client`-gated, so a default
+/// (`auth`, `whoami`) are `client`-gated, so a default
 /// `cargo install heddle-cli` omits their clap nodes — but their schema verbs
 /// and `output_kind` discriminators are a wire-format-stable promise that must
 /// stay advertised in the catalog regardless of build features. Distinct from
@@ -4535,12 +4496,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             },
             AuthCommands::DeriveAgent { .. } => vec!["auth", "derive-agent"],
             AuthCommands::CreateServiceToken { .. } => vec!["auth", "create-service-token"],
-        },
-        #[cfg(feature = "client")]
-        Commands::Identity { command } => match command {
-            IdentityCommands::Ensure { .. } => vec!["identity", "ensure"],
-            IdentityCommands::ClaimLink { .. } => vec!["identity", "claim-link"],
-            IdentityCommands::Serve { .. } => vec!["identity", "serve"],
         },
         #[cfg(feature = "client")]
         Commands::Whoami { .. } => vec!["whoami"],

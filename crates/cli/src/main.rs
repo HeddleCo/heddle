@@ -640,12 +640,6 @@ async fn async_main() -> Result<()> {
         }
 
         #[cfg(feature = "client")]
-        Commands::Identity { command } => {
-            let cmd = command.clone();
-            hosted.identity(&cli, cmd).await
-        }
-
-        #[cfg(feature = "client")]
         Commands::Whoami { server } => {
             let server = server.clone();
             hosted.whoami(&cli, server).await

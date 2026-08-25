@@ -35,8 +35,8 @@ pub use agent::{
     SegmentOutput, SessionEnvelope, SessionListOutput, SessionOutput,
 };
 pub use auth::{
-    AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, CaptureActor, IdentityOutput,
-    ServiceTokenOutput, WhoamiIdentity, WhoamiOutput, WhoamiRole,
+    AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, CaptureActor, ServiceTokenOutput,
+    WhoamiIdentity, WhoamiOutput, WhoamiRole,
 };
 pub use bridge::{
     ExportGitOutput, ExportedRefOutput, ImportGitOutput, IntegrationStatusOutput,

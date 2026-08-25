@@ -1,6 +1,6 @@
 //! `heddle auth` command implementations.
 
-use std::{collections::BTreeSet, path::Path};
+use std::{collections::BTreeSet, io::IsTerminal, path::Path};
 
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha1::{
@@ -12,6 +12,9 @@ use config::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
 use heddle_cli_args::CliContext;
 use heddle_cli_contract::cli::commands::RecoveryAdvice;
+pub(crate) use heddle_cli_contract::cli::commands::wire::auth::{
+    AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, ServiceTokenOutput,
+};
 use objects::{HeddleError, RecoveryDetails};
 use sha2::{Digest, Sha256};
 
@@ -28,21 +31,24 @@ use super::{
     },
 };
 
-pub(crate) use heddle_cli_contract::cli::commands::wire::auth::{
-    AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, ServiceTokenOutput,
-};
-
 const DERIVED_TOKEN_SECURITY_NOTE: &str = "Derived credential has its own proof key and is operation/TTL/resource-scope-limited and enforced server-side. The token and proof key travel together inside the .hcred file; the parent device key is not exported.";
 
 const SERVICE_TOKEN_TTL_DAYS: u32 = 30;
 const SERVICE_TOKEN_TTL_SECS: i64 = SERVICE_TOKEN_TTL_DAYS as i64 * 24 * 3600;
 const ISSUE_SA_PROOF_DOMAIN: &[u8] = b"heddle-sa-credential-issue-v1";
 
+fn is_interactive_tty() -> bool {
+    std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+        && std::io::stderr().is_terminal()
+}
+
 pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> {
     match command {
         AuthCommand::Login {
             server,
             open_browser,
+            invite,
             credential,
         } => match credential {
             Some(credential) => {
@@ -52,7 +58,14 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
             }
             None => {
                 let server = resolve_server(server.as_deref())?;
-                cmd_auth_login(&server, open_browser).await
+                crate::hosted_runtime::auth_login::login(
+                    ctx,
+                    &server,
+                    open_browser,
+                    invite,
+                    is_interactive_tty(),
+                )
+                .await
             }
         },
         AuthCommand::Logout { server } => cmd_auth_logout(ctx, server.as_deref()),
@@ -615,7 +628,7 @@ pub(crate) fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetada
 }
 
 /// Authenticate via device authorization flow.
-async fn cmd_auth_login(server: &str, open_browser: bool) -> Result<()> {
+pub(crate) async fn cmd_auth_login_browser(server: &str, open_browser: bool) -> Result<()> {
     // 1. Generate Ed25519 keypair for device binding.
     let signer = Ed25519Signer::generate()
         .map_err(|e| anyhow::anyhow!("failed to generate keypair: {e}"))?;
@@ -2116,6 +2129,7 @@ mod tests {
             AuthCommand::Login {
                 server: None,
                 open_browser: false,
+                invite: None,
                 credential: Some(std::path::PathBuf::from("/definitely/not/here.hcred")),
             },
         )
