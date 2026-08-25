@@ -6927,7 +6927,7 @@ serialized as `null`.
 {"output_kind": "review_next", "state_id": "hc-def456", "headline": "Tighten parser recovery", "existing_signatures": 0, "next": {"state_id": "hc-def456", "headline": "Tighten parser recovery", "existing_signatures": 0}}
 ```
 
-With no pending review:
+`heddle review next --output json` with no pending review emits:
 
 ```json
 {"output_kind": "review_next", "next": null}
