@@ -3,7 +3,7 @@
 
 use std::{
     collections::HashSet,
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
 };
 
@@ -23,8 +23,9 @@ use super::{
 };
 use crate::{
     object::{
-        Action, ActionId, AnnotatedTag, Blob, ContentHash, State, StateAttachment,
-        StateAttachmentId, StateId, Tree,
+        Action, ActionId, AnnotatedTag, Blob, BytesTreeSource, ContentHash, FileTreeSource,
+        OpenedTreeBody, State, StateAttachment, StateAttachmentId, StateId, TREE_CANONICAL_MAGIC,
+        Tree, TreeEntryReader, TreeResumeCursor, is_canonical_tree,
     },
     store::{
         HeddleError, ObjectStore, Result, SidecarStore, SnapshotCommitDescriptor, codec,
@@ -572,6 +573,49 @@ impl FsStore {
         Ok(None)
     }
 
+    fn try_open_tree_once(
+        &self,
+        tree_id: &ContentHash,
+        cursor: Option<&TreeResumeCursor>,
+    ) -> Result<Option<TreeEntryReader<OpenedTreeBody>>> {
+        let path = hash_path(&trees_dir(&self.root), tree_id);
+        if path.exists()
+            && let Some((header, len)) = read_file_header(&path, TREE_CANONICAL_MAGIC.len())?
+            && header.starts_with(TREE_CANONICAL_MAGIC)
+        {
+            let file = File::open(&path)?;
+            return Ok(Some(TreeEntryReader::open(
+                OpenedTreeBody::File(FileTreeSource::sequential_verify(file, len)),
+                *tree_id,
+                cursor,
+            )?));
+        }
+        if path.exists()
+            && let Some(data) = read_file_bytes(&path)?
+        {
+            let body = codec::decode_tree_body(data.as_slice())?;
+            if is_canonical_tree(&body) {
+                return Ok(Some(TreeEntryReader::open(
+                    OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(body)),
+                    *tree_id,
+                    cursor,
+                )?));
+            }
+        }
+        if let Ok(manager) = self.pack_manager().read()
+            && let Some((obj_type, data)) = manager.get_hashed_object(tree_id)?
+            && obj_type == ObjectType::Tree
+            && is_canonical_tree(&data)
+        {
+            return Ok(Some(TreeEntryReader::open(
+                OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(data)),
+                *tree_id,
+                cursor,
+            )?));
+        }
+        Ok(None)
+    }
+
     fn try_get_tree_once(&self, hash: &ContentHash) -> Result<Option<Tree>> {
         // Cache first. The recent-object cache only ever holds trees we
         // wrote or read this process, so a hit is authoritative for a
@@ -638,7 +682,6 @@ impl FsStore {
             && let Some((obj_type, data)) = manager.get_hashed_object(hash)?
             && obj_type == ObjectType::Tree
         {
-            validate_tree_serialized(&data, *hash)?;
             return Ok(Some(data));
         }
 
@@ -1157,9 +1200,32 @@ impl ObjectStore for FsStore {
             None
         };
         if let Some(tree) = external_tree {
-            return rmp_serde::to_vec_named(&tree)
-                .map(Some)
-                .map_err(|error| HeddleError::InvalidObject(error.to_string()));
+            return tree.encode_canonical().map(Some).map_err(HeddleError::from);
+        }
+        Ok(None)
+    }
+
+    fn open_tree(
+        &self,
+        tree_id: &ContentHash,
+        cursor: Option<&TreeResumeCursor>,
+    ) -> Result<Option<TreeEntryReader<OpenedTreeBody>>> {
+        if let Some(reader) = self.try_open_tree_once(tree_id, cursor)? {
+            return Ok(Some(reader));
+        }
+        if self.reload_packs_if_stale()?
+            && let Some(reader) = self.try_open_tree_once(tree_id, cursor)?
+        {
+            return Ok(Some(reader));
+        }
+        if let Some(data) = ObjectStore::get_tree_serialized(self, tree_id)?
+            && is_canonical_tree(&data)
+        {
+            return Ok(Some(TreeEntryReader::open(
+                OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(data)),
+                *tree_id,
+                cursor,
+            )?));
         }
         Ok(None)
     }
@@ -1502,9 +1568,9 @@ impl ObjectStore for FsStore {
                 if let Some(blob) = self.get_blob(hash)? {
                     return Ok(Some((ObjectType::Blob, blob.into_content())));
                 }
-                // Raw storage body: skips a full tree decode + re-encode on
-                // the pack-building path. Byte-compatible with `to_vec_named`
-                // (the receiver installs through `put_tree_serialized`).
+                // Raw canonical storage body: skips a full tree decode +
+                // re-encode on the pack-building path (the receiver installs
+                // through `put_tree_serialized`).
                 if let Some(tree_data) = self.get_tree_serialized(hash)? {
                     return Ok(Some((ObjectType::Tree, tree_data)));
                 }

@@ -196,7 +196,7 @@ fn add_tree_frames(
             ids.clear();
             tree_bytes = 0;
         }
-        let source = rmp_serde::to_vec_named(&tree).map_err(HeddleError::from)?;
+        let source = tree.encode_canonical().map_err(HeddleError::from)?;
         logical_bytes = logical_bytes.saturating_add(source.len() as u64);
         tree_bytes = tree_bytes.saturating_add(tree_size);
         trees.push(tree);

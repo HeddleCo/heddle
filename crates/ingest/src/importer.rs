@@ -802,13 +802,8 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
 
         let tree = Tree::from_entries(entries);
         let hash = tree.hash();
-        // `to_vec_named` (struct-as-map) matches objects's convention.
-        // Every reader in `store/fs/fs_impl.rs` and `store/mod.rs` calls
-        // `rmp_serde::from_slice` which defaults to struct-as-map; the
-        // earlier `to_vec` here produced struct-as-array bytes that
-        // round-tripped through the pack but failed deserialization with
-        // "invalid type: integer N, expected struct Tree".
-        let data = rmp_serde::to_vec_named(&tree)
+        let data = tree
+            .encode_canonical()
             .map_err(|e| IngestError::Other(format!("serialize tree for import pack: {e}")))?;
         if self.emit_objects {
             self.builder.add(hash, PackObjectType::Tree, data)?;

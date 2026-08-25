@@ -13,6 +13,20 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ## Unreleased
 
+### Added
+
+- **Streamable HTR4 tree encoding.** Trees store uncompressed
+  length-prefixed frames so a reader can page entries and persist a
+  resume cursor without materializing the full directory. Object-store
+  backends hash on finish; ranged resume requires a hashed body, not a
+  hash-shaped path (heddle#1457).
+
+### Changed
+
+- **Durable trees are HTR4.** Loose, packed, ingest, and wire tree bodies
+  use the canonical encoding. Migration `0005_streamable_tree_encoding`
+  rewrites leftover msgpack trees on repo open (heddle#1457).
+
 ## 0.14.0 - 2026-08-21
 
 - Rebuilt the workspace on `heddle-api` 0.12 and
