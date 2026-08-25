@@ -238,7 +238,13 @@ fn auth_login_honours_dash_c_repo_ca_not_cwd() {
     let output = heddle_command(&fixture.temp, &cwd_repo)
         .arg("-C")
         .arg(&fixture.repo)
-        .args(["auth", "login", "--server", &fixture.server])
+        .args([
+            "auth",
+            "login",
+            "--open-browser",
+            "--server",
+            &fixture.server,
+        ])
         .output()
         .expect("run heddle -C auth login");
     assert_tls_honored(&output, "-C selected repo config");

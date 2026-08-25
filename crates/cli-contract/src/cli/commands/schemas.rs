@@ -23,32 +23,35 @@ use verbs::{
     VerifyReport, remote::RemoteInfo,
 };
 
-use super::command_catalog;
-use super::doctor_docs::DocsReport;
-use super::doctor_schemas::SchemaReport;
-use super::init_output::InitOutput;
-use super::wire::agent::{
-    ActorDoneOutput, ActorExplainDetectedOutput, ActorListOutput, ActorSingleOutput,
-    AgentFanoutOutput, AgentReservationEnvelope, AgentReservationListOutput, AgentTaskEnvelope,
-    AgentTaskListOutput, SegmentEnvelope, SessionEnvelope, SessionListOutput,
-};
-use super::wire::auth::{
-    AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, ServiceTokenOutput, WhoamiOutput,
-};
-use super::wire::thread::{
-    ApprovalOutput, ApprovalRevokeOutput, EligibilityOutput, ThreadAbsorbOutput,
-    ThreadCleanupOutput, ThreadOpOutput, ThreadRecordOutput, ThreadResolveOutput,
-};
-use super::wire::{
-    AdoptOutput, BlameOutput, CloneOutput, CommitOutput, DiscussionListOutput,
-    DiscussionShowOutput, DiscussionWriteOutput, ExpandOutput, ExportGitOutput, ImportGitOutput,
-    IntegrationStatusOutput, LandOutput, LogOutput, MarkerBulkDeleteOutput, MarkerListOutput,
-    MarkerOpOutput, MultiLandOutput, OperatorCommandOutput, PullOutput, PushOutput, ReadyOutput,
-    ReflogOutput, RemoteMutationOutput, RepackOutput, RevertOutput, ReviewHealthOutput,
-    ReviewNextOutput, ReviewShowOutput, ReviewSignOutput, ShowOutput, SnapshotOutput,
-    SyncGitOutput, SyncOutput, ThreadCaptureOutput, ThreadCurrentOutput, ThreadListOutput,
-    ThreadShowOutput, TimelineActionOutput, TimelineLogOutput, TimelineRecordingOutput,
-    TimelineStatusOutput, UndoRedoOutput, WatchLineOutput,
+use super::{
+    command_catalog,
+    doctor_docs::DocsReport,
+    doctor_schemas::SchemaReport,
+    init_output::InitOutput,
+    wire::{
+        AdoptOutput, BlameOutput, CloneOutput, CommitOutput, DiscussionListOutput,
+        DiscussionShowOutput, DiscussionWriteOutput, ExpandOutput, ExportGitOutput,
+        ImportGitOutput, IntegrationStatusOutput, LandOutput, LogOutput, MarkerBulkDeleteOutput,
+        MarkerListOutput, MarkerOpOutput, MultiLandOutput, OperatorCommandOutput, PullOutput,
+        PushOutput, ReadyOutput, ReflogOutput, RemoteMutationOutput, RepackOutput, RevertOutput,
+        ReviewHealthOutput, ReviewNextOutput, ReviewShowOutput, ReviewSignOutput, ShowOutput,
+        SnapshotOutput, SyncGitOutput, SyncOutput, ThreadCaptureOutput, ThreadCurrentOutput,
+        ThreadListOutput, ThreadShowOutput, TimelineActionOutput, TimelineLogOutput,
+        TimelineRecordingOutput, TimelineStatusOutput, UndoRedoOutput, WatchLineOutput,
+        agent::{
+            ActorDoneOutput, ActorExplainDetectedOutput, ActorListOutput, ActorSingleOutput,
+            AgentFanoutOutput, AgentReservationEnvelope, AgentReservationListOutput,
+            AgentTaskEnvelope, AgentTaskListOutput, SegmentEnvelope, SessionEnvelope,
+            SessionListOutput,
+        },
+        auth::{
+            AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, ServiceTokenOutput, WhoamiOutput,
+        },
+        thread::{
+            ApprovalOutput, ApprovalRevokeOutput, EligibilityOutput, ThreadAbsorbOutput,
+            ThreadCleanupOutput, ThreadOpOutput, ThreadRecordOutput, ThreadResolveOutput,
+        },
+    },
 };
 use crate::cli::INIT_VERB;
 

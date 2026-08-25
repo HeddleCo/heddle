@@ -165,6 +165,7 @@ pub(crate) fn is_local_agent_root(subject: &str, proof_public_key_hex: &str) -> 
 }
 
 /// True when a stored local agent root is missing expiry or is already stale.
+#[cfg(test)]
 pub(crate) fn local_agent_credential_needs_refresh(
     expires_at: Option<&str>,
     now: DateTime<Utc>,

@@ -171,15 +171,6 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         ],
     ),
     #[cfg(feature = "client")]
-    sample(&["identity", "ensure"], &["identity", "ensure"]),
-    #[cfg(feature = "client")]
-    sample(&["identity", "claim-link"], &["identity", "claim-link"]),
-    #[cfg(feature = "client")]
-    sample(
-        &["identity", "serve"],
-        &["identity", "serve", "--server", "api.heddle.test"],
-    ),
-    #[cfg(feature = "client")]
     sample(&["whoami"], &["whoami"]),
     #[cfg(feature = "git-overlay")]
     sample(&["bridge", "git", "import"], &["bridge", "git", "import"]),
@@ -2417,8 +2408,5 @@ fn feature_gated_command_roots_are_catalog_owned() {
     // `#[cfg(feature = "client")]`, `ci` is
     // `#[cfg(feature = "ci")]`. Any new feature-gated root MUST be
     // listed here.
-    assert_eq!(
-        feature_gated_command_roots(),
-        &["auth", "ci", "whoami"]
-    );
+    assert_eq!(feature_gated_command_roots(), &["auth", "ci", "whoami"]);
 }

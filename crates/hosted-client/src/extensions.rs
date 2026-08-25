@@ -14,7 +14,8 @@ use heddle_cli_args::{AgentTemplateArg, AuthCommands, AuthTrustCommands, CliCont
 
 use crate::hosted_runtime::{
     auth_requests::{AuthCommand, AuthTrustCommand},
-    device_flow::AgentTemplate, whoami::cmd_whoami,
+    device_flow::AgentTemplate,
+    whoami::cmd_whoami,
 };
 
 #[async_trait]
