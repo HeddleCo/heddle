@@ -213,6 +213,12 @@ pub static MIGRATIONS: &[Migration] = &[
         applies_to: SchemaTarget::Trees,
         run: run_streamable_tree_encoding,
     },
+    Migration {
+        id: "0006_identity_cursor_attribution",
+        description: "Record the identity-cursor state-hash and HCS2 compact-frame boundary",
+        applies_to: SchemaTarget::Mixed,
+        run: run_identity_cursor_attribution,
+    },
 ];
 
 /// Returns true when every registered migration id is already recorded in
@@ -396,6 +402,13 @@ fn run_first_class_annotated_tags(ctx: &mut MigrationCtx<'_>) -> Result<()> {
     // Format v3 repositories never stored annotated tags in the native object
     // graph. Existing Git-authority repositories are re-adopted at the v4
     // boundary, while native repositories have no tag bytes to transform.
+    bump_repo_format_to_supported(ctx.repo)
+}
+
+fn run_identity_cursor_attribution(ctx: &mut MigrationCtx<'_>) -> Result<()> {
+    // Format-4 agent states keep their pre-cursor ids via dual-hash. This
+    // migration records the HCS2 / thought_level+parent hash boundary so a
+    // format-4 binary refuses the repo as too new instead of mismatching ids.
     bump_repo_format_to_supported(ctx.repo)
 }
 
@@ -619,6 +632,7 @@ mod tests {
                 "0003_canonicalize_tree_entries",
                 "0004_first_class_annotated_tags",
                 "0005_streamable_tree_encoding",
+                "0006_identity_cursor_attribution",
             ],
             "the deletion-wave migration ids must stay ordered and reviewable",
         );
@@ -760,6 +774,26 @@ mod tests {
             .expect("rewritten tree");
         assert!(objects::object::is_canonical_tree(&raw));
         assert_eq!(repo.store().get_tree(&tree_hash).unwrap().unwrap(), tree);
+    }
+
+    #[test]
+    fn migration_0006_bumps_format_4_to_supported() {
+        let (_temp, repo) = fresh_repo();
+        remove_ledger(&repo);
+        let config_path = repo.heddle_dir().join("config.toml");
+        let mut config = repo_config::RepoConfig::load(&config_path).unwrap();
+        config.repository.version = 4;
+        config.save(&config_path).unwrap();
+
+        apply_pending(&repo).unwrap();
+
+        let config = repo_config::RepoConfig::load(&config_path).unwrap();
+        assert_eq!(
+            config.repository.version,
+            repo_config::SUPPORTED_REPO_FORMAT
+        );
+        let ledger = std::fs::read_to_string(ledger_path(&repo)).unwrap();
+        assert!(ledger.contains("0006_identity_cursor_attribution"));
     }
 
     #[test]

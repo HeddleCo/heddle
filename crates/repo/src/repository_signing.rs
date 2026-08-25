@@ -29,9 +29,10 @@ where
     /// this device or repository. The legacy attachment remains as immutable
     /// evidence; migration appends a domain-tagged signature.
     pub(crate) fn resign_if_owned(&self, state: &State) -> Result<bool> {
-        let hash = state.compute_hash();
+        let stored_id = accepted_state_id(state);
+        let hash = state.hash_for_stored_id(&stored_id);
         let signatures: Vec<_> = self
-            .list_state_attachments(&state.id())?
+            .list_state_attachments(&stored_id)?
             .into_iter()
             .filter_map(|attachment| match attachment.body {
                 StateAttachmentBody::Signature(signature) => Some(signature),
@@ -57,13 +58,13 @@ where
                     HeddleError::Conflict(format!("failed to re-sign state: {error}"))
                 })?;
             self.put_state_attachment(&StateAttachment {
-                state_id: state.id(),
+                state_id: stored_id,
                 body: StateAttachmentBody::Signature(replacement),
                 attribution: state.attribution.clone(),
                 created_at: chrono::Utc::now(),
                 supersedes: None,
             })?;
-            debug!(state_id = %state.id().short(), "Re-signed owned legacy state signature");
+            debug!(state_id = %stored_id.short(), "Re-signed owned legacy state signature");
             return Ok(true);
         }
         Ok(false)
@@ -175,7 +176,10 @@ impl Repository {
             debug!("no signing identity available; state captured unsigned");
             return None;
         };
-        match state_signature_from_signer(&state.compute_hash(), &*signer) {
+        match state_signature_from_signer(
+            &state.hash_for_stored_id(&accepted_state_id(state)),
+            &*signer,
+        ) {
             Ok(signature) => Some(signature),
             Err(error) => {
                 tracing::warn!(%error, "auto-signing failed; state captured unsigned");
@@ -234,7 +238,7 @@ impl Repository {
             .store
             .get_state(state_id)?
             .ok_or(HeddleError::StateNotFound(*state_id))?;
-        let signature = state_signature_from_signer(&state.compute_hash(), signer)
+        let signature = state_signature_from_signer(&state.hash_for_stored_id(state_id), signer)
             .map_err(|error| HeddleError::Conflict(format!("failed to sign state: {error}")))?;
         self.put_state_attachment(&StateAttachment {
             state_id: *state_id,
@@ -301,7 +305,7 @@ impl Repository {
             debug!("State has no signature");
             return Ok(SignatureStatus::Unsigned);
         }
-        let status = classify_state_signatures(&signatures, &state.compute_hash());
+        let status = classify_state_signatures(&signatures, &state.hash_for_stored_id(state_id));
         debug!(?status, "Classified state signatures");
         Ok(status)
     }
@@ -317,7 +321,7 @@ impl Repository {
             .store
             .get_state(state_id)?
             .ok_or(HeddleError::StateNotFound(*state_id))?;
-        let hash = state.compute_hash();
+        let hash = state.hash_for_stored_id(state_id);
         Ok(self
             .list_state_attachments(state_id)?
             .into_iter()
@@ -326,6 +330,14 @@ impl Repository {
                 _ => None,
             })
             .find(|signature| verify_state_signature_bytes(signature, &hash).is_ok()))
+    }
+}
+
+fn accepted_state_id(state: &State) -> StateId {
+    if state.accepts_stored_id(&state.state_id) {
+        state.state_id
+    } else {
+        state.id()
     }
 }
 
@@ -377,7 +389,10 @@ fn classify_state_signatures(
 #[cfg(test)]
 mod tests {
     use crypto::Ed25519Signer;
-    use objects::object::{Attribution, Blob, Principal, Tree, TreeEntry};
+    use objects::{
+        object::{Agent, Attribution, Blob, Principal, Tree, TreeEntry},
+        store::ObjectStore,
+    };
     use tempfile::TempDir;
 
     use super::*;
@@ -398,6 +413,44 @@ mod tests {
         let state = objects::object::State::new(tree_hash, vec![], attribution);
         repo.store().put_state(&state).expect("put state");
         state.id()
+    }
+
+    #[test]
+    fn format4_agent_signature_verifies_against_preserved_hash() {
+        let (_temp, repo) = setup_repo();
+        let tree = Tree::new();
+        let tree_hash = repo.store().put_tree(&tree).expect("put tree");
+        let state = objects::object::State::new(
+            tree_hash,
+            vec![],
+            Attribution::with_agent(
+                Principal::new("Author", "author@example.com"),
+                Agent::new("anthropic", "opus"),
+            ),
+        );
+        let stored_id = state.pre_cursor_id();
+        assert_ne!(
+            state.id(),
+            stored_id,
+            "unpublished cursor tags must change the current id"
+        );
+        let data = rmp_serde::to_vec(&state).expect("serialize format-4 agent state");
+        repo.store()
+            .put_state_serialized(&data, stored_id)
+            .expect("store under the preserved pre-cursor id");
+
+        let signer = Ed25519Signer::generate().expect("generate key");
+        repo.sign_state(&stored_id, &signer)
+            .expect("sign against the accepted stored hash");
+        assert_eq!(
+            repo.verify_state_signature(&stored_id).expect("verify"),
+            SignatureStatus::Valid
+        );
+        assert!(
+            repo.get_state_signature(&stored_id)
+                .expect("get signature")
+                .is_some()
+        );
     }
 
     #[test]

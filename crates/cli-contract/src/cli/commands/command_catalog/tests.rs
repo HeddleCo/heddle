@@ -282,6 +282,10 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["integration", "relay"],
         &["integration", "relay", "codex", "agent_done"],
     ),
+    sample(
+        &["integration", "stamp"],
+        &["integration", "stamp", "claude-code"],
+    ),
     sample(&["log"], &["log"]),
     sample(&["maintenance", "inspect"], &["maintenance", "inspect"]),
     sample(&["maintenance", "refresh"], &["maintenance", "refresh"]),
@@ -1454,6 +1458,14 @@ fn materializer_effect_sets_include_refs_metadata_and_worktree() {
             ],
         );
     }
+}
+
+#[test]
+fn integration_stamp_writes_metadata_only() {
+    assert_command_effects(
+        &["integration", "stamp"],
+        &[CommandSideEffect::WritesMetadata],
+    );
 }
 
 #[test]

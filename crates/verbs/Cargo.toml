@@ -13,6 +13,7 @@ categories.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 crypto.workspace = true
+fs2.workspace = true
 merge.workspace = true
 ignore.workspace = true
 hex.workspace = true

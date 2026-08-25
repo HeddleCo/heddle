@@ -88,13 +88,13 @@ fn validate_annotated_tag(data: &[u8], hash: ContentHash) -> Result<AnnotatedTag
 }
 
 fn validate_loaded_state(requested_id: &StateId, mut state: State) -> Result<State> {
-    let computed = state.id();
-    if computed != *requested_id {
+    if !state.accepts_stored_id(requested_id) {
         return Err(HeddleError::InvalidObject(format!(
-            "state id mismatch: requested {requested_id}, computed {computed}"
+            "state id mismatch: requested {requested_id}, computed {}",
+            state.id()
         )));
     }
-    state.state_id = computed;
+    state.state_id = *requested_id;
     Ok(state)
 }
 

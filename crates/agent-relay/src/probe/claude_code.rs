@@ -54,12 +54,7 @@ impl HarnessActorProbe for ClaudeCodeProbe {
             model: input
                 .explicit_model
                 .clone()
-                .or_else(|| attribution_env_hint(&input.env_hints, "HEDDLE_AGENT_MODEL"))
                 .or_else(|| metadata.get("model").cloned())
-                .or_else(|| argv_value(argv, "--model"))
-                .or_else(|| input.env_hints.get("CLAUDE_MODEL").cloned())
-                .or_else(|| input.env_hints.get("ANTHROPIC_MODEL").cloned())
-                .or_else(|| input.env_hints.get("MODEL").cloned())
                 .or_else(|| input.current_model.clone()),
             thinking_level: metadata
                 .get("effort")

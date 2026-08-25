@@ -205,6 +205,7 @@ const UNSWEPT_TODO: &[&str] = &[
     "integration install",
     "integration list",
     "integration relay",
+    "integration stamp",
     "integration uninstall",
     "integration upgrade",
     "semantic hot",

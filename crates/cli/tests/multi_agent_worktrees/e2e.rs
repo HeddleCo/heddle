@@ -100,7 +100,12 @@ fn agent_capture_and_ready_require_authenticated_writer_authority() {
     let token = reserved["token"].as_str().unwrap();
 
     fs::write(main.path().join("first.txt"), "first").unwrap();
-    let capture_output = heddle_output_with_env(
+    fs::write(
+        main.path().join(".heddle/identity"),
+        r#"{"provider":"openai","model":"gpt-5.3-codex"}"#,
+    )
+    .unwrap();
+    let capture_output = heddle_output(
         &[
             "--output",
             "json",
@@ -114,10 +119,6 @@ fn agent_capture_and_ready_require_authenticated_writer_authority() {
             "authenticated capture",
         ],
         Some(main.path()),
-        &[
-            ("HEDDLE_AGENT_PROVIDER", "openai"),
-            ("HEDDLE_AGENT_MODEL", "gpt-5.3-codex"),
-        ],
     )
     .unwrap();
     assert!(
@@ -256,7 +257,15 @@ fn capture_inherits_agent_from_thread() {
 
     fs::write(work.path().join("modulo.rs"), "pub fn modulo() {}").unwrap();
     heddle(
-        &["capture", "--intent", "feat: add modulo"],
+        &[
+            "capture",
+            "--intent",
+            "feat: add modulo",
+            "--agent-provider",
+            "anthropic",
+            "--agent-model",
+            "claude-sonnet-4-5",
+        ],
         Some(work.path()),
     )
     .unwrap();
@@ -856,10 +865,7 @@ fn land_auto_captures_and_merges_clean_thread() {
     let envelope: Value = serde_json::from_str(stderr.trim())
         .unwrap_or_else(|err| panic!("actor show failure should be JSON: {err}: {stderr}"));
     assert_eq!(envelope["kind"], "no_active_actor");
-    assert_eq!(
-        envelope["primary_command"],
-        "heddle agent presence list"
-    );
+    assert_eq!(envelope["primary_command"], "heddle agent presence list");
     assert!(
         envelope["hint"]
             .as_str()
@@ -952,13 +958,19 @@ fn ready_and_land_name_low_confidence_without_sync_loop() {
     let thread = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
 
     std::fs::write(thread.join("uncertain.txt"), "draft").unwrap();
-    let capture = heddle_output_with_env(
-        &["capture", "-m", "uncertain work", "--confidence", "0.40"],
-        Some(&thread),
+    let capture = heddle_output(
         &[
-            ("HEDDLE_AGENT_PROVIDER", "test-agent"),
-            ("HEDDLE_AGENT_MODEL", "test-model"),
+            "capture",
+            "-m",
+            "uncertain work",
+            "--confidence",
+            "0.40",
+            "--agent-provider",
+            "test-agent",
+            "--agent-model",
+            "test-model",
         ],
+        Some(&thread),
     )
     .unwrap();
     assert!(
@@ -1177,10 +1189,8 @@ fn delegate_creates_child_threads_with_parent_relationship() {
     for child in ["parser", "tests"] {
         let child_name = format!("feature/orchestrator/{child}");
         // `start` requires an explicit empty checkout directory.
-        let child_path = std::env::temp_dir().join(format!(
-            "heddle-e2e-{}-{child}",
-            std::process::id()
-        ));
+        let child_path =
+            std::env::temp_dir().join(format!("heddle-e2e-{}-{child}", std::process::id()));
         let _ = fs::remove_dir_all(&child_path);
         fs::create_dir_all(&child_path).unwrap();
         heddle(

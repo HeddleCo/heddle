@@ -15,6 +15,25 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Added
 
+- **Harness identity cursor on each capture.** `integration install` writes
+  per-harness hooks that stamp a workspace `.heddle/identity` sidecar
+  (`provider`, `model`, `thought_level`, `session`, `parent`). Each
+  `capture` freezes that cursor onto that state. Mid-thread `/model` or
+  `/effort` updates the cursor only; earlier states keep the old pair.
+  Session segments rotate when a published provider, model, or
+  thought_level changes (empty → set is attach). Claude PreToolUse and
+  StatusLine stay on the stamp hot path (~200-byte atomic rename);
+  StatusLine chains an existing command. Codex writes user-scope `[hooks]`
+  to a workspace sidecar. OpenCode reads `event.type` and object `model`.
+  Parent walk is last-resort kind only (exact basename). Cursor/Grok stay
+  `agent=null`. Codex `Stop` expires the cursor. OpenCode expire/merge go
+  through locked `integration stamp`. A later parent-session event clears a
+  stale subagent `parent`. Unpublished→published identity attaches to the
+  placeholder segment. User-scoped Claude, Codex, and OpenCode discover
+  the workspace at runtime (heddle#1518). Repository format 5 records the
+  cursor-hash / HCS2 boundary; format-4 agent states keep their stored
+  ids. Pointer-checkout cursor files are reserved from capture.
+
 - **Streamable HTR4 tree encoding.** Trees store uncompressed
   length-prefixed frames so a reader can page entries and persist a
   resume cursor without materializing the full directory. Object-store
@@ -28,6 +47,13 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   rewrites leftover msgpack trees on repo open (heddle#1457).
 
 ### Fixed
+
+- **Format-4 agent states keep their signatures and pack ids.** Verification
+  and re-signing use the hash for the accepted stored id. Compact HCS2
+  repack accepts that pre-cursor id. Claude SessionEnd relays
+  `close_session` and then expires the cursor. A later main-agent Claude
+  event (`parent == session`) clears a stale subagent parent. OpenCode
+  relays await so timeline before/after stay ordered.
 
 - **Live annotations ride `diff --context`.** After `context set`,
   `heddle diff --context` shows the annotation on the existing `context` /

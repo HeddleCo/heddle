@@ -759,10 +759,12 @@ export interface CommandContractSchemaCoverage {
 
 export interface CommitAgentSchema {
   model: string;
+  parent?: string | null;
   policy_id?: string | null;
   provider: string;
   segment_id?: string | null;
   session_id?: string | null;
+  thought_level?: string | null;
 }
 
 export interface CommitGraphInspection {
@@ -1372,6 +1374,8 @@ export interface IntegrationRelaySchema {
   replayed?: boolean | null;
   [key: string]: unknown;
 }
+
+export type IntegrationStampSchema = Record<string, unknown>;
 
 /** One row of `integration list`. */
 export interface IntegrationStatusListSchema {
@@ -3491,6 +3495,7 @@ export interface HeddleVerbOutputs {
   "integration install": IntegrationInstallSchema;
   "integration list": IntegrationListSchema;
   "integration relay": IntegrationRelaySchema;
+  "integration stamp": IntegrationStampSchema;
   "integration uninstall": IntegrationUninstallSchema;
   "integration upgrade": IntegrationUpgradeSchema;
   land: LandSchema;
@@ -3651,6 +3656,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "integration install",
   "integration list",
   "integration relay",
+  "integration stamp",
   "integration uninstall",
   "integration upgrade",
   "land",

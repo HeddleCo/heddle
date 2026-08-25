@@ -16,7 +16,7 @@ use super::{
 use crate::{
     fs_atomic::temp_path,
     object::{
-        Action, Attribution, Blob, ContentHash, Operation, Principal, State, StateId, Tree,
+        Action, Agent, Attribution, Blob, ContentHash, Operation, Principal, State, StateId, Tree,
         TreeEntry,
     },
     store::{
@@ -1293,6 +1293,44 @@ fn test_get_state_rejects_wrong_object_swap() {
         .expect_err("swapped state should be rejected");
     assert!(
         matches!(error, HeddleError::InvalidObject(message) if message.contains("state id mismatch"))
+    );
+}
+
+#[test]
+fn test_get_state_accepts_format4_agent_id_after_cursor_hash_bump() {
+    let (_temp, store) = create_test_store();
+    let created_at = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    let mut state = State::new(
+        ContentHash::from_bytes([9; 32]),
+        vec![],
+        Attribution::with_agent(
+            Principal::new("Author", "author@example.com"),
+            Agent::new("anthropic", "opus"),
+        ),
+    );
+    state.created_at = created_at;
+    let stored_id = state.pre_cursor_id();
+    assert_ne!(
+        state.id(),
+        stored_id,
+        "sanity: unpublished cursor tags must change the current id"
+    );
+    let path = store
+        .root
+        .join("objects/states")
+        .join(format!("{}.state", stored_id.to_string_full()));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, rmp_serde::to_vec(&state).unwrap()).unwrap();
+    store.clear_recent_object_caches();
+
+    let loaded = store
+        .get_state(&stored_id)
+        .expect("format-4 agent id must still load")
+        .expect("state exists");
+    assert_eq!(loaded.state_id, stored_id);
+    assert_eq!(
+        loaded.attribution.agent.as_ref().unwrap().provider,
+        "anthropic"
     );
 }
 

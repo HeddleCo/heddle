@@ -2872,6 +2872,14 @@ Hidden integration relay output is registered as a generic object payload.
 {"status": "ok"}
 ```
 
+## `heddle integration stamp --output json`
+
+Hidden identity-cursor stamp output is registered as a generic object payload.
+
+```json
+{"status": "ok"}
+```
+
 ---
 
 ## `heddle maintenance inspect --output json`
@@ -3130,7 +3138,7 @@ as one; no `help advanced`).
       "visibility set",
       "visibility promote"
     ],
-    "accepted_opaque_schema_verbs_total": 38,
+    "accepted_opaque_schema_verbs_total": 39,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
@@ -3142,26 +3150,26 @@ as one; no `help advanced`).
       "visibility set",
       "visibility promote"
     ],
-    "advanced_scope_json_commands_total": 97,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 38,
-    "advanced_scope_mutating_commands_total": 54,
-    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 20,
-    "catalog_commands_total": 182,
-    "catalog_mutating_commands_total": 87,
-    "json_commands_total": 145,
-    "json_commands_with_accepted_opaque_schema": 38,
+    "advanced_scope_json_commands_total": 98,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 39,
+    "advanced_scope_mutating_commands_total": 55,
+    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 21,
+    "catalog_commands_total": 183,
+    "catalog_mutating_commands_total": 88,
+    "json_commands_total": 146,
+    "json_commands_with_accepted_opaque_schema": 39,
     "json_commands_with_schema": 107,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 84,
+    "json_mutating_commands_total": 85,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 84,
-    "mutating_commands_with_accepted_opaque_schema": 20,
+    "mutating_commands_total": 85,
+    "mutating_commands_with_accepted_opaque_schema": 21,
     "mutating_commands_with_schema": 64,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 38,
+    "opaque_schema_verbs_total": 39,
     "status": "available",
-    "summary": "184 command(s), 145 JSON command(s), 87 mutating command(s), 84 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
+    "summary": "185 command(s), 146 JSON command(s), 88 mutating command(s), 85 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3199,7 +3207,7 @@ as one; no `help advanced`).
     "try"
   ],
   "status": "available",
-  "summary": "184 command(s), 145 JSON command(s), 87 mutating command(s), 84 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
+  "summary": "185 command(s), 146 JSON command(s), 88 mutating command(s), 85 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true

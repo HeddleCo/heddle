@@ -14,6 +14,8 @@ pub mod cli;
 pub mod exit;
 pub mod harness;
 mod hosted_failure;
+pub mod identity_freeze;
+pub mod identity_stamp;
 pub mod operation_id;
 pub mod perf;
 #[cfg(feature = "semantic")]
@@ -33,8 +35,7 @@ pub use objects::{
     error::{HeddleError, HeddleError as StoreError},
     store::ObjectStore,
 };
-pub use repo::Repository;
-pub use repo::remote;
+pub use repo::{Repository, remote};
 pub type StoreResult<T> = objects::error::Result<T>;
 
 /// Register factories needed to reopen CLI-owned lazy hosted repositories.

@@ -21,35 +21,21 @@ use refs::{Head, RefManager};
 
 #[cfg(feature = "git-overlay")]
 use super::git_overlay_object_source;
-use super::{RepoConfig, Repository, RepositoryCapability, RepositorySourceAuthority};
-use super::discovery::{
-    RepositoryOpenMode, bounded_ancestor_paths, discover_heddle_root,
-    has_git_repository_at_root, is_heddle_repository_root, metadataless_managed_thread_root,
+use super::{
+    RepoConfig, Repository, RepositoryCapability, RepositorySourceAuthority,
+    discovery::{
+        RepositoryOpenMode, bounded_ancestor_paths, discover_heddle_root,
+        has_git_repository_at_root, is_heddle_repository_root, metadataless_managed_thread_root,
+    },
+    overlay::{GitHeadState, detect_git_head_state, ensure_git_overlay_exclude},
 };
-use super::overlay::{GitHeadState, detect_git_head_state, ensure_git_overlay_exclude};
 
 pub(super) fn has_git_metadata(path: &Path) -> bool {
     has_git_repository_at_root(path)
 }
 
 fn ensure_supported_repo_format(config_path: &Path, config: &RepoConfig) -> Result<()> {
-    let found = config.repository.version;
-    let supported = super::repo_config::SUPPORTED_REPO_FORMAT;
-    if found > supported {
-        return Err(HeddleError::RepositoryFormatTooNew {
-            path: config_path.to_path_buf(),
-            found,
-            supported,
-        });
-    }
-    if found < supported {
-        return Err(HeddleError::RepositoryFormatMigrationRequired {
-            path: config_path.to_path_buf(),
-            found,
-            required: supported,
-        });
-    }
-    Ok(())
+    super::repo_config::reject_unsupported_repo_format(config_path, config.repository.version)
 }
 
 fn validate_snapshot_artifact_records(

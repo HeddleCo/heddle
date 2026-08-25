@@ -511,6 +511,11 @@ mod resolve {
         create_conflict(&temp);
 
         fs::write(temp.path().join("file.txt"), "custom resolved\n").unwrap();
+        fs::write(
+            temp.path().join(".heddle/identity"),
+            r#"{"provider":"openai","model":"gpt-resolver"}"#,
+        )
+        .unwrap();
         heddle_with_env(
             &["resolve", "file.txt"],
             Some(temp.path()),

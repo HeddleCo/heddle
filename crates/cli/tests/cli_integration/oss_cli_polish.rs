@@ -1902,13 +1902,15 @@ fn capture_json_reports_recorded_confidence_principal_and_agent() {
             "0.9",
             "--output",
             "json",
+            "--agent-provider",
+            "codex",
+            "--agent-model",
+            "gpt-5-codex",
         ],
         Some(temp.path()),
         &[
             ("HEDDLE_PRINCIPAL_NAME", "Ada Agent"),
             ("HEDDLE_PRINCIPAL_EMAIL", "ada-agent@example.com"),
-            ("HEDDLE_AGENT_PROVIDER", "codex"),
-            ("HEDDLE_AGENT_MODEL", "gpt-5-codex"),
         ],
     )
     .expect("capture should run");
@@ -1955,7 +1957,14 @@ fn capture_auto_detects_codex_model_without_fabricating_plain_shell_agent() {
         "HEDDLE_AGENT_MODEL",
         "CLAUDECODE",
         "CLAUDE_MODEL",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_EFFORT",
         "ANTHROPIC_MODEL",
+        "PI_MODEL",
+        "PI_REASONING_LEVEL",
+        "PI_SESSION_ID",
+        "PI_PROVIDER",
+        "PI_PARENT_ID",
     ];
     let capture = |message: &str, envs: &[(&str, &str)]| {
         let output = heddle_output_with_env_removed(
@@ -2001,6 +2010,12 @@ fn capture_auto_detects_codex_model_without_fabricating_plain_shell_agent() {
     .unwrap();
 
     std::fs::write(temp.path().join("codex.txt"), "codex work\n").unwrap();
+    // Capture freezes the identity cursor, not hoped-for env / rollout hunts.
+    std::fs::write(
+        temp.path().join(".heddle/identity"),
+        r#"{"provider":"openai","model":"gpt-5.6-sol"}"#,
+    )
+    .unwrap();
     capture(
         "codex save",
         &[
@@ -2011,20 +2026,24 @@ fn capture_auto_detects_codex_model_without_fabricating_plain_shell_agent() {
     assert_eq!(latest_agent(), "openai/gpt-5.6-sol");
 
     std::fs::write(temp.path().join("plain.txt"), "plain shell work\n").unwrap();
+    std::fs::remove_file(temp.path().join(".heddle/identity")).unwrap();
     capture("plain shell save", &[]);
     assert_eq!(latest_agent(), Value::Null);
 
     std::fs::write(temp.path().join("claude.txt"), "claude work\n").unwrap();
-    // CLAUDE_MODEL is inert in an ordinary shell, but CLAUDECODE is the
-    // independent process marker that proves this is a real Claude Code
-    // session and makes the model safe to retain.
+    // CLAUDECODE + CLAUDE_MODEL must not invent an agent without a cursor.
     capture(
         "claude save",
         &[("CLAUDECODE", "1"), ("CLAUDE_MODEL", "claude-fable-5")],
     );
-    assert_eq!(latest_agent(), "anthropic/claude-fable-5");
+    assert_eq!(latest_agent(), Value::Null);
 
     std::fs::write(temp.path().join("claude-hinted.txt"), "claude work\n").unwrap();
+    std::fs::write(
+        temp.path().join(".heddle/identity"),
+        r#"{"provider":"anthropic","model":"claude-fable-5"}"#,
+    )
+    .unwrap();
     capture(
         "claude hinted save",
         &[
@@ -8738,7 +8757,10 @@ fn agent_presence_explain_json_detects_harness_without_active_presence() {
     assert!(parsed.get("active_presence").is_none());
     assert_eq!(parsed["detected"]["harness"], "codex");
     assert_eq!(parsed["detected"]["provider"], "openai");
-    assert_eq!(parsed["detected"]["model"], "gpt-5.3-codex");
+    assert!(
+        parsed["detected"].get("model").is_none() || parsed["detected"]["model"].is_null(),
+        "presence explain must not invent a model from CODEX_MODEL: {parsed}"
+    );
     assert_eq!(parsed["detected"]["thinking_level"], "high");
     assert!(parsed["detected"].get("policy").is_none());
     assert!(parsed["detected"].get("native_parent_actor_key").is_none());
@@ -9806,13 +9828,19 @@ fn default_status_and_log_hide_internal_hashes_until_verbose() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("a.txt"), "alpha\n").unwrap();
-    let capture = heddle_output_with_env(
-        &["capture", "-m", "seed", "--confidence", "0.9"],
-        Some(temp.path()),
+    let capture = heddle_output(
         &[
-            ("HEDDLE_AGENT_PROVIDER", "codex"),
-            ("HEDDLE_AGENT_MODEL", "gpt-5"),
+            "capture",
+            "-m",
+            "seed",
+            "--confidence",
+            "0.9",
+            "--agent-provider",
+            "codex",
+            "--agent-model",
+            "gpt-5",
         ],
+        Some(temp.path()),
     )
     .expect("capture with agent attribution should run");
     assert!(capture.status.success(), "capture should succeed");
@@ -10221,8 +10249,12 @@ fn verify_after_git_overlay_clone_reports_clone_verified() {
         serde_json::json!([])
     );
     let exclude = std::fs::read_to_string(work.join(".git/info/exclude")).unwrap();
-    {
-        let pattern = ".heddle/";
+    for pattern in [
+        ".heddle/",
+        ".heddle.identity",
+        ".identity.lock",
+        ".identity.tmp.*",
+    ] {
         assert!(
             exclude.lines().any(|line| line.trim() == pattern),
             "clone should install the same local Git exclude policy as init; missing {pattern:?}: {exclude}"

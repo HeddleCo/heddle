@@ -12,7 +12,11 @@ use serde::{Deserialize, Serialize};
 use super::Result;
 use crate::FsMonitorConfig;
 
-pub(crate) const SUPPORTED_REPO_FORMAT: u32 = 4;
+pub(crate) const SUPPORTED_REPO_FORMAT: u32 = 5;
+/// Oldest format this binary can open and migrate forward. Format 4
+/// repositories keep pre-cursor agent ids; `0006_identity_cursor_attribution`
+/// records the HCS2 / cursor-hash boundary and bumps the version.
+pub(crate) const MIN_MIGRATABLE_REPO_FORMAT: u32 = 4;
 
 /// Repository configuration stored in `.heddle/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -570,20 +574,7 @@ impl RepoConfig {
             });
         }
         let version = repository_format_version(&contents, &resolved)?;
-        if version > SUPPORTED_REPO_FORMAT {
-            return Err(HeddleError::RepositoryFormatTooNew {
-                path: resolved,
-                found: version,
-                supported: SUPPORTED_REPO_FORMAT,
-            });
-        }
-        if version < SUPPORTED_REPO_FORMAT {
-            return Err(HeddleError::RepositoryFormatMigrationRequired {
-                path: resolved,
-                found: version,
-                required: SUPPORTED_REPO_FORMAT,
-            });
-        }
+        reject_unsupported_repo_format(&resolved, version)?;
         Self::load(path)
     }
 
@@ -611,6 +602,24 @@ struct RepositoryFormatProbe {
 #[derive(Deserialize)]
 struct RepositoryVersionProbe {
     version: u32,
+}
+
+pub(crate) fn reject_unsupported_repo_format(path: &Path, version: u32) -> Result<()> {
+    if version > SUPPORTED_REPO_FORMAT {
+        return Err(HeddleError::RepositoryFormatTooNew {
+            path: path.to_path_buf(),
+            found: version,
+            supported: SUPPORTED_REPO_FORMAT,
+        });
+    }
+    if version < MIN_MIGRATABLE_REPO_FORMAT {
+        return Err(HeddleError::RepositoryFormatMigrationRequired {
+            path: path.to_path_buf(),
+            found: version,
+            required: SUPPORTED_REPO_FORMAT,
+        });
+    }
+    Ok(())
 }
 
 fn repository_format_version(contents: &str, path: &Path) -> Result<u32> {
@@ -803,6 +812,18 @@ format = "auto"
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn format_4_is_migratable_without_rewriting_the_file() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("config.toml");
+        let fixture = "[repository]\nversion = 4\nsource_authority = \"native\"\n";
+        std::fs::write(&path, fixture).unwrap();
+
+        let loaded = RepoConfig::load_for_repository(&path).expect("format 4 must still load");
+        assert_eq!(loaded.repository.version, 4);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), fixture);
     }
 
     #[test]

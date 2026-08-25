@@ -68,7 +68,7 @@ fn verify_state_frame(records: &[(StateId, State)], frame: &[u8]) -> Result<(), 
         );
     }
     for ((id, expected), actual) in records.iter().zip(decoded) {
-        if actual.id() != *id {
+        if !actual.accepts_stored_id(id) {
             return Err(HeddleError::InvalidObject(
                 "compact state frame changed its typed id".into(),
             )
@@ -84,4 +84,27 @@ fn verify_state_frame(records: &[(StateId, State)], frame: &[u8]) -> Result<(), 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object::{Agent, Attribution, Principal};
+
+    #[test]
+    fn hcs2_repack_keeps_format4_agent_stored_id() {
+        let mut state = State::new(
+            crate::object::ContentHash::from_bytes([9; 32]),
+            Vec::new(),
+            Attribution::with_agent(
+                Principal::new("Author", "author@example.com"),
+                Agent::new("anthropic", "opus"),
+            ),
+        );
+        let stored_id = state.pre_cursor_id();
+        state.state_id = stored_id;
+        let frame = encode_state_frame(std::slice::from_ref(&state)).expect("encode HCS2");
+        verify_state_frame(&[(stored_id, state)], &frame)
+            .expect("repack must accept the preserved pre-cursor id");
+    }
 }

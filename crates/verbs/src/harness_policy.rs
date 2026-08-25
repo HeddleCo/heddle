@@ -4,14 +4,14 @@
 //! Owns:
 //! - harness kind fingerprinting from argv / env hint maps
 //! - session attach-vs-create decision given caller-gathered probe facts
-//! - segment rotation when provider or model changes
+//! - segment rotation when provider, model, or thought_level changes
+//!   (empty → set is attach, not a rotate)
 //!
 //! Process detection, registry lookups, session store I/O, and path
 //! canonicalization remain CLI-owned. Callers pass pure facts in and apply
 //! the returned decision.
 
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 // ---------------------------------------------------------------------------
 // Harness kind / fingerprint
@@ -137,25 +137,6 @@ pub fn fingerprint_harness_from_hints(
         policy: None,
     };
 
-    // HEDDLE_AGENT_PROVIDER fills only when no harness default was set
-    // (historical `or_else` order in the CLI fingerprint).
-    fingerprint.provider = fingerprint.provider.or_else(|| {
-        env_hints
-            .get("HEDDLE_AGENT_PROVIDER")
-            .cloned()
-            .and_then(clean_attribution_value)
-    });
-    fingerprint.model = env_hints
-        .get("HEDDLE_AGENT_MODEL")
-        .cloned()
-        .and_then(clean_attribution_value)
-        .or_else(|| env_hints.get("CODEX_MODEL").cloned())
-        .or_else(|| env_hints.get("CLAUDE_MODEL").cloned())
-        .or_else(|| env_hints.get("ANTHROPIC_MODEL").cloned())
-        .or_else(|| env_hints.get("OPENAI_MODEL").cloned())
-        .or_else(|| env_hints.get("OPENCODE_MODEL").cloned())
-        .or_else(|| env_hints.get("AIDER_MODEL").cloned())
-        .or_else(|| env_hints.get("MODEL").cloned());
     fingerprint.thinking_level = env_hints
         .get("THINKING_LEVEL")
         .cloned()
@@ -526,38 +507,99 @@ fn create_decision(
 // Segment rotation
 // ---------------------------------------------------------------------------
 
-/// Whether the current session segment should rotate for a new identity.
+/// Whether the current session segment should rotate or attach for a new identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegmentRotation {
     Keep,
+    /// Unpublished → published: write onto the current placeholder segment.
+    Attach,
     Rotate,
 }
 
-/// Pure segment rotation policy: rotate when provider or model changes.
+/// Pure segment rotation policy: rotate when a published provider, model,
+/// or thought_level **changes**. Empty → set is [`SegmentRotation::Attach`],
+/// not a rotate.
 ///
-/// - No current segment → keep (caller creates the first segment elsewhere).
-/// - `new_*` is `None` → does not force rotation (blank hints fall through).
-/// - Rotation only when a new value is present and differs from current.
+/// - Incoming `None` / empty / `unknown` does not force rotation.
+/// - Rotation only when both sides have a published value and they differ.
+/// - Each field is evaluated independently so an unpublished provider cannot
+///   mask a published model / thought_level change.
 pub fn segment_rotation_policy(
     current_provider: Option<&str>,
     current_model: Option<&str>,
     new_provider: Option<&str>,
     new_model: Option<&str>,
 ) -> SegmentRotation {
-    let Some(current_provider) = current_provider else {
-        return SegmentRotation::Keep;
-    };
-    // Model may be missing on a segment only if caller has no current segment;
-    // when a segment exists both provider and model are set. Treat missing
-    // current model as empty for comparison only when provider was present.
-    let current_model = current_model.unwrap_or("");
+    cursor_segment_rotation(
+        current_provider,
+        current_model,
+        None,
+        new_provider,
+        new_model,
+        None,
+    )
+}
 
-    let provider_changed = new_provider.is_some_and(|p| p != current_provider);
-    let model_changed = new_model.is_some_and(|m| m != current_model);
-    if provider_changed || model_changed {
+/// Same as [`segment_rotation_policy`] plus `thought_level`.
+pub fn cursor_segment_rotation(
+    current_provider: Option<&str>,
+    current_model: Option<&str>,
+    current_thought_level: Option<&str>,
+    new_provider: Option<&str>,
+    new_model: Option<&str>,
+    new_thought_level: Option<&str>,
+) -> SegmentRotation {
+    if field_rotates(current_provider, new_provider)
+        || field_rotates(current_model, new_model)
+        || field_rotates(current_thought_level, new_thought_level)
+    {
         SegmentRotation::Rotate
+    } else if field_attaches(current_provider, new_provider)
+        || field_attaches(current_model, new_model)
+        || field_attaches(current_thought_level, new_thought_level)
+    {
+        SegmentRotation::Attach
     } else {
         SegmentRotation::Keep
+    }
+}
+
+fn field_rotates(current: Option<&str>, incoming: Option<&str>) -> bool {
+    match (
+        crate::identity_cursor::published_field(current),
+        crate::identity_cursor::published_field(incoming),
+    ) {
+        (Some(current), Some(incoming)) => current != incoming,
+        _ => false,
+    }
+}
+
+fn field_attaches(current: Option<&str>, incoming: Option<&str>) -> bool {
+    crate::identity_cursor::published_field(current).is_none()
+        && crate::identity_cursor::published_field(incoming).is_some()
+}
+
+/// Write newly published values onto a placeholder segment (empty → set).
+pub fn attach_published_segment_fields(
+    segment: &mut objects::object::SessionSegment,
+    provider: Option<&str>,
+    model: Option<&str>,
+    thought_level: Option<&str>,
+) {
+    if crate::identity_cursor::published_field(Some(segment.provider.as_str())).is_none()
+        && let Some(provider) = crate::identity_cursor::published_field(provider)
+    {
+        segment.provider = provider.to_string();
+    }
+    if crate::identity_cursor::published_field(Some(segment.model.as_str())).is_none()
+        && let Some(model) = crate::identity_cursor::published_field(model)
+    {
+        segment.model = model.to_string();
+    }
+    if crate::identity_cursor::published_field(segment.thought_level.as_deref()).is_none()
+        && let Some(thought_level) = crate::identity_cursor::published_field(thought_level)
+    {
+        segment.thought_level = Some(thought_level.to_string());
     }
 }
 
@@ -658,23 +700,28 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_reads_model_and_thinking_env() {
+    fn fingerprint_does_not_invent_model_from_hoped_for_env() {
         let fp = fingerprint_harness_from_hints(
             None,
             &env(&[
                 ("CODEX_THREAD_ID", "t1"),
                 ("CODEX_MODEL", "gpt-5.5"),
+                ("HEDDLE_AGENT_MODEL", "claude-opus-4-7"),
+                ("MODEL", "fallback-model"),
                 ("CODEX_REASONING_EFFORT", "xhigh"),
             ]),
         );
         assert_eq!(fp.kind, HarnessKind::Codex);
-        assert_eq!(fp.model.as_deref(), Some("gpt-5.5"));
+        assert!(
+            fp.model.is_none(),
+            "kind-only fingerprint must not hunt a model"
+        );
         assert_eq!(fp.thinking_level.as_deref(), Some("xhigh"));
         assert_eq!(fp.provider.as_deref(), Some("openai"));
     }
 
     #[test]
-    fn fingerprint_strips_blank_heddle_agent_env() {
+    fn fingerprint_strips_blank_heddle_agent_policy() {
         let fp = fingerprint_harness_from_hints(
             None,
             &env(&[
@@ -684,8 +731,8 @@ mod tests {
                 ("MODEL", "fallback-model"),
             ]),
         );
-        assert_eq!(fp.provider.as_deref(), Some("custom"));
-        assert_eq!(fp.model.as_deref(), Some("fallback-model"));
+        assert!(fp.provider.is_none());
+        assert!(fp.model.is_none());
         assert_eq!(fp.policy, None);
     }
 
@@ -745,6 +792,92 @@ mod tests {
                 Some("opus"),
                 Some("anthropic"),
                 Some("sonnet"),
+            ),
+            SegmentRotation::Rotate
+        );
+    }
+
+    #[test]
+    fn segment_rotates_on_thought_level_change_empty_set_is_attach() {
+        assert_eq!(
+            cursor_segment_rotation(
+                Some("anthropic"),
+                Some("opus"),
+                None,
+                Some("anthropic"),
+                Some("opus"),
+                Some("high"),
+            ),
+            SegmentRotation::Attach
+        );
+        assert_eq!(
+            cursor_segment_rotation(
+                Some("anthropic"),
+                Some("opus"),
+                Some("high"),
+                Some("anthropic"),
+                Some("opus"),
+                Some("low"),
+            ),
+            SegmentRotation::Rotate
+        );
+        assert_eq!(
+            cursor_segment_rotation(
+                Some("anthropic"),
+                Some(""),
+                None,
+                Some("anthropic"),
+                Some("opus"),
+                None,
+            ),
+            SegmentRotation::Attach
+        );
+    }
+
+    #[test]
+    fn unpublished_to_published_attaches_placeholder_segment() {
+        assert_eq!(
+            cursor_segment_rotation(
+                Some("unknown"),
+                Some("unknown"),
+                None,
+                Some("anthropic"),
+                Some("opus"),
+                Some("high"),
+            ),
+            SegmentRotation::Attach
+        );
+        assert!(!should_rotate_segment(
+            Some("unknown"),
+            Some("unknown"),
+            Some("anthropic"),
+            Some("opus"),
+        ));
+        let mut segment = objects::object::SessionSegment {
+            id: "sess-1-seg-1".into(),
+            provider: "unknown".into(),
+            model: "unknown".into(),
+            started_at: chrono::Utc::now(),
+            policy_id: None,
+            thought_level: None,
+        };
+        attach_published_segment_fields(
+            &mut segment,
+            Some("anthropic"),
+            Some("opus"),
+            Some("high"),
+        );
+        assert_eq!(segment.provider, "anthropic");
+        assert_eq!(segment.model, "opus");
+        assert_eq!(segment.thought_level.as_deref(), Some("high"));
+        assert_eq!(
+            cursor_segment_rotation(
+                Some("anthropic"),
+                Some("opus"),
+                Some("high"),
+                Some("anthropic"),
+                Some("sonnet"),
+                Some("high"),
             ),
             SegmentRotation::Rotate
         );

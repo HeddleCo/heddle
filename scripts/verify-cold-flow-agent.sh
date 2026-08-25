@@ -9,6 +9,10 @@ export HEDDLE_AGENT_PROVIDER="${HEDDLE_AGENT_PROVIDER:-codex-cli}"
 export HEDDLE_AGENT_MODEL="${HEDDLE_AGENT_MODEL:-oss-cold-flow}"
 export HEDDLE_PRINCIPAL_NAME="${HEDDLE_PRINCIPAL_NAME:-Codex Evaluation}"
 export HEDDLE_PRINCIPAL_EMAIL="${HEDDLE_PRINCIPAL_EMAIL:-codex-eval@example.com}"
+# Capture freezes flags + `.heddle/identity` only. Host Claude/OpenCode child
+# env must not rewrite the stamped Codex cursor (provider/thought_level).
+unset CLAUDE_CODE_SESSION_ID CLAUDE_EFFORT \
+  PI_MODEL PI_REASONING_LEVEL PI_SESSION_ID PI_PROVIDER PI_PARENT_ID
 
 ARTIFACT_ROOT="${HEDDLE_VERIFY_ARTIFACT_ROOT:-$ROOT/target/verify-cold-flow-agent}"
 WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/heddle-verify-agent.XXXXXX")"
@@ -19,6 +23,14 @@ find "$ARTIFACT_ROOT" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 
 heddle_runtime() {
   env PATH="$HEDDLE_RUNTIME_PATH" "$HEDDLE_BIN" "$@"
+}
+
+# Capture freezes `.heddle/identity`, not hoped-for HEDDLE_AGENT_* env.
+# Stamp the same cursor a Codex hook would write so this agent flow stays attributed.
+stamp_identity_cursor() {
+  local repo="$1"
+  mkdir -p "$repo/.heddle"
+  printf '{"provider":"codex-cli","model":"oss-cold-flow"}\n' > "$repo/.heddle/identity"
 }
 
 heddle_runtime_path_label() {
@@ -851,6 +863,7 @@ PYJSON
     run_json "$transcript" "$clone_path" "$shape.00.adopt-native" adopt --ref main
   fi
   assert_source_authority "$clone_path" native
+  stamp_identity_cursor "$clone_path"
   printf 'native authority proof for %s\n' "$shape" > "$clone_path/native-authority-proof.txt"
   run_json "$transcript" "$clone_path" "$shape.00.native-capture" capture -m "native authority proof $shape" --confidence 0.9
   run_json_expect_undo_requires_hard "$transcript" "$clone_path" "$shape.00.native-undo-refusal" undo
@@ -869,6 +882,7 @@ PYJSON
   test ! -e "$repo/.heddle"
 
   run_json "$transcript" "$repo" "$shape.03.init-overlay" init
+  stamp_identity_cursor "$repo"
   assert_source_authority "$repo" git-overlay
   run_json "$transcript" "$repo" "$shape.03.import-overlay-main" bridge git import --ref main
   assert_source_authority "$repo" git-overlay
@@ -931,6 +945,7 @@ PYJSON
   local feature_thread="feature-$shape"
   local feature_path="$WORK_ROOT/$shape-isolated"
   run_json "$transcript" "$repo" "$shape.27.start" start "$feature_thread" --path "$feature_path" --workspace solid
+  stamp_identity_cursor "$feature_path"
   make_agent_isolated_edit "$feature_path" "$shape"
   run_json "$transcript" "$feature_path" "$shape.28.diff-isolated" diff
   if [[ "$shape" != "small-app" ]]; then

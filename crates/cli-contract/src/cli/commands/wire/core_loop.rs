@@ -10,10 +10,9 @@
 //! The `#[schemars(rename)]` attributes keep the published `$defs` titles
 //! stable while the Rust types carry their natural names.
 
+use objects::object::{Agent, Principal};
 use schemars::JsonSchema;
 use serde::Serialize;
-
-use objects::object::{Agent, Principal};
 use verbs::{ActionTemplate, RepositoryVerificationState, UndoBatchSummary};
 
 // ---- capture ---------------------------------------------------------------
@@ -69,6 +68,10 @@ pub struct SnapshotAgentOutput {
     pub segment_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 impl From<&Principal> for SnapshotPrincipalOutput {
@@ -88,6 +91,8 @@ impl From<&Agent> for SnapshotAgentOutput {
             session_id: agent.session_id.clone(),
             segment_id: agent.segment_id.clone(),
             policy_id: agent.policy_id.clone(),
+            thought_level: agent.thought_level.clone(),
+            parent: agent.parent.clone(),
         }
     }
 }

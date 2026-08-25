@@ -9,6 +9,11 @@ use std::{
 use anyhow::{Result, anyhow};
 use base64::Engine as _;
 use chrono::Utc;
+use config::config::{
+    HarnessMode, HarnessTranscriptMode, HarnessTransport, UserConfig, UserHarnessOverride,
+    UserHarnessRootThreadPolicy, UserHarnessSubagentThreadPolicy, UserThreadWorkspaceMode,
+};
+use heddle_cli_render::cli::style;
 use objects::{
     fs_atomic::write_file_atomic,
     object::{
@@ -21,18 +26,18 @@ use objects::{
 };
 use refs::Head;
 use repo::{
-    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
-    Repository, SessionManager, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
-    ThreadMode, ThreadState, TimelineStore, TimelineView,
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, Repository,
+    SessionManager, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager, ThreadMode,
+    ThreadState, TimelineStore, TimelineView, summarize_confidence, summarize_verification,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use verbs::{
-    ExplicitAgentBind, HarnessKind, SessionAttachFacts, SessionLookupFact, SessionPolicy,
-    TokenSidFact, WorktreeSessionFact, decide_session_attach, detect_harness_kind,
-    first_value_string, map_from_pairs, merge_string_vec, opencode_tool_name, opencode_tool_status,
-    parse_relay_payload as core_parse_relay_payload,
-    should_rotate_segment as pure_should_rotate_segment, value_array_join, value_cost_micros,
+    ExplicitAgentBind, HarnessKind, SegmentRotation, SessionAttachFacts, SessionLookupFact,
+    SessionPolicy, TokenSidFact, WorktreeSessionFact, attach_published_segment_fields,
+    cursor_segment_rotation, decide_session_attach, detect_harness_kind, first_value_string,
+    map_from_pairs, merge_string_vec, opencode_tool_name, opencode_tool_status,
+    parse_relay_payload as core_parse_relay_payload, value_array_join, value_cost_micros,
     value_cost_micros_u64, value_string, value_string_array, value_u64, value_u64_string,
 };
 use wire::{
@@ -40,24 +45,17 @@ use wire::{
     TranscriptAttachmentRef, UsageTotals, WorktreeChangeBaseline,
 };
 
-use config::config::{
-    HarnessMode, HarnessTranscriptMode, HarnessTransport, UserConfig, UserHarnessOverride,
-    UserHarnessRootThreadPolicy, UserHarnessSubagentThreadPolicy, UserThreadWorkspaceMode,
-};
-use heddle_cli_render::cli::style;
-use repo::{summarize_confidence, summarize_verification};
-
 use crate::{
     bridge::{HarnessCliBridge, RelayCapture},
     claude_hook,
-    probe::{HarnessProbeInput, HarnessProbeResult, codex_session_probe_metadata, probe_harness_actor},
+    probe::{
+        HarnessProbeInput, HarnessProbeResult, codex_session_probe_metadata, probe_harness_actor,
+    },
 };
 
 /// Provider/model hint from the wrapping harness, in the shape the hosted
 /// client's attribution resolver consumes (installed at startup).
-pub fn current_process_harness_hint(
-    repo: &Repository,
-) -> (Option<String>, Option<String>) {
+pub fn current_process_harness_hint(repo: &Repository) -> (Option<String>, Option<String>) {
     let probe = probe_current_process_harness(repo, None, None, None).ok();
     (
         probe.as_ref().and_then(|probe| probe.provider.clone()),
@@ -105,12 +103,12 @@ fn anchored_process_harness_hints(
         argv.and_then(|args| args.first()).map(String::as_str),
         &BTreeMap::new(),
     );
-    let codex_anchored = non_empty_hint(&raw, "CODEX_THREAD_ID")
-        || program_kind == HarnessKind::Codex;
-    let claude_anchored = non_empty_hint(&raw, "CLAUDECODE")
-        || program_kind == HarnessKind::ClaudeCode;
-    let opencode_anchored = non_empty_hint(&raw, "OPENCODE_CLIENT")
-        || program_kind == HarnessKind::OpenCode;
+    let codex_anchored =
+        non_empty_hint(&raw, "CODEX_THREAD_ID") || program_kind == HarnessKind::Codex;
+    let claude_anchored =
+        non_empty_hint(&raw, "CLAUDECODE") || program_kind == HarnessKind::ClaudeCode;
+    let opencode_anchored =
+        non_empty_hint(&raw, "OPENCODE_CLIENT") || program_kind == HarnessKind::OpenCode;
 
     raw.into_iter()
         .filter(|(key, _)| {
@@ -124,9 +122,7 @@ fn anchored_process_harness_hints(
 }
 
 fn non_empty_hint(hints: &BTreeMap<String, String>, key: &str) -> bool {
-    hints
-        .get(key)
-        .is_some_and(|value| !value.trim().is_empty())
+    hints.get(key).is_some_and(|value| !value.trim().is_empty())
 }
 
 fn ambient_model_hint(key: &str) -> bool {
@@ -152,8 +148,9 @@ fn anchored_model_hint(
     opencode_anchored: bool,
 ) -> bool {
     match key {
-        "CODEX_MODEL" | "CODEX_REASONING_EFFORT" | "OPENAI_MODEL"
-        | "OPENAI_REASONING_EFFORT" => codex_anchored,
+        "CODEX_MODEL" | "CODEX_REASONING_EFFORT" | "OPENAI_MODEL" | "OPENAI_REASONING_EFFORT" => {
+            codex_anchored
+        }
         "CLAUDE_MODEL" | "ANTHROPIC_MODEL" => claude_anchored,
         "OPENCODE_MODEL" => opencode_anchored,
         "MODEL" | "REASONING_EFFORT" | "THINKING_LEVEL" => {
@@ -186,6 +183,15 @@ fn detected_harness_argv() -> Option<Vec<String>> {
     detected_harness_argv_impl()
 }
 
+/// Parent walk is kind-only: basename of argv0, never `--model` or other args.
+fn harness_kind_argv_from_cmdline(raw: &[u8]) -> Option<Vec<String>> {
+    let program = raw
+        .split(|byte| *byte == 0)
+        .find(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part).to_string())?;
+    verbs::harness_kind_from_basename(&program).map(|_| vec![program])
+}
+
 #[cfg(target_os = "linux")]
 fn detected_harness_argv_impl() -> Option<Vec<String>> {
     let mut pid = std::process::id();
@@ -197,16 +203,7 @@ fn detected_harness_argv_impl() -> Option<Vec<String>> {
         }
         pid = ppid;
         let raw = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-        let argv = raw
-            .split(|byte| *byte == 0)
-            .filter(|part| !part.is_empty())
-            .map(|part| String::from_utf8_lossy(part).to_string())
-            .collect::<Vec<_>>();
-        let program = argv.first().map(|arg| arg.to_ascii_lowercase())?;
-        if ["codex", "claude", "opencode", "aider"]
-            .iter()
-            .any(|needle| program.contains(needle))
-        {
+        if let Some(argv) = harness_kind_argv_from_cmdline(&raw) {
             return Some(argv);
         }
     }
@@ -394,6 +391,7 @@ fn relay_claude(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value
     })?;
     match event {
         "SessionEnd" => {
+            verbs::expire_identity_cursor(runtime.repo.root())?;
             runtime.close_session(CloseSessionParams {
                 heddle_session_id: opened.heddle_session_id,
                 summary: value_string(payload, &["reason"])
@@ -528,6 +526,9 @@ fn relay_claude(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value
 }
 
 fn relay_opencode(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value) -> Result<()> {
+    if verbs::cursor_event_expires(payload, Some(event)) {
+        verbs::expire_identity_cursor(runtime.repo.root())?;
+    }
     let metadata = map_from_pairs([
         (
             "session_id",
@@ -1090,20 +1091,8 @@ impl HarnessBridgeRuntime {
         )?;
 
         let mut segment_id = session.current_segment_id.clone().unwrap_or_default();
-        if should_rotate_segment(&session, &identity) {
-            let segment = sessions.add_segment(
-                &session.id,
-                identity
-                    .provider
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                identity
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                identity.policy.clone(),
-            )?;
-            segment_id = segment.id;
+        if let Some(next_segment) = apply_identity_segment(&mut sessions, &session, &identity)? {
+            segment_id = next_segment;
         }
 
         let base_state = self
@@ -1117,7 +1106,8 @@ impl HarnessBridgeRuntime {
                     .flatten()
                     .map(|id| id.to_string_full())
             });
-        let worktree_changes_at_open = capture_worktree_change_snapshot(&self.user_config, &self.repo)?;
+        let worktree_changes_at_open =
+            capture_worktree_change_snapshot(&self.user_config, &self.repo)?;
         let opened_at = Utc::now().to_rfc3339();
         let mut report = SessionReportEnvelope {
             version: 1,
@@ -1612,22 +1602,13 @@ impl HarnessBridgeRuntime {
         let Some(session) = sessions.get_session(&report.heddle_session_id)? else {
             return Ok(());
         };
-        if !session.is_active() || !should_rotate_segment(&session, identity) {
+        if !session.is_active() {
             return Ok(());
         }
-        let segment = sessions.add_segment(
-            &report.heddle_session_id,
-            identity
-                .provider
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            identity
-                .model
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            identity.policy.clone(),
-        )?;
-        report.heddle_segment_id = Some(segment.id);
+        let Some(segment_id) = apply_identity_segment(&mut sessions, &session, identity)? else {
+            return Ok(());
+        };
+        report.heddle_segment_id = Some(segment_id);
         if identity.provider.is_some() {
             report.harness.provider = identity.provider.clone();
         }
@@ -2364,16 +2345,59 @@ struct TokenClaims {
     agent_model: Option<String>,
 }
 
-fn should_rotate_segment(session: &objects::object::Session, identity: &ResolvedIdentity) -> bool {
-    let Some(segment) = session.current_segment() else {
-        return false;
-    };
-    pure_should_rotate_segment(
-        Some(segment.provider.as_str()),
-        Some(segment.model.as_str()),
+fn apply_identity_segment(
+    sessions: &mut SessionManager,
+    session: &Session,
+    identity: &ResolvedIdentity,
+) -> Result<Option<String>> {
+    let current = session.current_segment();
+    match cursor_segment_rotation(
+        current.map(|segment| segment.provider.as_str()),
+        current.map(|segment| segment.model.as_str()),
+        current.and_then(|segment| segment.thought_level.as_deref()),
         identity.provider.as_deref(),
         identity.model.as_deref(),
-    )
+        identity.thinking_level.as_deref(),
+    ) {
+        SegmentRotation::Rotate => {
+            let segment = sessions.add_segment(
+                &session.id,
+                identity
+                    .provider
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                identity
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                identity.policy.clone(),
+            )?;
+            if let Some(thought_level) = identity.thinking_level.clone()
+                && let Some(mut updated) = sessions.get_session(&session.id)?
+            {
+                if let Some(current) = updated.current_segment_mut() {
+                    current.thought_level = Some(thought_level);
+                }
+                sessions.save_session(&updated)?;
+            }
+            Ok(Some(segment.id))
+        }
+        SegmentRotation::Attach => {
+            if let Some(mut updated) = sessions.get_session(&session.id)? {
+                if let Some(segment) = updated.current_segment_mut() {
+                    attach_published_segment_fields(
+                        segment,
+                        identity.provider.as_deref(),
+                        identity.model.as_deref(),
+                        identity.thinking_level.as_deref(),
+                    );
+                }
+                sessions.save_session(&updated)?;
+            }
+            Ok(session.current_segment_id.clone())
+        }
+        SegmentRotation::Keep => Ok(session.current_segment_id.clone()),
+    }
 }
 
 fn thread_id_for_name(repo: &Repository, thread_name: Option<&str>) -> Result<Option<String>> {
@@ -3173,6 +3197,23 @@ mod tests {
     }
 
     #[test]
+    fn parent_walk_cmdline_is_kind_only_and_does_not_extract_model() {
+        let raw = b"/usr/bin/claude\0--model\0claude-opus-4-7\0--effort\0high\0";
+        let argv = super::harness_kind_argv_from_cmdline(raw).expect("claude basename is a kind");
+        assert_eq!(argv, vec!["/usr/bin/claude".to_string()]);
+        assert!(
+            !argv
+                .iter()
+                .any(|arg| arg.contains("opus") || arg == "--model"),
+            "parent walk must not extract a model from /proc cmdline"
+        );
+        let ignored = super::harness_kind_argv_from_cmdline(
+            b"/home/u/dev/claude/target/debug/heddle\0--model\0opus\0",
+        );
+        assert!(ignored.is_none());
+    }
+
+    #[test]
     fn harness_config_load_missing_path_defaults_without_warning() {
         let temp = tempfile::TempDir::new().unwrap();
         let missing = temp.path().join("missing-config.toml");
@@ -3300,8 +3341,7 @@ mod tests {
                     ("OPENAI_MODEL".to_string(), "gpt-5.6-sol".to_string()),
                 ]),
                 "codex",
-                "openai",
-                "gpt-5.6-sol",
+                Some("openai"),
             ),
             (
                 BTreeMap::from([
@@ -3309,8 +3349,7 @@ mod tests {
                     ("CLAUDE_MODEL".to_string(), "claude-opus-4-8".to_string()),
                 ]),
                 "claude-code",
-                "anthropic",
-                "claude-opus-4-8",
+                Some("anthropic"),
             ),
             (
                 BTreeMap::from([
@@ -3322,12 +3361,11 @@ mod tests {
                     ),
                 ]),
                 "opencode",
-                "anthropic",
-                "claude-sonnet-4-6",
+                Some("anthropic"),
             ),
         ];
 
-        for (raw, harness, provider, model) in cases {
+        for (raw, harness, provider) in cases {
             let result = probe_harness_actor(&HarnessProbeInput {
                 env_hints: anchored_process_harness_hints(None, raw),
                 repo_root: "/tmp/repo".to_string(),
@@ -3336,8 +3374,11 @@ mod tests {
             .expect("anchored harness probe succeeds");
 
             assert_eq!(result.harness.as_deref(), Some(harness));
-            assert_eq!(result.provider.as_deref(), Some(provider));
-            assert_eq!(result.model.as_deref(), Some(model));
+            assert_eq!(result.provider.as_deref(), provider);
+            assert!(
+                result.model.is_none(),
+                "{harness} must not invent a model from inherited *_MODEL env"
+            );
         }
     }
 
@@ -3470,6 +3511,55 @@ mod tests {
             report.heddle_segment_id.as_deref(),
             Some(expected_segment.as_str())
         );
+    }
+
+    #[test]
+    fn unpublished_identity_attaches_to_placeholder_segment() {
+        let (_temp, repo) = init_repo();
+        let user_config = UserConfig::default();
+        let mut runtime = HarnessBridgeRuntime::new(repo, user_config, test_bridge());
+
+        let opened = runtime
+            .open_session(OpenSessionParams {
+                // Use a root-actor probe with no default provider/model. Aider
+                // goes through the generic subagent path, whose default child
+                // worktree creation is unrelated to this segment test.
+                harness: Some("opencode".to_string()),
+                ..OpenSessionParams::default()
+            })
+            .unwrap();
+        assert!(opened.provider.is_none());
+        assert!(opened.model.is_none());
+        let first_segment = opened.heddle_segment_id.clone();
+        runtime
+            .update_progress(UpdateProgressParams {
+                heddle_session_id: opened.heddle_session_id.clone(),
+                provider: Some("anthropic".to_string()),
+                model: Some("opus".to_string()),
+                thinking_level: Some("high".to_string()),
+                ..UpdateProgressParams::default()
+            })
+            .unwrap();
+
+        let session = SessionManager::new(runtime.repo.root())
+            .get_session(&opened.heddle_session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            session.segments.len(),
+            1,
+            "empty → set must attach, not rotate"
+        );
+        let segment = session.current_segment().unwrap();
+        assert_eq!(segment.provider, "anthropic");
+        assert_eq!(segment.model, "opus");
+        assert_eq!(segment.thought_level.as_deref(), Some("high"));
+        let report = runtime
+            .reports
+            .load(&opened.heddle_session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.heddle_segment_id, first_segment);
     }
 
     #[test]
@@ -3954,7 +4044,8 @@ mod tests {
         drop(repo);
 
         let fresh_repo = Repository::open(temp.path()).unwrap();
-        let mut runtime = HarnessBridgeRuntime::new(fresh_repo, UserConfig::default(), test_bridge());
+        let mut runtime =
+            HarnessBridgeRuntime::new(fresh_repo, UserConfig::default(), test_bridge());
         let payload = serde_json::json!({
             "session_id": "claude-sess-clean",
             "model": {"id": "claude-sonnet-4-6"},
@@ -3975,7 +4066,8 @@ mod tests {
         let (temp, repo) = init_repo();
         drop(repo);
         let fresh_repo = Repository::open(temp.path()).unwrap();
-        let mut runtime = HarnessBridgeRuntime::new(fresh_repo, UserConfig::default(), test_bridge());
+        let mut runtime =
+            HarnessBridgeRuntime::new(fresh_repo, UserConfig::default(), test_bridge());
         let payload = serde_json::json!({
             "session_id": "claude-sess-bash",
             "tool_name": "Bash",
