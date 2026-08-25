@@ -11,8 +11,8 @@ use merge::RenameCandidateIndex;
 use objects::{
     HeddleError, RecoveryDetails,
     object::{
-        AnnotationStatus, Blob, ContentHash, ContextTarget, DiffKind, EntryType, FileChangeSet,
-        FileMode, SemanticChange, State, StateId, Tree, TreeEntry,
+        Blob, ContentHash, DiffKind, EntryType, FileChangeSet, FileMode, SemanticChange, State,
+        StateId, Tree, TreeEntry,
     },
     store::ObjectStore,
     worktree::{WorktreeStatus, diff_blobs},
@@ -26,10 +26,12 @@ use sley::{EntryKind, Repository as SleyRepository};
 
 use crate::ExecutionContext;
 
+mod context;
 mod patch;
 mod path_filter;
 mod types;
 
+pub use context::{attach_show_context, worktree_context_state};
 pub use patch::{render_diff_patch, render_diff_patch_bytes, write_diff_patch};
 pub use types::*;
 
@@ -192,18 +194,16 @@ pub fn diff(ctx: &ExecutionContext, options: DiffOptions) -> Result<DiffReport> 
         options.to.clone(),
         file_changes,
         semantic_changes,
-        context_state
-            .as_ref()
-            .map(|state| collect_file_context(repo, state, &changes))
-            .transpose()?,
-        context_state
-            .as_ref()
-            .map(|state| collect_state_guidance(repo, state))
-            .transpose()?,
+        None,
+        None,
         stats,
     );
     output.worktree_mode = options.to.is_none();
-    finalize_diff_report(output, &options)
+    let mut output = finalize_diff_report(output, &options)?;
+    if let Some(state) = context_state.as_ref() {
+        attach_show_context(repo, &mut output, state, &options.paths)?;
+    }
+    Ok(output)
 }
 
 fn file_changes_from_change_set(
@@ -353,7 +353,14 @@ pub fn diff_worktree_status(
     };
     let mut output = DiffReport::new(Some("HEAD".to_string()), None, changes, None, None, None);
     output.worktree_mode = true;
-    finalize_diff_report(output, options)
+    let mut output = finalize_diff_report(output, options)?;
+    if options.show_context
+        && let Some(repo) = repo
+        && let Some(state) = worktree_context_state(repo)?
+    {
+        attach_show_context(repo, &mut output, &state, &options.paths)?;
+    }
+    Ok(output)
 }
 
 /// Compute a HEAD-vs-worktree report for a plain Git repository discovered by
@@ -1665,84 +1672,6 @@ fn hunk_span(lines: &[LineDiff], start: usize, end: usize) -> (usize, usize, usi
     (old_start, old_len, new_start, new_len)
 }
 
-fn collect_file_context(
-    repo: &Repository,
-    state: &State,
-    changes: &FileChangeSet,
-) -> Result<Vec<FileContextEntry>> {
-    let Some(context_root) = repo.inherit_parent_context(state)? else {
-        return Ok(Vec::new());
-    };
-
-    let mut entries = Vec::new();
-    for change in changes {
-        let target = ContextTarget::file(change.path.clone())?;
-        let Some(blob) = repo.get_context_blob(&context_root, &target)? else {
-            continue;
-        };
-        let annotations = blob
-            .annotations
-            .iter()
-            .filter(|annotation| annotation.status == AnnotationStatus::Active)
-            .filter_map(|annotation| {
-                annotation
-                    .current_revision()
-                    .map(|revision| ContextSnippet {
-                        annotation_id: annotation.annotation_id.clone(),
-                        kind: revision.kind.to_string(),
-                        content: summarize_context(&revision.content),
-                        revision_count: annotation.revisions.len(),
-                    })
-            })
-            .collect::<Vec<_>>();
-        if !annotations.is_empty() {
-            entries.push(FileContextEntry {
-                path: change.path.clone(),
-                annotations,
-            });
-        }
-    }
-    Ok(entries)
-}
-
-fn collect_state_guidance(repo: &Repository, state: &State) -> Result<Vec<ContextSnippet>> {
-    let Some(context_root) = repo.inherit_parent_context(state)? else {
-        return Ok(Vec::new());
-    };
-    let target = ContextTarget::state(state.state_id);
-    let Some(blob) = repo.get_context_blob(&context_root, &target)? else {
-        return Ok(Vec::new());
-    };
-    Ok(blob
-        .annotations
-        .iter()
-        .filter(|annotation| annotation.status == AnnotationStatus::Active)
-        .filter_map(|annotation| {
-            annotation
-                .current_revision()
-                .map(|revision| ContextSnippet {
-                    annotation_id: annotation.annotation_id.clone(),
-                    kind: revision.kind.to_string(),
-                    content: summarize_context(&revision.content),
-                    revision_count: annotation.revisions.len(),
-                })
-        })
-        .collect())
-}
-
-fn summarize_context(content: &str) -> String {
-    let first_line = content
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("");
-    let char_count = first_line.chars().count();
-    if char_count <= 88 {
-        first_line.to_string()
-    } else {
-        format!("{}...", first_line.chars().take(85).collect::<String>())
-    }
-}
-
 fn get_worktree_diff(
     repo: &Repository,
     from_tree: Option<&Tree>,
@@ -2624,7 +2553,7 @@ mod tests {
     use super::{
         DiffStats, FileChange, FileEolState, LineCounts, LineDiff, RENAME_SIMILARITY_THRESHOLD,
         RenameDetectionStats, change_line_counts, detect_clear_renames_with_stats, lcs_len,
-        prepare_rename_blob, rename_similarity, summarize_context, unified_hunks,
+        prepare_rename_blob, rename_similarity, unified_hunks,
     };
 
     type RenameSummary = Vec<(String, String, Option<String>, Option<f64>)>;
@@ -3007,35 +2936,6 @@ mod tests {
             Some("@ -1,2 +1,4 @@"),
             "display trim must not rewrite the `@@` header: {display:?}"
         );
-    }
-
-    /// Byte-index truncation at 85 panicked when a multi-byte code point straddled
-    /// that offset (HEDDLE-DR-7 / #879). Summaries must truncate on char boundaries.
-    #[test]
-    fn summarize_context_truncates_on_char_boundary_not_byte_index() {
-        let first_line = format!("{}中中", "a".repeat(83));
-        assert!(first_line.len() > 88);
-        assert!(!first_line.is_char_boundary(85));
-
-        let summary = summarize_context(&format!("{first_line}\nsecond line"));
-        assert_eq!(summary, first_line);
-    }
-
-    #[test]
-    fn summarize_context_char_cap_truncates_multibyte_line() {
-        let first_line = format!("{}中中中", "a".repeat(86));
-        assert!(first_line.chars().count() > 88);
-
-        let summary = summarize_context(&first_line);
-        let expected = format!("{}...", "a".repeat(85));
-        assert_eq!(summary, expected);
-    }
-
-    #[test]
-    fn summarize_context_ascii_truncation_unchanged() {
-        let line = "b".repeat(90);
-        let summary = summarize_context(&line);
-        assert_eq!(summary, format!("{}...", "b".repeat(85)));
     }
 
     /// Characterization: core::diff maps minimal-policy not-found failures to

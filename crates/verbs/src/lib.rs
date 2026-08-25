@@ -127,9 +127,10 @@ pub use contract::{
 pub use diff::{
     ContextSnippet, DiffOptions, DiffReport, DiffStats, FileChange, FileContextEntry, FileEolState,
     LineCounts, LineDiff, PlainGitDiffProbe, SemanticChangeEntry, SymlinkChange,
-    change_line_counts, compute_state_diff, compute_tree_diff, diff, diff_worktree_status,
-    plain_git_head_diff, render_diff_patch, render_diff_patch_bytes, should_render_modified_pair,
-    trim_added_decorations_for_display, write_diff_patch,
+    attach_show_context, change_line_counts, compute_state_diff, compute_tree_diff, diff,
+    diff_worktree_status, plain_git_head_diff, render_diff_patch, render_diff_patch_bytes,
+    should_render_modified_pair, trim_added_decorations_for_display, worktree_context_state,
+    write_diff_patch,
 };
 pub use fsck::{FsckError, FsckOptions, FsckRepair, FsckReport, fsck};
 pub use gc_plan::{
@@ -269,11 +270,10 @@ pub use revert_plan::{
 pub use save::{
     CaptureAgentReport, CaptureAttribution, CaptureDiagnostics, CaptureOptions,
     CapturePrincipalReport, CaptureProfile, CaptureReport, CommitGitIndexPlan, GitScope, SavePlan,
-    SaveReport, SaveVerb, capture,
-    commit_next_action_from_trust, commit_scope_text, complete_current_thread_manual_resolution,
-    execute_save, plan_commit_git_index, plan_commit_git_index_only, plan_creates_new_state,
-    plan_git_scope, plan_writes_git_checkpoint, recover_published_git_checkpoint,
-    split_git_extra_paths, staged_commit_summary, tree_leaf_name,
+    SaveReport, SaveVerb, capture, commit_next_action_from_trust, commit_scope_text,
+    complete_current_thread_manual_resolution, execute_save, plan_commit_git_index,
+    plan_commit_git_index_only, plan_creates_new_state, plan_git_scope, plan_writes_git_checkpoint,
+    recover_published_git_checkpoint, split_git_extra_paths, staged_commit_summary, tree_leaf_name,
 };
 pub use semantic_plan::{
     HOT_EVENT_KIND_TOKENS, HotEventKindToken, hot_event_kind_label, human_event_kind,

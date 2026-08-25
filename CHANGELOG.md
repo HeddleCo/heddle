@@ -27,6 +27,13 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   use the canonical encoding. Migration `0005_streamable_tree_encoding`
   rewrites leftover msgpack trees on repo open (heddle#1457).
 
+### Fixed
+
+- **Live annotations ride `diff --context`.** After `context set`,
+  `heddle diff --context` shows the annotation on the existing `context` /
+  `broader_guidance` fields, including Git-overlay worktrees and
+  path-filtered clean diffs (heddle#1459).
+
 ## 0.14.0 - 2026-08-21
 
 - Rebuilt the workspace on `heddle-api` 0.12 and
