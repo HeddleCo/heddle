@@ -518,6 +518,8 @@ struct CountingStore {
     blob_size_calls: Arc<AtomicUsize>,
 }
 
+impl objects::store::SidecarStore for CountingStore {}
+
 impl ObjectStore for CountingStore {
     fn get_blob(&self, hash: &ContentHash) -> objects::store::Result<Option<Blob>> {
         self.get_blob_calls.fetch_add(1, Ordering::Relaxed);

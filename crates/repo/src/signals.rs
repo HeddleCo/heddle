@@ -5,10 +5,10 @@
 //! trait and the registration slot on [`Repository`]; the concrete
 //! implementation lives in `state-review` (which owns the signal
 //! modules), keeping this crate free of that dependency. Entry-point
-//! binaries opt in once at startup with
-//! [`Repository::set_signal_computer`]; unregistered repos skip signal
-//! computation entirely, which is identical to the historical
-//! "feature off" on-disk shape.
+//! binaries opt in once at startup with [`install_default_computer`];
+//! unregistered repos skip signal computation entirely, which is identical to
+//! the historical "feature off" on-disk shape. Embedders can still override
+//! the process default per repository with [`Repository::set_signal_computer`].
 
 use std::collections::HashMap;
 

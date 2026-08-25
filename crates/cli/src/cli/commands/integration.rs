@@ -949,37 +949,37 @@ fn opencode_timeline_capabilities(repo: &Repository, heddle_raw: &str) -> Value 
                 },
                 {
                     "name": "timeline_fork_from_tool_call",
-                    "verb": "timeline fork",
+                    "verb": "agent timeline fork",
                     "intent": "Create a branch from an OpenCode tool call or timeline step before experimenting.",
-                    "argv": ["--repo", repo_path, "timeline", "fork", "--tool-call", "<opencode_tool_call_id>", "--harness", "opencode", "--session", "<opencode_session_id>", "--reason", "fan-out", "--output", "json"],
+                    "argv": ["--repo", repo_path, "agent", "timeline", "fork", "--tool-call", "<opencode_tool_call_id>", "--harness", "opencode", "--session", "<opencode_session_id>", "--reason", "fan-out", "--output", "json"],
                     "mutates_checkout": false
                 },
                 {
                     "name": "timeline_reset_to_tool_call",
-                    "verb": "timeline reset",
+                    "verb": "agent timeline reset",
                     "intent": "Move the timeline cursor to an OpenCode tool call and optionally materialize checkout files.",
-                    "argv": ["--repo", repo_path, "timeline", "reset", "--tool-call", "<opencode_tool_call_id>", "--harness", "opencode", "--session", "<opencode_session_id>", "--materialize", "--mode", "fail-if-dirty", "--output", "json"],
+                    "argv": ["--repo", repo_path, "agent", "timeline", "reset", "--tool-call", "<opencode_tool_call_id>", "--harness", "opencode", "--session", "<opencode_session_id>", "--materialize", "--mode", "fail-if-dirty", "--output", "json"],
                     "mutates_checkout": true
                 },
                 {
                     "name": "timeline_undo",
-                    "verb": "timeline reset",
+                    "verb": "agent timeline reset",
                     "intent": "Move one reversible timeline step backward.",
-                    "argv": ["--repo", repo_path, "timeline", "reset", "--undo", "--materialize", "--mode", "fail-if-dirty", "--output", "json"],
+                    "argv": ["--repo", repo_path, "agent", "timeline", "reset", "--undo", "--materialize", "--mode", "fail-if-dirty", "--output", "json"],
                     "mutates_checkout": true
                 },
                 {
                     "name": "timeline_redo",
-                    "verb": "timeline reset",
+                    "verb": "agent timeline reset",
                     "intent": "Move one reversible timeline step forward.",
-                    "argv": ["--repo", repo_path, "timeline", "reset", "--redo", "--materialize", "--mode", "fail-if-dirty", "--output", "json"],
+                    "argv": ["--repo", repo_path, "agent", "timeline", "reset", "--redo", "--materialize", "--mode", "fail-if-dirty", "--output", "json"],
                     "mutates_checkout": true
                 },
                 {
                     "name": "timeline_recover",
-                    "verb": "timeline recover",
+                    "verb": "agent timeline recover",
                     "intent": "Inspect or complete recovery after an interrupted timeline materialization.",
-                    "argv": ["--repo", repo_path, "timeline", "recover", "--thread", "<thread>", "--output", "json"],
+                    "argv": ["--repo", repo_path, "agent", "timeline", "recover", "--thread", "<thread>", "--output", "json"],
                     "mutates_checkout": false
                 }
             ]
@@ -1263,20 +1263,49 @@ mod tests {
         assert_eq!(timeline_manifest["harness"], "opencode");
         assert_eq!(timeline_manifest["timeline"]["schema_version"], 1);
         assert_eq!(timeline_manifest["timeline"]["default_harness"], "opencode");
-        assert!(
-            timeline_manifest["timeline"]["verbs"]
+        let repo_path = repo.root().display().to_string();
+        let expected_timeline_commands = [
+            serde_json::json!({
+                "name": "timeline_fork_from_tool_call",
+                "verb": "agent timeline fork",
+                "argv": ["--repo", repo_path, "agent", "timeline", "fork", "--tool-call", "<opencode_tool_call_id>", "--harness", "opencode", "--session", "<opencode_session_id>", "--reason", "fan-out", "--output", "json"]
+            }),
+            serde_json::json!({
+                "name": "timeline_reset_to_tool_call",
+                "verb": "agent timeline reset",
+                "argv": ["--repo", repo_path, "agent", "timeline", "reset", "--tool-call", "<opencode_tool_call_id>", "--harness", "opencode", "--session", "<opencode_session_id>", "--materialize", "--mode", "fail-if-dirty", "--output", "json"]
+            }),
+            serde_json::json!({
+                "name": "timeline_undo",
+                "verb": "agent timeline reset",
+                "argv": ["--repo", repo_path, "agent", "timeline", "reset", "--undo", "--materialize", "--mode", "fail-if-dirty", "--output", "json"]
+            }),
+            serde_json::json!({
+                "name": "timeline_redo",
+                "verb": "agent timeline reset",
+                "argv": ["--repo", repo_path, "agent", "timeline", "reset", "--redo", "--materialize", "--mode", "fail-if-dirty", "--output", "json"]
+            }),
+            serde_json::json!({
+                "name": "timeline_recover",
+                "verb": "agent timeline recover",
+                "argv": ["--repo", repo_path, "agent", "timeline", "recover", "--thread", "<thread>", "--output", "json"]
+            }),
+        ];
+        let timeline_commands = timeline_manifest["timeline"]["verbs"].as_array().unwrap();
+        for expected in expected_timeline_commands {
+            let actual = timeline_commands
+                .iter()
+                .find(|command| command["name"] == expected["name"])
+                .unwrap();
+            assert_eq!(actual["verb"], expected["verb"]);
+            assert_eq!(actual["argv"], expected["argv"]);
+            let argv = actual["argv"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|verb| verb["name"] == "timeline_reset_to_tool_call")
-        );
-        assert!(
-            timeline_manifest["timeline"]["verbs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|verb| verb["name"] == "timeline_undo")
-        );
+                .map(|arg| arg.as_str().unwrap());
+            Cli::try_parse_from(std::iter::once("heddle").chain(argv)).unwrap();
+        }
         let status = integration_status(&repo, &manifest.integrations[0]).unwrap();
         assert_eq!(status.capabilities, vec!["timeline"]);
         assert_eq!(

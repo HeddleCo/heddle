@@ -61,16 +61,34 @@ struct LocalOpIdResponse {
     stderr: Vec<u8>,
 }
 
+/// Process outcome of the local idempotency adapter.
+///
+/// `Complete` means the child command's recorded streams have already been
+/// replayed. Only `main` may translate its status into process control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalIdempotencyOutcome {
+    Continue,
+    Complete { exit_code: i32 },
+}
+
+impl LocalOpIdResponse {
+    fn completion(&self) -> LocalIdempotencyOutcome {
+        LocalIdempotencyOutcome::Complete {
+            exit_code: self.status_code,
+        }
+    }
+}
+
 pub fn run_local_idempotency_if_requested(
     cli: &Cli,
     command_name: &str,
     command_supports_op_id: bool,
-) -> Result<bool> {
+) -> Result<LocalIdempotencyOutcome> {
     let Some(op_id) = resolve_operation_id(cli)? else {
-        return Ok(false);
+        return Ok(LocalIdempotencyOutcome::Continue);
     };
     if std::env::var_os(LOCAL_OP_ID_CHILD_ENV).is_some() {
-        return Ok(false);
+        return Ok(LocalIdempotencyOutcome::Continue);
     }
     if !command_supports_op_id {
         return Err(anyhow!(RecoveryAdvice::op_id_unsupported(command_name)));
@@ -143,10 +161,7 @@ pub fn run_local_idempotency_if_requested(
                     mode,
                 }),
             )?;
-            if replay.status_code != 0 {
-                std::process::exit(replay.status_code);
-            }
-            Ok(true)
+            Ok(replay.completion())
         }
         DedupOutcome::Conflict => Err(anyhow!(RecoveryAdvice::op_id_conflict(
             command_name,
@@ -189,10 +204,7 @@ pub fn run_local_idempotency_if_requested(
                     mode,
                 }),
             )?;
-            if response.status_code != 0 {
-                std::process::exit(response.status_code);
-            }
-            Ok(true)
+            Ok(response.completion())
         }
     }
 }
@@ -544,6 +556,20 @@ mod tests {
         let id = OperationId::new();
         let cli = cli_with(Some(&id.to_string()));
         assert_eq!(wire(&cli), id.to_string());
+    }
+
+    #[test]
+    fn recorded_response_returns_typed_completion_without_process_control() {
+        let response = LocalOpIdResponse {
+            status_code: 73,
+            stdout: b"partial output".to_vec(),
+            stderr: b"retry later".to_vec(),
+        };
+
+        assert_eq!(
+            response.completion(),
+            LocalIdempotencyOutcome::Complete { exit_code: 73 }
+        );
     }
 
     /// Two clones with the same `--op-id` and same relative destination

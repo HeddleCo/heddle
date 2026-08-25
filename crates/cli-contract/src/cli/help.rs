@@ -132,8 +132,7 @@ fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthori
          or `heddle help <topic>` for a topic page (e.g. `git-concepts`, \
          `git-overlay`, \
          `threads`, `daemon`, `signals`, `git-projection`, `operation-ids`, \
-         `remotes`, `output-formats`, `ignore`/`heddleignore`, `git-dependencies`, \
-         `agent-flags`)."
+         `remotes`, `output-formats`, `ignore`/`heddleignore`, `git-dependencies`)."
     );
 }
 
@@ -182,7 +181,9 @@ pub fn render_help_for_authority(
     match topic {
         [] => write_first_screen(&mut out, authority),
         [name] if topic_text(name).is_some() => {
-            let _ = writeln!(out, "{}", topic_text(name).expect("checked above"));
+            if let Some(text) = topic_text(name) {
+                let _ = writeln!(out, "{text}");
+            }
         }
         path => {
             if let Some(mut subcommand) = help_command_for_path(cmd, path) {

@@ -51,20 +51,30 @@ CLI / Web UI
   -> immutable objects and hosted control-plane metadata
 ```
 
-Heddle is no longer best understood as a single `src/` tree. The repository is a Cargo workspace with separate crates for the local/client CLI, core types, repository helpers, refs, oplog, semantic analysis, and Git interoperability/projection functionality. (The hosted server and admin binary moved to the sibling **weft** repo — see below.)
+Heddle is no longer best understood as a single `src/` tree. The repository is
+a Cargo workspace with separate crates for the CLI surface, embeddable verbs,
+hosted client, core types, repository helpers, refs, oplog, semantic analysis,
+and Git interoperability. (The hosted server and admin binary moved to the
+sibling **weft** repo — see below.)
 
 ## Workspace Structure
 
 ```text
 crates/
-  cli/       # local CLI entry point, command dispatch, private hosted runtime
-  config/    # user-config TOML schema, credential store, transport knobs
-  objects/      # core object model and shared types
-  repo/      # repository operations and helpers
-  refs/      # threads, markers, HEAD, packed refs
-  oplog/     # undo/redo oplog logic
-  git-projection/ # Git interoperability engine, re-exported by the CLI
-  semantic/  # semantic diff and parser-heavy analysis
+  cli/             # local CLI entry point and command dispatch
+  cli-args/        # clap argument surface
+  cli-contract/    # verb catalog, schemas, help, recovery contracts
+  cli-render/      # human-facing terminal presentation
+  config/          # user-config TOML schema, credentials, tracing
+  verbs/           # embeddable command plans and domain operations
+  hosted-client/   # hosted transport, identity, credentials, and sync
+  agent-relay/     # harness event relay and agent coordination adapter
+  objects/         # core object model and shared types
+  repo/            # repository operations and helpers
+  refs/            # threads, markers, HEAD, packed refs
+  oplog/           # undo/redo oplog logic
+  git-projection/  # Git interoperability engine
+  semantic/        # semantic diff and parser-heavy analysis
   ...
 docs/             # architecture, hosted model, roadmap, future-state plans
 specs/            # Quint formal specifications

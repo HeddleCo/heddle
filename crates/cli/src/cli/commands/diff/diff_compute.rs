@@ -25,7 +25,7 @@ use super::{
     diff_paths::classify_diff_refs,
 };
 use crate::{
-    cli::{Cli, output_is_compact, should_output_json},
+    cli::{Cli, execution_context_from_cli_parts, output_is_compact, should_output_json},
     config::UserConfig,
 };
 
@@ -155,20 +155,7 @@ pub fn cmd_diff(
     }
 
     let config = UserConfig::load_default().unwrap_or_default();
-    let fsmonitor_mode = config
-        .worktree_status_options(Some(repo.config()))
-        .fsmonitor
-        .mode;
-    let ctx = verbs::ExecutionContext::builder()
-        .repo(repo)
-        .start_path(start.to_path_buf())
-        .principal_fallback(
-            config
-                .principal_pair()
-                .map(|(name, email)| (name.to_string(), email.to_string())),
-        )
-        .fsmonitor_mode(fsmonitor_mode)
-        .build();
+    let ctx = execution_context_from_cli_parts(cli, start, Some(repo), &config)?;
     let report = core_diff(&ctx, options)?;
     render_diff_report(
         cli,

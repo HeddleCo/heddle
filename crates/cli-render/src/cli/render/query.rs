@@ -12,6 +12,10 @@ pub fn query_json(report: &QueryReport) -> Result<()> {
 }
 
 pub fn query_text(report: &QueryReport) -> Result<()> {
+    write_stdout(&format_query_text(report))
+}
+
+fn format_query_text(report: &QueryReport) -> String {
     let mut text = String::new();
     if report.hits.is_empty() {
         text.push_str("(no matches)\n");
@@ -35,5 +39,44 @@ pub fn query_text(report: &QueryReport) -> Result<()> {
             text.push('\n');
         }
     }
-    write_stdout(&text)
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use verbs::QueryHit;
+
+    use super::*;
+
+    #[test]
+    fn text_renderer_consumes_the_typed_query_report() {
+        let report = QueryReport {
+            output_kind: "query",
+            hits: vec![QueryHit {
+                seq: 7,
+                timestamp_secs: 0,
+                verb: "snapshot".to_string(),
+                actor_email: "agent@example.com".to_string(),
+                operation_id: None,
+                thread: Some("agent/facade".to_string()),
+                symbols: Vec::new(),
+                signal_kinds: Vec::new(),
+                state_id: Some("hs-123".to_string()),
+            }],
+        };
+
+        assert_eq!(
+            format_query_text(&report),
+            "#7 1970-01-01T00:00:00+00:00 snapshot <agent@example.com> thread=agent/facade -> hs-123\n"
+        );
+    }
+
+    #[test]
+    fn text_renderer_has_a_stable_empty_report() {
+        let report = QueryReport {
+            output_kind: "query",
+            hits: Vec::new(),
+        };
+        assert_eq!(format_query_text(&report), "(no matches)\n");
+    }
 }

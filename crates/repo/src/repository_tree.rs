@@ -242,7 +242,13 @@ impl Repository {
         baseline_tree: Option<&Tree>,
         stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
     ) -> Result<(Tree, TreeBuildProfile)> {
-        self.build_tree_profiled_output(dir, baseline_tree, stat_cache, false)
+        self.build_tree_profiled_output(
+            dir,
+            baseline_tree,
+            stat_cache,
+            false,
+            &self.default_worktree_status_options(),
+        )
             .map(|output| (output.tree, output.profile))
     }
 
@@ -252,8 +258,25 @@ impl Repository {
         baseline_tree: Option<&Tree>,
         stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
     ) -> Result<SnapshotTreeBuildOutput> {
+        self.build_tree_profiled_for_snapshot_against_with_options(
+            dir,
+            baseline_tree,
+            stat_cache,
+            &self.default_worktree_status_options(),
+        )
+    }
+
+    pub(crate) fn build_tree_profiled_for_snapshot_against_with_options(
+        &self,
+        dir: &Path,
+        baseline_tree: Option<&Tree>,
+        stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
+        options: &WorktreeStatusOptions,
+    ) -> Result<SnapshotTreeBuildOutput> {
         let fast_start = Instant::now();
-        if let Some(mut output) = self.try_build_single_changed_file_tree(dir, baseline_tree)? {
+        if let Some(mut output) =
+            self.try_build_single_changed_file_tree(dir, baseline_tree, options)?
+        {
             output.profile.tree_walk_ms = fast_start.elapsed().as_millis();
             return Ok((
                 output.tree,
@@ -264,7 +287,7 @@ impl Repository {
                 output.monitor_token,
             ));
         }
-        self.build_tree_profiled_output(dir, baseline_tree, stat_cache, true)
+        self.build_tree_profiled_output(dir, baseline_tree, stat_cache, true, options)
             .map(|output| {
                 (
                     output.tree,
@@ -286,6 +309,7 @@ impl Repository {
         &self,
         dir: &Path,
         baseline_tree: Option<&Tree>,
+        options: &WorktreeStatusOptions,
     ) -> Result<Option<TreeBuildOutput>> {
         if dir != self.root() {
             return Ok(None);
@@ -293,10 +317,7 @@ impl Repository {
         let Some(baseline_tree) = baseline_tree else {
             return Ok(None);
         };
-        let monitor = ChangeMonitorSession::prepare(
-            self.root(),
-            self.default_worktree_status_options().fsmonitor,
-        );
+        let monitor = ChangeMonitorSession::prepare(self.root(), options.fsmonitor);
         let Some(changed) = monitor.single_changed_path() else {
             return Ok(None);
         };
@@ -393,6 +414,7 @@ impl Repository {
         baseline_tree: Option<&Tree>,
         stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
         defer_object_writes: bool,
+        options: &WorktreeStatusOptions,
     ) -> Result<TreeBuildOutput> {
         let patterns = self.ignore_patterns()?;
         debug!(pattern_count = patterns.len(), "Starting tree build");
@@ -405,6 +427,7 @@ impl Repository {
             baseline_tree,
             stat_cache,
             defer_object_writes,
+            options,
         );
         let elapsed = start.elapsed().as_millis();
         debug!(duration_ms = elapsed, "Tree build complete");
@@ -416,6 +439,7 @@ impl Repository {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[instrument(skip(self, patterns, nested_exclusions, baseline_tree, stat_cache), fields(dir = %dir.display()))]
     fn build_tree_walk(
         &self,
@@ -425,14 +449,12 @@ impl Repository {
         baseline_tree: Option<&Tree>,
         stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
         defer_object_writes: bool,
+        options: &WorktreeStatusOptions,
     ) -> Result<TreeBuildOutput> {
         let ignore_matcher = WorktreeIgnoreMatcher::cached(patterns)
             .with_nested_worktree_exclusions(nested_exclusions);
         let incremental_state = (dir == self.root() && baseline_tree.is_some()).then(|| {
-            let monitor = ChangeMonitorSession::prepare(
-                self.root(),
-                self.default_worktree_status_options().fsmonitor,
-            );
+            let monitor = ChangeMonitorSession::prepare(self.root(), options.fsmonitor);
             let index = if monitor.status == MonitorStatus::Usable {
                 WorktreeIndex::load_hot_profiled_for_directories(
                     &self.worktree_index_path(),

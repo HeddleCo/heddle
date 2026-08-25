@@ -804,9 +804,9 @@ impl FsStore {
 }
 
 impl FsStore {
-    pub(crate) fn snapshot_commit_recovery_descriptors_impl(
-        &self,
-    ) -> Result<Vec<SnapshotCommitDescriptor>> {
+    /// Lightweight repository-open seam for authoritative snapshot recovery.
+    #[doc(hidden)]
+    pub fn snapshot_commit_recovery_descriptors(&self) -> Result<Vec<SnapshotCommitDescriptor>> {
         self.reload_packs_if_stale()?;
         let manager = self
             .pack_manager()
@@ -815,7 +815,11 @@ impl FsStore {
         manager.snapshot_commit_recovery_descriptors()
     }
 
-    pub(crate) fn snapshot_commit_descriptors_impl(&self) -> Result<Vec<SnapshotCommitDescriptor>> {
+    /// Internal repository seam for the local authoritative snapshot artifact.
+    /// Kept off [`ObjectStore`] so other stores do not acquire a filesystem
+    /// recovery contract.
+    #[doc(hidden)]
+    pub fn snapshot_commit_descriptors(&self) -> Result<Vec<SnapshotCommitDescriptor>> {
         self.reload_packs_if_stale()?;
         let manager = self
             .pack_manager()
@@ -824,7 +828,10 @@ impl FsStore {
         manager.snapshot_commit_descriptors()
     }
 
-    pub(crate) fn snapshot_commit_descriptor_for_state_impl(
+    /// O(1) lookup for the authoritative snapshot pack associated with a
+    /// pushed state.
+    #[doc(hidden)]
+    pub fn snapshot_commit_descriptor_for_state(
         &self,
         state: &StateId,
     ) -> Result<Option<SnapshotCommitDescriptor>> {

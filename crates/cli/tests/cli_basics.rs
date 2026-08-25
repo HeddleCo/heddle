@@ -38,8 +38,6 @@ mod placeholder_identity;
 mod refs_and_history;
 #[path = "cli_integration/state_id_acceptance.rs"]
 mod state_id_acceptance;
-#[path = "cli_integration/status_context_surface.rs"]
-mod status_context_surface;
 #[path = "cli_integration/submodule_status.rs"]
 mod submodule_status;
 #[path = "cli_integration/transcript_harness.rs"]

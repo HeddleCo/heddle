@@ -18,7 +18,7 @@ pub mod modules;
 pub mod payload;
 pub mod registry;
 
-pub use capture::CaptureSignalComputer;
+pub use capture::{CaptureSignalComputer, install_capture_signal_computer};
 pub use config::{
     InvariantAdjacencyConfig, NoveltyConfig, PatternDeviationConfig, ReviewSignalsConfig,
     SelfFlaggedUncertaintyConfig, TestReachabilityConfig,

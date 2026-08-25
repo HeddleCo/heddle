@@ -14,7 +14,7 @@ use objects::{
     error::{HeddleError, Result},
     fs_atomic::{enrich_fs_error, write_file_atomic},
     object::ThreadName,
-    store::{AnyStore, FsStore},
+    store::FsStore,
 };
 use oplog::{ConditionalCommitOutcome, IsolationPrecondition, OpLogBackend, OpRecord};
 use refs::{Head, RefManager};
@@ -116,7 +116,7 @@ fn validate_snapshot_artifact_records(
 impl Repository {
     /// Run the local-only hooks that follow a config-driven [`Repository::open`]:
     /// declarative migrations + lazy-clone hydrator reconstruction. Both are
-    /// bound to the default `AnyStore` flavor (`apply_pending` and
+    /// bound to the default [`FsStore`] flavor (`apply_pending` and
     /// `BlobHydrator` operate on the bare `Repository`), so they live here
     /// rather than in the generic `open_raw`.
     pub(super) fn run_open_hooks(&self) -> Result<()> {
@@ -258,19 +258,19 @@ impl Repository {
 
     /// Build an object store from the repository configuration.
     ///
-    /// Returns the local [`FsStore`] wrapped in the [`AnyStore`] enum so object
-    /// access stays statically dispatched.
+    /// Returns the concrete local [`FsStore`].
     pub(super) fn build_store(
         config: &RepoConfig,
         root: &Path,
         heddle_dir: &Path,
         shared_overlay_source_root: Option<&Path>,
-    ) -> Result<AnyStore> {
+    ) -> Result<FsStore> {
         let mut fs_store = FsStore::new(heddle_dir);
         fs_store.set_snapshot_delta_search(config.storage.delta_search.snapshot);
-        let store = AnyStore::Fs(fs_store);
         #[cfg(feature = "git-overlay")]
-        let mut store = store;
+        let mut store = fs_store;
+        #[cfg(not(feature = "git-overlay"))]
+        let store = fs_store;
         #[cfg(not(feature = "git-overlay"))]
         let _ = (config, root, shared_overlay_source_root);
         #[cfg(feature = "git-overlay")]

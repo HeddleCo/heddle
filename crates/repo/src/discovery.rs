@@ -13,7 +13,7 @@ use objects::{
     error::{HeddleError, Result},
     fs_atomic::enrich_fs_error,
     object::ThreadName,
-    store::{AnyStore, FsStore, ObjectStore, ShallowInfo},
+    store::{FsStore, ObjectStore, ShallowInfo},
 };
 use oplog::OpLog;
 use refs::{Head, RefManager};
@@ -395,7 +395,7 @@ impl Repository {
             root,
             heddle_dir: heddle_dir.clone(),
             capability: repository_capability_for_authority(source_authority),
-            store: AnyStore::Fs(store),
+            store,
             refs,
             oplog,
             config,

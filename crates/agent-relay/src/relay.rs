@@ -28,9 +28,9 @@ use repo::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use verbs::{
-    ExplicitAgentBind, SessionAttachFacts, SessionLookupFact, SessionPolicy, TokenSidFact,
-    WorktreeSessionFact, decide_session_attach, first_value_string, map_from_pairs,
-    merge_string_vec, opencode_tool_name, opencode_tool_status,
+    ExplicitAgentBind, HarnessKind, SessionAttachFacts, SessionLookupFact, SessionPolicy,
+    TokenSidFact, WorktreeSessionFact, decide_session_attach, detect_harness_kind,
+    first_value_string, map_from_pairs, merge_string_vec, opencode_tool_name, opencode_tool_status,
     parse_relay_payload as core_parse_relay_payload,
     should_rotate_segment as pure_should_rotate_segment, value_array_join, value_cost_micros,
     value_cost_micros_u64, value_string, value_string_array, value_u64, value_u64_string,
@@ -71,24 +71,11 @@ pub fn probe_current_process_harness(
     current_model: Option<String>,
     current_policy: Option<String>,
 ) -> Result<HarnessProbeResult> {
-    // Ambient model identity (CLAUDE_MODEL, OPENAI_MODEL, …) must not
-    // fabricate attribution on its own. It is trusted only when a session
-    // anchor proves the harness — a live codex thread in this process's
-    // environment — mirroring `inherited_harness_hint` plus that anchor.
-    let codex_anchored = std::env::var("CODEX_THREAD_ID")
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
-    let env_hints: BTreeMap<String, String> = harness_env_hints()
-        .into_iter()
-        .filter(|(key, _)| {
-            inherited_harness_hint(key)
-                || (codex_anchored
-                    && matches!(key.as_str(), "OPENAI_MODEL" | "OPENAI_REASONING_EFFORT"))
-        })
-        .collect();
+    let argv = detected_harness_argv().or_else(|| Some(std::env::args().collect()));
+    let env_hints = anchored_process_harness_hints(argv.as_deref(), harness_env_hints());
     let probe_metadata = codex_session_probe_metadata(&env_hints);
     probe_harness_actor(&HarnessProbeInput {
-        argv: detected_harness_argv().or_else(|| Some(std::env::args().collect())),
+        argv,
         env_hints,
         explicit_harness: None,
         explicit_provider: None,
@@ -101,6 +88,79 @@ pub fn probe_current_process_harness(
         current_policy,
         repo_root: repo.root().display().to_string(),
     })
+}
+
+/// Admit ambient model hints only when an independent process/session signal
+/// identifies the harness that owns them.
+///
+/// This keeps `*_MODEL` variables inherited by an ordinary shell from
+/// fabricating agent attribution, while preserving model attribution inside a
+/// real Codex, Claude Code, or OpenCode process. Explicit `HEDDLE_AGENT_*`
+/// overrides remain trusted without a harness anchor.
+fn anchored_process_harness_hints(
+    argv: Option<&[String]>,
+    raw: BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let program_kind = detect_harness_kind(
+        argv.and_then(|args| args.first()).map(String::as_str),
+        &BTreeMap::new(),
+    );
+    let codex_anchored = non_empty_hint(&raw, "CODEX_THREAD_ID")
+        || program_kind == HarnessKind::Codex;
+    let claude_anchored = non_empty_hint(&raw, "CLAUDECODE")
+        || program_kind == HarnessKind::ClaudeCode;
+    let opencode_anchored = non_empty_hint(&raw, "OPENCODE_CLIENT")
+        || program_kind == HarnessKind::OpenCode;
+
+    raw.into_iter()
+        .filter(|(key, _)| {
+            if ambient_model_hint(key) {
+                anchored_model_hint(key, codex_anchored, claude_anchored, opencode_anchored)
+            } else {
+                inherited_harness_hint(key)
+            }
+        })
+        .collect()
+}
+
+fn non_empty_hint(hints: &BTreeMap<String, String>, key: &str) -> bool {
+    hints
+        .get(key)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn ambient_model_hint(key: &str) -> bool {
+    matches!(
+        key,
+        "CODEX_MODEL"
+            | "CODEX_REASONING_EFFORT"
+            | "OPENAI_MODEL"
+            | "OPENAI_REASONING_EFFORT"
+            | "CLAUDE_MODEL"
+            | "ANTHROPIC_MODEL"
+            | "OPENCODE_MODEL"
+            | "MODEL"
+            | "REASONING_EFFORT"
+            | "THINKING_LEVEL"
+    )
+}
+
+fn anchored_model_hint(
+    key: &str,
+    codex_anchored: bool,
+    claude_anchored: bool,
+    opencode_anchored: bool,
+) -> bool {
+    match key {
+        "CODEX_MODEL" | "CODEX_REASONING_EFFORT" | "OPENAI_MODEL"
+        | "OPENAI_REASONING_EFFORT" => codex_anchored,
+        "CLAUDE_MODEL" | "ANTHROPIC_MODEL" => claude_anchored,
+        "OPENCODE_MODEL" => opencode_anchored,
+        "MODEL" | "REASONING_EFFORT" | "THINKING_LEVEL" => {
+            codex_anchored || claude_anchored || opencode_anchored
+        }
+        _ => false,
+    }
 }
 
 fn harness_env_hints() -> BTreeMap<String, String> {
@@ -3211,6 +3271,74 @@ mod tests {
         assert!(inherited_harness_hint("HEDDLE_AGENT_MODEL"));
         assert!(inherited_harness_hint("CODEX_SANDBOX"));
         assert!(inherited_harness_hint("CLAUDECODE"));
+    }
+
+    #[test]
+    fn ambient_model_hints_without_a_harness_anchor_are_discarded() {
+        let hints = anchored_process_harness_hints(
+            None,
+            BTreeMap::from([
+                ("CLAUDE_CODE".to_string(), "1".to_string()),
+                ("CODEX_MODEL".to_string(), "gpt-5.6-sol".to_string()),
+                ("OPENAI_MODEL".to_string(), "gpt-5.6-sol".to_string()),
+                ("CLAUDE_MODEL".to_string(), "claude-opus-4-8".to_string()),
+                ("ANTHROPIC_MODEL".to_string(), "claude-opus-4-8".to_string()),
+                ("OPENCODE_MODEL".to_string(), "provider/model".to_string()),
+                ("MODEL".to_string(), "ambient-model".to_string()),
+            ]),
+        );
+
+        assert!(hints.is_empty(), "unanchored model hints leaked: {hints:?}");
+    }
+
+    #[test]
+    fn anchored_harness_sessions_retain_their_model_attribution() {
+        let cases = [
+            (
+                BTreeMap::from([
+                    ("CODEX_THREAD_ID".to_string(), "thread-123".to_string()),
+                    ("OPENAI_MODEL".to_string(), "gpt-5.6-sol".to_string()),
+                ]),
+                "codex",
+                "openai",
+                "gpt-5.6-sol",
+            ),
+            (
+                BTreeMap::from([
+                    ("CLAUDECODE".to_string(), "1".to_string()),
+                    ("CLAUDE_MODEL".to_string(), "claude-opus-4-8".to_string()),
+                ]),
+                "claude-code",
+                "anthropic",
+                "claude-opus-4-8",
+            ),
+            (
+                BTreeMap::from([
+                    ("OPENCODE_CLIENT".to_string(), "desktop".to_string()),
+                    ("OPENCODE_PROVIDER".to_string(), "anthropic".to_string()),
+                    (
+                        "OPENCODE_MODEL".to_string(),
+                        "claude-sonnet-4-6".to_string(),
+                    ),
+                ]),
+                "opencode",
+                "anthropic",
+                "claude-sonnet-4-6",
+            ),
+        ];
+
+        for (raw, harness, provider, model) in cases {
+            let result = probe_harness_actor(&HarnessProbeInput {
+                env_hints: anchored_process_harness_hints(None, raw),
+                repo_root: "/tmp/repo".to_string(),
+                ..HarnessProbeInput::default()
+            })
+            .expect("anchored harness probe succeeds");
+
+            assert_eq!(result.harness.as_deref(), Some(harness));
+            assert_eq!(result.provider.as_deref(), Some(provider));
+            assert_eq!(result.model.as_deref(), Some(model));
+        }
     }
 
     #[test]

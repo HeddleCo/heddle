@@ -3,6 +3,13 @@
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
+// The agent wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::agent::{
+    AgentFanoutCommandOutput, AgentFanoutLaneOutput, AgentFanoutOutput, AgentReservationEnvelope,
+    AgentReservationListOutput, AgentReservationOutput, AgentTaskEnvelope, AgentTaskListOutput,
+    AgentTaskOutput,
+};
 use objects::{
     object::ThreadName,
     store::{
@@ -13,11 +20,9 @@ use objects::{
 use refs::{Head, RefExpectation};
 use repo::{
     ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStatus,
-    AgentTaskStore, AgentUsageSummary, validate_task_id,
-};
-use repo::{
-    Repository, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadId,
-    ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState, ThreadVerificationSummary,
+    AgentTaskStore, AgentUsageSummary, Repository, Thread, ThreadConfidenceSummary,
+    ThreadFreshness, ThreadId, ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState,
+    ThreadVerificationSummary, validate_task_id,
 };
 use verbs::{
     AgentCaptureOptions, AgentCaptureThreadCheck, AgentReadyOptions, FanoutLaneAvailability,
@@ -48,14 +53,6 @@ use crate::cli::{
         AgentTaskStatusArg, AgentTaskUpdateArgs, ThreadStartArgs, WorkspaceModeArg,
     },
     should_output_json,
-};
-
-// The agent wire payloads live in cli-contract so the schema registry
-// registers the real serialization types.
-pub(crate) use heddle_cli_contract::cli::commands::wire::agent::{
-    AgentFanoutCommandOutput, AgentFanoutLaneOutput, AgentFanoutOutput, AgentReservationEnvelope,
-    AgentReservationListOutput, AgentReservationOutput, AgentTaskEnvelope, AgentTaskListOutput,
-    AgentTaskOutput,
 };
 
 fn live_owner_conflict_advice(
@@ -1232,7 +1229,6 @@ pub async fn cmd_agent_capture(
             no_agent: false,
         },
     )
-    .await
 }
 
 pub async fn cmd_agent_ready(cli: &Cli, args: crate::cli::cli_args::AgentReadyArgs) -> Result<()> {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Tree types: entries, structure, and supporting enums.
 
-use std::{fmt, path::Path};
+use std::{fmt, path::Path, sync::Arc};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
@@ -470,19 +470,24 @@ impl TreeEntry {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tree {
-    entries: Vec<TreeEntry>,
+    // Trees are immutable on every read path and only change while a caller is
+    // constructing a replacement tree. Sharing the entry vector makes those
+    // read-path clones O(1); insert/remove detach with copy-on-write.
+    entries: Arc<Vec<TreeEntry>>,
 }
 
 impl Tree {
     pub fn new() -> Self {
         Self {
-            entries: Vec::new(),
+            entries: Arc::new(Vec::new()),
         }
     }
 
     pub fn from_entries(mut entries: Vec<TreeEntry>) -> Self {
         entries.sort_by(|a, b| a.name.cmp(&b.name));
-        Self { entries }
+        Self {
+            entries: Arc::new(entries),
+        }
     }
 
     /// Build a tree from entries that are already in canonical name order.
@@ -498,7 +503,7 @@ impl Tree {
 
     pub fn validate(&self) -> Result<(), TreeError> {
         let mut previous_name: Option<&str> = None;
-        for entry in &self.entries {
+        for entry in self.entries.iter() {
             entry.validate()?;
             if let Some(previous) = previous_name
                 && previous >= entry.name.as_str()
@@ -525,18 +530,18 @@ impl Tree {
     }
 
     pub fn insert(&mut self, entry: TreeEntry) {
-        self.entries.retain(|e| e.name != entry.name);
-        let pos = self
-            .entries
+        let entries = Arc::make_mut(&mut self.entries);
+        entries.retain(|e| e.name != entry.name);
+        let pos = entries
             .iter()
             .position(|e| e.name > entry.name)
-            .unwrap_or(self.entries.len());
-        self.entries.insert(pos, entry);
+            .unwrap_or(entries.len());
+        entries.insert(pos, entry);
     }
 
     pub fn remove(&mut self, name: &str) -> Option<TreeEntry> {
         let pos = self.entries.iter().position(|e| e.name == name)?;
-        Some(self.entries.remove(pos))
+        Some(Arc::make_mut(&mut self.entries).remove(pos))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -550,7 +555,7 @@ impl Tree {
     pub fn hash(&self) -> ContentHash {
         let total_len: usize = self.entries.iter().map(TreeEntry::encoded_len).sum();
         ContentHash::compute_typed_with_len("tree", total_len as u64, |hasher| {
-            for entry in &self.entries {
+            for entry in self.entries.iter() {
                 entry.update_hasher(hasher);
             }
         })
@@ -807,7 +812,9 @@ impl IntoIterator for Tree {
     type IntoIter = std::vec::IntoIter<TreeEntry>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.entries.into_iter()
+        Arc::try_unwrap(self.entries)
+            .unwrap_or_else(|entries| (*entries).clone())
+            .into_iter()
     }
 }
 
@@ -882,5 +889,55 @@ mod spoollink_tests {
             EntryType::from_byte(EntryType::Spoollink.to_byte()),
             Some(EntryType::Spoollink)
         );
+    }
+}
+
+#[cfg(test)]
+mod cow_tests {
+    use super::*;
+
+    fn fixture() -> Tree {
+        Tree::from_entries(vec![
+            TreeEntry::file("a", ContentHash::compute(b"a"), false).unwrap(),
+            TreeEntry::file("b", ContentHash::compute(b"b"), true).unwrap(),
+        ])
+    }
+
+    #[test]
+    fn clone_shares_entries_until_mutated() {
+        let original = fixture();
+        let mut clone = original.clone();
+        assert!(Arc::ptr_eq(&original.entries, &clone.entries));
+
+        clone.insert(TreeEntry::file("c", ContentHash::compute(b"c"), false).unwrap());
+
+        assert!(!Arc::ptr_eq(&original.entries, &clone.entries));
+        assert!(original.get("c").is_none());
+        assert!(clone.get("c").is_some());
+    }
+
+    #[test]
+    fn clone_mutation_preserves_original_hash_and_encoding() {
+        let original = fixture();
+        let original_hash = original.hash();
+        let original_bytes = rmp_serde::to_vec_named(&original).unwrap();
+        let mut clone = original.clone();
+
+        assert!(clone.remove("a").is_some());
+
+        assert_eq!(original.hash(), original_hash);
+        assert_eq!(rmp_serde::to_vec_named(&original).unwrap(), original_bytes);
+        assert_ne!(clone.hash(), original_hash);
+    }
+
+    #[test]
+    fn clone_and_mutate_roundtrips_through_durable_encoding() {
+        let mut tree = fixture().clone();
+        tree.insert(TreeEntry::directory("dir", ContentHash::compute(b"dir")).unwrap());
+        let encoded = rmp_serde::to_vec_named(&tree).unwrap();
+        let decoded: Tree = rmp_serde::from_slice(&encoded).unwrap();
+
+        assert_eq!(decoded, tree);
+        assert_eq!(decoded.hash(), tree.hash());
     }
 }

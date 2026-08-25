@@ -1225,3 +1225,36 @@ fn test_empty_bucket_is_noop() {
     // Pack data should still have magic + version + count + checksum
     assert!(pack_data.len() >= 16 + 32); // header + checksum
 }
+
+#[test]
+fn build_retaining_objects_returns_original_payloads_and_valid_pack() {
+    let payloads = (0..16u8)
+        .map(|index| {
+            let mut data = b"shared prefix for retained delta candidates ".repeat(8);
+            data.extend_from_slice(&[index; 32]);
+            (ContentHash::compute(&data), data)
+        })
+        .collect::<Vec<_>>();
+    let mut builder = PackBuilder::new(CompressionConfig::default());
+    for (hash, data) in &payloads {
+        builder.add(*hash, ObjectType::Blob, data.clone());
+    }
+
+    let (pack_data, index_data, stats, retained) = builder.build_retaining_objects().unwrap();
+
+    assert_eq!(stats.object_count, payloads.len() as u64);
+    assert_eq!(retained.len(), payloads.len());
+    for (hash, expected) in &payloads {
+        assert!(retained.iter().any(|(id, object_type, data)| {
+            *id == PackObjectId::Hash(*hash) && *object_type == ObjectType::Blob && data == expected
+        }));
+    }
+
+    let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
+    for (hash, expected) in payloads {
+        assert_eq!(
+            reader.get_hashed_object(&hash).unwrap(),
+            Some((ObjectType::Blob, expected))
+        );
+    }
+}

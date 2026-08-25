@@ -21,7 +21,7 @@ mod pack_tests;
 
 pub use compact_frame::compress_compact_frame;
 pub use manager::PackManager;
-pub use pack_builder::PackBuilder;
+pub use pack_builder::{PackBuilder, RetainedPackBuild};
 pub use pack_identity::{PACK_LOGICAL_ID_CONTEXT, PackLogicalId, PackRepresentationHash};
 pub use pack_index::PackIndex;
 pub use pack_reader::{EncodedPackSubset, PackReadTier, PackReader};

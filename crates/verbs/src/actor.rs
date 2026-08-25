@@ -21,7 +21,7 @@ use repo::{
 use schemars::JsonSchema;
 use serde::Serialize;
 
-/// Machine JSON for `heddle presence list` domain fields (stable field names).
+/// Machine JSON for `heddle agent presence list` domain fields (stable field names).
 ///
 /// CLI may wrap this with a `verification` envelope; domain fields here match
 /// the public `actor_list` contract (`output_kind`, `actors`, `active_only`).

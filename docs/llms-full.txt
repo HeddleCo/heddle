@@ -59,20 +59,30 @@ CLI / Web UI
   -> immutable objects and hosted control-plane metadata
 ```
 
-Heddle is no longer best understood as a single `src/` tree. The repository is a Cargo workspace with separate crates for the local/client CLI, core types, repository helpers, refs, oplog, semantic analysis, and Git interoperability/projection functionality. (The hosted server and admin binary moved to the sibling **weft** repo — see below.)
+Heddle is no longer best understood as a single `src/` tree. The repository is
+a Cargo workspace with separate crates for the CLI surface, embeddable verbs,
+hosted client, core types, repository helpers, refs, oplog, semantic analysis,
+and Git interoperability. (The hosted server and admin binary moved to the
+sibling **weft** repo — see below.)
 
 ## Workspace Structure
 
 ```text
 crates/
-  cli/       # local CLI entry point, command dispatch, private hosted runtime
-  cli-shared/ # published CLI config and credential-file contract
-  objects/      # core object model and shared types
-  repo/      # repository operations and helpers
-  refs/      # threads, markers, HEAD, packed refs
-  oplog/     # undo/redo oplog logic
-  git-projection/ # Git interoperability engine, re-exported by the CLI
-  semantic/  # semantic diff and parser-heavy analysis
+  cli/             # local CLI entry point and command dispatch
+  cli-args/        # clap argument surface
+  cli-contract/    # verb catalog, schemas, help, recovery contracts
+  cli-render/      # human-facing terminal presentation
+  config/          # user-config TOML schema, credentials, tracing
+  verbs/           # embeddable command plans and domain operations
+  hosted-client/   # hosted transport, identity, credentials, and sync
+  agent-relay/     # harness event relay and agent coordination adapter
+  objects/         # core object model and shared types
+  repo/            # repository operations and helpers
+  refs/            # threads, markers, HEAD, packed refs
+  oplog/           # undo/redo oplog logic
+  git-projection/  # Git interoperability engine
+  semantic/        # semantic diff and parser-heavy analysis
   ...
 docs/             # architecture, hosted model, roadmap, future-state plans
 specs/            # Quint formal specifications
@@ -86,7 +96,7 @@ product in the sibling **tapestry** repo — neither is part of this workspace.
 
 Heddle uses separate config/state scopes instead of a single repository config file doing everything:
 
-- `UserConfig` and the compatible credential-file store live in `heddle-cli-shared`; they own identity, agent defaults, output preferences, and hosted auth profiles
+- `UserConfig` and the compatible credential-file store live in `heddle-config`; they own identity, agent defaults, output preferences, and hosted auth profiles
 - `RepoConfig` lives in `.heddle/config.toml` and owns repository-local behavior, storage coordinates, and remotes
 - `ServerConfig` lives with the hosted runtime (in the sibling **weft** repo) and owns storage, database, auth, TLS, and admission settings
 - `WorktreeState` is checkout-local runtime state and should not be serialized into repo config
@@ -96,7 +106,7 @@ Binary ownership follows the same split:
 - `heddle` (this repo) owns local repository operations and its private hosted transport/downloader runtime
 - the hosted server runtime and admin operations live in the sibling **weft** repo (no `hosted` binary in this workspace)
 
-Native review commands call `daemon::local_review::LocalStateReview` directly
+Native review commands call `verbs::review::LocalStateReview` directly
 in-process. That module uses Heddle-owned domain types; it is not an
 implementation of the API-owned hosted `StateReviewService` and does not use
 Prost as its local interface. Its repository-local idempotency cache encodes
@@ -206,7 +216,7 @@ This matters for harness integration work:
 - Heddle should follow supported harnesses ambiently rather than requiring users to run tools through Heddle
 - presence records are stored separately from writer leases
 - harness-native identities are tracked separately from Heddle-local reconnect identifiers
-- `heddle presence ...` inspects attribution without granting write authority
+- `heddle agent presence ...` inspects attribution without granting write authority
 - `heddle agent reserve|heartbeat|capture|ready|release` is the writer hot loop
 - `heddle agent provenance ...` records provider, model, and policy epochs
 
@@ -406,7 +416,7 @@ This single line is responsible for `cli → server → axum → hyper-util` (62
 Only two import paths (from `grep -rn 'use server::' crates/cli/src/`):
 
 - `server::server::grpc_local_impl::*` — local gRPC service trait impls (`review`, `query`, `transaction`, `discuss` verbs)
-- `server::local_daemon::*` — the UDS listener + pidfile for `heddle agent serve`
+- `server::local_daemon::*` — the UDS listener + pidfile for `heddle daemon serve`
 
 Imports inside those modules ([crates/server/src/server/grpc_local_impl/](crates/server/src/server/grpc_local_impl/) + [crates/server/src/local_daemon.rs](crates/server/src/local_daemon.rs)) reference:
 
@@ -1085,7 +1095,7 @@ score. A global hard-gate failure blocks release.
    `heddle <command> --help`, and `heddle <command> -h` work for every public
    command path.
 8. **Schema drift fails.** Any command documented as JSON-producing must be
-   registered in `heddle schemas` and covered by schema/doc drift tests.
+   registered in the runtime schema registry and covered by schema/doc drift tests.
 9. **Non-interactive safety.** Commands used in scripts must not block on prompts
    unless explicitly interactive; interactive prompts must have a non-interactive
    equivalent.
@@ -1106,7 +1116,7 @@ score. A global hard-gate failure blocks release.
 - 2 pts: command does not duplicate another command's job without a clear
   compositional reason.
 
-Audit evidence: `heddle help`, `heddle help advanced`, command enum, docs, and
+Audit evidence: `heddle help`, per-verb `--help`, command enum, docs, and
 real invocation transcripts.
 
 ### 2. Arguments and flags: 10 pts
@@ -1307,7 +1317,7 @@ Heddle is ready to present as a best-of-class OSS CLI only when:
 1. All hard gates pass globally.
 2. All everyday commands score A or better.
 3. No advanced public command scores below B.
-4. `docs/json-schemas.md`, `heddle schemas`, and runtime JSON agree.
+4. `docs/json-schemas.md`, the runtime schema registry, and runtime JSON agree.
 5. `heddle doctor docs --all --output json` and schema drift checks are clean.
 6. The Git-overlay matrix passes with no `git` executable on `PATH`.
 7. Every C-or-lower audit finding has an owner, issue, and release-blocking
@@ -1558,13 +1568,11 @@ quality is part of the contract, not a polish step.
 
 ## 2. Disposability
 
-Speculation has no cost. `heddle try -- <cmd>` spins up an ephemeral
-thread with an isolated checkout, runs the command, and either captures
-the result on success or drops the thread on failure — the parent
-worktree is never touched ([`crates/cli/src/cli/commands/try_cmd.rs`](../crates/cli/src/cli/commands/try_cmd.rs)).
-For parallel speculation, create isolated child threads with
+Speculation is cheap. For parallel speculation, create isolated child
+threads with
 `heddle start <name> --parent-thread <parent> --task <task>` and run each
-experiment in its own checkout.
+experiment in its own checkout; drop it with `heddle thread drop` when
+the experiment fails.
 
 Disposability is what makes those verbs possible. Threads are cheap, the
 oplog is reliable, and rolling back is `heddle undo` — not a manual file
@@ -1574,19 +1582,16 @@ agent's strategy changes. We design for that.
 ## 3. Composability
 
 The same primitives appear in multiple verbs because the right ones were
-chosen first. A thread is a thread whether it came from `heddle start`,
-`heddle try`, or a child `heddle start --parent-thread` workflow. A capture is a capture
+chosen first. A thread is a thread whether it came from `heddle start`
+or a child `heddle start --parent-thread` workflow. A capture is a capture
 whether you triggered it explicitly or the verify hook fired it after a
 green test run.
 
-`heddle retro --since <marker>` is the clearest example
-([`crates/cli/src/cli/commands/retro.rs`](../crates/cli/src/cli/commands/retro.rs)).
-Before retro, reconstructing "what happened this turn" meant
-cross-referencing `heddle log`, `heddle agent list`,
-`heddle context history`, and `heddle thread marker list` separately, then
-aligning timestamps by hand. Retro folds those four reads into one trip on
-a single time window. It isn't new data — it's an idiom that emerged often
-enough to deserve a name.
+Composition beats accretion: reconstructing "what happened this turn"
+is a matter of reading `heddle log`, `heddle agent list`,
+`heddle context history`, and `heddle thread marker list` — four reads
+over one shared time window — rather than a fifth verb that duplicates
+them.
 
 ## 4. Restraint
 
@@ -1596,7 +1601,7 @@ check integration, land or push, undo, inspect history, and recover.
 The exact verb list comes from the command contract table so human help
 and `heddle help --output json` do not drift. Collaboration and
 annotation surfaces such as `review`, `discuss`, and `context` stay
-behind `heddle help advanced` and their topic pages for the moments you
+behind `heddle <verb> --help` and topic pages for the moments you
 need them. First-time users see the smallest surface that explains where
 they are, what is in flight, what to do next, and how to recover.
 
@@ -1604,8 +1609,8 @@ State IDs follow the same logic. Every state-taking verb accepts the same
 specifiers — full change ID, 4-character-or-longer prefix, marker name,
 `HEAD`, `HEAD~N`, thread name — so the muscle memory you build on
 `heddle show` carries to `heddle diff`, `heddle revert`,
-`heddle query --attribution --state`, `heddle review show`,
-and `heddle retro --since`. One acceptance rule, every state-taking verb.
+`heddle query --attribution --state`, and `heddle review show`.
+One acceptance rule, every state-taking verb.
 
 Restraint in defaults: child thread workflows can share a Cargo target
 directory whenever the workspace has a `Cargo.toml`, because ten parallel
@@ -1619,7 +1624,7 @@ Claims match behavior. The `MergeOutput` schema separates `blockers`
 (non-blocking nudges when state did advance) — and the `status` field
 follows the truth: `"blocked"` flips when there are real blockers, even
 if the underlying integration engine itself completed
-([`crates/core/src/merge/mod.rs`](../crates/core/src/merge/mod.rs),
+([`crates/verbs/src/merge/mod.rs`](../crates/verbs/src/merge/mod.rs),
 [`crates/cli/src/cli/commands/operator_core.rs`](../crates/cli/src/cli/commands/operator_core.rs)).
 A merge that landed but couldn't write its git commit doesn't get to
 report `"completed"`.
@@ -1723,8 +1728,8 @@ hosted server. The attenuation machinery is identical either way.
 Self-sovereign minting uses
 [`biscuit-auth`](https://docs.rs/biscuit-auth) directly. Heddle does not expose a
 general-purpose capability-token library. Its hosted attenuation policy belongs
-to the application and lives in the CLI's private
-[`hosted_runtime/device_flow.rs`](../crates/cli/src/hosted_runtime/device_flow.rs)
+to the application and lives in
+[`hosted_runtime/device_flow.rs`](../crates/hosted-client/src/hosted_runtime/device_flow.rs)
 module. Use `heddle auth derive-agent` for that policy-controlled flow.
 
 [`heddle-crypto`](../crates/crypto/) is a *different* crypto surface:
@@ -1805,8 +1810,8 @@ Each restriction translates to a Biscuit Datalog clause that the
 verifier evaluates with the per-request facts (`time`, `operation`,
 `resource`) injected by the server. The shape is documented in
 [`.agents/agent-attenuation.md`](../.agents/agent-attenuation.md)
-and the CLI-owned construction lives in
-[`hosted_runtime/device_flow.rs`](../crates/cli/src/hosted_runtime/device_flow.rs).
+and the Heddle-owned construction lives in
+[`hosted_runtime/device_flow.rs`](../crates/hosted-client/src/hosted_runtime/device_flow.rs).
 In short:
 
 | Field | Datalog | Default when fact missing |
@@ -1857,8 +1862,8 @@ chain is still under 2 KB.
 - [`.agents/agent-attenuation.md`](../.agents/agent-attenuation.md)
   — hosted-flow cookbook (read-only inspector, time-bounded agent,
   multi-repo writer, sub-sub-agent chain).
-- [`crates/cli/src/hosted_runtime/device_flow.rs`](../crates/cli/src/hosted_runtime/device_flow.rs)
-  — the CLI-owned attenuation policy and its unit tests.
+- [`crates/hosted-client/src/hosted_runtime/device_flow.rs`](../crates/hosted-client/src/hosted_runtime/device_flow.rs)
+  — the hosted-client attenuation policy and its unit tests.
 - [biscuit-auth documentation](https://docs.rs/biscuit-auth) —
   upstream details on the Biscuit format, Datalog semantics, and
   `KeyPair`/`Biscuit::builder` APIs used at mint time.
@@ -2410,17 +2415,13 @@ implementer cannot route around. Hosted consumers rely on the separately owned
   that's covered by `heddle doctor docs` /
   `heddle doctor schemas` plus the conventions in
   [`CONTRIBUTING.md`](../CONTRIBUTING.md).
-- `heddle-cli-shared`, `heddle-daemon`,
-  `heddle-devtools`, `heddle-ingest`, `heddle-mount`,
-  `heddle-oplog`, `heddle-refs`, `heddle-repo`, `heddle-review`,
-  `heddle-semantic`, `heddle-state-review`, `heddle-crypto`,
-  `weft-client-shim` — internal-shaped today, may absorb churn from
-  ongoing work (hosted control plane, semantic diff evolution,
-  daemon redesigns). Promoting any of these to 1.0 is a follow-up
+- All other workspace crates are internal-shaped today and may absorb churn
+  from ongoing work (hosted control plane, semantic diff evolution).
+  Promoting any of these to 1.0 is a follow-up
   decision after the first 1.0.x release proves the stability
-  contract is workable on the three above.
+  contract is workable on the stable crates above.
 
-Tradeoff: a wider 1.0 scope (e.g. "all 18 crates frozen") is a
+Tradeoff: a wider 1.0 scope (for example, freezing every workspace crate) is a
 stronger ecosystem signal but raises the cost of every internal
 refactor — and most of these crates are pre-product-shaped. A
 narrower scope is honest about which surfaces are actually being
@@ -3244,7 +3245,7 @@ Source: docs/WIRE_PROTOCOL.md
 The current hosted contract is owned by `HeddleCo/api` and uses generated
 protobuf messages (Prost in Rust). The `heddle-wire` crate retains native object
 transfer, graph-planning, pack, and failure-projection primitives, but legacy
-envelopes such as `ListRefs`, `RefsList`, `RefFilter`, `WantObjects`, and
+envelopes such as `ListRefs` (streamed), `RefFilter`, `WantObjects`, and
 `UpdateRef` have been removed. Any remaining Weft imports of those names must be
 migrated in the coordinated clean cut before the incompatible Heddle crate is
 published.
@@ -3296,11 +3297,15 @@ Hosted admin authorization is server-side and combines:
 
 ## Reference Advertisement
 
-`ListRefs -> RefsList` returns:
+`ListRefs` streams `ListRefsResponse` frames:
 
-- `head`: `Attached { thread }` or `Detached { state }`
-- `head_state`: resolved `ChangeId` if HEAD currently points to an existing state
-- `refs`: thread + marker entries
+- `item`: one `RefEntry` per thread/marker ref
+- `page_end`: `head_thread` (+ stable `head_thread_id`) as `Attached`, or
+  `head_state` (`ChangeId`) when HEAD is detached; `next_page_token` is
+  empty on the final frame
+
+The pre-streaming aggregate `RefsList` envelope is retired; consumers
+must read the streamed form.
 
 ## Object Transfer
 
@@ -3822,16 +3827,10 @@ declared discriminators, `exit_codes`) are stable for that minor.
 ## Coverage
 
 Today, only a representative subset of commands has populated
-`exit_codes` — exactly eight entries in the command catalog:
+`exit_codes`:
 
-- `init`, `status`, `verify`, `commit`
-- `pull`, `push`
-- `bridge git import`, `sync git`
-
-This list mirrors the catalog (`CommandContract.exit_codes`, exposed per
-command by `heddle help --output json`); the
-`exit_codes_declared_have_doc_entry` lint below keeps every declared code
-present in the table above.
+- `init`, `verify`, `push`, `pull`, `commit`, `merge`, `status`
+- `import git`, `fsck repair git`, `sync git`
 
 Commands not yet swept implicitly contract to `0` on success and an
 unspecified non-zero on failure — currently always mapped through
@@ -4056,20 +4055,10 @@ on.
 Schemas in this document are registered at runtime by
 `crates/cli-contract/src/cli/commands/schemas.rs`. `init` registers the
 real `InitOutput` type (no hand-written `InitSchema` mirror); remaining
-verbs still use a hand-written mirror. Generate the canonical JSON
-Schema for any verb with:
+verbs still use a hand-written mirror. The registered verb list is the
+`schema_verbs` field of the command catalog:
 
-    heddle schemas                    # list registered schema verbs
-    heddle schemas <verb>             # e.g. heddle schemas status
-    heddle schemas log --reflog       # subcommands taking --flags work too
-    heddle schemas agent ready --output text
-    heddle schemas status
-
-(Indented as plain text rather than a fenced block so the
-`heddle doctor docs` flag-checker doesn't flag `--reflog` as
-unknown — the schemas verb takes its argument as
-`trailing_var_arg`. Schema output is always JSON; trailing global
-flags such as `--output text` are ignored for lookup.)
+    heddle help --output json
 
 CI runs `heddle doctor schemas` on every PR and validates each literal
 JSON sample below against the registered schema. Drift — a sample
@@ -4149,7 +4138,7 @@ specifiers. Pass any of them — they all resolve to the same change ID:
 
 Verbs covered: `show`, `diff`, `revert`, `query --attribution --state`,
 `log --since`, `review show`,
-`review sign`, `discuss open|list|resolve --state`, `retro --since`.
+`review sign`, `discuss open|list|resolve --state`.
 The `heddle log --output json` `change_id` field is the canonical short form
 that downstream verbs consume.
 
@@ -4840,15 +4829,40 @@ List recent saved states on a thread.
   "output_kind": "thread_drop",
   "status": "completed",
   "action": "thread_drop",
-  "name": "feature/parser",
   "message": "Dropped thread 'feature/parser'",
   "next_action": null,
   "next_action_template": null,
   "recommended_action": null,
   "recommended_action_template": null,
-  "thread": null,
-  "path": null,
-  "execution_path": null
+  "thread": {
+    "id": "th-01abc",
+    "thread": "feature/parser",
+    "target_thread": null,
+    "parent_thread": null,
+    "mode": "virtualized",
+    "state": "merged",
+    "base_state": "hs-01abc",
+    "base_root": "32fc0aff",
+    "current_state": "hs-02def",
+    "merged_state": null,
+    "task": null,
+    "execution_path": ".heddle/threads/feature-parser",
+    "materialized_path": null,
+    "changed_paths": [],
+    "impact_categories": [],
+    "heavy_impact_paths": [],
+    "promotion_suggested": false,
+    "freshness": "current",
+    "verification_summary": {"tests_passed": null, "tests_failed": null, "coverage_pct": null, "lint_warnings": null},
+    "confidence_summary": {"value": null, "band": null},
+    "integration_policy_result": {"status": null, "reason": null, "manual_resolution_state": null, "manually_resolved": false},
+    "created_at": "2026-08-20T10:00:00.000000Z",
+    "updated_at": "2026-08-21T09:30:00.000000Z",
+    "ephemeral": null,
+    "auto": false,
+    "shared_target_dir": null
+  },
+  "changed_path_count": 0
 }
 ```
 
@@ -5162,8 +5176,10 @@ verification.
 ```json
 {
   "output_kind": "thread_marker_delete",
-  "name": "verified-parser",
-  "state_id": null,
+  "deleted": [
+    {"name": "verified-parser", "state_id": "hc-def456"}
+  ],
+  "count": 1,
   "message": "Deleted marker 'verified-parser'"
 }
 ```
@@ -5246,7 +5262,7 @@ verification.
 }
 ```
 
-## `heddle presence show --output json`
+## `heddle agent presence show --output json`
 
 Presence inspection emits an envelope with post-command verification. Lists are
 also enveloped so agents never have to special-case a raw array.
@@ -5275,7 +5291,7 @@ also enveloped so agents never have to special-case a raw array.
 
 ---
 
-## `heddle presence list --output json`
+## `heddle agent presence list --output json`
 
 ```json
 {
@@ -5307,7 +5323,7 @@ also enveloped so agents never have to special-case a raw array.
 
 ---
 
-## `heddle presence complete --output json`
+## `heddle agent presence complete --output json`
 
 ```json
 {
@@ -5321,7 +5337,7 @@ also enveloped so agents never have to special-case a raw array.
 
 ---
 
-## `heddle presence explain --output json`
+## `heddle agent presence explain --output json`
 
 ```json
 {
@@ -5369,7 +5385,7 @@ also enveloped so agents never have to special-case a raw array.
 
 ---
 
-## `heddle agent serve --output json`
+## `heddle daemon serve --output json`
 
 The foreground daemon emits one JSON value when it exits cleanly.
 
@@ -5384,7 +5400,7 @@ The foreground daemon emits one JSON value when it exits cleanly.
 
 ---
 
-## `heddle agent status --output json`
+## `heddle daemon status --output json`
 
 ```json
 {
@@ -5418,15 +5434,13 @@ The foreground daemon emits one JSON value when it exits cleanly.
 
 ---
 
-## `heddle agent stop --output json`
+## `heddle daemon stop --output json`
 
 ```json
 {
-  "output_kind": "agent_stop",
-  "stopped": false,
-  "swept_stale": false,
-  "pid": null,
-  "reason": "no pidfile"
+  "output_kind": "daemon_stop",
+  "action": "daemon stop",
+  "status": "not_running"
 }
 ```
 
@@ -5929,42 +5943,6 @@ the same ready envelope.
 
 ---
 
-## `heddle context check --output json`
-
-Staleness sweep over context annotations. The `reason` enum is the
-shipped `StalenessStatus` model (`crates/object-model/src/object/staleness_core.rs`)
-minus the non-stale variants: `source_changed`, `symbol_missing`,
-`file_missing`. `fresh` and `unknown` annotations are counted but not
-listed.
-
-```json
-{
-  "output_kind": "context_check",
-  "annotations": 3,
-  "fresh": 1,
-  "stale": 2,
-  "unknown": 0,
-  "issues": [
-    {
-      "target": "src/auth.rs",
-      "scope": "symbol",
-      "reason": "symbol_missing",
-      "annotation_id": "ann-01",
-      "content": "verify token expiry before..."
-    },
-    {
-      "target": "src/removed.rs",
-      "scope": "file",
-      "reason": "file_missing",
-      "annotation_id": "ann-02",
-      "content": "legacy adapter notes"
-    }
-  ]
-}
-```
-
----
-
 ## `heddle auth trust show --output json`
 
 ```json
@@ -6460,7 +6438,7 @@ tool-call navigation state:
 }
 ```
 
-`heddle timeline status --output json` emits a scrubbed status envelope for
+`heddle agent timeline status --output json` emits a scrubbed status envelope for
 the selected timeline thread. It reports cursor and summary metadata only; it
 does not include raw tool payloads, transcripts, stdout, stderr, environment
 values, argv, or filename lists.
@@ -6500,7 +6478,7 @@ values, argv, or filename lists.
 }
 ```
 
-`heddle timeline record-start --output json` emits the scrubbed append
+`heddle agent timeline record-start --output json` emits the scrubbed append
 result after appending a versioned tool-call-start operation body:
 
 ```json
@@ -6524,7 +6502,7 @@ result after appending a versioned tool-call-start operation body:
 }
 ```
 
-`heddle timeline record-finish --output json` emits the scrubbed append
+`heddle agent timeline record-finish --output json` emits the scrubbed append
 result after appending a versioned tool-call-finish operation body:
 
 ```json
@@ -6548,7 +6526,7 @@ result after appending a versioned tool-call-finish operation body:
 }
 ```
 
-`heddle timeline fork|reset|recover --output json` emit timeline
+`heddle agent timeline fork|reset|recover --output json` emit timeline
 action results:
 
 ```json
@@ -6942,10 +6920,17 @@ review, the pending state's view is flattened alongside `output_kind`
 (`state_id`, `headline`, `existing_signatures`) and the same view is
 echoed under `next`. When the scan window holds no pending review, the
 payload carries only `output_kind` and `next: null` — never a
-top-level `null`.
+top-level `null`; the three pending-state fields are omitted rather than
+serialized as `null`.
 
 ```json
 {"output_kind": "review_next", "state_id": "hc-def456", "headline": "Tighten parser recovery", "existing_signatures": 0, "next": {"state_id": "hc-def456", "headline": "Tighten parser recovery", "existing_signatures": 0}}
+```
+
+With no pending review:
+
+```json
+{"output_kind": "review_next", "next": null}
 ```
 
 `heddle review health --output json` emits:
@@ -7137,28 +7122,6 @@ Sync emits:
 
 ---
 
-## `heddle schemas --output json`
-
-List every runtime schema verb and the subset enforced by
-`heddle doctor schemas`.
-
-```json
-{
-  "output_kind": "schemas",
-  "schema_verbs": ["status", "verify", "try"],
-  "documented_schema_verbs": ["status", "verify", "try"]
-}
-```
-
-### Fields
-
-| Field | Type | Optionality | Semantics |
-|-------|------|-------------|-----------|
-| `schema_verbs` | array<string> | required | Every verb with a runtime JSON Schema mirror. |
-| `documented_schema_verbs` | array<string> | required | Schema verbs whose samples are checked against this document. |
-
----
-
 ## `heddle doctor --output json`
 
 Doctor is the comprehensive health report; it includes the shared
@@ -7234,60 +7197,60 @@ as one; no `help advanced`).
   "command_contract_schema_coverage": {
     "accepted_opaque_schema_examples": [
       "help",
-      "ci run",
       "redact apply",
       "redact list",
       "redact show",
       "redact purge apply",
       "redact purge list",
-      "visibility set"
+      "visibility set",
+      "visibility promote"
     ],
     "accepted_opaque_schema_verbs_total": 38,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
-      "ci run",
       "redact apply",
       "redact list",
       "redact show",
       "redact purge apply",
       "redact purge list",
-      "visibility set"
+      "visibility set",
+      "visibility promote"
     ],
-    "advanced_scope_json_commands_total": 112,
+    "advanced_scope_json_commands_total": 99,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 38,
-    "advanced_scope_mutating_commands_total": 64,
-    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 21,
-    "catalog_commands_total": 192,
-    "catalog_mutating_commands_total": 93,
-    "json_commands_total": 151,
+    "advanced_scope_mutating_commands_total": 56,
+    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 20,
+    "catalog_commands_total": 186,
+    "catalog_mutating_commands_total": 90,
+    "json_commands_total": 147,
     "json_commands_with_accepted_opaque_schema": 38,
-    "json_commands_with_schema": 113,
+    "json_commands_with_schema": 109,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 88,
+    "json_mutating_commands_total": 86,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 88,
-    "mutating_commands_with_accepted_opaque_schema": 21,
-    "mutating_commands_with_schema": 67,
+    "mutating_commands_total": 86,
+    "mutating_commands_with_accepted_opaque_schema": 20,
+    "mutating_commands_with_schema": 66,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 38,
     "status": "available",
-    "summary": "192 command(s), 151 JSON command(s), 93 mutating command(s), 88 mutating JSON command(s); verified everyday/agent machine surface has 39 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
+    "summary": "188 command(s), 147 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
     "undocumented_schema_verbs_total": 0,
     "verified_scope": "everyday_and_agent",
     "verified_scope_accepted_opaque_schema_examples": [],
-    "verified_scope_json_commands_total": 39,
+    "verified_scope_json_commands_total": 48,
     "verified_scope_json_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_json_commands_with_schema": 39,
+    "verified_scope_json_commands_with_schema": 48,
     "verified_scope_json_commands_without_schema": 0,
     "verified_scope_missing_schema_examples": [],
-    "verified_scope_mutating_commands_total": 24,
+    "verified_scope_mutating_commands_total": 30,
     "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_mutating_commands_with_schema": 24,
+    "verified_scope_mutating_commands_with_schema": 30,
     "verified_scope_mutating_commands_without_schema": 0
   },
   "doc_path": "/repo/docs/json-schemas.md",
@@ -7311,7 +7274,7 @@ as one; no `help advanced`).
     "try"
   ],
   "status": "available",
-  "summary": "192 command(s), 151 JSON command(s), 93 mutating command(s), 88 mutating JSON command(s); verified everyday/agent machine surface has 39 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
+  "summary": "188 command(s), 147 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -7334,32 +7297,6 @@ as one; no `help advanced`).
   "confidence": 0.91,
   "actor": {"provider": "openai", "model": "gpt-5"},
   "id": 12
-}
-```
-
----
-
-## `heddle try --output json`
-
-Run a command in an ephemeral isolated thread. A successful run leaves
-the thread ready for merge unless `--auto-merge` lands and drops it.
-Every action field is a single parseable command; discard guidance
-lives in `recovery_commands`.
-
-```json
-{
-  "status": "completed",
-  "action": "try",
-  "message": "`cargo test` succeeded; thread 'try-1234abcd' ready (state hc-sqr398dvx9ay). Run `heddle ready --thread try-1234abcd` to land.",
-  "thread": "try-1234abcd",
-  "thread_dropped": false,
-  "exit_code": 0,
-  "duration_ms": 1420,
-  "captured_state": "hc-sqr398dvx9ay",
-  "merge_state": null,
-  "next_action": "heddle ready --thread try-1234abcd",
-  "recommended_action": "heddle ready --thread try-1234abcd",
-  "recovery_commands": ["heddle thread drop try-1234abcd"]
 }
 ```
 
@@ -7471,19 +7408,19 @@ required:
 {"commits_scanned":2,"commits_with_matches":1,"sessions_mined":3,"points_extracted":4,"states_updated":1,"annotations_written":4}
 ```
 
-`heddle collapse --output json` emits:
+`heddle thread collapse --output json` emits:
 
 ```json
 {"change_id": "hc-collapsed123", "collapsed": 3, "message": "collapse feature checkpoints", "parents": ["hc-base123"]}
 ```
 
-`heddle expand --output json` emits the ordered captures recorded by a squashed land collapse:
+`heddle thread expand --output json` emits the ordered captures recorded by a squashed land collapse:
 
 ```json
 {"output_kind": "expand", "status": "completed", "requested": "HEAD", "collapsed": {"change_id": "hc-collapsed123", "change_id_full": "hc-collapsed123000000000000000000", "git_commit": "abc123def456abc123def456abc123def456abcd", "thread": "feature/parser", "source_count": 2}, "captures": [{"change_id": "hc-source111", "change_id_full": "hc-source1110000000000000000000", "content_hash": "h1-source", "intent": "first parser checkpoint", "principal": "A. Engineer <a@example.com>", "agent": null, "confidence": null, "created_at": "2026-01-01 00:00:00", "parents": ["hc-base123"]}, {"change_id": "hc-source222", "change_id_full": "hc-source2220000000000000000000", "content_hash": "h1-source2", "intent": "second parser checkpoint", "principal": "A. Engineer <a@example.com>", "agent": "codex/gpt-5", "confidence": 0.91, "created_at": "2026-01-01 00:05:00", "parents": ["hc-source111"]}]}
 ```
 
-`heddle context set|get|list|history|edit|supersede|rm|suggest|audit --output json` emit per-subcommand shapes (each carries `output_kind` set to the snake-cased subcommand, e.g. `context_set`, `context_get`) — there is no single shared shape. `context check` has its own payload-complete contract below. For example, `context set` (and `edit`/`supersede`/`rm`) reports the mutated target and the new state:
+`heddle context set|get|list|history|edit|supersede|rm|check|suggest|audit --output json` emit per-subcommand shapes (each carries `output_kind` set to the snake-cased subcommand, e.g. `context_set`, `context_get`) — there is no single shared shape. For example, `context set` (and `edit`/`supersede`/`rm`) reports the mutated target and the new state:
 
 ```json
 {"output_kind": "context_set", "target": "src/lib.rs", "annotations": 1, "state": "hc-k6a0wfrbgcg7"}
@@ -7541,7 +7478,7 @@ the `discuss_show` discriminator:
 {"valid": true, "errors": [], "warnings": [], "objects_checked": 42, "git_projection_checked": false, "repair_target": null, "repaired": false, "repairs": []}
 ```
 
-`heddle oplog recover --output json` emits the health or explicit salvage
+`heddle maintenance oplog recover --output json` emits the health or explicit salvage
 report for the manifest-selected oplog containers. Optional recovery detail
 fields appear when the invocation repaired damage or found a durable report
 from an earlier recovery:
@@ -7663,14 +7600,6 @@ state, source blob (or `null` when absent), and BLAKE3 hunk hash. `resolutions`
 records the stable region id, resolution mode (`ours`, `theirs`, `edit`, or
 `auto`), and complete human/agent attribution written to the operation log.
 
-`heddle retro --output json` emits the same shape with bounded session data;
-`timeline_steps` is `[]` unless expanded with `--full`. `heddle retro
---full --output json` emits expanded timeline summaries:
-
-```json
-{"since": "hc-base123", "until": "hc-head456", "duration_secs": 3600, "states_captured": [{"change_id": "hc-head456", "intent": "capture parser fix", "confidence": 0.91, "agent": "codex/gpt-5", "principal": "A. Engineer <a@example.com>", "timestamp": "2026-01-01T00:00:00Z"}], "agents_active": [{"session_id": "session-123", "provider": "codex", "model": "gpt-5", "status": "active", "started_at": "2026-01-01T00:00:00Z", "completed_at": null, "tokens": {"input": 1200, "output": 800, "reasoning": 300, "tool_calls": 12}}], "agent_tasks": [{"task_id": "task-parser-fast", "title": "Tighten parser validation", "status": "in_progress", "target_thread": "feature/parser-fast", "updated_at": "2026-01-01T00:00:00Z", "completed_at": null, "coordination_discussion_id": null}], "timeline_steps": [{"thread": "feature/parser-fast", "step_id": "tls-1", "branch_id": "tlb-main", "parent_step_id": null, "tool_name": "edit", "tool_status": "succeeded", "changed": true, "payload_summary": "Edit parser validation", "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "before_state": "hc-base123", "after_state": "hc-head456", "capture_state": "hc-head456", "started_at_ms": 1770000000000, "finished_at_ms": 1770000001000}], "markers_created": [{"name": "verified-parser", "state": "hc-head456", "timestamp": "2026-01-01T00:00:00Z"}], "context_annotations": [{"path": "src/lib.rs", "scope": "file", "kind": "rationale", "content_excerpt": "Parser accepts the new token form.", "attribution": "A. Engineer <a@example.com>", "created_at": "2026-01-01T00:00:00Z"}], "verify_signals": [{"kind": "test_passed", "label": "verified: cargo test", "timestamp": "2026-01-01T00:00:00Z"}], "merges": [{"description": "Collapsed feature/parser", "timestamp": "2026-01-01T00:00:00Z"}], "undos": [{"description": "Undo capture", "timestamp": "2026-01-01T00:00:00Z"}]}
-```
-
 `heddle semantic hot --output json` emits:
 
 ```json
@@ -7697,15 +7626,15 @@ weft#451 Tier-2 body (`SemanticGraphQueryResponse`); hosted RPCs remain residual
 The following verbs also emit `--output json`. Their shapes follow the same
 discipline; see the corresponding handler in `crates/cli/src/cli/commands/`:
 
-`heddle clone`, `heddle collapse`,
-`heddle context get/set`, `heddle diff`, `heddle expand`,
+`heddle clone`, `heddle thread collapse`,
+`heddle context get/set`, `heddle diff`, `heddle thread expand`,
 `heddle discuss`, `heddle doctor docs`,
 `heddle maintenance fsck`, `heddle init`, `heddle integration`,
 `heddle maintenance`, `heddle ready`,
-`heddle remote`, `heddle resolve`, `heddle retro`,
+`heddle remote`, `heddle resolve`,
 `heddle agent provenance`, `heddle capture`,
 `heddle thread show/start`,
-`heddle try`, `heddle undo`, `heddle watch`.
+`heddle undo`, `heddle watch`.
 
 Each of these:
 
@@ -8141,9 +8070,8 @@ Counts below are unique primary clippy diagnostics from `cargo clippy --workspac
 |---|---:|---:|---:|
 | heddle-cli | 1099 | 336 | 58 |
 | heddle-cli-macro-poc | 0 | 2 | 0 |
-| heddle-cli-shared | 0 | 21 | 2 |
+| heddle-config | 0 | 0 | 0 |
 | heddle-crypto | 0 | 78 | 5 |
-| heddle-daemon | 183 | 95 | 8 |
 | heddle-devtools | 32 | 12 | 0 |
 | heddle-format | 25 | 5 | 1 |
 | heddle-ingest | 478 | 79 | 3 |
@@ -8155,8 +8083,8 @@ Counts below are unique primary clippy diagnostics from `cargo clippy --workspac
 | heddle-repo | 1993 | 430 | 22 |
 | heddle-review | 57 | 15 | 1 |
 | heddle-runtime-bridge | 0 | 18 | 1 |
-| heddle-schema | 37 | 0 | 2 |
 | heddle-semantic | 189 | 58 | 89 |
 | heddle-state-review | 2 | 0 | 0 |
+| heddle-verbs | 2 | 9 | 0 |
 | heddle-wire | 96 | 2 | 0 |
 | weft-client-shim | 0 | 0 | 0 |

@@ -64,7 +64,7 @@ pub struct TransferPlanStats {
 
 impl RepositoryTransferPlan<PlannedObject> {
     pub fn from_state_closure_plan(
-        store: &(impl ObjectStore + crate::store::SidecarStore),
+        store: &impl ObjectStore,
         root: StateId,
         options: StateClosureOptions,
         git_lane: GitLaneTransferIntent,

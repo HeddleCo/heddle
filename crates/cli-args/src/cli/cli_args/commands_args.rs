@@ -418,7 +418,7 @@ pub struct TimelineResetArgs {
     pub mode: String,
 }
 
-/// Arguments for `heddle timeline recover`.
+/// Arguments for `heddle agent timeline recover`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct TimelineRecoverArgs {
     /// Timeline thread to recover.
@@ -426,7 +426,7 @@ pub struct TimelineRecoverArgs {
     pub thread: String,
 }
 
-/// Arguments for `heddle timeline status`.
+/// Arguments for `heddle agent timeline status`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct TimelineStatusArgs {
     /// Timeline thread to inspect.
@@ -474,7 +474,7 @@ pub struct TimelineRecordToolArgs {
     pub payload_hash: Option<String>,
 }
 
-/// Arguments for `heddle timeline record-start`.
+/// Arguments for `heddle agent timeline record-start`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct TimelineRecordStartArgs {
     #[command(flatten)]
@@ -485,7 +485,7 @@ pub struct TimelineRecordStartArgs {
     pub tool_name: String,
 }
 
-/// Arguments for `heddle timeline record-finish`.
+/// Arguments for `heddle agent timeline record-finish`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct TimelineRecordFinishArgs {
     #[command(flatten)]

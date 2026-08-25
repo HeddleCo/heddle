@@ -3,7 +3,7 @@
 
 #[cfg(any(test, feature = "memory-backend"))]
 use super::InMemoryStore;
-use super::{AnyStore, FsStore, ObjectStore, Result};
+use super::{FsStore, ObjectStore, Result};
 use crate::object::{Blob, ContentHash, State, StateId, Tree};
 
 #[cfg(feature = "async-source")]
@@ -41,7 +41,6 @@ macro_rules! impl_object_source {
     };
 }
 
-impl_object_source!(AnyStore);
 impl_object_source!(FsStore);
 #[cfg(any(test, feature = "memory-backend"))]
 impl_object_source!(InMemoryStore);

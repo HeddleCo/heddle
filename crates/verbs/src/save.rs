@@ -9,30 +9,140 @@
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
+use chrono::Utc;
 use heddle_git_projection::{GitProjection, WriteThroughOutcome};
 use objects::{
     HeddleError, RecoveryDetails,
     lock::RepositoryLockExt,
-    object::{Agent, Attribution, ContentHash, Principal, State, StateId, Tree},
+    object::{Agent, Attribution, ContentHash, Principal, State, StateId, ThreadName, Tree},
     store::ObjectStore,
+    worktree::WorktreeStatus,
 };
 use oplog::{OpLogBackend, OpRecord};
 use refs::Head;
 use repo::{
-    GitCheckpointRecord, Hook, HookContext, HookManager, Repository, RepositoryCapability,
-    SnapshotProfile, WorktreeStateLookupProfile, WorktreeStatusOptions,
-    refresh_active_thread_metadata,
+    ActorPresenceStore, CommitGraphIndex, GitCheckpointRecord, Hook, HookContext, HookManager,
+    OperationScope, Repository, RepositoryCapability, SnapshotProfile, Thread, ThreadFreshness,
+    ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState, WorktreeStateLookupProfile,
+    WorktreeStatusOptions, refresh_active_thread_metadata, update_thread_state_from_state,
 };
+use schemars::JsonSchema;
 use serde::Serialize;
 use sley::Repository as SleyRepository;
 
 use crate::{
-    MachineContractInput, RepositoryVerificationState,
+    ActionTemplate, ExecutionContext, HeddleReport, MachineContractInput, MachineOutputKind,
+    OutputDiscriminator, ReportContract, RepositoryVerificationState,
     build_repository_verification_health_with_worktree_status, build_repository_verification_state,
     build_repository_verification_state_with_machine_contract,
     build_repository_verification_state_with_worktree_status,
     build_repository_verification_state_with_worktree_status_and_machine_contract,
+    schema_for_report,
+    status::next_action::{contextual_thread_action, import_guidance_includes_active_branch},
+    verify::action_template,
 };
+
+const BULK_CAPTURE_WARNING_THRESHOLD: usize = 500;
+
+/// Fully-resolved inputs for the normal local capture operation.
+///
+/// Attribution remains an embedding concern because the CLI combines explicit
+/// flags, harness detection, sessions, and environment variables. [`capture`]
+/// resolves it lazily after non-mutating safety checks, then owns the remaining
+/// mutation ordering.
+#[derive(Debug)]
+pub struct CaptureOptions {
+    pub intent: String,
+    pub confidence: Option<f32>,
+    pub force: bool,
+    pub worktree_status_options: WorktreeStatusOptions,
+    pub machine_contract_input: Option<MachineContractInput>,
+}
+
+/// Attribution resolved lazily after capture's non-mutating safety checks.
+#[derive(Debug, Clone)]
+pub struct CaptureAttribution {
+    pub attribution: Attribution,
+    pub principal_source: String,
+}
+
+/// Capture-specific timings owned by the operation implementation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CaptureProfile {
+    pub worktree_status_ms: u128,
+    pub preflight_ms: u128,
+    pub attribution_ms: u128,
+    pub execute_save_ms: u128,
+}
+
+/// Final semantic report returned by the capture seam.
+///
+/// The CLI may project this into its stable JSON wire type or render it for a
+/// person, but it must not add recovery state or derive workflow actions.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CaptureReport {
+    pub output_kind: &'static str,
+    pub state_id: String,
+    pub content_hash: String,
+    pub intent: Option<String>,
+    pub confidence: Option<f32>,
+    pub task_assignment_id: Option<String>,
+    pub principal: CapturePrincipalReport,
+    pub principal_source: String,
+    pub agent: Option<CaptureAgentReport>,
+    pub promotion_suggested: bool,
+    pub heavy_impact_paths: Vec<String>,
+    pub captured_path_count: usize,
+    pub warnings: Vec<String>,
+    pub signed: bool,
+    pub message: String,
+    pub recommended_action: Option<String>,
+    pub recommended_action_template: Option<ActionTemplate>,
+    pub verification: RepositoryVerificationState,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub captured_thread_targets_integration: bool,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub diagnostics: CaptureDiagnostics,
+}
+
+impl CaptureReport {
+    pub const CONTRACT: ReportContract = ReportContract {
+        schema_name: "capture",
+        machine_output_kind: MachineOutputKind::Json,
+        output_discriminator: Some(OutputDiscriminator {
+            field: "output_kind",
+            value: "capture",
+        }),
+        schema: schema_for_report::<CaptureReport>,
+    };
+}
+
+impl HeddleReport for CaptureReport {
+    const CONTRACT: ReportContract = CaptureReport::CONTRACT;
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct CapturePrincipalReport {
+    pub name: String,
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct CaptureAgentReport {
+    pub provider: String,
+    pub model: String,
+    pub session_id: Option<String>,
+    pub segment_id: Option<String>,
+    pub policy_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CaptureDiagnostics {
+    pub save: SaveReport,
+    pub profile: CaptureProfile,
+}
 
 /// How far a save should write through into Git (Git-overlay only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -415,6 +525,572 @@ pub fn staged_commit_summary(
     )
 }
 
+/// Capture the current worktree as one synchronous local operation.
+///
+/// The implementation owns the complete semantic sequence: authority-aware
+/// worktree checks, safety preflight, Heddle mutation, manual-resolution
+/// completion, best-effort intent-to-add maintenance, and final report
+/// assembly. There are no genuine suspension points on this path.
+pub fn capture(
+    ctx: &ExecutionContext,
+    options: CaptureOptions,
+    resolve_attribution: impl FnOnce(&Repository) -> Result<CaptureAttribution>,
+) -> Result<CaptureReport> {
+    let repo = ctx.require_repo()?;
+    if options.intent.trim().is_empty() {
+        return Err(capture_refusal(
+            "missing_capture_intent",
+            "refusing to capture without an intent",
+            "Provide a short intent with `heddle capture -m \"...\"`.",
+            "no capture intent was supplied with -m/--message/--intent",
+            "capturing without intent would create a weak provenance record",
+            "repository state, refs, metadata, and worktree files were left unchanged",
+            vec!["heddle capture -m \"...\"".to_string()],
+        ));
+    }
+
+    preflight_unimported_git_history(repo, "capture")?;
+    let complete_thread_resolution = merge_resolution_is_complete(repo)?;
+    let worktree_status_started = Instant::now();
+    if !complete_thread_resolution
+        && repo.capability() == RepositoryCapability::GitOverlay
+        && !capture_has_worktree_changes(repo, &options.worktree_status_options)?
+    {
+        return Err(map_capture_error(anyhow!(HeddleError::NoChanges)));
+    }
+
+    let worktree_status = repo.git_overlay_worktree_status();
+    let worktree_status_ms = worktree_status_started.elapsed().as_millis();
+
+    let preflight_started = Instant::now();
+    preflight_large_capture(options.force, &worktree_status)?;
+    preflight_capture_mutation(
+        repo,
+        &worktree_status,
+        options.machine_contract_input.as_ref(),
+    )?;
+    let preflight_ms = preflight_started.elapsed().as_millis();
+    let attribution_started = Instant::now();
+    let resolved_attribution = resolve_attribution(repo)?;
+    let attribution_ms = attribution_started.elapsed().as_millis();
+
+    let plan = SavePlan {
+        verb: SaveVerb::Capture,
+        intent: Some(options.intent),
+        confidence: options.confidence,
+        attribution: resolved_attribution.attribution,
+        git_scope: GitScope::None,
+        supplied_tree: None,
+        reuse_current_state: false,
+        require_clean_worktree: false,
+        // Native repositories compare the built tree with their Heddle HEAD.
+        // Git-overlay performs its distinct authority-aware comparison above:
+        // an overlay can legitimately have no Heddle HEAD yet and still need
+        // to capture an empty tree that represents deletion from Git's base.
+        require_worktree_change: repo.capability() == RepositoryCapability::NativeHeddle
+            && !complete_thread_resolution,
+        worktree_status_options: options.worktree_status_options,
+        run_hooks: true,
+        commit_safe_post_verify: false,
+        coalesce_snapshot_and_checkpoint: false,
+        linearize_git_parent: false,
+        precomputed_worktree_status: Some(worktree_status),
+        machine_contract_input: options.machine_contract_input,
+    };
+    let execute_save_started = Instant::now();
+    let save = execute_save(repo, plan).map_err(map_capture_error)?;
+    let execute_save_ms = execute_save_started.elapsed().as_millis();
+
+    let manual_resolution_action = if complete_thread_resolution {
+        complete_current_thread_manual_resolution(repo)?
+    } else {
+        None
+    };
+    update_capture_intent_to_add(repo, &save.state_id);
+
+    let current_thread = current_thread(repo)?;
+    let captured_thread_targets_integration = current_thread
+        .as_ref()
+        .and_then(|thread| thread.target_thread.as_ref())
+        .is_some();
+    let task_assignment_id = active_task_assignment_id(repo, current_thread.as_ref())?;
+    let principal_source = resolved_attribution.principal_source;
+    let warnings = bulk_capture_warning(save.captured_path_count)
+        .into_iter()
+        .collect();
+
+    let mut recommended_action = non_empty_action(&save.verification.recommended_action);
+    let mut recommended_action_template = recommended_action
+        .as_deref()
+        .and_then(action_template)
+        .or_else(|| save.verification.recommended_action_template.clone());
+    if let Some(action) = manual_resolution_action {
+        recommended_action_template = action_template(&action);
+        recommended_action = Some(action);
+    }
+
+    let principal = CapturePrincipalReport {
+        name: save.principal.name_lossy().into_owned(),
+        email: save.principal.email_lossy().into_owned(),
+    };
+    let agent = save.agent.as_ref().map(|agent| CaptureAgentReport {
+        provider: agent.provider.clone(),
+        model: agent.model.clone(),
+        session_id: agent.session_id.clone(),
+        segment_id: agent.segment_id.clone(),
+        policy_id: agent.policy_id.clone(),
+    });
+    Ok(CaptureReport {
+        output_kind: "capture",
+        state_id: save.state_id.short(),
+        content_hash: save.content_hash.short(),
+        intent: save.intent.clone(),
+        confidence: save.confidence,
+        task_assignment_id,
+        principal,
+        principal_source,
+        agent,
+        promotion_suggested: save.promotion_suggested,
+        heavy_impact_paths: save.heavy_impact_paths.clone(),
+        captured_path_count: save.captured_path_count,
+        warnings,
+        signed: save.signed,
+        message: save.summary.clone(),
+        recommended_action,
+        recommended_action_template,
+        verification: save.verification.clone(),
+        captured_thread_targets_integration,
+        diagnostics: CaptureDiagnostics {
+            save,
+            profile: CaptureProfile {
+                worktree_status_ms,
+                preflight_ms,
+                attribution_ms,
+                execute_save_ms,
+            },
+        },
+    })
+}
+
+fn preflight_unimported_git_history(repo: &Repository, action: &str) -> Result<()> {
+    if repo.capability() != RepositoryCapability::GitOverlay {
+        return Ok(());
+    }
+    let Some(guidance) = repo.git_import_guidance()? else {
+        return Ok(());
+    };
+    if !import_guidance_includes_active_branch(&guidance) {
+        return Ok(());
+    }
+    let branches = preview_paths(&guidance.missing_branches);
+    let command = guidance.recommended_command;
+    Err(capture_refusal(
+        "git_history_needs_import",
+        format!("Refusing to {action}: Git history has not been imported into Heddle"),
+        format!("Run `{command}` before retrying `heddle {action}`."),
+        format!("Git branch(es) waiting for Heddle import: {branches}"),
+        format!(
+            "{action} would write new Heddle state before Heddle has adopted the existing Git history"
+        ),
+        "Git refs, Heddle refs, and worktree files were left unchanged",
+        vec![command],
+    ))
+}
+
+fn preflight_capture_mutation(
+    repo: &Repository,
+    worktree_status: &repo::Result<Option<WorktreeStatus>>,
+    machine_contract_input: Option<&MachineContractInput>,
+) -> Result<()> {
+    if repo.capability() != RepositoryCapability::GitOverlay {
+        return Ok(());
+    }
+    if let Some(operation) = repo.operation_status()?
+        && matches!(operation.scope, OperationScope::Git)
+    {
+        return Err(capture_refusal(
+            "raw_git_operation_in_progress",
+            format!(
+                "Refusing to capture: an externally-started Git {} is in progress",
+                operation.kind
+            ),
+            format!(
+                "Inspect with `heddle verify`. Heddle did not start this raw Git {}, so finish or abort it with the Git-compatible tool that started it, then run `heddle verify` for the exact adoption command before retrying `heddle capture`.",
+                operation.kind
+            ),
+            format!(
+                "Git {} is {}; Heddle cannot safely turn sequencer state into a saved change inside the no-git runtime",
+                operation.kind, operation.state
+            ),
+            "capture would capture worktree/index contents while Git still has unresolved sequencer metadata",
+            "Git refs, Git sequencer files, Heddle refs, and worktree files were left unchanged",
+            vec!["heddle verify".to_string()],
+        ));
+    }
+
+    let health = build_repository_verification_health_with_worktree_status(repo, worktree_status);
+    let trust = if let Some(input) = machine_contract_input {
+        build_repository_verification_state_with_worktree_status_and_machine_contract(
+            repo,
+            health,
+            worktree_status,
+            input,
+        )
+    } else {
+        build_repository_verification_state_with_worktree_status(repo, health, worktree_status)
+    };
+    if trust.status != "needs_reconcile" || uncheckpointed_state_is_ahead_of_git(repo)? {
+        return Ok(());
+    }
+    let primary = if trust.recommended_action.trim().is_empty() {
+        "heddle verify".to_string()
+    } else {
+        trust.recommended_action.clone()
+    };
+    let recovery_commands = if trust.recovery_commands.is_empty() {
+        vec![primary.clone()]
+    } else {
+        trust.recovery_commands.clone()
+    };
+    Err(capture_refusal(
+        "repository_verification_blocked",
+        format!(
+            "Refusing to capture: repository verification is blocked ({})",
+            trust.status
+        ),
+        format!("Run `{primary}` before retrying `heddle capture`."),
+        format!(
+            "repository verification status is {}: {}",
+            trust.status, trust.summary
+        ),
+        "capture would write new Heddle or Git state while Git and Heddle disagree",
+        "Git refs, Heddle refs, Git checkpoint metadata, and worktree files were left unchanged",
+        recovery_commands,
+    ))
+}
+
+fn uncheckpointed_state_is_ahead_of_git(repo: &Repository) -> Result<bool> {
+    let Some(branch) = repo.git_overlay_current_branch()? else {
+        return Ok(false);
+    };
+    let Some(tip) = repo.git_overlay_branch_tip(&branch)? else {
+        return Ok(false);
+    };
+    let Some(mapped) = tip.mapped_state else {
+        return Ok(false);
+    };
+    let Some(current) = repo.current_state()? else {
+        return Ok(false);
+    };
+    if mapped == current.state_id {
+        return Ok(false);
+    }
+    let mut graph = CommitGraphIndex::new(repo);
+    if !graph
+        .is_ancestor(&mapped, &current.state_id)
+        .unwrap_or(false)
+        || graph
+            .is_ancestor(&current.state_id, &mapped)
+            .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+    Ok(repo
+        .latest_git_checkpoint_for_state(&current.state_id)?
+        .is_none())
+}
+
+fn preflight_large_capture(
+    force: bool,
+    worktree_status: &repo::Result<Option<WorktreeStatus>>,
+) -> Result<()> {
+    if force {
+        return Ok(());
+    }
+    let Ok(Some(status)) = worktree_status else {
+        return Ok(());
+    };
+    let total = status.change_count();
+    let delete_count = status.deleted.len();
+    let add_count = status.added.len();
+    if !crate::large_capture_requires_force(total, delete_count, add_count) {
+        return Ok(());
+    }
+    let sample = status
+        .deleted
+        .iter()
+        .chain(status.added.iter())
+        .chain(status.modified.iter())
+        .take(5)
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sample = if sample.is_empty() {
+        "no sample paths available".to_string()
+    } else {
+        sample
+    };
+    Err(capture_refusal(
+        "large_capture_requires_force",
+        format!(
+            "Large capture safety check: this would capture {total} changed paths ({delete_count} deletions, {add_count} additions)"
+        ),
+        "If this is intentional, rerun with `heddle capture --force -m \"...\"`.",
+        format!("sample changed paths: {sample}"),
+        "capture would preserve an unusually large Git-overlay worktree change without an explicit confirmation",
+        "repository state, refs, metadata, and worktree files were left unchanged",
+        vec!["heddle capture --force -m \"...\"".to_string()],
+    ))
+}
+
+fn merge_resolution_is_complete(repo: &Repository) -> Result<bool> {
+    Ok(repo
+        .merge_state_manager()
+        .load()?
+        .is_some_and(|merge_state| {
+            merge_state
+                .conflicts
+                .iter()
+                .all(|path| merge_state.resolved.contains(path))
+        }))
+}
+
+/// Compare against Heddle's current tree before asking Git for its index-based
+/// status. These are distinct authorities: Sley's Git status cannot prime
+/// Heddle's persisted worktree index, which the following snapshot consumes.
+/// In particular, retaining this check prevents a fast forced retry after a
+/// refused directory deletion from being misclassified as an unchanged tree.
+fn capture_has_worktree_changes(
+    repo: &Repository,
+    options: &WorktreeStatusOptions,
+) -> Result<bool> {
+    if repo.current_state_for_worktree_status()?.is_none()
+        && let Some(status) = repo.git_overlay_worktree_status()?
+    {
+        return Ok(!status.is_clean());
+    }
+    let tree = match repo.current_state_for_worktree_status()? {
+        Some(state) => repo.require_tree_for_worktree_status(&state.tree)?,
+        None => Tree::new(),
+    };
+    Ok(!repo
+        .compare_worktree_cached_with_options(&tree, options)?
+        .is_clean())
+}
+
+/// Complete a captured manual resolution and return its contextual land action.
+///
+/// This is shared by capture and the operator continuation path so the thread
+/// metadata/ref/oplog transaction has one implementation.
+pub fn complete_current_thread_manual_resolution(repo: &Repository) -> Result<Option<String>> {
+    let Some(current_thread) = repo.current_lane()? else {
+        return Ok(None);
+    };
+    let Some(current_state) = repo.head()? else {
+        return Ok(None);
+    };
+    let Some(current_state_object) = repo.store().get_state(&current_state)? else {
+        return Ok(None);
+    };
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let Some(mut thread) = manager.find_by_thread(&current_thread)? else {
+        return Ok(None);
+    };
+    let Some(target_thread) = thread.target_thread.clone() else {
+        return Ok(None);
+    };
+    let Some(target_state) = repo.refs().get_thread(&ThreadName::new(&target_thread))? else {
+        return Ok(None);
+    };
+    let Some(target_state_object) = repo.store().get_state(&target_state)? else {
+        return Ok(None);
+    };
+    let before = crate::capture_thread_update_before(repo, &manager, &thread)?;
+
+    thread.base_state = target_state.short();
+    thread.base_root = target_state_object.tree.short();
+    update_thread_state_from_state(&mut thread, &current_state_object);
+    thread.state = ThreadState::Ready;
+    thread.freshness = ThreadFreshness::Current;
+    thread.integration_policy_result = ThreadIntegrationPolicy {
+        status: Some("manual_resolved".to_string()),
+        reason: Some("manual conflict resolution captured".to_string()),
+        manual_resolution_state: Some(current_state.short()),
+        conflicts_resolved_manually: true,
+    };
+    thread.updated_at = Utc::now();
+    let thread_id = thread.id.clone();
+    let target = thread.target_thread.clone();
+    crate::save_thread_update(repo, &manager, &thread, before, current_state)?;
+
+    Ok(Some(manual_resolution_land_action(
+        repo,
+        &thread_id,
+        target.as_deref(),
+    )))
+}
+
+fn manual_resolution_land_action(
+    repo: &Repository,
+    thread_id: &str,
+    target_thread: Option<&str>,
+) -> String {
+    let action = crate::status::next_action::land_local_command(thread_id);
+    contextual_thread_action(repo, thread_id, target_thread, &action)
+}
+
+fn update_capture_intent_to_add(repo: &Repository, state_id: &StateId) {
+    if repo.capability() != RepositoryCapability::GitOverlay {
+        return;
+    }
+    let projection = GitProjection::new(repo);
+    if let Err(error) = projection.update_intent_to_add(state_id) {
+        tracing::debug!(%error, "intent-to-add index update skipped");
+    }
+}
+
+fn current_thread(repo: &Repository) -> Result<Option<Thread>> {
+    let manager = ThreadManager::new(repo.heddle_dir());
+    if let Some(thread) = manager.find_by_execution_root(repo.root())? {
+        return Ok(Some(thread));
+    }
+    let Head::Attached { thread } = repo.head_ref()? else {
+        return Ok(None);
+    };
+    let current_state_id = repo.refs().get_thread(&thread)?;
+    let current_state = current_state_id.map(|state| state.short());
+    let base_root = current_state_id
+        .and_then(|state| repo.store().get_state(&state).ok().flatten())
+        .map(|state| state.tree.short())
+        .unwrap_or_default();
+    let thread = thread.to_string();
+    Ok(Some(Thread {
+        id: thread.clone(),
+        thread,
+        target_thread: None,
+        parent_thread: None,
+        mode: ThreadMode::Materialized,
+        state: ThreadState::Active,
+        base_state: current_state.clone().unwrap_or_default(),
+        base_root,
+        current_state,
+        merged_state: None,
+        task: None,
+        execution_path: repo.root().to_path_buf(),
+        materialized_path: None,
+        changed_paths: Vec::new(),
+        impact_categories: Vec::new(),
+        heavy_impact_paths: Vec::new(),
+        promotion_suggested: false,
+        freshness: ThreadFreshness::Unknown,
+        verification_summary: Default::default(),
+        confidence_summary: Default::default(),
+        integration_policy_result: Default::default(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        ephemeral: None,
+        auto: false,
+        shared_target_dir: None,
+    }))
+}
+
+fn active_task_assignment_id(repo: &Repository, thread: Option<&Thread>) -> Result<Option<String>> {
+    let Some(thread) = thread else {
+        return Ok(None);
+    };
+    let store = ActorPresenceStore::new(repo.heddle_dir());
+    Ok(store
+        .active_entries()?
+        .into_iter()
+        .filter(|entry| entry.thread == thread.id)
+        .max_by_key(|entry| entry.started_at)
+        .and_then(|entry| entry.task_assignment_id))
+}
+
+fn bulk_capture_warning(captured_path_count: usize) -> Option<String> {
+    (captured_path_count >= BULK_CAPTURE_WARNING_THRESHOLD).then(|| {
+        format!(
+            "captured {captured_path_count} paths in one operation; check root .gitignore and .heddleignore rules if build artifacts or tool state were included"
+        )
+    })
+}
+
+fn non_empty_action(action: &str) -> Option<String> {
+    (!action.trim().is_empty()).then(|| action.to_string())
+}
+
+fn map_capture_error(error: anyhow::Error) -> anyhow::Error {
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<HeddleError>()
+            .is_some_and(|error| matches!(error, HeddleError::NoChanges))
+    }) {
+        return capture_refusal(
+            "nothing_to_capture",
+            "nothing to capture: worktree has no changes eligible for Heddle capture",
+            "Inspect the worktree with `heddle status`; make changes before running `heddle capture -m \"...\"`.",
+            "the worktree has no modified, deleted, or untracked paths relative to the current Heddle state",
+            "capture would not create a meaningful Heddle state",
+            "repository state was left unchanged",
+            vec!["heddle status".to_string()],
+        );
+    }
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(objects::fs_atomic::is_out_of_space)
+    }) {
+        return capture_refusal(
+            "capture_out_of_space",
+            format!("Capture aborted because the filesystem is out of space: {error:#}"),
+            "Free disk space and re-run `heddle capture`. Your working tree changes are intact.",
+            "the filesystem reported no remaining space while Heddle was writing captured objects",
+            "retrying before freeing space may fail again or leave another incomplete object write",
+            "the working tree was not modified; already-committed repository data remains behind atomic write boundaries",
+            vec!["heddle capture -m \"...\"".to_string()],
+        );
+    }
+    error
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_refusal(
+    kind: &'static str,
+    error: impl Into<String>,
+    hint: impl Into<String>,
+    unsafe_condition: impl Into<String>,
+    would_change: impl Into<String>,
+    preserved: impl Into<String>,
+    recovery_commands: Vec<String>,
+) -> anyhow::Error {
+    anyhow!(HeddleError::recovery(
+        RecoveryDetails::safety_refusal(
+            kind,
+            error,
+            hint,
+            unsafe_condition,
+            would_change,
+            preserved,
+        )
+        .with_recovery_commands(recovery_commands),
+    ))
+}
+
+fn preview_paths(paths: &[String]) -> String {
+    let shown = paths
+        .iter()
+        .take(12)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let hidden = paths.len().saturating_sub(12);
+    if hidden == 0 {
+        shown
+    } else {
+        format!("{shown}, and {hidden} more")
+    }
+}
+
 /// Execute a save: optional Heddle snapshot + optional Git checkpoint write-through.
 ///
 /// Callers own clap validation (missing message/intent) and plain-Git refusal.
@@ -638,18 +1314,6 @@ struct CreatedState {
 }
 
 fn create_heddle_state(repo: &Repository, plan: &SavePlan) -> Result<CreatedState> {
-    // Review signals are computed at capture time (locked decision):
-    // Review signals are computed at capture time (locked decision):
-    // install the concrete computer once process-wide so every snapshot
-    // path — capture, commit, revert, undo, expand — computes signals,
-    // matching base behavior. Per-repository registration here let
-    // direct snapshot callers (revert) silently skip signals.
-    static SIGNALS: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    SIGNALS.get_or_init(|| {
-        repo::signals::install_default_computer(std::sync::Arc::new(
-            state_review::CaptureSignalComputer,
-        ));
-    });
     let hook_manager = HookManager::new(repo);
     let hook_ctx = HookContext::new(repo);
 
@@ -944,9 +1608,110 @@ fn is_commit_action(action: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use repo::RepositoryCapability;
+    use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn capture_interface_owns_mutation_and_returns_the_report_contract() {
+        let temp = TempDir::new().expect("create temp repository");
+        let repo = Repository::init_default(temp.path()).expect("initialize repository");
+        std::fs::write(temp.path().join("tracked.txt"), "captured\n")
+            .expect("write worktree change");
+        let ctx = ExecutionContext::builder()
+            .repo(repo)
+            .principal_fallback(Some(("Ada".into(), "ada@example.com".into())))
+            .build();
+
+        let report = capture(
+            &ctx,
+            CaptureOptions {
+                intent: "exercise the deep capture interface".into(),
+                confidence: Some(0.9),
+                force: false,
+                worktree_status_options: WorktreeStatusOptions::default(),
+                machine_contract_input: None,
+            },
+            |_| {
+                Ok(CaptureAttribution {
+                    attribution: Attribution::human(Principal::new("Ada", "ada@example.com")),
+                    principal_source: "embedder".into(),
+                })
+            },
+        )
+        .expect("capture succeeds");
+
+        assert_eq!(report.output_kind, "capture");
+        assert_eq!(report.captured_path_count, 1);
+        assert_eq!(report.principal.name, "Ada");
+        assert_eq!(report.principal.email, "ada@example.com");
+        assert_eq!(report.principal_source, "embedder");
+        assert_eq!(CaptureReport::CONTRACT.schema_name, "capture");
+        assert_eq!(
+            ctx.require_repo()
+                .expect("repository")
+                .head()
+                .expect("read head")
+                .expect("captured head")
+                .short(),
+            report.state_id
+        );
+
+        let wire = serde_json::to_value(&report).expect("serialize report");
+        assert_eq!(wire["output_kind"], "capture");
+        assert!(wire.get("diagnostics").is_none());
+        assert!(wire.get("captured_thread_targets_integration").is_none());
+    }
+
+    #[test]
+    fn manual_resolution_land_action_quotes_untrusted_thread_ids() {
+        let temp = TempDir::new().expect("create temp repository");
+        let repo = Repository::init_default(temp.path()).expect("initialize repository");
+
+        assert_eq!(
+            manual_resolution_land_action(&repo, "bad;echo pwn", None),
+            "heddle land --thread 'bad;echo pwn'"
+        );
+        assert_eq!(
+            manual_resolution_land_action(&repo, "-danger", None),
+            "heddle land --thread=-danger"
+        );
+    }
+
+    #[test]
+    fn clean_overlay_refuses_before_resolving_attribution() {
+        let temp = TempDir::new().expect("create temp repository");
+        SleyRepository::init(temp.path()).expect("initialize Git repository");
+        let repo = Repository::init_git_overlay_sidecar(temp.path())
+            .expect("initialize Git-overlay sidecar");
+        let ctx = ExecutionContext::builder().repo(repo).build();
+        let resolver_called = Cell::new(false);
+
+        let error = capture(
+            &ctx,
+            CaptureOptions {
+                intent: "nothing changed".into(),
+                confidence: None,
+                force: false,
+                worktree_status_options: WorktreeStatusOptions::default(),
+                machine_contract_input: None,
+            },
+            |_| {
+                resolver_called.set(true);
+                Ok(CaptureAttribution {
+                    attribution: Attribution::human(Principal::new("Ada", "ada@example.com")),
+                    principal_source: "embedder".into(),
+                })
+            },
+        )
+        .expect_err("clean overlay must refuse capture");
+
+        assert!(!resolver_called.get());
+        assert!(error.to_string().contains("nothing to capture"));
+    }
 
     #[test]
     fn capture_always_uses_git_scope_none() {
@@ -1136,65 +1901,5 @@ mod tests {
         assert!(commit_scope_text("staged_index").contains("staged Git index"));
         assert!(staged_commit_summary("ok", 1, 2).contains("left 2 unstaged/untracked"));
         assert_eq!(staged_commit_summary("ok", 1, 0), "ok");
-    }
-}
-
-#[cfg(test)]
-mod revert_signals_tests {
-    use objects::object::{Attribution, ChangeLineage, ChangeLineageKind, Principal, StateAttachmentBody};
-    use repo::{Repository, StateAttachmentKind};
-
-    /// Regression: revert snapshots directly through
-    /// `snapshot_with_attribution_and_lineage`, bypassing the save verb's
-    /// registration. Signals must come from the process-wide default so a
-    /// revert-created state carries the same risk-signal attachment a
-    /// capture-created state gets.
-    #[test]
-    fn revert_created_state_carries_risk_signals() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
-
-        // First snapshot: no signals expected (nothing installed yet —
-        // this mirrors any binary that never captured).
-        let author = Attribution::human(Principal::new("Test", "test@example.com"));
-        let base = repo
-            .snapshot_with_attribution_and_lineage(Some("base".into()), None, author.clone(), vec![])
-            .unwrap();
-        assert!(
-            repo.latest_state_attachment(&base.id(), StateAttachmentKind::RiskSignals)
-                .unwrap()
-                .is_none(),
-            "pre-install snapshot must stay signal-free"
-        );
-
-        // Give the revert something to change, as a real revert does.
-        std::fs::write(temp.path().join("hello.rs"), "fn foo() -> i32 { 1 }\n").unwrap();
-
-        // Install the default computer (save/revert do this on first use).
-        repo::signals::install_default_computer(std::sync::Arc::new(
-            state_review::CaptureSignalComputer,
-        ));
-
-        // The self-flagged-uncertainty module fires deterministically on a
-        // `self-flag:` intent line under the default signals config.
-        let reverted = repo
-            .snapshot_with_attribution_and_lineage(
-                Some("self-flag:[src/auth.rs:verify] not certain about edge case".to_string()),
-                None,
-                author,
-                vec![ChangeLineage {
-                    kind: ChangeLineageKind::Revert,
-                    source_change: base.change_id,
-                    source_state: base.id(),
-                }],
-            )
-            .unwrap();
-
-        let body = repo
-            .latest_state_attachment(&reverted.id(), StateAttachmentKind::RiskSignals)
-            .unwrap()
-            .expect("revert-created state must carry a risk-signals attachment")
-            .body;
-        assert!(matches!(body, StateAttachmentBody::RiskSignals(_)));
     }
 }

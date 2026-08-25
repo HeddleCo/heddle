@@ -165,8 +165,11 @@ pub struct NextStateView {
 #[schemars(rename = "ReviewNextSchema")]
 pub struct ReviewNextOutput {
     pub output_kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub state_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub headline: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub existing_signatures: Option<u32>,
     pub next: RequiredNullableNextState,
 }

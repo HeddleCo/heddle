@@ -45,8 +45,7 @@ use heddle_git_projection::{
     git_core::GitProjection, git_reconstruct::commit_object_id, test_support,
 };
 use objects::store::{
-    AnyStore, FsRepackOperation, RepackPolicy, RepackResourceLimits, RepackSchedule,
-    RepackScheduler,
+    FsRepackOperation, RepackPolicy, RepackResourceLimits, RepackSchedule, RepackScheduler,
 };
 use sley::{ObjectId, Repository as SleyRepository};
 use tempfile::TempDir;
@@ -348,12 +347,11 @@ fn assert_all_commits_reconstruct(case: &str, source: &Path) {
     // #1326: fidelity must survive the real native replacement-pack cutover,
     // not merely the import encoder. Use the scheduler's manual entry point so
     // this remains the #566 byte-exact reconstruction gate after a repack.
-    let AnyStore::Fs(store) = repo.store();
     let scheduler = RepackScheduler::new(
         RepackPolicy::default(),
         RepackResourceLimits::new(NonZeroUsize::MIN).with_io_rate(None),
     );
-    let operation = Arc::new(FsRepackOperation::new(store.clone()));
+    let operation = Arc::new(FsRepackOperation::new(repo.store().clone()));
     let RepackSchedule::Started(handle) = scheduler.repack_now(operation).unwrap() else {
         panic!("[{case}] native repack did not start");
     };

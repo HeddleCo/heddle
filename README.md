@@ -240,9 +240,14 @@ collector wiring are documented in [CLI trace export](docs/telemetry.md).
 This repository is a Cargo workspace. The OSS crates live under `crates/`:
 
 ```text
-crates/cli/                 # the `heddle` binary and private hosted runtime
+crates/cli/                 # the `heddle` binary and command dispatch
+crates/cli-args/            # clap argument surface
+crates/cli-contract/        # verb catalog, schemas, help, recovery contracts
+crates/cli-render/          # human-facing terminal presentation
 crates/config/              # user-config TOML schema, credentials, tracing init
 crates/verbs/               # embeddable verb facade: status/diff/merge/save plans
+crates/hosted-client/       # hosted transport, identity, credentials, and sync
+crates/agent-relay/         # harness event relay and agent coordination adapter
 crates/objects/             # core object and repository model
 crates/repo/                # repository helpers and higher-level repo operations
 crates/refs/                # threads, markers, HEAD, packed refs
@@ -252,11 +257,10 @@ crates/merge/               # merge core
 crates/state-review/        # state-level review helpers
 crates/ingest/              # `heddle-ingest` binary and Git import path
 crates/wire/                # native Heddle wire protocol types
-crates/weft-client-shim/    # shim used by the `client` feature to talk to weft
 crates/crypto/              # crypto primitives
 crates/devtools/            # developer tooling
 crates/mount/               # filesystem mount support
-crates/runtime-bridge/      # runtime bridge between cli and async server stacks
+crates/git-projection/      # Git import, export, and projection engine
 
 docs/                       # architecture, principles, stability, design notes
 specs/                      # Quint formal specifications

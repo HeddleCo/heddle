@@ -707,11 +707,36 @@ impl SnapshotMutation<'_> {
                 Head::Detached { .. } => None,
             };
 
-        self.repo.build_tree_profiled_for_snapshot_against(
+        let output = self.repo.build_tree_profiled_for_snapshot_against(
             &self.repo.root,
             baseline_tree.as_ref(),
             manifest_context.as_ref().map(|(_, manifest)| manifest),
-        )
+        )?;
+        if self.require_worktree_change
+            && baseline_tree
+                .as_ref()
+                .is_some_and(|baseline| output.0.hash() == baseline.hash())
+        {
+            // A usable monitor can legitimately have no event yet even though
+            // the caller raced a just-written change. `*_if_changed` must fail
+            // closed only after an authoritative walk, so retry the apparent
+            // no-op with the monitor disabled. Changed hot paths keep the
+            // incremental result above and never pay for this fallback.
+            let options = crate::WorktreeStatusOptions {
+                fsmonitor: crate::FsMonitorSettings {
+                    mode: crate::FsMonitorMode::Off,
+                },
+            };
+            return self
+                .repo
+                .build_tree_profiled_for_snapshot_against_with_options(
+                    &self.repo.root,
+                    baseline_tree.as_ref(),
+                    manifest_context.as_ref().map(|(_, manifest)| manifest),
+                    &options,
+                );
+        }
+        Ok(output)
     }
 }
 

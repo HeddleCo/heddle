@@ -56,8 +56,8 @@ hosted server. The attenuation machinery is identical either way.
 Self-sovereign minting uses
 [`biscuit-auth`](https://docs.rs/biscuit-auth) directly. Heddle does not expose a
 general-purpose capability-token library. Its hosted attenuation policy belongs
-to the application and lives in the CLI's private
-[`hosted_runtime/device_flow.rs`](../crates/cli/src/hosted_runtime/device_flow.rs)
+to the application and lives in
+[`hosted_runtime/device_flow.rs`](../crates/hosted-client/src/hosted_runtime/device_flow.rs)
 module. Use `heddle auth derive-agent` for that policy-controlled flow.
 
 [`heddle-crypto`](../crates/crypto/) is a *different* crypto surface:
@@ -138,8 +138,8 @@ Each restriction translates to a Biscuit Datalog clause that the
 verifier evaluates with the per-request facts (`time`, `operation`,
 `resource`) injected by the server. The shape is documented in
 [`.agents/agent-attenuation.md`](../.agents/agent-attenuation.md)
-and the CLI-owned construction lives in
-[`hosted_runtime/device_flow.rs`](../crates/cli/src/hosted_runtime/device_flow.rs).
+and the Heddle-owned construction lives in
+[`hosted_runtime/device_flow.rs`](../crates/hosted-client/src/hosted_runtime/device_flow.rs).
 In short:
 
 | Field | Datalog | Default when fact missing |
@@ -190,8 +190,8 @@ chain is still under 2 KB.
 - [`.agents/agent-attenuation.md`](../.agents/agent-attenuation.md)
   — hosted-flow cookbook (read-only inspector, time-bounded agent,
   multi-repo writer, sub-sub-agent chain).
-- [`crates/cli/src/hosted_runtime/device_flow.rs`](../crates/cli/src/hosted_runtime/device_flow.rs)
-  — the CLI-owned attenuation policy and its unit tests.
+- [`crates/hosted-client/src/hosted_runtime/device_flow.rs`](../crates/hosted-client/src/hosted_runtime/device_flow.rs)
+  — the hosted-client attenuation policy and its unit tests.
 - [biscuit-auth documentation](https://docs.rs/biscuit-auth) —
   upstream details on the Biscuit format, Datalog semantics, and
   `KeyPair`/`Biscuit::builder` APIs used at mint time.

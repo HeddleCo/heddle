@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Heddle, HeddleError, HeddleStreamingVerbError, ExecStreamError, type Executor, type ExecRequest, type ExecResult } from "../src/index.js";
 import type {
   StatusSchema,
-  TimelineForkSchema,
+  AgentTimelineForkSchema,
   TimelineLogSchema,
   WatchLineSchema,
 } from "../generated/heddle-schemas.js";
@@ -20,6 +20,11 @@ class FakeExecutor implements Executor {
     this.lastRequest = req;
     return Promise.resolve(this.canned);
   }
+}
+
+function canonicalArgv(request: ExecRequest | undefined): string[] {
+  assert.ok(request, "expected the executor to receive a request");
+  return [...request.verb.split(" "), ...request.args];
 }
 
 const STATUS_JSON: StatusSchema = {
@@ -49,7 +54,7 @@ const TIMELINE_LOG_JSON: TimelineLogSchema = {
   recovery: null,
 };
 
-const TIMELINE_ACTION_JSON: TimelineForkSchema = {
+const TIMELINE_ACTION_JSON: AgentTimelineForkSchema = {
   output_kind: "timeline_action",
   status: "completed",
   action: "fork",
@@ -300,9 +305,9 @@ test("timelineFork() builds an OpenCode native tool-call selector", async () => 
   );
 
   assert.equal(forked.output_kind, "timeline_action");
-  assert.equal(fake.lastRequest?.verb, "timeline fork");
   assert.equal(fake.lastRequest?.opId, "op-fork");
-  assert.deepEqual(fake.lastRequest?.args, [
+  assert.deepEqual(canonicalArgv(fake.lastRequest), [
+    "agent", "timeline", "fork",
     "--thread", "main",
     "--tool-call", "call_123",
     "--harness", "opencode",
@@ -332,9 +337,9 @@ test("timelineReset() supports step targets and materialization options", async 
     { opId: "op-reset" },
   );
 
-  assert.equal(fake.lastRequest?.verb, "timeline reset");
   assert.equal(fake.lastRequest?.opId, "op-reset");
-  assert.deepEqual(fake.lastRequest?.args, [
+  assert.deepEqual(canonicalArgv(fake.lastRequest), [
+    "agent", "timeline", "reset",
     "--thread", "main",
     "--from-branch", "tlb-main",
     "--step", "tls-one",
@@ -353,9 +358,10 @@ test("timelineRecover() targets a thread", async () => {
 
   await heddle.timelineRecover({ thread: "main" }, { opId: "op-recover" });
 
-  assert.equal(fake.lastRequest?.verb, "timeline recover");
   assert.equal(fake.lastRequest?.opId, "op-recover");
-  assert.deepEqual(fake.lastRequest?.args, ["--thread", "main"]);
+  assert.deepEqual(canonicalArgv(fake.lastRequest), [
+    "agent", "timeline", "recover", "--thread", "main",
+  ]);
 });
 
 test("run() rejects every jsonl-capable verb", async () => {
@@ -395,8 +401,8 @@ test("run() still accepts a watch-mode verb in single-payload mode", async () =>
 
 test("real-binary smoke test", { skip: !process.env["HEDDLE_BIN"] }, async () => {
   const heddle = new Heddle({ binaryPath: process.env["HEDDLE_BIN"] });
-  // `schemas` is read-only and works outside a repo: a stable known verb.
-  const schemas = await heddle.run("schemas");
+  // `doctor schemas` is read-only and works outside a repo: a stable known verb.
+  const schemas = await heddle.run("doctor schemas");
   assert.ok(schemas, "schemas payload should parse");
 });
 

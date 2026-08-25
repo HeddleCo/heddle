@@ -10,6 +10,11 @@ pub fn suggested_command(unknown: &str) -> Option<&'static str> {
     match unknown.trim().to_ascii_lowercase().as_str() {
         "save" | "add" => Some("capture"),
         "stash" => Some("start"),
+        "presence" => Some("agent presence"),
+        "timeline" => Some("agent timeline"),
+        "collapse" => Some("thread collapse"),
+        "expand" => Some("thread expand"),
+        "oplog" => Some("maintenance oplog recover"),
         _ => None,
     }
 }
@@ -35,6 +40,19 @@ mod tests {
     #[test]
     fn stash_suggests_start() {
         assert_eq!(suggested_command("stash"), Some("start"));
+    }
+
+    #[test]
+    fn moved_commands_suggest_their_nested_paths() {
+        for (old, new) in [
+            ("presence", "agent presence"),
+            ("timeline", "agent timeline"),
+            ("collapse", "thread collapse"),
+            ("expand", "thread expand"),
+            ("oplog", "maintenance oplog recover"),
+        ] {
+            assert_eq!(suggested_command(old), Some(new));
+        }
     }
 
     #[test]

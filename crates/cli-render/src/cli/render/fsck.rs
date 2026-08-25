@@ -11,6 +11,10 @@ pub fn fsck_json(report: &FsckReport) -> Result<()> {
 }
 
 pub fn fsck_text(report: &FsckReport) -> Result<()> {
+    write_stdout(&format_fsck_text(report))
+}
+
+fn format_fsck_text(report: &FsckReport) -> String {
     let mut text = String::new();
     if report.valid {
         let counted = style::count(report.objects_checked, "object");
@@ -87,5 +91,29 @@ pub fn fsck_text(report: &FsckReport) -> Result<()> {
     for warning in &report.warnings {
         text.push_str(&format!("{} {}\n", style::warn_marker(), warning));
     }
-    write_stdout(&text)
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_renderer_consumes_the_typed_fsck_report() {
+        let report = FsckReport {
+            valid: true,
+            errors: Vec::new(),
+            warnings: vec!["legacy object retained".to_string()],
+            objects_checked: 2,
+            git_projection_checked: false,
+            provenance: None,
+            repair_target: None,
+            repaired: false,
+            repairs: Vec::new(),
+        };
+
+        let text = format_fsck_text(&report);
+        assert!(text.contains("repository is valid (2 objects checked)"));
+        assert!(text.contains("legacy object retained"));
+    }
 }

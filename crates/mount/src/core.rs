@@ -68,7 +68,7 @@ use std::{
 
 use objects::{
     object::{Blob, ContentHash, EntryType, FileMode, StateId, Tree, TreeEntry, TreeEntryTarget},
-    store::{AnyStore, ObjectStore},
+    store::{FsStore, ObjectStore},
     sync::{LockExt, RwLockExt},
     util::gitlink_placeholder_bytes,
 };
@@ -859,7 +859,7 @@ impl<'brand> Pending<'brand> {
 pub struct ContentAddressedMount<
     R: RefBackend + 'static = RefManager,
     O: OpLogBackend + 'static = OpLog,
-    S: ObjectStore + 'static = AnyStore,
+    S: ObjectStore + 'static = FsStore,
 > {
     inner: Arc<MountInner<R, O, S>>,
     /// Background safety-sweep worker. Held in an `Option` so the

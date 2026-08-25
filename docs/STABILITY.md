@@ -301,17 +301,13 @@ implementer cannot route around. Hosted consumers rely on the separately owned
   that's covered by `heddle doctor docs` /
   `heddle doctor schemas` plus the conventions in
   [`CONTRIBUTING.md`](../CONTRIBUTING.md).
-- `heddle-config`,
-  `heddle-devtools`, `heddle-ingest`, `heddle-mount`,
-  `heddle-oplog`, `heddle-refs`, `heddle-repo`, `heddle-review`,
-  `heddle-semantic`, `heddle-state-review`, `heddle-crypto`,
-  `weft-client-shim` — internal-shaped today, may absorb churn from
-  ongoing work (hosted control plane, semantic diff evolution).
+- All other workspace crates are internal-shaped today and may absorb churn
+  from ongoing work (hosted control plane, semantic diff evolution).
   Promoting any of these to 1.0 is a follow-up
   decision after the first 1.0.x release proves the stability
-  contract is workable on the three above.
+  contract is workable on the stable crates above.
 
-Tradeoff: a wider 1.0 scope (e.g. "all 18 crates frozen") is a
+Tradeoff: a wider 1.0 scope (for example, freezing every workspace crate) is a
 stronger ecosystem signal but raises the cost of every internal
 refactor — and most of these crates are pre-product-shaped. A
 narrower scope is honest about which surfaces are actually being

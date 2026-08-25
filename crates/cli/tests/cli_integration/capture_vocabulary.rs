@@ -22,6 +22,32 @@ fn save_suggests_capture() {
 }
 
 #[test]
+fn moved_commands_suggest_their_full_nested_paths() {
+    for (legacy, replacement) in [
+        (&["presence", "list"][..], "agent presence"),
+        (&["timeline", "status"], "agent timeline"),
+        (&["collapse", "HEAD~2", "HEAD"], "thread collapse"),
+        (&["expand", "HEAD"], "thread expand"),
+        (&["oplog", "recover"], "maintenance oplog recover"),
+    ] {
+        let output = heddle_output(legacy, None)
+            .unwrap_or_else(|error| panic!("invoke legacy command {legacy:?}: {error}"));
+        assert_eq!(
+            output.status.code(),
+            Some(64),
+            "legacy command {legacy:?} should be Usage (64); stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("unrecognized subcommand '{}'", legacy[0]))
+                && stderr.contains(&format!("similar subcommand exists: '{replacement}'")),
+            "legacy command {legacy:?} should suggest `{replacement}`: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn status_log_and_capture_text_use_capture_vocabulary() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();

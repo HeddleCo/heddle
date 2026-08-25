@@ -146,7 +146,10 @@ impl FsStore {
         Ok(was_present)
     }
 
-    pub(crate) fn put_committed_snapshot_objects_packed_impl(
+    /// Install a structured snapshot closure and its commit artifact through
+    /// the filesystem store's single durable pack barrier.
+    #[doc(hidden)]
+    pub fn put_committed_snapshot_objects_packed(
         &self,
         blobs: Vec<(ContentHash, Vec<u8>)>,
         trees: Vec<Tree>,
@@ -197,13 +200,11 @@ impl FsStore {
             compression.max_delta_size = 0;
         }
         let mut builder = PackBuilder::new(compression);
-        let mut staged_blobs = Vec::with_capacity(blobs.len());
 
         for (hash, data) in blobs {
             if commit_artifact.is_none() && ObjectStore::has_blob_locally(self, &hash)? {
                 continue;
             }
-            staged_blobs.push((hash, data.clone()));
             builder.add(hash, PackObjectType::Blob, data);
         }
 
@@ -268,7 +269,8 @@ impl FsStore {
             );
         }
 
-        let (pack_data, index_data, _stats) = builder.build()?;
+        let (pack_data, index_data, _stats, retained_objects) =
+            builder.build_retaining_objects()?;
         let packs = packs_dir(&self.root);
         let installed_pack_name = if commit_artifact.is_some() {
             super::pack_install_journal::install_committed_snapshot_pack_bytes(
@@ -293,8 +295,10 @@ impl FsStore {
         self.materialize_packed_attachment_index(&state_id, &attachment_ids, state_was_present)?;
 
         if let Ok(mut cache) = self.recent_blobs.write() {
-            for (hash, data) in staged_blobs {
-                cache.insert(hash, crate::object::Blob::from_slice(&data));
+            for (id, object_type, data) in retained_objects {
+                if let (PackObjectId::Hash(hash), PackObjectType::Blob) = (id, object_type) {
+                    cache.insert(hash, crate::object::Blob::new(data));
+                }
             }
         }
         if let Ok(mut cache) = self.recent_trees.write() {
@@ -350,34 +354,30 @@ impl FsStore {
             compression.max_delta_size = 0;
         }
         let mut builder = PackBuilder::new(compression);
-        let mut staged: Vec<(ContentHash, Vec<u8>)> = Vec::with_capacity(blobs.len());
+        let mut added = 0usize;
         for (hash, data) in blobs {
             if ObjectStore::has_blob_locally(self, &hash)? {
                 continue;
             }
-            staged.push((hash, data.clone()));
             builder.add(hash, PackObjectType::Blob, data);
+            added += 1;
         }
-        if staged.is_empty() {
+        if added == 0 {
             return Ok(());
         }
-        let (pack_data, index_data, _stats) = builder.build()?;
+        let (pack_data, index_data, _stats, retained_objects) =
+            builder.build_retaining_objects()?;
 
-        // Install the pack files. `install_pack_files` clears the
-        // recent-objects caches because a generic pack install (e.g.
-        // received over the network) might shadow loose objects we
-        // didn't write. For our locally-built pack we know exactly
-        // what we just installed, so we re-populate `recent_blobs`
-        // with the staged contents immediately afterwards. Without
-        // this the snapshot hot path takes a cache miss on every
-        // blob it just wrote, and `seed_large_repository` style
-        // benchmarks that snapshot-many-times-in-a-loop end up
-        // re-reading every parent state from disk between
-        // iterations.
+        // A generic install clears recent-object caches because received packs
+        // can shadow loose objects. This locally-built pack returns ownership
+        // of its original inputs after encoding, so repopulating the cache does
+        // not require a payload-sized staging or `Blob::from_slice` copy.
         self.install_pack_files(&pack_data, &index_data)?;
         if let Ok(mut cache) = self.recent_blobs.write() {
-            for (hash, data) in staged {
-                cache.insert(hash, crate::object::Blob::from_slice(&data));
+            for (id, object_type, data) in retained_objects {
+                if let (PackObjectId::Hash(hash), PackObjectType::Blob) = (id, object_type) {
+                    cache.insert(hash, crate::object::Blob::new(data));
+                }
             }
         }
         Ok(())

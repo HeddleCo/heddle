@@ -6,8 +6,9 @@ use api::heddle::api::v1alpha1::{
 };
 use crypto::Signer;
 use heddleco_capability_verifier::{
-    Decision,
+    Decision, HEDDLE_API_REQUIREMENT, PurgeContext, VerificationLimits,
     conformance::{ConformanceFixture, FIXTURE_V2_JSON, run_fixture},
+    verify_authorization_bundle, verify_purge_authorization, verify_spool_owner_genesis,
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -66,6 +67,60 @@ fn generated_genesis(spool_uuid: [u8; 16]) -> SignedSpoolOwnerGenesis {
             signature: signer.sign(&digest).expect("sign owner genesis"),
         }),
     }
+}
+
+#[test]
+fn verifier_consumes_the_current_owner_authorization_wire_contract() {
+    assert_eq!(HEDDLE_API_REQUIREMENT, "0.15");
+
+    let fixture = purge_fixture();
+    let valid = fixture
+        .cases
+        .iter()
+        .find(|case| case.name == "owner-anchored-purge")
+        .expect("valid fixture case");
+    let genesis: SignedSpoolOwnerGenesis = decode(&valid.owner_genesis_hex);
+    let authorization: SidecarAuthorization = decode(&valid.authorization_hex);
+    let body: PurgeOperationSigningBody = decode(&valid.operation_body_hex);
+    let payload = hex::decode(&valid.payload_hex).expect("fixture payload");
+
+    // These calls deliberately pass heddle-api's public messages directly to
+    // the verifier. If its generated wire contract drifts, this test no longer
+    // compiles instead of silently dropping unknown policy fields in a decode.
+    let verified_genesis = verify_spool_owner_genesis(&genesis).expect("verify current genesis");
+    let limits = VerificationLimits::new(30 * 24 * 60 * 60).expect("verification limits");
+    let verified_bundle = verify_authorization_bundle(
+        authorization
+            .capability
+            .as_ref()
+            .expect("fixture authorization bundle"),
+        valid.now_unix_seconds,
+        limits,
+    )
+    .expect("verify current authorization bundle");
+    let spool_uuid: [u8; 16] = body
+        .spool_uuid
+        .as_slice()
+        .try_into()
+        .expect("fixture spool UUID");
+    let owner_state_hash = verified_bundle.owner_state().state_hash();
+    assert_eq!(verified_genesis.spool_uuid(), spool_uuid);
+    assert_eq!(
+        verify_purge_authorization(
+            &authorization,
+            &body,
+            &payload,
+            &PurgeContext {
+                owner_genesis: &genesis,
+                current_owner_state_hash: &owner_state_hash,
+                spool_uuid: &spool_uuid,
+                spool_path_segments: &valid.spool_path_segments,
+                now_unix_seconds: valid.now_unix_seconds,
+                limits,
+            },
+        ),
+        Decision::Purge
+    );
 }
 
 #[test]

@@ -45,7 +45,9 @@ use cli::{
     exit::HeddleExitCode,
     harness::current_process_harness_hint,
     logging::{CommandTrace, LoggingConfig, LoggingGuard, init_logging},
-    operation_id::{resolve_operation_id, run_local_idempotency_if_requested},
+    operation_id::{
+        LocalIdempotencyOutcome, resolve_operation_id, run_local_idempotency_if_requested,
+    },
     perf::{ProfileField, emit_command_profile, profile_enabled},
 };
 use tracing::debug;
@@ -88,6 +90,12 @@ async fn async_main() -> Result<()> {
     // keep the 80s aws-lc-sys C build out of release builds. Measured
     // ~0ms on macOS — defensive ordering rather than a perf hot spot.
     let _ = rustls::crypto::ring::default_provider().install_default();
+
+    // The repository owns the signal-computation seam while state-review owns
+    // its concrete implementation. Install it once at the process entry point,
+    // before any command can open a repository, so direct snapshot paths such
+    // as `revert` behave the same as capture and commit.
+    verbs::install_capture_signal_computer();
 
     // Register lazy-clone hydrator factories with the `repo` crate's
     // global registry. This must happen before any `Repository::open`
@@ -322,11 +330,14 @@ async fn async_main() -> Result<()> {
     }
 
     match run_local_idempotency_if_requested(&cli, &command_name, command_supports_op_id) {
-        Ok(true) => {
-            shutdown_command_telemetry(command_trace, command_span_guard, telemetry, 0);
-            return Ok(());
+        Ok(LocalIdempotencyOutcome::Complete { exit_code }) => {
+            shutdown_command_telemetry(command_trace, command_span_guard, telemetry, exit_code);
+            if exit_code == 0 {
+                return Ok(());
+            }
+            std::process::exit(exit_code);
         }
-        Ok(false) => {}
+        Ok(LocalIdempotencyOutcome::Continue) => {}
         Err(err) => {
             let code = HeddleExitCode::from_error(&err);
             print_error_with_hint(&cli, &err);
@@ -468,7 +479,6 @@ async fn async_main() -> Result<()> {
                         no_agent: args.no_agent,
                     },
                 )
-                .await
             }
         }
 

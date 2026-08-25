@@ -531,7 +531,7 @@ if !vt.is_a?(Hash)
   errors << "validate-tag job missing or malformed"
 else
   uses = vt["uses"].to_s
-  if uses.match?(/\AHeddleCo\/heddle\/\.github\/workflows\/validate-release-tag\.yml@[0-9a-f]{40}\z/)
+  if uses.match?(/\AHEddleCo\/heddle\/\.github\/workflows\/validate-release-tag\.yml@[0-9a-f]{40}\z/)
     oks << "validate-tag is a SHA-pinned reusable workflow"
   else
     errors << "validate-tag must use HeddleCo/heddle/.github/workflows/validate-release-tag.yml@<40-char-sha>, got '#{uses}'"
