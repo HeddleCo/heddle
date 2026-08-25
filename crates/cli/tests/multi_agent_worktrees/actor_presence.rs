@@ -124,7 +124,10 @@ fn start_path_inherits_codex_probe_identity_into_actor_metadata() {
     assert_eq!(actor_entry["thread"].as_str(), Some("feature/codex-probed"));
     assert_eq!(actor_entry["harness"].as_str(), Some("codex"));
     assert_eq!(actor_entry["provider"].as_str(), Some("openai"));
-    assert_eq!(actor_entry["model"].as_str(), Some("gpt-5.3-codex"));
+    assert!(
+        actor_entry.get("model").and_then(Value::as_str).is_none(),
+        "start must not invent a model from OPENAI_MODEL: {actor_entry}"
+    );
     assert_eq!(actor_entry["thinking_level"].as_str(), Some("high"));
     assert_eq!(actor_entry["probe_source"].as_str(), Some("app_protocol"));
 
@@ -138,7 +141,13 @@ fn start_path_inherits_codex_probe_identity_into_actor_metadata() {
     .unwrap();
     assert_eq!(shown["harness"].as_str(), Some("codex"));
     assert_eq!(shown["actor"]["provider"].as_str(), Some("openai"));
-    assert_eq!(shown["actor"]["model"].as_str(), Some("gpt-5.3-codex"));
+    assert!(
+        shown["actor"]
+            .get("model")
+            .and_then(Value::as_str)
+            .is_none(),
+        "thread show must not invent a model from OPENAI_MODEL: {shown}"
+    );
 }
 
 #[test]

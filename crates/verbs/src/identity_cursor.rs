@@ -212,6 +212,7 @@ fn acquire_identity_lock(dest: &Path) -> io::Result<IdentityWriteGuard> {
     }
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)?;
@@ -260,8 +261,9 @@ pub fn harness_kind_from_basename(argv0: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn merge_keeps_last_cursor_when_event_omits_field() {

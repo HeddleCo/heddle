@@ -35,8 +35,7 @@ pub use objects::{
     error::{HeddleError, HeddleError as StoreError},
     store::ObjectStore,
 };
-pub use repo::Repository;
-pub use repo::remote;
+pub use repo::{Repository, remote};
 pub type StoreResult<T> = objects::error::Result<T>;
 
 /// Register factories needed to reopen CLI-owned lazy hosted repositories.

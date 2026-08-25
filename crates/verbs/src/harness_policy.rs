@@ -11,8 +11,7 @@
 //! canonicalization remain CLI-owned. Callers pass pure facts in and apply
 //! the returned decision.
 
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 // ---------------------------------------------------------------------------
 // Harness kind / fingerprint

@@ -25,8 +25,10 @@ use verbs::integration_plan::{
     validate_install_plan as plan_validate_install_plan,
 };
 
-use super::advice::RecoveryAdvice;
-use super::next_action::{NextActionValidationContext, write_full_command_json};
+use super::{
+    advice::RecoveryAdvice,
+    next_action::{NextActionValidationContext, write_full_command_json},
+};
 use crate::{
     cli::{
         Cli, IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs,
@@ -1045,7 +1047,7 @@ fn uninstall_one(
     else {
         return Ok(());
     };
-    heddle_core::expire_identity_cursor(repo.root()).map_err(anyhow::Error::from)?;
+    verbs::expire_identity_cursor(repo.root()).map_err(anyhow::Error::from)?;
     match harness {
         "codex" => {
             if let Some(path) = existing.paths.first() {
@@ -1633,12 +1635,12 @@ mod tests {
             vec![timeline_manifest_path.display().to_string()]
         );
 
-        heddle_core::write_identity_cursor(
+        verbs::write_identity_cursor(
             repo.root(),
-            &heddle_core::IdentityCursor {
+            &verbs::IdentityCursor {
                 provider: Some("opencode".into()),
                 model: Some("sonnet".into()),
-                ..heddle_core::IdentityCursor::default()
+                ..verbs::IdentityCursor::default()
             },
         )
         .unwrap();
@@ -1647,7 +1649,7 @@ mod tests {
         assert!(!timeline_manifest_path.exists());
         assert!(manifest.integrations.is_empty());
         assert!(
-            heddle_core::read_identity_cursor(repo.root()).is_empty(),
+            verbs::read_identity_cursor(repo.root()).is_empty(),
             "uninstall must expire the identity cursor"
         );
     }
@@ -1751,18 +1753,18 @@ mod tests {
         assert_eq!(manifest.integrations[0].harness, "codex");
         assert_eq!(manifest.integrations[0].path_mode, PathMode::Relative);
 
-        heddle_core::write_identity_cursor(
+        verbs::write_identity_cursor(
             repo.root(),
-            &heddle_core::IdentityCursor {
+            &verbs::IdentityCursor {
                 provider: Some("openai".into()),
                 model: Some("gpt-5.4".into()),
-                ..heddle_core::IdentityCursor::default()
+                ..verbs::IdentityCursor::default()
             },
         )
         .unwrap();
         uninstall_one(&repo, &mut manifest, "codex").unwrap();
         assert!(
-            heddle_core::read_identity_cursor(repo.root()).is_empty(),
+            verbs::read_identity_cursor(repo.root()).is_empty(),
             "codex uninstall must expire the identity cursor"
         );
         let after = fs::read_to_string(&config_path).unwrap();

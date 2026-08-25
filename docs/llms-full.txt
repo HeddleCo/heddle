@@ -6917,6 +6917,14 @@ Hidden integration relay output is registered as a generic object payload.
 {"status": "ok"}
 ```
 
+## `heddle integration stamp --output json`
+
+Hidden identity-cursor stamp output is registered as a generic object payload.
+
+```json
+{"status": "ok"}
+```
+
 ---
 
 ## `heddle maintenance inspect --output json`
@@ -7175,7 +7183,7 @@ as one; no `help advanced`).
       "visibility set",
       "visibility promote"
     ],
-    "accepted_opaque_schema_verbs_total": 38,
+    "accepted_opaque_schema_verbs_total": 39,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
@@ -7204,7 +7212,7 @@ as one; no `help advanced`).
     "mutating_commands_with_accepted_opaque_schema": 20,
     "mutating_commands_with_schema": 64,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 38,
+    "opaque_schema_verbs_total": 39,
     "status": "available",
     "summary": "184 command(s), 145 JSON command(s), 87 mutating command(s), 84 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],

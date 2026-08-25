@@ -153,10 +153,11 @@ pub fn stamp_bytes(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
 
     use verbs::{identity_cursor_path, read_identity_cursor};
+
+    use super::*;
 
     #[test]
     fn parse_recognises_stamp_and_rejects_relay() {

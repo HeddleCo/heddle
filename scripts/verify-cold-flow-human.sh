@@ -9,6 +9,9 @@ export HEDDLE_AGENT_PROVIDER=
 export HEDDLE_AGENT_MODEL=
 export HEDDLE_PRINCIPAL_NAME="${HEDDLE_PRINCIPAL_NAME:-Heddle Human}"
 export HEDDLE_PRINCIPAL_EMAIL="${HEDDLE_PRINCIPAL_EMAIL:-human@example.com}"
+# Human flow must stay agent-null even when the host shell is a Claude session.
+unset CLAUDE_CODE_SESSION_ID CLAUDE_EFFORT \
+  PI_MODEL PI_REASONING_LEVEL PI_SESSION_ID PI_PROVIDER PI_PARENT_ID
 
 ARTIFACT_ROOT="${HEDDLE_VERIFY_ARTIFACT_ROOT:-$ROOT/target/verify-cold-flow-human}"
 WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/heddle-verify-human.XXXXXX")"

@@ -3,7 +3,6 @@
 //! mappings, worktree status, durable Git checkpoints, and remote-tracking
 //! reporting.
 
-use schemars::JsonSchema;
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
@@ -23,23 +22,21 @@ use objects::{
 use oplog::OpRecord;
 use refs::Head;
 use rusqlite::{Connection, OpenFlags};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sley::{
-    ObjectId as SleyObjectId, ReferenceTarget as SleyRefTarget,
-    Repository as SleyRepository,
+    ObjectId as SleyObjectId, ReferenceTarget as SleyRefTarget, Repository as SleyRepository,
 };
-
 #[cfg(feature = "git-overlay")]
 use sley::{
     ShortStatusOptions as SleyShortStatusOptions, StatusUntrackedMode as SleyStatusUntrackedMode,
     StreamControl as SleyStreamControl,
 };
 
-use crate::{GitRefContentNamespace, GitRefName};
-
 #[cfg(feature = "git-overlay")]
 use super::CommitGraphIndex;
 use super::{Repository, RepositoryCapability, open_git_repository_at_root};
+use crate::{GitRefContentNamespace, GitRefName};
 
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
 const GIT_CHECKPOINT_INTENT_FILE: &str = "git-checkpoint-intent.json";
@@ -219,14 +216,11 @@ impl Repository {
         };
 
         let local_ref_name = GitRefName::branch_full_name(&branch);
-        if git
-            .reference_exists(&local_ref_name)
-            .map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to inspect Git reference '{local_ref_name}': {error}"
-                ))
-            })?
-            && let Some(tracking_name) = git_configured_tracking_ref(&git, &branch)?
+        if git.reference_exists(&local_ref_name).map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to inspect Git reference '{local_ref_name}': {error}"
+            ))
+        })? && let Some(tracking_name) = git_configured_tracking_ref(&git, &branch)?
             && let Some(upstream_head) = git_resolve_oid(&git, &tracking_name)?
         {
             let (ahead, behind) = git_ahead_behind_counts(&git, head, upstream_head)?;
@@ -771,8 +765,9 @@ impl Repository {
         Ok(None)
     }
     fn git_projection_mapping(&self) -> Result<HashMap<String, String>> {
-        use objects::sync::LockExt;
         use std::sync::{Mutex, OnceLock};
+
+        use objects::sync::LockExt;
 
         // The mapping file only changes when a Git Projection import or
         // bridge lands; status paths re-read it many times per process.

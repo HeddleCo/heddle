@@ -9,6 +9,11 @@ use std::{
 use anyhow::{Result, anyhow};
 use base64::Engine as _;
 use chrono::Utc;
+use config::config::{
+    HarnessMode, HarnessTranscriptMode, HarnessTransport, UserConfig, UserHarnessOverride,
+    UserHarnessRootThreadPolicy, UserHarnessSubagentThreadPolicy, UserThreadWorkspaceMode,
+};
+use heddle_cli_render::cli::style;
 use objects::{
     fs_atomic::write_file_atomic,
     object::{
@@ -21,9 +26,9 @@ use objects::{
 };
 use refs::Head;
 use repo::{
-    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
-    Repository, SessionManager, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
-    ThreadMode, ThreadState, TimelineStore, TimelineView,
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, Repository,
+    SessionManager, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager, ThreadMode,
+    ThreadState, TimelineStore, TimelineView, summarize_confidence, summarize_verification,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -40,24 +45,17 @@ use wire::{
     TranscriptAttachmentRef, UsageTotals, WorktreeChangeBaseline,
 };
 
-use config::config::{
-    HarnessMode, HarnessTranscriptMode, HarnessTransport, UserConfig, UserHarnessOverride,
-    UserHarnessRootThreadPolicy, UserHarnessSubagentThreadPolicy, UserThreadWorkspaceMode,
-};
-use heddle_cli_render::cli::style;
-use repo::{summarize_confidence, summarize_verification};
-
 use crate::{
     bridge::{HarnessCliBridge, RelayCapture},
     claude_hook,
-    probe::{HarnessProbeInput, HarnessProbeResult, codex_session_probe_metadata, probe_harness_actor},
+    probe::{
+        HarnessProbeInput, HarnessProbeResult, codex_session_probe_metadata, probe_harness_actor,
+    },
 };
 
 /// Provider/model hint from the wrapping harness, in the shape the hosted
 /// client's attribution resolver consumes (installed at startup).
-pub fn current_process_harness_hint(
-    repo: &Repository,
-) -> (Option<String>, Option<String>) {
+pub fn current_process_harness_hint(repo: &Repository) -> (Option<String>, Option<String>) {
     let probe = probe_current_process_harness(repo, None, None, None).ok();
     (
         probe.as_ref().and_then(|probe| probe.provider.clone()),
@@ -105,12 +103,12 @@ fn anchored_process_harness_hints(
         argv.and_then(|args| args.first()).map(String::as_str),
         &BTreeMap::new(),
     );
-    let codex_anchored = non_empty_hint(&raw, "CODEX_THREAD_ID")
-        || program_kind == HarnessKind::Codex;
-    let claude_anchored = non_empty_hint(&raw, "CLAUDECODE")
-        || program_kind == HarnessKind::ClaudeCode;
-    let opencode_anchored = non_empty_hint(&raw, "OPENCODE_CLIENT")
-        || program_kind == HarnessKind::OpenCode;
+    let codex_anchored =
+        non_empty_hint(&raw, "CODEX_THREAD_ID") || program_kind == HarnessKind::Codex;
+    let claude_anchored =
+        non_empty_hint(&raw, "CLAUDECODE") || program_kind == HarnessKind::ClaudeCode;
+    let opencode_anchored =
+        non_empty_hint(&raw, "OPENCODE_CLIENT") || program_kind == HarnessKind::OpenCode;
 
     raw.into_iter()
         .filter(|(key, _)| {
@@ -124,9 +122,7 @@ fn anchored_process_harness_hints(
 }
 
 fn non_empty_hint(hints: &BTreeMap<String, String>, key: &str) -> bool {
-    hints
-        .get(key)
-        .is_some_and(|value| !value.trim().is_empty())
+    hints.get(key).is_some_and(|value| !value.trim().is_empty())
 }
 
 fn ambient_model_hint(key: &str) -> bool {
@@ -152,8 +148,9 @@ fn anchored_model_hint(
     opencode_anchored: bool,
 ) -> bool {
     match key {
-        "CODEX_MODEL" | "CODEX_REASONING_EFFORT" | "OPENAI_MODEL"
-        | "OPENAI_REASONING_EFFORT" => codex_anchored,
+        "CODEX_MODEL" | "CODEX_REASONING_EFFORT" | "OPENAI_MODEL" | "OPENAI_REASONING_EFFORT" => {
+            codex_anchored
+        }
         "CLAUDE_MODEL" | "ANTHROPIC_MODEL" => claude_anchored,
         "OPENCODE_MODEL" => opencode_anchored,
         "MODEL" | "REASONING_EFFORT" | "THINKING_LEVEL" => {
@@ -1109,7 +1106,8 @@ impl HarnessBridgeRuntime {
                     .flatten()
                     .map(|id| id.to_string_full())
             });
-        let worktree_changes_at_open = capture_worktree_change_snapshot(&self.user_config, &self.repo)?;
+        let worktree_changes_at_open =
+            capture_worktree_change_snapshot(&self.user_config, &self.repo)?;
         let opened_at = Utc::now().to_rfc3339();
         let mut report = SessionReportEnvelope {
             version: 1,
@@ -3343,8 +3341,7 @@ mod tests {
                     ("OPENAI_MODEL".to_string(), "gpt-5.6-sol".to_string()),
                 ]),
                 "codex",
-                "openai",
-                "gpt-5.6-sol",
+                Some("openai"),
             ),
             (
                 BTreeMap::from([
@@ -3352,8 +3349,7 @@ mod tests {
                     ("CLAUDE_MODEL".to_string(), "claude-opus-4-8".to_string()),
                 ]),
                 "claude-code",
-                "anthropic",
-                "claude-opus-4-8",
+                Some("anthropic"),
             ),
             (
                 BTreeMap::from([
@@ -3365,12 +3361,11 @@ mod tests {
                     ),
                 ]),
                 "opencode",
-                "anthropic",
-                "claude-sonnet-4-6",
+                Some("anthropic"),
             ),
         ];
 
-        for (raw, harness, provider, model) in cases {
+        for (raw, harness, provider) in cases {
             let result = probe_harness_actor(&HarnessProbeInput {
                 env_hints: anchored_process_harness_hints(None, raw),
                 repo_root: "/tmp/repo".to_string(),
@@ -3379,8 +3374,11 @@ mod tests {
             .expect("anchored harness probe succeeds");
 
             assert_eq!(result.harness.as_deref(), Some(harness));
-            assert_eq!(result.provider.as_deref(), Some(provider));
-            assert_eq!(result.model.as_deref(), Some(model));
+            assert_eq!(result.provider.as_deref(), provider);
+            assert!(
+                result.model.is_none(),
+                "{harness} must not invent a model from inherited *_MODEL env"
+            );
         }
     }
 
@@ -4041,7 +4039,8 @@ mod tests {
         drop(repo);
 
         let fresh_repo = Repository::open(temp.path()).unwrap();
-        let mut runtime = HarnessBridgeRuntime::new(fresh_repo, UserConfig::default(), test_bridge());
+        let mut runtime =
+            HarnessBridgeRuntime::new(fresh_repo, UserConfig::default(), test_bridge());
         let payload = serde_json::json!({
             "session_id": "claude-sess-clean",
             "model": {"id": "claude-sonnet-4-6"},
@@ -4062,7 +4061,8 @@ mod tests {
         let (temp, repo) = init_repo();
         drop(repo);
         let fresh_repo = Repository::open(temp.path()).unwrap();
-        let mut runtime = HarnessBridgeRuntime::new(fresh_repo, UserConfig::default(), test_bridge());
+        let mut runtime =
+            HarnessBridgeRuntime::new(fresh_repo, UserConfig::default(), test_bridge());
         let payload = serde_json::json!({
             "session_id": "claude-sess-bash",
             "tool_name": "Bash",

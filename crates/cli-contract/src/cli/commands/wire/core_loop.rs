@@ -10,10 +10,9 @@
 //! The `#[schemars(rename)]` attributes keep the published `$defs` titles
 //! stable while the Rust types carry their natural names.
 
+use objects::object::{Agent, Principal};
 use schemars::JsonSchema;
 use serde::Serialize;
-
-use objects::object::{Agent, Principal};
 use verbs::{ActionTemplate, RepositoryVerificationState, UndoBatchSummary};
 
 // ---- capture ---------------------------------------------------------------

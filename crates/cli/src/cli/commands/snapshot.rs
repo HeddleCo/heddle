@@ -687,6 +687,8 @@ fn snapshot_output_from_capture_report(
             session_id: agent.session_id,
             segment_id: agent.segment_id,
             policy_id: agent.policy_id,
+            thought_level: agent.thought_level,
+            parent: agent.parent,
         }),
         promotion_suggested: report.promotion_suggested,
         heavy_impact_paths: report.heavy_impact_paths,
@@ -1006,6 +1008,27 @@ mod tests {
             unsafe { std::env::set_var(key, value) };
             Self { key, previous }
         }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe { std::env::remove_var(key) };
+            Self { key, previous }
+        }
+    }
+
+    fn isolate_child_identity_env() -> Vec<EnvVarGuard> {
+        [
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_EFFORT",
+            "PI_MODEL",
+            "PI_REASONING_LEVEL",
+            "PI_SESSION_ID",
+            "PI_PROVIDER",
+            "PI_PARENT_ID",
+        ]
+        .into_iter()
+        .map(EnvVarGuard::remove)
+        .collect()
     }
 
     impl Drop for EnvVarGuard {
@@ -1086,6 +1109,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn cursor_grok_stays_agent_null_when_env_or_repo_model_set() {
+        let _child = isolate_child_identity_env();
         let _model = EnvVarGuard::set("HEDDLE_AGENT_MODEL", "claude-opus-4-7");
         let _provider = EnvVarGuard::set("HEDDLE_AGENT_PROVIDER", "anthropic");
         let temp = tempfile::TempDir::new().unwrap();
@@ -1110,7 +1134,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn model_change_mid_thread_rotates_segment_and_leaves_old_state() {
+        let _child = isolate_child_identity_env();
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         let mut manager = SessionManager::new(repo.root());
@@ -1172,12 +1198,14 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn session_end_expire_leaves_human_capture() {
+        let _child = isolate_child_identity_env();
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
-        heddle_core::write_identity_cursor(
+        verbs::write_identity_cursor(
             repo.root(),
-            &heddle_core::IdentityCursor {
+            &verbs::IdentityCursor {
                 provider: Some("anthropic".into()),
                 model: Some("opus".into()),
                 thought_level: Some("high".into()),
@@ -1186,7 +1214,7 @@ mod tests {
             },
         )
         .unwrap();
-        heddle_core::expire_identity_cursor(repo.root()).unwrap();
+        verbs::expire_identity_cursor(repo.root()).unwrap();
         let attribution = build_attribution(
             &repo,
             &user_config_with_principal(),
@@ -1200,7 +1228,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn codex_stop_expire_leaves_human_capture() {
+        let _child = isolate_child_identity_env();
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         crate::identity_stamp::stamp_bytes(
@@ -1210,9 +1240,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            heddle_core::read_identity_cursor(repo.root())
-                .model
-                .as_deref(),
+            verbs::read_identity_cursor(repo.root()).model.as_deref(),
             Some("gpt-5.4")
         );
         crate::identity_stamp::stamp_bytes(
@@ -1234,7 +1262,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn build_attribution_omits_unpublished_cursor_fields() {
+        let _child = isolate_child_identity_env();
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         verbs::write_identity_cursor(

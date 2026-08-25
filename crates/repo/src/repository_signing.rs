@@ -389,8 +389,10 @@ fn classify_state_signatures(
 #[cfg(test)]
 mod tests {
     use crypto::Ed25519Signer;
-    use objects::object::{Agent, Attribution, Blob, Principal, Tree, TreeEntry};
-    use objects::store::ObjectStore;
+    use objects::{
+        object::{Agent, Attribution, Blob, Principal, Tree, TreeEntry},
+        store::ObjectStore,
+    };
     use tempfile::TempDir;
 
     use super::*;

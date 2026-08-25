@@ -5,12 +5,12 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
+use objects::{lock::RepositoryLockExt, object::Session};
+use repo::{Repository, SessionManager};
 use verbs::{
     IdentityCursor, SegmentRotation, attach_published_segment_fields, cursor_patch_from_child_env,
     cursor_segment_rotation, published_field, read_identity_cursor, stamp_identity_cursor,
 };
-use objects::{lock::RepositoryLockExt, object::Session};
-use repo::{Repository, SessionManager};
 
 /// Cursor values frozen onto one capture (ACP names).
 #[derive(Clone, Debug, Default)]
@@ -125,17 +125,57 @@ fn apply_segment_policy(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use heddle_core::write_identity_cursor;
     use objects::object::Principal;
     use repo::Repository;
+    use verbs::write_identity_cursor;
+
+    use super::*;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe { std::env::remove_var(key) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    fn isolate_child_identity_env() -> Vec<EnvVarGuard> {
+        [
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_EFFORT",
+            "PI_MODEL",
+            "PI_REASONING_LEVEL",
+            "PI_SESSION_ID",
+            "PI_PROVIDER",
+            "PI_PARENT_ID",
+        ]
+        .into_iter()
+        .map(EnvVarGuard::remove)
+        .collect()
+    }
 
     fn principal() -> Principal {
         Principal::new("Ada", "ada@example.com")
     }
 
     #[test]
+    #[serial_test::serial]
     fn freeze_rotates_on_model_change_and_attaches_thought_level() {
+        let _child = isolate_child_identity_env();
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         let mut manager = SessionManager::new(repo.root());
@@ -176,7 +216,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn empty_thought_level_to_set_does_not_rotate() {
+        let _child = isolate_child_identity_env();
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         let mut manager = SessionManager::new(repo.root());
@@ -207,7 +249,9 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn empty_provider_model_to_set_attaches_without_rotate() {
+        let _child = isolate_child_identity_env();
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         let mut manager = SessionManager::new(repo.root());

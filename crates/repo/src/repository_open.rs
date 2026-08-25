@@ -21,12 +21,14 @@ use refs::{Head, RefManager};
 
 #[cfg(feature = "git-overlay")]
 use super::git_overlay_object_source;
-use super::{RepoConfig, Repository, RepositoryCapability, RepositorySourceAuthority};
-use super::discovery::{
-    RepositoryOpenMode, bounded_ancestor_paths, discover_heddle_root,
-    has_git_repository_at_root, is_heddle_repository_root, metadataless_managed_thread_root,
+use super::{
+    RepoConfig, Repository, RepositoryCapability, RepositorySourceAuthority,
+    discovery::{
+        RepositoryOpenMode, bounded_ancestor_paths, discover_heddle_root,
+        has_git_repository_at_root, is_heddle_repository_root, metadataless_managed_thread_root,
+    },
+    overlay::{GitHeadState, detect_git_head_state, ensure_git_overlay_exclude},
 };
-use super::overlay::{GitHeadState, detect_git_head_state, ensure_git_overlay_exclude};
 
 pub(super) fn has_git_metadata(path: &Path) -> bool {
     has_git_repository_at_root(path)

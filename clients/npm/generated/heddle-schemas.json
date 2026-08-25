@@ -826,6 +826,12 @@
             "model": {
               "type": "string"
             },
+            "parent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "policy_id": {
               "type": [
                 "string",
@@ -842,6 +848,12 @@
               ]
             },
             "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "thought_level": {
               "type": [
                 "string",
                 "null"
@@ -14040,6 +14052,12 @@
             "model": {
               "type": "string"
             },
+            "parent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "policy_id": {
               "type": [
                 "string",
@@ -14056,6 +14074,12 @@
               ]
             },
             "session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "thought_level": {
               "type": [
                 "string",
                 "null"
@@ -20844,6 +20868,12 @@
           ]
         }
       },
+      "title": "GenericJsonObjectSchema",
+      "type": "object"
+    },
+    "integration stamp": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
       "title": "GenericJsonObjectSchema",
       "type": "object"
     },

@@ -9,9 +9,11 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::harness_json::{first_value_string, value_string};
-use crate::identity_cursor::{
-    IdentityCursor, published_field, thought_level_from_payload, value_string_or_named,
+use crate::{
+    harness_json::{first_value_string, value_string},
+    identity_cursor::{
+        IdentityCursor, published_field, thought_level_from_payload, value_string_or_named,
+    },
 };
 
 /// Supported stamp harness names (install + stdin parsers).
@@ -206,8 +208,9 @@ pub fn opencode_event_type(payload: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn session_end_payload_expires_cursor() {
