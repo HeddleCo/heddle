@@ -3,8 +3,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 
 use anyhow::Result;
 use objects::store::{
-    AnyStore, FsRepackOperation, RepackPolicy, RepackResourceLimits, RepackSchedule,
-    RepackScheduler,
+    FsRepackOperation, RepackPolicy, RepackResourceLimits, RepackSchedule, RepackScheduler,
 };
 use serde::Serialize;
 use verbs::maintenance_plan::{MaintenanceInspectView, MaintenanceRefreshView};
@@ -154,12 +153,11 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
             }
         }
         MaintenanceCommands::Repack => {
-            let AnyStore::Fs(store) = repo.store();
             let scheduler = RepackScheduler::new(
                 RepackPolicy::default(),
                 RepackResourceLimits::new(NonZeroUsize::MIN),
             );
-            let operation = Arc::new(FsRepackOperation::new(store.clone()));
+            let operation = Arc::new(FsRepackOperation::new(repo.store().clone()));
             let RepackSchedule::Started(handle) = scheduler.repack_now(operation)? else {
                 unreachable!("a fresh manual repack scheduler always has capacity");
             };

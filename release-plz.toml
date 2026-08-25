@@ -36,9 +36,7 @@ name = "heddle-objects"
 release = true
 
 [[package]]
-
-[[package]]
-name = "heddle-refs"
+name = "heddle-crypto"
 release = true
 
 [[package]]
@@ -46,17 +44,8 @@ name = "heddle-oplog"
 release = true
 
 [[package]]
-name = "heddle-semantic-recovery"
+name = "heddle-refs"
 release = true
-
-[[package]]
-name = "heddle-repo"
-release = true
-
-[[package]]
-name = "heddle-crypto"
-release = true
-
 
 [[package]]
 name = "heddle-merge"
@@ -67,7 +56,23 @@ name = "heddle-semantic"
 release = true
 
 [[package]]
+name = "heddle-semantic-recovery"
+release = true
+
+[[package]]
 name = "heddle-wire"
+release = true
+
+[[package]]
+name = "heddle-repo"
+release = true
+
+[[package]]
+name = "heddle-state-review"
+release = true
+
+[[package]]
+name = "heddle-config"
 release = true
 
 [[package]]
@@ -76,6 +81,10 @@ release = true
 
 [[package]]
 name = "heddle-git-projection"
+release = true
+
+[[package]]
+name = "heddle-verbs"
 release = true
 
 [[package]]
@@ -91,10 +100,6 @@ name = "heddle-ci-engine"
 release = true
 
 [[package]]
-name = "heddle-cli"
-release = true
-
-[[package]]
 name = "heddle-cli-args"
 release = true
 
@@ -107,25 +112,17 @@ name = "heddle-cli-contract"
 release = true
 
 [[package]]
-name = "heddle-config"
-release = true
-
-[[package]]
-name = "heddle-verbs"
-release = true
-
-[[package]]
-name = "heddle-devtools"
-release = true
-
-[[package]]
-name = "heddle-state-review"
-release = true
-
-[[package]]
 name = "heddle-hosted-client"
 release = true
 
 [[package]]
 name = "heddle-agent-relay"
+release = true
+
+[[package]]
+name = "heddle-cli"
+release = true
+
+[[package]]
+name = "heddle-devtools"
 release = true

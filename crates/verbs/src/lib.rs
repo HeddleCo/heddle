@@ -42,10 +42,8 @@ pub mod redact_plan;
 pub mod remote;
 pub mod resolve;
 pub mod resolve_plan;
-pub mod retro_plan;
 pub mod revert_plan;
 pub mod review;
-pub mod run_plan;
 pub mod save;
 pub mod semantic_plan;
 pub mod shell_plan;
@@ -58,7 +56,6 @@ pub mod thread_materialize;
 pub mod thread_plan;
 pub mod thread_shaping;
 pub mod timeline_plan;
-pub mod try_plan;
 pub mod undo;
 pub mod verify;
 pub mod visibility_plan;
@@ -270,10 +267,13 @@ pub use revert_plan::{
     plan_revert, revert_has_no_changes, revert_inspect_command, revert_success_message,
 };
 pub use save::{
-    CommitGitIndexPlan, GitScope, SavePlan, SaveReport, SaveVerb, commit_next_action_from_trust,
-    commit_scope_text, execute_save, plan_commit_git_index, plan_commit_git_index_only,
-    plan_creates_new_state, plan_git_scope, plan_writes_git_checkpoint,
-    recover_published_git_checkpoint, split_git_extra_paths, staged_commit_summary, tree_leaf_name,
+    CaptureAgentReport, CaptureAttribution, CaptureDiagnostics, CaptureOptions,
+    CapturePrincipalReport, CaptureProfile, CaptureReport, CommitGitIndexPlan, GitScope, SavePlan,
+    SaveReport, SaveVerb, capture,
+    commit_next_action_from_trust, commit_scope_text, complete_current_thread_manual_resolution,
+    execute_save, plan_commit_git_index, plan_commit_git_index_only, plan_creates_new_state,
+    plan_git_scope, plan_writes_git_checkpoint, recover_published_git_checkpoint,
+    split_git_extra_paths, staged_commit_summary, tree_leaf_name,
 };
 pub use semantic_plan::{
     HOT_EVENT_KIND_TOKENS, HotEventKindToken, hot_event_kind_label, human_event_kind,
@@ -281,6 +281,7 @@ pub use semantic_plan::{
 };
 #[cfg(feature = "semantic")]
 pub use semantic_plan::{hot_event_kind_token, human_hot_event_kind, map_hot_event_kind};
+pub use state_review::install_capture_signal_computer;
 pub use status::{
     ActorInfo, ChangesInfo, CoordinationStatus, FastShortStatusProfile, FastShortStatusReport,
     GitImportGuidanceReport, GitIndexPlan, MaterializedThreadInfo, ParallelThreadInfo,
@@ -296,8 +297,9 @@ pub use status::{
 };
 pub use thread::{
     AvailableGitRef, ThreadActorInfo, ThreadListEntry, ThreadListOptions, ThreadListReport,
-    ThreadSummary, ThreadTaskSummary, collect_thread_summaries, find_thread_summary, list_threads,
-    list_threads_with_worktree_status, split_available_git_refs, thread_is_available_git_ref,
+    ThreadSummary, ThreadTaskSummary, ThreadUpdateBefore, capture_thread_update_before,
+    collect_thread_summaries, find_thread_summary, list_threads, list_threads_with_worktree_status,
+    save_thread_update, split_available_git_refs, thread_is_available_git_ref,
     thread_is_imported_git_ref, visibility_label,
 };
 pub use thread_lifecycle::{

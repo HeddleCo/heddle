@@ -2,12 +2,12 @@
 use std::{collections::BTreeSet, path::Path};
 
 use anyhow::Result;
-use chrono::Utc;
-use objects::{object::ThreadName, store::ObjectStore};
+pub(crate) use heddle_cli_contract::cli::commands::wire::{
+    OperatorAction, OperatorCommandEnvelope, OperatorCommandOutput, VerificationClaimPolicy,
+};
 use repo::{
     GitImportGuidance, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
-    RepositoryOperationStatus, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
-    ThreadState, shell_quote, update_thread_state_from_state,
+    RepositoryOperationStatus, shell_quote,
 };
 use sley::{IndexStage, Repository as SleyRepository};
 use verbs::{
@@ -25,10 +25,6 @@ use super::{
     verification_health::action_template,
 };
 use crate::config::UserConfig;
-
-pub(crate) use heddle_cli_contract::cli::commands::wire::{
-    OperatorAction, OperatorCommandEnvelope, OperatorCommandOutput, VerificationClaimPolicy,
-};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct OperatorEmission {
@@ -169,7 +165,7 @@ pub(crate) fn continue_operator(repo: &Repository) -> Result<OperatorCommandOutp
                 no_agent: false,
             },
         )?;
-        let next_action = complete_current_thread_manual_resolution(repo)?;
+        let next_action = verbs::complete_current_thread_manual_resolution(repo)?;
         return Ok(OperatorCommandOutput {
             status: "continued".to_string(),
             action: OperatorAction::Merge,
@@ -236,65 +232,6 @@ pub(crate) fn abort_operator(repo: &Repository) -> Result<OperatorCommandOutput>
         next_action: None,
         recommended_action: None,
     })
-}
-
-pub(crate) fn complete_current_thread_manual_resolution(
-    repo: &Repository,
-) -> Result<Option<String>> {
-    let Some(current_thread) = repo.current_lane()? else {
-        return Ok(None);
-    };
-    let Some(current_state) = repo.head()? else {
-        return Ok(None);
-    };
-    let Some(current_state_obj) = repo.store().get_state(&current_state)? else {
-        return Ok(None);
-    };
-
-    let manager = ThreadManager::new(repo.heddle_dir());
-    let Some(mut thread) = manager.find_by_thread(&current_thread)? else {
-        return Ok(None);
-    };
-    let Some(target_thread) = thread.target_thread.clone() else {
-        return Ok(None);
-    };
-    let Some(target_state) = repo.refs().get_thread(&ThreadName::new(&target_thread))? else {
-        return Ok(None);
-    };
-    let Some(target_state_obj) = repo.store().get_state(&target_state)? else {
-        return Ok(None);
-    };
-    let before_update = super::thread_cmd::capture_thread_update_before(repo, &manager, &thread)?;
-
-    thread.base_state = target_state.short();
-    thread.base_root = target_state_obj.tree.short();
-    update_thread_state_from_state(&mut thread, &current_state_obj);
-    thread.state = ThreadState::Ready;
-    thread.freshness = ThreadFreshness::Current;
-    thread.integration_policy_result = ThreadIntegrationPolicy {
-        status: Some("manual_resolved".to_string()),
-        reason: Some("manual conflict resolution captured".to_string()),
-        manual_resolution_state: Some(current_state.short()),
-        conflicts_resolved_manually: true,
-    };
-    thread.updated_at = Utc::now();
-    let thread_id = thread.id.clone();
-    let target = thread.target_thread.clone();
-    super::thread_cmd::save_thread_update_with_oplog(
-        repo,
-        &manager,
-        &thread,
-        before_update,
-        current_state,
-    )?;
-
-    let action = super::thread_landing::land_command_for_thread(repo, &thread_id);
-    Ok(Some(super::thread::contextual_thread_action(
-        repo,
-        &thread_id,
-        target.as_deref(),
-        &action,
-    )))
 }
 
 fn continue_from_operation(
@@ -493,10 +430,11 @@ fn git_unmerged_paths(repo: &Repository) -> Result<Vec<String>> {
 mod tests {
     use std::collections::BTreeMap;
 
+    use verbs::{RepositoryVerificationState, VerificationCheck};
+
     use super::*;
     #[allow(unused_imports)]
     use crate::cli::commands::verification_health::machine_contract_coverage;
-    use verbs::{RepositoryVerificationState, VerificationCheck};
 
     // heddle#464 close-the-class (paths): a conflict path can contain spaces.
     // `continue` builds `recommended_action = heddle resolve <path>`, a VALIDATED

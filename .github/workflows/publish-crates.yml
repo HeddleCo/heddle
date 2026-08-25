@@ -87,9 +87,9 @@ env:
     heddle-merge
     heddle-semantic
     heddle-semantic-recovery
-    heddle-state-review
     heddle-wire
     heddle-repo
+    heddle-state-review
     heddle-config
     heddle-ingest
     heddle-git-projection

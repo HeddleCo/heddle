@@ -380,6 +380,7 @@ tomllib = importlib.import_module(os.environ["TOML_MODULE"])
 with open("Cargo.toml", "rb") as f:
     workspace_toml = tomllib.load(f)
 workspace_version = workspace_toml.get("workspace", {}).get("package", {}).get("version")
+workspace_dependencies = workspace_toml.get("workspace", {}).get("dependencies", {})
 
 crates = []
 for cm in sorted(glob.glob("crates/*/Cargo.toml")):
@@ -388,6 +389,31 @@ for cm in sorted(glob.glob("crates/*/Cargo.toml")):
 
 errors = []
 oks = []
+reported_workspace_dependency_errors = set()
+
+
+def resolved_dependency(dep_key, dep_val):
+    """Resolve the path/version/package fields inherited from the workspace.
+
+    Member-level `workspace = true` entries intentionally keep only local
+    feature and optional flags. The publish contract must inspect the root
+    declaration instead of treating those dependencies as unversioned.
+    """
+    if dep_val.get("workspace") is not True:
+        return dep_val
+    inherited = workspace_dependencies.get(dep_key)
+    if isinstance(inherited, str):
+        return {"version": inherited}
+    if not isinstance(inherited, dict):
+        message = (
+            f"dependency {dep_key} inherits from [workspace.dependencies], "
+            "but the root declaration is missing or is not a dependency table"
+        )
+        if message not in reported_workspace_dependency_errors:
+            errors.append(message)
+            reported_workspace_dependency_errors.add(message)
+        return None
+    return inherited
 
 by_name = {}      # crate name → current version string
 toml_by_name = {}
@@ -410,6 +436,43 @@ for cm, toml in crates:
         publishable.add(name)
 
 
+# release-plz requires every [[package]] table to carry a package name. TOML
+# itself accepts an empty table, so parse and validate the typed shape here
+# rather than letting the next release run discover it.
+release_names = []
+try:
+    with open("release-plz.toml", "rb") as f:
+        release_plz_toml = tomllib.load(f)
+except (OSError, tomllib.TOMLDecodeError) as exc:
+    errors.append(f"release-plz.toml could not be parsed: {exc}")
+else:
+    release_packages = release_plz_toml.get("package")
+    if not isinstance(release_packages, list):
+        errors.append("release-plz.toml must contain [[package]] entries")
+    else:
+        for index, package in enumerate(release_packages, start=1):
+            name = package.get("name") if isinstance(package, dict) else None
+            if not isinstance(name, str) or not name.strip():
+                errors.append(
+                    f"release-plz.toml [[package]] entry {index} is missing a non-empty name"
+                )
+                continue
+            release_names.append(name)
+            if name not in by_name:
+                errors.append(
+                    f"release-plz.toml lists {name}, but no workspace package has that name"
+                )
+        if len(release_names) != len(set(release_names)):
+            errors.append("release-plz.toml contains a duplicate package name")
+        if release_names and not any(
+            error.startswith("release-plz.toml") for error in errors
+        ):
+            oks.append(
+                f"release-plz.toml has named, unique workspace packages "
+                f"({len(release_names)} package entries)"
+            )
+
+
 workflow_lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
 publish_list = []
 in_publish_list = False
@@ -430,7 +493,12 @@ if not publish_list:
     errors.append("could not parse PUBLISHABLE_CRATES from workflow")
 elif len(publish_positions) != len(publish_list):
     errors.append("PUBLISHABLE_CRATES contains a duplicate crate name")
+elif release_names != publish_list:
+    errors.append(
+        "release-plz.toml package order must exactly match PUBLISHABLE_CRATES"
+    )
 else:
+    oks.append("release-plz.toml package order matches PUBLISHABLE_CRATES")
     dependency_pairs = 0
     order_pairs = 0
     # Versioned dev-dependencies are errors as well: they do not block
@@ -461,11 +529,14 @@ else:
             for dep_key, dep_val in deps.items():
                 if not isinstance(dep_val, dict):
                     continue
-                if not isinstance(dep_val.get("path"), str) or not isinstance(
-                    dep_val.get("version"), str
+                resolved = resolved_dependency(dep_key, dep_val)
+                if resolved is None:
+                    continue
+                if not isinstance(resolved.get("path"), str) or not isinstance(
+                    resolved.get("version"), str
                 ):
                     continue
-                dependency = dep_val.get("package") or dep_key
+                dependency = resolved.get("package") or dep_key
                 dependency_pairs += 1
                 if dependency not in publish_positions:
                     errors.append(
@@ -759,10 +830,13 @@ for cm, toml in crates:
         for dep_key, dep_val in deps.items():
             if not isinstance(dep_val, dict):
                 continue
-            pkg_name = dep_val.get("package") or dep_key
+            resolved = resolved_dependency(dep_key, dep_val)
+            if resolved is None:
+                continue
+            pkg_name = resolved.get("package") or dep_key
             if pkg_name not in publishable:
                 continue
-            req = dep_val.get("version")
+            req = resolved.get("version")
             if not isinstance(req, str):
                 continue
             src_ver = by_name.get(pkg_name)

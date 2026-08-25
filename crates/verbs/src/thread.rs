@@ -10,7 +10,6 @@
 //! path; the two share underlying repo primitives but not the same
 //! report shape.
 
-use schemars::JsonSchema;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
@@ -18,7 +17,12 @@ use std::{
 
 use anyhow::Result;
 use chrono::Utc;
-use objects::{object::Tree, worktree::WorktreeStatus};
+use objects::{
+    object::{StateId, ThreadName, Tree},
+    worktree::WorktreeStatus,
+};
+use oplog::{OpLogRecorder, OpRecord, ThreadUpdateSnapshots};
+use refs::{RefExpectation, RefUpdate};
 use repo::{
     ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStore,
     AgentUsageSummary, GitOverlayBranchTip, GitRemoteTrackingStatus, Repository,
@@ -27,6 +31,7 @@ use repo::{
     ThreadState, ThreadVerificationSummary, ThreadView, describe_thread_advice,
     refresh_thread_freshness, shell_quote,
 };
+use schemars::JsonSchema;
 use serde::Serialize;
 use sley::Repository as SleyRepository;
 
@@ -51,6 +56,116 @@ pub struct ThreadListOptions {
     /// When `false` (default for CLI), abandoned threads are omitted unless
     /// they are the current checkout lane.
     pub include_abandoned: bool,
+}
+
+/// Durable before-image for a thread metadata + ref update.
+///
+/// Obtain this value with [`capture_thread_update_before`] and consume it with
+/// [`save_thread_update`]. Only the captured state is exposed for callers that
+/// need to shape the next thread state; the rest of the before-image stays
+/// private.
+pub struct ThreadUpdateBefore {
+    pub state: StateId,
+    ref_absent: bool,
+    manager_snapshot: Option<Vec<u8>>,
+    manager_records: Vec<Thread>,
+}
+
+/// Capture the complete before-image needed to update a thread transactionally.
+pub fn capture_thread_update_before(
+    repo: &Repository,
+    manager: &ThreadManager,
+    thread: &Thread,
+) -> Result<ThreadUpdateBefore> {
+    let thread_name = ThreadName::new(&thread.thread);
+    let (state, ref_absent) = match repo.refs().get_thread(&thread_name)? {
+        Some(state) => (state, false),
+        None => {
+            let state = if let Some(current) = thread.current_state.as_deref() {
+                repo.resolve_state(current)?
+            } else {
+                repo.resolve_state(&thread.base_state)?
+            }
+            .ok_or_else(|| anyhow::anyhow!("state not found for thread '{}'", thread.thread))?;
+            (state, true)
+        }
+    };
+    Ok(ThreadUpdateBefore {
+        state,
+        ref_absent,
+        manager_snapshot: manager.snapshot_thread_record(&thread.thread)?,
+        manager_records: manager.snapshot_records(&thread.thread)?,
+    })
+}
+
+/// Publish thread metadata, its ref update, and the undo before-image together.
+pub fn save_thread_update(
+    repo: &Repository,
+    manager: &ThreadManager,
+    thread: &Thread,
+    before: ThreadUpdateBefore,
+    new_state: StateId,
+) -> Result<()> {
+    let new_manager_snapshot = Some(manager.encode_thread_record_snapshot(thread)?);
+    let mut new_manager_records = before.manager_records.clone();
+    if let Some(existing) = new_manager_records
+        .iter_mut()
+        .find(|record| record.id == thread.id)
+    {
+        *existing = thread.clone();
+    } else {
+        new_manager_records.push(thread.clone());
+    }
+    let encode_records = |records: &[Thread]| -> Result<Vec<Vec<u8>>> {
+        records
+            .iter()
+            .map(|record| {
+                manager
+                    .encode_thread_record_snapshot(record)
+                    .map_err(Into::into)
+            })
+            .collect()
+    };
+    let snapshots = ThreadUpdateSnapshots::from_record_sets(
+        before.manager_snapshot,
+        new_manager_snapshot,
+        encode_records(&before.manager_records)?,
+        encode_records(&new_manager_records)?,
+        before.ref_absent,
+    );
+    let thread_name = ThreadName::new(&thread.thread);
+    if repo.refs().get_thread(&thread_name)? == Some(new_state) {
+        objects::fault_inject::maybe_fail_at("thread_manager_save_in_thread_update")?;
+        manager.save(thread)?;
+        repo.oplog().record_thread_update(
+            &thread_name,
+            &before.state,
+            &new_state,
+            snapshots,
+            Some(&repo.op_scope()),
+        )?;
+    } else {
+        objects::fault_inject::maybe_fail_at("thread_manager_save_in_thread_update")?;
+        repo.commit_and_publish(
+            vec![OpRecord::ThreadUpdate {
+                name: thread_name.to_string(),
+                old_state: before.state,
+                new_state,
+                manager_snapshots: snapshots,
+            }],
+            &[RefUpdate::Thread {
+                name: thread_name,
+                expected: if before.ref_absent {
+                    RefExpectation::Missing
+                } else {
+                    RefExpectation::Value(before.state)
+                },
+                new: Some(new_state),
+            }],
+        )?;
+        manager.save(thread)?;
+    }
+    Ok(())
 }
 
 impl ThreadListOptions {

@@ -326,6 +326,11 @@ jobs:
       - name: Bench-compare script unit tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
+      # Agent-facing docs are committed generated artifacts. Keep the corpus
+      # synchronized whenever a top-level docs/*.md source changes.
+      - name: Agent documentation corpus
+        run: python3 scripts/gen-llms-txt.py --check
+
       # Enumerate the exact default-feature executables from one Cargo build,
       # then exercise every binary-backed CLI contract against that artifact.
       - name: Default CLI executable contracts

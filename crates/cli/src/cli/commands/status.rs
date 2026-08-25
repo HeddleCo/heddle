@@ -36,10 +36,10 @@ use verbs::{
 use super::{
     action_line::print_command,
     next_action::{NextActionValidationContext, write_command_json},
-    verification_health::{action_template, action_templates, repository_setup_guidance},
+    verification_health::repository_setup_guidance,
 };
 use crate::{
-    cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
+    cli::{Cli, execution_context_from_cli_parts, output_is_compact, should_output_json, style},
     perf::{ProfileField, ProfileMode, emit_profile, instrumentation_enabled, profile_mode},
 };
 
@@ -323,22 +323,9 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
     } else {
         StatusDetail::DefaultText
     };
-    let status_options = worktree_status_options(Some(&repo_config));
     let user_config = config::UserConfig::load_default()?;
-    let fsmonitor_mode = user_config
-        .worktree_status_options(Some(&repo_config))
-        .fsmonitor
-        .mode;
-    let ctx = verbs::ExecutionContext::builder()
-        .start_path(start.clone())
-        .repo(repo)
-        .principal_fallback(
-            user_config
-                .principal_pair()
-                .map(|(name, email)| (name.to_string(), email.to_string())),
-        )
-        .fsmonitor_mode(fsmonitor_mode)
-        .build();
+    let status_options = user_config.worktree_status_options(Some(&repo_config));
+    let ctx = execution_context_from_cli_parts(cli, &start, Some(repo), &user_config)?;
     let mut output = core_status(
         &ctx,
         StatusOptions::new(detail, status_options)
@@ -347,26 +334,6 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
                 super::verification_health::machine_contract_coverage(),
             )),
     )?;
-    if let Some(thread) = ctx
-        .repo()
-        .map(super::workflow::pending_incomplete_land_thread)
-        .transpose()?
-        .flatten()
-    {
-        let action = super::command_catalog::heddle_action(["land", "--thread", thread.as_str()]);
-        output.blockers.push(format!(
-            "land of '{thread}' has durable recovery work pending"
-        ));
-        if !output.recovery_commands.contains(&action) {
-            output.recovery_commands.push(action.clone());
-        }
-        output.recovery_action_templates = action_templates(&output.recovery_commands);
-        output.coordination_status = CoordinationStatus::Blocked;
-        if output.recommended_action.is_empty() {
-            output.recommended_action = action.clone();
-            output.recommended_action_template = action_template(&action);
-        }
-    }
     // Core reports 0 for injected repos; fold the shell open into the profile
     // so `repo_open_ms` reflects real work on this path.
     output.profile.repo_open_ms += cli_repo_open_ms;
@@ -761,7 +728,6 @@ fn render_long_status(output: &StatusOutput, verbose: bool) {
     render_status_operation(output);
     render_status_thread(output, verbose);
     render_status_details(output, verbose);
-    render_status_context(output);
     render_status_advice(output);
     render_status_changes(output);
     render_status_submodules(output);
@@ -1187,35 +1153,6 @@ fn status_workspace_label(output: &StatusOutput, mode: &ThreadMode) -> &'static 
         ThreadMode::Materialized => "attached checkout",
         ThreadMode::Solid => "isolated checkout",
         ThreadMode::Virtualized => "virtual checkout",
-    }
-}
-
-/// Existing pinned context, per heddle#1152 criterion 2: a cold reader should
-/// learn from `status` alone that annotations and discussions exist. Silent
-/// when the repository has none — the same "no news is good news" shape as
-/// the materialized-thread advisory.
-fn render_status_context(output: &StatusOutput) {
-    if output.annotation_count == 0 && output.open_discussion_count == 0 {
-        return;
-    }
-    println!();
-    println!("{}", style::bold("Context"));
-    if output.annotation_count > 0 {
-        println!(
-            "Annotations: {} active — heddle context list",
-            style::bold(&output.annotation_count.to_string())
-        );
-    }
-    if output.open_discussion_count > 0 {
-        println!(
-            "Discussions: {} open{} — heddle discuss list",
-            style::bold(&output.open_discussion_count.to_string()),
-            if output.resolved_discussion_count > 0 {
-                format!(", {} resolved", output.resolved_discussion_count)
-            } else {
-                String::new()
-            }
-        );
     }
 }
 

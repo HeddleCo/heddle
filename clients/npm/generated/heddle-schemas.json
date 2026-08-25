@@ -15969,93 +15969,20 @@
       "type": "object"
     },
     "context check": {
-      "$defs": {
-        "ContextCheckIssueSchema": {
-          "description": "One stale annotation reported by `context check`. `reason` is the\nmachine name of the staleness result that made the annotation stale.",
-          "properties": {
-            "annotation_id": {
-              "type": "string"
-            },
-            "content": {
-              "description": "First 80 characters of the annotation's current content.",
-              "type": "string"
-            },
-            "reason": {
-              "$ref": "#/$defs/ContextCheckStalenessReason"
-            },
-            "scope": {
-              "description": "Annotation scope token (for example `line`, `symbol`, or `file`).",
-              "type": "string"
-            },
-            "target": {
-              "description": "Target label: either a path or `state:<id>`.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "target",
-            "scope",
-            "reason",
-            "annotation_id",
-            "content"
-          ],
-          "type": "object"
-        },
-        "ContextCheckStalenessReason": {
-          "enum": [
-            "SourceChanged",
-            "SymbolMissing",
-            "FileMissing"
-          ],
-          "type": "string"
-        }
-      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "Payload-complete schema for `heddle context check --output json`.",
+      "additionalProperties": true,
       "properties": {
-        "annotations": {
-          "description": "Annotations examined after active/tag filtering.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "fresh": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "issues": {
-          "items": {
-            "$ref": "#/$defs/ContextCheckIssueSchema"
-          },
-          "type": "array"
-        },
         "output_kind": {
           "enum": [
             "context_check"
           ],
           "type": "string"
-        },
-        "stale": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "unknown": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
         }
       },
       "required": [
-        "output_kind",
-        "annotations",
-        "fresh",
-        "stale",
-        "unknown",
-        "issues"
+        "output_kind"
       ],
-      "title": "ContextCheckSchema",
+      "title": "GenericJsonObjectSchema",
       "type": "object"
     },
     "context edit": {
@@ -32122,11 +32049,6 @@
             }
           ]
         },
-        "annotation_count": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
         "attach_reason": {
           "type": [
             "string",
@@ -32255,12 +32177,6 @@
           },
           "type": "array"
         },
-        "open_discussion_count": {
-          "description": "Existing pinned context. Zero counts are explicit so machine readers\ncan distinguish an empty repository from an unknown value.",
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
         "operation": true,
         "output_kind": {
           "enum": [
@@ -32339,11 +32255,6 @@
         },
         "repository_label": {
           "type": "string"
-        },
-        "resolved_discussion_count": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
         },
         "session_id": {
           "type": [
@@ -32456,9 +32367,6 @@
         "parallel_threads",
         "changes",
         "submodules",
-        "open_discussion_count",
-        "resolved_discussion_count",
-        "annotation_count",
         "recommended_action"
       ],
       "title": "StatusSchema",
@@ -43258,7 +43166,7 @@
               "type": "string"
             },
             "source": {
-              "description": "`environment`, `repository`, `git_config`, or null when unknown.",
+              "description": "`environment`, `repository`, `git_config`, `user_config`, or null when unknown.",
               "type": [
                 "string",
                 "null"

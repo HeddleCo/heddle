@@ -26,6 +26,44 @@ fn test_revert_with_custom_message() {
     );
     assert!(result.is_ok());
 }
+
+/// Regression: `revert` snapshots directly instead of passing through the
+/// save verb. The CLI must install the production signal computer before
+/// dispatch so the new state still receives capture-time risk signals.
+#[test]
+fn test_revert_created_state_carries_risk_signals() {
+    use objects::object::StateAttachmentBody;
+    use repo::{Repository, StateAttachmentKind};
+
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    fs::write(temp.path().join("file.txt"), "original").unwrap();
+    heddle(&["capture", "-m", "Add file"], Some(temp.path())).unwrap();
+    fs::write(temp.path().join("file.txt"), "modified").unwrap();
+    heddle(&["capture", "-m", "Modify file"], Some(temp.path())).unwrap();
+
+    heddle(
+        &[
+            "revert",
+            "HEAD",
+            "-m",
+            "self-flag:[file.txt:content] not certain about this revert",
+        ],
+        Some(temp.path()),
+    )
+    .expect("revert must succeed");
+
+    let repo = Repository::open(temp.path()).unwrap();
+    let head = repo.head().unwrap().expect("revert must create a state");
+    let attachment = repo
+        .latest_state_attachment(&head, StateAttachmentKind::RiskSignals)
+        .unwrap()
+        .expect("revert-created state must carry a risk-signals attachment");
+    assert!(matches!(
+        attachment.body,
+        StateAttachmentBody::RiskSignals(_)
+    ));
+}
 #[test]
 fn test_revert_add_implicitly_removes_file() {
     let temp = TempDir::new().unwrap();

@@ -22,17 +22,15 @@ must instead name a committed state, a staged capture, or inline content.
 
 The substrate needed for a no-local-FS surface is already present.
 
-- `ObjectStore` is backend-neutral (`crates/objects/src/store/mod.rs:310-358`)
-  and has Heddle-owned implementations for local files, memory tests, shared
-  dynamic dispatch. `AnyStore` is sealed by construction and dispatches
-  only to Heddle's concrete stores (`crates/objects/src/store/mod.rs:153-186`).
+- `ObjectStore` is store-neutral (`crates/objects/src/store/mod.rs`) and has
+  Heddle-owned Implementations for local files and memory tests. Generic
+  algorithms use that real Interface directly.
 - `Repository` is generic over refs, oplog, and object store. The default CLI
-  shape is `Repository<RefManager, OpLog, AnyStore>`, while hosted can assemble
-  `Repository<PgRefBackend, PgOpLogBackend, ...>` via `from_parts`
-  (`crates/repo/src/repository.rs:259-345`).
-- `Repository::build_store` constructs the local `FsStore` wrapped in
-  `AnyStore`. The hosted server owns remote object-store backends outside this
-  workspace.
+  shape is `Repository<RefManager, OpLog, FsStore>`, while owned callers can
+  assemble `Repository<PgRefBackend, PgOpLogBackend, ...>` via `from_parts`
+  (`crates/repo/src/repository.rs`).
+- `Repository::build_store` constructs the concrete local `FsStore`. The hosted
+  server owns its async remote-storage Module outside this workspace.
 - The current hosted proto has auth/control-plane RPCs, native push/pull, and a
   partial content surface. `ContentService` already exposes refs, states, trees,
   blobs, compare, and diff (`crates/grpc/proto/heddle/v1/service.proto:165-185`,

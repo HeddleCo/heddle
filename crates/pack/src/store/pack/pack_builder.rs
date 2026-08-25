@@ -21,6 +21,14 @@ const DEFAULT_DELTA_WINDOW: usize = 10;
 
 type GroupedPackMap = HashMap<ObjectType, Vec<PackObjectRecord>>;
 
+/// Pack bytes, index bytes, statistics, and the original uncompressed inputs.
+pub type RetainedPackBuild = (
+    Vec<u8>,
+    Vec<u8>,
+    PackStats,
+    Vec<(PackObjectId, ObjectType, Vec<u8>)>,
+);
+
 /// Pack builder for creating packfiles.
 pub struct PackBuilder {
     objects: Vec<PackObjectRecord>,
@@ -120,6 +128,20 @@ impl PackBuilder {
     ///
     /// Returns the pack data, index data, and statistics.
     pub fn build(self) -> Result<(Vec<u8>, Vec<u8>, PackStats)> {
+        let (pack_data, index_data, stats, _) = self.build_impl(false)?;
+        Ok((pack_data, index_data, stats))
+    }
+
+    /// Build the packfile and return ownership of the uncompressed inputs.
+    ///
+    /// This is useful for callers that need to populate a decoded-object cache
+    /// after durable installation. Returning the original buffers avoids
+    /// cloning every payload before the build merely to keep it alive.
+    pub fn build_retaining_objects(self) -> Result<RetainedPackBuild> {
+        self.build_impl(true)
+    }
+
+    fn build_impl(self, retain_objects: bool) -> Result<RetainedPackBuild> {
         let mut pack_data = Vec::new();
         let mut index = PackIndex::new();
 
@@ -134,6 +156,11 @@ impl PackBuilder {
         let mut delta_count = 0u64;
 
         let object_count = self.objects.len() as u64;
+        let mut retained_objects = Vec::with_capacity(if retain_objects {
+            self.objects.len()
+        } else {
+            0
+        });
         let grouped = Self::group_by_type(self.objects);
 
         for (obj_type, mut objects) in grouped {
@@ -159,10 +186,13 @@ impl PackBuilder {
                     total_compressed += compressed.len() as u64;
 
                     Self::write_entry(&mut pack_data, &record, obj_type, &compressed)?;
+                    if retain_objects {
+                        retained_objects.push((record.id, obj_type, record.data));
+                    }
                 }
             } else {
                 Self::sort_for_delta_window(&mut objects);
-                Self::encode_with_sliding_window(
+                retained_objects.extend(Self::encode_with_sliding_window(
                     &mut pack_data,
                     &mut index,
                     &mut total_uncompressed,
@@ -172,7 +202,8 @@ impl PackBuilder {
                     objects,
                     &self.compression,
                     self.delta_window,
-                )?;
+                    retain_objects,
+                )?);
             }
         }
 
@@ -188,7 +219,7 @@ impl PackBuilder {
             compression_ratio: total_compressed as f64 / total_uncompressed as f64,
         };
 
-        Ok((pack_data, index.to_bytes(), stats))
+        Ok((pack_data, index.to_bytes(), stats, retained_objects))
     }
 
     /// Sort objects for optimal delta window traversal.
@@ -239,9 +270,12 @@ impl PackBuilder {
         objects: Vec<PackObjectRecord>,
         compression: &CompressionConfig,
         delta_window: usize,
-    ) -> Result<()> {
+        retain_objects: bool,
+    ) -> Result<Vec<(PackObjectId, ObjectType, Vec<u8>)>> {
         let mut window: VecDeque<WindowEntry> =
             VecDeque::with_capacity(delta_window.min(objects.len()));
+        let mut retained_objects =
+            Vec::with_capacity(if retain_objects { objects.len() } else { 0 });
 
         for record in objects {
             let hash = match record.id {
@@ -253,6 +287,9 @@ impl PackBuilder {
                     let compressed = compress_pack_payload(&record.data, compression)?;
                     *total_compressed += compressed.len() as u64;
                     Self::write_entry(pack_data, &record, obj_type, &compressed)?;
+                    if retain_objects {
+                        retained_objects.push((record.id, obj_type, record.data));
+                    }
                     continue;
                 }
             };
@@ -325,8 +362,15 @@ impl PackBuilder {
             if delta_window > 0 {
                 // Build the index once, then reuse it for all future comparisons.
                 let entry_index = DeltaEncoder::build_index(&data);
-                if window.len() >= delta_window {
-                    window.pop_front();
+                if window.len() >= delta_window
+                    && let Some(evicted) = window.pop_front()
+                    && retain_objects
+                {
+                    retained_objects.push((
+                        PackObjectId::Hash(evicted.hash),
+                        obj_type,
+                        evicted.data,
+                    ));
                 }
                 window.push_back(WindowEntry {
                     hash,
@@ -334,10 +378,19 @@ impl PackBuilder {
                     index: entry_index,
                     chain_depth,
                 });
+            } else if retain_objects {
+                retained_objects.push((PackObjectId::Hash(hash), obj_type, data));
             }
         }
 
-        Ok(())
+        if retain_objects {
+            retained_objects.extend(
+                window
+                    .into_iter()
+                    .map(|entry| (PackObjectId::Hash(entry.hash), obj_type, entry.data)),
+            );
+        }
+        Ok(retained_objects)
     }
 
     fn group_by_type(objects: Vec<PackObjectRecord>) -> GroupedPackMap {

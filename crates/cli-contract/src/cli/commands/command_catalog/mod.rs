@@ -520,19 +520,26 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
     ),
     (
         "heddle agent presence show <session>",
-        &["heddle", "presence", "show", "<session>"],
+        &["heddle", "agent", "presence", "show", "<session>"],
         &["session"],
         true,
     ),
     (
         "heddle agent presence complete --session <session>",
-        &["heddle", "presence", "complete", "--session", "<session>"],
+        &[
+            "heddle",
+            "agent",
+            "presence",
+            "complete",
+            "--session",
+            "<session>",
+        ],
         &["session"],
         true,
     ),
     (
         "heddle agent presence explain <session>",
-        &["heddle", "presence", "explain", "<session>"],
+        &["heddle", "agent", "presence", "explain", "<session>"],
         &["session"],
         true,
     ),
@@ -1810,7 +1817,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["context", "check"],
         json_discriminators(
-            documented_schemas(READ_JSON, &["context check"]),
+            opaque_schemas(READ_JSON, &["context check"]),
             &[json_discriminator(
                 Some("context check"),
                 "output_kind",

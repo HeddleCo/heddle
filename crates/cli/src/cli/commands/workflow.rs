@@ -2525,10 +2525,6 @@ fn discard_unpublished_land_checkpoint_intent(
     Ok(())
 }
 
-pub(crate) fn pending_incomplete_land_thread(repo: &Repository) -> Result<Option<String>> {
-    Ok(load_incomplete_land_marker(repo)?.map(|marker| marker.thread_id))
-}
-
 pub fn recover_incomplete_land_if_present(repo: &Repository) -> Result<()> {
     // Recovery and a live land mutate the same marker, refs, oplog batches,
     // worktree, and Git checkpoint. Serialize the complete recovery decision

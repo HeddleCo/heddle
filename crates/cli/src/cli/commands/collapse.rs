@@ -7,6 +7,7 @@ use anyhow::Result;
 use objects::object::{ChangeLineage, ChangeLineageKind, State, StateId, ThreadName};
 use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
+use repo::Repository;
 use serde::Serialize;
 use verbs::{CollapsePlan, plan_collapse};
 
@@ -40,11 +41,11 @@ struct CollapseOutput {
 /// This is useful for cleaning up exploratory work before sharing.
 pub fn cmd_collapse(
     cli: &Cli,
+    repo: &Repository,
     states: Vec<String>,
     into: String,
     confidence: Option<f32>,
 ) -> Result<()> {
-    let repo = cli.open_repo()?;
     let json = should_output_json(cli, Some(repo.config()));
 
     if matches!(plan_collapse(states.len()), CollapsePlan::StatesRequired) {
@@ -59,8 +60,8 @@ pub fn cmd_collapse(
     // Resolve all state specifiers to actual states
     let mut resolved_states = Vec::new();
     for state_spec in &states {
-        let state_id = resolve_state_id(&repo, state_spec)?;
-        let state = require_resolved_state(&repo, &state_id)?;
+        let state_id = resolve_state_id(repo, state_spec)?;
+        let state = require_resolved_state(repo, &state_id)?;
         resolved_states.push(state);
     }
 
@@ -77,7 +78,7 @@ pub fn cmd_collapse(
         Head::Detached { .. } => CollapsePublishedRef::DetachedHead,
     };
     let new_state = collapse_resolved_states(
-        &repo,
+        repo,
         &user_config,
         &resolved_states,
         into.clone(),

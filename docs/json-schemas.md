@@ -1898,42 +1898,6 @@ the same ready envelope.
 
 ---
 
-## `heddle context check --output json`
-
-Staleness sweep over context annotations. The `reason` enum is the
-shipped `StalenessStatus` model (`crates/object-model/src/object/staleness_core.rs`)
-minus the non-stale variants: `source_changed`, `symbol_missing`,
-`file_missing`. `fresh` and `unknown` annotations are counted but not
-listed.
-
-```json
-{
-  "output_kind": "context_check",
-  "annotations": 3,
-  "fresh": 1,
-  "stale": 2,
-  "unknown": 0,
-  "issues": [
-    {
-      "target": "src/auth.rs",
-      "scope": "symbol",
-      "reason": "symbol_missing",
-      "annotation_id": "ann-01",
-      "content": "verify token expiry before..."
-    },
-    {
-      "target": "src/removed.rs",
-      "scope": "file",
-      "reason": "file_missing",
-      "annotation_id": "ann-02",
-      "content": "legacy adapter notes"
-    }
-  ]
-}
-```
-
----
-
 ## `heddle auth trust show --output json`
 
 ```json
@@ -2911,10 +2875,17 @@ review, the pending state's view is flattened alongside `output_kind`
 (`state_id`, `headline`, `existing_signatures`) and the same view is
 echoed under `next`. When the scan window holds no pending review, the
 payload carries only `output_kind` and `next: null` — never a
-top-level `null`.
+top-level `null`; the three pending-state fields are omitted rather than
+serialized as `null`.
 
 ```json
 {"output_kind": "review_next", "state_id": "hc-def456", "headline": "Tighten parser recovery", "existing_signatures": 0, "next": {"state_id": "hc-def456", "headline": "Tighten parser recovery", "existing_signatures": 0}}
+```
+
+`heddle review next --output json` with no pending review emits:
+
+```json
+{"output_kind": "review_next", "next": null}
 ```
 
 `heddle review health --output json` emits:
@@ -3189,7 +3160,7 @@ as one; no `help advanced`).
       "visibility set",
       "visibility promote"
     ],
-    "accepted_opaque_schema_verbs_total": 37,
+    "accepted_opaque_schema_verbs_total": 38,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
@@ -3202,14 +3173,14 @@ as one; no `help advanced`).
       "visibility promote"
     ],
     "advanced_scope_json_commands_total": 99,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 37,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 38,
     "advanced_scope_mutating_commands_total": 56,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 20,
     "catalog_commands_total": 186,
     "catalog_mutating_commands_total": 90,
     "json_commands_total": 147,
-    "json_commands_with_accepted_opaque_schema": 37,
-    "json_commands_with_schema": 110,
+    "json_commands_with_accepted_opaque_schema": 38,
+    "json_commands_with_schema": 109,
     "json_commands_without_schema": 0,
     "json_mutating_commands_total": 86,
     "missing_mutating_schema_examples": [],
@@ -3218,9 +3189,9 @@ as one; no `help advanced`).
     "mutating_commands_with_accepted_opaque_schema": 20,
     "mutating_commands_with_schema": 66,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 37,
+    "opaque_schema_verbs_total": 38,
     "status": "available",
-    "summary": "188 command(s), 147 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 37 accepted opaque schema(s) outside clean verification",
+    "summary": "188 command(s), 147 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3258,7 +3229,7 @@ as one; no `help advanced`).
     "try"
   ],
   "status": "available",
-  "summary": "188 command(s), 147 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 37 accepted opaque schema(s) outside clean verification",
+  "summary": "188 command(s), 147 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -3404,7 +3375,7 @@ required:
 {"output_kind": "expand", "status": "completed", "requested": "HEAD", "collapsed": {"change_id": "hc-collapsed123", "change_id_full": "hc-collapsed123000000000000000000", "git_commit": "abc123def456abc123def456abc123def456abcd", "thread": "feature/parser", "source_count": 2}, "captures": [{"change_id": "hc-source111", "change_id_full": "hc-source1110000000000000000000", "content_hash": "h1-source", "intent": "first parser checkpoint", "principal": "A. Engineer <a@example.com>", "agent": null, "confidence": null, "created_at": "2026-01-01 00:00:00", "parents": ["hc-base123"]}, {"change_id": "hc-source222", "change_id_full": "hc-source2220000000000000000000", "content_hash": "h1-source2", "intent": "second parser checkpoint", "principal": "A. Engineer <a@example.com>", "agent": "codex/gpt-5", "confidence": 0.91, "created_at": "2026-01-01 00:05:00", "parents": ["hc-source111"]}]}
 ```
 
-`heddle context set|get|list|history|edit|supersede|rm|suggest|audit --output json` emit per-subcommand shapes (each carries `output_kind` set to the snake-cased subcommand, e.g. `context_set`, `context_get`) — there is no single shared shape. `context check` has its own payload-complete contract above. For example, `context set` (and `edit`/`supersede`/`rm`) reports the mutated target and the new state:
+`heddle context set|get|list|history|edit|supersede|rm|check|suggest|audit --output json` emit per-subcommand shapes (each carries `output_kind` set to the snake-cased subcommand, e.g. `context_set`, `context_get`) — there is no single shared shape. For example, `context set` (and `edit`/`supersede`/`rm`) reports the mutated target and the new state:
 
 ```json
 {"output_kind": "context_set", "target": "src/lib.rs", "annotations": 1, "state": "hc-k6a0wfrbgcg7"}

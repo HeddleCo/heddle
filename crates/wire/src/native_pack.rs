@@ -7,7 +7,7 @@ use std::{
 };
 
 use objects::store::{
-    CompressionConfig, ObjectStore, SidecarStore,
+    CompressionConfig, ObjectStore,
     pack::{PackBuilder, PackObjectId, PackReader, StreamingPackBuilder},
 };
 
@@ -611,7 +611,7 @@ pub fn is_native_packable_object_type(obj_type: ObjectType) -> bool {
 }
 
 pub fn build_native_pack(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     objects: &[ObjectInfo],
 ) -> Result<NativePackBundle> {
     let mut builder = PackBuilder::new(sync_pack_compression());

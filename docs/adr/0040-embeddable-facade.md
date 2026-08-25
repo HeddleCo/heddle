@@ -5,12 +5,12 @@ touch process control, I/O side-channels, or ambient global state. The CLI is
 demoted to a thin `clap → facade → render` shell in front of that library. This
 ADR locks the foundational decisions every downstream extraction wave of the
 0.5.0 hardening campaign (`reviews/heddle-hardening-plan.md`) consumes, so each
-"extract X into the facade" wave can proceed without re-litigating the boundary.
+"extract X into the facade" wave can proceed without re-litigating the seam.
 
 The decisions are concrete on purpose: a downstream agent picking up
 "extract X-ops into the facade" must be able to read off the target crate, the
-result-type location, the `ExecutionContext` it receives, and the render
-boundary — without asking the maintainer.
+result-type location, the `ExecutionContext` it receives, and the render seam —
+without asking the maintainer.
 
 ## Context — what the code looks like today (2026-06-21, main `20698831`)
 
@@ -77,16 +77,16 @@ The three principles enforced everywhere below the `cli` line, from the plan:
 `println!`/`eprintln!`), **no ambient state** (config/registries/caches live in a
 passed-in context, not statics). The eight locked decisions follow.
 
-### 1. Facade crate boundary — a new `heddle-core` crate
+### 1. Facade crate seam — `heddle-verbs`
 
-Create a new crate `crates/core`, package name **`heddle-core`**. It is the
-operation API and sits one layer below `cli` and above the domain crates.
+The facade lives in `crates/verbs`, package name **`heddle-verbs`**. It is the
+operation interface and sits one layer below `cli` and above the domain crates.
 
 ```
 crates/cli (heddle-cli)        clap parse · render (text/json) · style/color ·
                                exit-code map · progress/stdout-stderr glue
         │ depends on
-crates/core (heddle-core)      ExecutionContext · operation API · typed *Report
+crates/verbs (heddle-verbs)    ExecutionContext · operation interface · typed *Report
                                structs · re-exports HeddleError + observability
         │ depends on
 repo · objects · merge · semantic · refs · oplog · ingest · format · wire ·
@@ -97,10 +97,10 @@ crypto · cli-shared            domain logic (Result-only, sink-reporting)
   `objects`, `merge`, `semantic`, `refs`, `oplog`, `ingest`, `format`, `wire`,
   `crypto`), plus `cli-shared` (for `UserConfig`/remote-target types), plus
   `serde`, `thiserror`/`anyhow`. The dependency edges stay acyclic: domain crates
-  never depend on `heddle-core`.
+  never depend on `heddle-verbs`.
 - **Dependencies it MUST NOT take:** `heddle-cli`, `clap`, `anstyle`/`anstream`
   or any terminal/TTY/`indicatif`-style render crate. A CI grep-gate enforces
-  this (`heddle-core` and domain crates may not list those deps) so the facade
+  this (`heddle-verbs` and domain crates may not list those deps) so the facade
   stays render-free and embeddable from a server, a daemon, or a test harness.
 - **What it re-exports** (so embedders need one crate): `ExecutionContext` and its
   builder, every operation fn/module, every typed `*Report`/`*Result`/`*Output`
@@ -111,21 +111,21 @@ crypto · cli-shared            domain logic (Result-only, sink-reporting)
 
 **Why not extend `cli-shared` or `repo`?** `cli-shared` is scoped to shared
 config/remote *value types* (its deps are `objects`, `wire`, `repo`); making it
-the operation API would balloon its dependency surface and conflate "config the
+the operation interface would balloon its dependency surface and conflate "config the
 CLI and client share" with "the orchestration layer." `repo` is one domain crate
 among many — the facade orchestrates across `merge`, `semantic`, `ingest`, and the
 bridge, so housing it in `repo` would force `repo` to depend on all of them and
 risk cycles (`semantic → repo`? `merge → repo`?). A dedicated apex-below-cli crate
-is the only home that keeps the graph acyclic and the boundary legible.
+is the only home that keeps the graph acyclic and the seam legible.
 
 ### 2. `ExecutionContext` — the struct that replaces `&Cli` threading
 
-`ExecutionContext` lives in `heddle-core`. It carries the *semantic* execution
+`ExecutionContext` lives in `heddle-verbs`. It carries the *semantic* execution
 state a command needs — and deliberately omits everything that is a render or
 process concern.
 
 ```rust
-// crates/core/src/context.rs
+// crates/verbs/src/context.rs
 pub struct ExecutionContext {
     /// Already-opened repository handle, or None for repo-creating ops
     /// (init / clone / adopt). The facade NEVER re-derives the repo from cwd;
@@ -165,7 +165,7 @@ impl ExecutionContext {
   hardening plan's F1 sketch put `output` in the context; this ADR overrides that
   — output mode is a *render selection*, owned by `cli`. An embedder receives
   typed structs and chooses its own representation, so it never needs `OutputMode`.
-  This sharpens the facade boundary.
+  This sharpens the facade seam.
 - **CLI construction:**
   `ExecutionContext::from_cli(cli: &Cli) -> Result<Self, HeddleError>` performs
   the `--repo`/cwd resolution currently in `Cli::open_repo()` (`cli_base.rs:90`),
@@ -194,8 +194,8 @@ pub async fn cmd_status(cli: &Cli, short: bool, watch: bool,
 ```
 
 ```rust
-// AFTER — logic in heddle-core, render in cli
-// crates/core/src/status.rs
+// AFTER — logic in heddle-verbs, render in cli
+// crates/verbs/src/status.rs
 pub fn status(ctx: &ExecutionContext, opts: StatusOptions)
     -> Result<StatusReport, HeddleError>
 {
@@ -208,7 +208,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions)
 pub async fn cmd_status(cli: &Cli, short: bool, watch: bool, /*…*/) -> Result<()> {
     let ctx = ExecutionContext::from_cli(cli)?;
     // `watch` is a CLI loop concern — the CLI re-calls the single-shot facade op.
-    let report = heddle_core::status(&ctx, StatusOptions { short })?;
+    let report = verbs::status(&ctx, StatusOptions { short })?;
     match cli.output_mode() {
         OutputMode::Text                  => render::status_text(&report, cli.style()),
         OutputMode::Json | JsonCompact    => render::status_json(&report, cli.output_mode()),
@@ -217,26 +217,26 @@ pub async fn cmd_status(cli: &Cli, short: bool, watch: bool, /*…*/) -> Result<
 }
 ```
 
-The `watch` loop, color, and json-vs-text choice never cross into `heddle-core`.
-`merge` follows the identical shape: `heddle_core::merge(&ctx, MergeOptions{…}) ->
+The `watch` loop, color, and json-vs-text choice never cross into `heddle-verbs`.
+`merge` follows the identical shape: `verbs::merge(&ctx, MergeOptions{…}) ->
 Result<MergeReport, HeddleError>`, and the `process::exit` at `merge/mod.rs:263`
 becomes a `return Err(…)` mapped by `main()` (decision 6).
 
-### 3. Operation API surface
+### 3. Operation interface
 
-Inputs are plain Rust option structs (defined in `heddle-core`, NOT clap structs);
+Inputs are plain Rust option structs (defined in `heddle-verbs`, NOT clap structs);
 the CLI's clap arg structs convert into them. Outputs are typed `*Report` structs
 (decision 4). Every operation returns `Result<T, HeddleError>`. "Logic home" is
-where the *compute* lands after extraction; `heddle-core` is the assembly/orchestration
+where the *compute* lands after extraction; `heddle-verbs` is the assembly/orchestration
 point and the home for compute that is genuinely cross-domain.
 
-| Operation | Facade signature (in `heddle-core`) | Result type | Logic home (WU) |
+| Operation | Facade signature (in `heddle-verbs`) | Result type | Logic home (WU) |
 |---|---|---|---|
 | init | `init(&Ctx, InitOptions) -> Result<InitReport>` | `InitReport` | `repo` |
 | adopt / import | `adopt(&Ctx, AdoptOptions) -> Result<AdoptReport>` | `AdoptReport` | `repo` + bridge (X-bridge) |
-| status | `status(&Ctx, StatusOptions) -> Result<StatusReport>` | `StatusReport` | `core::status` (X-status) |
+| status | `status(&Ctx, StatusOptions) -> Result<StatusReport>` | `StatusReport` | `verbs::status` (X-status) |
 | capture / commit | `capture(&Ctx, CaptureOptions) -> Result<CaptureReport>` | `CaptureReport` | `repo` / `oplog` |
-| diff | `diff(&Ctx, DiffOptions) -> Result<DiffReport>` | `DiffReport` (borrowed `LineDiff<'_>` later, Z3) | `core::diff` (X-diff) |
+| diff | `diff(&Ctx, DiffOptions) -> Result<DiffReport>` | `DiffReport` (borrowed `LineDiff<'_>` later, Z3) | `verbs::diff` (X-diff) |
 | merge | `merge(&Ctx, MergeOptions) -> Result<MergeReport>` | `MergeReport` | `merge` (X-ops) |
 | resolve | `resolve(&Ctx, ResolveOptions) -> Result<ResolveReport>` | `ResolveReport` | `merge` (X-ops) |
 | rebase | `rebase(&Ctx, RebaseOptions) -> Result<RebaseReport>` | `RebaseReport` | `repo`/`merge` (X-ops) |
@@ -252,7 +252,7 @@ point and the home for compute that is genuinely cross-domain.
 | gc / maintenance | `gc(&Ctx, GcOptions) -> Result<GcReport>` | `GcReport` | `objects`/`repo` |
 | thread ops | `thread::start/switch/land/ready/abort/continue(&Ctx, …)` | `Thread*Report` | `repo` |
 | discuss / context | `discuss(&Ctx, DiscussOptions) -> Result<DiscussReport>` | `DiscussReport` | `repo` (collab store) |
-| git-bridge | `git_bridge::import(&Ctx, …)` · `export(&Ctx, …)` | `BridgeReport` | `core::git_bridge` (X-bridge, from `cli/bridge/*`) |
+| git-bridge | `git_bridge::import(&Ctx, …)` · `export(&Ctx, …)` | `BridgeReport` | `verbs::git_bridge` (X-bridge, from `cli/bridge/*`) |
 | verify / doctor | `verify(&Ctx, VerifyOptions) -> Result<VerifyReport>` | `VerifyReport` | new `verification` (X-verify) |
 
 `try` (sandboxed child run) is a CLI orchestration verb, not a facade op: it
@@ -266,7 +266,7 @@ The rule every extraction follows: **logic returns a typed, `serde`-`Serialize`
 data struct; the CLI owns ALL rendering — text, json, json-compact — and ALL
 styling.**
 
-- **Result types live in `heddle-core`** (e.g. `crates/core/src/status.rs`
+- **Result types live in `heddle-verbs`** (e.g. `crates/verbs/src/status.rs`
   defines `StatusReport`). They derive `Serialize` (and `Deserialize` where round-
   tripping helps tests). Because they serialize, `--output json` collapses to
   `serde_json::to_writer(stdout, &report)` — JSON output becomes near-free and the
@@ -275,7 +275,7 @@ styling.**
   command, e.g. `render::status_text`). Text rendering uses the existing `style`
   helpers; the renderer is the *only* place `println!`/`style::*` appears for that
   command.
-- The boundary is mechanical: a reviewer can grep `heddle-core` for `println!`,
+- The seam is mechanical: a reviewer can grep `heddle-verbs` for `println!`,
   `style`, `serde_json::to_string`-for-display, or `OutputMode` and expect zero
   hits; all of those belong to `cli::render`.
 
@@ -288,8 +288,8 @@ Two traits, **defined in `crates/objects`** — the lowest crate that every
 print-emitting logic crate (`semantic`, `ingest`, `refs`, `oplog`) already depends
 on, and the crate that already owns `HeddleError` (`objects/src/error.rs:8`).
 Defining them here avoids a dependency cycle (they must live *below* the domain
-crates, so they cannot live in `heddle-core`, which depends on those crates) and
-avoids minting a new crate. `heddle-core` and `cli` re-export them.
+crates, so they cannot live in `heddle-verbs`, which depends on those crates) and
+avoids minting a new crate. `heddle-verbs` and `cli` re-export them.
 
 ```rust
 // crates/objects/src/observe.rs
@@ -335,7 +335,7 @@ impl ProgressSink for NoopProgress { fn event(&self, _: ProgressEvent) {} }
 ### 6. `process::exit` removal + error → exit-code mapping
 
 - **Rule:** the facade and every command body return `Result<_, HeddleError>`
-  (the CLI boundary may widen to `anyhow::Error`). **Only `main()` maps an error
+  (the CLI adapter may widen to `anyhow::Error`). **Only `main()` maps an error
   to an exit code and calls `process::exit`.** The 7 production CLI `process::exit`
   sites inside command/orchestration bodies (`merge/mod.rs:263`,
   `operator_core.rs:248`, `thread_approval.rs:331`, `snapshot.rs:216`,
@@ -347,7 +347,7 @@ impl ProgressSink for NoopProgress { fn event(&self, _: ProgressEvent) {} }
   returns `ChildOutcome { exit_code }` and `main()` performs the single
   `process::exit(exit_code)`. No mid-stack process control.
 - **Where the taxonomy lives:** `HeddleExitCode` stays in **`cli`**
-  (`crates/cli/src/exit.rs:19`) and must NOT move into `heddle-core` — a library
+  (`crates/cli/src/exit.rs:19`) and must NOT move into `heddle-verbs` — a library
   has no business owning process lifecycle. `main()` calls
   `HeddleExitCode::from_error(&err)` (`exit.rs:86`), which already walks the error
   chain and classifies on the stable `kind` discriminator (`exit.rs:59`). The
@@ -360,7 +360,7 @@ impl ProgressSink for NoopProgress { fn event(&self, _: ProgressEvent) {} }
 | Singleton (today) | Moves to | Re-entrancy win |
 |---|---|---|
 | `USER_CONFIG` OnceLock (`cli/mod.rs:49`) | `ExecutionContext.config` field, loaded once at construction | two contexts → two configs in one process |
-| color `COLOR_STATE` (`style.rs:44`) | **stays in CLI** as render-layer state — a `StyleMode` value passed to renderers, not a process static. Never enters `heddle-core`. | parallel renders don't share a global color bit |
+| color `COLOR_STATE` (`style.rs:44`) | **stays in CLI** as render-layer state — a `StyleMode` value passed to renderers, not a process static. Never enters `heddle-verbs`. | parallel renders don't share a global color bit |
 | lazy-hydrator `REGISTRY` (`repo/lazy_hydrator.rs:196`) | **`Repository` field**, populated at `Repository::open` | two repos → two hydrator registries; the headline re-entrancy fix |
 | fault-inject `FAULT_POINTS` (`objects/fault_inject.rs:43`) | `ExecutionContext.faults` (`FaultConfig`), env-seeded by the CLI constructor only | embedders never inherit a test env var; faults are per-context |
 | semantic `CACHE` (`semantic/cache.rs:57`) | `ExecutionContext.semantic_cache: Arc<SemanticCache>` | content-addressed, so it MAY be shared, but lifetime/bound is now the caller's choice, not a leaked global |
@@ -391,7 +391,7 @@ Phase 1  (parallel NOW, independent of S1, up to the 3-builder cap):
 SPINE PR  (after S1; the serial gate for all of Phase 3):
   = F1 (ExecutionContext spine, ~100 cmd signatures: &Cli → &ExecutionContext)
   + F2 (process::exit → Result; exit-code map confined to main)
-  + render-separation seam: create the `heddle-core` crate skeleton with
+  + render-separation seam: create the `heddle-verbs` crate skeleton with
     ExecutionContext, define the *Report convention + cli::render module, and
     land ProgressSink/WarningSink in crates/objects (decision 5).
   Land as ONE focused PR; freeze parallel cli edits during its window.
@@ -403,7 +403,7 @@ Phase 2  (after S1; foundational):
 
 Phase 3  (after the SPINE PR; fan out, disjoint by domain):
   X-bridge · X-ops · X-diff · X-status · X-verify
-  then X-facade assembles heddle-core over the extracted pieces.
+  then X-facade assembles heddle-verbs over the extracted pieces.
 
 Phase 3.5:  Z3 (after Z2 + X-diff) · Z5 (after Z1 + X-ops)
 
@@ -429,9 +429,9 @@ their file scopes are disjoint by domain.
   any server or batched embedder.
 - The CLI shrinks toward "parse args → build context → call op → render result →
   map error to exit code," with the ~17–19k LOC of trapped logic relocated to
-  `heddle-core` and the domain crates.
+  `heddle-verbs` and the domain crates.
 - Cost: the F1 spine touches ~100 command signatures and is merge-conflict-prone;
-  it must land as one frozen-window PR. The `Z1` borrow API and the de-singleton
+  it must land as one frozen-window PR. The `Z1` borrow interface and the de-singleton
   moves ripple through every `ObjectStore`/`Repository` construction site.
 
 ## Open questions / risks
@@ -445,7 +445,7 @@ their file scopes are disjoint by domain.
   the structured `tracing` event is the accepted fallback — never `eprintln!`.
 - **Observability-trait home.** `crates/objects` is chosen as the lowest common
   dependency; if a future refactor lifts `HeddleError` and these traits into a
-  dedicated tiny `heddle-observe` crate, `heddle-core` re-exports shield callers
+  dedicated tiny `heddle-observe` crate, `heddle-verbs` re-exports shield callers
   from the move.
 - **Async surface.** `status` is `async` today; `merge` is sync. The facade should
   pick one convention per op based on its real I/O; mixed sync/async across the op
@@ -463,8 +463,8 @@ crate* — rejected: it inflates a config crate's dependency surface or forces a
 domain crate to depend on its siblings, risking cycles. (b) *Keep `OutputMode`/
 color in the `ExecutionContext`* (the plan's F1 sketch) — rejected: output mode is
 a render selection an embedder never needs, and keeping it in the facade weakens
-the boundary. (c) *Define the progress/warning traits in `heddle-core`* — rejected:
-the logic crates that must report live *below* `heddle-core`, so the traits would
+the seam. (c) *Define the progress/warning traits in `heddle-verbs`* — rejected:
+the logic crates that must report live *below* `heddle-verbs`, so the traits would
 create a cycle; `crates/objects` is the lowest shared home. (d) *Cut 0.5.0 now and
 build the facade on a 0.6.0-dev line* (plan Option A) — rejected by the maintainer:
 the campaign is folded into 0.5.0 and the tag is held until the facade lands.

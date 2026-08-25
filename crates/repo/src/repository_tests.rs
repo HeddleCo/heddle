@@ -191,7 +191,7 @@ fn test_init_creates_structure() {
 fn test_custom_store_fixture_threads_a_custom_object_store() {
     // heddle#283: keep coverage that `Repository<RefManager, OpLog, S>`
     // compiles and runs with a concrete store that is not the default
-    // `AnyStore`, without exposing a production custom-store open helper.
+    // `FsStore`, without exposing a production custom-store open helper.
     use objects::store::FsStore;
 
     let temp_dir = TempDir::new().unwrap();

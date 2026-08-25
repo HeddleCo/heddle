@@ -14,6 +14,8 @@
 
 use std::fs;
 
+use crypto::Signer as _;
+use objects::object::{ReviewKind, ReviewScope, StateId, signing_payload};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -658,18 +660,64 @@ fn review_show_emits_output_kind() {
 
 #[test]
 fn review_next_envelope_is_emitted_when_window_empty() {
-    // Smoke test: `review next` against a fresh repo with no
-    // pending review work hits the `None`-branch of the envelope —
-    // that path is the one the lint test exercises generally, but
-    // asserting the explicit `next: null` shape here pins the wire
-    // contract that agents key off when there's nothing to review.
+    // Sign every state in the fixture so `review next` reaches the empty
+    // branch. Each signature must cover the exact review payload that the
+    // command verifies before persisting it.
     let temp = init_and_capture();
-    let value = heddle_json(&["review", "next"], &temp);
+    let signer = crypto::Ed25519Signer::generate().expect("generate review key");
+    let public_key = hex::encode(signer.public_key());
+    let mut signed_count = 0;
+    let value = loop {
+        let candidate = heddle_json(&["review", "next"], &temp);
+        if candidate.get("next") == Some(&serde_json::Value::Null) {
+            break candidate;
+        }
+        assert!(signed_count < 256, "fixture review history did not drain");
+        signed_count += 1;
+
+        let state_text = candidate["state_id"].as_str().expect("review state_id");
+        let state_id = StateId::parse(state_text).expect("parse review state_id");
+        let signed_at = chrono::Utc::now().timestamp();
+        let payload = signing_payload(
+            state_id,
+            ReviewKind::Read,
+            &ReviewScope::WholeChange,
+            signed_at,
+            None,
+        );
+        let signature = hex::encode(signer.sign(&payload).expect("sign review payload"));
+        let signed_at = signed_at.to_string();
+        heddle(
+            &[
+                "review",
+                "sign",
+                state_text,
+                "--kind",
+                "read",
+                "--public-key",
+                &public_key,
+                "--signature",
+                &signature,
+                "--signed-at-unix",
+                &signed_at,
+            ],
+            Some(temp.path()),
+        )
+        .expect("sign pending review");
+    };
+
     assert_output_kind(&value, "review_next");
-    assert!(
-        value.get("next").is_some(),
-        "review next must always emit a `next` field (null or object): {value}"
+    assert_eq!(
+        value.get("next"),
+        Some(&serde_json::Value::Null),
+        "review next must emit required `next: null` when the scan is empty: {value}"
     );
+    for absent in ["state_id", "headline", "existing_signatures"] {
+        assert!(
+            value.get(absent).is_none(),
+            "empty review next must omit `{absent}` rather than serialize null: {value}"
+        );
+    }
 }
 
 #[test]

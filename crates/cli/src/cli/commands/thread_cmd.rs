@@ -8,13 +8,13 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
+use heddle_cli_contract::cli::commands::wire::thread::ThreadRecordOutput as ThreadOutput;
 use objects::{
     fs_ops::remove_path_recursively,
     object::{Blob, StateId, ThreadName},
     store::{ObjectStore, WriterLeaseStatus, WriterLeaseStore},
 };
-use oplog::{OpLogRecorder, OpRecord, ThreadUpdateSnapshots};
-use refs::{Head, RefExpectation, RefUpdate};
+use refs::Head;
 use repo::{
     ActorPresenceStore, Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode,
     ThreadState, describe_thread_advice,
@@ -47,20 +47,6 @@ use super::{
 };
 use crate::cli::{Cli, ThreadCleanupArgs, ThreadCommands, should_output_json, style};
 
-use heddle_cli_contract::cli::commands::wire::thread::ThreadRecordOutput as ThreadOutput;
-
-pub(crate) struct ThreadRefState {
-    pub state: StateId,
-    pub ref_absent: bool,
-}
-
-pub(crate) struct ThreadUpdateBefore {
-    pub state: StateId,
-    pub ref_absent: bool,
-    pub manager_snapshot: Option<Vec<u8>>,
-    pub manager_records: Vec<Thread>,
-}
-
 // The cleanup wire payloads live in cli-contract so the schema registry
 // registers the real serialization types.
 pub(crate) use heddle_cli_contract::cli::commands::wire::thread::{
@@ -82,15 +68,9 @@ fn remove_thread_checkout(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn current_thread_ref_state_with_presence(
-    repo: &Repository,
-    thread: &Thread,
-) -> Result<ThreadRefState> {
+pub(crate) fn current_thread_ref_state(repo: &Repository, thread: &Thread) -> Result<StateId> {
     if let Some(state) = repo.refs().get_thread(&ThreadName::new(&thread.thread))? {
-        return Ok(ThreadRefState {
-            state,
-            ref_absent: false,
-        });
+        return Ok(state);
     }
     let state = if let Some(current_state) = thread.current_state.as_deref() {
         repo.resolve_state(current_state)?
@@ -99,101 +79,12 @@ pub(crate) fn current_thread_ref_state_with_presence(
         repo.resolve_state(&thread.base_state)?
             .ok_or_else(|| anyhow!("base state not found for thread '{}'", thread.thread))?
     };
-    Ok(ThreadRefState {
-        state,
-        ref_absent: true,
-    })
+    Ok(state)
 }
 
-pub(crate) fn current_thread_ref_state(repo: &Repository, thread: &Thread) -> Result<StateId> {
-    Ok(current_thread_ref_state_with_presence(repo, thread)?.state)
-}
-
-pub(crate) fn capture_thread_update_before(
-    repo: &Repository,
-    manager: &ThreadManager,
-    thread: &Thread,
-) -> Result<ThreadUpdateBefore> {
-    let ref_state = current_thread_ref_state_with_presence(repo, thread)?;
-    Ok(ThreadUpdateBefore {
-        state: ref_state.state,
-        ref_absent: ref_state.ref_absent,
-        manager_snapshot: manager.snapshot_thread_record(&thread.thread)?,
-        manager_records: manager.snapshot_records(&thread.thread)?,
-    })
-}
-
-pub(crate) fn save_thread_update_with_oplog(
-    repo: &Repository,
-    manager: &ThreadManager,
-    thread: &Thread,
-    before: ThreadUpdateBefore,
-    new_state: StateId,
-) -> Result<()> {
-    let new_manager_snapshot = Some(manager.encode_thread_record_snapshot(thread)?);
-    let mut new_manager_records = before.manager_records.clone();
-    if let Some(existing) = new_manager_records
-        .iter_mut()
-        .find(|record| record.id == thread.id)
-    {
-        *existing = thread.clone();
-    } else {
-        new_manager_records.push(thread.clone());
-    }
-    let old_manager_records = encode_thread_records(manager, &before.manager_records)?;
-    let new_manager_records = encode_thread_records(manager, &new_manager_records)?;
-    let thread_name = ThreadName::new(&thread.thread);
-    let snapshots = ThreadUpdateSnapshots::from_record_sets(
-        before.manager_snapshot,
-        new_manager_snapshot,
-        old_manager_records,
-        new_manager_records,
-        before.ref_absent,
-    );
-    if repo.refs().get_thread(&thread_name)? == Some(new_state) {
-        objects::fault_inject::maybe_fail_at("thread_manager_save_in_thread_update")?;
-        manager.save(thread)?;
-        repo.oplog().record_thread_update(
-            &thread_name,
-            &before.state,
-            &new_state,
-            snapshots,
-            Some(&repo.op_scope()),
-        )?;
-    } else {
-        objects::fault_inject::maybe_fail_at("thread_manager_save_in_thread_update")?;
-        repo.commit_and_publish(
-            vec![OpRecord::ThreadUpdate {
-                name: thread_name.to_string(),
-                old_state: before.state,
-                new_state,
-                manager_snapshots: snapshots,
-            }],
-            &[RefUpdate::Thread {
-                name: thread_name,
-                expected: if before.ref_absent {
-                    RefExpectation::Missing
-                } else {
-                    RefExpectation::Value(before.state)
-                },
-                new: Some(new_state),
-            }],
-        )?;
-        manager.save(thread)?;
-    }
-    Ok(())
-}
-
-fn encode_thread_records(manager: &ThreadManager, records: &[Thread]) -> Result<Vec<Vec<u8>>> {
-    records
-        .iter()
-        .map(|record| {
-            manager
-                .encode_thread_record_snapshot(record)
-                .map_err(Into::into)
-        })
-        .collect()
-}
+pub(crate) use verbs::{
+    capture_thread_update_before, save_thread_update as save_thread_update_with_oplog,
+};
 
 /// Resolve an optional positional thread identifier to a concrete
 /// name. When the user omits the positional, fall back to whichever
@@ -504,11 +395,14 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
         )),
         ThreadCommands::Collapse(args) => super::collapse::cmd_collapse(
             cli,
+            &repo,
             args.states.clone(),
             args.into.clone(),
             args.confidence,
         ),
-        ThreadCommands::Expand(args) => super::expand::cmd_expand(cli, args.reference.clone()),
+        ThreadCommands::Expand(args) => {
+            super::expand::cmd_expand(cli, &repo, args.reference.clone())
+        }
     }
 }
 

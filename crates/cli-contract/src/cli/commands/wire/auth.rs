@@ -29,36 +29,6 @@ pub struct AuthLogoutOutput {
     pub device_identity_removed: bool,
 }
 
-/// JSON contract for `auth login`. Credential material never appears in this
-/// payload; it reports only the installed credential's public metadata.
-#[derive(Serialize, JsonSchema)]
-#[schemars(rename = "AuthLoginSchema")]
-pub struct AuthLoginOutput {
-    pub output_kind: &'static str,
-    pub server: String,
-    pub authenticated: bool,
-    pub subject: String,
-    pub credential_id: Option<String>,
-    pub expires_at: Option<String>,
-}
-
-/// JSON contract for `auth derive-agent`. Token and proof-key material stay
-/// confined to the keystore or `.hcred` file.
-#[derive(Serialize, JsonSchema)]
-#[schemars(rename = "AuthDeriveAgentSchema")]
-pub struct AuthDeriveAgentOutput {
-    pub output_kind: &'static str,
-    pub server: String,
-    pub agent_id: String,
-    pub expires_at: Option<String>,
-    pub template: Option<String>,
-    pub allowed_operations: Vec<String>,
-    pub scopes: Vec<String>,
-    /// Absolute path of the written credential when `--out` was given;
-    /// `None` when the child was installed into the keystore.
-    pub credential_path: Option<String>,
-}
-
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "AuthStatusSchema")]
 pub struct AuthStatusOutput {
@@ -107,7 +77,7 @@ pub struct ServiceTokenOutput {
 pub struct CaptureActor {
     pub name: String,
     pub email: String,
-    /// `environment`, `repository`, `git_config`, or null when unknown.
+    /// `environment`, `repository`, `git_config`, `user_config`, or null when unknown.
     pub source: Option<&'static str>,
 }
 

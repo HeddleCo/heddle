@@ -835,30 +835,10 @@ export interface ContextAuditSchema {
   [key: string]: unknown;
 }
 
-/** One stale annotation reported by `context check`. `reason` is the machine name of the staleness result that made the annotation stale. */
-export interface ContextCheckIssueSchema {
-  annotation_id: string;
-  /** First 80 characters of the annotation's current content. */
-  content: string;
-  reason: ContextCheckStalenessReason;
-  /** Annotation scope token (for example `line`, `symbol`, or `file`). */
-  scope: string;
-  /** Target label: either a path or `state:<id>`. */
-  target: string;
-}
-
-/** Payload-complete schema for `heddle context check --output json`. */
 export interface ContextCheckSchema {
-  /** Annotations examined after active/tag filtering. */
-  annotations: number;
-  fresh: number;
-  issues: ContextCheckIssueSchema[];
   output_kind: "context_check";
-  stale: number;
-  unknown: number;
+  [key: string]: unknown;
 }
-
-export type ContextCheckStalenessReason = "SourceChanged" | "SymbolMissing" | "FileMissing";
 
 export interface ContextEditSchema {
   idempotency_status?: string | null;
@@ -2410,7 +2390,6 @@ export interface StateProvenanceVerification {
 
 export interface StatusSchema {
   actor?: ActorInfo | null;
-  annotation_count: number;
   attach_reason?: string | null;
   base_root?: string | null;
   base_state?: string | null;
@@ -2433,8 +2412,6 @@ export interface StatusSchema {
   is_isolated: boolean;
   last_progress_at?: string | null;
   materialized_threads?: MaterializedThreadInfo[];
-  /** Existing pinned context. Zero counts are explicit so machine readers can distinguish an empty repository from an unknown value. */
-  open_discussion_count: number;
   operation?: unknown;
   output_kind: "status";
   parallel_threads: ParallelThreadInfo[];
@@ -2450,7 +2427,6 @@ export interface StatusSchema {
   repository_capability: string;
   repository_context?: RepositoryContextInfo | null;
   repository_label: string;
-  resolved_discussion_count: number;
   session_id?: string | null;
   state?: StateInfo | null;
   storage_model: string;
@@ -3397,7 +3373,7 @@ export interface WatchLineSchema {
 export interface WhoamiCaptureActorSchema {
   email: string;
   name: string;
-  /** `environment`, `repository`, `git_config`, or null when unknown. */
+  /** `environment`, `repository`, `git_config`, `user_config`, or null when unknown. */
   source?: string | null;
 }
 

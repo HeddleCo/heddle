@@ -8,7 +8,7 @@ use std::{collections::HashMap, hint::black_box, sync::RwLock};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use objects::{
     object::{Action, ActionId, Blob, ContentHash, State, StateId, Tree, TreeEntry, diff_trees},
-    store::{ObjectSource, ObjectStore, Result},
+    store::{ObjectSource, ObjectStore, Result, SidecarStore},
     sync::RwLockExt,
 };
 
@@ -36,6 +36,8 @@ struct BenchStore {
     blobs: RwLock<HashMap<ContentHash, Blob>>,
     trees: RwLock<HashMap<ContentHash, Tree>>,
 }
+
+impl SidecarStore for BenchStore {}
 
 impl ObjectSource for BenchStore {
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {

@@ -8,7 +8,7 @@ use anyhow::Result;
 use objects::store::AsyncObjectSource;
 use objects::{
     object::{ContentHash, StateId, Tree, diff_trees},
-    store::{AnyStore, ObjectSource, ObjectStore},
+    store::{FsStore, ObjectSource, ObjectStore},
 };
 use oplog::OpLogBackend;
 use refs::RefBackend;
@@ -95,7 +95,7 @@ pub struct CachedNodeMetadata {
     pub created_at_secs: i64,
 }
 
-pub struct CommitGraphIndex<'source, S: ObjectSource + ?Sized = AnyStore> {
+pub struct CommitGraphIndex<'source, S: ObjectSource + ?Sized = FsStore> {
     source: &'source S,
     nodes: HashMap<StateId, CommitGraphNode>,
     cache: Box<dyn CommitGraphCache + 'source>,
@@ -109,7 +109,7 @@ pub struct CommitGraphIndex<'source, S: ObjectSource + ?Sized = AnyStore> {
 /// persisted together by [`Self::finish`]. This keeps a history walk from
 /// repeatedly traversing the same parent closure or rewriting the complete
 /// cache for every visited state.
-pub(crate) struct CommitGraphHistorySession<'graph, 'source, S: ObjectSource + ?Sized = AnyStore> {
+pub(crate) struct CommitGraphHistorySession<'graph, 'source, S: ObjectSource + ?Sized = FsStore> {
     graph: &'graph mut CommitGraphIndex<'source, S>,
 }
 

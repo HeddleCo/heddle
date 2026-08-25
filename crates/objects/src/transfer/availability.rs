@@ -73,7 +73,7 @@ impl ObjectAvailabilityPlan {
 mod tests {
     use crate::{
         object::{Blob, ContentHash, StateId, Tree},
-        store::{ObjectStore, Result as StoreResult},
+        store::{ObjectStore, Result as StoreResult, SidecarStore},
     };
 
     use super::*;
@@ -83,6 +83,8 @@ mod tests {
         blob: Option<ContentHash>,
         state: Option<StateId>,
     }
+
+    impl SidecarStore for DummyStore {}
 
     impl ObjectStore for DummyStore {
         fn get_blob(&self, _hash: &ContentHash) -> StoreResult<Option<Blob>> {

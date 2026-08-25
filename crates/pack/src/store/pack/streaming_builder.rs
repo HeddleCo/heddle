@@ -511,6 +511,16 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
                     .seek(SeekFrom::Start(csize_pos))
                     .map_err(StoreError::from)?;
                 inner.write_all(&csize_bytes).map_err(StoreError::from)?;
+                // Pack entries have no explicit compression bit: readers treat
+                // equal stored/logical lengths as raw bytes. A zstd frame can
+                // occasionally be exactly as long as its input, so replace
+                // that ambiguous frame in place with the original payload.
+                if compressed_size == data.len() as u64 {
+                    inner
+                        .seek(SeekFrom::Start(body_start))
+                        .map_err(StoreError::from)?;
+                    inner.write_all(&data).map_err(StoreError::from)?;
+                }
                 inner
                     .seek(SeekFrom::Start(body_end))
                     .map_err(StoreError::from)?;
@@ -1743,6 +1753,57 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(got, payload);
+    }
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn equal_length_zstd_frame_is_stored_as_raw_payload() {
+        // The pack format infers compression from stored length != logical
+        // length. Find a stable boundary payload whose zstd frame is exactly
+        // as long as its input, then pin the streaming writer's raw fallback.
+        fn encode_like_streaming_writer(data: &[u8]) -> Vec<u8> {
+            let mut compressed = Vec::new();
+            let mut encoder = zstd::stream::write::Encoder::new(&mut compressed, 3).unwrap();
+            encoder
+                .set_pledged_src_size(Some(data.len() as u64))
+                .unwrap();
+            std::io::Write::write_all(&mut encoder, data).unwrap();
+            encoder.finish().unwrap();
+            compressed
+        }
+
+        let mut random = Vec::with_capacity(1024);
+        for seed in 0u64..32 {
+            random.extend_from_slice(blake3::hash(&seed.to_le_bytes()).as_bytes());
+        }
+        let payload = (256..=random.len())
+            .find_map(|logical_len| {
+                (0..=logical_len).find_map(|zero_prefix| {
+                    let mut candidate = random[..logical_len].to_vec();
+                    candidate[..zero_prefix].fill(0);
+                    let compressed = encode_like_streaming_writer(&candidate);
+                    (compressed.len() == candidate.len()).then_some(candidate)
+                })
+            })
+            .expect("fixture search must find an equal-length zstd frame");
+        let compressed = encode_like_streaming_writer(&payload);
+        assert_eq!(compressed.len(), payload.len());
+        assert_eq!(compressed.first(), Some(&0x28), "fixture must be zstd");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (mut builder, _, index_path) = fresh_builder(&tmp);
+        let id = PackObjectId::Hash(deterministic_hash(0x78));
+        builder
+            .add_id(id, ObjectType::StateAttachment, payload.clone())
+            .unwrap();
+        let (pack, index, stats) = finalize_cursor(builder, &index_path);
+
+        assert_eq!(stats.total_compressed, stats.total_uncompressed);
+        let reader = PackReader::from_bytes(pack, index).unwrap();
+        assert_eq!(
+            reader.get_object(&id).unwrap(),
+            Some((ObjectType::StateAttachment, payload))
+        );
     }
 
     #[cfg(feature = "zstd")]

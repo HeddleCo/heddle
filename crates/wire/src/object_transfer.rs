@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use objects::{
     object::{AnnotatedTag, State, Tree},
-    store::{ObjectStore, SidecarStore},
+    store::ObjectStore,
 };
 
 use crate::{ObjectData, ObjectId, ObjectRequest, ObjectType, ProtocolError, Result};
@@ -172,7 +172,7 @@ pub fn load_requested_object(store: &impl ObjectStore, req: &ObjectRequest) -> R
 }
 
 pub fn load_object_data(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     id: &ObjectId,
     obj_type: ObjectType,
 ) -> Result<ObjectData> {

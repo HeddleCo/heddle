@@ -27,10 +27,10 @@ product in the sibling **tapestry** repo — neither is part of this workspace.
 ### 1. Repository as Central Coordinator
 
 ```rust
-pub struct Repository<R = RefManager, O = OpLog, S = AnyStore> {
+pub struct Repository<R = RefManager, O = OpLog, S = FsStore> {
     root: PathBuf,             // working directory (checkout root)
     heddle_dir: PathBuf,         // shared .heddle directory (may differ from root/.heddle in agent checkouts)
-    store: S,                  // object store backend; AnyStore = FsStore (static dispatch)
+    store: S,                  // object store Adapter; FsStore by default
     refs: R,                   // threads, markers, HEAD (HEAD may be per-checkout)
     oplog: O,
     config: Config,
@@ -40,9 +40,9 @@ pub struct Repository<R = RefManager, O = OpLog, S = AnyStore> {
 
 The Repository type coordinates between all subsystems. Most operations use it as the primary interface.
 The backends are type parameters (heddle#259 / #283) so the CLI monomorphizes to the on-disk
-local flavor — the bare name `Repository` resolves to `Repository<RefManager, OpLog, AnyStore>` — while
-the hosted server can swap in Postgres-backed ref/oplog backends. `AnyStore` is an enum over Heddle's
-concrete object stores, so object access stays statically dispatched without a vtable.
+local flavor — the bare name `Repository` resolves to `Repository<RefManager, OpLog, FsStore>` — while
+the hosted server can swap in Postgres-backed ref/oplog backends. `S` remains generic over the real
+`ObjectStore` Interface, while the local default avoids a hypothetical one-Adapter enum Seam.
 
 In a standard repo `heddle_dir == root/.heddle`. In an agent checkout `root` is the checkout
 directory and `heddle_dir` is the *shared* `.heddle` from the main repo — both are set by
@@ -58,7 +58,10 @@ pub trait ObjectStore {
 }
 ```
 
-Enables testing with in-memory implementations and future alternative backends (S3, database, etc.).
+Enables local substitution with the in-memory Adapter and keeps storage-generic
+algorithms testable. The hosted server owns its async remote-storage Module in
+the sibling weft repository rather than routing S3 through this synchronous
+Interface.
 
 ### 3. Command Pattern for CLI
 

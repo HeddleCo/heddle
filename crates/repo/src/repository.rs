@@ -62,7 +62,7 @@ use objects::{
     error::{HeddleError, Result},
     lock::{RepoLock, RepositoryLockExt},
     object::{Attribution, ContentHash, State, StateId, ThreadName, Tree},
-    store::{AnyStore, ObjectStore, ShallowInfo},
+    store::{FsStore, ObjectStore, ShallowInfo},
     sync::RwLockExt,
 };
 use oplog::{OpLog, OpLogBackend, OpRecord};
@@ -177,17 +177,15 @@ pub trait BlobHydrator: Send + Sync {
 /// A Heddle repository.
 ///
 /// Generic over its reference, operation-log, and object-store backends.
-/// The CLI uses the defaults — `Repository<RefManager, OpLog, AnyStore>`
+/// The CLI uses the defaults — `Repository<RefManager, OpLog, FsStore>`
 /// (the on-disk local backends) — so the bare name `Repository` resolves to
 /// the local flavor everywhere. The hosted server instantiates
 /// `Repository<PgRefBackend, PgOpLogBackend, …>` via [`Repository::from_parts`].
 ///
-/// The object store is the [`AnyStore`] enum by default: [`Repository::open`]
-/// wraps the local [`FsStore`] in a concrete enum variant rather than a
-/// `Box<dyn>`, so every object access is static-dispatched through the enum
-/// to the inner store — no vtable (heddle#283). `S` goes last so existing
-/// `Repository<R, O>` references keep resolving with `S = AnyStore`.
-pub struct Repository<R = RefManager, O = OpLog, S = AnyStore>
+/// The object store is [`FsStore`] by default, so local object access remains
+/// concrete and statically dispatched. `S` stays generic for callers that
+/// assemble a repository around another real [`ObjectStore`] Adapter.
+pub struct Repository<R = RefManager, O = OpLog, S = FsStore>
 where
     R: RefBackend,
     O: OpLogBackend,
@@ -282,7 +280,7 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
 ///
 /// `open_raw` assembles a repository from already-resolved pieces and runs
 /// none of the local-only open hooks (migrations, hydrator reconstruction) —
-/// those are bound to the default `AnyStore` flavor and live in
+/// those are bound to the default [`FsStore`] flavor and live in
 /// [`Repository::run_open_hooks`], which the config-driven [`Repository::open`]
 /// invokes after `open_raw`.
 /// The per-worktree checkout lane (heddle#330 §1.5). Free function so the

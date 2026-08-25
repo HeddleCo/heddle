@@ -10,7 +10,7 @@ use crate::{
         SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode, State, StateAttachment,
         StateAttachmentBody, StateAttachmentId, StateAttachmentKind, StateId, TreeEntryTarget,
     },
-    store::{ObjectStore, SidecarStore, pack::ObjectType as PackObjectType},
+    store::{ObjectStore, pack::ObjectType as PackObjectType},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -222,14 +222,14 @@ pub struct StateClosureOptions {
 }
 
 pub fn enumerate_state_closure(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     state_id: StateId,
 ) -> Result<Vec<ObjectInfo>> {
     enumerate_state_closure_with_options(store, state_id, StateClosureOptions::default())
 }
 
 pub fn enumerate_state_closure_with_options(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     state_id: StateId,
     options: StateClosureOptions,
 ) -> Result<Vec<ObjectInfo>> {
@@ -248,14 +248,14 @@ pub fn enumerate_state_closure_with_options(
 }
 
 pub fn enumerate_state_closure_plan(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     state_id: StateId,
 ) -> Result<Vec<PlannedObject>> {
     enumerate_state_closure_plan_with_options(store, state_id, StateClosureOptions::default())
 }
 
 pub fn enumerate_state_closure_plan_with_options(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     state_id: StateId,
     options: StateClosureOptions,
 ) -> Result<Vec<PlannedObject>> {
@@ -279,7 +279,7 @@ pub fn enumerate_state_closure_plan_with_options(
 }
 
 pub fn enumerate_state_closure_transfer_with_options(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     state_id: StateId,
     options: StateClosureOptions,
     full_descriptor_object_threshold: usize,
@@ -325,7 +325,7 @@ pub fn enumerate_state_closure_transfer_with_options(
 }
 
 fn annotated_tags_for_state(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     state_id: StateId,
 ) -> Result<Vec<(ContentHash, AnnotatedTag)>> {
     let mut roots = Vec::new();
@@ -377,7 +377,7 @@ fn annotated_tag_info(hash: ContentHash, tag: &AnnotatedTag) -> ObjectInfo {
 /// new tip may still be advertised, and the receiver's have-set filters them.
 /// This keeps incremental push planning proportional to the new history.
 pub fn enumerate_state_closure_transfer_from_boundaries(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     state_id: StateId,
     boundary_states: &[StateId],
     full_descriptor_object_threshold: usize,
@@ -448,7 +448,7 @@ enum StateClosureEvent<'a> {
 }
 
 fn walk_state_closure(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     state_id: StateId,
     options: StateClosureOptions,
     visit: impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
@@ -466,7 +466,7 @@ fn walk_state_closure(
 }
 
 fn walk_state_closure_with_exclusions(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     state_id: StateId,
     max_depth: Option<u32>,
     excluded_states: HashSet<StateId>,
@@ -556,7 +556,7 @@ fn walk_state_closure_with_exclusions(
 }
 
 fn walk_tree_closure_filtered(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     tree_hash: ContentHash,
     excluded: &HashSet<ContentHash>,
     seen: &mut HashSet<ContentHash>,
@@ -601,7 +601,7 @@ fn walk_tree_closure_filtered(
 }
 
 fn walk_blob_filtered(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     blob_hash: ContentHash,
     excluded: &HashSet<ContentHash>,
     seen: &mut HashSet<ContentHash>,
@@ -634,7 +634,7 @@ fn walk_blob_filtered(
 /// closure is a HARD failure (`ObjectNotFound`/`Serialization`) — a partial or
 /// corrupt semantic closure must never be shipped silently.
 fn walk_semantic_index_closure(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     root_hash: ContentHash,
     excluded: &HashSet<ContentHash>,
     seen: &mut HashSet<ContentHash>,
@@ -720,7 +720,7 @@ fn decode_semantic_container(
 }
 
 fn emit_binding_delta(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     hash: ContentHash,
     excluded: &HashSet<ContentHash>,
     seen: &mut HashSet<ContentHash>,
@@ -737,7 +737,7 @@ fn emit_binding_delta(
 }
 
 fn emit_importer_index(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     hash: ContentHash,
     excluded: &HashSet<ContentHash>,
     seen: &mut HashSet<ContentHash>,
@@ -758,7 +758,7 @@ fn emit_importer_index(
 /// excluded (present on the far side) or already seen. A blob that is neither
 /// excluded nor present is a HARD failure — the closure must be complete.
 fn emit_semantic_blob(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     hash: ContentHash,
     excluded: &HashSet<ContentHash>,
     seen: &mut HashSet<ContentHash>,
@@ -783,7 +783,7 @@ fn emit_semantic_blob(
 /// have-set index is not fatal — it just means fewer objects are marked
 /// already-present, which is safe over-fetching, not corruption).
 fn collect_semantic_hashes(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     root_hash: ContentHash,
     excluded: &mut HashSet<ContentHash>,
 ) -> Result<()> {
@@ -815,7 +815,7 @@ fn collect_semantic_hashes(
 }
 
 fn object_info_from_event(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     event: StateClosureEvent<'_>,
 ) -> Result<Option<ObjectInfo>> {
     match event {
@@ -892,7 +892,7 @@ fn object_info_from_event(
 }
 
 fn planned_object_from_event(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     event: StateClosureEvent<'_>,
 ) -> Result<Option<PlannedObject>> {
     match event {
@@ -954,7 +954,7 @@ fn missing_blob(hash: ContentHash) -> HeddleError {
 }
 
 fn blob_has_purge_evidence(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     hash: &ContentHash,
 ) -> Result<bool> {
     let Some(bytes) = store.get_redactions_bytes_for_blob(hash)? else {
@@ -973,7 +973,7 @@ fn blob_has_purge_evidence(
 }
 
 pub fn missing_blobs_in_tree(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     tree_hash: ContentHash,
 ) -> Result<Vec<ContentHash>> {
     let mut missing = Vec::new();
@@ -982,7 +982,7 @@ pub fn missing_blobs_in_tree(
 }
 
 fn collect_missing_blobs_recursive(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     tree_hash: &ContentHash,
     missing: &mut Vec<ContentHash>,
 ) -> Result<()> {
@@ -1021,7 +1021,7 @@ fn collect_missing_blobs_recursive(
 }
 
 fn collect_excluded(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     roots: &[StateId],
 ) -> Result<(HashSet<StateId>, HashSet<ContentHash>)> {
     if roots.is_empty() {
@@ -1077,7 +1077,7 @@ fn collect_excluded(
 }
 
 fn collect_tree_hashes(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     tree_hash: ContentHash,
     excluded: &mut HashSet<ContentHash>,
 ) -> Result<()> {
@@ -1109,7 +1109,7 @@ fn collect_tree_hashes(
 }
 
 pub fn is_ancestor(
-    store: &(impl ObjectStore + SidecarStore),
+    store: &impl ObjectStore,
     ancestor: StateId,
     descendant: StateId,
 ) -> Result<bool> {

@@ -2,10 +2,11 @@
 //! Capture-time risk-signal computer, wired into `repo` through the
 //! [`repo::signals::SignalComputer`] registration seam.
 //!
-//! Entry points register [`CaptureSignalComputer`] once at startup
-//! (`Repository::set_signal_computer`); unregistered repos skip signal
-//! computation entirely — identical to the historical "feature off"
-//! on-disk shape.
+//! Entry points call [`install_capture_signal_computer`] once at startup;
+//! unregistered processes and repositories skip signal computation entirely —
+//! identical to the historical "feature off" on-disk shape.
+
+use std::sync::Arc;
 
 use objects::{
     object::{Blob, ContentHash, RiskSignalBlob, State},
@@ -30,6 +31,15 @@ use crate::{
 /// snapshot diff (tree-sitter-backed when the semantic index allows) and
 /// runs the registry, persisting any fired signals as a `RiskSignalBlob`.
 pub struct CaptureSignalComputer;
+
+/// Install the production signal computer for this process.
+///
+/// CLI entry points call this before opening any repository so snapshot paths
+/// that do not pass through the save verb (for example `revert`) retain the
+/// same capture-time signal behavior.
+pub fn install_capture_signal_computer() {
+    repo::signals::install_default_computer(Arc::new(CaptureSignalComputer));
+}
 
 impl SignalComputer for CaptureSignalComputer {
     fn compute_and_persist(
@@ -126,18 +136,6 @@ fn semantic_context_from_capture(ctx: &CaptureSemanticContext) -> SemanticContex
         changed_paths: ctx.changed_paths.clone(),
         changed_symbols: ctx.changed_symbols.clone(),
         corpus_complete: ctx.corpus_complete,
-        invariant_annotations: ctx
-            .invariant_annotations
-            .iter()
-            .map(
-                |annotation| crate::modules::invariant_adjacency::InvariantAnnotation {
-                    anchor: annotation.anchor.clone(),
-                    kind: annotation.kind,
-                    content: annotation.content.clone(),
-                    tags: annotation.tags.clone(),
-                },
-            )
-            .collect(),
     }
 }
 
@@ -801,60 +799,5 @@ mod tests {
         assert!(!tree_sitter_producers_enabled(&cfg));
         cfg.novelty.enabled = true;
         assert!(tree_sitter_producers_enabled(&cfg));
-    }
-
-    /// The consolidation moved capture-side signal persistence out of `repo`.
-    /// Exercise the registered production seam so an attached invariant cannot
-    /// regress to the historical hard-wired empty annotation set.
-    #[test]
-    fn snapshot_with_invariant_annotation_persists_invariant_adjacency_signal() {
-        use objects::object::{
-            Annotation, AnnotationKind, AnnotationScope, ContextBlob, ContextTarget,
-            StateAttachment, StateAttachmentBody,
-        };
-
-        let temp = TempDir::new().unwrap();
-        let repo = registered(Repository::init_default(temp.path()).unwrap());
-        std::fs::write(temp.path().join("src.rs"), b"fn guarded() {}").unwrap();
-        let attribution = author();
-        let seed = repo
-            .snapshot_with_attribution(Some("seed".to_string()), None, attribution.clone())
-            .unwrap();
-
-        let target = ContextTarget::file("src.rs").unwrap();
-        let annotation = Annotation::new(
-            AnnotationScope::Symbol {
-                name: "guarded".to_string(),
-                resolved_lines: None,
-            },
-            AnnotationKind::Invariant,
-            "must hold across all operations".to_string(),
-            vec![],
-            "test@example.com".to_string(),
-            0,
-            None,
-            None,
-        );
-        let context_root = repo
-            .set_context_blob(None, &target, &ContextBlob::new(vec![annotation]))
-            .unwrap();
-        repo.put_state_attachment(&StateAttachment {
-            state_id: seed.id(),
-            body: StateAttachmentBody::Context(context_root),
-            attribution: attribution.clone(),
-            created_at: seed.created_at,
-            supersedes: None,
-        })
-        .unwrap();
-
-        std::fs::write(temp.path().join("src.rs"), b"fn guarded() { changed() }").unwrap();
-        let changed = repo
-            .snapshot_with_attribution(Some("change".to_string()), None, attribution)
-            .unwrap();
-        let kinds = load_risk_kinds(&repo, &changed);
-        assert!(
-            kinds.contains(&RiskSignalKind::InvariantAdjacency),
-            "invariant_adjacency must fire through the registered capture seam; got {kinds:?}"
-        );
     }
 }

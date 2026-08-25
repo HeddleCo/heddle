@@ -15,21 +15,20 @@ use chrono::Utc;
 use objects::{
     HeddleError,
     error::Result,
-    object::{Principal, State, StateAttachmentBody, ThreadName, Tree},
+    object::{Principal, State, ThreadName, Tree},
     worktree::{WorktreeStatus, build_worktree_ignore},
 };
 use refs::Head;
 use repo::{
-    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, CollaborationStore,
-    CommitGraphIndex, GitImportGuidance, GitOverlayBranchTip, GitOverlayOutOfBandCommits,
-    GitRemoteTrackingStatus, RepoConfig, Repository, RepositoryCapability,
-    RepositoryOperationStatus, StateAttachmentKind, Thread, ThreadFreshness, ThreadImpactCategory,
-    ThreadManager, ThreadMode, ThreadState, WorktreeCompareProfile,
-    describe_thread_advice_with_initial, discover_heddle_root, is_synthetic_root,
-    refresh_thread_freshness,
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, CommitGraphIndex,
+    GitImportGuidance, GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitRemoteTrackingStatus,
+    RepoConfig, Repository, RepositoryCapability, RepositoryOperationStatus, Thread,
+    ThreadFreshness, ThreadImpactCategory, ThreadManager, ThreadMode, ThreadState,
+    WorktreeCompareProfile, describe_thread_advice_with_initial, discover_heddle_root,
+    is_synthetic_root, refresh_thread_freshness,
 };
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sley::{
     Repository as SleyRepository, ShortStatusOptions, ShortStatusRow, StatusUntrackedMode,
@@ -208,11 +207,6 @@ pub struct StatusReport {
     pub submodules: Vec<SubmoduleInfo>,
     #[serde(default)]
     pub materialized_threads: Vec<MaterializedThreadInfo>,
-    /// Existing pinned context. Zero counts are explicit so machine readers
-    /// can distinguish an empty repository from an unknown value.
-    pub open_discussion_count: usize,
-    pub resolved_discussion_count: usize,
-    pub annotation_count: usize,
     #[serde(skip)]
     #[schemars(skip)]
     pub profile: StatusProfile,
@@ -2192,7 +2186,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
         native_worktree_status_ms + worktree_status_start.elapsed().as_millis();
 
     if opts.detail.short_path() {
-        return Ok(build_short_path_report(ShortPathInputs {
+        let mut report = build_short_path_report(ShortPathInputs {
             repo,
             current_state: current_state.as_ref(),
             operation,
@@ -2217,7 +2211,9 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
                 worktree_profile,
                 ..StatusProfile::default()
             },
-        }));
+        });
+        apply_pending_land_recovery(repo, &mut report)?;
+        return Ok(report);
     }
     let submodules = collect_status_submodules(repo, current_state.as_ref())?;
 
@@ -2284,7 +2280,6 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
     let materialized_start = Instant::now();
     let materialized_threads = assess_materialized_threads(repo);
     let materialized_ms = materialized_start.elapsed().as_millis();
-    let context_counts = repository_context_counts(repo);
     let target_thread = thread_summary
         .as_ref()
         .and_then(|thread| thread.target_thread.clone());
@@ -2419,9 +2414,6 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
         changes,
         submodules,
         materialized_threads,
-        open_discussion_count: context_counts.0,
-        resolved_discussion_count: context_counts.1,
-        annotation_count: context_counts.2,
         profile: StatusProfile::default(),
     };
     let late_state_ms = late_state_start.elapsed().as_millis();
@@ -2452,7 +2444,70 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
         build_total_ms: body_start.elapsed().as_millis(),
         worktree_profile,
     };
+    apply_pending_land_recovery(repo, &mut output)?;
     Ok(output)
+}
+
+const INCOMPLETE_LAND_MARKER: &str = "incomplete-land.json";
+
+#[derive(Deserialize)]
+struct IncompleteLandStatusMarker {
+    thread_id: String,
+    // These fields are required by the recovery journal schema even when the
+    // recorded phase has not produced either state yet. Keep them required
+    // here so status cannot advertise recovery for a truncated marker that
+    // `land` itself will reject.
+    merge_state: serde_json::Value,
+    collapse_state: serde_json::Value,
+}
+
+/// Fold durable land recovery into the final Repository Verification State
+/// report before it crosses the facade seam. The CLI must never need to know
+/// how the journal changes blockers or recovery guidance.
+fn apply_pending_land_recovery(repo: &Repository, report: &mut StatusReport) -> Result<()> {
+    let path = repo.heddle_dir().join(INCOMPLETE_LAND_MARKER);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(HeddleError::Config(format!(
+                "failed to read incomplete-land marker {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    let marker: IncompleteLandStatusMarker = serde_json::from_str(&raw).map_err(|error| {
+        HeddleError::Config(format!(
+            "failed to parse incomplete-land marker {}: {error}",
+            path.display()
+        ))
+    })?;
+    for (name, value) in [
+        ("merge_state", &marker.merge_state),
+        ("collapse_state", &marker.collapse_state),
+    ] {
+        if !value.is_null() && !value.is_string() {
+            return Err(HeddleError::Config(format!(
+                "failed to parse incomplete-land marker {}: {name} must be a string or null",
+                path.display()
+            )));
+        }
+    }
+    let thread = marker.thread_id;
+    let action = heddle_action(["land", "--thread", thread.as_str()]);
+    report.blockers.push(format!(
+        "land of '{thread}' has durable recovery work pending"
+    ));
+    if !report.recovery_commands.contains(&action) {
+        report.recovery_commands.push(action.clone());
+    }
+    report.recovery_action_templates = action_templates(&report.recovery_commands);
+    report.coordination_status = CoordinationStatus::Blocked;
+    if report.recommended_action.is_empty() {
+        report.recommended_action = action.clone();
+        report.recommended_action_template = action_template(&action);
+    }
+    Ok(())
 }
 
 struct ShortPathInputs<'a> {
@@ -2481,7 +2536,6 @@ fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
         .with_verification(&input.trust),
     );
     let worktree_clean = input.changes.is_empty();
-    let context_counts = repository_context_counts(input.repo);
     let recommended_action =
         first_save_recommendation(input.repo, input.current_state, worktree_clean)
             .unwrap_or(recommended_action);
@@ -2569,9 +2623,6 @@ fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
         changes: input.changes,
         submodules: Vec::new(),
         materialized_threads: assess_materialized_threads(input.repo),
-        open_discussion_count: context_counts.0,
-        resolved_discussion_count: context_counts.1,
-        annotation_count: context_counts.2,
         profile: input.profile,
     }
 }
@@ -3139,50 +3190,6 @@ fn sley_error(err: sley::GitError) -> HeddleError {
     HeddleError::Config(err.to_string())
 }
 
-/// Count active annotations and open/resolved discussions for the status
-/// discovery surface. These reads are advisory: corruption or an unavailable
-/// sidecar must not turn `status` into a blocking operation.
-pub fn repository_context_counts(repo: &Repository) -> (usize, usize, usize) {
-    let mut open = 0usize;
-    let mut resolved = 0usize;
-    let mut annotations = 0usize;
-
-    if let Ok(store) = CollaborationStore::open(repo.heddle_dir())
-        && let Ok(collaboration) = store.materialize()
-    {
-        for discussion in collaboration.discussions.values() {
-            if discussion.resolution.is_some() {
-                resolved += 1;
-            } else {
-                open += 1;
-            }
-        }
-    }
-
-    if let Ok(Some(state)) = repo.current_state_for_worktree_status()
-        && let Ok(Some(attachment)) =
-            repo.latest_state_attachment(&state.state_id, StateAttachmentKind::Context)
-        && let StateAttachmentBody::Context(context_root) = attachment.body
-        && let Ok(entries) = repo.list_context_entries(&context_root, None)
-    {
-        annotations = entries
-            .iter()
-            .map(|entry| {
-                entry
-                    .blob
-                    .annotations
-                    .iter()
-                    .filter(|annotation| {
-                        annotation.status == objects::object::AnnotationStatus::Active
-                    })
-                    .count()
-            })
-            .sum();
-    }
-
-    (open, resolved, annotations)
-}
-
 pub fn assess_materialized_threads(repo: &Repository) -> Vec<MaterializedThreadInfo> {
     let summaries = match repo::thread_manifest::list_thread_manifests(repo.heddle_dir()) {
         Ok(s) => s,
@@ -3496,6 +3503,77 @@ mod tests {
                 .iter()
                 .any(|check| check.name == "Machine contract" && check.status == "not_checked")
         );
+    }
+
+    #[test]
+    fn status_interface_reports_durable_land_recovery_without_cli_augmentation() {
+        let temp = tempfile::tempdir().expect("temp repo");
+        repo::Repository::init_default(temp.path()).expect("init repo");
+        let repo = Repository::open(temp.path()).expect("open repo");
+        fs::write(
+            repo.heddle_dir().join(INCOMPLETE_LAND_MARKER),
+            serde_json::json!({
+                "thread_id": "agent/recovery",
+                "merge_state": null,
+                "collapse_state": null
+            })
+            .to_string(),
+        )
+        .expect("write incomplete-land marker");
+        let ctx = ExecutionContext::builder().repo(repo).build();
+
+        let report = status(
+            &ctx,
+            StatusOptions::new(
+                StatusDetail::DefaultText,
+                repo::WorktreeStatusOptions::default(),
+            ),
+        )
+        .expect("status report");
+
+        assert_eq!(report.coordination_status, CoordinationStatus::Blocked);
+        assert!(
+            report
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("agent/recovery"))
+        );
+        assert!(
+            report
+                .recovery_commands
+                .iter()
+                .any(|command| command == "heddle land --thread agent/recovery")
+        );
+        assert!(
+            report
+                .recovery_action_templates
+                .iter()
+                .any(|template| { template.action == "heddle land --thread agent/recovery" })
+        );
+    }
+
+    #[test]
+    fn status_interface_rejects_truncated_land_recovery_marker() {
+        let temp = tempfile::tempdir().expect("temp repo");
+        repo::Repository::init_default(temp.path()).expect("init repo");
+        let repo = Repository::open(temp.path()).expect("open repo");
+        fs::write(
+            repo.heddle_dir().join(INCOMPLETE_LAND_MARKER),
+            serde_json::json!({ "thread_id": "agent/recovery" }).to_string(),
+        )
+        .expect("write incomplete-land marker");
+        let ctx = ExecutionContext::builder().repo(repo).build();
+
+        let error = status(
+            &ctx,
+            StatusOptions::new(
+                StatusDetail::DefaultText,
+                repo::WorktreeStatusOptions::default(),
+            ),
+        )
+        .expect_err("truncated recovery marker must fail closed");
+
+        assert!(error.to_string().contains("failed to parse incomplete-land marker"));
     }
 
     #[test]

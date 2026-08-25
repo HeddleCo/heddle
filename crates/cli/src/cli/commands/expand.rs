@@ -34,15 +34,14 @@ struct CollapseRecord {
     thread: Option<String>,
 }
 
-pub fn cmd_expand(cli: &Cli, reference: String) -> Result<()> {
-    let repo = cli.open_repo()?;
-    let target = resolve_expand_target(&repo, &reference)?;
-    let collapse = find_collapse_for_result(&repo, &target)?
+pub fn cmd_expand(cli: &Cli, repo: &Repository, reference: String) -> Result<()> {
+    let target = resolve_expand_target(repo, &reference)?;
+    let collapse = find_collapse_for_result(repo, &target)?
         .ok_or_else(|| anyhow!(not_expandable_advice(&reference, &target)))?;
     let captures = collapse
         .sources
         .iter()
-        .map(|source| require_resolved_state(&repo, source).map(ExpandedCaptureOutput::from))
+        .map(|source| require_resolved_state(repo, source).map(ExpandedCaptureOutput::from))
         .collect::<Result<Vec<_>>>()?;
     let git_commit = repo
         .latest_git_checkpoint_for_state(&collapse.result)

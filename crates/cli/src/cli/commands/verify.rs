@@ -12,7 +12,7 @@ use verbs::{
 
 use super::{RecoveryAdvice, action_line::print_next, next_action::write_projected_command_json};
 use crate::{
-    cli::{Cli, should_output_json, style},
+    cli::{Cli, execution_context_from_cli_parts, should_output_json, style},
     config::UserConfig,
     perf::{ProfileField, ProfileMode, emit_profile, instrumentation_enabled, profile_mode},
 };
@@ -94,29 +94,6 @@ struct VerifyExecutionPrep {
 
 fn verify_execution_context_from_cli(cli: &Cli, start: &Path) -> Result<VerifyExecutionPrep> {
     let config = UserConfig::load_default()?;
-    let verbosity = if cli.quiet {
-        verbs::Verbosity::Quiet
-    } else if cli.verbose > 0 {
-        verbs::Verbosity::Verbose
-    } else {
-        verbs::Verbosity::Normal
-    };
-    let mut builder = verbs::ExecutionContext::builder()
-        .start_path(start.to_path_buf())
-        .principal_fallback(
-            config
-                .principal_pair()
-                .map(|(name, email)| (name.to_string(), email.to_string())),
-        )
-        .fsmonitor_mode(config.worktree_status_options(None).fsmonitor.mode)
-        .verbosity(verbosity)
-        .progress(std::sync::Arc::new(verbs::NoopProgress))
-        .warnings(std::sync::Arc::new(verbs::NoopWarnings));
-
-    if let Some(op_id) = crate::operation_id::resolve_operation_id(cli)? {
-        builder = builder.op_id(op_id.to_string());
-    }
-
     // Open once when a Heddle sidecar is already present so core reuses the
     // handle and JSON mode can read config without a second open.
     //
@@ -124,7 +101,7 @@ fn verify_execution_context_from_cli(cli: &Cli, start: &Path) -> Result<VerifyEx
     // sidecar for mutators, which would make verify mutate and skip the
     // plain-Git observe probe (observe-only contract).
     let open_start = Instant::now();
-    let (builder, repo_config, repo_open_ms) = if heddle_sidecar_present(start) {
+    let (repo, repo_config, repo_open_ms) = if heddle_sidecar_present(start) {
         match Repository::open(start) {
             Ok(repo) => {
                 let repo_open_ms = open_start.elapsed().as_millis();
@@ -134,17 +111,17 @@ fn verify_execution_context_from_cli(cli: &Cli, start: &Path) -> Result<VerifyEx
                     .mode;
                 let repo = repo.with_fsmonitor_mode(mode);
                 let repo_config = repo.config().clone();
-                let builder = builder.fsmonitor_mode(mode).repo(repo);
-                (builder, Some(repo_config), repo_open_ms)
+                (Some(repo), Some(repo_config), repo_open_ms)
             }
-            Err(_) => (builder, None, 0),
+            Err(_) => (None, None, 0),
         }
     } else {
-        (builder, None, 0)
+        (None, None, 0)
     };
+    let ctx = execution_context_from_cli_parts(cli, start, repo, &config)?;
 
     Ok(VerifyExecutionPrep {
-        ctx: builder.build(),
+        ctx,
         repo_config,
         repo_open_ms,
     })

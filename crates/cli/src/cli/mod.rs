@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Command-line interface for Heddle.
 
-use std::io::IsTerminal;
+use std::{io::IsTerminal, path::Path};
 
 pub mod commands;
 
@@ -9,7 +9,7 @@ pub use heddle_cli_args as cli_args;
 pub use heddle_cli_args::*;
 pub use heddle_cli_contract::cli::help;
 pub use heddle_cli_render::cli::{progress_render, render, style, tips};
-use repo::Config;
+use repo::{Config, Repository};
 
 use crate::config::UserConfig;
 
@@ -31,6 +31,21 @@ pub fn execution_context_from_cli(cli: &Cli) -> anyhow::Result<verbs::ExecutionC
     let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();
     let repo = cli.open_repo()?;
     let config = UserConfig::load_default()?;
+    execution_context_from_cli_parts(cli, &start, Some(repo), &config)
+}
+
+/// Canonical CLI adapter for the embeddable execution context.
+///
+/// Callers may choose how repository discovery happens (notably observe-only
+/// `verify`, which must not create a Heddle sidecar), but every CLI path maps
+/// verbosity, principal fallback, fsmonitor policy, sinks, and operation id in
+/// this one place.
+pub(crate) fn execution_context_from_cli_parts(
+    cli: &Cli,
+    start: &Path,
+    repo: Option<Repository>,
+    config: &UserConfig,
+) -> anyhow::Result<verbs::ExecutionContext> {
     let verbosity = if cli.quiet {
         verbs::Verbosity::Quiet
     } else if cli.verbose > 0 {
@@ -39,12 +54,11 @@ pub fn execution_context_from_cli(cli: &Cli) -> anyhow::Result<verbs::ExecutionC
         verbs::Verbosity::Normal
     };
     let fsmonitor_mode = config
-        .worktree_status_options(Some(repo.config()))
+        .worktree_status_options(repo.as_ref().map(Repository::config))
         .fsmonitor
         .mode;
     let mut builder = verbs::ExecutionContext::builder()
-        .repo(repo)
-        .start_path(start)
+        .start_path(start.to_path_buf())
         .principal_fallback(
             config
                 .principal_pair()
@@ -54,6 +68,10 @@ pub fn execution_context_from_cli(cli: &Cli) -> anyhow::Result<verbs::ExecutionC
         .verbosity(verbosity)
         .progress(std::sync::Arc::new(verbs::NoopProgress))
         .warnings(std::sync::Arc::new(verbs::NoopWarnings));
+
+    if let Some(repo) = repo {
+        builder = builder.repo(repo);
+    }
 
     if let Some(op_id) = crate::operation_id::resolve_operation_id(cli)? {
         builder = builder.op_id(op_id.to_string());
@@ -162,6 +180,32 @@ mod tests {
         assert_eq!(
             json_output_mode_for_kind(&text, None, "jsonl"),
             JsonOutputMode::Text
+        );
+    }
+
+    #[test]
+    fn canonical_context_adapter_maps_cli_state_for_an_injected_repository() {
+        let temp = tempfile::tempdir().expect("temp repository");
+        Repository::init_default(temp.path()).expect("init repository");
+        let repo = Repository::open(temp.path()).expect("open repository");
+        let path = temp.path().to_string_lossy().into_owned();
+        let cli = Cli::try_parse_from(["heddle", "-v", "-C", &path, "status"])
+            .expect("status should parse");
+        let config = UserConfig::default();
+
+        let ctx = execution_context_from_cli_parts(&cli, temp.path(), Some(repo), &config)
+            .expect("build execution context");
+
+        assert_eq!(ctx.start_path(), Some(temp.path()));
+        assert_eq!(ctx.require_repo().expect("repo").root(), temp.path());
+        assert_eq!(ctx.verbosity(), verbs::Verbosity::Verbose);
+        assert!(ctx.op_id().is_none());
+        assert_eq!(
+            ctx.fsmonitor_mode(),
+            config
+                .worktree_status_options(Some(ctx.require_repo().expect("repo").config()))
+                .fsmonitor
+                .mode
         );
     }
 }

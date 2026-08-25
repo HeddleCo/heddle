@@ -2015,14 +2015,14 @@ fn capture_auto_detects_codex_model_without_fabricating_plain_shell_agent() {
     assert_eq!(latest_agent(), Value::Null);
 
     std::fs::write(temp.path().join("claude.txt"), "claude work\n").unwrap();
-    // Ambient CLAUDE_MODEL is deliberately not inherited
-    // (`inherited_harness_hint` excludes ambient model identity), so a bare
-    // CLAUDECODE marker must not fabricate a model.
+    // CLAUDE_MODEL is inert in an ordinary shell, but CLAUDECODE is the
+    // independent process marker that proves this is a real Claude Code
+    // session and makes the model safe to retain.
     capture(
         "claude save",
         &[("CLAUDECODE", "1"), ("CLAUDE_MODEL", "claude-fable-5")],
     );
-    assert_eq!(latest_agent(), Value::Null);
+    assert_eq!(latest_agent(), "anthropic/claude-fable-5");
 
     std::fs::write(temp.path().join("claude-hinted.txt"), "claude work\n").unwrap();
     capture(
@@ -2425,6 +2425,23 @@ fn review_next_envelope_top_level_keys_match_registered_schema() {
         "review next must always emit a `next` field (object or null): {value}"
     );
     assert_schema_declares_runtime_top_level(&["review", "next"], &value);
+
+    let schema = heddle_schema("review next");
+    let required = schema["required"]
+        .as_array()
+        .unwrap_or_else(|| panic!("review next schema should declare required fields: {schema}"));
+    let required = required
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(required.contains(&"output_kind"), "{schema}");
+    assert!(required.contains(&"next"), "{schema}");
+    for optional in ["state_id", "headline", "existing_signatures"] {
+        assert!(
+            !required.contains(&optional),
+            "review next schema must permit omitting `{optional}` when no review is pending: {schema}"
+        );
+    }
 }
 
 #[test]
@@ -10514,59 +10531,6 @@ fn exit_codes_surface_in_json_catalog() {
     assert!(
         bridge_import.exit_codes.iter().any(|c| c.code == 65),
         "bridge git import must surface DataErr (65) for malformed repos"
-    );
-}
-
-/// `docs/exit-codes.md` § Coverage must name exactly the commands whose
-/// `CommandContract.exit_codes` is non-empty (heddle#1392). Keeps the
-/// hand-written coverage list from drifting from the catalog again.
-#[test]
-fn exit_codes_coverage_doc_lists_catalogued_commands() {
-    let doc = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/exit-codes.md"
-    ))
-    .expect("docs/exit-codes.md should exist");
-
-    let catalog = cli::cli::commands::build_command_catalog();
-    let mut swept: Vec<&str> = catalog
-        .commands
-        .iter()
-        .filter(|c| !c.exit_codes.is_empty())
-        .map(|c| c.display.as_str())
-        .collect();
-    swept.sort();
-
-    // Extract the bullet list under the `## Coverage` heading; a single
-    // bullet may name several commands (`a`, `b`).
-    let coverage = doc
-        .split("## Coverage")
-        .nth(1)
-        .expect("Coverage section exists");
-    let listed: Vec<String> = coverage
-        .lines()
-        .skip_while(|line| !line.starts_with("- `"))
-        .take_while(|line| line.starts_with("- `"))
-        .flat_map(|line| {
-            line.split("`, `")
-                .map(|part| {
-                    part.trim()
-                        .trim_start_matches("- `")
-                        .trim_matches('`')
-                        .to_string()
-                })
-                .collect::<Vec<_>>()
-        })
-        .filter(|part| !part.is_empty())
-        .collect();
-
-    let mut listed_sorted = listed.clone();
-    listed_sorted.sort();
-
-    assert_eq!(
-        listed_sorted, swept,
-        "docs/exit-codes.md § Coverage drifts from CommandContract.exit_codes; \
-         update the list to match `heddle help --output json`"
     );
 }
 

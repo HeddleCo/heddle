@@ -326,7 +326,7 @@ export class Heddle {
     return this.run("log --timeline", argv, options);
   }
 
-  /** `heddle timeline fork` — fork a timeline branch from a typed target. */
+  /** `heddle agent timeline fork` — fork a timeline branch from a typed target. */
   timelineFork(
     target: TimelineTarget,
     args: TimelineForkOptions = {},
@@ -335,10 +335,10 @@ export class Heddle {
     const argv = timelineTargetArgs(target);
     if (args.branch !== undefined) argv.push("--branch", args.branch);
     if (args.reason !== undefined) argv.push("--reason", args.reason);
-    return this.run("timeline fork", argv, options);
+    return this.run("agent timeline fork", argv, options);
   }
 
-  /** `heddle timeline reset` — move the logical cursor, optionally materializing checkout files. */
+  /** `heddle agent timeline reset` — move the logical cursor, optionally materializing checkout files. */
   timelineReset(
     target: TimelineTarget,
     args: TimelineResetOptions = {},
@@ -347,14 +347,14 @@ export class Heddle {
     const argv = timelineTargetArgs(target);
     if (args.materialize === true) argv.push("--materialize");
     if (args.mode !== undefined) argv.push("--mode", args.mode);
-    return this.run("timeline reset", argv, options);
+    return this.run("agent timeline reset", argv, options);
   }
 
-  /** `heddle timeline recover` — finish or inspect pending timeline materialization recovery. */
+  /** `heddle agent timeline recover` — finish or inspect pending timeline materialization recovery. */
   timelineRecover(args: TimelineRecoverOptions = {}, options: RunOptions = {}) {
     const argv: string[] = [];
     if (args.thread !== undefined) argv.push("--thread", args.thread);
-    return this.run("timeline recover", argv, options);
+    return this.run("agent timeline recover", argv, options);
   }
 
   /** `heddle diff` — working/range diff. Read-only. */

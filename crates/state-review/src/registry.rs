@@ -9,7 +9,7 @@ use std::{
 use objects::object::{RiskSignal, State};
 use semantic::parser::FunctionDef;
 
-use crate::{config::ReviewSignalsConfig, modules::invariant_adjacency::InvariantAnnotation};
+use crate::config::ReviewSignalsConfig;
 
 /// Bundle of pre-extracted function lists per file, keyed by repo-relative
 /// path. The caller parses + extracts once per review pass and shares this
@@ -39,12 +39,6 @@ pub struct SemanticContext {
     /// stay quiet when this is false rather than scoring a partial repo.
     /// `Default` is `true` so hand-built unit-test contexts keep firing.
     pub corpus_complete: bool,
-    /// Invariant-kind annotations from the new state's attached context.
-    /// Populated by the capture path from the context tree; the
-    /// `invariant_adjacency` module reads this field instead of doing
-    /// its own I/O. Empty on the first capture (no prior context) or
-    /// when context loading is unavailable — the module stays quiet.
-    pub invariant_annotations: Vec<InvariantAnnotation>,
 }
 
 impl Default for SemanticContext {
@@ -55,7 +49,6 @@ impl Default for SemanticContext {
             changed_paths: BTreeSet::new(),
             changed_symbols: BTreeSet::new(),
             corpus_complete: true,
-            invariant_annotations: Vec::new(),
         }
     }
 }

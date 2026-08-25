@@ -49,7 +49,7 @@ impl Repository {
             );
         }
         let signed = decode_canonical_genesis(&pin.signed_genesis)?;
-        let verified = verify_spool_owner_genesis(&to_verifier_wire(&signed)?)
+        let verified = verify_spool_owner_genesis(&signed)
             .context("verify persisted self-signed owner genesis")?;
         if verified.spool_uuid() != pin.spool_uuid
             || verified.owner_public_key().public_key != pin.owner_public_key
@@ -73,7 +73,7 @@ impl Repository {
         let signed = signed.ok_or_else(|| {
             HeddleError::InvalidObject("PullReady owner genesis is absent".to_owned())
         })?;
-        let verified = verify_spool_owner_genesis(&to_verifier_wire(signed)?)
+        let verified = verify_spool_owner_genesis(signed)
             .context("verify PullReady self-signed owner genesis")?;
         let candidate = PinnedOwnerGenesis {
             protocol_version,
@@ -121,9 +121,8 @@ impl Repository {
         let bundle = authorization.capability.as_ref().ok_or_else(|| {
             HeddleError::InvalidObject("owner purge capability is absent".to_owned())
         })?;
-        let verified_bundle =
-            verify_authorization_bundle(&to_verifier_wire(bundle)?, now_unix_seconds, limits)
-                .context("verify owner purge transition and capability chain")?;
+        let verified_bundle = verify_authorization_bundle(bundle, now_unix_seconds, limits)
+            .context("verify owner purge transition and capability chain")?;
         let leaf_capability_id = verified_bundle
             .capability()
             .capability()
@@ -140,11 +139,11 @@ impl Repository {
             leaf_capability_id,
         };
         let decision = verify_purge_authorization(
-            &to_verifier_wire(authorization)?,
-            &to_verifier_wire(&body)?,
+            authorization,
+            &body,
             raw_payload,
             &PurgeContext {
-                owner_genesis: &to_verifier_wire(&signed_genesis)?,
+                owner_genesis: &signed_genesis,
                 current_owner_state_hash: &current_owner_state_hash,
                 spool_uuid: &pin.spool_uuid,
                 spool_path_segments: &pin.canonical_spool_path_segments,
@@ -169,16 +168,6 @@ fn decode_canonical_genesis(bytes: &[u8]) -> Result<SignedSpoolOwnerGenesis> {
         anyhow::bail!("owner genesis protobuf is not canonical");
     }
     Ok(signed)
-}
-
-/// The capability verifier pins its own heddle-api release line, so messages
-/// cross that seam by protobuf round-trip rather than by shared types.
-fn to_verifier_wire<T>(message: &impl prost::Message) -> Result<T>
-where
-    T: prost::Message + Default,
-{
-    T::decode(message.encode_to_vec().as_slice())
-        .context("transfer owner authorization message across verifier boundary")
 }
 
 fn verifier_limits() -> Result<VerificationLimits> {

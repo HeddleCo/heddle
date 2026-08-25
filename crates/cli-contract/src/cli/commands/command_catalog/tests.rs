@@ -693,6 +693,32 @@ fn recommended_action_templates_describe_display_only_placeholders() {
 }
 
 #[test]
+fn presence_recommended_action_templates_generate_parseable_nested_commands() {
+    for action in [
+        "heddle agent presence show <session>",
+        "heddle agent presence complete --session <session>",
+        "heddle agent presence explain <session>",
+    ] {
+        let template = recommended_action_template(action)
+            .unwrap_or_else(|| panic!("presence action `{action}` should have a template"));
+        let argv = template
+            .argv_template
+            .iter()
+            .map(|arg| {
+                if arg == "<session>" {
+                    "session-1".to_string()
+                } else {
+                    arg.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        Cli::try_parse_from(&argv).unwrap_or_else(|error| {
+            panic!("generated presence argv {argv:?} should parse: {error}")
+        });
+    }
+}
+
+#[test]
 fn action_fields_template_dirty_worktree_message_placeholders() {
     let action = "heddle capture -m \"...\"";
     let fields = ActionFields::from_action(action);

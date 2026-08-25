@@ -279,6 +279,13 @@ fn put_blobs_packed_writes_a_single_packfile_no_loose_blobs() {
             "blob {hash:?} not visible after put_blobs_packed",
         );
     }
+
+    // The locally-built pack returns ownership of its input buffers so the
+    // post-install cache remains warm without payload-sized clones.
+    let cache = store.recent_blobs.read().unwrap();
+    for (hash, expected) in &blobs {
+        assert_eq!(cache.get(hash).unwrap().content(), expected);
+    }
 }
 
 #[test]

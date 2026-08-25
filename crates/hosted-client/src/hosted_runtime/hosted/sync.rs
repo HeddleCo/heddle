@@ -29,7 +29,7 @@ use objects::{
         AnnotationStatus, ContentHash, ContextBlob, ContextTarget, Discussion, DiscussionsBlob,
         MarkerName, StateAttachmentBody, StateAttachmentKind, StateId, ThreadName, TreeEntryTarget,
     },
-    store::{AnyStore, ObjectStore, PackObjectId, SnapshotCommitDescriptor},
+    store::{FsStore, ObjectStore, PackObjectId, SnapshotCommitDescriptor},
 };
 use repo::{
     GitRefKind as ClassifiedGitRefKind, GitRefName, Repository, RepositoryCapability,
@@ -5588,7 +5588,7 @@ async fn send_native_pack_streaming_messages(
 }
 
 fn load_native_pack_objects_parallel(
-    store: AnyStore,
+    store: FsStore,
     objects: Vec<ObjectInfo>,
     tx: mpsc::Sender<(usize, Result<wire::ObjectData, ProtocolError>)>,
 ) {

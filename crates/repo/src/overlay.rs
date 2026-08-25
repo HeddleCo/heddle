@@ -771,25 +771,28 @@ impl Repository {
 
         // The mapping file only changes when a Git Projection import or
         // bridge lands; status paths re-read it many times per process.
-        // Cache the parsed map keyed by (path, mtime).
-        type MappingCache = Mutex<Option<(PathBuf, std::time::SystemTime, HashMap<String, String>)>>;
+        // Include file identity in the cache key: projection writers replace
+        // this file atomically, and equal-size replacements can share an mtime
+        // tick on coarse filesystems.
+        type MappingIdentity = (u64, u64, i64, i64, u32);
+        type MappingCache = Mutex<Option<(PathBuf, MappingIdentity, HashMap<String, String>)>>;
         static CACHE: OnceLock<MappingCache> = OnceLock::new();
 
         let path = self
             .heddle_dir
             .join("git-projection")
             .join("git-projection-mapping.json");
-        let modified = match fs::metadata(&path).and_then(|meta| meta.modified()) {
-            Ok(modified) => modified,
+        let identity = match fs::metadata(&path) {
+            Ok(metadata) => crate::stat_signature::stat_signature(&path, &metadata),
             Err(_) => return Ok(HashMap::new()),
         };
 
         let cache = CACHE.get_or_init(|| Mutex::new(None));
         {
             let cached = cache.lock_or_poisoned();
-            if let Some((cached_path, cached_mtime, mapping)) = cached.as_ref()
+            if let Some((cached_path, cached_identity, mapping)) = cached.as_ref()
                 && *cached_path == path
-                && *cached_mtime == modified
+                && *cached_identity == identity
             {
                 return Ok(mapping.clone());
             }
@@ -805,7 +808,7 @@ impl Repository {
             .into_iter()
             .map(|entry| (entry.git_oid, entry.state_id))
             .collect();
-        *cache.lock_or_poisoned() = Some((path, modified, mapping.clone()));
+        *cache.lock_or_poisoned() = Some((path, identity, mapping.clone()));
         Ok(mapping)
     }
 
@@ -1531,10 +1534,10 @@ mod tests {
 
     use super::*;
 
-    /// The mtime-keyed projection-mapping cache must serve fresh parses
-    /// when the mapping file changes under the same path.
+    /// The projection-mapping cache must serve fresh parses when an atomic
+    /// replacement preserves both the path and mtime.
     #[test]
-    fn git_projection_mapping_picks_up_changed_mapping_file() {
+    fn git_projection_mapping_picks_up_same_mtime_replacement() {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
 
@@ -1542,24 +1545,34 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("git-projection-mapping.json");
 
-        let write_mapping = |state_suffix: &str| {
-            let contents = format!(
+        let mapping = |state_suffix: &str| {
+            format!(
                 r#"{{"entries":[{{"git_oid":"abc123","state_id":"{}{state_suffix}"}}]}}"#,
                 "0".repeat(64 - state_suffix.len()),
-            );
-            fs::write(&path, contents).unwrap();
-            // Ensure the filesystem reports a distinct mtime.
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            )
         };
 
-        write_mapping("a");
+        fs::write(&path, mapping("a")).unwrap();
+        let original_mtime = fs::metadata(&path).unwrap().modified().unwrap();
         let first = repo.git_projection_mapping().unwrap();
         assert_eq!(
             first.get("abc123").unwrap(),
             &format!("{}a", "0".repeat(63))
         );
 
-        write_mapping("b");
+        write_file_atomic(&path, mapping("b").as_bytes()).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+            .unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().modified().unwrap(),
+            original_mtime,
+            "test requires the replacement to preserve mtime"
+        );
+
         let second = repo.git_projection_mapping().unwrap();
         assert_eq!(
             second.get("abc123").unwrap(),

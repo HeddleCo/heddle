@@ -22,7 +22,7 @@ use api::{
 };
 use bytes::Bytes;
 use futures::{StreamExt as _, stream::FuturesUnordered};
-use objects::store::{AnyStore, PackObjectId};
+use objects::store::{FsStore, PackObjectId};
 use prost::Message;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use wire::{
@@ -289,7 +289,7 @@ impl HostedClient {
         challenge: &ProviderPlanChallenge,
         manifest: &ApiProviderPullManifest,
         spool_root: &Path,
-        store: AnyStore,
+        store: FsStore,
     ) -> Result<CompletedProviderPull, ProviderPullFailure> {
         let evidence = ProviderPullEvidence::from_manifest(manifest);
         let signed_expiry = minimum_signed_expiry(challenge, manifest).map_err(|error| {
@@ -877,7 +877,7 @@ async fn download_provider_plan_with_evidence<B: ProviderBackend>(
 
 async fn finish_and_install_provider_pack(
     download: ProviderPlanDownload,
-    store: AnyStore,
+    store: FsStore,
     evidence: Arc<ProviderPullEvidence>,
 ) -> Result<InstalledProviderPlan, ProviderPullFailure> {
     let peak_inflight_bytes = download.peak_inflight_bytes;
@@ -2102,7 +2102,7 @@ mod tests {
         let store_root = tempfile::tempdir().unwrap();
         let result = finish_and_install_provider_pack(
             download,
-            AnyStore::Fs(FsStore::new(store_root.path().join(".heddle"))),
+            FsStore::new(store_root.path().join(".heddle")),
             evidence,
         )
         .await;
