@@ -19,6 +19,7 @@
 use std::{
     collections::HashMap,
     fs::File,
+    io,
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock},
     thread::{self, ThreadId},
@@ -89,6 +90,32 @@ impl Drop for ReadLockGuard {
 
 pub struct WriteLockGuard {
     entry: Arc<Entry>,
+}
+
+impl WriteLockGuard {
+    /// Transfer this guard's reentrant ownership to the calling thread.
+    ///
+    /// A guard moved to a worker must update the process-local owner before
+    /// the original thread can continue. Otherwise the original thread can
+    /// re-acquire the same lock as a false "same-thread" reentrant hold while
+    /// the worker still owns the cross-process flock. Handoff is valid only
+    /// for an outermost guard: transferring one level of a nested hold would
+    /// strand the remaining guards on the previous owner.
+    #[doc(hidden)]
+    pub fn handoff_to_current_thread(&mut self) -> Result<()> {
+        let mut state = lock_gate(&self.entry);
+        let current = thread::current().id();
+        if state.owner == Some(current) {
+            return Ok(());
+        }
+        if state.owner.is_none() || state.depth != 1 || state.flock.is_none() {
+            return Err(LockError::Acquire(io::Error::other(
+                "write-lock handoff requires one outermost held guard",
+            )));
+        }
+        state.owner = Some(current);
+        Ok(())
+    }
 }
 
 impl Drop for WriteLockGuard {
@@ -412,6 +439,37 @@ mod tests {
             .join()
             .unwrap();
         assert!(now_available, "available after the outermost guard drops");
+    }
+
+    #[test]
+    fn moved_guard_handoff_changes_the_reentrant_owner() {
+        let temp = TempDir::new().unwrap();
+        let lock = RepoLock::new(temp.path());
+        let guard = lock.write().unwrap();
+        let original_owner = thread::current().id();
+        let entry = entry_for(lock.registry_key());
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let worker = thread::spawn(move || {
+            let mut guard = guard;
+            guard.handoff_to_current_thread().unwrap();
+            ready_tx.send(thread::current().id()).unwrap();
+            release_rx.recv().unwrap();
+            drop(guard);
+        });
+
+        let worker_owner = ready_rx.recv().unwrap();
+        assert_ne!(worker_owner, original_owner);
+        assert_eq!(lock_gate(&entry).owner, Some(worker_owner));
+        assert!(
+            lock.try_write().unwrap().is_none(),
+            "the original thread must not re-enter a guard owned by the worker"
+        );
+
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(lock.try_write().unwrap().is_some());
     }
 
     /// `try_write` is intentionally NON-reentrant: even the thread that already
