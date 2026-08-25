@@ -496,7 +496,9 @@ impl Tree {
     /// eager and streaming paths reject the same out-of-order or duplicate
     /// encodings instead of silently canonicalizing them.
     pub fn try_from_decoded_entries(entries: Vec<TreeEntry>) -> Result<Self, TreeError> {
-        let tree = Self { entries };
+        let tree = Self {
+            entries: Arc::new(entries),
+        };
         tree.validate()?;
         Ok(tree)
     }
