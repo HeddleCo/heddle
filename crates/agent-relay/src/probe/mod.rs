@@ -329,7 +329,10 @@ mod tests {
 
         assert_eq!(result.harness.as_deref(), Some("claude-code"));
         assert_eq!(result.provider.as_deref(), Some("anthropic"));
-        assert_eq!(result.model.as_deref(), Some("claude-fable-5"));
+        assert!(
+            result.model.is_none(),
+            "ambient CLAUDE_MODEL is not session evidence"
+        );
     }
 
     #[test]
@@ -347,7 +350,10 @@ mod tests {
 
         assert_eq!(result.harness.as_deref(), Some("codex"));
         assert_eq!(result.provider.as_deref(), Some("openai"));
-        assert_eq!(result.model.as_deref(), Some("gpt-5.3-codex"));
+        assert!(
+            result.model.is_none(),
+            "ambient CODEX_MODEL is not durable rollout evidence"
+        );
     }
 
     #[test]

@@ -3521,10 +3521,15 @@ mod tests {
 
         let opened = runtime
             .open_session(OpenSessionParams {
-                harness: Some("aider".to_string()),
+                // Use a root-actor probe with no default provider/model. Aider
+                // goes through the generic subagent path, whose default child
+                // worktree creation is unrelated to this segment test.
+                harness: Some("opencode".to_string()),
                 ..OpenSessionParams::default()
             })
             .unwrap();
+        assert!(opened.provider.is_none());
+        assert!(opened.model.is_none());
         let first_segment = opened.heddle_segment_id.clone();
         runtime
             .update_progress(UpdateProgressParams {
