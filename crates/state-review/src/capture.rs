@@ -129,12 +129,14 @@ fn semantic_context_from_capture(ctx: &CaptureSemanticContext) -> SemanticContex
         invariant_annotations: ctx
             .invariant_annotations
             .iter()
-            .map(|annotation| crate::modules::invariant_adjacency::InvariantAnnotation {
-                anchor: annotation.anchor.clone(),
-                kind: annotation.kind,
-                content: annotation.content.clone(),
-                tags: annotation.tags.clone(),
-            })
+            .map(
+                |annotation| crate::modules::invariant_adjacency::InvariantAnnotation {
+                    anchor: annotation.anchor.clone(),
+                    kind: annotation.kind,
+                    content: annotation.content.clone(),
+                    tags: annotation.tags.clone(),
+                },
+            )
             .collect(),
     }
 }
@@ -806,7 +808,6 @@ mod tests {
     /// regress to the historical hard-wired empty annotation set.
     #[test]
     fn snapshot_with_invariant_annotation_persists_invariant_adjacency_signal() {
-        use chrono::Utc;
         use objects::object::{
             Annotation, AnnotationKind, AnnotationScope, ContextBlob, ContextTarget,
             StateAttachment, StateAttachmentBody,
@@ -841,7 +842,7 @@ mod tests {
             state_id: seed.id(),
             body: StateAttachmentBody::Context(context_root),
             attribution: attribution.clone(),
-            created_at: Utc::now(),
+            created_at: seed.created_at,
             supersedes: None,
         })
         .unwrap();

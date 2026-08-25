@@ -3189,7 +3189,7 @@ as one; no `help advanced`).
       "visibility set",
       "visibility promote"
     ],
-    "accepted_opaque_schema_verbs_total": 38,
+    "accepted_opaque_schema_verbs_total": 37,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
@@ -3202,14 +3202,14 @@ as one; no `help advanced`).
       "visibility promote"
     ],
     "advanced_scope_json_commands_total": 99,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 38,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 37,
     "advanced_scope_mutating_commands_total": 56,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 20,
     "catalog_commands_total": 186,
     "catalog_mutating_commands_total": 90,
     "json_commands_total": 147,
-    "json_commands_with_accepted_opaque_schema": 38,
-    "json_commands_with_schema": 109,
+    "json_commands_with_accepted_opaque_schema": 37,
+    "json_commands_with_schema": 110,
     "json_commands_without_schema": 0,
     "json_mutating_commands_total": 86,
     "missing_mutating_schema_examples": [],
@@ -3218,9 +3218,9 @@ as one; no `help advanced`).
     "mutating_commands_with_accepted_opaque_schema": 20,
     "mutating_commands_with_schema": 66,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 38,
+    "opaque_schema_verbs_total": 37,
     "status": "available",
-    "summary": "188 command(s), 147 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
+    "summary": "188 command(s), 147 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 37 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3258,7 +3258,7 @@ as one; no `help advanced`).
     "try"
   ],
   "status": "available",
-  "summary": "188 command(s), 147 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 38 accepted opaque schema(s) outside clean verification",
+  "summary": "188 command(s), 147 JSON command(s), 90 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 37 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true

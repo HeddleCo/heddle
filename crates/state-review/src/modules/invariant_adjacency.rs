@@ -73,9 +73,8 @@ use crate::truncate_reason;
 mod tests {
     use objects::object::{Attribution, ContentHash, Principal};
 
-    use crate::{registry::SemanticContext, ReviewSignalsConfig};
-
     use super::*;
+    use crate::{ReviewSignalsConfig, registry::SemanticContext};
 
     fn empty_state() -> State {
         State::new_snapshot(

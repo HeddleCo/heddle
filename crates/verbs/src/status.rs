@@ -23,8 +23,8 @@ use repo::{
     ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, CollaborationStore,
     CommitGraphIndex, GitImportGuidance, GitOverlayBranchTip, GitOverlayOutOfBandCommits,
     GitRemoteTrackingStatus, RepoConfig, Repository, RepositoryCapability,
-    RepositoryOperationStatus, StateAttachmentKind, Thread, ThreadFreshness,
-    ThreadImpactCategory, ThreadManager, ThreadMode, ThreadState, WorktreeCompareProfile,
+    RepositoryOperationStatus, StateAttachmentKind, Thread, ThreadFreshness, ThreadImpactCategory,
+    ThreadManager, ThreadMode, ThreadState, WorktreeCompareProfile,
     describe_thread_advice_with_initial, discover_heddle_root, is_synthetic_root,
     refresh_thread_freshness,
 };

@@ -13,18 +13,18 @@ categories.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 chrono.workspace = true
-config = { path = "../config", package = "heddle-config", version = "0.14" }
-heddle-cli-render = { path = "../cli-render", version = "0.14", default-features = false }
-hosted-client = { path = "../hosted-client", package = "heddle-hosted-client", version = "0.14", default-features = false }
-ingest = { path = "../ingest", package = "heddle-ingest", version = "0.14", default-features = false }
-objects = { path = "../objects", package = "heddle-objects", version = "0.14" }
-refs = { path = "../refs", package = "heddle-refs", version = "0.14" }
-repo = { path = "../repo", package = "heddle-repo", version = "0.14", default-features = false }
+config = { path = "../config", package = "heddle-config", version = "0.15.0" }
+heddle-cli-render = { path = "../cli-render", version = "0.15.0", default-features = false }
+hosted-client = { path = "../hosted-client", package = "heddle-hosted-client", version = "0.15.0", default-features = false }
+ingest = { path = "../ingest", package = "heddle-ingest", version = "0.15.0", default-features = false }
+objects = { path = "../objects", package = "heddle-objects", version = "0.15.0" }
+refs = { path = "../refs", package = "heddle-refs", version = "0.15.0" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.15.0", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-verbs = { path = "../verbs", package = "heddle-verbs", version = "0.14", default-features = false }
-wire = { path = "../wire", package = "heddle-wire", version = "0.14", default-features = false }
+verbs = { path = "../verbs", package = "heddle-verbs", version = "0.15.0", default-features = false }
+wire = { path = "../wire", package = "heddle-wire", version = "0.15.0", default-features = false }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -12,6 +12,10 @@ use config::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
 use heddle_cli_args::CliContext;
 use heddle_cli_contract::cli::commands::RecoveryAdvice;
+pub(crate) use heddle_cli_contract::cli::commands::wire::auth::{
+    AuthDeriveAgentOutput, AuthLoginOutput, AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput,
+    ServiceTokenOutput,
+};
 use objects::{HeddleError, RecoveryDetails};
 use sha2::{Digest, Sha256};
 
@@ -26,11 +30,6 @@ use super::{
         HostedAuthMode, HostedClient, HostedError, HostedSession, ResolvedHostedCredential,
         operation_id::ClientOperationId, resolve_hosted_credential,
     },
-};
-
-pub(crate) use heddle_cli_contract::cli::commands::wire::auth::{
-    AuthDeriveAgentOutput, AuthLoginOutput, AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput,
-    ServiceTokenOutput,
 };
 
 const DERIVED_TOKEN_SECURITY_NOTE: &str = "Derived credential has its own proof key and is operation/TTL/resource-scope-limited and enforced server-side. The token and proof key travel together inside the .hcred file; the parent device key is not exported.";
