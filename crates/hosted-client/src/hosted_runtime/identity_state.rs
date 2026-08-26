@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use objects::{
     fs_atomic::write_file_atomic_secret,
     lock::{RepoLock, WriteLockGuard},
@@ -21,6 +22,22 @@ enum ClaimStatus {
     Active,
     Prepared,
     Claimed,
+}
+
+pub(crate) struct ClaimSecret(String);
+
+impl ClaimSecret {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClaimIssuanceStatus {
+    Active,
+    Claimed,
+    Expired,
+    Replaced,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,16 +82,38 @@ impl ClaimState {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn reissue(&mut self, secret: &[u8], expires_at_millis: i64) -> bool {
+    /// Mint and activate a fresh one-time claim capability.
+    ///
+    /// Only the SHA-256 digest is retained by the state. The returned secret
+    /// exists solely long enough for the caller to render the claim link.
+    pub(crate) fn activate(&mut self, expires_at_millis: i64) -> Result<Option<ClaimSecret>> {
         if matches!(self.status, ClaimStatus::Claimed) {
-            return false;
+            return Ok(None);
         }
+        if expires_at_millis <= chrono::Utc::now().timestamp_millis() {
+            bail!("claim expiry must be in the future");
+        }
+        let mut random = [0u8; 32];
+        getrandom::fill(&mut random).context("minting claim secret")?;
+        let secret = ClaimSecret(URL_SAFE_NO_PAD.encode(random));
+        self.activate_with_secret(secret.as_str().as_bytes(), expires_at_millis);
+        Ok(Some(secret))
+    }
+
+    fn activate_with_secret(&mut self, secret: &[u8], expires_at_millis: i64) {
         self.secret_hash = hex::encode(Sha256::digest(secret));
         self.expires_at_millis = expires_at_millis;
         self.status = ClaimStatus::Active;
         self.prepared_handle = None;
         self.prepared_nonce_hash = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reissue(&mut self, secret: &[u8], expires_at_millis: i64) -> bool {
+        if matches!(self.status, ClaimStatus::Claimed) {
+            return false;
+        }
+        self.activate_with_secret(secret, expires_at_millis);
         true
     }
 
@@ -93,7 +132,17 @@ impl ClaimState {
     }
 
     pub(crate) fn accepts(&self, secret: &[u8], now: i64) -> bool {
-        if !self.is_active(now) {
+        self.is_active(now) && self.secret_matches(secret)
+    }
+
+    pub(crate) fn accepts_claimed_resolve(&self, secret: &[u8], now: i64) -> bool {
+        matches!(self.status, ClaimStatus::Claimed)
+            && self.consent_unexpired(now)
+            && self.secret_matches(secret)
+    }
+
+    fn secret_matches(&self, secret: &[u8]) -> bool {
+        if self.secret_hash.is_empty() {
             return false;
         }
         let Ok(expected) = hex::decode(&self.secret_hash) else {
@@ -108,6 +157,36 @@ impl ClaimState {
 
     pub(crate) fn is_claimed(&self) -> bool {
         matches!(self.status, ClaimStatus::Claimed)
+    }
+
+    pub(crate) fn issuance_status(
+        &self,
+        authorization_hash: &str,
+        now: i64,
+    ) -> ClaimIssuanceStatus {
+        if self.secret_hash != authorization_hash {
+            return ClaimIssuanceStatus::Replaced;
+        }
+        if self.is_claimed() {
+            return ClaimIssuanceStatus::Claimed;
+        }
+        if self.is_active(now) {
+            ClaimIssuanceStatus::Active
+        } else {
+            ClaimIssuanceStatus::Expired
+        }
+    }
+
+    pub(crate) fn deactivate_issuance(&mut self, authorization_hash: &str) -> bool {
+        if self.secret_hash != authorization_hash || self.is_claimed() {
+            return false;
+        }
+        self.secret_hash.clear();
+        self.expires_at_millis = 0;
+        self.status = ClaimStatus::Dormant;
+        self.prepared_handle = None;
+        self.prepared_nonce_hash = None;
+        true
     }
 
     pub(crate) fn prepare(&mut self, handle: &str, nonce: &[u8]) -> bool {
@@ -238,6 +317,24 @@ mod tests {
     }
 
     #[test]
+    fn production_activation_mints_a_persistable_bearer_without_storing_it() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("claim.toml");
+        let mut state = state();
+        let expires_at = chrono::Utc::now().timestamp_millis() + 60_000;
+        let secret = state
+            .activate(expires_at)
+            .expect("activate claim")
+            .expect("unclaimed account");
+        assert!(state.accepts(secret.as_str().as_bytes(), expires_at - 1));
+        assert_eq!(secret.as_str().len(), 43, "32 random bytes use base64url");
+        store_at(&path, &state).expect("store active claim state");
+        let contents = std::fs::read_to_string(path).expect("read claim state");
+        assert!(!contents.contains(secret.as_str()));
+        assert!(contents.contains("status = \"active\""));
+    }
+
+    #[test]
     fn prepared_claim_is_bound_to_one_handle_and_nonce() {
         let mut state = state();
         assert!(state.reissue(b"claim-secret", 2_000));
@@ -249,6 +346,21 @@ mod tests {
         assert!(state.claim("human-handle"));
         assert!(!state.accepts(b"claim-secret", 1_000));
         assert!(!state.reissue(b"third-secret", 3_000));
+    }
+
+    #[test]
+    fn shutdown_deactivates_only_its_own_unclaimed_issuance() {
+        let mut state = state();
+        assert!(state.reissue(b"first-secret", 2_000));
+        let first_hash = state.authorization_hash().to_string();
+        assert!(state.reissue(b"replacement-secret", 3_000));
+        assert!(
+            !state.deactivate_issuance(&first_hash),
+            "an older resident process must not revoke a replacement offer"
+        );
+        let replacement_hash = state.authorization_hash().to_string();
+        assert!(state.deactivate_issuance(&replacement_hash));
+        assert!(!state.accepts(b"replacement-secret", 2_000));
     }
 
     #[test]

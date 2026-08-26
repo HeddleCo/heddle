@@ -52,6 +52,14 @@ pub(crate) trait ClaimHandler: Send + Sync + std::fmt::Debug + 'static {
         principal: VerifiedClaimPrincipal,
         body: &[u8],
     ) -> impl std::future::Future<Output = Result<Vec<u8>, CallFailure>> + Send;
+
+    fn response_delivered(
+        &self,
+        _method: &str,
+        _body: &[u8],
+    ) -> impl std::future::Future<Output = ()> + Send {
+        std::future::ready(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -122,19 +130,24 @@ where
         .read_to_end(MAX_REQUEST_FRAME + 1)
         .await
         .map_err(ClaimProtocolError::transport)?;
+    let mut successful_call = None;
     let response = match decode_request_frame(&request) {
         Ok(frame) => match validate_auth_shape(frame.method, &frame.context) {
             Ok(()) => match verifier
                 .verify(frame.method, &frame.context, frame.body)
                 .await
             {
-                Ok(principal) => handler
-                    .call(frame.method, principal, frame.body)
-                    .await
-                    .and_then(|body| {
-                        encode_success_response(&body)
-                            .map_err(|error| failure(CallFailureCode::Internal, error.to_string()))
-                    }),
+                Ok(principal) => match handler.call(frame.method, principal, frame.body).await {
+                    Ok(body) => {
+                        let response = encode_success_response(&body)
+                            .map_err(|error| failure(CallFailureCode::Internal, error.to_string()));
+                        if response.is_ok() {
+                            successful_call = Some((frame.method, frame.body));
+                        }
+                        response
+                    }
+                    Err(failure) => Err(failure),
+                },
                 Err(failure) => Err(failure),
             },
             Err(failure) => Err(failure),
@@ -150,6 +163,11 @@ where
         .await
         .map_err(ClaimProtocolError::transport)?;
     send.finish().map_err(ClaimProtocolError::transport)?;
+    if let Some((method, body)) = successful_call
+        && matches!(send.stopped().await, Ok(None))
+    {
+        handler.response_delivered(method, body).await;
+    }
     Ok(())
 }
 

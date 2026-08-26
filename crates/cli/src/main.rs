@@ -643,6 +643,9 @@ async fn async_main() -> Result<()> {
         }
 
         #[cfg(feature = "client")]
+        Commands::Claim(args) => hosted.claim(args.clone()).await,
+
+        #[cfg(feature = "client")]
         Commands::Whoami { server } => {
             let server = server.clone();
             hosted.whoami(&cli, server).await

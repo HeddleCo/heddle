@@ -3,7 +3,7 @@
 // The transport contract owns `CallFailure` by value at this seam.
 #![allow(clippy::result_large_err)]
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha1::{CallContext, CallFailure, CallFailureCode};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use crypto::{Ed25519Signer, Signer as _};
@@ -23,12 +23,21 @@ const PRE_CONSENT_DOMAIN: &[u8] = b"heddle-agent-pre-consent-v1";
 const PROMOTE_CONSENT_DOMAIN: &[u8] = b"heddle-agent-promote-consent-v1";
 
 #[derive(Clone, Debug)]
-pub(crate) struct StoredClaimAuthorization;
+pub(crate) struct StoredClaimAuthorization {
+    completion: tokio::sync::watch::Sender<bool>,
+}
+
+impl StoredClaimAuthorization {
+    pub(crate) fn new() -> (Self, tokio::sync::watch::Receiver<bool>) {
+        let (completion, receiver) = tokio::sync::watch::channel(false);
+        (Self { completion }, receiver)
+    }
+}
 
 impl ClaimSecretVerifier for StoredClaimAuthorization {
     async fn verify(
         &self,
-        _method: &str,
+        method: &str,
         context: &CallContext,
         _body: &[u8],
     ) -> Result<VerifiedClaimPrincipal, CallFailure> {
@@ -36,10 +45,11 @@ impl ClaimSecretVerifier for StoredClaimAuthorization {
         let Some(state) = state else {
             return Err(auth_failure());
         };
-        if !state.accepts(
-            &context.bearer_capability,
-            chrono::Utc::now().timestamp_millis(),
-        ) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let authorized = state.accepts(&context.bearer_capability, now)
+            || (method == CLAIM_RESOLVE_METHOD
+                && state.accepts_claimed_resolve(&context.bearer_capability, now));
+        if !authorized {
             return Err(auth_failure());
         }
         Ok(VerifiedClaimPrincipal {
@@ -63,9 +73,15 @@ impl ClaimHandler for StoredClaimAuthorization {
         let mut state = identity_state::load_while_locked()
             .map_err(internal_failure)?
             .ok_or_else(auth_failure)?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let method_is_available = if method == CLAIM_RESOLVE_METHOD {
+            state.is_active(now) || (state.is_claimed() && state.consent_unexpired(now))
+        } else {
+            state.is_active(now)
+        };
         if state.owner_id.to_string() != principal.subject
             || state.authorization_hash() != principal.authorization_hash
-            || !state.is_active(chrono::Utc::now().timestamp_millis())
+            || !method_is_available
         {
             return Err(auth_failure());
         }
@@ -81,6 +97,14 @@ impl ClaimHandler for StoredClaimAuthorization {
                 CallFailureCode::Unimplemented,
                 "unknown claim method",
             )),
+        }
+    }
+
+    async fn response_delivered(&self, method: &str, body: &[u8]) {
+        if method == CLAIM_CONSENT_METHOD
+            && matches!(parse_request(body), Ok(ClaimRequest::PromoteConsent { .. }))
+        {
+            self.completion.send_replace(true);
         }
     }
 }
@@ -237,14 +261,7 @@ pub(crate) fn pre_consent_message(
     handle: &str,
     nonce: &[u8],
 ) -> Result<Vec<u8>, CallFailure> {
-    encode_pre_consent(
-        &state.owner_id.to_string(),
-        handle,
-        &state.node_id,
-        nonce,
-        state.authorization_hash(),
-        state.expires_at_millis,
-    )
+    encode_pre_consent(&state.owner_id.to_string(), handle, &state.node_id, nonce)
 }
 
 pub(crate) fn promote_consent_message(
@@ -252,21 +269,15 @@ pub(crate) fn promote_consent_message(
     handle: &str,
     credential_id: &str,
 ) -> Result<Vec<u8>, CallFailure> {
-    encode_promote_consent(
-        &state.owner_id.to_string(),
-        handle,
-        credential_id,
-        state.authorization_hash(),
-        state.expires_at_millis,
-    )
+    encode_promote_consent(&state.owner_id.to_string(), handle, credential_id)
 }
 
 /// Verifies a pre/promote pair from the consent payload, not local claim TTL.
 ///
-/// Rejects when the bound `expiresAt` has elapsed, the pair is not the same
-/// issuance, or either signature fails over the counted statement that includes
-/// the claim-state id and expiry. This is the weft-matching check; the CLI
-/// only issues consents.
+/// Rejects when the locally bound `expiresAt` has elapsed, the pair is not the
+/// same issuance, or either signature fails over weft's exact counted tuple.
+/// The issuance hash/expiry remain local anti-replay metadata; weft's v1
+/// signature domains intentionally do not include them.
 #[cfg(test)]
 pub(crate) fn verify_promotion_consents(
     agent_public_key: &[u8],
@@ -287,35 +298,22 @@ pub(crate) fn verify_promotion_consents(
             "claim consents are not a matching pair",
         ));
     }
-    consent_binding_parts(&pre.authorization_hash, pre.expires_at)?;
+    validate_consent_binding(&pre.authorization_hash, pre.expires_at)?;
     if now_millis >= pre.expires_at {
         return Err(failure(
             CallFailureCode::Unauthenticated,
             "claim consent has expired",
         ));
     }
-    let pre_statement = encode_pre_consent(
-        &pre.account_id,
-        handle,
-        &pre.node_id,
-        nonce,
-        &pre.authorization_hash,
-        pre.expires_at,
-    )?;
-    let promote_statement = encode_promote_consent(
-        &promote.account_id,
-        handle,
-        credential_id,
-        &promote.authorization_hash,
-        promote.expires_at,
-    )?;
+    let pre_statement = encode_pre_consent(&pre.account_id, handle, &pre.node_id, nonce)?;
+    let promote_statement = encode_promote_consent(&promote.account_id, handle, credential_id)?;
     verify_consent_signature(&pre_statement, agent_public_key, &pre.signature)?;
     verify_consent_signature(&promote_statement, agent_public_key, &promote.signature)?;
     Ok(())
 }
 
 fn refuse_stale_consent(state: &ClaimState) -> Result<(), CallFailure> {
-    consent_binding_parts(state.authorization_hash(), state.expires_at_millis)?;
+    validate_consent_binding(state.authorization_hash(), state.expires_at_millis)?;
     if state.consent_unexpired(chrono::Utc::now().timestamp_millis()) {
         return Ok(());
     }
@@ -340,18 +338,13 @@ fn encode_pre_consent(
     handle: &str,
     node_id: &str,
     nonce: &[u8],
-    authorization_hash: &str,
-    expires_at_millis: i64,
 ) -> Result<Vec<u8>, CallFailure> {
-    let binding = consent_binding_parts(authorization_hash, expires_at_millis)?;
     encode_counted(&[
         PRE_CONSENT_DOMAIN,
         account_id.as_bytes(),
         handle.as_bytes(),
         node_id.as_bytes(),
         nonce,
-        binding.authorization_hash.as_bytes(),
-        &binding.expires_at,
     ])
 }
 
@@ -359,39 +352,26 @@ fn encode_promote_consent(
     account_id: &str,
     handle: &str,
     credential_id: &str,
-    authorization_hash: &str,
-    expires_at_millis: i64,
 ) -> Result<Vec<u8>, CallFailure> {
-    let binding = consent_binding_parts(authorization_hash, expires_at_millis)?;
     encode_counted(&[
         PROMOTE_CONSENT_DOMAIN,
         account_id.as_bytes(),
         handle.as_bytes(),
         credential_id.as_bytes(),
-        binding.authorization_hash.as_bytes(),
-        &binding.expires_at,
     ])
 }
 
-fn consent_binding_parts(
+fn validate_consent_binding(
     authorization_hash: &str,
     expires_at_millis: i64,
-) -> Result<ConsentBinding<'_>, CallFailure> {
+) -> Result<(), CallFailure> {
     if authorization_hash.is_empty() || expires_at_millis <= 0 {
         return Err(failure(
             CallFailureCode::FailedPrecondition,
             "claim consent is not bound to an issuance",
         ));
     }
-    Ok(ConsentBinding {
-        authorization_hash,
-        expires_at: expires_at_millis.to_be_bytes(),
-    })
-}
-
-struct ConsentBinding<'a> {
-    authorization_hash: &'a str,
-    expires_at: [u8; 8],
+    Ok(())
 }
 
 #[cfg(test)]
@@ -423,26 +403,41 @@ fn encode_counted(parts: &[&[u8]]) -> Result<Vec<u8>, CallFailure> {
 }
 
 fn claim_signer(state: &ClaimState) -> Result<Ed25519Signer, CallFailure> {
-    let store = config::credentials::load_credentials().map_err(internal_failure)?;
-    let credential = store.servers.get(&state.server).ok_or_else(auth_failure)?;
-    let metadata = headless_token_metadata(&credential.token).map_err(internal_failure)?;
+    stored_claim_signer(state).map_err(|error| {
+        tracing::warn!(%error, "stored claim signer is unavailable");
+        auth_failure()
+    })
+}
+
+pub(crate) fn validate_stored_claim_signer(state: &ClaimState) -> Result<()> {
+    stored_claim_signer(state).map(|_| ())
+}
+
+fn stored_claim_signer(state: &ClaimState) -> Result<Ed25519Signer> {
+    let store = config::credentials::load_credentials()?;
+    let credential = store
+        .servers
+        .get(&state.server)
+        .with_context(|| format!("no agent credential is stored for {}", state.server))?;
+    let metadata = headless_token_metadata(&credential.token)
+        .context("reading the stored agent credential")?;
     if metadata.subject != state.subject
         || !(metadata.is_derived
             || is_local_agent_root(&metadata.subject, &metadata.proof_public_key_hex))
     {
-        return Err(auth_failure());
+        bail!("the stored credential is not the agent root recorded by this claim account");
     }
     let pem = credential
         .private_key_pem
         .as_deref()
-        .ok_or_else(auth_failure)?;
-    let signer = Ed25519Signer::from_pem(pem).map_err(internal_failure)?;
+        .context("the stored agent credential has no consent-signing key")?;
+    let signer = Ed25519Signer::from_pem(pem).context("loading the agent consent-signing key")?;
     if hex::encode(signer.public_key()) != state.node_id
         || !metadata
             .proof_public_key_hex
             .eq_ignore_ascii_case(&state.node_id)
     {
-        return Err(auth_failure());
+        bail!("the stored agent credential does not match agent-node-identity.toml");
     }
     Ok(signer)
 }

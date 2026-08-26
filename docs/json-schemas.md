@@ -3154,8 +3154,8 @@ as one; no `help advanced`).
     "advanced_scope_json_commands_with_accepted_opaque_schema": 39,
     "advanced_scope_mutating_commands_total": 55,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 21,
-    "catalog_commands_total": 183,
-    "catalog_mutating_commands_total": 88,
+    "catalog_commands_total": 184,
+    "catalog_mutating_commands_total": 89,
     "json_commands_total": 146,
     "json_commands_with_accepted_opaque_schema": 39,
     "json_commands_with_schema": 107,
@@ -3169,7 +3169,7 @@ as one; no `help advanced`).
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 39,
     "status": "available",
-    "summary": "185 command(s), 146 JSON command(s), 88 mutating command(s), 85 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+    "summary": "186 command(s), 146 JSON command(s), 89 mutating command(s), 85 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3207,7 +3207,7 @@ as one; no `help advanced`).
     "try"
   ],
   "status": "available",
-  "summary": "185 command(s), 146 JSON command(s), 88 mutating command(s), 85 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+  "summary": "186 command(s), 146 JSON command(s), 89 mutating command(s), 85 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
