@@ -28,6 +28,7 @@ def metadata():
     add("heddle-objects", "crates/objects")
     add("heddle-repo", "crates/repo", ["heddle-objects"])
     add("heddle-cli", "crates/cli", ["heddle-repo"])
+    add("heddle-docsgen", "crates/docsgen")
     add("heddle-review", "crates/review")
     return {
         "packages": packages,
@@ -85,10 +86,10 @@ class AffectedRustPackagesTests(unittest.TestCase):
             ["heddle-objects", "heddle-repo", "heddle-cli"],
         )
 
-    def test_docs_select_cli_doctor_tests_only(self):
+    def test_docs_select_cli_doctor_and_docsgen_freshness_tests(self):
         result = self.select(["docs/json-schemas.md"])
         self.assertFalse(result["all"])
-        self.assertEqual(result["selected"], ["heddle-cli"])
+        self.assertEqual(result["selected"], ["heddle-cli", "heddle-docsgen"])
 
     def test_workspace_manifest_fails_closed_to_all_packages(self):
         result = self.select(["Cargo.lock"])
@@ -99,7 +100,13 @@ class AffectedRustPackagesTests(unittest.TestCase):
         self.assertTrue(result["all"])
         self.assertEqual(
             result["selected"],
-            ["heddle-objects", "heddle-repo", "heddle-cli", "heddle-review"],
+            [
+                "heddle-objects",
+                "heddle-repo",
+                "heddle-cli",
+                "heddle-docsgen",
+                "heddle-review",
+            ],
         )
 
     def test_script_only_change_can_skip_cargo(self):

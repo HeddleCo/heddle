@@ -11,6 +11,7 @@ members = [
     "crates/verbs",
     "crates/crypto",
     "crates/devtools",
+    "crates/docsgen",
     "crates/hosted-client",
     "crates/ingest",
     "crates/merge",

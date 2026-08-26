@@ -11,6 +11,7 @@ set -euo pipefail
 # the quality lane compiles test targets too.
 
 DOC_PACKAGE=heddle-cli
+DOCSGEN_PACKAGE=heddle-docsgen
 CLI_PACKAGE=heddle-cli
 
 changed_paths=
@@ -164,7 +165,8 @@ classify_path() {
 
   if is_doc_path "$path"; then
     add_direct_package "$DOC_PACKAGE"
-    add_reason "$path: docs are validated by heddle-cli doctor tests"
+    add_direct_package "$DOCSGEN_PACKAGE"
+    add_reason "$path: docs are validated by heddle-cli doctor and heddle-docsgen freshness tests"
     return 0
   fi
 
