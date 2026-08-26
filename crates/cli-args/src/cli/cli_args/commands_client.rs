@@ -3,6 +3,56 @@
 
 use clap::{Args, Subcommand, ValueEnum};
 
+const DEFAULT_CLAIM_TIMEOUT: &str = "15m";
+pub const DEFAULT_CLAIM_WEB_ORIGIN: &str = "https://app.heddle.sh";
+
+/// Offer the current agent-rooted account for a human to claim.
+#[derive(Args, Clone, Debug)]
+pub struct ClaimArgs {
+    /// Hosted Heddle server. Omit to use the configured default
+    /// (`api.heddle.sh` when none is stored).
+    #[arg(long)]
+    pub server: Option<String>,
+
+    /// Web origin used to build the human claim link. Defaults to
+    /// `https://app.heddle.sh`.
+    #[arg(long, value_name = "ORIGIN")]
+    pub web_origin: Option<String>,
+
+    /// How long to keep the claim listener resident (`s`, `m`, `h`, or `d`).
+    #[arg(
+        long,
+        default_value = DEFAULT_CLAIM_TIMEOUT,
+        value_name = "DURATION",
+        value_parser = parse_claim_timeout
+    )]
+    pub timeout: std::time::Duration,
+}
+
+fn parse_claim_timeout(value: &str) -> Result<std::time::Duration, String> {
+    let value = value.trim();
+    let (amount, multiplier) = match value.as_bytes().last().copied() {
+        Some(b's') => (&value[..value.len() - 1], 1),
+        Some(b'm') => (&value[..value.len() - 1], 60),
+        Some(b'h') => (&value[..value.len() - 1], 60 * 60),
+        Some(b'd') => (&value[..value.len() - 1], 24 * 60 * 60),
+        Some(byte) if byte.is_ascii_digit() => (value, 1),
+        _ => {
+            return Err("expected a positive duration such as 30s, 15m, 2h, or 1d".to_string());
+        }
+    };
+    let amount = amount
+        .parse::<u64>()
+        .map_err(|_| "claim timeout must be a positive whole number".to_string())?;
+    let seconds = amount
+        .checked_mul(multiplier)
+        .ok_or_else(|| "claim timeout is too large".to_string())?;
+    if seconds == 0 {
+        return Err("claim timeout must be greater than zero".to_string());
+    }
+    Ok(std::time::Duration::from_secs(seconds))
+}
+
 /// Preset operation ceilings for `heddle auth derive-agent`.
 ///
 /// Each variant expands to a curated set of safe agent operations. `reviewer`
@@ -264,6 +314,28 @@ mod tests {
     fn interactive_login_needs_no_flags() {
         Cli::try_parse_from(["heddle", "auth", "login"])
             .expect("interactive login may resolve the configured default server");
+    }
+
+    #[test]
+    fn claim_is_one_top_level_resident_command() {
+        let cli = Cli::try_parse_from([
+            "heddle",
+            "claim",
+            "--server",
+            "weft.example",
+            "--web-origin",
+            "https://heddle.example",
+            "--timeout",
+            "30m",
+        ])
+        .expect("claim flags parse");
+        let Commands::Claim(args) = cli.command else {
+            panic!("expected top-level claim");
+        };
+        assert_eq!(args.server.as_deref(), Some("weft.example"));
+        assert_eq!(args.web_origin.as_deref(), Some("https://heddle.example"));
+        assert_eq!(args.timeout, std::time::Duration::from_secs(30 * 60));
+        assert!(Cli::try_parse_from(["heddle", "claim", "--timeout", "0s"]).is_err());
     }
 
     #[test]

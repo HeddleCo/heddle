@@ -53,6 +53,7 @@ use connection::HostedConnection;
 pub use context::CallContextFactory;
 #[cfg(test)]
 pub(crate) use credential::CredentialSource;
+pub(crate) use credential::server_keys_match;
 pub use credential::{ResolvedHostedCredential, resolve_active_bearer, resolve_hosted_credential};
 use crypto::{Ed25519Signer, Signer as _};
 pub use descriptor_trust::{
@@ -169,6 +170,10 @@ impl std::fmt::Debug for HostedClient {
 impl HostedClient {
     pub fn routes(&self) -> HostedRoutes<'_> {
         HostedRoutes::new(self)
+    }
+
+    pub(crate) fn claim_completion(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.connection.claim_completion()
     }
 
     pub async fn connect(descriptor: &VerifiedEndpointDescriptor) -> Result<Self> {

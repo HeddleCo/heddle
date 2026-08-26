@@ -25,6 +25,7 @@ pub(super) struct HostedConnection {
     provider_transport: Option<ProviderWebSocketTransport>,
     provider_connections:
         Mutex<HashMap<EndpointId, Arc<Mutex<Option<iroh::endpoint::Connection>>>>>,
+    claim_completion: tokio::sync::watch::Receiver<bool>,
 }
 
 impl HostedConnection {
@@ -97,13 +98,14 @@ impl HostedConnection {
                 return Err(HostedError::transport(error));
             }
         };
-        let router = claim_router(endpoint.clone());
+        let (router, claim_completion) = claim_router(endpoint.clone());
         Ok(Arc::new(Self {
             router,
             endpoint,
             connection,
             provider_transport,
             provider_connections: Mutex::new(HashMap::new()),
+            claim_completion,
         }))
     }
 
@@ -113,6 +115,10 @@ impl HostedConnection {
 
     pub(super) fn supports_provider_transport(&self) -> bool {
         self.provider_transport.is_some()
+    }
+
+    pub(super) fn claim_completion(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.claim_completion.clone()
     }
 
     pub(super) async fn provider_connection(
@@ -181,15 +187,17 @@ async fn bind_endpoint(
     builder.bind().await.map_err(HostedError::transport)
 }
 
-fn claim_router(endpoint: Endpoint) -> Router {
-    let authorization =
-        Arc::new(crate::hosted_runtime::claim_authorization::StoredClaimAuthorization);
-    Router::builder(endpoint)
+fn claim_router(endpoint: Endpoint) -> (Router, tokio::sync::watch::Receiver<bool>) {
+    let (authorization, completion) =
+        crate::hosted_runtime::claim_authorization::StoredClaimAuthorization::new();
+    let authorization = Arc::new(authorization);
+    let router = Router::builder(endpoint)
         .accept(
             CLAIM_ALPN_V1,
             ClaimProtocol::new(Arc::clone(&authorization), authorization),
         )
-        .spawn()
+        .spawn();
+    (router, completion)
 }
 
 impl Drop for HostedConnection {

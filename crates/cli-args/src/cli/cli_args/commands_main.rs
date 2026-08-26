@@ -3,8 +3,6 @@
 
 use clap::{Args, Subcommand};
 
-#[cfg(feature = "client")]
-use super::AuthCommands;
 #[cfg(feature = "git-overlay")]
 use super::BridgeCommands;
 #[cfg(feature = "semantic")]
@@ -19,6 +17,8 @@ use super::{
         ThreadStartArgs, UndoArgs, WatchArgs,
     },
 };
+#[cfg(feature = "client")]
+use super::{AuthCommands, ClaimArgs};
 
 #[derive(Clone, Debug, Args)]
 pub struct FsckArgs {
@@ -357,6 +357,19 @@ Examples:
         #[command(subcommand)]
         command: AuthCommands,
     },
+
+    /// Offer this agent account for a human to claim.
+    ///
+    /// Prints a short-lived bearer link, then keeps the agent's Iroh endpoint
+    /// online until the human finishes, the offer expires, or Ctrl-C stops it.
+    #[cfg(feature = "client")]
+    #[command(after_help = "\
+Examples:
+  heddle claim
+  heddle claim --timeout 30m
+  heddle claim --server weft.example --web-origin https://heddle.example
+")]
+    Claim(ClaimArgs),
 
     /// Report the capture actor, then hosted auth.
     ///

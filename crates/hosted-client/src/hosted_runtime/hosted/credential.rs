@@ -137,7 +137,7 @@ pub fn resolve_active_bearer() -> Result<Option<AuthToken>> {
     Ok(resolve_hosted_credential(server.as_deref())?.token)
 }
 
-pub(super) fn server_keys_match(left: &str, right: &str) -> bool {
+pub(crate) fn server_keys_match(left: &str, right: &str) -> bool {
     fn without_scheme(value: &str) -> &str {
         value
             .strip_prefix("http://")

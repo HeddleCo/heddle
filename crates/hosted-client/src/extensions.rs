@@ -10,7 +10,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use heddle_cli_args::{AgentTemplateArg, AuthCommands, AuthTrustCommands, CliContext};
+use heddle_cli_args::{AgentTemplateArg, AuthCommands, AuthTrustCommands, ClaimArgs, CliContext};
 
 use crate::hosted_runtime::{
     auth_requests::{AuthCommand, AuthTrustCommand},
@@ -24,6 +24,9 @@ pub trait HostedExtensions: Send + Sync {
     /// service account issuance.
     async fn auth(&self, ctx: &(dyn CliContext + 'static), command: AuthCommands) -> Result<()>;
 
+    /// `heddle claim` — activate and serve a resident agent-account offer.
+    async fn claim(&self, args: ClaimArgs) -> Result<()>;
+
     /// `heddle whoami` — resolve and report the acting identity without
     /// attaching or replacing a credential.
     async fn whoami(&self, ctx: &(dyn CliContext + 'static), server: Option<String>) -> Result<()>;
@@ -36,6 +39,10 @@ impl HostedExtensions for EnabledHostedExtensions {
     async fn auth(&self, ctx: &(dyn CliContext + 'static), command: AuthCommands) -> Result<()> {
         let command = auth_command(command);
         crate::hosted_runtime::auth::cmd_auth(ctx, command).await
+    }
+
+    async fn claim(&self, args: ClaimArgs) -> Result<()> {
+        crate::hosted_runtime::claim_offer::cmd_claim(args).await
     }
 
     async fn whoami(&self, ctx: &(dyn CliContext + 'static), server: Option<String>) -> Result<()> {

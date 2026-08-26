@@ -1519,6 +1519,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
             190,
         ),
     ),
+    entry(
+        &["claim"],
+        front_door(
+            feature_gated(user_scoped(NETWORK_CONFIG_MUTATION_TEXT), "client"),
+            191,
+        ),
+    ),
     entry(&["bridge"], surface(GROUP, "git_projection")),
     entry(&["bridge", "git"], surface(GROUP, "git_projection")),
     entry(
@@ -4506,6 +4513,8 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         },
         #[cfg(feature = "client")]
         Commands::Whoami { .. } => vec!["whoami"],
+        #[cfg(feature = "client")]
+        Commands::Claim(_) => vec!["claim"],
         Commands::Context { command } => match command {
             ContextCommands::Set(_) => vec!["context", "set"],
             ContextCommands::Get(_) => vec!["context", "get"],
