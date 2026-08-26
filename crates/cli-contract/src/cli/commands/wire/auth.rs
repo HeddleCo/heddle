@@ -8,6 +8,30 @@
 use schemars::JsonSchema;
 use serde::Serialize;
 
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "AgentAccountCreatedSchema")]
+pub struct AgentAccountCreatedOutput {
+    pub output_kind: &'static str,
+    pub account_id: String,
+    pub pet_name: String,
+    /// Subject carried by the client-minted, persisted agent capability.
+    pub subject: String,
+    pub authenticated: bool,
+    pub credential_saved: bool,
+    pub next: HumanPromotionDirective,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct HumanPromotionDirective {
+    pub kind: &'static str,
+    pub summary: &'static str,
+    pub account_id: String,
+    /// Agent-native command that starts the short-lived human claim ceremony.
+    pub command: &'static str,
+    /// Reserved for a concrete server-provided promotion affordance.
+    pub promotion_uri: Option<String>,
+}
+
 /// How a server's descriptor trust was established.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]

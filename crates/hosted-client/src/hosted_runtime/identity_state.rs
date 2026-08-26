@@ -49,6 +49,8 @@ pub(crate) struct ClaimState {
     pub(crate) subject: String,
     pub(crate) pet_name: String,
     pub(crate) node_id: String,
+    #[serde(default)]
+    pub(crate) web_origin: Option<String>,
     pub(crate) created_at: String,
     secret_hash: String,
     pub(crate) expires_at_millis: i64,
@@ -64,6 +66,7 @@ impl ClaimState {
         subject: String,
         pet_name: String,
         node_id: String,
+        web_origin: Option<String>,
     ) -> Self {
         Self {
             format: STATE_FORMAT.to_string(),
@@ -73,6 +76,7 @@ impl ClaimState {
             subject,
             pet_name,
             node_id,
+            web_origin,
             created_at: chrono::Utc::now().to_rfc3339(),
             secret_hash: String::new(),
             expires_at_millis: 0,
@@ -303,6 +307,7 @@ mod tests {
             "subject-1".into(),
             "quiet-otter".into(),
             "11".repeat(32),
+            None,
         )
     }
 

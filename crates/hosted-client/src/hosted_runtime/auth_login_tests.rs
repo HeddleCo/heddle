@@ -11,7 +11,7 @@ use super::{
     agent_node_identity,
     auth::headless_token_metadata,
     auth_login::{LoginInputs, LoginPath, login, login_path, store_agent_root},
-    auth_login_agent::{finish_invite_create_from_response, invite_created_claim_link},
+    auth_login_agent::finish_invite_create_from_response,
     device_flow::restrict_agent_account_root,
     identity_state::{self, ClaimState},
     root_mint::mint_agent_root,
@@ -283,33 +283,40 @@ async fn login_with_invite_does_not_take_the_fail_closed_path() {
 }
 
 #[test]
-fn login_invite_create_exposes_the_server_claim_token() {
+fn login_invite_create_succeeds_with_a_claim_next_directive() {
     let _home = IsolatedHome::new();
-    let token = "hcl1.node.one-time-claim";
-    let claim_link = finish_invite_create_from_response(
-        "api.claim-token.test",
+    let server = "api.claim-next.test";
+    let output = finish_invite_create_from_response(
+        server,
         CreateAgentAccountResponse {
             account_id: "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28".into(),
             pet_name: "quiet-otter".into(),
             agent_capability: Vec::new(),
-            claim_token: token.into(),
+            web_origin: "https://claims.heddle.test/".into(),
         },
     )
-    .expect("invite create must expose the server claim token");
-    assert_eq!(claim_link, token);
-}
-
-#[test]
-fn login_invite_create_refuses_to_drop_an_empty_claim_token() {
-    let error = invite_created_claim_link("").expect_err("empty claim token must not be dropped");
+    .expect("invite create must succeed without a server claim token");
+    assert_eq!(output.output_kind, "agent_account_created");
+    assert!(output.authenticated);
+    assert!(output.credential_saved);
+    assert_eq!(output.next.kind, "human_promotion_required");
+    assert_eq!(output.next.command, "heddle claim");
+    assert_eq!(output.next.account_id, output.account_id);
+    let json = serde_json::to_value(&output).expect("serialize machine contract");
+    assert_eq!(json["next"]["kind"], "human_promotion_required");
+    assert_eq!(json["next"]["command"], "heddle claim");
     assert!(
-        error.to_string().contains("claim token"),
-        "missing token must stay visible: {error}"
+        credentials::get_server_credential(server)
+            .expect("load credential")
+            .is_some(),
+        "successful create must persist its agent credential"
     );
-    let error = invite_created_claim_link("   ").expect_err("whitespace is not a claim token");
-    assert!(
-        error.to_string().contains("claim token"),
-        "whitespace token must stay visible: {error}"
+    let state = identity_state::load()
+        .expect("load claim state")
+        .expect("claim state was stored");
+    assert_eq!(
+        state.web_origin.as_deref(),
+        Some("https://claims.heddle.test/")
     );
 }
 
@@ -324,6 +331,7 @@ async fn remint_uses_claim_state_when_the_keystore_row_is_missing() {
         "subject-1".to_string(),
         "quiet-otter".to_string(),
         identity.node_id().to_string(),
+        None,
     ))
     .expect("store claim state");
     login(&TextCtx, server, false, None, false)
