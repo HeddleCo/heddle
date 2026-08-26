@@ -2313,6 +2313,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "heddle-docsgen"
+version = "0.15.0"
+
+[[package]]
 name = "heddle-format"
 version = "0.15.0"
 dependencies = [

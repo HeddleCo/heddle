@@ -1,0 +1,16 @@
+[package]
+name = "heddle-docsgen"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Generator for Heddle's agent-facing documentation corpus"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "heddle_docsgen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "heddle-docsgen"
+path = "src/main.rs"
