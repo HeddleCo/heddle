@@ -817,6 +817,12 @@ const NETWORK_CONFIG_MUTATION_TEXT: CommandContract = CommandContract {
     ..CONFIG_MUTATION
 };
 
+const NETWORK_CONFIG_MUTATION_NO_OP_ID: CommandContract = CommandContract {
+    supports_op_id: false,
+    network_io: true,
+    ..CONFIG_MUTATION
+};
+
 const INIT: CommandContract = CommandContract {
     may_initialize: true,
     may_move_ref: false,
@@ -1420,7 +1426,20 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["auth"], feature_gated(user_scoped(GROUP), "client")),
     entry(
         &["auth", "login"],
-        feature_gated(user_scoped(NETWORK_CONFIG_MUTATION_TEXT), "client"),
+        feature_gated(
+            json_discriminators(
+                documented_schemas(
+                    user_scoped(NETWORK_CONFIG_MUTATION_NO_OP_ID),
+                    &["auth login"],
+                ),
+                &[json_discriminator(
+                    Some("auth login"),
+                    "output_kind",
+                    "agent_account_created",
+                )],
+            ),
+            "client",
+        ),
     ),
     entry(
         &["auth", "logout"],

@@ -45,7 +45,8 @@ use super::{
             SessionListOutput,
         },
         auth::{
-            AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, ServiceTokenOutput, WhoamiOutput,
+            AgentAccountCreatedOutput, AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput,
+            ServiceTokenOutput, WhoamiOutput,
         },
         thread::{
             ApprovalOutput, ApprovalRevokeOutput, EligibilityOutput, ThreadAbsorbOutput,
@@ -170,6 +171,7 @@ schema_registry! {
     (&["agent task create", "agent task show", "agent task update"], AgentTaskEnvelope),
     (&["agent task list"], AgentTaskListOutput),
     (&["agent fanout plan", "agent fanout start"], AgentFanoutOutput),
+    (&["auth login"], AgentAccountCreatedOutput),
     (&["auth logout"], AuthLogoutOutput),
     (&["auth status"], AuthStatusOutput),
     (&["auth trust show", "auth trust replace"], AuthTrustOutput),

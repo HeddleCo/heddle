@@ -109,6 +109,17 @@ export interface AdoptSchema {
   verification: RepositoryVerificationState;
 }
 
+export interface AgentAccountCreatedSchema {
+  account_id: string;
+  authenticated: boolean;
+  credential_saved: boolean;
+  next: HumanPromotionDirective;
+  output_kind: "agent_account_created";
+  pet_name: string;
+  /** Subject carried by the client-minted, persisted agent capability. */
+  subject: string;
+}
+
 /** JSON payload for `heddle capture` / `heddle agent capture`. */
 export interface AgentCaptureSchema {
   action: string;
@@ -1284,6 +1295,16 @@ export interface HookUninstallSchema {
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   replayed?: boolean | null;
   [key: string]: unknown;
+}
+
+export interface HumanPromotionDirective {
+  account_id: string;
+  /** Agent-native command that starts the short-lived human claim ceremony. */
+  command: string;
+  kind: string;
+  /** Reserved for a concrete server-provided promotion affordance. */
+  promotion_uri?: string | null;
+  summary: string;
 }
 
 /** JSON payload for `bridge git import`. */
@@ -3449,6 +3470,7 @@ export interface HeddleVerbOutputs {
   "agent timeline reset": AgentTimelineResetSchema;
   "agent timeline status": TimelineStatusSchema;
   "auth create-service-token": AuthCreateServiceTokenSchema;
+  "auth login": AgentAccountCreatedSchema;
   "auth logout": AuthLogoutSchema;
   "auth status": AuthStatusSchema;
   "auth trust replace": AuthTrustReplaceSchema;
@@ -3610,6 +3632,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "agent timeline reset",
   "agent timeline status",
   "auth create-service-token",
+  "auth login",
   "auth logout",
   "auth status",
   "auth trust replace",

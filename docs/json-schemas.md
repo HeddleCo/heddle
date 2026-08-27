@@ -1868,6 +1868,32 @@ the same ready envelope.
 
 ---
 
+## `heddle auth login --output json`
+
+```json
+{
+  "output_kind": "agent_account_created",
+  "account_id": "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28",
+  "pet_name": "quiet-otter",
+  "subject": "agent:11e64d7c...",
+  "authenticated": true,
+  "credential_saved": true,
+  "next": {
+    "kind": "human_promotion_required",
+    "summary": "Account is active and usable now; a human must complete the claim ceremony to bind ownership.",
+    "account_id": "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28",
+    "command": "heddle claim",
+    "promotion_uri": null
+  }
+}
+```
+
+The created account and stored agent credential are usable immediately. The
+`next` directive tells an agent how to start the separate, short-lived human
+claim ceremony; account creation itself does not wait for a human.
+
+---
+
 ## `heddle auth logout --output json`
 
 ```json
@@ -3150,26 +3176,26 @@ as one; no `help advanced`).
       "visibility set",
       "visibility promote"
     ],
-    "advanced_scope_json_commands_total": 98,
+    "advanced_scope_json_commands_total": 99,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 39,
-    "advanced_scope_mutating_commands_total": 55,
+    "advanced_scope_mutating_commands_total": 56,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 21,
     "catalog_commands_total": 184,
     "catalog_mutating_commands_total": 89,
-    "json_commands_total": 146,
+    "json_commands_total": 147,
     "json_commands_with_accepted_opaque_schema": 39,
-    "json_commands_with_schema": 107,
+    "json_commands_with_schema": 108,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 85,
+    "json_mutating_commands_total": 86,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 85,
+    "mutating_commands_total": 86,
     "mutating_commands_with_accepted_opaque_schema": 21,
-    "mutating_commands_with_schema": 64,
+    "mutating_commands_with_schema": 65,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 39,
     "status": "available",
-    "summary": "186 command(s), 146 JSON command(s), 89 mutating command(s), 85 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+    "summary": "186 command(s), 147 JSON command(s), 89 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3207,7 +3233,7 @@ as one; no `help advanced`).
     "try"
   ],
   "status": "available",
-  "summary": "186 command(s), 146 JSON command(s), 89 mutating command(s), 85 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+  "summary": "186 command(s), 147 JSON command(s), 89 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true

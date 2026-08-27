@@ -1722,6 +1722,9 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "agent presence show",
             "agent presence explain",
             "agent presence complete",
+            // heddle#1567: invite-based headless account creation emits the
+            // agent-native promotion directive.
+            "auth login",
             "auth logout",
             "auth status",
             // heddle#1130: descriptor-trust inspection and explicit

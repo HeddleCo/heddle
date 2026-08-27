@@ -39,7 +39,7 @@ crypto.workspace = true
 # text auto-merge. Always-on: the merge driver and rebase replay both call
 # into it unconditionally.
 merge.workspace = true
-api = { package = "heddle-api", version = "0.15.0" }
+api = { workspace = true }
 config.workspace = true
 hosted-client.workspace = true
 heddle-cli-args.workspace = true

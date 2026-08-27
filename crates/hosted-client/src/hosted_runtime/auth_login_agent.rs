@@ -5,11 +5,14 @@ use api::heddle::api::v1alpha1::{CreateAgentAccountRequest, CreateAgentAccountRe
 use config::UserConfig;
 use crypto::{Ed25519Signer, Signer as _};
 use heddle_cli_args::CliContext;
+use heddle_cli_contract::cli::commands::wire::auth::{
+    AgentAccountCreatedOutput, HumanPromotionDirective,
+};
 
 use super::{
     HostedAuthMode, HostedSession, agent_node_identity,
     auth::headless_token_metadata,
-    auth_login::{print_claim_link, print_success, store_agent_root},
+    auth_login::{print_success, store_agent_root},
     device_flow::restrict_agent_account_root,
     identity_state::{self, ClaimState},
     root_mint::{is_local_agent_root, mint_agent_root},
@@ -60,28 +63,37 @@ pub(crate) async fn create_with_invite(
         });
     client.close().await;
     let response = response?;
-    let subject = minted.subject.clone();
-    let claim_link = finish_invite_create(server, minted, response)?;
-    print_success(&subject);
-    print_claim_link(&claim_link);
+    let output = finish_invite_create(server, minted, response)?;
+    emit_created(ctx, &output)?;
     Ok(())
 }
 
-pub(crate) fn invite_created_claim_link(claim_token: &str) -> Result<&str> {
-    match claim_token.trim() {
-        "" => bail!("CreateAgentAccount returned no claim token; the human has no claim link"),
-        token => Ok(token),
+fn emit_created(ctx: &dyn CliContext, output: &AgentAccountCreatedOutput) -> Result<()> {
+    if ctx.should_output_json(None) {
+        println!("{}", serde_json::to_string(output)?);
+    } else {
+        print_success(&output.subject);
+        println!(
+            "Agent account {} is active; a human can claim it later.",
+            output.pet_name
+        );
+        println!("Next: {}", output.next.command);
     }
+    Ok(())
 }
 
 fn finish_invite_create(
     server: &str,
     minted: RestrictedAgentRoot,
     response: CreateAgentAccountResponse,
-) -> Result<String> {
+) -> Result<AgentAccountCreatedOutput> {
     let owner_id = uuid::Uuid::parse_str(&response.account_id)
         .context("server returned a non-UUID account identity")?;
-    let claim_link = invite_created_claim_link(&response.claim_token).map(str::to_string);
+    let web_origin = match response.web_origin.trim() {
+        "" => None,
+        value => Some(value.to_string()),
+    };
+    let subject = minted.subject.clone();
     store_agent_root(
         server,
         minted.token,
@@ -89,21 +101,38 @@ fn finish_invite_create(
         minted.private_key_pem,
         minted.expires_at,
     )?;
+    let account_id = response.account_id;
+    let pet_name = response.pet_name;
     identity_state::store(&ClaimState::new(
         server.to_string(),
         owner_id,
-        minted.subject,
-        response.pet_name,
+        subject.clone(),
+        pet_name.clone(),
         hex::encode(minted.public_key),
+        web_origin,
     ))?;
-    claim_link
+    Ok(AgentAccountCreatedOutput {
+        output_kind: "agent_account_created",
+        account_id: account_id.clone(),
+        pet_name,
+        subject,
+        authenticated: true,
+        credential_saved: true,
+        next: HumanPromotionDirective {
+            kind: "human_promotion_required",
+            summary: "Account is active and usable now; a human must complete the claim ceremony to bind ownership.",
+            account_id,
+            command: "heddle claim",
+            promotion_uri: None,
+        },
+    })
 }
 
 #[cfg(test)]
 pub(crate) fn finish_invite_create_from_response(
     server: &str,
     response: CreateAgentAccountResponse,
-) -> Result<String> {
+) -> Result<AgentAccountCreatedOutput> {
     finish_invite_create(server, mint_restricted_agent_root()?, response)
 }
 

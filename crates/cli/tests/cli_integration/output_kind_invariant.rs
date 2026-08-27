@@ -69,6 +69,7 @@ const SWEPT: &[&str] = &[
     "agent presence show",
     "agent presence explain",
     "agent presence complete",
+    "auth login",
     "auth logout",
     "auth status",
     "auth trust show",
@@ -261,6 +262,8 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         "agent presence show" => Some("presence_show"),
         "agent presence explain" => Some("presence_explain"),
         "agent presence complete" => Some("presence_complete"),
+        // Headless invite login emits the created account, not the command path.
+        "auth login" => Some("agent_account_created"),
         // Expand folded under `thread`; wire value keeps the root spelling.
         "thread expand" => Some("expand"),
         // Oplog recover folded under `maintenance`; wire value unchanged.

@@ -33,14 +33,8 @@ enum ClaimWaitOutcome {
 
 pub(crate) async fn cmd_claim(args: ClaimArgs) -> Result<()> {
     let server = resolve_server(args.server.as_deref())?;
-    // TODO(weft#1839): persist CreateAgentAccountResponse.web_origin and use
-    // explicit --web-origin > server-supplied origin > Heddle hosted default.
-    let web_origin = normalized_web_origin(
-        args.web_origin
-            .as_deref()
-            .unwrap_or(DEFAULT_CLAIM_WEB_ORIGIN),
-    )?;
     let state = claimable_state(&server)?;
+    let web_origin = resolve_web_origin(args.web_origin.as_deref(), state.web_origin.as_deref())?;
     validate_stored_claim_signer(&state)?;
 
     let identity = agent_node_identity::load()?
@@ -227,6 +221,14 @@ fn normalized_web_origin(value: &str) -> Result<String> {
     Ok(parsed.origin().ascii_serialization())
 }
 
+fn resolve_web_origin(explicit: Option<&str>, server_supplied: Option<&str>) -> Result<String> {
+    normalized_web_origin(
+        explicit
+            .or(server_supplied)
+            .unwrap_or(DEFAULT_CLAIM_WEB_ORIGIN),
+    )
+}
+
 fn claim_link(web_origin: &str, node_id: &str, secret: &str) -> String {
     format!("{web_origin}/claim/{node_id}.{secret}")
 }
@@ -273,5 +275,25 @@ mod tests {
                 "accepted {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn web_origin_precedence_is_explicit_then_server_then_hosted_default() {
+        assert_eq!(
+            resolve_web_origin(
+                Some("https://explicit.heddle.test/"),
+                Some("https://server.heddle.test")
+            )
+            .expect("explicit origin"),
+            "https://explicit.heddle.test"
+        );
+        assert_eq!(
+            resolve_web_origin(None, Some("https://server.heddle.test/")).expect("server origin"),
+            "https://server.heddle.test"
+        );
+        assert_eq!(
+            resolve_web_origin(None, None).expect("hosted default"),
+            DEFAULT_CLAIM_WEB_ORIGIN
+        );
     }
 }
