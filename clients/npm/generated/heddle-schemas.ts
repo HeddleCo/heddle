@@ -1049,6 +1049,7 @@ export interface DiscussionListSchema {
 
 export interface DiscussionOutput {
   anchor: AnchorOutput;
+  anchor_status: string;
   conflict_operation_ids: string[];
   display_head_operation_id: string;
   head_operation_ids: string[];
@@ -1067,6 +1068,7 @@ export interface DiscussionShowSchema {
 }
 
 export interface DiscussionView {
+  anchor_ambiguous: boolean;
   body_changed_since_open: boolean;
   file: string;
   id: string;

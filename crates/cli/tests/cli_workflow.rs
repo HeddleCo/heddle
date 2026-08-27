@@ -18,6 +18,8 @@ mod context_rides_diff;
 mod current_context_advice;
 #[path = "cli_integration/diff_patch_conformance.rs"]
 mod diff_patch_conformance;
+#[path = "cli_integration/discuss_anchor_travel.rs"]
+mod discuss_anchor_travel;
 #[path = "cli_integration/discuss_carry_forward.rs"]
 mod discuss_carry_forward;
 #[path = "cli_integration/dry_run_preview.rs"]

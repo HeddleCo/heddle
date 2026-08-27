@@ -493,6 +493,49 @@ fn test_detect_function_changes_rename() {
 }
 
 #[test]
+fn discussion_anchor_function_rename_requires_one_clear_semantic_target() {
+    let old = "fn foo() {\n    let value = 42;\n    println!(\"{}\", value);\n}\n";
+    let renamed = "fn bar() {\n    let value = 42;\n    println!(\"{}\", value);\n}\n";
+    assert!(matches!(
+        resolve_function_rename(
+            std::path::Path::new("test.rs"),
+            old,
+            renamed,
+            "foo",
+            SimilarityMethod::Lines,
+        ),
+        FunctionRenameResolution::Renamed(FunctionRenameCandidate { new_name, .. })
+            if new_name == "bar"
+    ));
+
+    let ambiguous = concat!(
+        "fn bar() {\n    let value = 42;\n    println!(\"{}\", value);\n}\n",
+        "fn baz() {\n    let value = 42;\n    println!(\"{}\", value);\n}\n",
+    );
+    assert!(matches!(
+        resolve_function_rename(
+            std::path::Path::new("test.rs"),
+            old,
+            ambiguous,
+            "foo",
+            SimilarityMethod::Lines,
+        ),
+        FunctionRenameResolution::Ambiguous(candidates) if candidates.len() == 2
+    ));
+
+    assert_eq!(
+        resolve_function_rename(
+            std::path::Path::new("test.rs"),
+            old,
+            "",
+            "foo",
+            SimilarityMethod::Lines,
+        ),
+        FunctionRenameResolution::NotRenamed
+    );
+}
+
+#[test]
 fn test_detect_function_changes_prefers_stable_best_rename_candidate() {
     let old = concat!(
         "fn alpha() {\n",

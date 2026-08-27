@@ -1012,6 +1012,7 @@ fn enumerate_state_closure_emits_state_metadata_blobs() {
         }],
         resolution: DiscussionResolution::Open,
         body_changed_since_open: false,
+        anchor_ambiguous: false,
         orphaned: false,
         visibility: VisibilityTier::default(),
         resolved_annotation_id: None,

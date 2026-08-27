@@ -58,6 +58,11 @@ pub struct Discussion {
     /// proceeds normally.
     #[serde(default)]
     pub body_changed_since_open: bool,
+    /// Set by anchor-travel when semantic analysis found plausible targets but
+    /// no single high-confidence winner. The durable symbol anchor remains
+    /// unchanged for human triage.
+    #[serde(default)]
+    pub anchor_ambiguous: bool,
     /// Set by anchor-travel when the symbol can't be resolved in the new
     /// state (deleted or unreachable rename). The discussion stays open with
     /// this marker for a human to triage.
@@ -223,6 +228,7 @@ mod tests {
             }],
             resolution: DiscussionResolution::Open,
             body_changed_since_open: false,
+            anchor_ambiguous: false,
             orphaned: false,
             visibility: VisibilityTier::default(),
             resolved_annotation_id: None,

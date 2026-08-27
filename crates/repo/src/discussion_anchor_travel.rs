@@ -11,11 +11,9 @@
 //!    `body_changed_since_open = true`. Reviewers see a marker;
 //!    resolution still proceeds normally.
 //! 3. **Renamed within file** — symbol no longer resolves at the old
-//!    name, but a structurally-similar definition exists in the same
-//!    file. Out of scope for now: function-level rename detection
-//!    requires a tree-sitter call-graph diff that hasn't been wired
-//!    yet. Falls through to the cross-file path with the old file
-//!    kept in scope.
+//!    name, but semantic rename analysis finds one high-confidence,
+//!    structurally-similar definition in the same file. Equally plausible
+//!    or low-confidence candidates are marked ambiguous, never selected.
 //! 4. **Cross-file move** — file moved (rename detected by
 //!    [`detect_file_renames`] with confidence above
 //!    [`RENAME_CONFIDENCE_FOR_ANCHOR_TRAVEL`]); re-anchor to the new
@@ -34,7 +32,9 @@ use std::{collections::HashMap, path::Path};
 
 use objects::object::{Discussion, SymbolAnchor};
 use semantic::{
-    analysis::{SimilarityMethod, detect_file_renames},
+    analysis::{
+        FunctionRenameResolution, SimilarityMethod, detect_file_renames, resolve_function_rename,
+    },
     symbol_resolver::resolve_symbol_lines,
 };
 
@@ -55,6 +55,9 @@ pub struct DiscussionAnchorUpdate {
     /// Set when the resolved body bytes differ from the body at the
     /// state the discussion was opened against.
     pub body_changed_since_open: bool,
+    /// Set when semantic analysis found plausible targets but could not
+    /// identify one high-confidence winner.
+    pub ambiguous: bool,
     /// Set when no resolution path produced a hit — neither original
     /// location, nor renamed file, nor cross-file move.
     pub orphaned: bool,
@@ -79,20 +82,40 @@ pub fn travel_anchors(
 
     open_discussions
         .iter()
-        .map(|d| travel_one(d, old_files, new_files, &renamed))
+        .map(|discussion| {
+            travel_one(
+                &discussion.id,
+                &discussion.anchor,
+                old_files,
+                new_files,
+                &renamed,
+            )
+        })
         .collect()
+}
+
+/// Resolve one symbol anchor between two file maps. This is also used by the
+/// append-only collaboration view, whose durable anchor keeps its opening
+/// state while the displayed location is derived against current state.
+pub fn travel_symbol_anchor(
+    old_files: &HashMap<String, Vec<u8>>,
+    new_files: &HashMap<String, Vec<u8>>,
+    anchor: &SymbolAnchor,
+) -> DiscussionAnchorUpdate {
+    let renamed = compute_renames(old_files, new_files);
+    travel_one("", anchor, old_files, new_files, &renamed)
 }
 
 /// Resolve a single discussion against the new tree. Mirrors the five
 /// cases above; lifted out of [`travel_anchors`] so each case is its own
 /// expression and the batch loop stays readable.
 fn travel_one(
-    discussion: &Discussion,
+    discussion_id: &str,
+    original: &SymbolAnchor,
     old_files: &HashMap<String, Vec<u8>>,
     new_files: &HashMap<String, Vec<u8>>,
     renamed: &HashMap<String, String>,
 ) -> DiscussionAnchorUpdate {
-    let original = &discussion.anchor;
     let old_body = old_files.get(&original.file).and_then(|src| {
         match resolve_symbol_lines(src, Path::new(&original.file), &original.symbol) {
             Ok((start, end)) => Some(extract_body(src, start, end)),
@@ -113,11 +136,55 @@ fn travel_one(
             None => true,
         };
         return DiscussionAnchorUpdate {
-            discussion_id: discussion.id.clone(),
+            discussion_id: discussion_id.to_string(),
             new_anchor: original.clone(),
             body_changed_since_open: body_changed,
+            ambiguous: false,
             orphaned: false,
         };
+    }
+
+    // Case 3: the file survived but the symbol name did not. Ask semantic
+    // rename analysis for a conservative, structure-backed resolution.
+    if let (Some(old_src), Some(new_src)) =
+        (old_files.get(&original.file), new_files.get(&original.file))
+        && let (Ok(old_text), Ok(new_text)) =
+            (std::str::from_utf8(old_src), std::str::from_utf8(new_src))
+    {
+        match resolve_function_rename(
+            Path::new(&original.file),
+            old_text,
+            new_text,
+            &original.symbol,
+            SimilarityMethod::Lines,
+        ) {
+            FunctionRenameResolution::Renamed(candidate) => {
+                if let Ok((start, end)) =
+                    resolve_symbol_lines(new_src, Path::new(&original.file), &candidate.new_name)
+                {
+                    let new_body = extract_body(new_src, start, end);
+                    return DiscussionAnchorUpdate {
+                        discussion_id: discussion_id.to_string(),
+                        new_anchor: SymbolAnchor::new(original.file.clone(), candidate.new_name),
+                        body_changed_since_open: old_body
+                            .as_ref()
+                            .is_none_or(|old| old != &new_body),
+                        ambiguous: false,
+                        orphaned: false,
+                    };
+                }
+            }
+            FunctionRenameResolution::Ambiguous(_) => {
+                return DiscussionAnchorUpdate {
+                    discussion_id: discussion_id.to_string(),
+                    new_anchor: original.clone(),
+                    body_changed_since_open: false,
+                    ambiguous: true,
+                    orphaned: false,
+                };
+            }
+            FunctionRenameResolution::NotRenamed => {}
+        }
     }
 
     // Case 4: file rename. The detector returned (old_path, new_path);
@@ -133,9 +200,10 @@ fn travel_one(
             None => true,
         };
         return DiscussionAnchorUpdate {
-            discussion_id: discussion.id.clone(),
+            discussion_id: discussion_id.to_string(),
             new_anchor: SymbolAnchor::new(new_path.clone(), original.symbol.clone()),
             body_changed_since_open: body_changed,
+            ambiguous: false,
             orphaned: false,
         };
     }
@@ -144,9 +212,10 @@ fn travel_one(
     // anchor in place so the discussion is still addressable in
     // history.
     DiscussionAnchorUpdate {
-        discussion_id: discussion.id.clone(),
+        discussion_id: discussion_id.to_string(),
         new_anchor: original.clone(),
         body_changed_since_open: false,
+        ambiguous: false,
         orphaned: true,
     }
 }
@@ -243,6 +312,7 @@ mod tests {
             }],
             resolution: DiscussionResolution::Open,
             body_changed_since_open: false,
+            anchor_ambiguous: false,
             orphaned: false,
             visibility: objects::object::VisibilityTier::default(),
             resolved_annotation_id: None,
@@ -310,16 +380,43 @@ mod tests {
     }
 
     #[test]
-    fn case_5_orphaned_when_symbol_renamed_in_place() {
+    fn case_3_symbol_renamed_in_place_rebinds() {
         let old = files(&[("src/lib.rs", FOO_RS)]);
-        // File present, but the original symbol no longer exists. We
-        // don't have function-level rename detection yet, so this falls
-        // through to orphaned — better than silently following a wrong
-        // symbol.
         let new = files(&[("src/lib.rs", "fn renamed() {\n    let x = 1;\n}\n")]);
         let d = vec![discussion("d1", "src/lib.rs", "foo")];
         let updates = travel_anchors(&old, &new, &d);
         assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].new_anchor.symbol, "renamed");
+        assert!(!updates[0].ambiguous);
+        assert!(!updates[0].orphaned);
+    }
+
+    #[test]
+    fn case_3_equal_symbol_rename_candidates_are_ambiguous() {
+        let old = files(&[("src/lib.rs", FOO_RS)]);
+        let new = files(&[(
+            "src/lib.rs",
+            concat!(
+                "fn bar() {\n    let x = 1;\n}\n",
+                "fn baz() {\n    let x = 1;\n}\n",
+            ),
+        )]);
+        let d = vec![discussion("d1", "src/lib.rs", "foo")];
+        let updates = travel_anchors(&old, &new, &d);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].new_anchor.symbol, "foo");
+        assert!(updates[0].ambiguous);
+        assert!(!updates[0].orphaned);
+    }
+
+    #[test]
+    fn case_5_orphaned_when_symbol_is_deleted() {
+        let old = files(&[("src/lib.rs", FOO_RS)]);
+        let new = files(&[("src/lib.rs", "// foo is gone\n")]);
+        let d = vec![discussion("d1", "src/lib.rs", "foo")];
+        let updates = travel_anchors(&old, &new, &d);
+        assert_eq!(updates.len(), 1);
+        assert!(!updates[0].ambiguous);
         assert!(updates[0].orphaned);
     }
 }

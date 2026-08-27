@@ -14,11 +14,11 @@ pub mod semantic_index;
 pub mod symbol_resolver;
 
 pub use analysis::{
-    AggregateKind, AggregatedChange, AggregationResult, HotEventKind, HotSpot, HotSpotKey,
-    HotSpotKeyValue, HotSpotParams, HotSpotsReport, SimilarityMethod, aggregate_changes,
-    analyze_actor_histogram, analyze_hot_spots, classify_modification,
-    classify_modification_with_confidence, compute_similarity, detect_file_renames,
-    detect_function_changes,
+    AggregateKind, AggregatedChange, AggregationResult, FunctionRenameCandidate,
+    FunctionRenameResolution, HotEventKind, HotSpot, HotSpotKey, HotSpotKeyValue, HotSpotParams,
+    HotSpotsReport, SimilarityMethod, aggregate_changes, analyze_actor_histogram,
+    analyze_hot_spots, classify_modification, classify_modification_with_confidence,
+    compute_similarity, detect_file_renames, detect_function_changes, resolve_function_rename,
 };
 pub use cache::{SemanticParseCache, SemanticParseCacheStats};
 pub use diff::{

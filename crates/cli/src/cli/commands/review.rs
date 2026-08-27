@@ -146,6 +146,9 @@ fn render_text(out: &ReviewShowOutput, all_signals: bool) {
             if d.body_changed_since_open {
                 suffix.push_str(" [body changed]");
             }
+            if d.anchor_ambiguous {
+                suffix.push_str(" [ambiguous anchor]");
+            }
             if d.orphaned {
                 suffix.push_str(" [orphaned]");
             }
@@ -408,6 +411,7 @@ fn discussion_view(discussion: &Discussion) -> DiscussionView {
         symbol: discussion.anchor.symbol.clone(),
         status,
         body_changed_since_open: discussion.body_changed_since_open,
+        anchor_ambiguous: discussion.anchor_ambiguous,
         orphaned: discussion.orphaned,
     }
 }

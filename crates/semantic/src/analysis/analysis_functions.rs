@@ -9,6 +9,28 @@ use super::analysis_similarity::{SimilarityMethod, compute_similarity_with_langu
 use crate::parser::{FunctionDef, Language, ParsedFile};
 
 const FUNCTION_RENAME_SIMILARITY_THRESHOLD: f64 = 0.58;
+const FUNCTION_RENAME_CANDIDATE_THRESHOLD: f64 = 0.30;
+const FUNCTION_RENAME_CONFIDENCE_MARGIN: f64 = 0.05;
+
+/// One structurally plausible target for a function that disappeared under
+/// its old name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FunctionRenameCandidate {
+    pub new_name: String,
+    pub confidence: f64,
+}
+
+/// Conservative result for resolving one function rename.
+///
+/// The general semantic diff may choose a stable best pairing so it can
+/// describe a whole file. Durable anchors have a stricter contract: only a
+/// high-confidence candidate with a clear lead may move the anchor.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FunctionRenameResolution {
+    Renamed(FunctionRenameCandidate),
+    Ambiguous(Vec<FunctionRenameCandidate>),
+    NotRenamed,
+}
 
 /// Multi-map: function name → all definitions on this side with that
 /// name, in source order.
@@ -113,6 +135,96 @@ pub fn detect_function_changes(
         new_parsed.as_ref(),
         similarity_method,
     )
+}
+
+/// Resolve the new name of one function within a single file.
+///
+/// Candidates come from parsed function definitions that are new under their
+/// qualified identity and share the original definition's container. This
+/// deliberately excludes text search and existing, unchanged neighbours.
+pub fn resolve_function_rename(
+    path: &std::path::Path,
+    old_content: &str,
+    new_content: &str,
+    old_name: &str,
+    similarity_method: SimilarityMethod,
+) -> FunctionRenameResolution {
+    let language = Language::from_path(path);
+    let Some(old_parsed) = ParsedFile::parse(old_content, language) else {
+        return FunctionRenameResolution::NotRenamed;
+    };
+    let Some(new_parsed) = ParsedFile::parse(new_content, language) else {
+        return FunctionRenameResolution::NotRenamed;
+    };
+    let old_functions = old_parsed.extract_functions();
+    let new_functions = new_parsed.extract_functions();
+    let qualified = old_name.contains("::");
+    let old_matches = old_functions
+        .iter()
+        .filter(|function| {
+            if qualified {
+                function.qualified_name() == old_name
+            } else {
+                function.name == old_name
+            }
+        })
+        .collect::<Vec<_>>();
+    let [old_function] = old_matches.as_slice() else {
+        return if old_matches.is_empty() {
+            FunctionRenameResolution::NotRenamed
+        } else {
+            FunctionRenameResolution::Ambiguous(Vec::new())
+        };
+    };
+
+    let old_identities = old_functions
+        .iter()
+        .map(FunctionDef::qualified_name)
+        .collect::<BTreeSet<_>>();
+    let old_normalized =
+        normalized_function_for_matching(&old_function.content, &old_function.name);
+    let mut candidates = new_functions
+        .iter()
+        .filter(|function| function.container == old_function.container)
+        .filter(|function| function.name != old_function.name)
+        .filter(|function| !old_identities.contains(&function.qualified_name()))
+        .filter_map(|function| {
+            let new_normalized =
+                normalized_function_for_matching(&function.content, &function.name);
+            let confidence = compute_similarity_with_language(
+                &old_normalized,
+                &new_normalized,
+                similarity_method,
+                language,
+            );
+            (confidence >= FUNCTION_RENAME_CANDIDATE_THRESHOLD).then(|| FunctionRenameCandidate {
+                new_name: if qualified {
+                    function.qualified_name()
+                } else {
+                    function.name.clone()
+                },
+                confidence,
+            })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .confidence
+            .total_cmp(&left.confidence)
+            .then_with(|| left.new_name.cmp(&right.new_name))
+    });
+
+    let Some(best) = candidates.first() else {
+        return FunctionRenameResolution::NotRenamed;
+    };
+    let clear_lead = candidates.get(1).is_none_or(|runner_up| {
+        best.confidence - runner_up.confidence >= FUNCTION_RENAME_CONFIDENCE_MARGIN
+    });
+    if best.confidence >= FUNCTION_RENAME_SIMILARITY_THRESHOLD && clear_lead {
+        FunctionRenameResolution::Renamed(best.clone())
+    } else {
+        FunctionRenameResolution::Ambiguous(candidates)
+    }
 }
 
 pub(crate) fn detect_function_changes_with_parsed(

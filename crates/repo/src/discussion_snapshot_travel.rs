@@ -15,7 +15,10 @@ use objects::{
 use oplog::OpLogBackend;
 use refs::RefBackend;
 
-use crate::{HeddleError, Repository, Result, discussion_anchor_travel::travel_anchors};
+use crate::{
+    HeddleError, Repository, Result,
+    discussion_anchor_travel::{travel_anchors, travel_symbol_anchor},
+};
 
 impl<R, O, S> Repository<R, O, S>
 where
@@ -23,6 +26,32 @@ where
     O: OpLogBackend,
     S: ObjectStore,
 {
+    /// Derive the current resolution of an append-only discussion's durable
+    /// opening anchor without rewriting that collaboration record.
+    pub fn resolve_discussion_symbol_anchor(
+        &self,
+        opened_against_state: StateId,
+        current_state: &State,
+        anchor: &objects::object::SymbolAnchor,
+    ) -> Result<(objects::object::SymbolAnchor, bool, bool)> {
+        let baseline_state = self
+            .store()
+            .get_state(&opened_against_state)?
+            .ok_or_else(|| missing_state(opened_against_state))?;
+        let baseline_tree = self
+            .store()
+            .get_tree(&baseline_state.tree)?
+            .ok_or_else(|| missing_object("tree", baseline_state.tree))?;
+        let current_tree = self
+            .store()
+            .get_tree(&current_state.tree)?
+            .ok_or_else(|| missing_object("tree", current_state.tree))?;
+        let old_files = self.collect_tree_file_bytes(&baseline_tree, None)?;
+        let new_files = self.collect_tree_file_bytes(&current_tree, None)?;
+        let update = travel_symbol_anchor(&old_files, &new_files, anchor);
+        Ok((update.new_anchor, update.ambiguous, update.orphaned))
+    }
+
     pub(crate) fn compute_and_persist_discussion_anchor_travel(
         &self,
         parent_state: &State,
@@ -78,6 +107,7 @@ where
             {
                 discussion.anchor = update.new_anchor;
                 discussion.body_changed_since_open = update.body_changed_since_open;
+                discussion.anchor_ambiguous = update.ambiguous;
                 discussion.orphaned = update.orphaned;
             }
         }
@@ -231,6 +261,7 @@ mod tests {
             }],
             resolution: DiscussionResolution::Open,
             body_changed_since_open: false,
+            anchor_ambiguous: false,
             orphaned: false,
             visibility: VisibilityTier::default(),
             resolved_annotation_id: None,
@@ -429,6 +460,41 @@ mod tests {
             vec![discussion("d1", first.id(), "src.rs", "foo")],
         );
 
+        fs::write(temp.path().join("src.rs"), "// foo was deleted\n").unwrap();
+        let second = repo
+            .snapshot_with_attribution(
+                Some("second".to_string()),
+                None,
+                Attribution::human(Principal::new("Alice", "alice@example.com")),
+            )
+            .unwrap();
+
+        let persisted = read_discussions(&repo, &second);
+        assert!(!persisted.discussions[0].body_changed_since_open);
+        assert!(persisted.discussions[0].orphaned);
+    }
+
+    #[test]
+    fn snapshot_persists_in_file_symbol_rename() {
+        let (temp, repo) = create_test_repo();
+        fs::write(
+            temp.path().join("src.rs"),
+            "fn foo() {\n    let x = 1;\n}\n",
+        )
+        .unwrap();
+        let first = repo
+            .snapshot_with_attribution(
+                Some("first".to_string()),
+                None,
+                Attribution::human(Principal::new("Alice", "alice@example.com")),
+            )
+            .unwrap();
+        attach_discussions_to_main_head(
+            &repo,
+            &first,
+            vec![discussion("d1", first.id(), "src.rs", "foo")],
+        );
+
         fs::write(
             temp.path().join("src.rs"),
             "fn bar() {\n    let x = 1;\n}\n",
@@ -443,7 +509,51 @@ mod tests {
             .unwrap();
 
         let persisted = read_discussions(&repo, &second);
-        assert!(!persisted.discussions[0].body_changed_since_open);
-        assert!(persisted.discussions[0].orphaned);
+        assert_eq!(persisted.discussions[0].anchor.symbol, "bar");
+        assert!(!persisted.discussions[0].anchor_ambiguous);
+        assert!(!persisted.discussions[0].orphaned);
+    }
+
+    #[test]
+    fn snapshot_persists_ambiguous_symbol_rename_without_picking() {
+        let (temp, repo) = create_test_repo();
+        fs::write(
+            temp.path().join("src.rs"),
+            "fn foo() {\n    let x = 1;\n}\n",
+        )
+        .unwrap();
+        let first = repo
+            .snapshot_with_attribution(
+                Some("first".to_string()),
+                None,
+                Attribution::human(Principal::new("Alice", "alice@example.com")),
+            )
+            .unwrap();
+        attach_discussions_to_main_head(
+            &repo,
+            &first,
+            vec![discussion("d1", first.id(), "src.rs", "foo")],
+        );
+
+        fs::write(
+            temp.path().join("src.rs"),
+            concat!(
+                "fn bar() {\n    let x = 1;\n}\n",
+                "fn baz() {\n    let x = 1;\n}\n",
+            ),
+        )
+        .unwrap();
+        let second = repo
+            .snapshot_with_attribution(
+                Some("ambiguous rename".to_string()),
+                None,
+                Attribution::human(Principal::new("Alice", "alice@example.com")),
+            )
+            .unwrap();
+
+        let persisted = read_discussions(&repo, &second);
+        assert_eq!(persisted.discussions[0].anchor.symbol, "foo");
+        assert!(persisted.discussions[0].anchor_ambiguous);
+        assert!(!persisted.discussions[0].orphaned);
     }
 }
