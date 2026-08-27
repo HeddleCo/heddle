@@ -94,6 +94,7 @@ pub(crate) fn create_git_checkpoint(
         require_clean_worktree: true,
         require_worktree_change: false,
         worktree_status_options: status_options,
+        known_worktree_changes: None,
         run_hooks: true,
         commit_safe_post_verify: false,
         coalesce_snapshot_and_checkpoint: false,

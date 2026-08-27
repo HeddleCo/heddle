@@ -139,11 +139,21 @@ impl TreeByteSource for FileTreeSource {
     }
 }
 
-/// Store-facing handle: either in-memory bytes or a seekable loose file.
-#[derive(Debug)]
+/// Store-facing handle for a seekable or lazily generated tree body.
 pub enum OpenedTreeBody {
     Bytes(BytesTreeSource),
     File(FileTreeSource),
+    Dynamic(Box<dyn TreeByteSource + Send>),
+}
+
+impl std::fmt::Debug for OpenedTreeBody {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bytes(source) => formatter.debug_tuple("Bytes").field(source).finish(),
+            Self::File(source) => formatter.debug_tuple("File").field(source).finish(),
+            Self::Dynamic(_) => formatter.write_str("Dynamic(..)"),
+        }
+    }
 }
 
 impl TreeByteSource for OpenedTreeBody {
@@ -151,6 +161,7 @@ impl TreeByteSource for OpenedTreeBody {
         match self {
             Self::Bytes(source) => source.read_exact_at(offset, buf),
             Self::File(source) => source.read_exact_at(offset, buf),
+            Self::Dynamic(source) => source.read_exact_at(offset, buf),
         }
     }
 
@@ -158,6 +169,7 @@ impl TreeByteSource for OpenedTreeBody {
         match self {
             Self::Bytes(source) => source.len(),
             Self::File(source) => source.len(),
+            Self::Dynamic(source) => source.len(),
         }
     }
 
@@ -165,6 +177,7 @@ impl TreeByteSource for OpenedTreeBody {
         match self {
             Self::Bytes(source) => source.integrity(),
             Self::File(source) => source.integrity(),
+            Self::Dynamic(source) => source.integrity(),
         }
     }
 
@@ -172,6 +185,7 @@ impl TreeByteSource for OpenedTreeBody {
         match self {
             Self::Bytes(source) => source.bytes_read(),
             Self::File(source) => source.bytes_read(),
+            Self::Dynamic(source) => source.bytes_read(),
         }
     }
 }

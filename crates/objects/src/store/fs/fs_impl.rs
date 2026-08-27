@@ -18,17 +18,21 @@ use super::{
         action_path, actions_dir, annotated_tags_dir, blobs_dir, hash_path, redaction_path,
         redactions_dir, state_attachment_index_lock_path, state_attachment_index_path,
         state_attachment_path, state_attachments_dir, state_path, state_visibility_dir,
-        state_visibility_path, states_dir, trees_dir,
+        state_visibility_path, states_dir, tree_lineage_path, trees_dir,
     },
 };
 use crate::{
     object::{
         Action, ActionId, AnnotatedTag, Blob, BytesTreeSource, ContentHash, FileTreeSource,
         OpenedTreeBody, State, StateAttachment, StateAttachmentId, StateId, TREE_CANONICAL_MAGIC,
-        Tree, TreeEntryReader, TreeResumeCursor, is_canonical_tree,
+        TREE_DELTA_HEADER_LEN, TREE_DELTA_MAGIC, TREE_LEAN_MAGIC, Tree, TreeByteSource,
+        TreeEntryReader, TreeResumeCursor, decode_tree_delta_header,
+        decode_tree_delta_header_prefix, decode_tree_delta_ops, is_delta_tree, is_streamable_tree,
     },
     store::{
-        HeddleError, ObjectStore, Result, SidecarStore, SnapshotCommitDescriptor, codec,
+        HeddleError, ObjectStore, Result, SidecarStore, SnapshotCommitDescriptor, TreeWrite, codec,
+        codec::{EncodedTree, TreeDeltaBase, TreeEncodingKind, TreeLineage},
+        delta_source::DeltaTreeSource,
         pack::{ObjectType, PackManager, PackObjectId},
     },
 };
@@ -62,7 +66,7 @@ fn validate_blob_bytes(data: &[u8], hash: ContentHash) -> Result<()> {
 }
 
 fn validate_tree_serialized(data: &[u8], hash: ContentHash) -> Result<Tree> {
-    let tree = codec::decode_tree_serialized(data)?;
+    let tree = codec::decode_tree_serialized_with_key(data, hash, None)?;
     let tree = validate_loaded_tree(tree)?;
     let found = tree.hash();
     if found != hash {
@@ -377,7 +381,18 @@ pub(super) fn validate_pack_entry(
             validate_annotated_tag(data, *hash).map(|_| ())
         }
         (PackObjectId::Hash(hash), ObjectType::Tree) => {
-            validate_tree_serialized(data, *hash).map(|_| ())
+            if is_delta_tree(data) {
+                let header = decode_tree_delta_header(data)?;
+                let (_, _, consumed) = decode_tree_delta_ops(data, header.op_count)?;
+                if consumed != data.len() {
+                    return Err(HeddleError::InvalidObject(
+                        "HDC1 pack tree has trailing bytes".to_string(),
+                    ));
+                }
+                Ok(())
+            } else {
+                validate_tree_serialized(data, *hash).map(|_| ())
+            }
         }
         (PackObjectId::Hash(hash), ObjectType::Action) => {
             validate_action_serialized(data, ActionId::from_hash(*hash)).map(|_| ())
@@ -581,36 +596,154 @@ impl FsStore {
         let path = hash_path(&trees_dir(&self.root), tree_id);
         if path.exists()
             && let Some((header, len)) = read_file_header(&path, TREE_CANONICAL_MAGIC.len())?
-            && header.starts_with(TREE_CANONICAL_MAGIC)
         {
-            let file = File::open(&path)?;
-            return Ok(Some(TreeEntryReader::open(
-                OpenedTreeBody::File(FileTreeSource::sequential_verify(file, len)),
-                *tree_id,
-                cursor,
-            )?));
+            if header.starts_with(TREE_CANONICAL_MAGIC) || header.starts_with(TREE_LEAN_MAGIC) {
+                let file = File::open(&path)?;
+                return Ok(Some(TreeEntryReader::open(
+                    OpenedTreeBody::File(FileTreeSource::sequential_verify(file, len)),
+                    *tree_id,
+                    cursor,
+                )?));
+            }
+            if header.starts_with(TREE_DELTA_MAGIC) {
+                let file = File::open(&path)?;
+                return self.open_delta_tree_source(
+                    *tree_id,
+                    cursor,
+                    OpenedTreeBody::File(FileTreeSource::sequential_verify(file, len)),
+                );
+            }
         }
         if path.exists()
             && let Some(data) = read_file_bytes(&path)?
         {
             let body = codec::decode_tree_body(data.as_slice())?;
-            if is_canonical_tree(&body) {
+            if is_streamable_tree(&body) {
                 return Ok(Some(TreeEntryReader::open(
                     OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(body)),
                     *tree_id,
                     cursor,
                 )?));
             }
+            if is_delta_tree(&body) {
+                return self.open_delta_tree_source(
+                    *tree_id,
+                    cursor,
+                    OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(body)),
+                );
+            }
         }
-        if let Ok(manager) = self.pack_manager().read()
-            && let Some((obj_type, data)) = manager.get_hashed_object(tree_id)?
-            && obj_type == ObjectType::Tree
-            && is_canonical_tree(&data)
+        let packed = if let Ok(manager) = self.pack_manager().read() {
+            manager.get_hashed_object(tree_id)?
+        } else {
+            None
+        };
+        if let Some((ObjectType::Tree, data)) = packed {
+            if is_streamable_tree(&data) {
+                return Ok(Some(TreeEntryReader::open(
+                    OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(data)),
+                    *tree_id,
+                    cursor,
+                )?));
+            }
+            if is_delta_tree(&data) {
+                return self.open_delta_tree_source(
+                    *tree_id,
+                    cursor,
+                    OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(data)),
+                );
+            }
+        }
+        Ok(None)
+    }
+
+    fn open_delta_tree_source(
+        &self,
+        tree_id: ContentHash,
+        cursor: Option<&TreeResumeCursor>,
+        mut delta: OpenedTreeBody,
+    ) -> Result<Option<TreeEntryReader<OpenedTreeBody>>> {
+        let object_len = usize::try_from(delta.len())
+            .map_err(|_| HeddleError::InvalidObject("HDC1 body exceeds usize".to_string()))?;
+        let mut header_bytes = [0u8; TREE_DELTA_HEADER_LEN];
+        delta.read_exact_at(0, &mut header_bytes)?;
+        let header = decode_tree_delta_header_prefix(&header_bytes, object_len)?;
+        let anchor = self
+            .try_open_materialized_tree_once(&header.anchor)?
+            .ok_or_else(|| HeddleError::NotFound(format!("tree delta anchor {}", header.anchor)))?;
+        let source = DeltaTreeSource::open(delta, anchor)?;
+        Ok(Some(TreeEntryReader::open(
+            OpenedTreeBody::Dynamic(Box::new(source)),
+            tree_id,
+            cursor,
+        )?))
+    }
+
+    fn try_open_materialized_tree_once(
+        &self,
+        tree_id: &ContentHash,
+    ) -> Result<Option<TreeEntryReader<OpenedTreeBody>>> {
+        let path = hash_path(&trees_dir(&self.root), tree_id);
+        if path.exists()
+            && let Some((header, len)) = read_file_header(&path, TREE_CANONICAL_MAGIC.len())?
+        {
+            if header.starts_with(TREE_DELTA_MAGIC) {
+                return Err(HeddleError::InvalidObject(
+                    "HDC1 anchor must be materialized; delta chains are forbidden".to_string(),
+                ));
+            }
+            if header.starts_with(TREE_CANONICAL_MAGIC) || header.starts_with(TREE_LEAN_MAGIC) {
+                let file = File::open(&path)?;
+                return Ok(Some(TreeEntryReader::open(
+                    OpenedTreeBody::File(FileTreeSource::sequential_verify(file, len)),
+                    *tree_id,
+                    None,
+                )?));
+            }
+        }
+        if path.exists()
+            && let Some(data) = read_file_bytes(&path)?
+        {
+            let body = codec::decode_tree_body(data.as_slice())?;
+            if is_delta_tree(&body) {
+                return Err(HeddleError::InvalidObject(
+                    "HDC1 anchor must be materialized; delta chains are forbidden".to_string(),
+                ));
+            }
+            if is_streamable_tree(&body) {
+                return Ok(Some(TreeEntryReader::open(
+                    OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(body)),
+                    *tree_id,
+                    None,
+                )?));
+            }
+        }
+        let packed = if let Ok(manager) = self.pack_manager().read() {
+            manager.get_hashed_object(tree_id)?
+        } else {
+            None
+        };
+        if let Some((ObjectType::Tree, data)) = packed {
+            if is_delta_tree(&data) {
+                return Err(HeddleError::InvalidObject(
+                    "HDC1 anchor must be materialized; delta chains are forbidden".to_string(),
+                ));
+            }
+            if is_streamable_tree(&data) {
+                return Ok(Some(TreeEntryReader::open(
+                    OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(data)),
+                    *tree_id,
+                    None,
+                )?));
+            }
+        }
+        if let Some(source) = &self.external_source
+            && let Some(tree) = source.get_tree(tree_id)?
         {
             return Ok(Some(TreeEntryReader::open(
-                OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(data)),
+                OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(tree.encode_lean()?)),
                 *tree_id,
-                cursor,
+                None,
             )?));
         }
         Ok(None)
@@ -635,7 +768,8 @@ impl FsStore {
             && let Some(data) = read_file_bytes(&path)?
         {
             trace!(size = data.as_slice().len(), "Tree data read");
-            let tree = validate_loaded_tree(codec::decode_tree(data.as_slice())?)?;
+            let body = codec::decode_tree_body(data.as_slice())?;
+            let tree = validate_loaded_tree(self.decode_tree_storage_body(*hash, &body)?)?;
             heddle_perf_contract::record_object_decode();
             if tree.hash() != *hash {
                 return Err(HeddleError::Corruption {
@@ -654,7 +788,7 @@ impl FsStore {
             && obj_type == ObjectType::Tree
         {
             trace!("Found tree in packfile");
-            let tree = validate_loaded_tree(codec::decode_tree_serialized(&data)?)?;
+            let tree = validate_loaded_tree(self.decode_tree_storage_body(*hash, &data)?)?;
             heddle_perf_contract::record_object_decode();
             if tree.hash() != *hash {
                 return Err(HeddleError::Corruption {
@@ -686,6 +820,115 @@ impl FsStore {
         }
 
         Ok(None)
+    }
+
+    fn decode_tree_storage_body(&self, hash: ContentHash, data: &[u8]) -> Result<Tree> {
+        let anchor = if is_delta_tree(data) {
+            let header = decode_tree_delta_header(data)?;
+            let anchor = if let Some(anchor_body) =
+                self.try_get_tree_serialized_once(&header.anchor)?
+            {
+                if is_delta_tree(&anchor_body) {
+                    return Err(HeddleError::InvalidObject(
+                        "HDC1 anchor must be materialized; delta chains are forbidden".to_string(),
+                    ));
+                }
+                let tree =
+                    codec::decode_tree_serialized_with_key(&anchor_body, header.anchor, None)?;
+                self.cache_recent_tree(header.anchor, &tree);
+                Some(tree)
+            } else if let Some(tree) = self.recent_tree(&header.anchor) {
+                // This can only be a read-through external tree: native bodies
+                // were checked above so a cached delta cannot hide a chain.
+                Some(tree)
+            } else if let Some(source) = &self.external_source {
+                source.get_tree(&header.anchor)?
+            } else {
+                None
+            };
+            Some(anchor.ok_or_else(|| {
+                HeddleError::NotFound(format!("tree delta anchor {}", header.anchor))
+            })?)
+        } else {
+            None
+        };
+        codec::decode_tree_serialized_with_key(data, hash, anchor.as_ref())
+    }
+
+    pub(super) fn encode_tree_write(&self, write: &TreeWrite) -> Result<EncodedTree> {
+        let Some(parent) = write.parent else {
+            return codec::encode_tree_hot(&write.tree, None);
+        };
+        let Some(parent_body) = self.try_get_tree_serialized_once(&parent)? else {
+            return codec::encode_tree_hot(&write.tree, None);
+        };
+        let base = if is_delta_tree(&parent_body) {
+            let header = decode_tree_delta_header(&parent_body)?;
+            let Some(lineage) = self.read_tree_lineage(&parent)? else {
+                return codec::encode_tree_hot(&write.tree, None);
+            };
+            if lineage.anchor != header.anchor || lineage.depth == 0 {
+                return codec::encode_tree_hot(&write.tree, None);
+            }
+            let Some(anchor_body) = self.try_get_tree_serialized_once(&lineage.anchor)? else {
+                return codec::encode_tree_hot(&write.tree, None);
+            };
+            if is_delta_tree(&anchor_body) {
+                return Err(HeddleError::InvalidObject(
+                    "HDC1 lineage points to another delta".to_string(),
+                ));
+            }
+            let anchor =
+                codec::decode_tree_serialized_with_key(&anchor_body, lineage.anchor, None)?;
+            Some((lineage.anchor, anchor, lineage.depth))
+        } else {
+            let anchor = codec::decode_tree_serialized_with_key(&parent_body, parent, None)?;
+            Some((parent, anchor, 0))
+        };
+        let Some((anchor_id, anchor, parent_depth)) = base else {
+            return codec::encode_tree_hot(&write.tree, None);
+        };
+        codec::encode_tree_hot(
+            &write.tree,
+            Some(TreeDeltaBase {
+                anchor_id,
+                anchor: &anchor,
+                parent_depth,
+            }),
+        )
+    }
+
+    fn read_tree_lineage(&self, hash: &ContentHash) -> Result<Option<TreeLineage>> {
+        let Some(bytes) = read_file_bytes(&tree_lineage_path(&self.root, hash))? else {
+            return Ok(None);
+        };
+        let data = bytes.as_slice();
+        if data.len() != 33 {
+            return Ok(None);
+        }
+        let anchor = match data[..32].try_into() {
+            Ok(bytes) => ContentHash::from_bytes(bytes),
+            Err(_) => return Ok(None),
+        };
+        let depth = data[32];
+        if depth == 0 || depth >= crate::object::TREE_DELTA_ANCHOR_INTERVAL {
+            return Ok(None);
+        }
+        Ok(Some(TreeLineage { anchor, depth }))
+    }
+
+    pub(super) fn remember_tree_encoding(
+        &self,
+        hash: ContentHash,
+        kind: TreeEncodingKind,
+    ) -> Result<()> {
+        let TreeEncodingKind::Delta { anchor, depth, .. } = kind else {
+            return Ok(());
+        };
+        let mut bytes = Vec::with_capacity(33);
+        bytes.extend_from_slice(anchor.as_bytes());
+        bytes.push(depth);
+        self.write_reconstructible_cache(&tree_lineage_path(&self.root, &hash), &bytes)
     }
 
     fn try_has_tree_once(&self, hash: &ContentHash) -> Result<bool> {
@@ -1225,11 +1468,18 @@ impl ObjectStore for FsStore {
         {
             return Ok(Some(reader));
         }
-        if let Some(data) = ObjectStore::get_tree_serialized(self, tree_id)?
-            && is_canonical_tree(&data)
-        {
+        if let Some(data) = ObjectStore::get_tree_serialized(self, tree_id)? {
+            let body = if is_streamable_tree(&data) {
+                data
+            } else if data.starts_with(TREE_DELTA_MAGIC) {
+                self.get_tree(tree_id)?
+                    .ok_or_else(|| HeddleError::NotFound(format!("tree {tree_id}")))?
+                    .encode_lean()?
+            } else {
+                return Ok(None);
+            };
             return Ok(Some(TreeEntryReader::open(
-                OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(data)),
+                OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(body)),
                 *tree_id,
                 cursor,
             )?));
@@ -1262,7 +1512,7 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self, data), fields(hash = %hash.short(), size = data.len()))]
     fn put_tree_serialized(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
-        let tree = validate_tree_serialized(data, hash)?;
+        let tree = validate_loaded_tree(self.decode_tree_storage_body(hash, data)?)?;
 
         let path = hash_path(&trees_dir(&self.root), &hash);
         let should_write = match read_file_bytes(&path)? {
@@ -1626,8 +1876,15 @@ impl ObjectStore for FsStore {
         tree: &Tree,
         state: &State,
     ) -> Result<()> {
-        self.put_snapshot_objects_packed_impl(blobs, Vec::new(), tree, state, Vec::new(), None)
-            .map(|_| ())
+        self.put_snapshot_objects_packed_impl(
+            blobs,
+            Vec::new(),
+            &TreeWrite::anchor(tree.clone()),
+            state,
+            Vec::new(),
+            None,
+        )
+        .map(|_| ())
     }
 
     fn put_snapshot_objects_and_attachments_packed(
@@ -1637,8 +1894,15 @@ impl ObjectStore for FsStore {
         state: &State,
         attachments: Vec<StateAttachment>,
     ) -> Result<()> {
-        self.put_snapshot_objects_packed_impl(blobs, Vec::new(), tree, state, attachments, None)
-            .map(|_| ())
+        self.put_snapshot_objects_packed_impl(
+            blobs,
+            Vec::new(),
+            &TreeWrite::anchor(tree.clone()),
+            state,
+            attachments,
+            None,
+        )
+        .map(|_| ())
     }
 
     #[instrument(skip(self))]

@@ -20,7 +20,7 @@ use crate::{
         TreeEntry,
     },
     store::{
-        ExternalObjectSource, HeddleError, ObjectStore, Result as StoreResult,
+        ExternalObjectSource, HeddleError, ObjectStore, Result as StoreResult, TreeWrite,
         pack::{
             ObjectType as PackObjectType, PackBuilder, PackIndex, PackObjectId,
             decode_tagged_entry_header,
@@ -1039,27 +1039,42 @@ fn test_tree_roundtrip() {
 }
 
 #[test]
-fn loose_htr4_open_is_sequential_and_hashes() {
-    use crate::object::{TreePageLimits, TreeStreamError};
+fn loose_hlr1_open_is_file_backed_bounded_and_hashes() {
+    use crate::object::{TREE_LEAN_MAGIC, TreePageLimits, TreeStreamError};
 
     let (_temp, store) = create_test_store();
-    let blob = ContentHash::compute(b"resume-leaf");
-    let tree = Tree::from_entries(vec![
-        TreeEntry::file("a.txt", blob, false).unwrap(),
-        TreeEntry::file("b.txt", blob, true).unwrap(),
-    ]);
+    let tree = Tree::from_entries(
+        (0..600)
+            .map(|index| {
+                TreeEntry::file(
+                    format!("module_{index:04}.rs"),
+                    ContentHash::compute(format!("resume-leaf-{index}").as_bytes()),
+                    false,
+                )
+                .unwrap()
+            })
+            .collect(),
+    );
     let hash = store.put_tree(&tree).unwrap();
+    let path = hash_path(&trees_dir(store.root()), &hash);
+    let stored = std::fs::read(&path).unwrap();
+    assert!(stored.starts_with(TREE_LEAN_MAGIC));
+
     let mut reader = store.open_tree(&hash, None).unwrap().unwrap();
     let first = reader
-        .next_page(TreePageLimits::new(1, usize::MAX).unwrap())
+        .next_page(TreePageLimits::new(100, usize::MAX).unwrap())
         .unwrap()
         .unwrap();
-    assert_eq!(first.entries[0].name(), "a.txt");
+    assert_eq!(first.entries, tree.entries()[..100]);
+    assert!(
+        reader.bytes_read() < tree.encode_canonical().unwrap().len() as u64 / 2,
+        "the first-100 porch must not transfer the full tree"
+    );
     let rest = reader
-        .next_page(TreePageLimits::new(8, usize::MAX).unwrap())
+        .next_page(TreePageLimits::new(500, usize::MAX).unwrap())
         .unwrap()
         .unwrap();
-    assert_eq!(rest.entries[0].name(), "b.txt");
+    assert_eq!(rest.entries, tree.entries()[100..]);
     reader.finish_and_verify().unwrap();
 
     let error = store
@@ -1069,6 +1084,72 @@ fn loose_htr4_open_is_sequential_and_hashes() {
         error,
         HeddleError::TreeStream(TreeStreamError::UnverifiedRange)
     ));
+}
+
+#[test]
+fn loose_hdc1_reconstructs_from_one_materialized_anchor() {
+    use crate::object::{
+        BytesTreeSource, TREE_DELTA_MAGIC, TreeEntryReader, TreePageLimits, is_delta_tree,
+    };
+
+    let (_temp, store) = create_test_store();
+    let anchor = Tree::from_entries(
+        (0..240)
+            .map(|index| {
+                TreeEntry::file(
+                    format!("module_{index:04}.rs"),
+                    ContentHash::compute(format!("anchor-{index}").as_bytes()),
+                    false,
+                )
+                .unwrap()
+            })
+            .collect(),
+    );
+    let anchor_id = store.put_tree(&anchor).unwrap();
+    let mut entries = anchor.entries().to_vec();
+    entries[117] =
+        TreeEntry::file("module_0117.rs", ContentHash::compute(b"changed"), false).unwrap();
+    let current = Tree::from_entries(entries);
+    let encoded = store
+        .encode_tree_write(&TreeWrite::descendant(current.clone(), anchor_id))
+        .unwrap();
+    assert!(is_delta_tree(&encoded.data));
+    store
+        .put_tree_serialized(&encoded.data, encoded.hash)
+        .unwrap();
+    let path = hash_path(&trees_dir(store.root()), &encoded.hash);
+    assert!(std::fs::read(&path).unwrap().starts_with(TREE_DELTA_MAGIC));
+
+    let reopened = FsStore::new(store.root());
+    let mut reader = reopened.open_tree(&encoded.hash, None).unwrap().unwrap();
+    let first = reader
+        .next_page(TreePageLimits::new(100, usize::MAX).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.entries, current.entries()[..100]);
+
+    let raw = current.encode_canonical().unwrap();
+    let mut raw_reader = TreeEntryReader::open(
+        BytesTreeSource::sequential_verify(raw),
+        current.hash(),
+        None,
+    )
+    .unwrap();
+    raw_reader
+        .next_page(TreePageLimits::new(100, usize::MAX).unwrap())
+        .unwrap();
+    assert!(
+        reader.bytes_read() <= raw_reader.bytes_read() * 2,
+        "HDC1 first-100 transfer must stay within 2x raw HTR4"
+    );
+
+    let rest = reader
+        .next_page(TreePageLimits::new(usize::MAX, usize::MAX).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(rest.entries, current.entries()[100..]);
+    reader.finish_and_verify().unwrap();
+    assert_eq!(reopened.get_tree(&encoded.hash).unwrap(), Some(current));
 }
 
 #[test]

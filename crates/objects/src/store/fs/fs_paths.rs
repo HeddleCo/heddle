@@ -17,6 +17,14 @@ pub(super) fn trees_dir(root: &Path) -> PathBuf {
     objects_dir(root).join("trees")
 }
 
+pub(super) fn tree_lineage_dir(root: &Path) -> PathBuf {
+    objects_dir(root).join("tree-lineage")
+}
+
+pub(super) fn tree_lineage_path(root: &Path, hash: &ContentHash) -> PathBuf {
+    hash_path(&tree_lineage_dir(root), hash)
+}
+
 pub(super) fn annotated_tags_dir(root: &Path) -> PathBuf {
     objects_dir(root).join("annotated-tags")
 }

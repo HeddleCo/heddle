@@ -26,9 +26,11 @@ sley.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 uuid.workspace = true
+zstd = { workspace = true, optional = true }
 
 [features]
 async-source = []
+zstd = ["dep:zstd"]
 
 [dev-dependencies]
 proptest.workspace = true

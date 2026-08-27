@@ -10,9 +10,9 @@ use crate::{
     object::{
         Action, ActionId, AnnotatedTag, Blob, BytesTreeSource, ContentHash, OpenedTreeBody, State,
         StateAttachment, StateAttachmentId, StateId, Tree, TreeEntryReader, TreeResumeCursor,
-        is_canonical_tree,
+        decode_tree_delta_header, is_delta_tree, is_streamable_tree,
     },
-    store::{HeddleError, ObjectStore, Result, SidecarStore},
+    store::{HeddleError, ObjectStore, Result, SidecarStore, codec},
     sync::RwLockExt,
 };
 
@@ -49,6 +49,20 @@ impl InMemoryStore {
     /// Create a new, empty in-memory store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn materialized_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
+        let Some(bytes) = self.trees.read_or_poisoned().get(hash).cloned() else {
+            return Ok(None);
+        };
+        if is_delta_tree(&bytes) {
+            return Err(HeddleError::InvalidObject(
+                "HDC1 anchor must be materialized; delta chains are forbidden".to_string(),
+            ));
+        }
+        Ok(Some(codec::decode_tree_serialized_with_key(
+            &bytes, *hash, None,
+        )?))
     }
 }
 
@@ -116,10 +130,20 @@ impl ObjectStore for InMemoryStore {
     }
 
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
-        match self.trees.read_or_poisoned().get(hash) {
-            Some(bytes) => Ok(Some(Tree::decode_canonical(bytes)?)),
-            None => Ok(None),
-        }
+        let Some(bytes) = self.trees.read_or_poisoned().get(hash).cloned() else {
+            return Ok(None);
+        };
+        let anchor = if is_delta_tree(&bytes) {
+            let header = decode_tree_delta_header(&bytes)?;
+            self.materialized_tree(&header.anchor)?
+        } else {
+            None
+        };
+        Ok(Some(codec::decode_tree_serialized_with_key(
+            &bytes,
+            *hash,
+            anchor.as_ref(),
+        )?))
     }
 
     fn open_tree(
@@ -130,11 +154,13 @@ impl ObjectStore for InMemoryStore {
         let Some(body) = self.trees.read_or_poisoned().get(tree_id).cloned() else {
             return Ok(None);
         };
-        if !is_canonical_tree(&body) {
-            return Err(HeddleError::InvalidObject(
-                "tree body is not the streamable canonical encoding".to_string(),
-            ));
-        }
+        let body = if is_streamable_tree(&body) {
+            body
+        } else {
+            self.get_tree(tree_id)?
+                .ok_or_else(|| HeddleError::NotFound(format!("tree {tree_id}")))?
+                .encode_lean()?
+        };
         Ok(Some(TreeEntryReader::open(
             OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(body)),
             *tree_id,
@@ -150,8 +176,20 @@ impl ObjectStore for InMemoryStore {
         let hash = tree.hash();
         self.trees
             .write_or_poisoned()
-            .insert(hash, tree.encode_canonical()?);
+            .insert(hash, tree.encode_lean()?);
         Ok(hash)
+    }
+
+    fn put_tree_serialized(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
+        let anchor = if is_delta_tree(data) {
+            let header = decode_tree_delta_header(data)?;
+            self.materialized_tree(&header.anchor)?
+        } else {
+            None
+        };
+        let tree = codec::decode_tree_serialized_with_key(data, hash, anchor.as_ref())?;
+        self.trees.write_or_poisoned().insert(hash, data.to_vec());
+        Ok(tree.hash())
     }
 
     fn has_tree(&self, hash: &ContentHash) -> Result<bool> {

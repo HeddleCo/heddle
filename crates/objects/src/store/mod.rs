@@ -5,10 +5,11 @@ use std::path::PathBuf;
 
 use crate::object::{
     Action, ActionId, AnnotatedTag, Blob, ContentHash, OpenedTreeBody, State, StateAttachment,
-    StateAttachmentId, StateId, Tree, TreeEntryReader, TreeResumeCursor, is_canonical_tree,
+    StateAttachmentId, StateId, Tree, TreeEntryReader, TreeResumeCursor, is_streamable_tree,
 };
 
 pub mod codec;
+mod delta_source;
 pub mod fs;
 pub mod liveness;
 #[cfg(any(test, feature = "memory-backend"))]
@@ -52,6 +53,28 @@ pub use writer_lease::{
     WriterLeaseReserveOutcome, WriterLeaseStatus, WriterLeaseStore, generate_writer_lease_id,
     generate_writer_lease_token,
 };
+
+/// A newly-authored tree plus its immediate parent, when capture already knows
+/// that relationship. Stores may use the hint for bounded HDC1 encoding; it
+/// never changes the tree's semantic content hash.
+#[derive(Clone, Debug)]
+pub struct TreeWrite {
+    pub tree: Tree,
+    pub parent: Option<ContentHash>,
+}
+
+impl TreeWrite {
+    pub fn anchor(tree: Tree) -> Self {
+        Self { tree, parent: None }
+    }
+
+    pub fn descendant(tree: Tree, parent: ContentHash) -> Self {
+        Self {
+            tree,
+            parent: Some(parent),
+        }
+    }
+}
 
 /// Read-only objects whose authoritative representation lives outside the
 /// native Heddle object directory. Git-overlay repositories use this seam to
@@ -311,11 +334,14 @@ pub trait ObjectStore: SidecarStore + Send + Sync {
         let Some(body) = self.get_tree_serialized(tree_id)? else {
             return Ok(None);
         };
-        if !is_canonical_tree(&body) {
-            return Err(HeddleError::InvalidObject(
-                "tree body is not the streamable canonical encoding".to_string(),
-            ));
-        }
+        let body = if is_streamable_tree(&body) {
+            body
+        } else {
+            let tree = self
+                .get_tree(tree_id)?
+                .ok_or_else(|| HeddleError::NotFound(format!("tree {tree_id}")))?;
+            tree.encode_lean()?
+        };
         Ok(Some(TreeEntryReader::open(
             OpenedTreeBody::Bytes(crate::object::BytesTreeSource::sequential_verify(body)),
             *tree_id,
@@ -365,13 +391,7 @@ pub trait ObjectStore: SidecarStore + Send + Sync {
     }
 
     fn put_tree_serialized(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
-        let tree = Tree::decode_canonical(data)?;
-        if tree.hash() != hash {
-            return Err(HeddleError::Corruption {
-                expected: hash,
-                found: tree.hash(),
-            });
-        }
+        let tree = codec::decode_tree_serialized_with_key(data, hash, None)?;
         self.put_tree(&tree)
     }
 

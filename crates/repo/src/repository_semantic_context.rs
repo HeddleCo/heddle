@@ -162,6 +162,27 @@ pub fn build_semantic_context(
         }
     }
 
+    let changed_symbols = crate::repository_semantic_corpus::collect_changed_symbols(
+        &changed_paths,
+        &prior_functions,
+        &new_functions,
+    );
+    // The signal registry emits tree-sitter-backed findings only for changed
+    // symbols. Once the changed leaf-to-root paths prove that set is empty,
+    // walking the new state's complete semantic directory forest cannot
+    // affect the result. This is especially important for capture: a change
+    // to one opaque file must stay proportional to that path instead of
+    // decoding every semantic directory node in the repository.
+    if corpus_complete && changed_symbols.is_empty() {
+        return Ok(CaptureSemanticContext {
+            prior_functions,
+            new_functions,
+            changed_paths,
+            changed_symbols,
+            corpus_complete,
+        });
+    }
+
     if corpus_complete {
         corpus_complete = crate::repository_semantic_corpus::populate_new_function_corpus(
             &overlay,
@@ -172,11 +193,6 @@ pub fn build_semantic_context(
             &mut new_functions,
         )?;
     }
-    let changed_symbols = crate::repository_semantic_corpus::collect_changed_symbols(
-        &changed_paths,
-        &prior_functions,
-        &new_functions,
-    );
 
     Ok(CaptureSemanticContext {
         prior_functions,

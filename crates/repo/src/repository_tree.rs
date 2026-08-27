@@ -10,7 +10,7 @@ use std::{
 
 use objects::{
     object::{Blob, ContentHash, State, StateId, Tree, TreeEntry},
-    store::ObjectStore,
+    store::{ObjectStore, TreeWrite},
     util::gitlink_placeholder_bytes,
     worktree::WorktreeStatus,
 };
@@ -83,7 +83,7 @@ pub(crate) type SnapshotTreeBuildOutput = (
     TreeBuildProfile,
     BTreeMap<String, ManifestFile>,
     Vec<(ContentHash, Vec<u8>)>,
-    Vec<Tree>,
+    Vec<TreeWrite>,
     Option<ChangeMonitorToken>,
 );
 
@@ -110,7 +110,7 @@ struct TreeBuildOutput {
     profile: TreeBuildProfile,
     revalidation_files: BTreeMap<String, ManifestFile>,
     pending_blobs: Vec<(ContentHash, Vec<u8>)>,
-    pending_trees: Vec<Tree>,
+    pending_trees: Vec<TreeWrite>,
     monitor_token: Option<ChangeMonitorToken>,
 }
 
@@ -121,7 +121,7 @@ fn rewrite_single_tracked_file(
     blob_hash: ContentHash,
     executable: bool,
     cached_trees: &HashMap<ContentHash, Tree>,
-    descendant_trees: &mut Vec<Tree>,
+    descendant_trees: &mut Vec<TreeWrite>,
 ) -> Result<Option<Tree>> {
     let Some((name, rest)) = components.split_first() else {
         return Ok(None);
@@ -160,7 +160,7 @@ fn rewrite_single_tracked_file(
             return Ok(None);
         };
         let updated_hash = updated_child.hash();
-        descendant_trees.push(updated_child);
+        descendant_trees.push(TreeWrite::descendant(updated_child, child_hash));
         TreeEntry::directory((*name).to_string(), updated_hash)?
     };
     let mut updated = tree.clone();
@@ -249,7 +249,7 @@ impl Repository {
             false,
             &self.default_worktree_status_options(),
         )
-            .map(|output| (output.tree, output.profile))
+        .map(|output| (output.tree, output.profile))
     }
 
     pub(crate) fn build_tree_profiled_for_snapshot_against(
@@ -257,12 +257,14 @@ impl Repository {
         dir: &Path,
         baseline_tree: Option<&Tree>,
         stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
+        known_worktree_changes: Option<&WorktreeStatus>,
     ) -> Result<SnapshotTreeBuildOutput> {
         self.build_tree_profiled_for_snapshot_against_with_options(
             dir,
             baseline_tree,
             stat_cache,
             &self.default_worktree_status_options(),
+            known_worktree_changes,
         )
     }
 
@@ -272,11 +274,15 @@ impl Repository {
         baseline_tree: Option<&Tree>,
         stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
         options: &WorktreeStatusOptions,
+        known_worktree_changes: Option<&WorktreeStatus>,
     ) -> Result<SnapshotTreeBuildOutput> {
         let fast_start = Instant::now();
-        if let Some(mut output) =
-            self.try_build_single_changed_file_tree(dir, baseline_tree, options)?
-        {
+        if let Some(mut output) = self.try_build_single_changed_file_tree(
+            dir,
+            baseline_tree,
+            options,
+            known_worktree_changes,
+        )? {
             output.profile.tree_walk_ms = fast_start.elapsed().as_millis();
             return Ok((
                 output.tree,
@@ -287,7 +293,21 @@ impl Repository {
                 output.monitor_token,
             ));
         }
-        self.build_tree_profiled_output(dir, baseline_tree, stat_cache, true, options)
+        // Capture preflight may have advanced an fsmonitor cursor while
+        // discovering a shape that the one-file rewrite cannot handle. In
+        // that case the fallback must walk authoritatively instead of asking
+        // a second monitor session for an event that was already consumed.
+        let authoritative_options = WorktreeStatusOptions {
+            fsmonitor: crate::FsMonitorSettings {
+                mode: crate::FsMonitorMode::Off,
+            },
+        };
+        let fallback_options = if known_worktree_changes.is_some() {
+            &authoritative_options
+        } else {
+            options
+        };
+        self.build_tree_profiled_output(dir, baseline_tree, stat_cache, true, fallback_options)
             .map(|output| {
                 (
                     output.tree,
@@ -310,6 +330,7 @@ impl Repository {
         dir: &Path,
         baseline_tree: Option<&Tree>,
         options: &WorktreeStatusOptions,
+        known_worktree_changes: Option<&WorktreeStatus>,
     ) -> Result<Option<TreeBuildOutput>> {
         if dir != self.root() {
             return Ok(None);
@@ -318,10 +339,24 @@ impl Repository {
             return Ok(None);
         };
         let monitor = ChangeMonitorSession::prepare(self.root(), options.fsmonitor);
-        let Some(changed) = monitor.single_changed_path() else {
-            return Ok(None);
+        let changed = match known_worktree_changes {
+            Some(status)
+                if status.modified.len() == 1
+                    && status.added.is_empty()
+                    && status.deleted.is_empty() =>
+            {
+                status.modified[0].clone()
+            }
+            Some(_) => return Ok(None),
+            None => match monitor.single_changed_path() {
+                Some(path) => PathBuf::from(path),
+                None => return Ok(None),
+            },
         };
-        let rel_path = Path::new(changed);
+        let rel_path = changed.as_path();
+        if rel_path.as_os_str().is_empty() {
+            return Ok(None);
+        }
         let components = rel_path
             .components()
             .map(|component| match component {
@@ -949,7 +984,7 @@ struct TreeBuildPolicy<'a> {
     /// Hashes already queued in `pending_blobs` so we don't double-add
     /// content-equal files (which is common: README.md, .gitkeep, etc).
     seen: HashSet<ContentHash>,
-    pending_trees: Vec<Tree>,
+    pending_trees: Vec<TreeWrite>,
     defer_object_writes: bool,
 }
 
@@ -1290,7 +1325,7 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
     fn visit_directory_output(
         &mut self,
         entry: WalkEntry<'_>,
-        _tree_entry: Option<&TreeEntry>,
+        tree_entry: Option<&TreeEntry>,
         subtree: TreeBuildOutput,
         state: &mut Self::DirectoryState,
     ) -> Result<()> {
@@ -1303,7 +1338,11 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         state.revalidation_files.extend(subtree.revalidation_files);
         let hash = subtree.tree.hash();
         if self.defer_object_writes {
-            self.pending_trees.push(subtree.tree);
+            let write = match tree_entry.and_then(TreeEntry::tree_hash) {
+                Some(parent) => TreeWrite::descendant(subtree.tree, parent),
+                None => TreeWrite::anchor(subtree.tree),
+            };
+            self.pending_trees.push(write);
         } else {
             let store_start = Instant::now();
             self.repo.store.put_tree(&subtree.tree)?;

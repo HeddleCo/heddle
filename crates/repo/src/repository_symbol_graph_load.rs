@@ -10,9 +10,7 @@ use objects::object::{
 };
 use semantic::cross_file_resolution::RepositorySemanticFile;
 
-use crate::{
-    HeddleError, Repository, Result, repository_symbol_graph_frontier::changed_file_paths,
-};
+use crate::{HeddleError, Repository, Result};
 
 impl Repository {
     pub(crate) fn changed_semantic_file_paths(
@@ -21,9 +19,88 @@ impl Repository {
         current_hash: ContentHash,
         pending_nodes: &HashMap<ContentHash, Vec<u8>>,
     ) -> Result<BTreeSet<String>> {
-        let parent = self.semantic_file_node_hashes(parent_hash, pending_nodes)?;
-        let current = self.semantic_file_node_hashes(current_hash, pending_nodes)?;
-        Ok(changed_file_paths(&parent, &current))
+        let mut changed = BTreeSet::new();
+        let mut stack = vec![(String::new(), Some(parent_hash), Some(current_hash), 0usize)];
+        while let Some((prefix, parent, current, depth)) = stack.pop() {
+            if parent == current {
+                continue;
+            }
+            if depth > crate::repository_semantic_query::MAX_SEMANTIC_TREE_DEPTH {
+                return Err(HeddleError::InvalidObject(
+                    "semantic index tree exceeds max depth".to_string(),
+                ));
+            }
+            let parent_entries = parent
+                .map(|hash| self.load_semantic_tree_with_pending(&hash, pending_nodes))
+                .transpose()?
+                .map(|node| {
+                    node.entries
+                        .into_iter()
+                        .map(|entry| (entry.name.clone(), entry))
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .unwrap_or_default();
+            let current_entries = current
+                .map(|hash| self.load_semantic_tree_with_pending(&hash, pending_nodes))
+                .transpose()?
+                .map(|node| {
+                    node.entries
+                        .into_iter()
+                        .map(|entry| (entry.name.clone(), entry))
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .unwrap_or_default();
+            let names = parent_entries
+                .keys()
+                .chain(current_entries.keys())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            for name in names {
+                let path = join_semantic_path(&prefix, &name);
+                let parent_entry = parent_entries.get(&name);
+                let current_entry = current_entries.get(&name);
+                match (parent_entry, current_entry) {
+                    (Some(parent), Some(current))
+                        if parent.kind == SemanticEntryKind::Dir
+                            && current.kind == SemanticEntryKind::Dir =>
+                    {
+                        stack.push((path, Some(parent.node), Some(current.node), depth + 1));
+                    }
+                    (Some(parent), Some(current)) => {
+                        if parent.kind == SemanticEntryKind::Dir {
+                            stack.push((path.clone(), Some(parent.node), None, depth + 1));
+                        } else if parent.kind == SemanticEntryKind::File
+                            && (current.kind != SemanticEntryKind::File
+                                || parent.node != current.node)
+                        {
+                            changed.insert(path.clone());
+                        }
+                        if current.kind == SemanticEntryKind::Dir {
+                            stack.push((path.clone(), None, Some(current.node), depth + 1));
+                        } else if current.kind == SemanticEntryKind::File
+                            && (parent.kind != SemanticEntryKind::File
+                                || parent.node != current.node)
+                        {
+                            changed.insert(path);
+                        }
+                    }
+                    (Some(parent), None) if parent.kind == SemanticEntryKind::Dir => {
+                        stack.push((path, Some(parent.node), None, depth + 1));
+                    }
+                    (None, Some(current)) if current.kind == SemanticEntryKind::Dir => {
+                        stack.push((path, None, Some(current.node), depth + 1));
+                    }
+                    (Some(parent), None) if parent.kind == SemanticEntryKind::File => {
+                        changed.insert(path);
+                    }
+                    (None, Some(current)) if current.kind == SemanticEntryKind::File => {
+                        changed.insert(path);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(changed)
     }
 
     pub(crate) fn semantic_files_with_pending(
@@ -35,21 +112,6 @@ impl Repository {
         self.walk_semantic_files(root.tree, pending_nodes, |path, entry| {
             if entry.kind == SemanticEntryKind::File {
                 files.insert(path, self.load_repository_file(&entry.node, pending_nodes)?);
-            }
-            Ok(())
-        })?;
-        Ok(files)
-    }
-
-    fn semantic_file_node_hashes(
-        &self,
-        root_hash: ContentHash,
-        pending_nodes: &HashMap<ContentHash, Vec<u8>>,
-    ) -> Result<BTreeMap<String, ContentHash>> {
-        let mut files = BTreeMap::new();
-        self.walk_semantic_files(root_hash, pending_nodes, |path, entry| {
-            if entry.kind == SemanticEntryKind::File {
-                files.insert(path, entry.node);
             }
             Ok(())
         })?;
