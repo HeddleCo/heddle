@@ -267,8 +267,11 @@ mod tests {
         for invalid in [
             "heddle.example",
             "ftp://heddle.example",
+            "http://heddle.example",
+            "http://localhost:3000",
             "https://heddle.example/path",
             "https://heddle.example/?query=1",
+            "https://user:pass@heddle.example",
         ] {
             assert!(
                 normalized_web_origin(invalid).is_err(),
@@ -278,22 +281,31 @@ mod tests {
     }
 
     #[test]
-    fn web_origin_precedence_is_explicit_then_server_then_hosted_default() {
+    fn claim_link_origin_is_explicit_https_or_the_trusted_hosted_default() {
         assert_eq!(
-            resolve_web_origin(
-                Some("https://explicit.heddle.test/"),
-                Some("https://server.heddle.test")
-            )
-            .expect("explicit origin"),
+            resolve_web_origin(Some("https://explicit.heddle.test/"), Some("https://evil.example"))
+                .expect("explicit origin"),
             "https://explicit.heddle.test"
         );
         assert_eq!(
-            resolve_web_origin(None, Some("https://server.heddle.test/")).expect("server origin"),
-            "https://server.heddle.test"
+            resolve_web_origin(None, Some("https://evil.example/")).expect("ignore unbound remote"),
+            DEFAULT_CLAIM_WEB_ORIGIN
         );
         assert_eq!(
             resolve_web_origin(None, None).expect("hosted default"),
             DEFAULT_CLAIM_WEB_ORIGIN
         );
+        assert_eq!(DEFAULT_CLAIM_WEB_ORIGIN, "https://app.heddle.sh");
+    }
+
+    #[test]
+    fn claim_link_refuses_http_even_when_explicit() {
+        for invalid in ["http://evil.example", "http://app.heddle.sh"] {
+            let error = resolve_web_origin(Some(invalid), None).expect_err("http origin");
+            assert!(
+                error.to_string().contains("https"),
+                "http refusal should name the https requirement: {error}"
+            );
+        }
     }
 }
