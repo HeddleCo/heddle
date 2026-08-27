@@ -7,7 +7,7 @@
 //! frame raw as a restart anchor and compresses only the tail.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap, HashSet},
     env,
     fs::File,
     hint::black_box,
@@ -27,7 +27,7 @@ use objects::object::{
     TREE_BLOCK_ENCODING_VERSION, TREE_HEADER_LEN, Tree, TreeEntry, TreeEntryReader, TreePageLimits,
 };
 use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempDir};
 
 const SEED: u64 = 0x6874_7234_5f62_656e;
 const SIZES: [usize; 5] = [1, 10, 100, 1_000, 10_000];
@@ -713,6 +713,9 @@ struct RealCorpus {
     discovered_trees: usize,
     skipped_trees: usize,
     trees: Vec<Tree>,
+    git_loose_bytes: usize,
+    git_packed_bytes: usize,
+    git_pack_files: usize,
 }
 
 fn git_output(repo: &Path, arguments: &[&str]) -> Result<Vec<u8>> {
@@ -773,8 +776,137 @@ fn discover_tree_ids(repo: &Path, limit: usize) -> Result<(usize, Vec<String>)> 
         }
     }
     let discovered = tree_ids.len();
-    let tree_ids = sample_evenly(&tree_ids.into_iter().collect::<Vec<_>>(), limit);
+    let tree_ids = if limit == 0 {
+        tree_ids.into_iter().collect()
+    } else {
+        sample_evenly(&tree_ids.into_iter().collect::<Vec<_>>(), limit)
+    };
     Ok((discovered, tree_ids))
+}
+
+fn git_loose_sizes(repo: &Path, tree_ids: &[String]) -> Result<usize> {
+    let temp = TempDir::new()?;
+    let object_dir = temp.path().join("objects");
+    std::fs::create_dir(&object_dir)?;
+    let mut pack = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "pack-objects",
+            "--stdout",
+            "--compression=1",
+            "--no-reuse-delta",
+            "--no-reuse-object",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let pack_stdout = pack.stdout.take().context("Git pack-objects stdout")?;
+    let unpack = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["unpack-objects", "-r"])
+        .env("GIT_OBJECT_DIRECTORY", &object_dir)
+        .stdin(Stdio::from(pack_stdout))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut requests = BufWriter::new(pack.stdin.take().context("Git pack-objects stdin")?);
+    for oid in tree_ids {
+        writeln!(requests, "{oid}")?;
+    }
+    drop(requests);
+    let unpack_output = unpack.wait_with_output()?;
+    let pack_output = pack.wait_with_output()?;
+    ensure!(
+        pack_output.status.success(),
+        "git pack-objects failed in {}: {}",
+        repo.display(),
+        String::from_utf8_lossy(&pack_output.stderr)
+    );
+    ensure!(
+        unpack_output.status.success(),
+        "git unpack-objects failed in {}: {}",
+        repo.display(),
+        String::from_utf8_lossy(&unpack_output.stderr)
+    );
+
+    let mut total = 0usize;
+    for oid in tree_ids {
+        ensure!(oid.len() > 2, "invalid Git object id {oid}");
+        let path = object_dir.join(&oid[..2]).join(&oid[2..]);
+        total = total
+            .checked_add(usize_from(
+                std::fs::metadata(&path)?.len(),
+                "Git loose size",
+            )?)
+            .context("Git loose total overflow")?;
+    }
+    Ok(total)
+}
+
+fn git_packed_sizes(repo: &Path, tree_ids: &[String]) -> Result<(usize, usize)> {
+    let git_dir = PathBuf::from(
+        std::str::from_utf8(&git_output(repo, &["rev-parse", "--absolute-git-dir"])?)?.trim(),
+    );
+    let pack_dir = git_dir.join("objects/pack");
+    let mut indexes = std::fs::read_dir(&pack_dir)
+        .with_context(|| format!("read Git pack directory {}", pack_dir.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|extension| extension == "idx"))
+        .collect::<Vec<_>>();
+    indexes.sort();
+    ensure!(
+        !indexes.is_empty(),
+        "{} has no pack indexes; run `git -C {} gc --prune=now` first",
+        repo.display(),
+        repo.display()
+    );
+
+    let wanted = tree_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut sizes = HashMap::with_capacity(wanted.len());
+    for index in &indexes {
+        let output = Command::new("git")
+            .args(["verify-pack", "-v"])
+            .arg(index)
+            .output()
+            .with_context(|| format!("verify Git pack {}", index.display()))?;
+        ensure!(
+            output.status.success(),
+            "git verify-pack failed for {}: {}",
+            index.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for line in output.stdout.split(|byte| *byte == b'\n') {
+            let fields = line
+                .split(|byte| byte.is_ascii_whitespace())
+                .filter(|field| !field.is_empty())
+                .collect::<Vec<_>>();
+            if fields.len() < 5 || fields[1] != b"tree" {
+                continue;
+            }
+            let oid = std::str::from_utf8(fields[0])?;
+            if wanted.contains(oid) {
+                let packed_size = std::str::from_utf8(fields[3])?.parse::<usize>()?;
+                sizes.entry(oid.to_string()).or_insert(packed_size);
+            }
+        }
+    }
+    let missing = tree_ids
+        .iter()
+        .filter(|oid| !sizes.contains_key(oid.as_str()))
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>();
+    ensure!(
+        missing.is_empty(),
+        "{} selected tree objects are not packed (examples: {}); run `git -C {} gc --prune=now` first",
+        tree_ids.len() - sizes.len(),
+        missing.join(","),
+        repo.display()
+    );
+    Ok((sizes.values().sum(), indexes.len()))
 }
 
 fn parse_git_tree(body: &[u8], format: GitObjectFormat) -> Result<Option<Tree>> {
@@ -856,6 +988,7 @@ fn load_real_corpus(path: &Path, limit: usize) -> Result<RealCorpus> {
     let stdout = child.stdout.take().context("Git cat-file stdout")?;
     let mut reader = BufReader::new(stdout);
     let mut trees = Vec::with_capacity(tree_ids.len());
+    let mut imported_tree_ids = Vec::with_capacity(tree_ids.len());
     let mut skipped_trees = 0usize;
     for expected_oid in &tree_ids {
         writeln!(requests, "{expected_oid}")?;
@@ -876,6 +1009,7 @@ fn load_real_corpus(path: &Path, limit: usize) -> Result<RealCorpus> {
         reader.read_exact(&mut delimiter)?;
         ensure!(delimiter == *b"\n", "missing Git batch delimiter");
         if let Some(tree) = parse_git_tree(&body, object_format)? {
+            imported_tree_ids.push(expected_oid.clone());
             trees.push(tree);
         } else {
             skipped_trees += 1;
@@ -889,6 +1023,8 @@ fn load_real_corpus(path: &Path, limit: usize) -> Result<RealCorpus> {
         path.display(),
         String::from_utf8_lossy(&output.stderr)
     );
+    let git_loose_bytes = git_loose_sizes(&path, &imported_tree_ids)?;
+    let (git_packed_bytes, git_pack_files) = git_packed_sizes(&path, &imported_tree_ids)?;
     Ok(RealCorpus {
         label,
         path,
@@ -896,6 +1032,9 @@ fn load_real_corpus(path: &Path, limit: usize) -> Result<RealCorpus> {
         discovered_trees,
         skipped_trees,
         trees,
+        git_loose_bytes,
+        git_packed_bytes,
+        git_pack_files,
     })
 }
 
@@ -1051,15 +1190,17 @@ fn measure_real_partial(
 fn validate_real_corpora(corpora: &[RealCorpus]) -> Result<()> {
     ensure!(!corpora.is_empty(), "no real repositories supplied");
     println!(
-        "REAL_REPO,label,path,object_format,discovered_trees,sampled_trees,skipped_trees,min_entries,p50_entries,p95_entries,max_entries,min_name,max_name,mean_name,blob_normal,blob_exec,tree,symlink,gitlink"
+        "REAL_REPO,label,path,object_format,discovered_trees,measured_trees,skipped_trees,pack_files,min_entries,p50_entries,p95_entries,max_entries,min_name,max_name,mean_name,blob_normal,blob_exec,tree,symlink,gitlink"
     );
     println!(
-        "REAL_SIZE,label,trees,htr4_raw,historical_loose,adaptive,compressed_trees,raw_fallback_trees,vs_raw_percent,vs_historical_percent"
+        "REAL_SIZE,label,trees,htr4_v5,htr4_raw,git_loose,git_packed,historical_loose,v5_over_git_loose,v5_over_git_packed,compressed_trees,raw_fallback_trees"
     );
 
     let mut aggregate_raw = 0usize;
     let mut aggregate_historical = 0usize;
     let mut aggregate_adaptive = 0usize;
+    let mut aggregate_git_loose = 0usize;
+    let mut aggregate_git_packed = 0usize;
     let mut aggregate_trees = 0usize;
     let mut aggregate_compressed = 0usize;
     let mut file_candidates = Vec::new();
@@ -1119,13 +1260,14 @@ fn validate_real_corpora(corpora: &[RealCorpus]) -> Result<()> {
             name_lengths.iter().sum::<usize>() as f64 / name_lengths.len() as f64
         };
         println!(
-            "REAL_REPO,{},{},{:?},{},{},{},{},{},{},{},{},{},{:.2},{},{},{},{},{}",
+            "REAL_REPO,{},{},{:?},{},{},{},{},{},{},{},{},{},{},{:.2},{},{},{},{},{}",
             corpus.label,
             corpus.path.display(),
             corpus.object_format,
             corpus.discovered_trees,
             corpus.trees.len(),
             corpus.skipped_trees,
+            corpus.git_pack_files,
             entry_counts[0],
             percentile(&entry_counts, 50, 100),
             percentile(&entry_counts, 95, 100),
@@ -1140,20 +1282,24 @@ fn validate_real_corpora(corpora: &[RealCorpus]) -> Result<()> {
             variants[4],
         );
         println!(
-            "REAL_SIZE,{},{},{},{},{},{},{},{:.3},{:.3}",
+            "REAL_SIZE,{},{},{},{},{},{},{},{:.6},{:.6},{},{}",
             corpus.label,
             corpus.trees.len(),
-            raw_total,
-            historical_total,
             adaptive_total,
+            raw_total,
+            corpus.git_loose_bytes,
+            corpus.git_packed_bytes,
+            historical_total,
+            adaptive_total as f64 / corpus.git_loose_bytes as f64,
+            adaptive_total as f64 / corpus.git_packed_bytes as f64,
             compressed_trees,
             raw_fallback_trees,
-            100.0 * (adaptive_total as f64 / raw_total as f64 - 1.0),
-            100.0 * (adaptive_total as f64 / historical_total as f64 - 1.0),
         );
         aggregate_raw += raw_total;
         aggregate_historical += historical_total;
         aggregate_adaptive += adaptive_total;
+        aggregate_git_loose += corpus.git_loose_bytes;
+        aggregate_git_packed += corpus.git_packed_bytes;
         aggregate_trees += corpus.trees.len();
         aggregate_compressed += compressed_trees;
 
@@ -1162,10 +1308,10 @@ fn validate_real_corpora(corpora: &[RealCorpus]) -> Result<()> {
     }
 
     println!(
-        "REAL_SIZE,ALL,{aggregate_trees},{aggregate_raw},{aggregate_historical},{aggregate_adaptive},{aggregate_compressed},{},{:.3},{:.3}",
+        "REAL_SIZE,ALL,{aggregate_trees},{aggregate_adaptive},{aggregate_raw},{aggregate_git_loose},{aggregate_git_packed},{aggregate_historical},{:.6},{:.6},{aggregate_compressed},{}",
+        aggregate_adaptive as f64 / aggregate_git_loose as f64,
+        aggregate_adaptive as f64 / aggregate_git_packed as f64,
         aggregate_trees - aggregate_compressed,
-        100.0 * (aggregate_adaptive as f64 / aggregate_raw as f64 - 1.0),
-        100.0 * (aggregate_adaptive as f64 / aggregate_historical as f64 - 1.0),
     );
     ensure!(
         aggregate_adaptive < aggregate_historical,
@@ -1381,6 +1527,10 @@ fn main() -> Result<()> {
     println!("META,target_sample_ms,{}", SAMPLE_TIME.as_millis());
     println!("META,block_entries,{block_entries}");
     println!("META,real_tree_limit_per_repo,{real_tree_limit}");
+    println!("META,git_loose,actual_git_loose_object_file_bytes(tree_header+body)");
+    println!(
+        "META,git_packed,sum_verify_pack_object_record_bytes_excluding_pack_and_index_fixed_overhead"
+    );
     println!("META,dictionary,{}", dictionary.name);
     println!("META,dictionary_bytes,{}", dictionary.bytes.len());
     println!("META,dictionary_blake3,{}", blake3::hash(dictionary.bytes));
