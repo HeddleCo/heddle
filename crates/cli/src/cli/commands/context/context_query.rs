@@ -17,10 +17,9 @@ use verbs::{
 
 use super::{
     AnnotationHistoryOutput, AnnotationOutput, ContextListRow, RevisionOutput,
-    context_root_for_state, parse_scope, print_context_get, resolve_state, resolve_state_id,
-    target_label,
+    annotation_anchor_candidates, annotation_anchor_status_label, context_root_for_state,
+    parse_scope, print_context_get, resolve_state, resolve_state_id, target_label,
 };
-use crate::cli::commands::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::cli::{
     Cli,
     commands::{
@@ -28,6 +27,7 @@ use crate::cli::{
         native_scope::{
             AnnotationStore, AnnotationSurface, open_annotation_store, report_absent_store,
         },
+        next_action::{NextActionValidationContext, write_full_command_json},
     },
     should_output_json,
 };
@@ -191,6 +191,26 @@ pub async fn cmd_context_list(
                 annotations.len(),
                 if annotations.len() == 1 { "" } else { "s" }
             );
+            for annotation in annotations {
+                if annotation_anchor_status_label(&annotation.anchor_status) == "resolved" {
+                    continue;
+                }
+                let candidates = annotation_anchor_candidates(&annotation.anchor_status);
+                if candidates.is_empty() {
+                    println!(
+                        "    {} anchor: {}",
+                        annotation.annotation_id,
+                        annotation_anchor_status_label(&annotation.anchor_status)
+                    );
+                } else {
+                    println!(
+                        "    {} anchor: {} ({})",
+                        annotation.annotation_id,
+                        annotation_anchor_status_label(&annotation.anchor_status),
+                        candidates.join(", ")
+                    );
+                }
+            }
         }
     }
 
@@ -344,22 +364,31 @@ pub async fn cmd_context_check(
                 StalenessStatus::Unknown => unknown += 1,
                 StalenessStatus::SourceChanged { .. }
                 | StalenessStatus::SymbolMissing { .. }
+                | StalenessStatus::AmbiguousFileMove { .. }
                 | StalenessStatus::FileMissing => {
                     stale += 1;
                     let reason = match &status {
                         StalenessStatus::SourceChanged { .. } => "source_changed",
                         StalenessStatus::SymbolMissing { .. } => "symbol_missing",
+                        StalenessStatus::AmbiguousFileMove { .. } => "ambiguous_file_move",
                         StalenessStatus::FileMissing => "file_missing",
                         StalenessStatus::Unknown | StalenessStatus::Fresh => unreachable!(),
                     };
                     let (_, target_label) = target_label(&entry.target);
                     if should_output_json(cli, None) {
+                        let candidate_paths = match &status {
+                            StalenessStatus::AmbiguousFileMove { candidate_paths } => {
+                                candidate_paths.clone()
+                            }
+                            _ => Vec::new(),
+                        };
                         issues.push(serde_json::json!({
                             "target": target_label,
                             "scope": annotation.scope.to_string(),
                             "reason": reason,
                             "annotation_id": annotation.annotation_id,
                             "content": current.content.chars().take(80).collect::<String>(),
+                            "candidate_paths": candidate_paths,
                         }));
                     } else {
                         println!("  ✗ {}  {}  {}", target_label, annotation.scope, reason,);

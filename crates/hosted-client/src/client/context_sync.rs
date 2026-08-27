@@ -839,6 +839,7 @@ async fn pull_one_rpc(
         supersedes_rewrite_pct: server.supersedes_rewrite_pct,
         visibility: objects::object::VisibilityTier::default(),
         resolved_from_discussion: None,
+        anchor_status: objects::object::AnnotationAnchorStatus::default(),
     };
     pull_one_annotation(
         repo,
@@ -927,6 +928,7 @@ fn pull_one_annotation(
                 supersedes_rewrite_pct: server.supersedes_rewrite_pct,
                 visibility: server.visibility.clone(),
                 resolved_from_discussion: server.resolved_from_discussion.clone(),
+                anchor_status: server.anchor_status.clone(),
             });
             true
         }

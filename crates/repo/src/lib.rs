@@ -24,6 +24,10 @@ mod ci_runner_trust;
 pub mod clone_intent;
 mod collaboration_migration;
 mod collaboration_store;
+#[cfg(feature = "tree-sitter-symbols")]
+mod context_anchor_travel;
+#[cfg(feature = "tree-sitter-symbols")]
+mod context_snapshot_travel;
 pub mod daemon;
 #[cfg(feature = "tree-sitter-symbols")]
 mod discussion_anchor_travel;

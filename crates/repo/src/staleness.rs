@@ -15,7 +15,7 @@ pub use objects::object::{
 use objects::store::AsyncObjectSource;
 use objects::{
     object::{
-        Annotation, Blob, ContextTarget, LeafPolicy, State, Tree,
+        Annotation, AnnotationAnchorStatus, Blob, ContextTarget, LeafPolicy, State, Tree,
         annotation_status_for_source_with_symbol_resolver, resolve_tree_path,
     },
     store::ObjectSource,
@@ -36,6 +36,11 @@ pub fn check_annotation_staleness(
     let Some(file_path) = target.path() else {
         return Ok(StalenessStatus::Unknown);
     };
+    if let AnnotationAnchorStatus::Ambiguous { candidate_paths } = &annotation.anchor_status {
+        return Ok(StalenessStatus::AmbiguousFileMove {
+            candidate_paths: candidate_paths.clone(),
+        });
+    }
     let file_path = Path::new(file_path);
     if annotation
         .current_revision()

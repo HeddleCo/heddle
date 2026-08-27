@@ -118,8 +118,8 @@ pub use state_attachment::{
 };
 pub use state_attribution::{Agent, Attribution, Principal};
 pub use state_context::{
-    Annotation, AnnotationKind, AnnotationRevision, AnnotationScope, AnnotationStatus, ContextBlob,
-    ContextError, ContextTarget,
+    Annotation, AnnotationAnchorStatus, AnnotationKind, AnnotationRevision, AnnotationScope,
+    AnnotationStatus, ContextBlob, ContextError, ContextTarget,
 };
 pub use state_core::{
     ChangeLineage, ChangeLineageKind, SignatureStatus, State, StateSignature, Status, Verification,
