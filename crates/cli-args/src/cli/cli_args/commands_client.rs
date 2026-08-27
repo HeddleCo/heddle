@@ -14,8 +14,9 @@ pub struct ClaimArgs {
     #[arg(long)]
     pub server: Option<String>,
 
-    /// Web origin used to build the human claim link. Defaults to
-    /// `https://app.heddle.sh`.
+    /// HTTPS origin used to build the human claim link. Defaults to
+    /// `https://app.heddle.sh`. This flag is the only override; a hosted
+    /// response cannot choose the destination.
     #[arg(long, value_name = "ORIGIN")]
     pub web_origin: Option<String>,
 

@@ -334,7 +334,6 @@ async fn remint_uses_claim_state_when_the_keystore_row_is_missing() {
         "subject-1".to_string(),
         "quiet-otter".to_string(),
         identity.node_id().to_string(),
-        None,
     ))
     .expect("store claim state");
     login(&TextCtx, server, false, None, false)

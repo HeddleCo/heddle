@@ -34,7 +34,7 @@ enum ClaimWaitOutcome {
 pub(crate) async fn cmd_claim(args: ClaimArgs) -> Result<()> {
     let server = resolve_server(args.server.as_deref())?;
     let state = claimable_state(&server)?;
-    let web_origin = resolve_web_origin(args.web_origin.as_deref(), state.web_origin.as_deref())?;
+    let web_origin = resolve_web_origin(args.web_origin.as_deref())?;
     validate_stored_claim_signer(&state)?;
 
     let identity = agent_node_identity::load()?
@@ -208,7 +208,7 @@ fn deactivate_offer(authorization_hash: &str) -> Result<()> {
 
 fn normalized_web_origin(value: &str) -> Result<String> {
     let parsed = reqwest::Url::parse(value).context("--web-origin must be an absolute URL")?;
-    if !matches!(parsed.scheme(), "http" | "https")
+    if parsed.scheme() != "https"
         || parsed.host_str().is_none()
         || !parsed.username().is_empty()
         || parsed.password().is_some()
@@ -216,17 +216,18 @@ fn normalized_web_origin(value: &str) -> Result<String> {
         || parsed.query().is_some()
         || parsed.fragment().is_some()
     {
-        bail!("--web-origin must contain only an http(s) scheme, host, and optional port");
+        bail!("--web-origin must be an https origin (scheme, host, and optional port only)");
     }
     Ok(parsed.origin().ascii_serialization())
 }
 
-fn resolve_web_origin(explicit: Option<&str>, server_supplied: Option<&str>) -> Result<String> {
-    normalized_web_origin(
-        explicit
-            .or(server_supplied)
-            .unwrap_or(DEFAULT_CLAIM_WEB_ORIGIN),
-    )
+/// Claim-link destination for the local bearer secret.
+///
+/// Remote `CreateAgentAccountResponse.web_origin` is not consulted. The
+/// trusted default is [`DEFAULT_CLAIM_WEB_ORIGIN`]; only an explicit
+/// `--web-origin` may override it, and that override must be `https`.
+fn resolve_web_origin(explicit: Option<&str>) -> Result<String> {
+    normalized_web_origin(explicit.unwrap_or(DEFAULT_CLAIM_WEB_ORIGIN))
 }
 
 fn claim_link(web_origin: &str, node_id: &str, secret: &str) -> String {
@@ -283,16 +284,11 @@ mod tests {
     #[test]
     fn claim_link_origin_is_explicit_https_or_the_trusted_hosted_default() {
         assert_eq!(
-            resolve_web_origin(Some("https://explicit.heddle.test/"), Some("https://evil.example"))
-                .expect("explicit origin"),
+            resolve_web_origin(Some("https://explicit.heddle.test/")).expect("explicit origin"),
             "https://explicit.heddle.test"
         );
         assert_eq!(
-            resolve_web_origin(None, Some("https://evil.example/")).expect("ignore unbound remote"),
-            DEFAULT_CLAIM_WEB_ORIGIN
-        );
-        assert_eq!(
-            resolve_web_origin(None, None).expect("hosted default"),
+            resolve_web_origin(None).expect("hosted default"),
             DEFAULT_CLAIM_WEB_ORIGIN
         );
         assert_eq!(DEFAULT_CLAIM_WEB_ORIGIN, "https://app.heddle.sh");
@@ -301,7 +297,7 @@ mod tests {
     #[test]
     fn claim_link_refuses_http_even_when_explicit() {
         for invalid in ["http://evil.example", "http://app.heddle.sh"] {
-            let error = resolve_web_origin(Some(invalid), None).expect_err("http origin");
+            let error = resolve_web_origin(Some(invalid)).expect_err("http origin");
             assert!(
                 error.to_string().contains("https"),
                 "http refusal should name the https requirement: {error}"

@@ -40,7 +40,6 @@ fn state(node_id: String) -> ClaimState {
         "subject-7".into(),
         "steady-heron".into(),
         node_id,
-        None,
     )
 }
 
@@ -495,7 +494,6 @@ fn store_production_claim_state(activate: bool) -> (Vec<u8>, Ed25519Signer) {
         root.subject,
         "steady-heron".to_string(),
         identity.node_id().to_string(),
-        None,
     );
     let secret = if activate {
         claim
