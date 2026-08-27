@@ -7,12 +7,13 @@ mod golden;
 mod prop;
 mod restart;
 
-use std::path::Path;
+use std::{cell::RefCell, collections::HashMap, path::Path};
 
 use crate::blame::{
     BlamePreparation, BlameSliceAdvance, BlameSliceError, BlameSliceLimits,
     advance_file_blame_slice, blame_file, prepare_file_blame,
 };
+use crate::object::{Blob, ContentHash, ObjectSource, State, StateId, Tree};
 use crate::util::ResourceKind;
 
 use fixture::{principals_at, put_state_with_file, store};
@@ -106,6 +107,76 @@ fn no_overlap_parent_is_not_a_processed_frontier() {
             panic!("no-overlap parent must not become a next frontier")
         }
     }
+}
+
+struct CountingSource<'source> {
+    inner: &'source crate::store::InMemoryStore,
+    trees: RefCell<HashMap<ContentHash, u32>>,
+    states: RefCell<HashMap<StateId, u32>>,
+    blobs: RefCell<HashMap<ContentHash, u32>>,
+    blob_sizes: RefCell<HashMap<ContentHash, u32>>,
+}
+
+impl<'source> CountingSource<'source> {
+    fn new(inner: &'source crate::store::InMemoryStore) -> Self {
+        Self {
+            inner,
+            trees: RefCell::new(HashMap::new()),
+            states: RefCell::new(HashMap::new()),
+            blobs: RefCell::new(HashMap::new()),
+            blob_sizes: RefCell::new(HashMap::new()),
+        }
+    }
+}
+
+impl ObjectSource for CountingSource<'_> {
+    fn get_tree(&self, hash: &ContentHash) -> crate::error::Result<Option<Tree>> {
+        *self.trees.borrow_mut().entry(*hash).or_default() += 1;
+        ObjectSource::get_tree(self.inner, hash)
+    }
+
+    fn get_state(&self, id: &StateId) -> crate::error::Result<Option<State>> {
+        *self.states.borrow_mut().entry(*id).or_default() += 1;
+        ObjectSource::get_state(self.inner, id)
+    }
+
+    fn get_blob(&self, hash: &ContentHash) -> crate::error::Result<Option<Blob>> {
+        *self.blobs.borrow_mut().entry(*hash).or_default() += 1;
+        ObjectSource::get_blob(self.inner, hash)
+    }
+
+    fn decoded_blob_len(&self, hash: &ContentHash) -> crate::error::Result<Option<u64>> {
+        *self.blob_sizes.borrow_mut().entry(*hash).or_default() += 1;
+        ObjectSource::decoded_blob_len(self.inner, hash)
+    }
+}
+
+#[test]
+fn oneshot_blame_decodes_each_object_once() {
+    let store = store();
+    let parent = put_state_with_file(&store, "fixture.txt", b"old line\n", Vec::new(), "alice");
+    let tip = put_state_with_file(
+        &store,
+        "fixture.txt",
+        b"old line\nnew line\n",
+        vec![parent.id()],
+        "bob",
+    );
+    let path = Path::new("fixture.txt");
+    let expected = blame_file(&store, &tip, path, BlameSliceLimits::unlimited()).unwrap();
+    let source = CountingSource::new(&store);
+
+    let actual = blame_file(&source, &tip, path, BlameSliceLimits::unlimited()).unwrap();
+
+    assert_eq!(actual, expected, "memoization must not change provenance");
+    for calls in [&source.trees, &source.blobs, &source.blob_sizes] {
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 2, "tip and parent objects must be loaded");
+        assert!(calls.values().all(|count| *count == 1));
+    }
+    let state_calls = source.states.borrow();
+    assert_eq!(state_calls.len(), 2, "tip and parent states must be loaded");
+    assert!(state_calls.values().all(|count| *count == 1));
 }
 
 #[test]
