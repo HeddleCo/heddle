@@ -5,7 +5,7 @@ use std::{
 };
 
 use objects::{
-    object::{Blob, ThreadName, Tree, TreeEntry},
+    object::{Blob, ThreadName, Tree, TreeEntry, is_delta_tree},
     store::{ObjectStore, ShallowInfo},
     util::{gitlink_placeholder_bytes, symlink_target_bytes},
 };
@@ -29,6 +29,55 @@ fn create_test_repo() -> (TempDir, Repository) {
     let temp_dir = TempDir::new().unwrap();
     let repo = Repository::init_default(temp_dir.path()).unwrap();
     (temp_dir, repo)
+}
+
+#[test]
+fn snapshot_modify_then_revert_keeps_epoch_anchor_readable_after_reopen() {
+    let (temp_dir, repo) = create_test_repo();
+    for index in 0..128 {
+        fs::write(
+            temp_dir.path().join(format!("fixture-{index:03}.txt")),
+            format!("unchanged-{index}\n"),
+        )
+        .unwrap();
+    }
+    let root = temp_dir.path().join("root.txt");
+
+    fs::write(&root, "v1\n").unwrap();
+    let anchor_state = repo.snapshot(Some("anchor".to_string()), None).unwrap();
+    let anchor_tree = repo.store().get_tree(&anchor_state.tree).unwrap().unwrap();
+    fs::write(&root, "v2\n").unwrap();
+    let descendant_state = repo.snapshot(Some("descendant".to_string()), None).unwrap();
+    let descendant_tree = repo
+        .store()
+        .get_tree(&descendant_state.tree)
+        .unwrap()
+        .unwrap();
+    assert!(
+        is_delta_tree(
+            &repo
+                .store()
+                .get_tree_serialized(&descendant_state.tree)
+                .unwrap()
+                .unwrap()
+        ),
+        "fixture must store the modified tree as HDC1",
+    );
+
+    fs::write(&root, "v1\n").unwrap();
+    let reverted_state = repo.snapshot(Some("revert".to_string()), None).unwrap();
+    assert_eq!(reverted_state.tree, anchor_state.tree);
+    drop(repo);
+
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    assert_eq!(
+        reopened.store().get_tree(&anchor_state.tree).unwrap(),
+        Some(anchor_tree),
+    );
+    assert_eq!(
+        reopened.store().get_tree(&descendant_state.tree).unwrap(),
+        Some(descendant_tree),
+    );
 }
 
 #[cfg(unix)]

@@ -564,6 +564,77 @@ fn install_pack_rejects_hash_mismatch_without_partial_commit() {
 }
 
 #[test]
+fn install_pack_rejects_hdc1_result_hash_mismatch() {
+    let (_temp, store) = create_test_store();
+    let anchor = Tree::from_entries(
+        (0..240)
+            .map(|index| {
+                TreeEntry::file(
+                    format!("module_{index:04}.rs"),
+                    ContentHash::compute(format!("anchor-{index}").as_bytes()),
+                    false,
+                )
+                .unwrap()
+            })
+            .collect(),
+    );
+    let anchor_id = store.put_tree(&anchor).unwrap();
+    let mut entries = anchor.entries().to_vec();
+    entries[117] =
+        TreeEntry::file("module_0117.rs", ContentHash::compute(b"changed"), false).unwrap();
+    let result = Tree::from_entries(entries);
+    let encoded = store
+        .encode_tree_write(&TreeWrite::descendant(result.clone(), anchor_id))
+        .unwrap();
+    assert!(crate::object::is_delta_tree(&encoded.data));
+
+    let claimed_id = Tree::from_entries(Vec::new()).hash();
+    assert_ne!(claimed_id, result.hash());
+    let mut builder = PackBuilder::new(CompressionConfig::disabled());
+    builder.add(claimed_id, PackObjectType::Tree, encoded.data);
+    let (pack_data, index_data, _) = builder.build().unwrap();
+
+    let error = store
+        .install_pack(&pack_data, &index_data)
+        .expect_err("HDC1 stored under a mismatched result id must be rejected");
+    assert!(
+        matches!(error, HeddleError::TreeStream(crate::object::TreeStreamError::HashMismatch { expected, found }) if expected == claimed_id && found == result.hash()),
+        "expected reconstructed HDC1 hash mismatch, got {error:?}",
+    );
+}
+
+#[test]
+fn install_pack_rejects_hdc1_stored_under_its_anchor_id() {
+    let (_temp, store) = create_test_store();
+    let anchor = Tree::from_entries(
+        (0..240)
+            .map(|index| {
+                TreeEntry::file(
+                    format!("module_{index:04}.rs"),
+                    ContentHash::compute(format!("anchor-{index}").as_bytes()),
+                    false,
+                )
+                .unwrap()
+            })
+            .collect(),
+    );
+    let anchor_id = store.put_tree(&anchor).unwrap();
+    let self_delta = crate::object::encode_tree_delta(anchor_id, &anchor, &anchor, &[]).unwrap();
+    let mut builder = PackBuilder::new(CompressionConfig::disabled());
+    builder.add(anchor_id, PackObjectType::Tree, self_delta);
+    let (pack_data, index_data, _) = builder.build().unwrap();
+
+    let error = store
+        .install_pack(&pack_data, &index_data)
+        .expect_err("an HDC1 object must not shadow its own materialized anchor");
+    assert!(
+        matches!(error, HeddleError::InvalidObject(ref message) if message.contains("result id must differ")),
+        "expected self-anchor admission rejection, got {error:?}",
+    );
+    assert_eq!(store.get_tree(&anchor_id).unwrap(), Some(anchor));
+}
+
+#[test]
 fn install_pack_accepts_valid_mixed_native_pack() {
     let (_temp, store) = create_test_store();
 

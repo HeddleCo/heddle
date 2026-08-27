@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use objects::{
-    object::{AnnotatedTag, State, Tree},
+    object::{AnnotatedTag, State},
     store::ObjectStore,
 };
 
@@ -237,18 +237,15 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
             store.put_blob_bytes_with_hash(&data.data, *hash)?;
         }
         (ObjectId::Hash(hash), ObjectType::Tree) => {
-            let tree = Tree::decode_canonical(&data.data).map_err(|error| {
-                ProtocolError::InvalidState(format!("invalid tree object: {error}"))
-            })?;
-            tree.validate().map_err(|error| {
-                ProtocolError::InvalidState(format!("invalid tree object: {error}"))
-            })?;
-            if &tree.hash() != hash {
-                return Err(ProtocolError::InvalidState(
-                    "tree hash mismatch".to_string(),
-                ));
-            }
-            store.put_tree_serialized(&data.data, *hash)?;
+            store
+                .put_tree_serialized(&data.data, *hash)
+                .map_err(|error| match error {
+                    objects::error::HeddleError::Corruption { .. }
+                    | objects::error::HeddleError::TreeStream(
+                        objects::object::TreeStreamError::HashMismatch { .. },
+                    ) => ProtocolError::InvalidState("tree hash mismatch".to_string()),
+                    error => ProtocolError::InvalidState(format!("invalid tree object: {error}")),
+                })?;
         }
         (ObjectId::Hash(hash), ObjectType::AnnotatedTag) => {
             let tag = AnnotatedTag::decode_current_msgpack(&data.data)
@@ -394,7 +391,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tree_data.obj_type, ObjectType::Tree);
-        assert_eq!(Tree::decode_canonical(&tree_data.data).unwrap(), tree);
+        assert_eq!(
+            objects::store::codec::decode_tree_serialized_with_key(
+                &tree_data.data,
+                tree_hash,
+                None,
+            )
+            .unwrap(),
+            tree,
+        );
         store_received_object(&dest, &tree_data).unwrap();
         assert_eq!(dest.get_tree(&tree_hash).unwrap().unwrap(), tree);
 

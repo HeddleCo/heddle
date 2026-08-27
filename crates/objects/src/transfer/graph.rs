@@ -9,6 +9,7 @@ use crate::{
         AnnotatedTag, BindingDelta, ContentHash, RedactionsBlob, ReverseDependencyIndex,
         SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode, State, StateAttachment,
         StateAttachmentBody, StateAttachmentId, StateAttachmentKind, StateId, TreeEntryTarget,
+        decode_tree_delta_header, is_delta_tree,
     },
     store::{ObjectStore, pack::ObjectType as PackObjectType},
 };
@@ -424,7 +425,8 @@ enum StateClosureEvent<'a> {
     },
     Tree {
         hash: ContentHash,
-        tree: &'a crate::object::Tree,
+        storage_size: u64,
+        delta_base: Option<ContentHash>,
     },
     Blob {
         hash: ContentHash,
@@ -577,10 +579,16 @@ fn walk_tree_closure_filtered(
             id: tree_hash.to_hex(),
         })?;
 
+    let (storage_size, delta_base) = tree_storage_metadata(store, tree_hash)?;
     visit(StateClosureEvent::Tree {
         hash: tree_hash,
-        tree: &tree,
+        storage_size,
+        delta_base,
     })?;
+
+    if let Some(anchor) = delta_base {
+        walk_tree_storage_anchor(store, anchor, seen, visit)?;
+    }
 
     for entry in tree.entries() {
         match entry.target() {
@@ -598,6 +606,59 @@ fn walk_tree_closure_filtered(
     }
 
     Ok(())
+}
+
+fn tree_storage_metadata(
+    store: &impl ObjectStore,
+    tree_hash: ContentHash,
+) -> Result<(u64, Option<ContentHash>)> {
+    let body =
+        store
+            .get_tree_serialized(&tree_hash)?
+            .ok_or_else(|| HeddleError::MissingObject {
+                object_type: "tree".to_string(),
+                id: tree_hash.to_hex(),
+            })?;
+    let delta_base = if is_delta_tree(&body) {
+        let header = decode_tree_delta_header(&body)?;
+        if header.anchor == tree_hash {
+            return Err(HeddleError::InvalidObject(
+                "HDC1 result id must differ from its anchor id".to_string(),
+            ));
+        }
+        Some(header.anchor)
+    } else {
+        None
+    };
+    Ok((body.len() as u64, delta_base))
+}
+
+fn walk_tree_storage_anchor(
+    store: &impl ObjectStore,
+    anchor_hash: ContentHash,
+    seen: &mut HashSet<ContentHash>,
+    visit: &mut impl for<'event> FnMut(StateClosureEvent<'event>) -> Result<()>,
+) -> Result<()> {
+    if !seen.insert(anchor_hash) {
+        return Ok(());
+    }
+    if store.get_tree(&anchor_hash)?.is_none() {
+        return Err(HeddleError::MissingObject {
+            object_type: "tree delta anchor".to_string(),
+            id: anchor_hash.to_hex(),
+        });
+    }
+    let (storage_size, delta_base) = tree_storage_metadata(store, anchor_hash)?;
+    if delta_base.is_some() {
+        return Err(HeddleError::InvalidObject(
+            "HDC1 anchor must be materialized; delta chains are forbidden".to_string(),
+        ));
+    }
+    visit(StateClosureEvent::Tree {
+        hash: anchor_hash,
+        storage_size,
+        delta_base: None,
+    })
 }
 
 fn walk_blob_filtered(
@@ -828,15 +889,16 @@ fn object_info_from_event(
                 delta_base: None,
             }))
         }
-        StateClosureEvent::Tree { hash, tree } => {
-            let tree_bytes = tree.encode_canonical().map_err(HeddleError::from)?;
-            Ok(Some(ObjectInfo {
-                id: ObjectId::Hash(hash),
-                obj_type: ObjectType::Tree,
-                size: tree_bytes.len() as u64,
-                delta_base: None,
-            }))
-        }
+        StateClosureEvent::Tree {
+            hash,
+            storage_size,
+            delta_base,
+        } => Ok(Some(ObjectInfo {
+            id: ObjectId::Hash(hash),
+            obj_type: ObjectType::Tree,
+            size: storage_size,
+            delta_base,
+        })),
         StateClosureEvent::Blob { hash, .. } => {
             let Some(blob) = store.get_blob(&hash)? else {
                 if blob_has_purge_evidence(store, &hash)? {
