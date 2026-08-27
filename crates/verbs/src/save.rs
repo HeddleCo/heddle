@@ -64,6 +64,9 @@ pub struct CaptureOptions {
 pub struct CaptureAttribution {
     pub attribution: Attribution,
     pub principal_source: String,
+    /// Native harness session from the workspace identity stamp. This remains
+    /// distinct from Heddle `Session.id` and only advances the last-turn cursor.
+    pub harness_session_id: Option<String>,
 }
 
 /// Capture-specific timings owned by the operation implementation.
@@ -576,6 +579,12 @@ pub fn capture(
     let preflight_ms = preflight_started.elapsed().as_millis();
     let attribution_started = Instant::now();
     let resolved_attribution = resolve_attribution(repo)?;
+    let harness_session_id = resolved_attribution
+        .attribution
+        .agent
+        .is_some()
+        .then(|| resolved_attribution.harness_session_id.clone())
+        .flatten();
     let attribution_ms = attribution_started.elapsed().as_millis();
 
     let plan = SavePlan {
@@ -604,6 +613,11 @@ pub fn capture(
     let execute_save_started = Instant::now();
     let save = execute_save(repo, plan).map_err(map_capture_error)?;
     let execute_save_ms = execute_save_started.elapsed().as_millis();
+    if let Some(session_id) = harness_session_id
+        && let Err(error) = crate::record_last_turn_capture(repo, &session_id, save.state_id)
+    {
+        tracing::warn!(%error, "could not update reconstructible last-turn anchor");
+    }
 
     let manual_resolution_action = if complete_thread_resolution {
         complete_current_thread_manual_resolution(repo)?
@@ -1645,6 +1659,7 @@ mod tests {
                 Ok(CaptureAttribution {
                     attribution: Attribution::human(Principal::new("Ada", "ada@example.com")),
                     principal_source: "embedder".into(),
+                    harness_session_id: None,
                 })
             },
         )
@@ -1710,6 +1725,7 @@ mod tests {
                 Ok(CaptureAttribution {
                     attribution: Attribution::human(Principal::new("Ada", "ada@example.com")),
                     principal_source: "embedder".into(),
+                    harness_session_id: None,
                 })
             },
         )

@@ -977,6 +977,7 @@ export interface DiffChangesGroupedSchema {
 export type DiffChangesSchema = DiffChangesGroupedSchema | FileChange[];
 
 export interface DiffReport {
+  base?: string | null;
   broader_guidance?: ContextSnippet[] | null;
   changed_path_count: number;
   changes: DiffChangesSchema;
@@ -2165,6 +2166,8 @@ export interface ReviewNextSchema {
 export interface ReviewShowSchema {
   agent_narrative?: string | null;
   all_signals: SignalView[];
+  /** Named comparison base selected for the existing review payload. */
+  base?: string | null;
   discussions: DiscussionView[];
   files_changed: number;
   headline: string;

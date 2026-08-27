@@ -32,6 +32,7 @@ pub fn heddle_output_env(
         if key.starts_with("CODEX_")
             || key.starts_with("CLAUDE")
             || key.starts_with("OPENCODE_")
+            || key.starts_with("PI_")
             || matches!(key.as_ref(), "HEDDLE_AGENT_PROVIDER" | "HEDDLE_AGENT_MODEL")
         {
             command.env_remove(key.as_ref());
@@ -98,10 +99,9 @@ pub use objects::store::ObjectStore;
 pub use repo::Repository;
 pub use serde_json::Value;
 pub use sley::{
-    CommitObject, EntryKind, GitObjectType, GitTime, ObjectId, RefPrecondition, ReferenceTarget,
-    Repository as SleyRepository, Signature, TagObject,
+    BString as GitByteString, CommitObject, EntryKind, GitObjectType, GitTime, ObjectId,
+    RefPrecondition, ReferenceTarget, Repository as SleyRepository, Signature, TagObject,
     plumbing::{sley_object::EncodedObject, sley_refs::ReflogEntry},
-    BString as GitByteString,
 };
 pub use tempfile::TempDir;
 

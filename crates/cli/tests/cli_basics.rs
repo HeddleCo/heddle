@@ -24,6 +24,8 @@ mod harness_error_surface;
 mod identity_resolution;
 #[path = "cli_integration/ignore_mechanics.rs"]
 mod ignore_mechanics;
+#[path = "cli_integration/last_turn_diff.rs"]
+mod last_turn_diff;
 #[path = "cli_integration/misc.rs"]
 mod misc;
 #[path = "cli_integration/perf_adopt.rs"]

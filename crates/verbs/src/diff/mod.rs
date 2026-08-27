@@ -10,6 +10,7 @@ use anyhow::{Result, anyhow};
 use merge::RenameCandidateIndex;
 use objects::{
     HeddleError, RecoveryDetails,
+    lock::RepositoryLockExt,
     object::{
         Blob, ContentHash, DiffKind, EntryType, FileChangeSet, FileMode, SemanticChange, State,
         StateId, Tree, TreeEntry,
@@ -24,7 +25,10 @@ use repo::{
 use semantic::diff::{SemanticDiffOptions, WorktreeStatus as SemanticWorktreeStatus};
 use sley::{EntryKind, Repository as SleyRepository};
 
-use crate::ExecutionContext;
+use crate::{
+    ExecutionContext, LastTurnAnchor, read_identity_cursor, read_last_turn_anchor,
+    write_last_turn_anchor,
+};
 
 mod context;
 mod patch;
@@ -38,6 +42,20 @@ pub use types::*;
 const BINARY_DIFF_ERROR: &str = "binary file";
 const RENAME_SIMILARITY_THRESHOLD: f64 = 0.75;
 
+/// A named comparison base that is resolved from repository metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffBase {
+    LastTurn,
+}
+
+impl DiffBase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LastTurn => "last-turn",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct SemanticDiffResult {
     changes: Vec<SemanticChange>,
@@ -49,6 +67,7 @@ struct SemanticDiffResult {
 pub struct DiffOptions {
     pub from: Option<String>,
     pub to: Option<String>,
+    pub base: Option<DiffBase>,
     pub semantic: bool,
     pub stat: bool,
     pub name_only: bool,
@@ -67,6 +86,7 @@ impl Default for DiffOptions {
         Self {
             from: None,
             to: None,
+            base: None,
             semantic: false,
             stat: false,
             name_only: false,
@@ -91,10 +111,30 @@ pub fn diff(ctx: &ExecutionContext, options: DiffOptions) -> Result<DiffReport> 
     let to = options.to.as_ref();
     let git_overlay_head_worktree_diff = repo.current_state()?.is_none()
         && to.is_none()
+        && options.base.is_none()
         && matches!(options.from.as_deref(), Some("HEAD" | "@"));
+
+    let to_state = if let Some(to_spec) = to {
+        let to_id = resolve_state_id(repo, to_spec)?;
+        Some(require_resolved_state(repo, &to_id)?)
+    } else {
+        None
+    };
 
     let from_id = if git_overlay_head_worktree_diff {
         None
+    } else if options.base == Some(DiffBase::LastTurn) {
+        if options.from.is_some() {
+            return Err(anyhow!(
+                "--base last-turn cannot be combined with an explicit from state"
+            ));
+        }
+        let target = to_state
+            .as_ref()
+            .map(|state| state.state_id)
+            .or(repo.head()?)
+            .ok_or_else(|| anyhow!("no agent turn is available for the last-turn base"))?;
+        Some(resolve_last_turn_base(repo, target)?)
     } else if let Some(ref spec) = options.from {
         Some(resolve_state_id(repo, spec)?)
     } else {
@@ -109,12 +149,6 @@ pub fn diff(ctx: &ExecutionContext, options: DiffOptions) -> Result<DiffReport> 
 
     let from_tree = if let Some(ref state) = from_state {
         repo.store().get_tree(&state.tree)?
-    } else {
-        None
-    };
-    let to_state = if let Some(to_spec) = to {
-        let to_id = resolve_state_id(repo, to_spec)?;
-        Some(require_resolved_state(repo, &to_id)?)
     } else {
         None
     };
@@ -198,12 +232,76 @@ pub fn diff(ctx: &ExecutionContext, options: DiffOptions) -> Result<DiffReport> 
         None,
         stats,
     );
+    output.base = options.base.map(DiffBase::as_str);
     output.worktree_mode = options.to.is_none();
     let mut output = finalize_diff_report(output, &options)?;
     if let Some(state) = context_state.as_ref() {
         attach_show_context(repo, &mut output, state, &options.paths)?;
     }
     Ok(output)
+}
+
+/// Record the first successful capture in a live harness session. A matching
+/// anchor is retained only while it remains on this thread's first-parent
+/// chain; a new session or unrelated thread starts a new turn anchor.
+pub fn record_last_turn_capture(
+    repo: &Repository,
+    session_id: &str,
+    captured_state: StateId,
+) -> Result<()> {
+    let _guard = repo.locker().write()?;
+    let keep_existing = match read_last_turn_anchor(repo.root()) {
+        Some(anchor) if anchor.session_id == session_id => {
+            first_parent_contains(repo, captured_state, anchor.state_id)?
+        }
+        Some(_) | None => false,
+    };
+    if keep_existing {
+        return Ok(());
+    }
+    write_last_turn_anchor(
+        repo.root(),
+        &LastTurnAnchor {
+            session_id: session_id.to_string(),
+            state_id: captured_state,
+        },
+    )?;
+    Ok(())
+}
+
+/// Resolve `last-turn` against the live workspace stamp and the selected
+/// target's thread history. Every missing or stale link is refused.
+pub fn resolve_last_turn_base(repo: &Repository, target: StateId) -> Result<StateId> {
+    let session_id = read_identity_cursor(repo.root())
+        .session
+        .filter(|session| !session.trim().is_empty())
+        .ok_or_else(|| anyhow!("no agent turn is available for the last-turn base"))?;
+    let anchor = read_last_turn_anchor(repo.root())
+        .filter(|anchor| anchor.session_id == session_id)
+        .ok_or_else(|| anyhow!("no captured agent turn matches the last-turn session stamp"))?;
+    if repo.store().get_state(&anchor.state_id)?.is_none() {
+        return Err(anyhow!("the captured last-turn base state is unavailable"));
+    }
+    if !first_parent_contains(repo, target, anchor.state_id)? {
+        return Err(anyhow!(
+            "the last-turn base is not on the selected thread history"
+        ));
+    }
+    Ok(anchor.state_id)
+}
+
+fn first_parent_contains(repo: &Repository, start: StateId, expected: StateId) -> Result<bool> {
+    let mut current = Some(start);
+    while let Some(state_id) = current {
+        if state_id == expected {
+            return Ok(true);
+        }
+        let Some(state) = repo.store().get_state(&state_id)? else {
+            return Ok(false);
+        };
+        current = state.parents.first().copied();
+    }
+    Ok(false)
 }
 
 fn file_changes_from_change_set(

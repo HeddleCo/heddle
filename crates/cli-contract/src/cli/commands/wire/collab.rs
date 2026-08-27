@@ -45,15 +45,23 @@ pub enum AnchorOutput {
 #[derive(Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ResolutionOutput {
-    AddressedByState { state_id: String },
-    AddressedByChange { change_id: String },
-    Dismissed { reason: String },
+    AddressedByState {
+        state_id: String,
+    },
+    AddressedByChange {
+        change_id: String,
+    },
+    Dismissed {
+        reason: String,
+    },
     IntoAnnotation {
         annotation_kind: String,
         content: String,
         tags: Vec<String>,
     },
-    Annotation { annotation_id: String },
+    Annotation {
+        annotation_id: String,
+    },
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -97,6 +105,9 @@ pub struct DiscussionListOutput {
 pub struct ReviewShowOutput {
     pub output_kind: &'static str,
     pub state_id: String,
+    /// Named comparison base selected for the existing review payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     pub headline: String,
     pub agent_narrative: Option<String>,
     pub files_changed: u32,

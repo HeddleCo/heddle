@@ -15,6 +15,7 @@ use crate::{
 pub struct DiffReport {
     pub output_kind: &'static str,
     pub status: &'static str,
+    pub base: Option<&'static str>,
     pub from_state: Option<String>,
     pub to_state: Option<String>,
     pub changed_path_count: usize,
@@ -40,6 +41,8 @@ impl Serialize for DiffReport {
         struct DiffReportView<'a> {
             output_kind: &'static str,
             status: &'static str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            base: Option<&'static str>,
             from_state: &'a Option<String>,
             to_state: &'a Option<String>,
             changed_path_count: usize,
@@ -58,6 +61,7 @@ impl Serialize for DiffReport {
         DiffReportView {
             output_kind: self.output_kind,
             status: self.status,
+            base: self.base,
             from_state: &self.from_state,
             to_state: &self.to_state,
             changed_path_count: self.changed_path_count,
@@ -149,6 +153,7 @@ impl DiffReport {
         Self {
             output_kind: "diff",
             status: "completed",
+            base: None,
             changed_path_count: changes.len(),
             from_state,
             to_state,
@@ -182,6 +187,7 @@ impl HeddleReport for DiffReport {
 struct DiffReportSchema {
     pub output_kind: String,
     pub status: String,
+    pub base: Option<String>,
     pub from_state: Option<String>,
     pub to_state: Option<String>,
     pub changed_path_count: usize,

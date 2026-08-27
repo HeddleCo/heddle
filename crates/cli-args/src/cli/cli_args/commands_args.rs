@@ -501,6 +501,7 @@ pub struct TimelineRecordFinishArgs {
 #[command(after_help = "\
 Examples:
   heddle diff                     # worktree vs HEAD
+  heddle diff --base last-turn    # worktree vs this agent peer's turn start
   heddle diff NOTES.md            # only that path
   heddle diff -- NOTES.md         # same, after the path separator
   heddle diff --path NOTES.md     # same, explicit path filter
@@ -524,6 +525,12 @@ pub struct DiffArgs {
 
     /// Target state (default: worktree). A path-shaped value is a worktree filter.
     pub to: Option<String>,
+
+    /// Select an additional diff base. `last-turn` uses the first capture in
+    /// the live harness session on this thread. With this set, one state
+    /// positional names the target rather than another base.
+    #[arg(long, value_enum)]
+    pub base: Option<DiffBaseArg>,
 
     /// Restrict the diff to these repository-relative paths.
     #[arg(long = "path", value_name = "PATH")]
@@ -556,6 +563,21 @@ pub struct DiffArgs {
     /// Output a Git-compatible unified diff.
     #[arg(short = 'p', long = "patch")]
     pub patch: bool,
+}
+
+/// Named bases shared by `diff` and review change selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum DiffBaseArg {
+    /// First capture in the current harness session on this thread.
+    LastTurn,
+}
+
+impl DiffBaseArg {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LastTurn => "last-turn",
+        }
+    }
 }
 
 /// Arguments for the `revert` command.

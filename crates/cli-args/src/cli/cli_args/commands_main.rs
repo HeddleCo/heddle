@@ -260,6 +260,7 @@ Examples:
     #[command(after_help = "\
 Examples:
   heddle review show HEAD                                # render the review payload for HEAD
+  heddle review show HEAD --base last-turn               # review this agent peer's turn
   heddle review sign HEAD --kind read --public-key <hex> --signature <hex> --signed-at-unix <ts>
   heddle review health --window 7                       # signal fire-rates over recent states
 ")]

@@ -8,9 +8,12 @@ use objects::object::{
     Discussion, DiscussionResolution, ReviewKind, ReviewScope, StateId, SymbolAnchor,
 };
 use repo::{HistoryQuery, operation_dedup::OperationDedupStore};
-use verbs::review::{
-    LocalReviewContext, LocalStateReview, ReviewSignal, ReviewSignalKind, ReviewSignalVisibility,
-    SignReviewRequest, get_repo_signal_health,
+use verbs::{
+    resolve_last_turn_base,
+    review::{
+        LocalReviewContext, LocalStateReview, ReviewSignal, ReviewSignalKind,
+        ReviewSignalVisibility, SignReviewRequest, get_repo_signal_health,
+    },
 };
 
 use super::{
@@ -20,7 +23,8 @@ use super::{
 };
 use crate::cli::{
     cli_args::{
-        Cli, ReviewCommands, ReviewHealthArgs, ReviewNextArgs, ReviewShowArgs, ReviewSignArgs,
+        Cli, DiffBaseArg, ReviewCommands, ReviewHealthArgs, ReviewNextArgs, ReviewShowArgs,
+        ReviewSignArgs,
     },
     should_output_json,
 };
@@ -47,7 +51,14 @@ pub async fn run(cli: &Cli, command: &ReviewCommands) -> Result<()> {
 async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
     let review = open_local_review(cli)?;
     let state_id = resolve_state(cli, args.state.as_deref())?;
-    let payload = review.get_review_payload(state_id, args.all_signals)?;
+    let base_state_id = match args.base {
+        Some(DiffBaseArg::LastTurn) => {
+            let repo = cli.open_repo()?;
+            Some(resolve_last_turn_base(&repo, state_id)?)
+        }
+        None => None,
+    };
+    let payload = review.get_review_payload_from(state_id, args.all_signals, base_state_id)?;
     let stored_signatures = review.list_signatures(state_id)?;
 
     let signatures: Vec<SignatureView> = stored_signatures
@@ -82,6 +93,7 @@ async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
     let output = ReviewShowOutput {
         output_kind: "review_show",
         state_id: payload.state_id.to_string_full(),
+        base: args.base.map(|base| base.as_str().to_string()),
         headline: payload.summary.headline,
         agent_narrative: payload.agent_narrative,
         files_changed: payload.summary.files_changed,
@@ -108,6 +120,9 @@ async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
 
 fn render_text(out: &ReviewShowOutput, all_signals: bool) {
     println!("review of state {}", out.state_id);
+    if let Some(base) = &out.base {
+        println!("  base: {base}");
+    }
     if !out.headline.is_empty() {
         println!("  {}", out.headline);
     }

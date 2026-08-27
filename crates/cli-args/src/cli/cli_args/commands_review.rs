@@ -3,6 +3,8 @@
 
 use clap::{Args, Subcommand, ValueEnum};
 
+use super::DiffBaseArg;
+
 #[derive(Clone, Debug, Subcommand)]
 pub enum ReviewCommands {
     /// Render the review payload for a state.
@@ -19,6 +21,10 @@ pub enum ReviewCommands {
 pub struct ReviewShowArgs {
     /// State to review. Defaults to HEAD.
     pub state: Option<String>,
+    /// Select the change-list base. `last-turn` uses the first capture in the
+    /// live harness session on this thread.
+    #[arg(long, value_enum)]
+    pub base: Option<DiffBaseArg>,
     /// Include hidden signals beyond the in-budget set.
     #[arg(long)]
     pub all_signals: bool,

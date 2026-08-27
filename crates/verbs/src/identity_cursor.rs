@@ -14,6 +14,7 @@ use std::{
 };
 
 use fs2::FileExt;
+use objects::object::StateId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -21,6 +22,14 @@ use crate::harness_json::{first_value_string, value_string};
 
 /// Sidecar file name under `.heddle/` (not `identity.toml`, the signing key).
 pub const IDENTITY_CURSOR_FILE: &str = "identity";
+const LAST_TURN_ANCHOR_FILE: &str = "last-turn";
+
+/// Workspace-local link between a live harness session and its first capture.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastTurnAnchor {
+    pub session_id: String,
+    pub state_id: StateId,
+}
 
 /// ACP-named current identity. Omit unpublished fields.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +135,46 @@ pub fn identity_cursor_path(repo_root: &Path) -> std::path::PathBuf {
     } else {
         marker.join(IDENTITY_CURSOR_FILE)
     }
+}
+
+/// Workspace-local last-turn anchor path. Pointer checkouts keep it beside
+/// `.heddle`, matching the identity cursor's isolation behavior.
+pub fn last_turn_anchor_path(repo_root: &Path) -> std::path::PathBuf {
+    let marker = repo_root.join(".heddle");
+    if marker.is_file() {
+        repo_root.join(".heddle.last-turn")
+    } else {
+        marker.join(LAST_TURN_ANCHOR_FILE)
+    }
+}
+
+/// Read the current last-turn anchor. Missing or malformed reconstructible
+/// metadata is treated as absent so callers fail closed.
+pub fn read_last_turn_anchor(repo_root: &Path) -> Option<LastTurnAnchor> {
+    let bytes = fs::read(last_turn_anchor_path(repo_root)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Atomically publish the first capture for a harness session.
+pub fn write_last_turn_anchor(repo_root: &Path, anchor: &LastTurnAnchor) -> io::Result<()> {
+    let dest = last_turn_anchor_path(repo_root);
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    static LAST_TURN_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmp = dest.with_file_name(format!(
+        ".last-turn.tmp.{}.{}",
+        std::process::id(),
+        LAST_TURN_TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let body = serde_json::to_vec(anchor)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    fs::write(&tmp, body)?;
+    let renamed = fs::rename(&tmp, &dest);
+    if renamed.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    renamed
 }
 
 /// Read the current cursor. Missing or unreadable → empty cursor.

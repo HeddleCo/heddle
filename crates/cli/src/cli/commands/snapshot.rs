@@ -884,6 +884,7 @@ fn build_capture_attribution(
         return Ok(verbs::CaptureAttribution {
             attribution: Attribution::human(principal),
             principal_source,
+            harness_session_id: None,
         });
     }
 
@@ -891,6 +892,7 @@ fn build_capture_attribution(
     // repo/user `agent.model` after a cursor miss. Cursor/Grok stay
     // `agent=null`. Never invent a model.
     let frozen = crate::identity_freeze::freeze_identity_for_capture(repo).unwrap_or_default();
+    let harness_session_id = frozen.session.clone();
     let current_session = SessionManager::new(repo.root()).get_current_session()?;
     let provider = agent
         .provider
@@ -959,6 +961,7 @@ fn build_capture_attribution(
     Ok(verbs::CaptureAttribution {
         attribution,
         principal_source,
+        harness_session_id,
     })
 }
 

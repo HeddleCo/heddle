@@ -25,7 +25,9 @@ use super::{
     diff_paths::classify_diff_refs,
 };
 use crate::{
-    cli::{Cli, execution_context_from_cli_parts, output_is_compact, should_output_json},
+    cli::{
+        Cli, DiffBaseArg, execution_context_from_cli_parts, output_is_compact, should_output_json,
+    },
     config::UserConfig,
 };
 
@@ -34,6 +36,7 @@ pub fn cmd_diff(
     cli: &Cli,
     from: Option<String>,
     to: Option<String>,
+    base: Option<DiffBaseArg>,
     path_filters: Vec<String>,
     trailing_paths: Vec<String>,
     semantic: bool,
@@ -49,15 +52,22 @@ pub fn cmd_diff(
     let mut extra_paths = path_filters;
     extra_paths.extend(trailing_paths);
     let classified = classify_diff_refs(start, opened.as_ref(), from, to, extra_paths);
-    let from = classified.from;
-    let to = classified.to;
+    let mut from = classified.from;
+    let mut to = classified.to;
+    // With a named base, the first state positional is the target. This keeps
+    // the existing positional grammar useful without making `last-turn` look
+    // like a state id. Path-shaped values were moved into `classified.paths`.
+    if base.is_some() && to.is_none() {
+        to = from.take();
+    }
     let paths = classified.paths;
     let from_is_head_or_default = from
         .as_deref()
         .map(|spec| matches!(spec, "HEAD" | "@"))
         .unwrap_or(true);
 
-    if opened.is_none()
+    if base.is_none()
+        && opened.is_none()
         && to.is_none()
         && from_is_head_or_default
         && let Some(probe) = build_plain_git_verification_probe(start)?
@@ -68,6 +78,7 @@ pub fn cmd_diff(
         let options = diff_options(
             from,
             to,
+            base,
             paths,
             semantic,
             stat,
@@ -97,6 +108,7 @@ pub fn cmd_diff(
     let options = diff_options(
         from.clone(),
         to.clone(),
+        base,
         paths,
         semantic,
         stat,
@@ -107,7 +119,8 @@ pub fn cmd_diff(
         json,
     );
 
-    if let Some(trust) = trust.as_ref()
+    if base.is_none()
+        && let Some(trust) = trust.as_ref()
         && to.is_none()
         && from_is_head_or_default
         && let Some(status) = trust_visible_worktree_status(&repo, trust)?
@@ -123,7 +136,8 @@ pub fn cmd_diff(
             patch,
         );
     }
-    if to.is_none()
+    if base.is_none()
+        && to.is_none()
         && from_is_head_or_default
         && trust
             .as_ref()
@@ -172,6 +186,7 @@ pub fn cmd_diff(
 fn diff_options(
     from: Option<String>,
     to: Option<String>,
+    base: Option<DiffBaseArg>,
     paths: Vec<String>,
     semantic: bool,
     stat: bool,
@@ -184,6 +199,9 @@ fn diff_options(
     DiffOptions {
         from,
         to,
+        base: base.map(|base| match base {
+            DiffBaseArg::LastTurn => verbs::DiffBase::LastTurn,
+        }),
         semantic,
         stat,
         name_only,
