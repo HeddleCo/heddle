@@ -42,6 +42,10 @@ pub struct Annotation {
     /// discussion that produced it.
     #[serde(default)]
     pub resolved_from_discussion: Option<String>,
+    /// Materialized health of the annotation's file anchor. Lifecycle status
+    /// remains separate: an active annotation can need anchor attention.
+    #[serde(default)]
+    pub anchor_status: AnnotationAnchorStatus,
 }
 
 /// A single revision of a logical annotation.
@@ -68,6 +72,18 @@ pub struct AnnotationRevision {
 pub enum AnnotationStatus {
     Active,
     Superseded,
+}
+
+/// Snapshot-time resolution state for a file-backed context annotation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnnotationAnchorStatus {
+    /// The target path currently resolves, including after a confident move.
+    #[default]
+    Resolved,
+    /// More than one path passed the rename confidence threshold.
+    Ambiguous { candidate_paths: Vec<String> },
+    /// The target disappeared and no path passed the rename threshold.
+    Orphaned,
 }
 
 /// The canonical annotation taxonomy the product surfaces.
@@ -170,6 +186,7 @@ impl Annotation {
             supersedes_rewrite_pct: None,
             visibility: VisibilityTier::default(),
             resolved_from_discussion: None,
+            anchor_status: AnnotationAnchorStatus::default(),
         }
     }
 
@@ -564,6 +581,58 @@ mod tests {
         let bytes = blob.encode().unwrap();
         let decoded = ContextBlob::decode(&bytes).unwrap();
         assert_eq!(blob, decoded);
+    }
+
+    #[test]
+    fn legacy_annotation_without_anchor_status_decodes_as_resolved() {
+        #[derive(Serialize)]
+        struct LegacyAnnotation {
+            annotation_id: String,
+            scope: AnnotationScope,
+            status: AnnotationStatus,
+            revisions: Vec<AnnotationRevision>,
+            supersedes_annotation_id: Option<String>,
+            supersedes_rewrite_pct: Option<u32>,
+            visibility: VisibilityTier,
+            resolved_from_discussion: Option<String>,
+        }
+
+        #[derive(Serialize)]
+        struct LegacyContextBlob {
+            format_version: u8,
+            annotations: Vec<LegacyAnnotation>,
+        }
+
+        let revision = AnnotationRevision {
+            revision_id: "legacy-revision".to_string(),
+            kind: AnnotationKind::Invariant,
+            content: "legacy context".to_string(),
+            tags: vec![],
+            attribution: "test@example.com".to_string(),
+            created_at: 1_700_000_000,
+            source_hash: None,
+            created_at_state: None,
+        };
+        let bytes = rmp_serde::to_vec(&LegacyContextBlob {
+            format_version: ContextBlob::FORMAT_VERSION,
+            annotations: vec![LegacyAnnotation {
+                annotation_id: "legacy-annotation".to_string(),
+                scope: AnnotationScope::File,
+                status: AnnotationStatus::Active,
+                revisions: vec![revision],
+                supersedes_annotation_id: None,
+                supersedes_rewrite_pct: None,
+                visibility: VisibilityTier::default(),
+                resolved_from_discussion: None,
+            }],
+        })
+        .unwrap();
+
+        let decoded = ContextBlob::decode(&bytes).unwrap();
+        assert_eq!(
+            decoded.annotations[0].anchor_status,
+            AnnotationAnchorStatus::Resolved
+        );
     }
 
     #[test]

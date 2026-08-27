@@ -446,7 +446,12 @@ fn split_path(path: &Path) -> Option<(&str, &Path)> {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{Annotation, AnnotationKind, StateAttachment, StateAttachmentBody};
+    use std::fs;
+
+    use objects::object::{
+        Annotation, AnnotationAnchorStatus, AnnotationKind, StalenessStatus, StateAttachment,
+        StateAttachmentBody,
+    };
     use tempfile::TempDir;
 
     use super::{Repository, *};
@@ -613,6 +618,70 @@ mod tests {
         a
     }
 
+    #[cfg(feature = "tree-sitter-symbols")]
+    fn travel_annotation(
+        state: &State,
+        scope: AnnotationScope,
+        source_hash: Option<ContentHash>,
+    ) -> Annotation {
+        Annotation::new(
+            scope,
+            AnnotationKind::Invariant,
+            "Keep this guard intact".to_string(),
+            vec![],
+            "test@example.com".to_string(),
+            1_700_000_000,
+            source_hash,
+            Some(state.id()),
+        )
+    }
+
+    #[cfg(feature = "tree-sitter-symbols")]
+    fn attach_context(repo: &Repository, state: &State, path: &str, annotations: Vec<Annotation>) {
+        let target = ContextTarget::file(path).unwrap();
+        let root = repo
+            .set_context_blob(None, &target, &ContextBlob::new(annotations))
+            .unwrap();
+        repo.put_state_attachment(&StateAttachment {
+            state_id: state.id(),
+            body: StateAttachmentBody::Context(root),
+            attribution: state.attribution.clone(),
+            created_at: chrono::Utc::now(),
+            supersedes: None,
+        })
+        .unwrap();
+    }
+
+    #[cfg(feature = "tree-sitter-symbols")]
+    fn snapshot_src_files(repo: &Repository, files: &[(&str, &str)], message: &str) -> State {
+        let mut blobs = Vec::new();
+        let mut entries = Vec::new();
+        for (name, source) in files {
+            let blob = Blob::from_slice(source.as_bytes());
+            entries.push(TreeEntry::file(*name, blob.hash(), false).unwrap());
+            blobs.push(blob);
+        }
+        let root = if entries.is_empty() {
+            Tree::new()
+        } else {
+            let src = Tree::from_entries(entries);
+            let src_hash = repo.store().put_tree(&src).unwrap();
+            Tree::from_entries(vec![TreeEntry::directory("src", src_hash).unwrap()])
+        };
+        repo.snapshot_tree_with_blobs_with_attribution_profiled(
+            root,
+            blobs,
+            Some(message.to_string()),
+            None,
+            objects::object::Attribution::human(objects::object::Principal::new(
+                "test",
+                "test@example.com",
+            )),
+        )
+        .unwrap()
+        .state
+    }
+
     #[test]
     fn inherit_parent_context_passes_through_pointer() {
         let (_dir, repo) = setup();
@@ -722,5 +791,167 @@ mod tests {
             .current_revision()
             .expect("annotation has a revision");
         assert_eq!(revision.content, "newer content");
+    }
+
+    #[cfg(feature = "tree-sitter-symbols")]
+    #[test]
+    fn context_symbol_annotation_rebinds_across_file_rename() {
+        let (dir, repo) = setup();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(
+            dir.path().join("src/old.rs"),
+            "fn guarded() {\n    let value = 1;\n}\n",
+        )
+        .unwrap();
+        let first = repo.snapshot(Some("first".to_string()), None).unwrap();
+        let annotation = travel_annotation(
+            &first,
+            AnnotationScope::Symbol {
+                name: "guarded".to_string(),
+                resolved_lines: Some((1, 3)),
+            },
+            None,
+        );
+        attach_context(
+            &repo,
+            &first,
+            "src/old.rs",
+            vec![
+                annotation,
+                travel_annotation(&first, AnnotationScope::File, None),
+                travel_annotation(&first, AnnotationScope::Lines(1, 2), None),
+            ],
+        );
+
+        let second = snapshot_src_files(
+            &repo,
+            &[("new.rs", "fn guarded() {\n    let value = 1;\n}\n")],
+            "rename",
+        );
+        let moved_root = repo
+            .inherit_parent_context(&second)
+            .unwrap()
+            .expect("renamed snapshot context");
+
+        let stale_lines = repo
+            .get_context_blob(&moved_root, &ContextTarget::file("src/old.rs").unwrap())
+            .unwrap()
+            .expect("line ranges stay on their original target");
+        assert_eq!(stale_lines.annotations.len(), 1);
+        assert!(matches!(
+            stale_lines.annotations[0].scope,
+            AnnotationScope::Lines(1, 2)
+        ));
+        let moved = repo
+            .get_context_blob(&moved_root, &ContextTarget::file("src/new.rs").unwrap())
+            .unwrap()
+            .expect("context moved to renamed path");
+        assert_eq!(moved.annotations.len(), 2);
+        assert!(matches!(
+            moved.annotations[0].scope,
+            AnnotationScope::Symbol { ref name, .. } if name == "guarded"
+        ));
+        assert!(matches!(moved.annotations[1].scope, AnnotationScope::File));
+    }
+
+    #[cfg(feature = "tree-sitter-symbols")]
+    #[test]
+    fn context_file_rename_with_two_candidates_is_ambiguous() {
+        const SOURCE: &str = "fn guarded() {\n    let value = 1;\n}\n";
+        let (dir, repo) = setup();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/old.rs"), SOURCE).unwrap();
+        let first = repo.snapshot(Some("first".to_string()), None).unwrap();
+        attach_context(
+            &repo,
+            &first,
+            "src/old.rs",
+            vec![travel_annotation(
+                &first,
+                AnnotationScope::Symbol {
+                    name: "guarded".to_string(),
+                    resolved_lines: Some((1, 3)),
+                },
+                Some(ContentHash::compute(
+                    b"fn guarded() {\n    let value = 1;\n}",
+                )),
+            )],
+        );
+
+        let second = snapshot_src_files(&repo, &[("a.rs", SOURCE), ("b.rs", SOURCE)], "ambiguous");
+        let root = repo
+            .inherit_parent_context(&second)
+            .unwrap()
+            .expect("context root");
+        let target = ContextTarget::file("src/old.rs").unwrap();
+        let blob = repo
+            .get_context_blob(&root, &target)
+            .unwrap()
+            .expect("ambiguous context stays at its prior target");
+
+        assert_eq!(
+            blob.annotations[0].anchor_status,
+            AnnotationAnchorStatus::Ambiguous {
+                candidate_paths: vec!["src/a.rs".to_string(), "src/b.rs".to_string()],
+            }
+        );
+        assert_eq!(
+            crate::staleness::check_annotation_staleness(
+                &repo,
+                &blob.annotations[0],
+                &target,
+                &second,
+            )
+            .unwrap(),
+            StalenessStatus::AmbiguousFileMove {
+                candidate_paths: vec!["src/a.rs".to_string(), "src/b.rs".to_string()],
+            }
+        );
+    }
+
+    #[cfg(feature = "tree-sitter-symbols")]
+    #[test]
+    fn deleted_context_target_remains_file_missing() {
+        const SOURCE: &str = "fn guarded() {\n    let value = 1;\n}\n";
+        let (dir, repo) = setup();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/old.rs"), SOURCE).unwrap();
+        let first = repo.snapshot(Some("first".to_string()), None).unwrap();
+        attach_context(
+            &repo,
+            &first,
+            "src/old.rs",
+            vec![travel_annotation(
+                &first,
+                AnnotationScope::File,
+                Some(ContentHash::compute(SOURCE.as_bytes())),
+            )],
+        );
+
+        let second = snapshot_src_files(&repo, &[], "delete");
+        let root = repo
+            .inherit_parent_context(&second)
+            .unwrap()
+            .expect("context root");
+        let target = ContextTarget::file("src/old.rs").unwrap();
+        let blob = repo
+            .get_context_blob(&root, &target)
+            .unwrap()
+            .expect("orphaned context remains addressable");
+
+        assert_eq!(
+            blob.annotations[0].anchor_status,
+            AnnotationAnchorStatus::Orphaned
+        );
+        assert_eq!(
+            crate::staleness::check_annotation_staleness(
+                &repo,
+                &blob.annotations[0],
+                &target,
+                &second,
+            )
+            .unwrap(),
+            StalenessStatus::FileMissing
+        );
     }
 }

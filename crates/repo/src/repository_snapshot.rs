@@ -442,7 +442,7 @@ impl SnapshotMutation<'_> {
             state = state.with_lineage(self.details.lineage.clone());
         }
 
-        let inherited_context = if let Some(parent_id) = self.prev_head
+        let mut inherited_context = if let Some(parent_id) = self.prev_head
             && let Some(parent_state) = self.repo.store.get_state(&parent_id)?
         {
             self.repo.inherit_parent_context(&parent_state)?
@@ -539,6 +539,17 @@ impl SnapshotMutation<'_> {
                         .map(|(hash, bytes)| (*hash, bytes.as_slice()))
                         .collect::<std::collections::HashMap<_, _>>()
                 });
+                match self.repo.compute_and_persist_context_anchor_travel(
+                    parent_state,
+                    &tree,
+                    source_blobs.as_ref(),
+                ) {
+                    Ok(Some(hash)) => inherited_context = Some(hash),
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(error = %err, "context anchor travel failed; inheriting prior context");
+                    }
+                }
                 match self.repo.compute_and_persist_discussion_anchor_travel(
                     parent_state,
                     &tree,

@@ -19,6 +19,8 @@ pub enum StalenessStatus {
     FileMissing,
     /// Symbol referenced by annotation no longer exists in the file.
     SymbolMissing { symbol: String },
+    /// More than one file passed the rename confidence threshold.
+    AmbiguousFileMove { candidate_paths: Vec<String> },
     /// No provenance data stored -- staleness cannot be determined.
     Unknown,
 }

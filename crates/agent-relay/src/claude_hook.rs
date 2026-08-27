@@ -416,6 +416,7 @@ mod tests {
             supersedes_rewrite_pct: None,
             visibility: objects::object::VisibilityTier::default(),
             resolved_from_discussion: None,
+            anchor_status: objects::object::AnnotationAnchorStatus::default(),
         }
     }
 

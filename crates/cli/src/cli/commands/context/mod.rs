@@ -10,8 +10,8 @@ pub use context_query::*;
 use objects::{
     error::HeddleError,
     object::{
-        Annotation, AnnotationKind, AnnotationScope, AnnotationStatus, ContentHash, ContextTarget,
-        State,
+        Annotation, AnnotationAnchorStatus, AnnotationKind, AnnotationScope, AnnotationStatus,
+        ContentHash, ContextTarget, State,
     },
     store::ObjectStore,
 };
@@ -52,6 +52,8 @@ pub(crate) struct AnnotationOutput {
     pub(crate) revision_count: usize,
     pub(crate) supersedes_annotation_id: Option<String>,
     pub(crate) supersedes_rewrite_pct: Option<u32>,
+    pub(crate) anchor_status: String,
+    pub(crate) anchor_candidates: Vec<String>,
 }
 
 impl AnnotationOutput {
@@ -72,7 +74,24 @@ impl AnnotationOutput {
             revision_count: annotation.revisions.len(),
             supersedes_annotation_id: annotation.supersedes_annotation_id.clone(),
             supersedes_rewrite_pct: annotation.supersedes_rewrite_pct,
+            anchor_status: annotation_anchor_status_label(&annotation.anchor_status).to_string(),
+            anchor_candidates: annotation_anchor_candidates(&annotation.anchor_status).to_vec(),
         }
+    }
+}
+
+pub(crate) fn annotation_anchor_status_label(status: &AnnotationAnchorStatus) -> &'static str {
+    match status {
+        AnnotationAnchorStatus::Resolved => "resolved",
+        AnnotationAnchorStatus::Ambiguous { .. } => "ambiguous",
+        AnnotationAnchorStatus::Orphaned => "orphaned",
+    }
+}
+
+pub(crate) fn annotation_anchor_candidates(status: &AnnotationAnchorStatus) -> &[String] {
+    match status {
+        AnnotationAnchorStatus::Ambiguous { candidate_paths } => candidate_paths,
+        AnnotationAnchorStatus::Resolved | AnnotationAnchorStatus::Orphaned => &[],
     }
 }
 
@@ -379,6 +398,21 @@ pub(crate) fn print_context_get(
             if !current.tags.is_empty() {
                 println!("tags: {}", current.tags.join(", "));
             }
+            if !matches!(annotation.anchor_status, AnnotationAnchorStatus::Resolved) {
+                let candidates = annotation_anchor_candidates(&annotation.anchor_status);
+                if candidates.is_empty() {
+                    println!(
+                        "anchor: {}",
+                        annotation_anchor_status_label(&annotation.anchor_status)
+                    );
+                } else {
+                    println!(
+                        "anchor: {} ({})",
+                        annotation_anchor_status_label(&annotation.anchor_status),
+                        candidates.join(", ")
+                    );
+                }
+            }
             println!("by: {}", current.attribution);
             println!("{}", current.content);
             println!();
@@ -396,11 +430,34 @@ fn extract_scope_bytes(source: &[u8], range: Option<(u32, u32)>) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::Tree;
-
+    use objects::object::{AnnotationAnchorStatus, Tree};
     use repo::StateAttachmentKind;
 
     use super::*;
+
+    #[test]
+    fn annotation_output_surfaces_ambiguous_anchor_candidates() {
+        let mut annotation = Annotation::new(
+            AnnotationScope::File,
+            AnnotationKind::Invariant,
+            "Keep the guard".to_string(),
+            vec![],
+            "test@example.com".to_string(),
+            1_700_000_000,
+            None,
+            None,
+        );
+        annotation.anchor_status = AnnotationAnchorStatus::Ambiguous {
+            candidate_paths: vec!["src/a.rs".to_string(), "src/b.rs".to_string()],
+        };
+
+        let value = serde_json::to_value(AnnotationOutput::from_annotation(&annotation)).unwrap();
+        assert_eq!(value["anchor_status"], "ambiguous");
+        assert_eq!(
+            value["anchor_candidates"],
+            serde_json::json!(["src/a.rs", "src/b.rs"])
+        );
+    }
 
     /// `heddle context get --state <short>` must accept the short prefix that
     /// the rest of the CLI emits, not just the full StateId.
