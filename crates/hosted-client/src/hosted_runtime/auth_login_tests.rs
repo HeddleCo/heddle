@@ -316,10 +316,9 @@ fn login_invite_create_succeeds_with_a_claim_next_directive() {
         .expect("claim state was stored");
     assert_eq!(state.server, server);
     assert_eq!(state.pet_name, "quiet-otter");
-    let stored = std::fs::read_to_string(identity_state::state_path()).expect("read claim state");
-    assert!(
-        !stored.contains("web_origin") && !stored.contains("claims.heddle.test"),
-        "server-supplied web_origin must not be persisted as a claim destination: {stored}"
+    assert_eq!(
+        state.web_origin.as_deref(),
+        Some("https://claims.heddle.test/")
     );
 }
 
@@ -334,6 +333,7 @@ async fn remint_uses_claim_state_when_the_keystore_row_is_missing() {
         "subject-1".to_string(),
         "quiet-otter".to_string(),
         identity.node_id().to_string(),
+        None,
     ))
     .expect("store claim state");
     login(&TextCtx, server, false, None, false)

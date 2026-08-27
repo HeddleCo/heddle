@@ -49,6 +49,10 @@ pub(crate) struct ClaimState {
     pub(crate) subject: String,
     pub(crate) pet_name: String,
     pub(crate) node_id: String,
+    /// Server-advertised claim page origin. Not trusted until `heddle claim`
+    /// binds it to the configured hosted server.
+    #[serde(default)]
+    pub(crate) web_origin: Option<String>,
     pub(crate) created_at: String,
     secret_hash: String,
     pub(crate) expires_at_millis: i64,
@@ -64,6 +68,7 @@ impl ClaimState {
         subject: String,
         pet_name: String,
         node_id: String,
+        web_origin: Option<String>,
     ) -> Self {
         Self {
             format: STATE_FORMAT.to_string(),
@@ -73,6 +78,7 @@ impl ClaimState {
             subject,
             pet_name,
             node_id,
+            web_origin,
             created_at: chrono::Utc::now().to_rfc3339(),
             secret_hash: String::new(),
             expires_at_millis: 0,
@@ -303,6 +309,7 @@ mod tests {
             "subject-1".into(),
             "quiet-otter".into(),
             "11".repeat(32),
+            None,
         )
     }
 
@@ -364,19 +371,19 @@ mod tests {
     }
 
     #[test]
-    fn leftover_remote_web_origin_is_ignored_on_load() {
+    fn leftover_remote_web_origin_still_deserializes() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("claim.toml");
         let contents = format!(
             "\
 format = \"heddle-agent-claim\"
 version = 2
-server = \"api.heddle.test\"
+server = \"api.acme.example\"
 owner_id = \"7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28\"
 subject = \"subject-1\"
 pet_name = \"quiet-otter\"
 node_id = \"{node_id}\"
-web_origin = \"http://evil.example\"
+web_origin = \"https://evil.com\"
 created_at = \"2026-08-26T00:00:00Z\"
 secret_hash = \"\"
 expires_at_millis = 0
@@ -388,13 +395,8 @@ status = \"dormant\"
         let state = load_at(&path)
             .expect("load leftover claim state")
             .expect("claim state present");
-        assert_eq!(state.server, "api.heddle.test");
-        assert_eq!(state.pet_name, "quiet-otter");
-        let encoded = toml::to_string(&state).expect("serialize without leftover field");
-        assert!(
-            !encoded.contains("web_origin"),
-            "re-serialized claim state must not carry a remote web_origin: {encoded}"
-        );
+        assert_eq!(state.server, "api.acme.example");
+        assert_eq!(state.web_origin.as_deref(), Some("https://evil.com"));
     }
 
     #[test]

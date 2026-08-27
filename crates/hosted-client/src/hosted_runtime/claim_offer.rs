@@ -10,9 +10,11 @@ use super::{
     HostedAuthMode, HostedSession, agent_node_identity,
     auth::resolve_server,
     claim_authorization::validate_stored_claim_signer,
-    hosted::server_keys_match,
+    hosted::{canonical_server_authority, server_keys_match},
     identity_state::{self, ClaimIssuanceStatus, ClaimSecret, ClaimState},
 };
+
+const HEDDLE_SAAS_API: &str = "https://api.heddle.sh";
 
 const CLAIM_STATUS_POLL: Duration = Duration::from_millis(200);
 
@@ -34,7 +36,12 @@ enum ClaimWaitOutcome {
 pub(crate) async fn cmd_claim(args: ClaimArgs) -> Result<()> {
     let server = resolve_server(args.server.as_deref())?;
     let state = claimable_state(&server)?;
-    let web_origin = resolve_web_origin(args.web_origin.as_deref())?;
+    // Bind the destination before activate_offer mints the local bearer.
+    let web_origin = resolve_web_origin(
+        args.web_origin.as_deref(),
+        state.web_origin.as_deref(),
+        &server,
+    )?;
     validate_stored_claim_signer(&state)?;
 
     let identity = agent_node_identity::load()?
@@ -207,7 +214,7 @@ fn deactivate_offer(authorization_hash: &str) -> Result<()> {
 }
 
 fn normalized_web_origin(value: &str) -> Result<String> {
-    let parsed = reqwest::Url::parse(value).context("--web-origin must be an absolute URL")?;
+    let parsed = reqwest::Url::parse(value).context("claim web origin must be an absolute URL")?;
     if parsed.scheme() != "https"
         || parsed.host_str().is_none()
         || !parsed.username().is_empty()
@@ -216,18 +223,84 @@ fn normalized_web_origin(value: &str) -> Result<String> {
         || parsed.query().is_some()
         || parsed.fragment().is_some()
     {
-        bail!("--web-origin must be an https origin (scheme, host, and optional port only)");
+        bail!("claim web origin must be an https origin (scheme, host, and optional port only)");
     }
     Ok(parsed.origin().ascii_serialization())
 }
 
 /// Claim-link destination for the local bearer secret.
 ///
-/// Remote `CreateAgentAccountResponse.web_origin` is not consulted. The
-/// trusted default is [`DEFAULT_CLAIM_WEB_ORIGIN`]; only an explicit
-/// `--web-origin` may override it, and that override must be `https`.
-fn resolve_web_origin(explicit: Option<&str>) -> Result<String> {
-    normalized_web_origin(explicit.unwrap_or(DEFAULT_CLAIM_WEB_ORIGIN))
+/// Precedence: explicit `--web-origin` (https origin-only, any host), then a
+/// server-advertised origin that binds to the configured hosted server
+/// (same host or same Public Suffix registrable domain), then
+/// [`DEFAULT_CLAIM_WEB_ORIGIN`] only when that server is `api.heddle.sh`.
+fn resolve_web_origin(
+    explicit: Option<&str>,
+    advertised: Option<&str>,
+    server: &str,
+) -> Result<String> {
+    if let Some(explicit) = explicit {
+        return normalized_web_origin(explicit).with_context(
+            || "--web-origin must be an https origin (scheme, host, and optional port only)",
+        );
+    }
+    if let Some(advertised) = advertised.map(str::trim).filter(|value| !value.is_empty()) {
+        let origin = normalized_web_origin(advertised).with_context(|| {
+            "server-advertised claim origin is not a valid https origin; pass --web-origin <https origin> to override"
+        })?;
+        bind_origin_to_server(&origin, server)?;
+        return Ok(origin);
+    }
+    if is_heddle_saas_api(server)? {
+        return normalized_web_origin(DEFAULT_CLAIM_WEB_ORIGIN);
+    }
+    bail!(
+        "hosted server {server} is not {HEDDLE_SAAS_API} and has no bound claim web origin; pass --web-origin <https origin>"
+    )
+}
+
+fn is_heddle_saas_api(server: &str) -> Result<bool> {
+    Ok(canonical_server_authority(server)? == HEDDLE_SAAS_API)
+}
+
+fn bind_origin_to_server(origin: &str, server: &str) -> Result<()> {
+    let origin_host = origin_host(origin)?;
+    let server_host = hosted_server_host(server)?;
+    if origin_host == server_host || same_registrable_domain(&origin_host, &server_host) {
+        return Ok(());
+    }
+    bail!(
+        "server-advertised claim origin {origin} is not bound to hosted server {server}; pass --web-origin <https origin> to override"
+    )
+}
+
+fn origin_host(origin: &str) -> Result<String> {
+    let parsed = reqwest::Url::parse(origin).context("claim web origin is not a valid URL")?;
+    parsed
+        .host_str()
+        .map(ascii_host)
+        .context("claim web origin has no host")
+}
+
+fn hosted_server_host(server: &str) -> Result<String> {
+    let canonical = canonical_server_authority(server)?;
+    let parsed = reqwest::Url::parse(&canonical)
+        .context("configured hosted server is not a valid HTTPS authority")?;
+    parsed
+        .host_str()
+        .map(ascii_host)
+        .context("configured hosted server has no host")
+}
+
+fn ascii_host(host: &str) -> String {
+    host.to_ascii_lowercase()
+}
+
+fn same_registrable_domain(left_host: &str, right_host: &str) -> bool {
+    match (psl::domain_str(left_host), psl::domain_str(right_host)) {
+        (Some(left), Some(right)) => left.as_bytes() == right.as_bytes(),
+        _ => false,
+    }
 }
 
 fn claim_link(web_origin: &str, node_id: &str, secret: &str) -> String {
@@ -282,26 +355,119 @@ mod tests {
     }
 
     #[test]
-    fn claim_link_origin_is_explicit_https_or_the_trusted_hosted_default() {
+    fn explicit_https_origin_wins_even_when_cross_site() {
         assert_eq!(
-            resolve_web_origin(Some("https://explicit.heddle.test/")).expect("explicit origin"),
-            "https://explicit.heddle.test"
+            resolve_web_origin(
+                Some("https://explicit.example:8443/"),
+                Some("https://app.acme.example"),
+                "api.acme.example",
+            )
+            .expect("explicit origin"),
+            "https://explicit.example:8443"
+        );
+    }
+
+    #[test]
+    fn saas_api_falls_back_to_app_heddle_sh() {
+        assert_eq!(
+            resolve_web_origin(None, None, "api.heddle.sh").expect("saas default"),
+            DEFAULT_CLAIM_WEB_ORIGIN
         );
         assert_eq!(
-            resolve_web_origin(None).expect("hosted default"),
+            resolve_web_origin(None, None, "https://api.heddle.sh").expect("canonical saas"),
             DEFAULT_CLAIM_WEB_ORIGIN
         );
         assert_eq!(DEFAULT_CLAIM_WEB_ORIGIN, "https://app.heddle.sh");
     }
 
     #[test]
+    fn self_hosted_without_a_bound_origin_refuses_the_saas_default() {
+        let error = resolve_web_origin(None, None, "api.acme.example")
+            .expect_err("self-hosted must not fall back to SaaS");
+        let message = error.to_string();
+        assert!(
+            message.contains("--web-origin"),
+            "refusal should name the override: {message}"
+        );
+        assert!(
+            !message.contains(DEFAULT_CLAIM_WEB_ORIGIN) || message.contains("pass --web-origin"),
+            "refusal must not silently select the SaaS app origin: {message}"
+        );
+    }
+
+    #[test]
+    fn bound_server_advertised_origin_is_accepted() {
+        assert_eq!(
+            resolve_web_origin(None, Some("https://app.acme.example/"), "api.acme.example")
+                .expect("same registrable domain"),
+            "https://app.acme.example"
+        );
+        assert_eq!(
+            resolve_web_origin(None, Some("https://api.acme.example"), "api.acme.example")
+                .expect("same host"),
+            "https://api.acme.example"
+        );
+        assert_eq!(
+            resolve_web_origin(None, Some("https://app.acme.co.uk/"), "api.acme.co.uk")
+                .expect("psl multi-part suffix"),
+            "https://app.acme.co.uk"
+        );
+    }
+
+    #[test]
+    fn leftover_unbound_web_origin_cannot_become_a_claim_link() {
+        for advertised in [
+            "https://evil.com",
+            "http://evil.com",
+            "https://evil.com/claim",
+            "https://notacme.example",
+            "https://bar.github.io",
+        ] {
+            let error = resolve_web_origin(None, Some(advertised), "api.acme.example")
+                .expect_err("unbound leftover origin");
+            let message = error.to_string();
+            assert!(
+                !message.contains("https://evil.com/claim/")
+                    && !claim_link_would_use_host(&message, "evil.com"),
+                "refused origin must not be formatted as a claim link: {message}"
+            );
+            assert!(
+                message.contains("--web-origin") || message.contains("https"),
+                "refusal should be actionable: {message}"
+            );
+        }
+        let error = resolve_web_origin(None, Some("https://bar.github.io"), "api.foo.github.io")
+            .expect_err("public suffix is not a string suffix");
+        assert!(
+            error.to_string().contains("--web-origin"),
+            "github.io siblings must not share a registrable domain: {error}"
+        );
+    }
+
+    #[test]
+    fn string_suffix_is_not_a_registrable_domain_bind() {
+        let error = resolve_web_origin(None, Some("https://evil.com"), "api.notevil.com")
+            .expect_err("ends-with is not a bind");
+        assert!(
+            error.to_string().contains("--web-origin"),
+            "string-suffix trap must fail closed: {error}"
+        );
+    }
+
+    #[test]
     fn claim_link_refuses_http_even_when_explicit() {
         for invalid in ["http://evil.example", "http://app.heddle.sh"] {
-            let error = resolve_web_origin(Some(invalid)).expect_err("http origin");
+            let error =
+                resolve_web_origin(Some(invalid), None, "api.heddle.sh").expect_err("http origin");
             assert!(
                 error.to_string().contains("https"),
                 "http refusal should name the https requirement: {error}"
             );
         }
+    }
+
+    fn claim_link_would_use_host(message: &str, host: &str) -> bool {
+        message.contains(&format!("https://{host}/claim/"))
+            || message.contains(&format!("http://{host}/claim/"))
     }
 }

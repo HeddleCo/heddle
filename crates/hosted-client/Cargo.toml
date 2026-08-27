@@ -44,6 +44,7 @@ heddle-cli-contract.workspace = true
 heddle-cli-render.workspace = true
 prost = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
+psl = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 repo.workspace = true
@@ -86,6 +87,7 @@ client = [
     "dep:noq-udp",
     "dep:prost",
     "dep:prost-types",
+    "dep:psl",
     "dep:rand",
     "dep:reqwest",
     "dep:rustls",

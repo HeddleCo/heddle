@@ -89,6 +89,10 @@ fn finish_invite_create(
 ) -> Result<AgentAccountCreatedOutput> {
     let owner_id = uuid::Uuid::parse_str(&response.account_id)
         .context("server returned a non-UUID account identity")?;
+    let web_origin = match response.web_origin.trim() {
+        "" => None,
+        value => Some(value.to_string()),
+    };
     let subject = minted.subject.clone();
     store_agent_root(
         server,
@@ -99,15 +103,15 @@ fn finish_invite_create(
     )?;
     let account_id = response.account_id;
     let pet_name = response.pet_name;
-    // Remote `web_origin` is not a trusted destination for the local claim
-    // bearer. `heddle claim` uses https://app.heddle.sh unless the human
-    // passes an explicit `--web-origin`.
+    // Stored for later routing. `heddle claim` binds this to the configured
+    // hosted server before minting the local claim bearer.
     identity_state::store(&ClaimState::new(
         server.to_string(),
         owner_id,
         subject.clone(),
         pet_name.clone(),
         hex::encode(minted.public_key),
+        web_origin,
     ))?;
     Ok(AgentAccountCreatedOutput {
         output_kind: "agent_account_created",

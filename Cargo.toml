@@ -84,6 +84,7 @@ prost = "0.14"
 prost-reflect = "0.16"
 prost-types = "0.14"
 protoc-bin-vendored = "3"
+psl = "2"
 opentelemetry = "0.32"
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics"] }
 opentelemetry_sdk = "0.32"
