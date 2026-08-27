@@ -126,13 +126,14 @@ pub use context_plan::{
 pub use contract::{
     HeddleReport, MachineOutputKind, OutputDiscriminator, ReportContract, schema_for_report,
 };
+// The diff facade includes named bases so CLI and review consumers share one resolver.
 pub use diff::{
-    ContextSnippet, DiffOptions, DiffReport, DiffStats, FileChange, FileContextEntry, FileEolState,
-    LineCounts, LineDiff, PlainGitDiffProbe, SemanticChangeEntry, SymlinkChange,
+    ContextSnippet, DiffBase, DiffOptions, DiffReport, DiffStats, FileChange, FileContextEntry,
+    FileEolState, LineCounts, LineDiff, PlainGitDiffProbe, SemanticChangeEntry, SymlinkChange,
     attach_show_context, change_line_counts, compute_state_diff, compute_tree_diff, diff,
-    diff_worktree_status, plain_git_head_diff, render_diff_patch, render_diff_patch_bytes,
-    should_render_modified_pair, trim_added_decorations_for_display, worktree_context_state,
-    write_diff_patch,
+    diff_worktree_status, plain_git_head_diff, record_last_turn_capture, render_diff_patch,
+    render_diff_patch_bytes, resolve_last_turn_base, should_render_modified_pair,
+    trim_added_decorations_for_display, worktree_context_state, write_diff_patch,
 };
 pub use fsck::{FsckError, FsckOptions, FsckRepair, FsckReport, fsck};
 pub use gc_plan::{
@@ -160,9 +161,10 @@ pub use hook_plan::{
     hook_install_source_required_kind, hook_unknown_kind, plan_hook_install_source,
 };
 pub use identity_cursor::{
-    IDENTITY_CURSOR_FILE, IdentityCursor, expire_identity_cursor, harness_kind_from_basename,
-    identity_cursor_path, published_field, read_identity_cursor, stamp_identity_cursor,
-    thought_level_from_payload, value_string_or_named, write_identity_cursor,
+    IDENTITY_CURSOR_FILE, IdentityCursor, LastTurnAnchor, expire_identity_cursor,
+    harness_kind_from_basename, identity_cursor_path, last_turn_anchor_path, published_field,
+    read_identity_cursor, read_last_turn_anchor, stamp_identity_cursor, thought_level_from_payload,
+    value_string_or_named, write_identity_cursor, write_last_turn_anchor,
 };
 pub use identity_payload::{
     claude_cursor_patch, codex_cursor_patch, cursor_event_expires, cursor_patch_from_child_env,

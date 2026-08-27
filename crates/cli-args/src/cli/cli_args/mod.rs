@@ -41,7 +41,7 @@ pub use commands_args::{
     AgentProvenanceListArgs, AgentProvenanceSegmentArgs, AgentProvenanceShowArgs, AgentReadyArgs,
     AgentReleaseArgs, AgentReleaseStatusArg, AgentReserveArgs, AgentTaskCreateArgs,
     AgentTaskListArgs, AgentTaskShowArgs, AgentTaskStatusArg, AgentTaskUpdateArgs, CloneArgs,
-    CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs,
+    CollapseArgs, CommitArgs, DiffArgs, DiffBaseArg, DoctorArgs, DoctorCommands, DoctorDocsArgs,
     DoctorSchemasArgs, ExpandArgs, INIT_VERB, InitArgs, LandArgs, LogArgs, PullArgs, PushArgs,
     ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs, ThreadAbsorbArgs,
     ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs, ThreadCheckMergeArgs,

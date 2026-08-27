@@ -16899,6 +16899,12 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "base": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "broader_guidance": {
           "items": {
             "$ref": "#/$defs/ContextSnippet"
@@ -30024,6 +30030,13 @@
             "$ref": "#/$defs/SignalView"
           },
           "type": "array"
+        },
+        "base": {
+          "description": "Named comparison base selected for the existing review payload.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "discussions": {
           "items": {

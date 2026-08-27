@@ -3,10 +3,10 @@
 //!
 //! Root `.heddle/` holds identity material (`identity.toml`), credentials,
 //! and repository-engine state. Pointer checkout also writes cursor files
-//! beside the `.heddle` file (`.heddle.identity`, `.identity.lock`,
-//! `.identity.tmp.*`). Gitignore last-match-wins would otherwise let
-//! `!.heddle/` pull that tree into capture. Nested `.heddle/` directories
-//! (fixtures) stay ordinary content.
+//! beside the `.heddle` file (`.heddle.identity`, `.heddle.last-turn`,
+//! `.identity.lock`, `.identity.tmp.*`, `.last-turn.tmp.*`). Gitignore
+//! last-match-wins would otherwise let `!.heddle/` pull that tree into
+//! capture. Nested `.heddle/` directories (fixtures) stay ordinary content.
 
 use std::path::{Component, Path};
 
@@ -37,9 +37,11 @@ fn is_reserved_root_name(name: &std::ffi::OsStr) -> bool {
     };
     name == ".heddle"
         || name == ".heddle.identity"
+        || name == ".heddle.last-turn"
         || name == ".identity.lock"
         || name == ".identity.tmp"
         || name.starts_with(".identity.tmp.")
+        || name.starts_with(".last-turn.tmp.")
 }
 
 fn is_worktree_root(path: &Path) -> bool {
@@ -84,9 +86,11 @@ mod tests {
         for path in [
             ".heddle.identity",
             "./.heddle.identity",
+            ".heddle.last-turn",
             ".identity.lock",
             ".identity.tmp.123.0",
             ".identity.tmp",
+            ".last-turn.tmp.123.0",
         ] {
             assert!(
                 is_reserved_worktree_path(Path::new(path)),
@@ -106,6 +110,7 @@ mod tests {
             "examples/calculator/.heddle/identity.toml",
             "examples/calculator/.heddle",
             "examples/foo/.heddle.identity",
+            "examples/foo/.heddle.last-turn",
             "examples/foo/.identity.lock",
             "src/.identity.tmp.1.2",
             "../.heddle/identity.toml",

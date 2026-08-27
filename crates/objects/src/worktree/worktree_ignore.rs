@@ -18,10 +18,11 @@
 //! write `**/<name>` explicitly.
 //!
 //! Root `.heddle/` and pointer-checkout cursor files (`.heddle.identity`,
-//! `.identity.lock`, `.identity.tmp.*`) are reserved-path hard-denies
-//! evaluated after user rules. A later `!.heddle/` (or similar) cannot
-//! un-ignore identity material. Nested fixture `.heddle/` trees are not
-//! reserved.
+//! `.heddle.last-turn`,
+//! `.identity.lock`, `.identity.tmp.*`, `.last-turn.tmp.*`) are reserved-path
+//! hard-denies evaluated after user rules. A later `!.heddle/` (or similar)
+//! cannot un-ignore identity material. Nested fixture `.heddle/` trees are
+//! not reserved.
 
 use std::path::Path;
 

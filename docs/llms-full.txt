@@ -4720,10 +4720,16 @@ flat `array<object>`:
 }
 ```
 
+`heddle diff --base last-turn [<to>]` resolves the first capture made by the
+live harness session on this thread and echoes `"base": "last-turn"`. If the
+live session stamp, captured anchor, or thread ancestry cannot be proven, the
+command refuses instead of substituting HEAD or another branch base.
+
 ### Fields
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
+| `base` | string | optional | Named comparison base. Present as `last-turn` only when explicitly selected. |
 | `from_state`, `to_state` | string \| null | required | State identifiers resolved for the comparison. Worktree-mode diffs leave `to_state` null. |
 | `changes` | object \| array<object> | required | Worktree mode: `{modified, added, deleted}` category arrays (each entry carries `path`, `kind`, and the other per-file diff fields; a `renamed` entry buckets under `modified`). State-to-state mode: a flat `array<object>` of file-level or semantic changes. Empty when there are no changes. |
 | `semantic_changes` | array<object> \| null | optional | Semantic diff entries when semantic analysis is requested and available. |
@@ -6880,6 +6886,7 @@ Hosted-review payload for a single state.
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
 | `state_id` | string | required | Physical state identifier. |
+| `base` | string | optional | Named change-list base. Present as `last-turn` only when explicitly selected. |
 | `headline` | string | required | |
 | `agent_narrative` | string \| null | required | |
 | `files_changed` | int | required | |

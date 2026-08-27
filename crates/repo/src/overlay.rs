@@ -43,8 +43,10 @@ const GIT_CHECKPOINT_INTENT_FILE: &str = "git-checkpoint-intent.json";
 const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[
     ".heddle/",
     ".heddle.identity",
+    ".heddle.last-turn",
     ".identity.lock",
     ".identity.tmp.*",
+    ".last-turn.tmp.*",
 ];
 
 #[derive(Debug)]

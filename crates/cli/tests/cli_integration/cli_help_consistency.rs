@@ -260,6 +260,12 @@ fn diff_help_explains_git_compatible_patch_headers() {
             && help.contains("extended headers for type and mode changes"),
         "diff help should explain its patch format and extended headers: {help}"
     );
+    assert!(
+        help.contains("--base <BASE>")
+            && help.contains("last-turn")
+            && help.contains("this agent peer's turn start"),
+        "diff help should name the last-turn base and its meaning: {help}"
+    );
 }
 
 #[test]

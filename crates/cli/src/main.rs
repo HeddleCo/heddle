@@ -524,6 +524,7 @@ async fn async_main() -> Result<()> {
         Commands::Diff(DiffArgs {
             from,
             to,
+            base,
             path_filters,
             paths,
             semantic,
@@ -536,6 +537,7 @@ async fn async_main() -> Result<()> {
             &cli,
             from.clone(),
             to.clone(),
+            *base,
             path_filters.clone(),
             paths.clone(),
             *semantic,

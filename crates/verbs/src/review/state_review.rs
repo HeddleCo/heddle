@@ -127,6 +127,17 @@ impl LocalStateReview {
         state_id: StateId,
         include_all_signals: bool,
     ) -> Result<ReviewPayload, LocalReviewError> {
+        self.get_review_payload_from(state_id, include_all_signals, None)
+    }
+
+    /// Build the existing review payload with an optional named change-list
+    /// base. `None` preserves state-vs-first-parent review behavior.
+    pub fn get_review_payload_from(
+        &self,
+        state_id: StateId,
+        include_all_signals: bool,
+        base_state_id: Option<StateId>,
+    ) -> Result<ReviewPayload, LocalReviewError> {
         let repo = self.inner.repo();
         let state = repo
             .store()
@@ -144,8 +155,8 @@ impl LocalStateReview {
         // signal registry / budgeter will eventually layer on top of
         // this; until then `files_changed` is the most useful single
         // number an agent can use for self-review.
-        let diff_summary =
-            compute_state_diff_summary(repo, &state).map_err(map_repository_error)?;
+        let diff_summary = compute_state_diff_summary(repo, &state, base_state_id)
+            .map_err(map_repository_error)?;
 
         let summary = ReviewSummary {
             headline: state.intent.clone().unwrap_or_default(),
@@ -726,9 +737,11 @@ struct DiffSummary {
 fn compute_state_diff_summary(
     repo: &Repository,
     state: &State,
+    base_state_id: Option<StateId>,
 ) -> objects::error::Result<DiffSummary> {
     use objects::object::Tree;
-    let parent_tree_hash = if let Some(parent_id) = state.parents.first() {
+    let parent_id = base_state_id.as_ref().or_else(|| state.parents.first());
+    let parent_tree_hash = if let Some(parent_id) = parent_id {
         match repo.store().get_state(parent_id)? {
             Some(parent_state) => parent_state.tree,
             None => Tree::new().hash(),
