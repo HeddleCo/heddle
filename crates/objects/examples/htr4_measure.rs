@@ -29,6 +29,9 @@ use objects::object::{
 use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 use tempfile::{NamedTempFile, TempDir};
 
+#[path = "htr4_measure/native_pack.rs"]
+mod native_pack;
+
 const SEED: u64 = 0x6874_7234_5f62_656e;
 const SIZES: [usize; 5] = [1, 10, 100, 1_000, 10_000];
 const SAMPLE_COUNT: usize = 15;
@@ -1445,6 +1448,15 @@ struct RealCorpus {
     git_loose_bytes: usize,
     git_packed_bytes: usize,
     git_pack_files: usize,
+    git_pack_depths: Vec<usize>,
+    git_pack_chain_bytes: Vec<usize>,
+}
+
+struct GitPackedStats {
+    bytes: usize,
+    pack_files: usize,
+    depths: Vec<usize>,
+    chain_bytes: Vec<usize>,
 }
 
 fn git_output(repo: &Path, arguments: &[&str]) -> Result<Vec<u8>> {
@@ -1471,6 +1483,31 @@ fn real_object_format(repo: &Path) -> Result<GitObjectFormat> {
         "sha256" => Ok(GitObjectFormat::Sha256),
         format => bail!("unsupported Git object format {format}"),
     }
+}
+
+fn git_tree_only_pack_bytes(corpus: &RealCorpus) -> Result<usize> {
+    let hash_len = match corpus.object_format {
+        GitObjectFormat::Sha1 => 20usize,
+        GitObjectFormat::Sha256 => 32usize,
+    };
+    let pack_overhead = 12usize
+        .checked_add(hash_len)
+        .context("Git pack overhead overflow")?;
+    let index_overhead = (256usize * 4)
+        .checked_add(
+            corpus
+                .trees
+                .len()
+                .checked_mul(hash_len + 8)
+                .context("Git tree-only index entries overflow")?,
+        )
+        .and_then(|size| size.checked_add(hash_len * 2))
+        .context("Git tree-only index overhead overflow")?;
+    corpus
+        .git_packed_bytes
+        .checked_add(pack_overhead)
+        .and_then(|size| size.checked_add(index_overhead))
+        .context("Git tree-only pack total overflow")
 }
 
 fn sample_evenly<T: Clone>(values: &[T], limit: usize) -> Vec<T> {
@@ -1644,7 +1681,7 @@ fn git_loose_sizes(repo: &Path, tree_ids: &[String]) -> Result<usize> {
     Ok(total)
 }
 
-fn git_packed_sizes(repo: &Path, tree_ids: &[String]) -> Result<(usize, usize)> {
+fn git_packed_sizes(repo: &Path, tree_ids: &[String]) -> Result<GitPackedStats> {
     let git_dir = PathBuf::from(
         std::str::from_utf8(&git_output(repo, &["rev-parse", "--absolute-git-dir"])?)?.trim(),
     );
@@ -1662,8 +1699,7 @@ fn git_packed_sizes(repo: &Path, tree_ids: &[String]) -> Result<(usize, usize)> 
         repo.display()
     );
 
-    let wanted = tree_ids.iter().map(String::as_str).collect::<HashSet<_>>();
-    let mut sizes = HashMap::with_capacity(wanted.len());
+    let mut records = HashMap::<String, (usize, usize, Option<String>)>::new();
     for index in &indexes {
         let output = Command::new("git")
             .args(["verify-pack", "-v"])
@@ -1685,26 +1721,69 @@ fn git_packed_sizes(repo: &Path, tree_ids: &[String]) -> Result<(usize, usize)> 
                 continue;
             }
             let oid = std::str::from_utf8(fields[0])?;
-            if wanted.contains(oid) {
-                let packed_size = std::str::from_utf8(fields[3])?.parse::<usize>()?;
-                sizes.entry(oid.to_string()).or_insert(packed_size);
-            }
+            let packed_size = std::str::from_utf8(fields[3])?.parse::<usize>()?;
+            let depth = if let Some(field) = fields.get(5) {
+                std::str::from_utf8(field)?.parse::<usize>()?
+            } else {
+                0
+            };
+            let base = fields
+                .get(6)
+                .map(|field| std::str::from_utf8(field).map(str::to_string))
+                .transpose()?;
+            records
+                .entry(oid.to_string())
+                .or_insert((packed_size, depth, base));
         }
     }
     let missing = tree_ids
         .iter()
-        .filter(|oid| !sizes.contains_key(oid.as_str()))
+        .filter(|oid| !records.contains_key(oid.as_str()))
         .take(3)
         .cloned()
         .collect::<Vec<_>>();
     ensure!(
         missing.is_empty(),
         "{} selected tree objects are not packed (examples: {}); run `git -C {} gc --prune=now` first",
-        tree_ids.len() - sizes.len(),
+        tree_ids.len()
+            - tree_ids
+                .iter()
+                .filter(|oid| records.contains_key(oid.as_str()))
+                .count(),
         missing.join(","),
         repo.display()
     );
-    Ok((sizes.values().sum(), indexes.len()))
+    let mut depths = Vec::with_capacity(tree_ids.len());
+    let mut chain_bytes = Vec::with_capacity(tree_ids.len());
+    let mut bytes = 0usize;
+    for oid in tree_ids {
+        let (record_bytes, depth, _) = records
+            .get(oid)
+            .with_context(|| format!("missing packed Git tree {oid}"))?;
+        bytes += record_bytes;
+        depths.push(*depth);
+        let mut chain_total = 0usize;
+        let mut cursor = oid.as_str();
+        loop {
+            let (stored, _, base) = records
+                .get(cursor)
+                .with_context(|| format!("missing Git delta base {cursor}"))?;
+            chain_total = chain_total
+                .checked_add(*stored)
+                .context("Git packed chain byte overflow")?;
+            let Some(base) = base else {
+                break;
+            };
+            cursor = base;
+        }
+        chain_bytes.push(chain_total);
+    }
+    Ok(GitPackedStats {
+        bytes,
+        pack_files: indexes.len(),
+        depths,
+        chain_bytes,
+    })
 }
 
 fn parse_git_tree(body: &[u8], format: GitObjectFormat) -> Result<Option<Tree>> {
@@ -1823,7 +1902,7 @@ fn load_real_corpus(path: &Path, limit: usize) -> Result<RealCorpus> {
         String::from_utf8_lossy(&output.stderr)
     );
     let git_loose_bytes = git_loose_sizes(&path, &imported_tree_ids)?;
-    let (git_packed_bytes, git_pack_files) = git_packed_sizes(&path, &imported_tree_ids)?;
+    let git_packed = git_packed_sizes(&path, &imported_tree_ids)?;
     Ok(RealCorpus {
         label,
         path,
@@ -1834,8 +1913,10 @@ fn load_real_corpus(path: &Path, limit: usize) -> Result<RealCorpus> {
         trees,
         parent_tree_ids,
         git_loose_bytes,
-        git_packed_bytes,
-        git_pack_files,
+        git_packed_bytes: git_packed.bytes,
+        git_pack_files: git_packed.pack_files,
+        git_pack_depths: git_packed.depths,
+        git_pack_chain_bytes: git_packed.chain_bytes,
     })
 }
 
@@ -1867,6 +1948,86 @@ struct Timing {
     stddev_ns: f64,
     cv_percent: f64,
     iterations_per_sample: u64,
+}
+
+struct GitBatchReader {
+    child: std::process::Child,
+    requests: BufWriter<std::process::ChildStdin>,
+    responses: BufReader<std::process::ChildStdout>,
+}
+
+impl GitBatchReader {
+    fn open(repo: &Path) -> Result<Self> {
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["cat-file", "--batch"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let requests = BufWriter::new(child.stdin.take().context("Git batch timing stdin")?);
+        let responses = BufReader::new(child.stdout.take().context("Git batch timing stdout")?);
+        Ok(Self {
+            child,
+            requests,
+            responses,
+        })
+    }
+
+    fn read_tree(&mut self, oid: &str) -> Result<usize> {
+        writeln!(self.requests, "{oid}")?;
+        self.requests.flush()?;
+        let mut header = String::new();
+        self.responses.read_line(&mut header)?;
+        let fields = header.split_ascii_whitespace().collect::<Vec<_>>();
+        ensure!(
+            fields.len() == 3 && fields[0] == oid && fields[1] == "tree",
+            "unexpected timed Git batch response {header:?}"
+        );
+        let size = fields[2].parse::<usize>()?;
+        let mut body = vec![0u8; size + 1];
+        self.responses.read_exact(&mut body)?;
+        ensure!(body.last() == Some(&b'\n'), "timed Git batch delimiter");
+        black_box(&body[..size]);
+        Ok(size)
+    }
+
+    fn finish(mut self) -> Result<()> {
+        self.requests.flush()?;
+        drop(self.requests);
+        let status = self.child.wait()?;
+        ensure!(status.success(), "timed Git batch process failed");
+        Ok(())
+    }
+}
+
+struct GitReadTiming {
+    samples: usize,
+    mean_tree_bytes: f64,
+    timing: Timing,
+}
+
+fn measure_git_pack_read(corpus: &RealCorpus) -> Result<GitReadTiming> {
+    let samples = sample_evenly(&corpus.tree_ids, 16);
+    ensure!(!samples.is_empty(), "Git packed read sample is empty");
+    let mut reader = GitBatchReader::open(&corpus.path)?;
+    let mut tree_bytes = 0usize;
+    for oid in &samples {
+        tree_bytes += reader.read_tree(oid)?;
+    }
+    let mut index = 0usize;
+    let timing = measure(|| {
+        let oid = &samples[index % samples.len()];
+        index += 1;
+        reader.read_tree(oid).expect("timed Git packed tree read")
+    });
+    reader.finish()?;
+    Ok(GitReadTiming {
+        samples: samples.len(),
+        mean_tree_bytes: tree_bytes as f64 / samples.len() as f64,
+        timing,
+    })
 }
 
 fn run_iterations<F, T>(operation: &mut F, iterations: u64) -> Duration
@@ -1999,6 +2160,23 @@ fn validate_real_corpora(corpora: &[RealCorpus]) -> Result<()> {
     println!(
         "RADICAL_SIZE,label,trees,parent_covered,bases,deltas,max_ops,lean_all,hot_bytes,settled_bytes,settled_over_git_loose,settled_over_git_packed,settled_over_raw,settled_over_v5"
     );
+    println!(
+        "NATIVE_PACK_SIZE,label,variant,trees,record_bytes,name_dictionary_bytes,target_dictionary_bytes,tree_index_bytes,total_bytes,anchors,deltas,cross_deltas,p50_depth,p95_depth,max_depth,total_over_git_loose,total_over_git_packed,total_over_radical"
+    );
+    println!(
+        "NATIVE_PACK_BUILD,label,trees,names,targets,candidate_pairs,winner_build_ms,exploration_build_ms,byte_delta_build_ms"
+    );
+    println!(
+        "NATIVE_PACK_READ,label,samples,mean_chain_record_bytes,p95_chain_record_bytes,mean_lookup_record_bytes,mean_lookup_records,mean_chain_ops,resolve_median_ns,lookup_median_ns"
+    );
+    println!(
+        "NATIVE_PACK_CHAIN,label,variant,trees,mean_chain_record_bytes,p95_chain_record_bytes,mean_chain_ops"
+    );
+    println!(
+        "GIT_PACK_CHAIN,label,trees,mean_chain_record_bytes,p95_chain_record_bytes,p50_depth,p95_depth,max_depth"
+    );
+    println!("GIT_PACK_TOTAL,label,trees,record_bytes,tree_only_pack_plus_index_bytes");
+    println!("GIT_PACK_READ,label,samples,mean_inflated_tree_bytes,cat_file_batch_median_ns");
 
     let mut aggregate_raw = 0usize;
     let mut aggregate_historical = 0usize;
@@ -2014,6 +2192,27 @@ fn validate_real_corpora(corpora: &[RealCorpus]) -> Result<()> {
     let mut aggregate_radical_deltas = 0usize;
     let mut aggregate_parent_coverage = 0usize;
     let mut aggregate_radical_max_ops = 0usize;
+    let mut aggregate_native_records = [0usize; 9];
+    let mut aggregate_native_totals = [0usize; 9];
+    let mut aggregate_native_anchors = [0usize; 9];
+    let mut aggregate_native_deltas = [0usize; 9];
+    let mut aggregate_native_cross_deltas = [0usize; 9];
+    let mut aggregate_native_max_depth = [0usize; 9];
+    let mut aggregate_native_names = 0usize;
+    let mut aggregate_native_targets = 0usize;
+    let mut aggregate_native_name_dictionary = 0usize;
+    let mut aggregate_native_target_dictionary = 0usize;
+    let mut aggregate_native_tree_index = 0usize;
+    let mut aggregate_native_candidate_pairs = 0usize;
+    let mut aggregate_native_build_ms = 0.0f64;
+    let mut aggregate_native_exploration_build_ms = 0.0f64;
+    let mut aggregate_native_byte_delta_build_ms = 0.0f64;
+    let mut aggregate_native_depths = vec![Vec::new(); 9];
+    let mut aggregate_native_chain_bytes = vec![Vec::new(); 9];
+    let mut aggregate_native_chain_ops = [0usize; 9];
+    let mut aggregate_git_depths = Vec::new();
+    let mut aggregate_git_chain_bytes = Vec::new();
+    let mut aggregate_git_tree_only_total = 0usize;
     let mut file_candidates = Vec::new();
     let mut radical_file_fixtures = Vec::new();
     let config = CompressionConfig::default();
@@ -2107,6 +2306,36 @@ fn validate_real_corpora(corpora: &[RealCorpus]) -> Result<()> {
             compressed_trees,
             raw_fallback_trees,
         );
+        let mut git_depths = corpus.git_pack_depths.clone();
+        let mut git_chain_bytes = corpus.git_pack_chain_bytes.clone();
+        git_depths.sort_unstable();
+        git_chain_bytes.sort_unstable();
+        println!(
+            "GIT_PACK_CHAIN,{},{},{:.2},{},{},{},{}",
+            corpus.label,
+            corpus.trees.len(),
+            git_chain_bytes.iter().sum::<usize>() as f64 / git_chain_bytes.len() as f64,
+            percentile(&git_chain_bytes, 95, 100),
+            percentile(&git_depths, 50, 100),
+            percentile(&git_depths, 95, 100),
+            git_depths.last().copied().unwrap_or(0),
+        );
+        let git_tree_only_total = git_tree_only_pack_bytes(corpus)?;
+        println!(
+            "GIT_PACK_TOTAL,{},{},{},{}",
+            corpus.label,
+            corpus.trees.len(),
+            corpus.git_packed_bytes,
+            git_tree_only_total,
+        );
+        aggregate_git_tree_only_total += git_tree_only_total;
+        let git_read = measure_git_pack_read(corpus)?;
+        println!(
+            "GIT_PACK_READ,{},{},{:.2},{:.3}",
+            corpus.label, git_read.samples, git_read.mean_tree_bytes, git_read.timing.median_ns,
+        );
+        aggregate_git_depths.extend(git_depths);
+        aggregate_git_chain_bytes.extend(git_chain_bytes);
         let radical = build_radical_corpus(corpus)?;
         println!(
             "RADICAL_SIZE,{},{},{},{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6}",
@@ -2124,6 +2353,83 @@ fn validate_real_corpora(corpora: &[RealCorpus]) -> Result<()> {
             radical.settled_total as f64 / raw_total as f64,
             radical.settled_total as f64 / adaptive_total as f64,
         );
+        let native = native_pack::build_native_pack(corpus)?;
+        for (variant_index, variant) in native.variants.iter().enumerate() {
+            println!(
+                "NATIVE_PACK_SIZE,{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.6},{:.6},{:.6}",
+                corpus.label,
+                variant.name,
+                corpus.trees.len(),
+                variant.record_bytes,
+                native.name_dictionary_bytes,
+                native.target_dictionary_bytes,
+                native.tree_index_bytes,
+                variant.total_bytes,
+                variant.anchors,
+                variant.deltas,
+                variant.cross_deltas,
+                variant.p50_depth,
+                variant.p95_depth,
+                variant.max_depth,
+                variant.total_bytes as f64 / corpus.git_loose_bytes as f64,
+                variant.total_bytes as f64 / corpus.git_packed_bytes as f64,
+                variant.total_bytes as f64 / radical.settled_total as f64,
+            );
+            println!(
+                "NATIVE_PACK_CHAIN,{},{},{},{:.2},{},{:.2}",
+                corpus.label,
+                variant.name,
+                corpus.trees.len(),
+                variant.chain_record_bytes.iter().sum::<usize>() as f64 / corpus.trees.len() as f64,
+                percentile(&variant.chain_record_bytes, 95, 100),
+                variant.total_chain_ops as f64 / corpus.trees.len() as f64,
+            );
+            aggregate_native_records[variant_index] += variant.record_bytes;
+            aggregate_native_totals[variant_index] += variant.total_bytes;
+            aggregate_native_anchors[variant_index] += variant.anchors;
+            aggregate_native_deltas[variant_index] += variant.deltas;
+            aggregate_native_cross_deltas[variant_index] += variant.cross_deltas;
+            aggregate_native_max_depth[variant_index] =
+                aggregate_native_max_depth[variant_index].max(variant.max_depth);
+            for (depth, count) in variant.depth_histogram.iter().copied().enumerate() {
+                aggregate_native_depths[variant_index].extend(std::iter::repeat_n(depth, count));
+            }
+            aggregate_native_chain_bytes[variant_index]
+                .extend(variant.chain_record_bytes.iter().copied());
+            aggregate_native_chain_ops[variant_index] += variant.total_chain_ops;
+        }
+        println!(
+            "NATIVE_PACK_BUILD,{},{},{},{},{},{:.3},{:.3},{:.3}",
+            corpus.label,
+            corpus.trees.len(),
+            native.names,
+            native.targets,
+            native.candidate_pairs,
+            native.build_ms,
+            native.exploration_build_ms,
+            native.byte_delta_build_ms,
+        );
+        println!(
+            "NATIVE_PACK_READ,{},{},{:.2},{},{:.2},{:.3},{:.2},{:.3},{:.3}",
+            corpus.label,
+            native.read.samples,
+            native.read.mean_chain_bytes,
+            native.read.p95_chain_bytes,
+            native.read.mean_lookup_bytes,
+            native.read.mean_lookup_records,
+            native.read.mean_chain_ops,
+            native.read.resolve_median_ns,
+            native.read.lookup_median_ns,
+        );
+        aggregate_native_names += native.names;
+        aggregate_native_targets += native.targets;
+        aggregate_native_name_dictionary += native.name_dictionary_bytes;
+        aggregate_native_target_dictionary += native.target_dictionary_bytes;
+        aggregate_native_tree_index += native.tree_index_bytes;
+        aggregate_native_candidate_pairs += native.candidate_pairs;
+        aggregate_native_build_ms += native.build_ms;
+        aggregate_native_exploration_build_ms += native.exploration_build_ms;
+        aggregate_native_byte_delta_build_ms += native.byte_delta_build_ms;
         let delta_candidates = radical
             .plans
             .iter()
@@ -2169,10 +2475,71 @@ fn validate_real_corpora(corpora: &[RealCorpus]) -> Result<()> {
         aggregate_radical_settled as f64 / aggregate_raw as f64,
         aggregate_radical_settled as f64 / aggregate_adaptive as f64,
     );
+    aggregate_git_depths.sort_unstable();
+    aggregate_git_chain_bytes.sort_unstable();
+    println!(
+        "GIT_PACK_CHAIN,ALL,{aggregate_trees},{:.2},{},{},{},{}",
+        aggregate_git_chain_bytes.iter().sum::<usize>() as f64
+            / aggregate_git_chain_bytes.len() as f64,
+        percentile(&aggregate_git_chain_bytes, 95, 100),
+        percentile(&aggregate_git_depths, 50, 100),
+        percentile(&aggregate_git_depths, 95, 100),
+        aggregate_git_depths.last().copied().unwrap_or(0),
+    );
+    println!(
+        "GIT_PACK_TOTAL,ALL,{aggregate_trees},{aggregate_git_packed},{aggregate_git_tree_only_total}"
+    );
+    for (variant_index, name) in [
+        "interned-anchors",
+        "parent-d1",
+        "parent-d8",
+        "window-d1",
+        "window-d4",
+        "window-d8",
+        "window-d16",
+        "window-d8-raw",
+        "byte-window-d8",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut depths = std::mem::take(&mut aggregate_native_depths[variant_index]);
+        depths.sort_unstable();
+        println!(
+            "NATIVE_PACK_SIZE,ALL,{name},{aggregate_trees},{},{aggregate_native_name_dictionary},{aggregate_native_target_dictionary},{aggregate_native_tree_index},{},{},{},{},{},{},{},{:.6},{:.6},{:.6}",
+            aggregate_native_records[variant_index],
+            aggregate_native_totals[variant_index],
+            aggregate_native_anchors[variant_index],
+            aggregate_native_deltas[variant_index],
+            aggregate_native_cross_deltas[variant_index],
+            percentile(&depths, 50, 100),
+            percentile(&depths, 95, 100),
+            aggregate_native_max_depth[variant_index],
+            aggregate_native_totals[variant_index] as f64 / aggregate_git_loose as f64,
+            aggregate_native_totals[variant_index] as f64 / aggregate_git_packed as f64,
+            aggregate_native_totals[variant_index] as f64 / aggregate_radical_settled as f64,
+        );
+        aggregate_native_chain_bytes[variant_index].sort_unstable();
+        println!(
+            "NATIVE_PACK_CHAIN,ALL,{name},{aggregate_trees},{:.2},{},{:.2}",
+            aggregate_native_chain_bytes[variant_index]
+                .iter()
+                .sum::<usize>() as f64
+                / aggregate_trees as f64,
+            percentile(&aggregate_native_chain_bytes[variant_index], 95, 100),
+            aggregate_native_chain_ops[variant_index] as f64 / aggregate_trees as f64,
+        );
+    }
+    println!(
+        "NATIVE_PACK_BUILD,ALL,{aggregate_trees},{aggregate_native_names},{aggregate_native_targets},{aggregate_native_candidate_pairs},{aggregate_native_build_ms:.3},{aggregate_native_exploration_build_ms:.3},{aggregate_native_byte_delta_build_ms:.3}"
+    );
     ensure!(
         aggregate_adaptive < aggregate_historical,
         "real-tree adaptive size does not beat historical loose compression"
     );
+    if env::var_os("HTR4_PACK_ONLY").is_some() {
+        return Ok(());
+    }
 
     file_candidates.sort_by_key(|candidate| candidate.0);
     let file_candidates = sample_evenly(&file_candidates, REAL_FILE_SAMPLE_LIMIT);
@@ -2524,6 +2891,9 @@ fn main() -> Result<()> {
         "META,self_check,v5_roundtrip+range+hash_corruption+payload_corruption;radical_lean+delta_roundtrip+hash_mismatch_ok"
     );
     validate_real_corpora(&real_corpora)?;
+    if env::var_os("HTR4_VALIDATE_ONLY").is_some() || env::var_os("HTR4_PACK_ONLY").is_some() {
+        return Ok(());
+    }
     measure_radical_capture()?;
     println!(
         "FIXTURE,entries,min_name,max_name,mean_name,blob_normal,blob_exec,tree,symlink,gitlink,spoollink"
