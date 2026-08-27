@@ -823,7 +823,15 @@ fn parse_git_tree(body: &[u8], format: GitObjectFormat) -> Result<Option<Tree>> 
         entries.push(entry);
         offset = oid_end;
     }
-    Ok(Some(Tree::from_entries(entries)))
+    let tree = Tree::from_entries(entries);
+    if tree
+        .entries()
+        .windows(2)
+        .any(|pair| pair[0].name() == pair[1].name())
+    {
+        return Ok(None);
+    }
+    Ok(Some(tree))
 }
 
 fn load_real_corpus(path: &Path, limit: usize) -> Result<RealCorpus> {
