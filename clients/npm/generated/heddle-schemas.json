@@ -13513,6 +13513,80 @@
       "title": "AuthCreateServiceTokenSchema",
       "type": "object"
     },
+    "auth login": {
+      "$defs": {
+        "HumanPromotionDirective": {
+          "properties": {
+            "account_id": {
+              "type": "string"
+            },
+            "command": {
+              "description": "Agent-native command that starts the short-lived human claim ceremony.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "promotion_uri": {
+              "description": "Reserved for a concrete server-provided promotion affordance.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "summary",
+            "account_id",
+            "command"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "account_id": {
+          "type": "string"
+        },
+        "authenticated": {
+          "type": "boolean"
+        },
+        "credential_saved": {
+          "type": "boolean"
+        },
+        "next": {
+          "$ref": "#/$defs/HumanPromotionDirective"
+        },
+        "output_kind": {
+          "enum": [
+            "agent_account_created"
+          ],
+          "type": "string"
+        },
+        "pet_name": {
+          "type": "string"
+        },
+        "subject": {
+          "description": "Subject carried by the client-minted, persisted agent capability.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "account_id",
+        "pet_name",
+        "subject",
+        "authenticated",
+        "credential_saved",
+        "next"
+      ],
+      "title": "AgentAccountCreatedSchema",
+      "type": "object"
+    },
     "auth logout": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
