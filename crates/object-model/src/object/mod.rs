@@ -154,8 +154,8 @@ pub use tree::{
     validate_name as validate_tree_entry_name,
 };
 pub use tree_canonical::{
-    TREE_CANONICAL_MAGIC, TREE_ENCODING_VERSION, TREE_HEADER_LEN, TreeHeader, decode_header,
-    is_canonical_tree,
+    TREE_BLOCK_ENCODING_VERSION, TREE_BLOCK_MIN_ENTRIES, TREE_CANONICAL_MAGIC,
+    TREE_ENCODING_VERSION, TREE_HEADER_LEN, TreeHeader, decode_header, is_canonical_tree,
 };
 #[cfg(feature = "async-source")]
 pub use tree_diff::diff_trees_visit_async;

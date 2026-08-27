@@ -1072,6 +1072,49 @@ fn loose_htr4_open_is_sequential_and_hashes() {
 }
 
 #[test]
+#[cfg(feature = "zstd")]
+fn loose_block_compressed_htr4_reads_a_file_backed_page_and_verifies() {
+    use crate::object::{TREE_BLOCK_ENCODING_VERSION, TreePageLimits};
+
+    let (_temp, store) = create_test_store();
+    let tree = Tree::from_entries(
+        (0usize..600)
+            .map(|index| {
+                TreeEntry::file(
+                    format!("module_{index:04}.rs"),
+                    ContentHash::compute(format!("blob-{index}").as_bytes()),
+                    index.is_multiple_of(19),
+                )
+                .unwrap()
+            })
+            .collect(),
+    );
+    let hash = store.put_tree(&tree).unwrap();
+    let path = hash_path(&trees_dir(store.root()), &hash);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(bytes[4], TREE_BLOCK_ENCODING_VERSION);
+
+    let mut reader = store.open_tree(&hash, None).unwrap().unwrap();
+    let first = reader
+        .next_page(TreePageLimits::new(1, usize::MAX).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.entries, tree.entries()[..1]);
+    assert!(reader.bytes_read() < 256);
+    let next = reader
+        .next_page(TreePageLimits::new(100, usize::MAX).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.entries, tree.entries()[1..101]);
+    while reader
+        .next_page(TreePageLimits::new(256, usize::MAX).unwrap())
+        .unwrap()
+        .is_some()
+    {}
+    reader.finish_and_verify().unwrap();
+}
+
+#[test]
 fn test_state_roundtrip() {
     let (_temp, store) = create_test_store();
 

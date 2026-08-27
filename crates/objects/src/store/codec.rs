@@ -23,10 +23,13 @@ pub fn decode_blob_content(data: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
-pub fn encode_tree(tree: &Tree, _config: &CompressionConfig) -> Result<(ContentHash, Vec<u8>)> {
-    // Canonical trees stay uncompressed so a resume cursor can seek to an
-    // entry frame without decompressing the prefix.
-    Ok((tree.hash(), tree.encode_canonical()?))
+pub fn encode_tree(tree: &Tree, config: &CompressionConfig) -> Result<(ContentHash, Vec<u8>)> {
+    let encoded = if config.enabled && tree.len() >= crate::object::TREE_BLOCK_MIN_ENTRIES {
+        tree.encode_canonical_blocked(config.level, config.min_size)?
+    } else {
+        tree.encode_canonical()?
+    };
+    Ok((tree.hash(), encoded))
 }
 
 pub fn decode_tree(data: &[u8]) -> Result<Tree> {
@@ -135,16 +138,17 @@ mod tests {
         let (_, encoded_tree) = encode_tree(&tree, &CompressionConfig::default()).unwrap();
         let encoded_state = encode_state(&state, &CompressionConfig::default()).unwrap();
 
-        assert!(
-            crate::object::is_canonical_tree(&encoded_tree),
-            "trees stay uncompressed HTR4 so resume can seek"
+        assert_eq!(
+            encoded_tree[4],
+            crate::object::TREE_BLOCK_ENCODING_VERSION,
+            "eligible trees use seekable block-compressed HTR4"
         );
         assert_eq!(&encoded_state[9..13], &1_u32.to_be_bytes());
     }
 
     #[test]
     #[cfg(feature = "zstd")]
-    fn tree_state_dictionary_corpus_roundtrips_byte_identically() {
+    fn tree_and_state_corpus_roundtrips() {
         let config = CompressionConfig::default();
 
         for revision in 0..64 {
@@ -162,9 +166,8 @@ mod tests {
                     })
                     .collect(),
             );
-            let serialized_tree = tree.encode_canonical().unwrap();
             let (_, encoded_tree) = encode_tree(&tree, &config).unwrap();
-            assert_eq!(decode_tree_body(&encoded_tree).unwrap(), serialized_tree);
+            assert_eq!(decode_tree_serialized(&encoded_tree).unwrap(), tree);
 
             let state = State::new(
                 tree.hash(),
@@ -182,6 +185,40 @@ mod tests {
                 serialized_state
             );
         }
+    }
+
+    #[test]
+    #[cfg(feature = "zstd")]
+    fn small_tree_and_disabled_compression_use_raw_htr4() {
+        let tree = Tree::from_entries(
+            (0..crate::object::TREE_BLOCK_MIN_ENTRIES - 1)
+                .map(|index| {
+                    TreeEntry::file(
+                        format!("module_{index:02}.rs"),
+                        ContentHash::compute(format!("blob-{index}").as_bytes()),
+                        false,
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        );
+        let (_, small) = encode_tree(&tree, &CompressionConfig::default()).unwrap();
+        assert_eq!(small[4], crate::object::TREE_ENCODING_VERSION);
+
+        let large = Tree::from_entries(
+            (0..64)
+                .map(|index| {
+                    TreeEntry::file(
+                        format!("module_{index:02}.rs"),
+                        ContentHash::compute(format!("large-blob-{index}").as_bytes()),
+                        false,
+                    )
+                    .unwrap()
+                })
+                .collect(),
+        );
+        let (_, disabled) = encode_tree(&large, &CompressionConfig::disabled()).unwrap();
+        assert_eq!(disabled[4], crate::object::TREE_ENCODING_VERSION);
     }
 
     #[test]

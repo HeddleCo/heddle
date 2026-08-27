@@ -63,6 +63,7 @@ fn error_class(error: &TreeStreamError) -> &'static str {
         TreeStreamError::InvalidPageLimits => "limits",
         TreeStreamError::UnverifiedRange => "unverified",
         TreeStreamError::Malformed(_) => "malformed",
+        TreeStreamError::Compression(_) => "compression",
         TreeStreamError::Io(_) => "io",
         TreeStreamError::HashMismatch { .. } => "hash",
     }

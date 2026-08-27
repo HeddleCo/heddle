@@ -32,6 +32,22 @@ fn sample_tree() -> Tree {
     ])
 }
 
+#[cfg(feature = "zstd")]
+fn compressible_tree(entries: usize) -> Tree {
+    Tree::from_entries(
+        (0..entries)
+            .map(|index| {
+                TreeEntry::file(
+                    format!("crates__module_{index:04}__src__shared_component.rs"),
+                    ContentHash::compute(format!("real-blob-{index}").as_bytes()),
+                    index.is_multiple_of(17),
+                )
+                .expect("compressed fixture entry")
+            })
+            .collect(),
+    )
+}
+
 fn open_reader(tree: &Tree) -> (Vec<u8>, TreeEntryReader<BytesTreeSource>) {
     let bytes = tree.encode_canonical().expect("encode");
     let reader = TreeEntryReader::open(
@@ -53,6 +69,100 @@ fn canonical_round_trip_matches_eager_tree() {
         Tree::decode_canonical_streamed(&bytes).expect("streamed"),
         tree
     );
+}
+
+#[test]
+#[cfg(feature = "zstd")]
+fn block_compressed_round_trip_matches_eager_and_streamed_tree() {
+    let tree = compressible_tree(600);
+    let bytes = tree.encode_canonical_blocked(3, 0).expect("encode blocked");
+    assert_eq!(bytes[4], crate::object::TREE_BLOCK_ENCODING_VERSION);
+    assert_eq!(Tree::decode_canonical(&bytes).expect("eager"), tree);
+    assert_eq!(
+        Tree::decode_canonical_streamed(&bytes).expect("streamed"),
+        tree
+    );
+}
+
+#[test]
+#[cfg(feature = "zstd")]
+fn compressed_tree_partial_read_and_resume_stay_block_local() {
+    let tree = compressible_tree(600);
+    let bytes = tree.encode_canonical_blocked(3, 0).expect("encode blocked");
+    let mut reader = TreeEntryReader::open(
+        BytesTreeSource::verified_placement(bytes.clone()),
+        tree.hash(),
+        None,
+    )
+    .expect("open blocked");
+    let first = reader
+        .next_page(TreePageLimits::new(1, usize::MAX).expect("limits"))
+        .expect("first page")
+        .expect("entry");
+    assert_eq!(first.entries, tree.entries()[..1]);
+    assert!(
+        reader.bytes_read() < 256,
+        "first block anchor should be a small ranged read"
+    );
+
+    let mut resumed = TreeEntryReader::open(
+        BytesTreeSource::verified_placement(bytes),
+        tree.hash(),
+        Some(&first.resume_cursor),
+    )
+    .expect("resume blocked");
+    let page = resumed
+        .next_page(TreePageLimits::new(100, usize::MAX).expect("limits"))
+        .expect("resumed page")
+        .expect("entries");
+    assert_eq!(page.entries, tree.entries()[1..101]);
+    assert!(
+        resumed.bytes_read() < tree.encode_canonical().expect("raw").len() as u64,
+        "resumed page should not read the whole tree"
+    );
+
+    let blocked = tree.encode_canonical_blocked(3, 0).expect("encode blocked");
+    let mut boundary_reader = TreeEntryReader::open(
+        BytesTreeSource::verified_placement(blocked.clone()),
+        tree.hash(),
+        None,
+    )
+    .expect("open boundary reader");
+    let before_boundary = boundary_reader
+        .next_page(TreePageLimits::new(256, usize::MAX).expect("limits"))
+        .expect("boundary page")
+        .expect("entries");
+    let mut at_boundary = TreeEntryReader::open(
+        BytesTreeSource::verified_placement(blocked),
+        tree.hash(),
+        Some(&before_boundary.resume_cursor),
+    )
+    .expect("resume at block boundary");
+    let anchor = at_boundary
+        .next_page(TreePageLimits::new(1, usize::MAX).expect("limits"))
+        .expect("anchor page")
+        .expect("entry");
+    assert_eq!(anchor.entries, tree.entries()[256..257]);
+    assert!(at_boundary.bytes_read() < 256);
+}
+
+#[test]
+#[cfg(feature = "zstd")]
+fn compressed_tree_hash_and_payload_corruption_fail_closed() {
+    let tree = compressible_tree(600);
+    let bytes = tree.encode_canonical_blocked(3, 0).expect("encode blocked");
+
+    let mut bad_hash = bytes.clone();
+    bad_hash[5] ^= 1;
+    assert!(matches!(
+        Tree::decode_canonical(&bad_hash),
+        Err(TreeStreamError::HashMismatch { .. })
+    ));
+
+    let mut bad_payload = bytes;
+    let last = bad_payload.len() - 1;
+    bad_payload[last] ^= 1;
+    assert!(Tree::decode_canonical(&bad_payload).is_err());
 }
 
 #[test]
