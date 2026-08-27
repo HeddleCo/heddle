@@ -308,7 +308,7 @@ fn run_canonicalize_tree_entries(ctx: &mut MigrationCtx<'_>) -> Result<()> {
         let Some(raw) = ctx.repo.store().get_tree_serialized(&tree_hash)? else {
             continue;
         };
-        if objects::object::is_canonical_tree(&raw) {
+        if has_discriminated_tree_encoding(&raw) {
             continue;
         }
 
@@ -362,7 +362,7 @@ fn run_streamable_tree_encoding(ctx: &mut MigrationCtx<'_>) -> Result<()> {
         let Some(raw) = ctx.repo.store().get_tree_serialized(&tree_hash)? else {
             continue;
         };
-        if objects::object::is_canonical_tree(&raw) {
+        if has_discriminated_tree_encoding(&raw) {
             continue;
         }
         let tree = rmp_serde::from_slice::<objects::object::Tree>(&raw).map_err(|err| {
@@ -396,6 +396,14 @@ fn run_streamable_tree_encoding(ctx: &mut MigrationCtx<'_>) -> Result<()> {
             })?;
     }
     Ok(())
+}
+
+/// Legacy tree bodies were discriminator-less MessagePack. Keep every known
+/// self-identifying tree format away from those permissive migration decoders.
+fn has_discriminated_tree_encoding(raw: &[u8]) -> bool {
+    objects::object::is_canonical_tree(raw)
+        || objects::object::is_lean_tree(raw)
+        || objects::object::is_delta_tree(raw)
 }
 
 fn run_first_class_annotated_tags(ctx: &mut MigrationCtx<'_>) -> Result<()> {
@@ -699,6 +707,41 @@ mod tests {
         assert_eq!(
             config.repository.version,
             repo_config::SUPPORTED_REPO_FORMAT
+        );
+    }
+
+    #[test]
+    fn tree_migrations_skip_hlr1_and_hdc1_bodies() {
+        let (_temp, repo) = fresh_repo();
+        remove_ledger(&repo);
+
+        let anchor = Tree::from_entries(vec![
+            TreeEntry::file("file.txt", ContentHash::compute(b"anchor"), false).unwrap(),
+        ]);
+        let anchor_hash = anchor.hash();
+        let anchor_body = anchor.encode_lean().unwrap();
+        write_loose_tree_bytes(&repo, anchor_hash, &anchor_body);
+
+        let current = Tree::from_entries(vec![
+            TreeEntry::file("file.txt", ContentHash::compute(b"current"), false).unwrap(),
+        ]);
+        let current_hash = current.hash();
+        let ops = objects::object::tree_delta(&anchor, &current);
+        let delta_body =
+            objects::object::encode_tree_delta(anchor_hash, &anchor, &current, &ops).unwrap();
+        write_loose_tree_bytes(&repo, current_hash, &delta_body);
+
+        apply_pending(&repo).unwrap();
+
+        assert_eq!(
+            repo.store().get_tree_serialized(&anchor_hash).unwrap(),
+            Some(anchor_body),
+            "HLR1 must not enter either legacy MessagePack decoder",
+        );
+        assert_eq!(
+            repo.store().get_tree_serialized(&current_hash).unwrap(),
+            Some(delta_body),
+            "HDC1 must not enter either legacy MessagePack decoder",
         );
     }
 
