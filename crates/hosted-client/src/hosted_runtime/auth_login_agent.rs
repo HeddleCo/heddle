@@ -103,6 +103,8 @@ fn finish_invite_create(
     )?;
     let account_id = response.account_id;
     let pet_name = response.pet_name;
+    // Stored for later routing. `heddle claim` binds this to the configured
+    // hosted server before minting the local claim bearer.
     identity_state::store(&ClaimState::new(
         server.to_string(),
         owner_id,

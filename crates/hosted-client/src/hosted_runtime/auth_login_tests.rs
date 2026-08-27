@@ -314,6 +314,8 @@ fn login_invite_create_succeeds_with_a_claim_next_directive() {
     let state = identity_state::load()
         .expect("load claim state")
         .expect("claim state was stored");
+    assert_eq!(state.server, server);
+    assert_eq!(state.pet_name, "quiet-otter");
     assert_eq!(
         state.web_origin.as_deref(),
         Some("https://claims.heddle.test/")

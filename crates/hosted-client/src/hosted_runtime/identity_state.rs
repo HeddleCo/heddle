@@ -49,6 +49,8 @@ pub(crate) struct ClaimState {
     pub(crate) subject: String,
     pub(crate) pet_name: String,
     pub(crate) node_id: String,
+    /// Server-advertised claim page origin. Not trusted until `heddle claim`
+    /// binds it to the configured hosted server.
     #[serde(default)]
     pub(crate) web_origin: Option<String>,
     pub(crate) created_at: String,
@@ -366,6 +368,35 @@ mod tests {
         let replacement_hash = state.authorization_hash().to_string();
         assert!(state.deactivate_issuance(&replacement_hash));
         assert!(!state.accepts(b"replacement-secret", 2_000));
+    }
+
+    #[test]
+    fn leftover_remote_web_origin_still_deserializes() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("claim.toml");
+        let contents = format!(
+            "\
+format = \"heddle-agent-claim\"
+version = 2
+server = \"api.acme.example\"
+owner_id = \"7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28\"
+subject = \"subject-1\"
+pet_name = \"quiet-otter\"
+node_id = \"{node_id}\"
+web_origin = \"https://evil.com\"
+created_at = \"2026-08-26T00:00:00Z\"
+secret_hash = \"\"
+expires_at_millis = 0
+status = \"dormant\"
+",
+            node_id = "11".repeat(32)
+        );
+        write_file_atomic_secret(&path, contents.as_bytes()).expect("write leftover claim state");
+        let state = load_at(&path)
+            .expect("load leftover claim state")
+            .expect("claim state present");
+        assert_eq!(state.server, "api.acme.example");
+        assert_eq!(state.web_origin.as_deref(), Some("https://evil.com"));
     }
 
     #[test]
