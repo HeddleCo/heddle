@@ -60,10 +60,11 @@ mod tests {
 
     use super::*;
     use crate::object::{
-        AnnotationKind, Attribution, ChangeId, CollaborationAnchor, CollaborationIdempotencyKey,
-        CollaborationOperationBodyV1, CollaborationResolution, ContentHash, DiscussionRecordId,
-        DiscussionTurnV1, LegacyDiscussionId, LegacyDiscussionResolutionV1, LegacySourceLocator,
-        Principal, StateAttachmentId, StateId, VisibilityTier,
+        AnnotationKind, Attribution, ChangeId, CollaborationAnchor, CollaborationAnchorStatus,
+        CollaborationIdempotencyKey, CollaborationOperationBodyV1, CollaborationResolution,
+        ContentHash, DiscussionRecordId, DiscussionTurnV1, LegacyDiscussionId,
+        LegacyDiscussionResolutionV1, LegacySourceLocator, Principal, StateAttachmentId, StateId,
+        VisibilityTier,
     };
 
     #[derive(Serialize)]
@@ -178,6 +179,18 @@ mod tests {
                 CollaborationOperationBodyV1::AppendTurn { turn: turn() },
             ),
             golden_operation(
+                "rebind_anchor",
+                CollaborationOperationBodyV1::RebindAnchor {
+                    anchor: CollaborationAnchor::Symbol {
+                        state_id: state,
+                        path: "p".to_string(),
+                        symbol: "s2".to_string(),
+                    },
+                    status: CollaborationAnchorStatus::Moved,
+                    body_changed_since_open: true,
+                },
+            ),
+            golden_operation(
                 "resolve_state",
                 CollaborationOperationBodyV1::Resolve {
                     resolution: CollaborationResolution::AddressedByState { state_id: state },
@@ -277,6 +290,10 @@ mod tests {
             (
                 "append_turn",
                 "b542d7f781fed9266dd557a8a422af1f3fce98b4fd834c0e88cc867787e32d1f",
+            ),
+            (
+                "rebind_anchor",
+                "105cff08ce66523d98a47a8f384aa4f2a3e91eada886e11c8c7a45a6d4a7aca6",
             ),
             (
                 "resolve_state",

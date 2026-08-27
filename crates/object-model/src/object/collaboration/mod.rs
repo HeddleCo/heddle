@@ -15,8 +15,9 @@ pub use materialize::{
     materialize_repository_collaboration,
 };
 pub use operation::{
-    CollaborationAnchor, CollaborationOperationBodyV1, CollaborationOperationEnvelope,
-    CollaborationResolution, DiscussionTurnV1, LegacyDiscussionResolutionV1,
+    CollaborationAnchor, CollaborationAnchorStatus, CollaborationOperationBodyV1,
+    CollaborationOperationEnvelope, CollaborationResolution, DiscussionTurnV1,
+    LegacyDiscussionResolutionV1,
 };
 
 pub const COLLABORATION_OPERATION_SCHEMA_VERSION: u16 = 1;

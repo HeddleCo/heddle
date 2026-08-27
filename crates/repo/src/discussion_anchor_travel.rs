@@ -159,16 +159,13 @@ fn travel_one(
             SimilarityMethod::Lines,
         ) {
             FunctionRenameResolution::Renamed(candidate) => {
-                if let Ok((start, end)) =
-                    resolve_symbol_lines(new_src, Path::new(&original.file), &candidate.new_name)
+                if resolve_symbol_lines(new_src, Path::new(&original.file), &candidate.new_name)
+                    .is_ok()
                 {
-                    let new_body = extract_body(new_src, start, end);
                     return DiscussionAnchorUpdate {
                         discussion_id: discussion_id.to_string(),
                         new_anchor: SymbolAnchor::new(original.file.clone(), candidate.new_name),
-                        body_changed_since_open: old_body
-                            .as_ref()
-                            .is_none_or(|old| old != &new_body),
+                        body_changed_since_open: candidate.body_changed,
                         ambiguous: false,
                         orphaned: false,
                     };

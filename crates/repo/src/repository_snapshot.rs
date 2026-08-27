@@ -541,6 +541,7 @@ impl SnapshotMutation<'_> {
                 });
                 match self.repo.compute_and_persist_discussion_anchor_travel(
                     parent_state,
+                    &state,
                     &tree,
                     source_blobs.as_ref(),
                 ) {

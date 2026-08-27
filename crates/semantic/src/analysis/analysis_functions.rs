@@ -18,6 +18,8 @@ const FUNCTION_RENAME_CONFIDENCE_MARGIN: f64 = 0.05;
 pub struct FunctionRenameCandidate {
     pub new_name: String,
     pub confidence: f64,
+    /// Whether bytes other than the consistently renamed function name changed.
+    pub body_changed: bool,
 }
 
 /// Conservative result for resolving one function rename.
@@ -204,6 +206,8 @@ pub fn resolve_function_rename(
                     function.name.clone()
                 },
                 confidence,
+                body_changed: renamed_function_content(&old_function.content, &old_function.name)
+                    != renamed_function_content(&function.content, &function.name),
             })
         })
         .collect::<Vec<_>>();
@@ -562,11 +566,14 @@ fn stable_order_moved_names(
 }
 
 fn normalized_function_for_matching(content: &str, name: &str) -> String {
-    content
-        .replace(name, "__function_name__")
+    renamed_function_content(content, name)
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn renamed_function_content(content: &str, name: &str) -> String {
+    content.replace(name, "__function_name__")
 }

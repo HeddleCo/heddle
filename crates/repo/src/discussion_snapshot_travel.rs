@@ -7,7 +7,9 @@ use std::{collections::HashMap, path::PathBuf};
 
 use objects::{
     object::{
-        Blob, ContentHash, Discussion, DiscussionResolution, DiscussionsBlob, EntryType, State,
+        Blob, CollaborationAnchor, CollaborationAnchorStatus, CollaborationIdempotencyKey,
+        CollaborationOperationBodyV1, CollaborationOperationEnvelope, ContentHash, Discussion,
+        DiscussionResolution, DiscussionsBlob, EntryType, MaterializedDiscussion, State,
         StateAttachmentBody, StateId, Tree,
     },
     store::ObjectStore,
@@ -16,7 +18,7 @@ use oplog::OpLogBackend;
 use refs::RefBackend;
 
 use crate::{
-    HeddleError, Repository, Result,
+    CollaborationStore, HeddleError, Repository, Result,
     discussion_anchor_travel::{travel_anchors, travel_symbol_anchor},
 };
 
@@ -26,45 +28,53 @@ where
     O: OpLogBackend,
     S: ObjectStore,
 {
-    /// Derive the current resolution of an append-only discussion's durable
-    /// opening anchor without rewriting that collaboration record.
-    pub fn resolve_discussion_symbol_anchor(
-        &self,
-        opened_against_state: StateId,
-        current_state: &State,
-        anchor: &objects::object::SymbolAnchor,
-    ) -> Result<(objects::object::SymbolAnchor, bool, bool)> {
-        let baseline_state = self
-            .store()
-            .get_state(&opened_against_state)?
-            .ok_or_else(|| missing_state(opened_against_state))?;
-        let baseline_tree = self
-            .store()
-            .get_tree(&baseline_state.tree)?
-            .ok_or_else(|| missing_object("tree", baseline_state.tree))?;
-        let current_tree = self
-            .store()
-            .get_tree(&current_state.tree)?
-            .ok_or_else(|| missing_object("tree", current_state.tree))?;
-        let old_files = self.collect_tree_file_bytes(&baseline_tree, None)?;
-        let new_files = self.collect_tree_file_bytes(&current_tree, None)?;
-        let update = travel_symbol_anchor(&old_files, &new_files, anchor);
-        Ok((update.new_anchor, update.ambiguous, update.orphaned))
-    }
-
     pub(crate) fn compute_and_persist_discussion_anchor_travel(
         &self,
         parent_state: &State,
+        new_state: &State,
         new_tree: &Tree,
         source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
     ) -> Result<Option<ContentHash>> {
-        let Some(parent_discussions_hash) = self
+        let parent_discussions_hash = self
             .latest_state_attachment(&parent_state.id(), crate::StateAttachmentKind::Discussions)?
             .and_then(|attachment| match attachment.body {
                 StateAttachmentBody::Discussions(hash) => Some(hash),
                 _ => None,
-            })
-        else {
+            });
+        let collaboration_store = self
+            .heddle_dir()
+            .join("collaboration")
+            .exists()
+            .then(|| CollaborationStore::open(self.heddle_dir()))
+            .transpose()?;
+        let collaboration_discussions = match &collaboration_store {
+            Some(store) => store
+                .materialize()?
+                .discussions
+                .into_values()
+                .filter(|discussion| {
+                    discussion.resolution.is_none()
+                        && matches!(discussion.anchor, CollaborationAnchor::Symbol { .. })
+                })
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+
+        if parent_discussions_hash.is_none() && collaboration_discussions.is_empty() {
+            return Ok(None);
+        }
+
+        let new_files = self.collect_tree_file_bytes(new_tree, source_blobs)?;
+        if let Some(store) = &collaboration_store {
+            self.persist_collaboration_anchor_travel(
+                store,
+                new_state,
+                &new_files,
+                collaboration_discussions,
+            )?;
+        }
+
+        let Some(parent_discussions_hash) = parent_discussions_hash else {
             return Ok(None);
         };
         let parent_blob = self
@@ -85,7 +95,6 @@ where
             return Ok(Some(parent_discussions_hash));
         }
 
-        let new_files = self.collect_tree_file_bytes(new_tree, source_blobs)?;
         let baseline_files = self.collect_discussion_baseline_file_bytes(&open_discussions)?;
         let mut updates = Vec::new();
         for (opened_against_state, discussions) in
@@ -117,6 +126,88 @@ where
             .map_err(|err| HeddleError::Serialization(format!("encode discussions blob: {err}")))?;
         let hash = self.store().put_blob(&Blob::new(bytes))?;
         Ok(Some(hash))
+    }
+
+    fn persist_collaboration_anchor_travel(
+        &self,
+        store: &CollaborationStore,
+        new_state: &State,
+        new_files: &HashMap<String, Vec<u8>>,
+        discussions: Vec<MaterializedDiscussion>,
+    ) -> Result<()> {
+        let mut baseline_files = HashMap::new();
+        for discussion in discussions {
+            let CollaborationAnchor::Symbol {
+                state_id,
+                path,
+                symbol,
+            } = &discussion.anchor
+            else {
+                continue;
+            };
+            if *state_id == new_state.id() {
+                continue;
+            }
+            if !baseline_files.contains_key(state_id) {
+                let baseline_state = self
+                    .store()
+                    .get_state(state_id)?
+                    .ok_or_else(|| missing_state(*state_id))?;
+                let baseline_tree = self
+                    .store()
+                    .get_tree(&baseline_state.tree)?
+                    .ok_or_else(|| missing_object("tree", baseline_state.tree))?;
+                baseline_files.insert(
+                    *state_id,
+                    self.collect_tree_file_bytes(&baseline_tree, None)?,
+                );
+            }
+            let old_files = baseline_files.get(state_id).ok_or_else(|| {
+                HeddleError::Config(format!(
+                    "missing collaboration discussion baseline files for state {state_id}"
+                ))
+            })?;
+            let original = objects::object::SymbolAnchor::new(path, symbol);
+            let update = travel_symbol_anchor(old_files, new_files, &original);
+            let status = if update.ambiguous {
+                CollaborationAnchorStatus::Ambiguous
+            } else if update.orphaned {
+                CollaborationAnchorStatus::Orphaned
+            } else if update.new_anchor != original {
+                CollaborationAnchorStatus::Moved
+            } else {
+                CollaborationAnchorStatus::Current
+            };
+            let resolved_state_id = if matches!(
+                status,
+                CollaborationAnchorStatus::Current | CollaborationAnchorStatus::Moved
+            ) {
+                new_state.id()
+            } else {
+                *state_id
+            };
+            let operation = CollaborationOperationEnvelope::new(
+                discussion.discussion_id,
+                discussion.heads.iter().copied().collect(),
+                CollaborationIdempotencyKey::new(format!("anchor-travel:{}", new_state.id()))
+                    .map_err(|error| HeddleError::InvalidObject(error.to_string()))?,
+                new_state.attribution.clone(),
+                new_state.created_at.timestamp_millis(),
+                CollaborationOperationBodyV1::RebindAnchor {
+                    anchor: CollaborationAnchor::Symbol {
+                        state_id: resolved_state_id,
+                        path: update.new_anchor.file,
+                        symbol: update.new_anchor.symbol,
+                    },
+                    status,
+                    body_changed_since_open: discussion.body_changed_since_open
+                        || update.body_changed_since_open,
+                },
+            )
+            .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+            store.write_operation(&operation)?;
+        }
+        Ok(())
     }
 
     fn collect_tree_file_bytes(

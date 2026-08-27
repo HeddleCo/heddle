@@ -11,9 +11,10 @@ pub(crate) use heddle_cli_contract::cli::commands::wire::collab::{
     DiscussionWriteOutput, ResolutionOutput, TurnOutput,
 };
 use objects::object::{
-    AnnotationKind, CollabOpId, CollaborationAnchor, CollaborationIdempotencyKey,
-    CollaborationOperationBodyV1, CollaborationOperationEnvelope, CollaborationResolution,
-    DiscussionRecordId, DiscussionTurnV1, MaterializedDiscussion, StateId, VisibilityTier,
+    AnnotationKind, CollabOpId, CollaborationAnchor, CollaborationAnchorStatus,
+    CollaborationIdempotencyKey, CollaborationOperationBodyV1, CollaborationOperationEnvelope,
+    CollaborationResolution, DiscussionRecordId, DiscussionTurnV1, MaterializedDiscussion, StateId,
+    VisibilityTier,
 };
 use repo::{
     CollaborationStore, CollaborationWriteDisposition, CollaborationWriteOutcome,
@@ -77,7 +78,7 @@ pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
         DiscussCommands::Resolve(args) => run_resolve(cli, &repo, &store, args),
         DiscussCommands::Reopen(args) => run_reopen(cli, &repo, &store, args),
         DiscussCommands::List(args) => run_list(cli, &repo, &store, args),
-        DiscussCommands::Show(args) => run_show(cli, &repo, &store, args),
+        DiscussCommands::Show(args) => run_show(cli, &store, args),
     }
 }
 
@@ -140,7 +141,7 @@ fn run_open(
     )?;
     let outcome = store.write_operation(&operation)?;
     emit_locality_notice_once(repo, AnnotationSurface::Discuss);
-    emit_write(cli, repo, "discuss_open", store, discussion_id, outcome)
+    emit_write(cli, "discuss_open", store, discussion_id, outcome)
 }
 
 fn open_inputs(args: &DiscussOpenArgs) -> Result<(&str, &str, &str)> {
@@ -268,7 +269,7 @@ fn write_descendant(
         body,
     )?;
     let outcome = store.write_operation(&operation)?;
-    emit_write(cli, repo, output_kind, store, discussion_id, outcome)
+    emit_write(cli, output_kind, store, discussion_id, outcome)
 }
 
 fn run_list(
@@ -327,26 +328,20 @@ fn run_list(
     Ok(())
 }
 
-fn run_show(
-    cli: &Cli,
-    repo: &repo::Repository,
-    store: &CollaborationStore,
-    args: &DiscussShowArgs,
-) -> Result<()> {
+fn run_show(cli: &Cli, store: &CollaborationStore, args: &DiscussShowArgs) -> Result<()> {
     let discussion_id = parse_discussion_id(&args.discussion_id)?;
     let discussion = store
         .materialize_discussion(&discussion_id)?
         .ok_or_else(|| anyhow!("discussion {discussion_id} not found"))?;
     let output = DiscussionShowOutput {
         output_kind: "discuss_show",
-        discussion: to_resolved_view(repo, store, &discussion)?,
+        discussion: to_view(store, &discussion)?,
     };
     emit_show(cli, &output)
 }
 
 fn emit_write(
     cli: &Cli,
-    repo: &repo::Repository,
     output_kind: &'static str,
     store: &CollaborationStore,
     discussion_id: DiscussionRecordId,
@@ -359,7 +354,7 @@ fn emit_write(
         output_kind,
         operation_id: outcome.operation_id.to_string_full(),
         disposition: outcome.disposition,
-        discussion: to_resolved_view(repo, store, &discussion)?,
+        discussion: to_view(store, &discussion)?,
     };
     if should_output_json(cli, None) {
         let emitting = match output_kind {
@@ -445,7 +440,7 @@ fn to_view(store: &CollaborationStore, value: &MaterializedDiscussion) -> Result
         id: value.discussion_id.to_string(),
         title: value.title.clone(),
         anchor: anchor_output(&value.anchor),
-        anchor_status: "current",
+        anchor_status: anchor_status_token(value.anchor_status),
         visibility: visibility_token(&value.visibility),
         thread_ref: value.thread_ref.clone(),
         status,
@@ -461,68 +456,13 @@ fn to_view(store: &CollaborationStore, value: &MaterializedDiscussion) -> Result
     })
 }
 
-fn to_resolved_view(
-    repo: &repo::Repository,
-    store: &CollaborationStore,
-    value: &MaterializedDiscussion,
-) -> Result<DiscussionOutput> {
-    let mut output = to_view(store, value)?;
-    (output.anchor, output.anchor_status) = resolved_anchor_output(repo, &value.anchor)?;
-    Ok(output)
-}
-
-#[cfg(feature = "semantic")]
-fn resolved_anchor_output(
-    repo: &repo::Repository,
-    anchor: &CollaborationAnchor,
-) -> Result<(AnchorOutput, &'static str)> {
-    let CollaborationAnchor::Symbol {
-        state_id,
-        path,
-        symbol,
-    } = anchor
-    else {
-        return Ok((anchor_output(anchor), "current"));
-    };
-    let Some(current_state) = repo.current_state()? else {
-        return Ok((anchor_output(anchor), "orphaned"));
-    };
-    if current_state.id() == *state_id {
-        return Ok((anchor_output(anchor), "current"));
+fn anchor_status_token(status: CollaborationAnchorStatus) -> &'static str {
+    match status {
+        CollaborationAnchorStatus::Current => "current",
+        CollaborationAnchorStatus::Moved => "moved",
+        CollaborationAnchorStatus::Ambiguous => "ambiguous",
+        CollaborationAnchorStatus::Orphaned => "orphaned",
     }
-    let original = objects::object::SymbolAnchor::new(path, symbol);
-    let (new_anchor, ambiguous, orphaned) =
-        repo.resolve_discussion_symbol_anchor(*state_id, &current_state, &original)?;
-    let status = if ambiguous {
-        "ambiguous"
-    } else if orphaned {
-        "orphaned"
-    } else if new_anchor != original {
-        "moved"
-    } else {
-        "current"
-    };
-    let resolved_state = if matches!(status, "current" | "moved") {
-        current_state.id()
-    } else {
-        *state_id
-    };
-    Ok((
-        AnchorOutput::Symbol {
-            state_id: resolved_state.to_string_full(),
-            path: new_anchor.file,
-            symbol: new_anchor.symbol,
-        },
-        status,
-    ))
-}
-
-#[cfg(not(feature = "semantic"))]
-fn resolved_anchor_output(
-    _repo: &repo::Repository,
-    anchor: &CollaborationAnchor,
-) -> Result<(AnchorOutput, &'static str)> {
-    Ok((anchor_output(anchor), "current"))
 }
 
 fn matches_filters(

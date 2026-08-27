@@ -504,8 +504,27 @@ fn discussion_anchor_function_rename_requires_one_clear_semantic_target() {
             "foo",
             SimilarityMethod::Lines,
         ),
-        FunctionRenameResolution::Renamed(FunctionRenameCandidate { new_name, .. })
-            if new_name == "bar"
+        FunctionRenameResolution::Renamed(FunctionRenameCandidate {
+            new_name,
+            body_changed: false,
+            ..
+        }) if new_name == "bar"
+    ));
+
+    let renamed_and_edited = "fn bar() {\n    let value = 43;\n    println!(\"{}\", value);\n}\n";
+    assert!(matches!(
+        resolve_function_rename(
+            std::path::Path::new("test.rs"),
+            old,
+            renamed_and_edited,
+            "foo",
+            SimilarityMethod::Lines,
+        ),
+        FunctionRenameResolution::Renamed(FunctionRenameCandidate {
+            new_name,
+            body_changed: true,
+            ..
+        }) if new_name == "bar"
     ));
 
     let ambiguous = concat!(
