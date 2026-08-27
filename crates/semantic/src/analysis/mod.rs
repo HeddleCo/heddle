@@ -17,8 +17,11 @@ pub use analysis_aggregate::{
 };
 pub(crate) use analysis_classify::classify_with_parsed;
 pub use analysis_classify::{classify_modification, classify_modification_with_confidence};
-pub use analysis_functions::detect_function_changes;
 pub(crate) use analysis_functions::detect_function_changes_with_parsed;
+pub use analysis_functions::{
+    FunctionRenameCandidate, FunctionRenameResolution, detect_function_changes,
+    resolve_function_rename,
+};
 pub(crate) use analysis_imports::detect_import_changes_with_parsed;
 pub use analysis_imports::{detect_import_changes, detect_import_changes_with_manifest};
 pub use analysis_renames::detect_file_renames;

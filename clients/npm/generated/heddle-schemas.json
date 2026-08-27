@@ -17088,6 +17088,9 @@
             "anchor": {
               "$ref": "#/$defs/AnchorOutput"
             },
+            "anchor_status": {
+              "type": "string"
+            },
             "conflict_operation_ids": {
               "items": {
                 "type": "string"
@@ -17142,6 +17145,7 @@
             "id",
             "title",
             "anchor",
+            "anchor_status",
             "visibility",
             "status",
             "conflict_operation_ids",
@@ -17459,6 +17463,9 @@
             "anchor": {
               "$ref": "#/$defs/AnchorOutput"
             },
+            "anchor_status": {
+              "type": "string"
+            },
             "conflict_operation_ids": {
               "items": {
                 "type": "string"
@@ -17513,6 +17520,7 @@
             "id",
             "title",
             "anchor",
+            "anchor_status",
             "visibility",
             "status",
             "conflict_operation_ids",
@@ -17785,6 +17793,9 @@
             "anchor": {
               "$ref": "#/$defs/AnchorOutput"
             },
+            "anchor_status": {
+              "type": "string"
+            },
             "conflict_operation_ids": {
               "items": {
                 "type": "string"
@@ -17839,6 +17850,7 @@
             "id",
             "title",
             "anchor",
+            "anchor_status",
             "visibility",
             "status",
             "conflict_operation_ids",
@@ -18164,6 +18176,9 @@
             "anchor": {
               "$ref": "#/$defs/AnchorOutput"
             },
+            "anchor_status": {
+              "type": "string"
+            },
             "conflict_operation_ids": {
               "items": {
                 "type": "string"
@@ -18218,6 +18233,7 @@
             "id",
             "title",
             "anchor",
+            "anchor_status",
             "visibility",
             "status",
             "conflict_operation_ids",
@@ -18543,6 +18559,9 @@
             "anchor": {
               "$ref": "#/$defs/AnchorOutput"
             },
+            "anchor_status": {
+              "type": "string"
+            },
             "conflict_operation_ids": {
               "items": {
                 "type": "string"
@@ -18597,6 +18616,7 @@
             "id",
             "title",
             "anchor",
+            "anchor_status",
             "visibility",
             "status",
             "conflict_operation_ids",
@@ -18914,6 +18934,9 @@
             "anchor": {
               "$ref": "#/$defs/AnchorOutput"
             },
+            "anchor_status": {
+              "type": "string"
+            },
             "conflict_operation_ids": {
               "items": {
                 "type": "string"
@@ -18968,6 +18991,7 @@
             "id",
             "title",
             "anchor",
+            "anchor_status",
             "visibility",
             "status",
             "conflict_operation_ids",
@@ -29913,6 +29937,9 @@
       "$defs": {
         "DiscussionView": {
           "properties": {
+            "anchor_ambiguous": {
+              "type": "boolean"
+            },
             "body_changed_since_open": {
               "type": "boolean"
             },
@@ -29938,6 +29965,7 @@
             "symbol",
             "status",
             "body_changed_since_open",
+            "anchor_ambiguous",
             "orphaned"
           ],
           "type": "object"

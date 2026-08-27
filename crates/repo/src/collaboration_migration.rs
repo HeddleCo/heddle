@@ -387,6 +387,7 @@ mod tests {
             }],
             resolution: DiscussionResolution::Open,
             body_changed_since_open: false,
+            anchor_ambiguous: false,
             orphaned: false,
             visibility: VisibilityTier::default(),
             resolved_annotation_id: None,

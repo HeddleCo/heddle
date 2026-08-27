@@ -29,6 +29,16 @@ pub enum CollaborationAnchor {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollaborationAnchorStatus {
+    #[default]
+    Current,
+    Moved,
+    Ambiguous,
+    Orphaned,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscussionTurnV1 {
     pub body: String,
@@ -100,6 +110,11 @@ pub enum CollaborationOperationBodyV1 {
     AppendTurn {
         turn: DiscussionTurnV1,
     },
+    RebindAnchor {
+        anchor: CollaborationAnchor,
+        status: CollaborationAnchorStatus,
+        body_changed_since_open: bool,
+    },
     Resolve {
         resolution: CollaborationResolution,
     },
@@ -127,6 +142,7 @@ impl CollaborationOperationBodyV1 {
         match self {
             Self::Open { .. } => "open",
             Self::AppendTurn { .. } => "append_turn",
+            Self::RebindAnchor { .. } => "rebind_anchor",
             Self::Resolve { .. } => "resolve",
             Self::Reopen { .. } => "reopen",
             Self::ResolveConflict { .. } => "resolve_conflict",
@@ -151,6 +167,7 @@ impl CollaborationOperationBodyV1 {
                 turn.validate()
             }
             Self::AppendTurn { turn } => turn.validate(),
+            Self::RebindAnchor { anchor, .. } => validate_anchor(anchor),
             Self::Resolve { resolution } => validate_resolution(resolution),
             Self::Reopen { reason } => require_text(reason, "reopen reason"),
             Self::ResolveConflict {
