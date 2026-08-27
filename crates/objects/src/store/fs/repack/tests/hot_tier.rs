@@ -37,6 +37,15 @@ fn read_tier(store: &FsStore, id: PackObjectId) -> PackReadTier {
         .expect("object tier")
 }
 
+fn is_settled_tree(store: &FsStore, hash: ContentHash) -> bool {
+    store
+        .npk1_manager()
+        .read()
+        .unwrap()
+        .has_tree(&hash)
+        .unwrap()
+}
+
 #[test]
 fn recent_metadata_stays_random_access_until_solidification() {
     let (_temp, store) = create_store();
@@ -60,12 +69,7 @@ fn recent_metadata_stays_random_access_until_solidification() {
         .unwrap();
     assert_eq!(report.objects_repacked, 4);
     let solid_store = FsStore::new(store.root());
-    assert_eq!(
-        read_tier(&solid_store, tree_one_id),
-        PackReadTier::SolidFrame,
-        "packs after solidification: {:?}",
-        direct_pack_names(store.root())
-    );
+    assert!(is_settled_tree(&solid_store, tree_one.hash()));
     assert_eq!(
         read_tier(&solid_store, state_one_id),
         PackReadTier::SolidFrame
@@ -141,12 +145,10 @@ fn metadata_installed_during_repack_survives_as_hot_tier() {
     let old_tree_id = PackObjectId::Hash(first_tree.unwrap().hash());
     let concurrent_tree_id = PackObjectId::Hash(concurrent_tree.hash());
     let concurrent_state_id = PackObjectId::StateId(concurrent_state.id());
-    assert_eq!(
-        read_tier(&reopened, old_tree_id),
-        PackReadTier::SolidFrame,
-        "packs after concurrent solidification: {:?}",
-        direct_pack_names(store.root())
-    );
+    let PackObjectId::Hash(old_tree_hash) = old_tree_id else {
+        unreachable!();
+    };
+    assert!(is_settled_tree(&reopened, old_tree_hash));
     assert_eq!(read_tier(&reopened, concurrent_tree_id), PackReadTier::Hot);
     assert_eq!(read_tier(&reopened, concurrent_state_id), PackReadTier::Hot);
     assert_eq!(

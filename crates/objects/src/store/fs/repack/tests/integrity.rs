@@ -96,14 +96,17 @@ fn repack_preserves_every_typed_identity_byte_identically() {
     let pack_path = store.root().join("packs").join(pack_name);
     let index_path = pack_path.with_extension("idx");
     let pack_bytes = fs::read(&pack_path).unwrap();
-    assert_eq!(u64::from_be_bytes(pack_bytes[8..16].try_into().unwrap()), 4);
+    assert_eq!(u64::from_be_bytes(pack_bytes[8..16].try_into().unwrap()), 3);
     assert_eq!(
         PackReader::open(&pack_path, &index_path)
             .unwrap()
             .list_ids()
             .unwrap()
             .len(),
-        expected.len()
+        expected
+            .iter()
+            .filter(|(_, object_type, _)| *object_type != ObjectType::Tree)
+            .count()
     );
     stale_reader.clear_recent_object_caches();
 
@@ -113,10 +116,23 @@ fn repack_preserves_every_typed_identity_byte_identically() {
             .unwrap()
             .expect("every typed object must survive repack");
         assert_eq!(actual_type, *expected_type);
-        assert_eq!(
-            &actual_bytes, expected_bytes,
-            "logical bytes changed for {id:?}"
-        );
+        if *expected_type == ObjectType::Tree {
+            let PackObjectId::Hash(hash) = id else {
+                panic!("tree has a non-hash id");
+            };
+            let actual =
+                crate::store::codec::decode_tree_serialized_with_key(&actual_bytes, *hash, None)
+                    .unwrap();
+            let expected =
+                crate::store::codec::decode_tree_serialized_with_key(expected_bytes, *hash, None)
+                    .unwrap();
+            assert_eq!(actual, expected, "tree semantics changed for {id:?}");
+        } else {
+            assert_eq!(
+                &actual_bytes, expected_bytes,
+                "logical bytes changed for {id:?}"
+            );
+        }
     }
 
     let loaded_blob = stale_reader.get_blob(&blob_hash).unwrap().unwrap();

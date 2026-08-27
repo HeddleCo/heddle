@@ -25,7 +25,7 @@ use crate::{
     object::{
         Action, ActionId, AnnotatedTag, Blob, BytesTreeSource, ContentHash, FileTreeSource,
         OpenedTreeBody, State, StateAttachment, StateAttachmentId, StateId, TREE_CANONICAL_MAGIC,
-        TREE_DELTA_HEADER_LEN, TREE_DELTA_MAGIC, TREE_LEAN_MAGIC, Tree, TreeByteSource,
+        TREE_DELTA_HEADER_LEN, TREE_DELTA_MAGIC, TREE_LEAN_MAGIC, Tree, TreeByteSource, TreeEntry,
         TreeEntryReader, TreeResumeCursor, decode_tree_delta_header,
         decode_tree_delta_header_prefix, decode_tree_delta_ops, is_delta_tree, is_streamable_tree,
     },
@@ -654,6 +654,18 @@ impl FsStore {
                 );
             }
         }
+        let npk_tree = if let Ok(manager) = self.npk1_manager().read() {
+            manager.get_tree(tree_id)?
+        } else {
+            None
+        };
+        if let Some(tree) = npk_tree {
+            return Ok(Some(TreeEntryReader::open(
+                OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(tree.encode_lean()?)),
+                *tree_id,
+                cursor,
+            )?));
+        }
         Ok(None)
     }
 
@@ -737,6 +749,18 @@ impl FsStore {
                 )?));
             }
         }
+        let npk_tree = if let Ok(manager) = self.npk1_manager().read() {
+            manager.get_tree(tree_id)?
+        } else {
+            None
+        };
+        if let Some(tree) = npk_tree {
+            return Ok(Some(TreeEntryReader::open(
+                OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(tree.encode_lean()?)),
+                *tree_id,
+                None,
+            )?));
+        }
         if let Some(source) = &self.external_source
             && let Some(tree) = source.get_tree(tree_id)?
         {
@@ -783,6 +807,14 @@ impl FsStore {
             return Ok(Some(tree));
         }
 
+        if let Ok(manager) = self.npk1_manager().read()
+            && let Some(tree) = manager.get_tree(hash)?
+        {
+            trace!("Found tree in NPK1 pack");
+            heddle_perf_contract::record_object_decode();
+            self.cache_recent_tree(*hash, &tree);
+            return Ok(Some(tree));
+        }
         if let Ok(manager) = self.pack_manager().read()
             && let Some((obj_type, data)) = manager.get_hashed_object(hash)?
             && obj_type == ObjectType::Tree
@@ -804,12 +836,43 @@ impl FsStore {
         Ok(None)
     }
 
+    fn try_get_tree_entry_once(&self, hash: &ContentHash, name: &str) -> Result<Option<TreeEntry>> {
+        if let Some(tree) = self.recent_tree(hash) {
+            return Ok(tree.get(name).cloned());
+        }
+        let path = hash_path(&trees_dir(&self.root), hash);
+        if path.exists() {
+            return Ok(self
+                .try_get_tree_once(hash)?
+                .and_then(|tree| tree.get(name).cloned()));
+        }
+        if let Ok(manager) = self.npk1_manager().read()
+            && manager.has_tree(hash)?
+        {
+            return manager.get_entry(hash, name);
+        }
+        if let Ok(manager) = self.pack_manager().read()
+            && manager.has_object(hash)
+        {
+            return Ok(self
+                .try_get_tree_once(hash)?
+                .and_then(|tree| tree.get(name).cloned()));
+        }
+        Ok(None)
+    }
+
     fn try_get_tree_serialized_once(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
         let path = hash_path(&trees_dir(&self.root), hash);
         if path.exists()
             && let Some(data) = read_file_bytes(&path)?
         {
             return Ok(Some(codec::decode_tree_body(data.as_slice())?));
+        }
+
+        if let Ok(manager) = self.npk1_manager().read()
+            && let Some(tree) = manager.get_tree(hash)?
+        {
+            return tree.encode_lean().map(Some).map_err(HeddleError::from);
         }
 
         if let Ok(manager) = self.pack_manager().read()
@@ -822,7 +885,7 @@ impl FsStore {
         Ok(None)
     }
 
-    fn decode_tree_storage_body(&self, hash: ContentHash, data: &[u8]) -> Result<Tree> {
+    pub(super) fn decode_tree_storage_body(&self, hash: ContentHash, data: &[u8]) -> Result<Tree> {
         let anchor = if is_delta_tree(data) {
             let header = decode_tree_delta_header(data)?;
             let anchor = if let Some(anchor_body) =
@@ -936,7 +999,13 @@ impl FsStore {
         // Recent-object entries may be read-through values from an external
         // Git overlay, so cache presence cannot establish local durability.
         let path = hash_path(&trees_dir(&self.root), hash);
-        self.loose_or_packed(&path, |m| m.has_object(hash))
+        if self.loose_or_packed(&path, |m| m.has_object(hash))? {
+            return Ok(true);
+        }
+        if let Ok(manager) = self.npk1_manager().read() {
+            return manager.has_tree(hash);
+        }
+        Ok(false)
     }
 
     fn try_get_state_once(&self, id: &StateId) -> Result<Option<State>> {
@@ -1428,6 +1497,26 @@ impl ObjectStore for FsStore {
         Ok(None)
     }
 
+    #[instrument(skip(self), fields(hash = %hash.short(), name))]
+    fn get_tree_entry(&self, hash: &ContentHash, name: &str) -> Result<Option<TreeEntry>> {
+        if let Some(entry) = self.try_get_tree_entry_once(hash, name)? {
+            return Ok(Some(entry));
+        }
+        if self.reload_packs_if_stale()?
+            && let Some(entry) = self.try_get_tree_entry_once(hash, name)?
+        {
+            return Ok(Some(entry));
+        }
+        if let Some(source) = &self.external_source
+            && let Some(tree) = source.get_tree(hash)?
+        {
+            let entry = tree.get(name).cloned();
+            self.cache_recent_tree(*hash, &tree);
+            return Ok(entry);
+        }
+        Ok(None)
+    }
+
     #[instrument(skip(self), fields(hash = %hash.short()))]
     fn get_tree_serialized(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
         if let Some(data) = self.try_get_tree_serialized_once(hash)? {
@@ -1801,6 +1890,11 @@ impl ObjectStore for FsStore {
         if let Ok(manager) = self.pack_manager().read() {
             append_packed_hashes(&mut trees, &manager, ObjectType::Tree)?;
         }
+        if let Ok(manager) = self.npk1_manager().read() {
+            trees.extend(manager.list_ids()?);
+        }
+        trees.sort();
+        trees.dedup();
         Ok(trees)
     }
 
@@ -1950,19 +2044,27 @@ impl ObjectStore for FsStore {
             Err(error) => return Err(error.into()),
         } {
             let path = entry?.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("pack") {
-                continue;
-            }
-            let index = path.with_extension("idx");
-            let valid = crate::store::pack::PackReader::open(&path, &index)
-                .and_then(|reader| {
-                    reader.visit_objects(|id, kind, bytes| validate_pack_entry(&id, kind, bytes))
-                })
-                .is_ok();
-            if !valid {
-                let _ = fs::remove_file(&path);
-                let _ = fs::remove_file(&index);
-                removed += 1;
+            match path.extension().and_then(|value| value.to_str()) {
+                Some("pack") => {
+                    let index = path.with_extension("idx");
+                    let valid = crate::store::pack::PackReader::open(&path, &index)
+                        .and_then(|reader| {
+                            reader.visit_objects(|id, kind, bytes| {
+                                validate_pack_entry(&id, kind, bytes)
+                            })
+                        })
+                        .is_ok();
+                    if !valid {
+                        let _ = fs::remove_file(&path);
+                        let _ = fs::remove_file(&index);
+                        removed += 1;
+                    }
+                }
+                Some("npk") if super::npk1::Npk1Pack::open(&path).is_err() => {
+                    let _ = fs::remove_file(&path);
+                    removed += 1;
+                }
+                _ => {}
             }
         }
         if removed > 0 {

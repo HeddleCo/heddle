@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, fs, path::PathBuf};
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use super::super::{
     FsStore,
     fs_io::{list_hashes_from_dir, list_state_ids_from_dir},
     fs_paths::{blobs_dir, states_dir, trees_dir},
+    npk1::Npk1Pack,
 };
 use crate::{
     object::{ContentHash, StateId},
@@ -22,6 +27,8 @@ pub(super) struct RepackSnapshot {
     pub(super) loose_trees: Vec<ContentHash>,
     pub(super) loose_states: Vec<StateId>,
     pub(super) old_pack_files: Vec<(PathBuf, PathBuf)>,
+    pub(super) old_npk1_files: Vec<PathBuf>,
+    pub(super) npk1_trees: Vec<ContentHash>,
     pub(super) commit_artifact_ids: Vec<ContentHash>,
 }
 
@@ -34,7 +41,7 @@ impl RepackSnapshot {
             .pack_manager()
             .read()
             .map_err(|_| HeddleError::Config("Failed to acquire pack manager lock".to_string()))?;
-        let ids = manager.list_all_ids()?;
+        let mut ids = manager.list_all_ids()?;
         let old_pack_files = manager
             .pack_file_paths()
             .into_iter()
@@ -45,12 +52,26 @@ impl RepackSnapshot {
             .into_iter()
             .map(|descriptor| descriptor.artifact.id())
             .collect();
+        drop(manager);
+        let npk1 = store
+            .npk1_manager()
+            .read()
+            .map_err(|_| HeddleError::Config("Failed to acquire NPK1 manager lock".to_string()))?;
+        let npk1_ids = npk1.list_ids()?;
+        ids.extend(npk1_ids.iter().copied().map(PackObjectId::Hash));
+        let old_npk1_files = npk1
+            .file_paths()
+            .into_iter()
+            .map(Path::to_path_buf)
+            .collect();
         Ok(Self {
             ids,
             loose_blobs,
             loose_trees,
             loose_states,
             old_pack_files,
+            old_npk1_files,
+            npk1_trees: npk1_ids,
             commit_artifact_ids,
         })
     }
@@ -60,6 +81,7 @@ pub(super) struct RepackStaging {
     pub(super) root: PathBuf,
     pub(super) pack: PathBuf,
     pub(super) index: PathBuf,
+    pub(super) npk1: PathBuf,
     pub(super) buckets: PathBuf,
 }
 
@@ -70,6 +92,7 @@ impl RepackStaging {
         Ok(Self {
             pack: root.join("replacement.pack"),
             index: root.join("replacement.idx"),
+            npk1: root.join("replacement.npk"),
             buckets: root.join("index-buckets"),
             root,
         })
@@ -102,13 +125,14 @@ impl From<std::io::Error> for BuildError {
 
 pub(super) fn verify_staged(
     staging: &RepackStaging,
-    expected: &HashSet<PackObjectId>,
+    expected_generic: &HashSet<PackObjectId>,
+    expected_trees: &HashSet<ContentHash>,
     context: &RepackContext,
 ) -> std::result::Result<(), RepackError> {
     let reader = PackReader::open(&staging.pack, &staging.index).map_err(RepackError::operation)?;
     let ids = reader.list_ids().map_err(RepackError::operation)?;
     let actual = ids.iter().copied().collect::<HashSet<_>>();
-    if actual != *expected || actual.len() != ids.len() {
+    if actual != *expected_generic || actual.len() != ids.len() {
         return Err(RepackError::message(
             "replacement pack object set differs from the source snapshot",
         ));
@@ -128,6 +152,19 @@ pub(super) fn verify_staged(
         return Err(error);
     }
     verification.map_err(RepackError::operation)?;
+    if !expected_trees.is_empty() {
+        let npk1 = Npk1Pack::open(&staging.npk1).map_err(RepackError::operation)?;
+        let actual = npk1.ids().collect::<HashSet<_>>();
+        if actual != *expected_trees || actual.len() != expected_trees.len() {
+            return Err(RepackError::message(
+                "replacement NPK1 object set differs from the source snapshot",
+            ));
+        }
+        for hash in expected_trees {
+            let tree = npk1.resolve(hash).map_err(RepackError::operation)?;
+            context.checkpoint(tree.len() as u64)?;
+        }
+    }
     Ok(())
 }
 

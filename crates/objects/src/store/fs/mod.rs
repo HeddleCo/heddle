@@ -6,6 +6,7 @@ mod fs_io;
 mod fs_pack;
 mod fs_paths;
 mod fs_store;
+mod npk1;
 mod pack_install_journal;
 mod repack;
 
