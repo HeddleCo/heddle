@@ -10,6 +10,37 @@ emit_data() {
     printf 'data %d\n%s' "${#value}" "$value"
 }
 
+monorepo="$root/monorepo.git"
+git init --bare "$monorepo"
+{
+    for ((revision = 0; revision < 128; revision++)); do
+        printf 'commit refs/heads/main\n'
+        printf 'committer HTR4 Measurement <measure@example.com> %d +0000\n' "$((1699900000 + revision))"
+        printf -v message '10,000-file hierarchical monorepo revision %d' "$revision"
+        emit_data "$message"
+        printf '\n'
+        if ((revision == 0)); then
+            for ((package = 0; package < 200; package++)); do
+                for ((entry = 0; entry < 50; entry++)); do
+                    printf -v content 'package-%03d-file-%02d-r000' "$package" "$entry"
+                    printf 'M 100644 inline packages/pkg-%03d/src/file-%02d.ts\n' "$package" "$entry"
+                    emit_data "$content"
+                    printf '\n'
+                done
+            done
+        else
+            package=$(((revision * 37) % 200))
+            entry=$(((revision * 17) % 50))
+            printf -v content 'package-%03d-file-%02d-r%03d' "$package" "$entry" "$revision"
+            printf 'M 100644 inline packages/pkg-%03d/src/file-%02d.ts\n' "$package" "$entry"
+            emit_data "$content"
+            printf '\n'
+        fi
+    done
+    printf 'done\n'
+} | git -C "$monorepo" fast-import --quiet
+git -C "$monorepo" gc --prune=now
+
 tiny="$root/many-tiny-trees.git"
 git init --bare "$tiny"
 {
@@ -76,4 +107,4 @@ git init --bare "$deep"
 } | git -C "$deep" fast-import --quiet
 git -C "$deep" gc --prune=now
 
-printf '%s\n' "$tiny" "$fanout" "$deep"
+printf '%s\n' "$monorepo" "$tiny" "$fanout" "$deep"

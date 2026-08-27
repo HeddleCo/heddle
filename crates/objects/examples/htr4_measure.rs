@@ -36,6 +36,11 @@ const CALIBRATION_TIME: Duration = Duration::from_millis(25);
 const SAMPLE_TIME: Duration = Duration::from_millis(40);
 const DEFAULT_REAL_TREE_LIMIT: usize = 4_000;
 const REAL_FILE_SAMPLE_LIMIT: usize = 64;
+const RADICAL_ANCHOR_INTERVAL: usize = 128;
+const RADICAL_MAX_OPS: usize = 512;
+const RADICAL_HEADER_LEN: usize = 59;
+const RADICAL_MAGIC: &[u8; 4] = b"HDC1";
+const LEAN_MAGIC: &[u8; 4] = b"HLR1";
 
 const BLOCK_MAGIC: &[u8; 4] = b"HTB1";
 const BLOCK_VERSION: u8 = 1;
@@ -525,6 +530,417 @@ fn semantic_encoded_len(entry: &TreeEntry) -> usize {
     3 + entry.name().len() + target_len
 }
 
+fn put_varint(mut value: usize, out: &mut Vec<u8>) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn take_varint(bytes: &[u8], offset: &mut usize) -> Result<usize> {
+    let mut value = 0usize;
+    for shift in (0..usize::BITS).step_by(7) {
+        let byte = *bytes.get(*offset).context("truncated varint")?;
+        *offset += 1;
+        value |= ((byte & 0x7f) as usize)
+            .checked_shl(shift)
+            .context("varint overflow")?;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    bail!("varint overflow")
+}
+
+fn shared_prefix(left: &str, right: &str) -> usize {
+    left.as_bytes()
+        .iter()
+        .zip(right.as_bytes())
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
+fn encode_compact_entry(entry: &TreeEntry, previous_name: &str, out: &mut Vec<u8>) {
+    out.push((entry.mode().to_byte() << 3) | entry.entry_type().to_byte());
+    let prefix = shared_prefix(previous_name, entry.name());
+    put_varint(prefix, out);
+    put_varint(entry.name().len() - prefix, out);
+    out.extend_from_slice(&entry.name().as_bytes()[prefix..]);
+    match entry.entry_type() {
+        EntryType::Blob | EntryType::Tree | EntryType::Symlink => out.extend_from_slice(
+            entry
+                .content_hash()
+                .expect("content-addressed compact entry")
+                .as_bytes(),
+        ),
+        EntryType::Gitlink => {
+            let target = entry.gitlink_target().expect("compact gitlink target");
+            out.push(match target.format() {
+                GitObjectFormat::Sha1 => 1,
+                GitObjectFormat::Sha256 => 2,
+            });
+            out.extend_from_slice(target.as_bytes());
+        }
+        EntryType::Spoollink => {
+            let (spool, state) = entry.spoollink_target().expect("compact spoollink target");
+            put_varint(spool.as_str().len(), out);
+            out.extend_from_slice(spool.as_str().as_bytes());
+            out.extend_from_slice(state.as_bytes());
+        }
+    }
+}
+
+fn decode_compact_entry(
+    bytes: &[u8],
+    offset: &mut usize,
+    previous_name: &str,
+) -> Result<TreeEntry> {
+    let tag = *bytes.get(*offset).context("truncated compact entry tag")?;
+    *offset += 1;
+    let mode = FileMode::from_byte(tag >> 3).context("invalid compact entry mode")?;
+    let kind = EntryType::from_byte(tag & 0x07).context("invalid compact entry kind")?;
+    let prefix = take_varint(bytes, offset)?;
+    let suffix_len = take_varint(bytes, offset)?;
+    ensure!(
+        prefix <= previous_name.len(),
+        "compact name prefix exceeds predecessor"
+    );
+    let suffix_end = offset
+        .checked_add(suffix_len)
+        .context("compact name length overflow")?;
+    let suffix = bytes
+        .get(*offset..suffix_end)
+        .context("truncated compact name suffix")?;
+    let mut name = previous_name.as_bytes()[..prefix].to_vec();
+    name.extend_from_slice(suffix);
+    let name = String::from_utf8(name)?;
+    *offset = suffix_end;
+    let entry = match kind {
+        EntryType::Blob | EntryType::Tree | EntryType::Symlink => {
+            let end = offset.checked_add(32).context("compact hash overflow")?;
+            let hash = ContentHash::from_bytes(
+                bytes
+                    .get(*offset..end)
+                    .context("truncated compact content hash")?
+                    .try_into()?,
+            );
+            *offset = end;
+            match kind {
+                EntryType::Blob => TreeEntry::file(name, hash, mode == FileMode::Executable)?,
+                EntryType::Tree => TreeEntry::directory(name, hash)?,
+                EntryType::Symlink => TreeEntry::symlink(name, hash)?,
+                _ => unreachable!(),
+            }
+        }
+        EntryType::Gitlink => {
+            let format = match *bytes
+                .get(*offset)
+                .context("missing compact gitlink format")?
+            {
+                1 => GitObjectFormat::Sha1,
+                2 => GitObjectFormat::Sha256,
+                _ => bail!("invalid compact gitlink format"),
+            };
+            *offset += 1;
+            let oid_len = match format {
+                GitObjectFormat::Sha1 => 20,
+                GitObjectFormat::Sha256 => 32,
+            };
+            let end = offset
+                .checked_add(oid_len)
+                .context("compact gitlink length overflow")?;
+            let target = GitObjectId::from_raw(
+                format,
+                bytes
+                    .get(*offset..end)
+                    .context("truncated compact gitlink")?,
+            )?;
+            *offset = end;
+            TreeEntry::gitlink(name, target)?
+        }
+        EntryType::Spoollink => {
+            let spool_len = take_varint(bytes, offset)?;
+            let spool_end = offset
+                .checked_add(spool_len)
+                .context("compact spool length overflow")?;
+            let spool = std::str::from_utf8(
+                bytes
+                    .get(*offset..spool_end)
+                    .context("truncated compact spool id")?,
+            )?;
+            *offset = spool_end;
+            let state_end = offset.checked_add(32).context("compact state overflow")?;
+            let state = StateId::from_bytes(
+                bytes
+                    .get(*offset..state_end)
+                    .context("truncated compact spool state")?
+                    .try_into()?,
+            );
+            *offset = state_end;
+            TreeEntry::spoollink(name, SpoolId::parse(spool)?, state)?
+        }
+    };
+    ensure!(entry.mode() == mode, "compact entry kind/mode mismatch");
+    Ok(entry)
+}
+
+fn encode_lean(tree: &Tree) -> Vec<u8> {
+    encode_lean_entries(tree.entries())
+}
+
+fn encode_lean_prefix(tree: &Tree, count: usize) -> Vec<u8> {
+    encode_lean_entries(&tree.entries()[..count.min(tree.len())])
+}
+
+fn encode_lean_entries(entries: &[TreeEntry]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(LEAN_MAGIC);
+    put_varint(entries.len(), &mut out);
+    let mut previous = "";
+    for entry in entries {
+        encode_compact_entry(entry, previous, &mut out);
+        previous = entry.name();
+    }
+    out
+}
+
+fn decode_lean(bytes: &[u8], expected: ContentHash) -> Result<Tree> {
+    ensure!(bytes.starts_with(LEAN_MAGIC), "not a lean tree anchor");
+    let mut offset = LEAN_MAGIC.len();
+    let count = take_varint(bytes, &mut offset)?;
+    let mut entries = Vec::with_capacity(count);
+    let mut previous = String::new();
+    for _ in 0..count {
+        let entry = decode_compact_entry(bytes, &mut offset, &previous)?;
+        previous = entry.name().to_string();
+        entries.push(entry);
+    }
+    ensure!(offset == bytes.len(), "trailing lean tree bytes");
+    let tree = Tree::try_from_decoded_entries(entries)?;
+    ensure!(tree.hash() == expected, "lean tree hash mismatch");
+    Ok(tree)
+}
+
+#[derive(Clone, Debug)]
+enum DeltaOp {
+    Remove(String),
+    Upsert(TreeEntry),
+}
+
+impl DeltaOp {
+    fn name(&self) -> &str {
+        match self {
+            Self::Remove(name) => name,
+            Self::Upsert(entry) => entry.name(),
+        }
+    }
+}
+
+fn tree_delta(anchor: &Tree, current: &Tree) -> Vec<DeltaOp> {
+    let mut ops = Vec::new();
+    let mut anchor_index = 0usize;
+    let mut current_index = 0usize;
+    while anchor_index < anchor.len() || current_index < current.len() {
+        match (
+            anchor.entries().get(anchor_index),
+            current.entries().get(current_index),
+        ) {
+            (Some(anchor_entry), Some(current_entry)) => {
+                match anchor_entry.name().cmp(current_entry.name()) {
+                    std::cmp::Ordering::Less => {
+                        ops.push(DeltaOp::Remove(anchor_entry.name().to_string()));
+                        anchor_index += 1;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        ops.push(DeltaOp::Upsert(current_entry.clone()));
+                        current_index += 1;
+                    }
+                    std::cmp::Ordering::Equal => {
+                        if anchor_entry != current_entry {
+                            ops.push(DeltaOp::Upsert(current_entry.clone()));
+                        }
+                        anchor_index += 1;
+                        current_index += 1;
+                    }
+                }
+            }
+            (Some(anchor_entry), None) => {
+                ops.push(DeltaOp::Remove(anchor_entry.name().to_string()));
+                anchor_index += 1;
+            }
+            (None, Some(current_entry)) => {
+                ops.push(DeltaOp::Upsert(current_entry.clone()));
+                current_index += 1;
+            }
+            (None, None) => break,
+        }
+    }
+    ops
+}
+
+fn apply_delta(anchor: &Tree, ops: &[DeltaOp]) -> Result<Tree> {
+    let mut entries = Vec::with_capacity(anchor.len() + ops.len());
+    let mut anchor_index = 0usize;
+    let mut op_index = 0usize;
+    while anchor_index < anchor.len() || op_index < ops.len() {
+        match (anchor.entries().get(anchor_index), ops.get(op_index)) {
+            (Some(anchor_entry), Some(op)) => match anchor_entry.name().cmp(op.name()) {
+                std::cmp::Ordering::Less => {
+                    entries.push(anchor_entry.clone());
+                    anchor_index += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    if let DeltaOp::Upsert(entry) = op {
+                        entries.push(entry.clone());
+                    }
+                    op_index += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    if let DeltaOp::Upsert(entry) = op {
+                        entries.push(entry.clone());
+                    }
+                    anchor_index += 1;
+                    op_index += 1;
+                }
+            },
+            (Some(anchor_entry), None) => {
+                entries.push(anchor_entry.clone());
+                anchor_index += 1;
+            }
+            (None, Some(op)) => {
+                if let DeltaOp::Upsert(entry) = op {
+                    entries.push(entry.clone());
+                }
+                op_index += 1;
+            }
+            (None, None) => break,
+        }
+    }
+    Ok(Tree::try_from_decoded_entries(entries)?)
+}
+
+fn delta_prefix_counts(anchor: &Tree, current: &Tree, ops: &[DeltaOp], count: usize) -> (u16, u16) {
+    if current.is_empty() {
+        return (0, 0);
+    }
+    let boundary = current.entries()[count.min(current.len()) - 1].name();
+    let op_count = ops.partition_point(|op| op.name() <= boundary);
+    let base_count = anchor
+        .entries()
+        .partition_point(|entry| entry.name() <= boundary);
+    (
+        u16::try_from(op_count).expect("radical op bound fits u16"),
+        u16::try_from(base_count).expect("prefix base count fits u16"),
+    )
+}
+
+fn encode_delta(anchor_id: ContentHash, anchor: &Tree, current: &Tree, ops: &[DeltaOp]) -> Vec<u8> {
+    let (first_ops, first_base) = delta_prefix_counts(anchor, current, ops, 1);
+    let (hundred_ops, hundred_base) = delta_prefix_counts(anchor, current, ops, 100);
+    let mut body = Vec::new();
+    let mut ends = Vec::with_capacity(ops.len());
+    let mut previous = "";
+    for op in ops {
+        match op {
+            DeltaOp::Remove(name) => {
+                body.push(0);
+                let prefix = shared_prefix(previous, name);
+                put_varint(prefix, &mut body);
+                put_varint(name.len() - prefix, &mut body);
+                body.extend_from_slice(&name.as_bytes()[prefix..]);
+            }
+            DeltaOp::Upsert(entry) => {
+                body.push(1);
+                encode_compact_entry(entry, previous, &mut body);
+            }
+        }
+        previous = op.name();
+        ends.push(body.len());
+    }
+    let end_for = |count: u16| {
+        if count == 0 {
+            RADICAL_HEADER_LEN
+        } else {
+            RADICAL_HEADER_LEN + ends[count as usize - 1]
+        }
+    };
+    let mut out = Vec::with_capacity(RADICAL_HEADER_LEN + body.len());
+    out.extend_from_slice(RADICAL_MAGIC);
+    out.push(1);
+    out.extend_from_slice(anchor_id.as_bytes());
+    out.extend_from_slice(&(current.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(ops.len() as u16).to_le_bytes());
+    out.extend_from_slice(&first_ops.to_le_bytes());
+    out.extend_from_slice(&first_base.to_le_bytes());
+    out.extend_from_slice(&(end_for(first_ops) as u32).to_le_bytes());
+    out.extend_from_slice(&hundred_ops.to_le_bytes());
+    out.extend_from_slice(&hundred_base.to_le_bytes());
+    out.extend_from_slice(&(end_for(hundred_ops) as u32).to_le_bytes());
+    debug_assert_eq!(out.len(), RADICAL_HEADER_LEN);
+    out.extend_from_slice(&body);
+    out
+}
+
+fn decode_delta_ops(
+    bytes: &[u8],
+    wanted: usize,
+) -> Result<(ContentHash, usize, Vec<DeltaOp>, usize)> {
+    ensure!(
+        bytes.len() >= RADICAL_HEADER_LEN,
+        "truncated radical delta header"
+    );
+    ensure!(bytes.starts_with(RADICAL_MAGIC), "not a radical tree delta");
+    ensure!(bytes[4] == 1, "unsupported radical delta version");
+    let anchor = ContentHash::from_bytes(bytes[5..37].try_into()?);
+    let result_count = read_u32(bytes, 37)? as usize;
+    let op_count = read_u16(bytes, 41)? as usize;
+    ensure!(wanted <= op_count, "partial delta op count exceeds object");
+    let mut offset = RADICAL_HEADER_LEN;
+    let mut previous = String::new();
+    let mut ops = Vec::with_capacity(wanted);
+    for _ in 0..wanted {
+        let opcode = *bytes.get(offset).context("truncated radical delta op")?;
+        offset += 1;
+        let op = match opcode {
+            0 => {
+                let prefix = take_varint(bytes, &mut offset)?;
+                let suffix_len = take_varint(bytes, &mut offset)?;
+                ensure!(
+                    prefix <= previous.len(),
+                    "delta name prefix exceeds predecessor"
+                );
+                let end = offset
+                    .checked_add(suffix_len)
+                    .context("delta name overflow")?;
+                let mut name = previous.as_bytes()[..prefix].to_vec();
+                name.extend_from_slice(bytes.get(offset..end).context("truncated delta name")?);
+                offset = end;
+                DeltaOp::Remove(String::from_utf8(name)?)
+            }
+            1 => DeltaOp::Upsert(decode_compact_entry(bytes, &mut offset, &previous)?),
+            _ => bail!("invalid radical delta opcode"),
+        };
+        previous = op.name().to_string();
+        ops.push(op);
+    }
+    Ok((anchor, result_count, ops, offset))
+}
+
+fn decode_delta(bytes: &[u8], anchor: &Tree, expected: ContentHash) -> Result<Tree> {
+    let op_count = read_u16(bytes, 41)? as usize;
+    let (anchor_id, result_count, ops, consumed) = decode_delta_ops(bytes, op_count)?;
+    ensure!(consumed == bytes.len(), "trailing radical delta bytes");
+    ensure!(anchor.hash() == anchor_id, "radical delta anchor mismatch");
+    let tree = apply_delta(anchor, &ops)?;
+    ensure!(
+        tree.len() == result_count,
+        "radical delta entry count mismatch"
+    );
+    ensure!(tree.hash() == expected, "radical delta tree hash mismatch");
+    Ok(tree)
+}
+
 fn block_decoder(dictionary: Dictionary<'_>) -> Result<zstd::bulk::Decompressor<'_>> {
     if let Some(prepared) = dictionary.decoder {
         Ok(zstd::bulk::Decompressor::with_prepared_dictionary(
@@ -706,13 +1122,326 @@ fn partial_production_file(path: &Path, tree_id: ContentHash, count: usize) -> R
     })
 }
 
+fn partial_lean_bytes(bytes: &[u8], count: usize) -> Result<PartialRead> {
+    ensure!(bytes.starts_with(LEAN_MAGIC), "not a lean tree anchor");
+    let mut offset = LEAN_MAGIC.len();
+    let entries = take_varint(bytes, &mut offset)?;
+    let wanted = count.min(entries);
+    let mut decoded = Vec::with_capacity(wanted);
+    let mut previous = String::new();
+    for _ in 0..wanted {
+        let entry = decode_compact_entry(bytes, &mut offset, &previous)?;
+        previous = entry.name().to_string();
+        decoded.push(entry);
+    }
+    Ok(PartialRead {
+        entries: decoded,
+        bytes_read: offset,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RadicalMode {
+    LeanAnchor,
+    Htr4Anchor,
+    Delta,
+}
+
+#[derive(Clone, Debug)]
+struct RadicalPlan {
+    mode: RadicalMode,
+    anchor: usize,
+    epoch_depth: usize,
+    settled_len: usize,
+    hot_len: usize,
+    op_count: usize,
+}
+
+struct RadicalCorpus {
+    plans: Vec<RadicalPlan>,
+    lean_total: usize,
+    settled_total: usize,
+    hot_total: usize,
+    bases: usize,
+    deltas: usize,
+    parent_coverage: usize,
+    max_ops: usize,
+}
+
+fn build_radical_corpus(corpus: &RealCorpus) -> Result<RadicalCorpus> {
+    let config = CompressionConfig::default();
+    let indexes = corpus
+        .tree_ids
+        .iter()
+        .enumerate()
+        .map(|(index, oid)| (oid.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let parent_indexes = corpus
+        .tree_ids
+        .iter()
+        .map(|oid| {
+            corpus
+                .parent_tree_ids
+                .get(oid)
+                .and_then(|parent| indexes.get(parent.as_str()).copied())
+        })
+        .collect::<Vec<_>>();
+    let parent_coverage = parent_indexes
+        .iter()
+        .filter(|parent| parent.is_some())
+        .count();
+    let tree_hashes = corpus.trees.iter().map(Tree::hash).collect::<Vec<_>>();
+    let mut lean_sizes = Vec::with_capacity(corpus.trees.len());
+    let mut adaptive_sizes = Vec::with_capacity(corpus.trees.len());
+    let mut lean_total = 0usize;
+    for tree in &corpus.trees {
+        let lean = encode_lean(tree);
+        let (_, adaptive) = objects::store::codec::encode_tree(tree, &config)?;
+        lean_total += lean.len();
+        lean_sizes.push(lean.len());
+        adaptive_sizes.push(adaptive.len());
+    }
+    let mut plans: Vec<Option<RadicalPlan>> = vec![None; corpus.trees.len()];
+    for start in 0..corpus.trees.len() {
+        if plans[start].is_some() {
+            continue;
+        }
+        let mut chain = Vec::new();
+        let mut cursor = start;
+        let mut seen = HashSet::new();
+        while plans[cursor].is_none() && seen.insert(cursor) {
+            chain.push(cursor);
+            let Some(parent) = parent_indexes[cursor] else {
+                break;
+            };
+            cursor = parent;
+        }
+        while let Some(index) = chain.pop() {
+            let lean_len = lean_sizes[index];
+            let htr4_with_porch = adaptive_sizes[index]
+                .checked_add(encode_lean_prefix(&corpus.trees[index], 100).len())
+                .context("radical anchor size overflow")?;
+            let (base_mode, base_len) = if lean_len <= htr4_with_porch {
+                (RadicalMode::LeanAnchor, lean_len)
+            } else {
+                (RadicalMode::Htr4Anchor, htr4_with_porch)
+            };
+            let mut plan = RadicalPlan {
+                mode: base_mode,
+                anchor: index,
+                epoch_depth: 0,
+                settled_len: base_len,
+                hot_len: lean_len,
+                op_count: 0,
+            };
+            if let Some(parent) = parent_indexes[index]
+                && let Some(parent_plan) = plans[parent].as_ref()
+                && parent_plan.epoch_depth + 1 < RADICAL_ANCHOR_INTERVAL
+            {
+                let anchor = parent_plan.anchor;
+                let ops = tree_delta(&corpus.trees[anchor], &corpus.trees[index]);
+                if ops.len() <= RADICAL_MAX_OPS {
+                    let encoded = encode_delta(
+                        tree_hashes[anchor],
+                        &corpus.trees[anchor],
+                        &corpus.trees[index],
+                        &ops,
+                    );
+                    let prefix_is_bounded =
+                        read_u16(&encoded, 45)? <= 1 && read_u16(&encoded, 53)? <= 100;
+                    if prefix_is_bounded && encoded.len() < base_len {
+                        plan = RadicalPlan {
+                            mode: RadicalMode::Delta,
+                            anchor,
+                            epoch_depth: parent_plan.epoch_depth + 1,
+                            settled_len: encoded.len(),
+                            hot_len: encoded.len(),
+                            op_count: ops.len(),
+                        };
+                    }
+                }
+            }
+            plans[index] = Some(plan);
+        }
+    }
+    let plans = plans
+        .into_iter()
+        .enumerate()
+        .map(|(index, plan)| plan.with_context(|| format!("unplanned tree {index}")))
+        .collect::<Result<Vec<_>>>()?;
+    let settled_total = plans.iter().map(|plan| plan.settled_len).sum();
+    let hot_total = plans.iter().map(|plan| plan.hot_len).sum();
+    let bases = plans
+        .iter()
+        .filter(|plan| plan.mode != RadicalMode::Delta)
+        .count();
+    let deltas = plans.len() - bases;
+    let max_ops = plans.iter().map(|plan| plan.op_count).max().unwrap_or(0);
+    Ok(RadicalCorpus {
+        plans,
+        lean_total,
+        settled_total,
+        hot_total,
+        bases,
+        deltas,
+        parent_coverage,
+        max_ops,
+    })
+}
+
+struct RadicalFileFixture {
+    raw: NamedTempFile,
+    delta: NamedTempFile,
+    anchor: NamedTempFile,
+    anchor_lean: bool,
+    anchor_id: ContentHash,
+    expected: ContentHash,
+    entries: usize,
+}
+
+fn radical_file_fixture(
+    corpus: &RealCorpus,
+    radical: &RadicalCorpus,
+    index: usize,
+) -> Result<RadicalFileFixture> {
+    let plan = &radical.plans[index];
+    ensure!(
+        plan.mode == RadicalMode::Delta,
+        "radical fixture must be a delta"
+    );
+    let anchor_plan = &radical.plans[plan.anchor];
+    ensure!(
+        anchor_plan.mode != RadicalMode::Delta,
+        "radical anchor must be materialized"
+    );
+    let anchor_tree = &corpus.trees[plan.anchor];
+    let current = &corpus.trees[index];
+    let ops = tree_delta(anchor_tree, current);
+    let delta = encode_delta(anchor_tree.hash(), anchor_tree, current, &ops);
+    let (anchor_lean, anchor) = if anchor_plan.mode == RadicalMode::LeanAnchor {
+        (true, encode_lean(anchor_tree))
+    } else {
+        (true, encode_lean_prefix(anchor_tree, 100))
+    };
+    ensure!(decode_delta(&delta, anchor_tree, current.hash())? == *current);
+    Ok(RadicalFileFixture {
+        raw: write_temp(&current.encode_canonical()?)?,
+        delta: write_temp(&delta)?,
+        anchor: write_temp(&anchor)?,
+        anchor_lean,
+        anchor_id: anchor_tree.hash(),
+        expected: current.hash(),
+        entries: current.len(),
+    })
+}
+
+fn measure_radical_partial(
+    fixtures: &[&RadicalFileFixture],
+    count: usize,
+) -> Result<(Timing, Timing, f64, f64)> {
+    ensure!(
+        !fixtures.is_empty(),
+        "no radical fixtures for {count}-entry read"
+    );
+    let mut raw_index = 0usize;
+    let raw_timing = measure(|| {
+        let fixture = &fixtures[raw_index % fixtures.len()];
+        raw_index += 1;
+        let read = partial_production_file(fixture.raw.path(), fixture.expected, count)
+            .expect("file-backed raw radical comparison");
+        black_box(read.entries[count - 1].name().len())
+    });
+    let mut radical_index = 0usize;
+    let radical_timing = measure(|| {
+        let fixture = &fixtures[radical_index % fixtures.len()];
+        radical_index += 1;
+        let read = partial_radical_file(fixture, count).expect("file-backed radical partial");
+        black_box(read.entries[count - 1].name().len())
+    });
+    let mut raw_bytes = 0usize;
+    let mut radical_bytes = 0usize;
+    for fixture in fixtures {
+        let raw = partial_production_file(fixture.raw.path(), fixture.expected, count)?;
+        let radical = partial_radical_file(fixture, count)?;
+        ensure!(
+            raw.entries == radical.entries,
+            "radical file partial mismatch"
+        );
+        raw_bytes += raw.bytes_read;
+        radical_bytes += radical.bytes_read;
+    }
+    Ok((
+        raw_timing,
+        radical_timing,
+        raw_bytes as f64 / fixtures.len() as f64,
+        radical_bytes as f64 / fixtures.len() as f64,
+    ))
+}
+
+fn partial_radical_file(fixture: &RadicalFileFixture, count: usize) -> Result<PartialRead> {
+    let mut delta_file = File::open(fixture.delta.path())?;
+    let mut header = [0u8; RADICAL_HEADER_LEN];
+    delta_file.read_exact(&mut header)?;
+    let (op_count, base_count, end) = if count == 1 {
+        (
+            read_u16(&header, 43)? as usize,
+            read_u16(&header, 45)? as usize,
+            read_u32(&header, 47)? as usize,
+        )
+    } else {
+        (
+            read_u16(&header, 51)? as usize,
+            read_u16(&header, 53)? as usize,
+            read_u32(&header, 55)? as usize,
+        )
+    };
+    ensure!(end >= RADICAL_HEADER_LEN, "invalid radical partial end");
+    let mut prefix = Vec::with_capacity(end);
+    prefix.extend_from_slice(&header);
+    prefix.resize(end, 0);
+    delta_file.read_exact(&mut prefix[RADICAL_HEADER_LEN..])?;
+    let (anchor_id, result_count, ops, consumed) = decode_delta_ops(&prefix, op_count)?;
+    ensure!(consumed == end, "radical partial index mismatch");
+    ensure!(
+        anchor_id == fixture.anchor_id,
+        "radical partial anchor mismatch"
+    );
+    let base = if base_count == 0 {
+        PartialRead {
+            entries: Vec::new(),
+            bytes_read: 0,
+        }
+    } else if fixture.anchor_lean {
+        let bytes = std::fs::read(fixture.anchor.path())?;
+        partial_lean_bytes(&bytes, base_count)?
+    } else {
+        partial_production_file(fixture.anchor.path(), fixture.anchor_id, base_count)?
+    };
+    let tree = apply_delta(&Tree::from_entries(base.entries), &ops)?;
+    let wanted = count.min(result_count);
+    ensure!(
+        tree.len() >= wanted,
+        "radical partial reconstruction is short"
+    );
+    let entries = tree.entries()[..wanted].to_vec();
+    if wanted == result_count {
+        ensure!(Tree::from_entries(entries.clone()).hash() == fixture.expected);
+    }
+    Ok(PartialRead {
+        entries,
+        bytes_read: end + base.bytes_read,
+    })
+}
+
 struct RealCorpus {
     label: String,
     path: PathBuf,
     object_format: GitObjectFormat,
     discovered_trees: usize,
     skipped_trees: usize,
+    tree_ids: Vec<String>,
     trees: Vec<Tree>,
+    parent_tree_ids: HashMap<String, String>,
     git_loose_bytes: usize,
     git_packed_bytes: usize,
     git_pack_files: usize,
@@ -782,6 +1511,75 @@ fn discover_tree_ids(repo: &Path, limit: usize) -> Result<(usize, Vec<String>)> 
         sample_evenly(&tree_ids.into_iter().collect::<Vec<_>>(), limit)
     };
     Ok((discovered, tree_ids))
+}
+
+fn discover_parent_tree_ids(repo: &Path, selected: &[String]) -> Result<HashMap<String, String>> {
+    let wanted = selected.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "log",
+            "--all",
+            "--topo-order",
+            "--reverse",
+            "--raw",
+            "-r",
+            "-t",
+            "--root",
+            "--no-abbrev",
+            "--diff-merges=first-parent",
+            "--format=COMMIT %H %T %P",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("walk Git tree history in {}", repo.display()))?;
+    let stdout = child.stdout.take().context("Git log stdout")?;
+    let mut roots = HashMap::<String, String>::new();
+    let mut parents = HashMap::new();
+    for line in BufReader::new(stdout).lines() {
+        let line = line?;
+        if let Some(rest) = line.strip_prefix("COMMIT ") {
+            let fields = rest.split_ascii_whitespace().collect::<Vec<_>>();
+            ensure!(fields.len() >= 2, "malformed Git commit/tree record");
+            let commit = fields[0];
+            let root = fields[1];
+            if let Some(parent_commit) = fields.get(2)
+                && let Some(parent_root) = roots.get(*parent_commit)
+                && wanted.contains(root)
+                && root != parent_root
+            {
+                parents
+                    .entry(root.to_string())
+                    .or_insert_with(|| parent_root.clone());
+            }
+            roots.insert(commit.to_string(), root.to_string());
+            continue;
+        }
+        if !line.starts_with(':') {
+            continue;
+        }
+        let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+        if fields.len() < 5 || fields[0] != ":040000" || fields[1] != "040000" {
+            continue;
+        }
+        let old = fields[2];
+        let new = fields[3];
+        if wanted.contains(new) && old != new && !old.bytes().all(|byte| byte == b'0') {
+            parents
+                .entry(new.to_string())
+                .or_insert_with(|| old.to_string());
+        }
+    }
+    let output = child.wait_with_output()?;
+    ensure!(
+        output.status.success(),
+        "git log tree-history walk failed in {}: {}",
+        repo.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(parents)
 }
 
 fn git_loose_sizes(repo: &Path, tree_ids: &[String]) -> Result<usize> {
@@ -975,6 +1773,7 @@ fn load_real_corpus(path: &Path, limit: usize) -> Result<RealCorpus> {
         .to_string();
     let object_format = real_object_format(&path)?;
     let (discovered_trees, tree_ids) = discover_tree_ids(&path, limit)?;
+    let parent_tree_ids = discover_parent_tree_ids(&path, &tree_ids)?;
     let mut child = Command::new("git")
         .arg("-C")
         .arg(&path)
@@ -1031,7 +1830,9 @@ fn load_real_corpus(path: &Path, limit: usize) -> Result<RealCorpus> {
         object_format,
         discovered_trees,
         skipped_trees,
+        tree_ids: imported_tree_ids,
         trees,
+        parent_tree_ids,
         git_loose_bytes,
         git_packed_bytes,
         git_pack_files,
@@ -1195,6 +1996,9 @@ fn validate_real_corpora(corpora: &[RealCorpus]) -> Result<()> {
     println!(
         "REAL_SIZE,label,trees,htr4_v5,htr4_raw,git_loose,git_packed,historical_loose,v5_over_git_loose,v5_over_git_packed,compressed_trees,raw_fallback_trees"
     );
+    println!(
+        "RADICAL_SIZE,label,trees,parent_covered,bases,deltas,max_ops,lean_all,hot_bytes,settled_bytes,settled_over_git_loose,settled_over_git_packed,settled_over_raw,settled_over_v5"
+    );
 
     let mut aggregate_raw = 0usize;
     let mut aggregate_historical = 0usize;
@@ -1203,7 +2007,15 @@ fn validate_real_corpora(corpora: &[RealCorpus]) -> Result<()> {
     let mut aggregate_git_packed = 0usize;
     let mut aggregate_trees = 0usize;
     let mut aggregate_compressed = 0usize;
+    let mut aggregate_lean = 0usize;
+    let mut aggregate_radical_hot = 0usize;
+    let mut aggregate_radical_settled = 0usize;
+    let mut aggregate_radical_bases = 0usize;
+    let mut aggregate_radical_deltas = 0usize;
+    let mut aggregate_parent_coverage = 0usize;
+    let mut aggregate_radical_max_ops = 0usize;
     let mut file_candidates = Vec::new();
+    let mut radical_file_fixtures = Vec::new();
     let config = CompressionConfig::default();
 
     for corpus in corpora {
@@ -1295,6 +2107,36 @@ fn validate_real_corpora(corpora: &[RealCorpus]) -> Result<()> {
             compressed_trees,
             raw_fallback_trees,
         );
+        let radical = build_radical_corpus(corpus)?;
+        println!(
+            "RADICAL_SIZE,{},{},{},{},{},{},{},{},{},{:.6},{:.6},{:.6},{:.6}",
+            corpus.label,
+            corpus.trees.len(),
+            radical.parent_coverage,
+            radical.bases,
+            radical.deltas,
+            radical.max_ops,
+            radical.lean_total,
+            radical.hot_total,
+            radical.settled_total,
+            radical.settled_total as f64 / corpus.git_loose_bytes as f64,
+            radical.settled_total as f64 / corpus.git_packed_bytes as f64,
+            radical.settled_total as f64 / raw_total as f64,
+            radical.settled_total as f64 / adaptive_total as f64,
+        );
+        let delta_candidates = radical
+            .plans
+            .iter()
+            .enumerate()
+            .filter(|(index, plan)| {
+                plan.mode == RadicalMode::Delta && !corpus.trees[*index].is_empty()
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let per_corpus = (REAL_FILE_SAMPLE_LIMIT / corpora.len()).max(1);
+        for index in sample_evenly(&delta_candidates, per_corpus) {
+            radical_file_fixtures.push(radical_file_fixture(corpus, &radical, index)?);
+        }
         aggregate_raw += raw_total;
         aggregate_historical += historical_total;
         aggregate_adaptive += adaptive_total;
@@ -1302,6 +2144,13 @@ fn validate_real_corpora(corpora: &[RealCorpus]) -> Result<()> {
         aggregate_git_packed += corpus.git_packed_bytes;
         aggregate_trees += corpus.trees.len();
         aggregate_compressed += compressed_trees;
+        aggregate_lean += radical.lean_total;
+        aggregate_radical_hot += radical.hot_total;
+        aggregate_radical_settled += radical.settled_total;
+        aggregate_radical_bases += radical.bases;
+        aggregate_radical_deltas += radical.deltas;
+        aggregate_parent_coverage += radical.parent_coverage;
+        aggregate_radical_max_ops = aggregate_radical_max_ops.max(radical.max_ops);
 
         eligible_files.sort_by_key(|candidate| candidate.0);
         file_candidates.extend(sample_evenly(&eligible_files, REAL_FILE_SAMPLE_LIMIT));
@@ -1312,6 +2161,13 @@ fn validate_real_corpora(corpora: &[RealCorpus]) -> Result<()> {
         aggregate_adaptive as f64 / aggregate_git_loose as f64,
         aggregate_adaptive as f64 / aggregate_git_packed as f64,
         aggregate_trees - aggregate_compressed,
+    );
+    println!(
+        "RADICAL_SIZE,ALL,{aggregate_trees},{aggregate_parent_coverage},{aggregate_radical_bases},{aggregate_radical_deltas},{aggregate_radical_max_ops},{aggregate_lean},{aggregate_radical_hot},{aggregate_radical_settled},{:.6},{:.6},{:.6},{:.6}",
+        aggregate_radical_settled as f64 / aggregate_git_loose as f64,
+        aggregate_radical_settled as f64 / aggregate_git_packed as f64,
+        aggregate_radical_settled as f64 / aggregate_raw as f64,
+        aggregate_radical_settled as f64 / aggregate_adaptive as f64,
     );
     ensure!(
         aggregate_adaptive < aggregate_historical,
@@ -1365,12 +2221,60 @@ fn validate_real_corpora(corpora: &[RealCorpus]) -> Result<()> {
             "file-backed {count}-entry partial read is {ratio:.3}x raw HTR4"
         );
     }
-    println!("REAL_VALIDATION,size_beats_historical=true,file_partial_within_2x=true");
+    println!(
+        "RADICAL_FILE_PARTIAL,count,trees,min_tree_entries,max_tree_entries,raw_mean_bytes,radical_mean_bytes,byte_ratio,raw_median_ns,radical_median_ns,time_ratio"
+    );
+    let mut radical_partial_within_2x = true;
+    for count in [1usize, 100] {
+        let eligible = radical_file_fixtures
+            .iter()
+            .filter(|fixture| fixture.entries >= count)
+            .collect::<Vec<_>>();
+        ensure!(
+            !eligible.is_empty(),
+            "no radical trees with {count} entries"
+        );
+        let (raw_timing, radical_timing, raw_bytes, radical_bytes) =
+            measure_radical_partial(&eligible, count)?;
+        let byte_ratio = radical_bytes / raw_bytes;
+        let time_ratio = radical_timing.median_ns / raw_timing.median_ns;
+        radical_partial_within_2x &= byte_ratio <= 2.0 && time_ratio <= 2.0;
+        println!(
+            "RADICAL_FILE_PARTIAL,{count},{},{},{},{raw_bytes:.2},{radical_bytes:.2},{byte_ratio:.3},{:.3},{:.3},{time_ratio:.3}",
+            eligible.len(),
+            eligible
+                .iter()
+                .map(|fixture| fixture.entries)
+                .min()
+                .unwrap_or(0),
+            eligible
+                .iter()
+                .map(|fixture| fixture.entries)
+                .max()
+                .unwrap_or(0),
+            raw_timing.median_ns,
+            radical_timing.median_ns,
+        );
+    }
+    println!(
+        "REAL_VALIDATION,size_beats_historical=true,file_partial_within_2x=true,radical_smaller_than_git_loose={},radical_partial_within_2x={radical_partial_within_2x}",
+        aggregate_radical_settled < aggregate_git_loose,
+    );
     Ok(())
 }
 
 fn self_check(dictionary: Dictionary<'_>, block_entries: usize) -> Result<()> {
     let tree = fixture(1_000);
+    let lean = encode_lean(&tree);
+    ensure!(decode_lean(&lean, tree.hash())? == tree);
+    let mut changed = tree.clone();
+    let changed_name = tree.entries()[500].name().to_string();
+    changed.insert(TreeEntry::file(changed_name, content_hash(500, 99), false)?);
+    let ops = tree_delta(&tree, &changed);
+    ensure!(ops.len() == 1, "one-entry radical self-check delta");
+    let delta = encode_delta(tree.hash(), &tree, &changed, &ops);
+    ensure!(decode_delta(&delta, &tree, changed.hash())? == changed);
+    ensure!(decode_delta(&delta, &tree, tree.hash()).is_err());
     let blocked = encode_blocked(&tree, block_entries, dictionary)?;
     ensure!(decode_blocked(&blocked, dictionary)? == tree);
     let range_start = block_entries.saturating_sub(20);
@@ -1388,6 +2292,88 @@ fn self_check(dictionary: Dictionary<'_>, block_entries: usize) -> Result<()> {
     let last = bad_payload.len() - 1;
     bad_payload[last] ^= 1;
     ensure!(decode_blocked(&bad_payload, dictionary).is_err());
+    Ok(())
+}
+
+fn measure_radical_capture() -> Result<()> {
+    let anchor = fixture(100_000);
+    let mut current = anchor.clone();
+    let changed_name = anchor.entries()[50_000].name().to_string();
+    current.insert(TreeEntry::file(
+        changed_name,
+        content_hash(50_000, 0xfeed),
+        false,
+    )?);
+    let ops = tree_delta(&anchor, &current);
+    ensure!(
+        ops.len() == 1,
+        "100k radical capture fixture must change one entry"
+    );
+    let raw = current.encode_canonical()?;
+    let v5 = objects::store::codec::encode_tree(&current, &CompressionConfig::default())?.1;
+    let lean = encode_lean(&current);
+    let anchor_id = anchor.hash();
+    let delta = encode_delta(anchor_id, &anchor, &current, &ops);
+    ensure!(decode_lean(&lean, current.hash())? == current);
+    ensure!(decode_delta(&delta, &anchor, current.hash())? == current);
+    println!(
+        "RADICAL_CAPTURE,entries,changes,htr4_raw_bytes,htr4_v5_bytes,lean_bytes,delta_bytes,operation,median_ns,mean_ns,stddev_ns,cv_percent,iterations_per_sample"
+    );
+    for (operation, timing) in [
+        ("lean_anchor_encode", measure(|| encode_lean(&current))),
+        (
+            "htr4_raw_encode",
+            measure(|| current.encode_canonical().expect("100k raw encode")),
+        ),
+        (
+            "htr4_v5_encode",
+            measure(|| {
+                objects::store::codec::encode_tree(&current, &CompressionConfig::default())
+                    .expect("100k v5 encode")
+                    .1
+            }),
+        ),
+        (
+            "htr4_raw_decode",
+            measure(|| Tree::decode_canonical(&raw).expect("100k raw decode")),
+        ),
+        (
+            "htr4_v5_decode",
+            measure(|| Tree::decode_canonical(&v5).expect("100k v5 decode")),
+        ),
+        (
+            "known_delta_encode",
+            measure(|| encode_delta(anchor_id, &anchor, &current, &ops)),
+        ),
+        (
+            "diff_and_delta_encode",
+            measure(|| {
+                let measured_ops = tree_delta(&anchor, &current);
+                encode_delta(anchor_id, &anchor, &current, &measured_ops)
+            }),
+        ),
+        (
+            "lean_anchor_decode",
+            measure(|| decode_lean(&lean, current.hash()).expect("100k lean decode")),
+        ),
+        (
+            "delta_decode",
+            measure(|| decode_delta(&delta, &anchor, current.hash()).expect("100k delta decode")),
+        ),
+    ] {
+        println!(
+            "RADICAL_CAPTURE,100000,1,{},{},{},{},{operation},{:.3},{:.3},{:.3},{:.3},{}",
+            raw.len(),
+            v5.len(),
+            lean.len(),
+            delta.len(),
+            timing.median_ns,
+            timing.mean_ns,
+            timing.stddev_ns,
+            timing.cv_percent,
+            timing.iterations_per_sample,
+        );
+    }
     Ok(())
 }
 
@@ -1534,8 +2520,11 @@ fn main() -> Result<()> {
     println!("META,dictionary,{}", dictionary.name);
     println!("META,dictionary_bytes,{}", dictionary.bytes.len());
     println!("META,dictionary_blake3,{}", blake3::hash(dictionary.bytes));
-    println!("META,self_check,roundtrip+range+hash_corruption+payload_corruption_ok");
+    println!(
+        "META,self_check,v5_roundtrip+range+hash_corruption+payload_corruption;radical_lean+delta_roundtrip+hash_mismatch_ok"
+    );
     validate_real_corpora(&real_corpora)?;
+    measure_radical_capture()?;
     println!(
         "FIXTURE,entries,min_name,max_name,mean_name,blob_normal,blob_exec,tree,symlink,gitlink,spoollink"
     );
