@@ -432,15 +432,6 @@ impl AgentAttenuation {
     }
 }
 
-/// Attenuate a parent Biscuit (decoded base64 string) with the
-/// supplied restrictions and return the attenuated Biscuit's
-/// base64-encoded bytes.
-///
-/// Uses `UnverifiedBiscuit` because attenuation appends a new block
-/// to bytes the parent already holds; the new block's signature
-/// chains off the parent's keys, and the server validates the full
-/// chain against its trust list when the agent presents the token.
-/// The CLI never holds the server's signing key.
 /// Narrow a client-minted agent account root with the deny floor that
 /// `heddle auth derive-agent` applies. The login-minted root IS the account:
 /// it keeps human-like everyday ops, including minting signup invites.
@@ -466,6 +457,15 @@ pub(crate) fn restrict_agent_account_root(
     )
 }
 
+/// Attenuate a parent Biscuit (decoded base64 string) with the
+/// supplied restrictions and return the attenuated Biscuit's
+/// base64-encoded bytes.
+///
+/// Uses `UnverifiedBiscuit` because attenuation appends a new block
+/// to bytes the parent already holds; the new block's signature
+/// chains off the parent's keys, and the server validates the full
+/// chain against its trust list when the agent presents the token.
+/// The CLI never holds the server's signing key.
 pub fn attenuate_for_agent(
     parent_token_b64: &str,
     restrictions: AgentAttenuation,
