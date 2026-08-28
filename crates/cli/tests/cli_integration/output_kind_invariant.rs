@@ -72,6 +72,8 @@ const SWEPT: &[&str] = &[
     "auth login",
     "auth logout",
     "auth status",
+    "auth invite",
+    "auth invite list",
     "auth trust show",
     "auth trust replace",
     "auth create-service-token",

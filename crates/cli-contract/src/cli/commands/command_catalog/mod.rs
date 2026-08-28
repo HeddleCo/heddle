@@ -1470,6 +1470,44 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
+        &["auth", "invite"],
+        feature_gated(
+            json_discriminators(
+                documented_schemas(
+                    user_scoped(NETWORK_METADATA_MUTATION_NO_OP_ID),
+                    &["auth invite"],
+                ),
+                &[json_discriminator(
+                    Some("auth invite"),
+                    "output_kind",
+                    "auth_invite",
+                )],
+            ),
+            "client",
+        ),
+    ),
+    entry(
+        &["auth", "invite", "list"],
+        feature_gated(
+            json_discriminators(
+                documented_schemas(
+                    user_scoped(CommandContract {
+                        observe_only: false,
+                        network_io: true,
+                        ..READ_JSON
+                    }),
+                    &["auth invite list"],
+                ),
+                &[json_discriminator(
+                    Some("auth invite list"),
+                    "output_kind",
+                    "auth_invite_list",
+                )],
+            ),
+            "client",
+        ),
+    ),
+    entry(
         &["auth", "trust"],
         feature_gated(user_scoped(GROUP), "client"),
     ),
@@ -4523,6 +4561,12 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             AuthCommands::Login { .. } => vec!["auth", "login"],
             AuthCommands::Logout { .. } => vec!["auth", "logout"],
             AuthCommands::Status { .. } => vec!["auth", "status"],
+            AuthCommands::Invite { command, .. } => match command {
+                None => vec!["auth", "invite"],
+                Some(crate::cli::AuthInviteCommands::List) => {
+                    vec!["auth", "invite", "list"]
+                }
+            },
             AuthCommands::Trust { command } => match command {
                 crate::cli::AuthTrustCommands::Show(_) => vec!["auth", "trust", "show"],
                 crate::cli::AuthTrustCommands::Replace(_) => vec!["auth", "trust", "replace"],

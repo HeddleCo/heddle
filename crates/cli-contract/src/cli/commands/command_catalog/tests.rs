@@ -127,6 +127,13 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["auth", "status"], &["auth", "status"]),
     #[cfg(feature = "client")]
     sample(
+        &["auth", "invite"],
+        &["auth", "invite", "--email", "alice@example.com"],
+    ),
+    #[cfg(feature = "client")]
+    sample(&["auth", "invite", "list"], &["auth", "invite", "list"]),
+    #[cfg(feature = "client")]
+    sample(
         &["auth", "trust", "show"],
         &["auth", "trust", "show", "--server", "api.heddle.test"],
     ),
@@ -1513,6 +1520,8 @@ fn auth_commands_are_user_scoped() {
         &["auth", "login"][..],
         &["auth", "logout"],
         &["auth", "status"],
+        &["auth", "invite"],
+        &["auth", "invite", "list"],
         &["auth", "derive-agent"],
         &["auth", "create-service-token"],
         &["claim"],
@@ -1727,6 +1736,8 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "auth login",
             "auth logout",
             "auth status",
+            "auth invite",
+            "auth invite list",
             // heddle#1130: descriptor-trust inspection and explicit
             // compare-and-swap replacement emit stable trust records.
             "auth trust show",
