@@ -334,7 +334,7 @@ mod tests {
     use objects::{
         object::{
             Attribution, Blob, ContentHash, Principal, State, StateAttachment, StateAttachmentBody,
-            Tree, TreeEntry,
+            TREE_BLOCK_ENCODING_VERSION, TREE_HEADER_LEN, Tree, TreeEntry,
         },
         store::{FsStore, ObjectStore},
     };
@@ -504,6 +504,46 @@ mod tests {
         .unwrap_err();
         assert!(
             matches!(error, ProtocolError::InvalidState(message) if message.contains("StateId mismatch"))
+        );
+    }
+
+    #[test]
+    fn store_received_object_rejects_unbounded_tree_block_raw_length() {
+        const TREE_BLOCK_PREAMBLE_LEN: usize = 16;
+        const TREE_BLOCK_INDEX_RAW_LEN_OFFSET: usize = 20;
+
+        let (_temp, store) = create_test_store();
+        let tree = Tree::from_entries(
+            (0..256)
+                .map(|index| {
+                    TreeEntry::file(
+                        format!("crates__shared_component_{index:04}.rs"),
+                        ContentHash::compute(format!("blob-{index}").as_bytes()),
+                        false,
+                    )
+                    .expect("tree entry")
+                })
+                .collect(),
+        );
+        let mut data = tree.encode_canonical_blocked(3, 0).expect("blocked tree");
+        assert_eq!(data[4], TREE_BLOCK_ENCODING_VERSION);
+        let raw_len_offset =
+            TREE_HEADER_LEN + TREE_BLOCK_PREAMBLE_LEN + TREE_BLOCK_INDEX_RAW_LEN_OFFSET;
+        data[raw_len_offset..raw_len_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let error = store_received_object(
+            &store,
+            &ObjectData {
+                id: ObjectId::Hash(tree.hash()),
+                obj_type: ObjectType::Tree,
+                data,
+                is_delta: false,
+            },
+        )
+        .expect_err("received tree must reject attacker-controlled raw length");
+        assert!(
+            matches!(error, ProtocolError::InvalidState(ref message) if message.contains("raw length") && message.contains("exceeds maximum")),
+            "unexpected error: {error}"
         );
     }
 

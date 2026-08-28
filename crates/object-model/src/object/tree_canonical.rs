@@ -43,11 +43,23 @@ pub(crate) const TREE_BLOCK_ENTRIES: usize = 256;
 pub(crate) const TREE_BLOCK_PREAMBLE_LEN: usize = 16;
 pub(crate) const TREE_BLOCK_INDEX_LEN: usize = 24;
 const TREE_BLOCK_CODEC_ZSTD: u8 = 1;
+// The largest encoder-produced frame is a spoollink with u16-max name and
+// spool-id fields: u32 frame length, mode, kind, u16 name length, name, u16
+// spool length, spool, and the 32-byte state id.
+const TREE_BLOCK_MAX_ENTRY_FRAME_LEN: usize =
+    4 + 1 + 1 + 2 + u16::MAX as usize + 2 + u16::MAX as usize + 32;
+pub(crate) const TREE_BLOCK_MAX_RAW_LEN: usize =
+    TREE_BLOCK_ENTRIES * TREE_BLOCK_MAX_ENTRY_FRAME_LEN;
+// A zstd block expands to at most 128 KiB and consumes encoded block bytes.
+// This deliberately loose format bound admits all encoder output while
+// preventing a tiny stored block from claiming the structural maximum.
+const TREE_BLOCK_MAX_EXPANSION_RATIO: usize = 128 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TreeBlockHeader {
     pub block_entries: usize,
     pub block_count: usize,
+    pub entry_count: u64,
     pub raw_payload_len: u64,
     pub index_end: u64,
 }
@@ -264,6 +276,11 @@ pub(crate) fn decode_block_header(
             "tree block size must be nonzero".into(),
         ));
     }
+    if block_entries > TREE_BLOCK_ENTRIES {
+        return Err(TreeStreamError::Malformed(format!(
+            "tree block entry count {block_entries} exceeds maximum {TREE_BLOCK_ENTRIES}"
+        )));
+    }
     let block_count = u32::from_le_bytes(
         preamble[4..8]
             .try_into()
@@ -297,6 +314,7 @@ pub(crate) fn decode_block_header(
     Ok(TreeBlockHeader {
         block_entries,
         block_count,
+        entry_count: header.entry_count,
         raw_payload_len,
         index_end,
     })
@@ -333,7 +351,19 @@ pub(crate) fn decode_block_index(
             .try_into()
             .map_err(|_| TreeStreamError::Malformed("invalid tree block raw length".into()))?,
     ) as usize;
-    if stored_len == 0 || raw_len == 0 || stored_offset < block_header.index_end {
+    let first_entry = (block as u64)
+        .checked_mul(block_header.block_entries as u64)
+        .ok_or_else(|| TreeStreamError::Malformed("tree block ordinal overflow".into()))?;
+    let entries = block_header
+        .entry_count
+        .checked_sub(first_entry)
+        .ok_or_else(|| TreeStreamError::Malformed("tree block starts past entries".into()))?
+        .min(block_header.block_entries as u64) as usize;
+    let max_raw_len = entries
+        .checked_mul(TREE_BLOCK_MAX_ENTRY_FRAME_LEN)
+        .ok_or_else(|| TreeStreamError::Malformed("tree block raw length overflow".into()))?;
+    validate_block_lengths(stored_len, raw_len, max_raw_len)?;
+    if stored_offset < block_header.index_end {
         return Err(TreeStreamError::Malformed(
             "invalid empty or overlapping tree block".into(),
         ));
@@ -354,10 +384,35 @@ pub(crate) fn decode_block_index(
     })
 }
 
+fn validate_block_lengths(
+    stored_len: usize,
+    raw_len: usize,
+    max_raw_len: usize,
+) -> Result<(), TreeStreamError> {
+    if raw_len > max_raw_len {
+        return Err(TreeStreamError::Malformed(format!(
+            "tree block raw length {raw_len} exceeds maximum {max_raw_len}"
+        )));
+    }
+    if stored_len == 0 || raw_len == 0 {
+        return Err(TreeStreamError::Malformed(
+            "invalid empty or overlapping tree block".into(),
+        ));
+    }
+    let expansion_limit = (stored_len as u64) * (TREE_BLOCK_MAX_EXPANSION_RATIO as u64);
+    if raw_len as u64 > expansion_limit {
+        return Err(TreeStreamError::Malformed(format!(
+            "tree block raw length {raw_len} exceeds {TREE_BLOCK_MAX_EXPANSION_RATIO}:1 expansion limit for {stored_len} stored bytes"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn decode_block_payload(
     stored: &[u8],
     raw_len: usize,
 ) -> Result<Vec<u8>, TreeStreamError> {
+    validate_block_lengths(stored.len(), raw_len, TREE_BLOCK_MAX_RAW_LEN)?;
     if stored.len() == raw_len {
         return Ok(stored.to_vec());
     }
@@ -536,6 +591,11 @@ fn compress_block_tail(_data: &[u8], _level: i32) -> Result<Vec<u8>, TreeStreamE
 
 #[cfg(feature = "zstd")]
 fn decompress_block_tail(data: &[u8], capacity: usize) -> Result<Vec<u8>, TreeStreamError> {
+    if capacity > TREE_BLOCK_MAX_RAW_LEN {
+        return Err(TreeStreamError::Malformed(format!(
+            "tree block tail length {capacity} exceeds maximum {TREE_BLOCK_MAX_RAW_LEN}"
+        )));
+    }
     let decoded = zstd::bulk::decompress(data, capacity)
         .map_err(|error| TreeStreamError::Compression(error.to_string()))?;
     if decoded.len() != capacity {
@@ -1441,6 +1501,23 @@ mod block_tests {
         )
     }
 
+    fn maximum_size_block_fixture() -> Tree {
+        let name_prefix = "n".repeat(u16::MAX as usize - 5);
+        let spool_id = SpoolId::parse(format!("s/{}", "s".repeat(u16::MAX as usize - 2)))
+            .expect("maximum-size spool id");
+        assert_eq!(spool_id.as_str().len(), u16::MAX as usize);
+        Tree::from_entries(
+            (0..TREE_BLOCK_ENTRIES)
+                .map(|index| {
+                    let name = format!("{name_prefix}{index:05}");
+                    assert_eq!(name.len(), u16::MAX as usize);
+                    TreeEntry::spoollink(name, spool_id.clone(), StateId::from_bytes([7; 32]))
+                        .expect("maximum-size fixture entry")
+                })
+                .collect(),
+        )
+    }
+
     #[test]
     fn blocked_encoder_falls_back_for_the_complete_object() {
         let tree = fixture(1);
@@ -1487,5 +1564,156 @@ mod block_tests {
         encoded.push(0);
 
         assert!(Tree::decode_canonical(&encoded).is_err());
+    }
+
+    #[test]
+    fn block_raw_length_above_encoder_ceiling_is_rejected_in_the_index() {
+        let tree = fixture(TREE_BLOCK_ENTRIES);
+        let encoded = tree.encode_canonical_blocked(3, 0).expect("encode");
+        let header = decode_header(&encoded).expect("header");
+        let preamble = &encoded[TREE_HEADER_LEN..TREE_HEADER_LEN + TREE_BLOCK_PREAMBLE_LEN];
+        let block_header =
+            decode_block_header(&header, preamble, encoded.len() as u64).expect("block header");
+        let index_offset = TREE_HEADER_LEN + TREE_BLOCK_PREAMBLE_LEN;
+        let mut index: [u8; TREE_BLOCK_INDEX_LEN] = encoded
+            [index_offset..index_offset + TREE_BLOCK_INDEX_LEN]
+            .try_into()
+            .expect("index");
+        index[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let error = decode_block_index(&index, 0, &block_header, encoded.len() as u64)
+            .expect_err("attacker-controlled raw length must fail at the index boundary");
+        assert!(
+            matches!(error, TreeStreamError::Malformed(ref message) if message.contains("raw length") && message.contains("exceeds maximum")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn block_entry_count_above_encoder_limit_is_rejected() {
+        let tree = fixture(TREE_BLOCK_ENTRIES);
+        let mut encoded = tree.encode_canonical_blocked(3, 0).expect("encode");
+        let block_entries_offset = TREE_HEADER_LEN + 2;
+        encoded[block_entries_offset..block_entries_offset + 2]
+            .copy_from_slice(&u16::MAX.to_le_bytes());
+
+        let error = Tree::decode_canonical(&encoded)
+            .expect_err("block entry count above the encoder limit must fail");
+        assert!(
+            matches!(error, TreeStreamError::Malformed(ref message) if message.contains("entry count") && message.contains("exceeds maximum")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn short_final_block_uses_its_actual_entry_count_for_the_ceiling() {
+        let tree = fixture(TREE_BLOCK_ENTRIES + 1);
+        let encoded = tree.encode_canonical_blocked(3, 0).expect("encode");
+        let header = decode_header(&encoded).expect("header");
+        let preamble = &encoded[TREE_HEADER_LEN..TREE_HEADER_LEN + TREE_BLOCK_PREAMBLE_LEN];
+        let block_header =
+            decode_block_header(&header, preamble, encoded.len() as u64).expect("block header");
+        let index_offset = TREE_HEADER_LEN + TREE_BLOCK_PREAMBLE_LEN + TREE_BLOCK_INDEX_LEN;
+        let mut index: [u8; TREE_BLOCK_INDEX_LEN] = encoded
+            [index_offset..index_offset + TREE_BLOCK_INDEX_LEN]
+            .try_into()
+            .expect("final index");
+        let one_entry_max_plus_one =
+            u32::try_from(TREE_BLOCK_MAX_ENTRY_FRAME_LEN + 1).expect("one over final block");
+        index[20..24].copy_from_slice(&one_entry_max_plus_one.to_le_bytes());
+
+        let error = decode_block_index(&index, 1, &block_header, encoded.len() as u64)
+            .expect_err("short final block must use its actual structural ceiling");
+        let expected_max = format!("maximum {TREE_BLOCK_MAX_ENTRY_FRAME_LEN}");
+        assert!(
+            matches!(error, TreeStreamError::Malformed(ref message) if message.contains("raw length") && message.contains(&expected_max)),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn block_raw_length_above_zstd_expansion_bound_is_rejected() {
+        let stored_offset = 128u64;
+        let stored_len = 1u32;
+        let raw_len = u32::try_from(TREE_BLOCK_MAX_EXPANSION_RATIO + 1).expect("raw length");
+        let mut index = [0u8; TREE_BLOCK_INDEX_LEN];
+        index[8..16].copy_from_slice(&stored_offset.to_le_bytes());
+        index[16..20].copy_from_slice(&stored_len.to_le_bytes());
+        index[20..24].copy_from_slice(&raw_len.to_le_bytes());
+        let block_header = TreeBlockHeader {
+            block_entries: TREE_BLOCK_ENTRIES,
+            block_count: 1,
+            entry_count: 1,
+            raw_payload_len: raw_len as u64,
+            index_end: stored_offset,
+        };
+
+        let error = decode_block_index(&index, 0, &block_header, stored_offset + stored_len as u64)
+            .expect_err("excessive zstd expansion must fail at the index boundary");
+        assert!(
+            matches!(error, TreeStreamError::Malformed(ref message) if message.contains("expansion limit")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn payload_and_zstd_helpers_recheck_the_structural_ceiling() {
+        let over_limit = TREE_BLOCK_MAX_RAW_LEN + 1;
+        let payload_error = decode_block_payload(&[0], over_limit)
+            .expect_err("payload helper must reject an unchecked raw length");
+        assert!(
+            matches!(payload_error, TreeStreamError::Malformed(ref message) if message.contains("raw length")),
+            "unexpected error: {payload_error}"
+        );
+        let zstd_error = decompress_block_tail(&[], over_limit)
+            .expect_err("zstd helper must cap its output independently");
+        assert!(
+            matches!(zstd_error, TreeStreamError::Malformed(ref message) if message.contains("tail length")),
+            "unexpected error: {zstd_error}"
+        );
+    }
+
+    #[test]
+    fn maximum_size_encoder_block_round_trips_and_one_over_is_rejected() {
+        let tree = maximum_size_block_fixture();
+        let raw = tree.encode_canonical().expect("encode raw");
+        assert_eq!(raw.len() - TREE_HEADER_LEN, TREE_BLOCK_MAX_RAW_LEN);
+
+        let blocked = tree.encode_canonical_blocked(3, 0).expect("encode blocked");
+        assert_eq!(blocked[4], TREE_BLOCK_ENCODING_VERSION);
+        let header = decode_header(&blocked).expect("header");
+        let preamble = &blocked[TREE_HEADER_LEN..TREE_HEADER_LEN + TREE_BLOCK_PREAMBLE_LEN];
+        let block_header =
+            decode_block_header(&header, preamble, blocked.len() as u64).expect("block header");
+        let index_offset = TREE_HEADER_LEN + TREE_BLOCK_PREAMBLE_LEN;
+        let index = decode_block_index(
+            &blocked[index_offset..index_offset + TREE_BLOCK_INDEX_LEN],
+            0,
+            &block_header,
+            blocked.len() as u64,
+        )
+        .expect("maximum-size block index");
+        assert_eq!(index.raw_len, TREE_BLOCK_MAX_RAW_LEN);
+
+        let decoded = Tree::decode_canonical(&blocked).expect("decode maximum-size block");
+        assert_eq!(decoded, tree);
+        assert_eq!(decoded.encode_canonical().expect("re-encode decoded"), raw);
+        assert_eq!(
+            decoded
+                .encode_canonical_blocked(3, 0)
+                .expect("re-encode blocked"),
+            blocked
+        );
+
+        let mut over_limit = blocked;
+        let raw_len_offset = index_offset + 20;
+        let one_over = u32::try_from(TREE_BLOCK_MAX_RAW_LEN + 1).expect("one over");
+        over_limit[raw_len_offset..raw_len_offset + 4].copy_from_slice(&one_over.to_le_bytes());
+        let error = Tree::decode_canonical(&over_limit)
+            .expect_err("one byte above the block ceiling must fail");
+        assert!(
+            matches!(error, TreeStreamError::Malformed(ref message) if message.contains("raw length")),
+            "unexpected error: {error}"
+        );
     }
 }
