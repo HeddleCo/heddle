@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2](https://github.com/HeddleCo/heddle/compare/heddle-cli-contract-v0.15.1...heddle-cli-contract-v0.15.2) - 2026-08-28
+
+### Other
+
+- Discuss anchors: rebind on in-file symbol rename ([#1581](https://github.com/HeddleCo/heddle/pull/1581))
+- Add last-turn diff base ([#1582](https://github.com/HeddleCo/heddle/pull/1582))
+
 ## [0.15.1](https://github.com/HeddleCo/heddle/compare/heddle-cli-contract-v0.15.0...heddle-cli-contract-v0.15.1) - 2026-08-27
 
 ### Fixed

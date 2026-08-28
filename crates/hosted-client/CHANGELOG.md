@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.15.1...heddle-hosted-client-v0.15.2) - 2026-08-28
+
+### Other
+
+- Discuss anchors: rebind on in-file symbol rename ([#1581](https://github.com/HeddleCo/heddle/pull/1581))
+- Rematch context anchors across file renames ([#1580](https://github.com/HeddleCo/heddle/pull/1580))
+- Stop claim links from following unbound remote web_origin ([#1575](https://github.com/HeddleCo/heddle/pull/1575))
+
 ## [0.15.1](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.15.0...heddle-hosted-client-v0.15.1) - 2026-08-27
 
 ### Fixed

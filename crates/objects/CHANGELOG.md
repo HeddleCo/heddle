@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2](https://github.com/HeddleCo/heddle/compare/heddle-objects-v0.15.1...heddle-objects-v0.15.2) - 2026-08-28
+
+### Added
+
+- productionize incremental HLR1/HDC1 tree storage ([#1587](https://github.com/HeddleCo/heddle/pull/1587))
+
+### Other
+
+- Add last-turn diff base ([#1582](https://github.com/HeddleCo/heddle/pull/1582))
+
 ## [0.15.1](https://github.com/HeddleCo/heddle/compare/heddle-objects-v0.15.0...heddle-objects-v0.15.1) - 2026-08-27
 
 ### Fixed
