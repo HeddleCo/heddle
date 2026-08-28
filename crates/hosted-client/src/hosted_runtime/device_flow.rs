@@ -277,6 +277,9 @@ const TEMPLATE_READ_OPERATIONS: &[&str] = &[
     "GetDiscussion",
     "ListByState",
     "ListBySymbol",
+    // Read of the caller's own spool; paired with CreateSpool in the
+    // contributor writes for host-only auto-provision push.
+    "GetCurrentUserSpool",
     "WhoAmI",
 ];
 
@@ -290,6 +293,8 @@ const TEMPLATE_CONTRIBUTOR_WRITES: &[&str] = &[
     "OpenDiscussion",
     "AppendTurn",
     "ResolveDiscussion",
+    // Provision the caller's own child spool (host-only auto-provision push).
+    "CreateSpool",
 ];
 
 /// The push/pull/ref-move set a CI lander needs to run `ready`/`land`.
