@@ -9,7 +9,8 @@ use objects::{
         Attribution, Blob, ChangeLineage, ContentHash, State, StateAttachment, StateAttachmentBody,
         StateId, Tree, TreeEntry,
     },
-    store::{ObjectStore, SnapshotCommitArtifact, SnapshotCommitDescriptor},
+    store::{ObjectStore, SnapshotCommitArtifact, SnapshotCommitDescriptor, TreeWrite},
+    worktree::WorktreeStatus,
 };
 use oplog::{IsolationKey, OpRecord};
 use refs::Head;
@@ -132,8 +133,8 @@ struct SnapshotDetails {
 
 struct PreparedSnapshotArtifact {
     blobs: Vec<(ContentHash, Vec<u8>)>,
-    trees: Vec<Tree>,
-    tree: Tree,
+    trees: Vec<TreeWrite>,
+    tree: TreeWrite,
     state: State,
     attachments: Vec<StateAttachment>,
 }
@@ -156,6 +157,7 @@ struct SnapshotMutation<'a> {
     worktree_revalidation_files: Option<BTreeMap<String, ManifestFile>>,
     worktree_revalidation_cutoff_ns: Option<i64>,
     worktree_monitor_token: Option<ChangeMonitorToken>,
+    known_worktree_changes: Option<WorktreeStatus>,
     require_worktree_change: bool,
 }
 
@@ -166,6 +168,7 @@ impl<'a> SnapshotMutation<'a> {
         details: SnapshotDetails,
         prev_head: Option<StateId>,
         head: Head,
+        known_worktree_changes: Option<WorktreeStatus>,
         require_worktree_change: bool,
     ) -> Self {
         Self {
@@ -181,6 +184,7 @@ impl<'a> SnapshotMutation<'a> {
             worktree_revalidation_files: None,
             worktree_revalidation_cutoff_ns: None,
             worktree_monitor_token: None,
+            known_worktree_changes,
             require_worktree_change,
         }
     }
@@ -442,13 +446,15 @@ impl SnapshotMutation<'_> {
             state = state.with_lineage(self.details.lineage.clone());
         }
 
-        let mut inherited_context = if let Some(parent_id) = self.prev_head
+        let inherited_context = if let Some(parent_id) = self.prev_head
             && let Some(parent_state) = self.repo.store.get_state(&parent_id)?
         {
             self.repo.inherit_parent_context(&parent_state)?
         } else {
             None
         };
+        #[cfg(feature = "tree-sitter-symbols")]
+        let mut inherited_context = inherited_context;
 
         #[cfg(feature = "tree-sitter-symbols")]
         let mut risk_signals = None;
@@ -472,7 +478,7 @@ impl SnapshotMutation<'_> {
                     .collect::<std::collections::HashMap<_, _>>();
                 let source_trees = trees
                     .iter()
-                    .map(|tree| (tree.hash(), tree))
+                    .map(|write| (write.tree.hash(), &write.tree))
                     .collect::<std::collections::HashMap<_, _>>();
                 self.repo.compute_semantic_index_for_tree_deferred(
                     prior_state.as_ref(),
@@ -511,7 +517,11 @@ impl SnapshotMutation<'_> {
             let mut source_trees = std::collections::HashMap::new();
             if let Some((blobs, trees)) = supplied_blobs.as_ref() {
                 source_blobs.extend(blobs.iter().map(|(hash, bytes)| (*hash, bytes.as_slice())));
-                source_trees.extend(trees.iter().map(|pending| (pending.hash(), pending)));
+                source_trees.extend(
+                    trees
+                        .iter()
+                        .map(|pending| (pending.tree.hash(), &pending.tree)),
+                );
             }
             source_trees.insert(tree.hash(), &tree);
             if let Some(computer) = crate::signals::effective_computer(self.repo.signal_computer())
@@ -623,13 +633,27 @@ impl SnapshotMutation<'_> {
         let worktree_tree_chain = supplied_blobs
             .as_ref()
             .filter(|(_, trees)| trees.len() <= 32)
-            .map(|(_, trees)| trees.clone())
+            .map(|(_, trees)| trees.iter().map(|write| write.tree.clone()).collect())
             .unwrap_or_default();
         if let Some((blobs, trees)) = supplied_blobs {
+            let parent_tree = self
+                .prev_head
+                .map(|id| self.repo.store.get_state(&id))
+                .transpose()?
+                .flatten()
+                .map(|state| state.tree);
+            let root_write = match parent_tree {
+                Some(parent)
+                    if parent != tree_hash && !self.repo.store.has_tree_locally(&tree_hash)? =>
+                {
+                    TreeWrite::descendant(tree.clone(), parent)
+                }
+                Some(_) | None => TreeWrite::anchor(tree.clone()),
+            };
             self.prepared_artifact = Some(PreparedSnapshotArtifact {
                 blobs,
                 trees,
-                tree: tree.clone(),
+                tree: root_write,
                 state: state.clone(),
                 attachments,
             });
@@ -724,6 +748,7 @@ impl SnapshotMutation<'_> {
             &self.repo.root,
             baseline_tree.as_ref(),
             manifest_context.as_ref().map(|(_, manifest)| manifest),
+            self.known_worktree_changes.as_ref(),
         )?;
         if self.require_worktree_change
             && baseline_tree
@@ -747,6 +772,7 @@ impl SnapshotMutation<'_> {
                     baseline_tree.as_ref(),
                     manifest_context.as_ref().map(|(_, manifest)| manifest),
                     &options,
+                    None,
                 );
         }
         Ok(output)
@@ -1184,7 +1210,30 @@ impl Repository {
             confidence,
             attribution,
             Vec::new(),
+            None,
             false,
+        )
+    }
+
+    /// Create a profiled snapshot using the authoritative parent-relative
+    /// paths already discovered by capture preflight. Passing the status into
+    /// the snapshot prevents a second monitor session from losing the event
+    /// and rebuilding the complete directory forest.
+    pub fn snapshot_with_attribution_profiled_from_status(
+        &self,
+        intent: Option<String>,
+        confidence: Option<f32>,
+        attribution: Attribution,
+        status: WorktreeStatus,
+        require_worktree_change: bool,
+    ) -> Result<SnapshotExecution> {
+        self.snapshot_with_attribution_profiled_locked(
+            intent,
+            confidence,
+            attribution,
+            Vec::new(),
+            Some(status),
+            require_worktree_change,
         )
     }
 
@@ -1201,6 +1250,7 @@ impl Repository {
             confidence,
             attribution,
             Vec::new(),
+            None,
             true,
         )
     }
@@ -1217,6 +1267,7 @@ impl Repository {
             confidence,
             attribution,
             lineage,
+            None,
             false,
         )
         .map(|execution| execution.state)
@@ -1229,6 +1280,7 @@ impl Repository {
         confidence: Option<f32>,
         attribution: Attribution,
         lineage: Vec<ChangeLineage>,
+        mut known_worktree_changes: Option<WorktreeStatus>,
         require_worktree_change: bool,
     ) -> Result<SnapshotExecution> {
         const MAX_WORKTREE_CHANGE_ATTEMPTS: usize = 4;
@@ -1309,6 +1361,7 @@ impl Repository {
                 },
                 prev_head,
                 head.clone(),
+                known_worktree_changes.clone(),
                 require_worktree_change,
             );
             mutation.prepare()?;
@@ -1322,6 +1375,7 @@ impl Repository {
                 || self.head()? != prev_head;
             if head_changed {
                 drop(_lock);
+                known_worktree_changes = None;
                 retry_after_head_contention(&mut head_change_attempts)?;
                 continue;
             }
@@ -1332,6 +1386,7 @@ impl Repository {
                         "worktree changed during snapshot preparation".to_string(),
                     ));
                 }
+                known_worktree_changes = None;
                 continue;
             }
 
@@ -1449,6 +1504,7 @@ impl Repository {
                 },
                 prev_head,
                 head.clone(),
+                None,
                 false,
             );
             mutation.prepare()?;

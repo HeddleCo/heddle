@@ -193,6 +193,10 @@ pub struct SavePlan {
     /// separate preflight walk.
     pub require_worktree_change: bool,
     pub worktree_status_options: WorktreeStatusOptions,
+    /// Authoritative parent-relative paths found by capture preflight. The
+    /// snapshot builder consumes these before the monitor cursor advances so
+    /// it can rewrite only the affected leaf-to-root chain.
+    pub known_worktree_changes: Option<WorktreeStatus>,
     /// Run pre/post snapshot hooks when creating a new Heddle state.
     pub run_hooks: bool,
     /// Map post-verify "commit" next actions to `heddle status` (commit UX).
@@ -225,6 +229,7 @@ impl SavePlan {
             require_clean_worktree: false,
             require_worktree_change: false,
             worktree_status_options: WorktreeStatusOptions::default(),
+            known_worktree_changes: None,
             run_hooks: true,
             commit_safe_post_verify: false,
             coalesce_snapshot_and_checkpoint: false,
@@ -250,6 +255,7 @@ impl SavePlan {
             require_clean_worktree: matches!(git_scope, GitScope::WorktreeAll),
             require_worktree_change: false,
             worktree_status_options: WorktreeStatusOptions::default(),
+            known_worktree_changes: None,
             run_hooks: true,
             commit_safe_post_verify: true,
             coalesce_snapshot_and_checkpoint: matches!(
@@ -278,6 +284,7 @@ impl SavePlan {
             require_clean_worktree: !staged,
             require_worktree_change: false,
             worktree_status_options: WorktreeStatusOptions::default(),
+            known_worktree_changes: None,
             run_hooks: true,
             commit_safe_post_verify: false,
             coalesce_snapshot_and_checkpoint: false,
@@ -559,12 +566,15 @@ pub fn capture(
     preflight_unimported_git_history(repo, "capture")?;
     let complete_thread_resolution = merge_resolution_is_complete(repo)?;
     let worktree_status_started = Instant::now();
-    if !complete_thread_resolution
-        && repo.capability() == RepositoryCapability::GitOverlay
-        && !capture_has_worktree_changes(repo, &options.worktree_status_options)?
-    {
-        return Err(map_capture_error(anyhow!(HeddleError::NoChanges)));
-    }
+    let known_worktree_changes = if complete_thread_resolution {
+        None
+    } else {
+        let status = capture_worktree_status(repo, &options.worktree_status_options)?;
+        if repo.capability() == RepositoryCapability::GitOverlay && status.is_clean() {
+            return Err(map_capture_error(anyhow!(HeddleError::NoChanges)));
+        }
+        Some(status)
+    };
 
     let worktree_status = repo.git_overlay_worktree_status();
     let worktree_status_ms = worktree_status_started.elapsed().as_millis();
@@ -603,6 +613,7 @@ pub fn capture(
         require_worktree_change: repo.capability() == RepositoryCapability::NativeHeddle
             && !complete_thread_resolution,
         worktree_status_options: options.worktree_status_options,
+        known_worktree_changes,
         run_hooks: true,
         commit_safe_post_verify: false,
         coalesce_snapshot_and_checkpoint: false,
@@ -880,22 +891,20 @@ fn merge_resolution_is_complete(repo: &Repository) -> Result<bool> {
 /// Heddle's persisted worktree index, which the following snapshot consumes.
 /// In particular, retaining this check prevents a fast forced retry after a
 /// refused directory deletion from being misclassified as an unchanged tree.
-fn capture_has_worktree_changes(
+fn capture_worktree_status(
     repo: &Repository,
     options: &WorktreeStatusOptions,
-) -> Result<bool> {
+) -> Result<WorktreeStatus> {
     if repo.current_state_for_worktree_status()?.is_none()
         && let Some(status) = repo.git_overlay_worktree_status()?
     {
-        return Ok(!status.is_clean());
+        return Ok(status);
     }
     let tree = match repo.current_state_for_worktree_status()? {
         Some(state) => repo.require_tree_for_worktree_status(&state.tree)?,
         None => Tree::new(),
     };
-    Ok(!repo
-        .compare_worktree_cached_with_options(&tree, options)?
-        .is_clean())
+    Ok(repo.compare_worktree_cached_with_options(&tree, options)?)
 }
 
 /// Complete a captured manual resolution and return its contextual land action.
@@ -1336,9 +1345,10 @@ struct CreatedState {
 fn create_heddle_state(repo: &Repository, plan: &SavePlan) -> Result<CreatedState> {
     let hook_manager = HookManager::new(repo);
     let hook_ctx = HookContext::new(repo);
+    let mut post_hook_worktree_changes = None;
 
     if plan.run_hooks {
-        hook_manager.run(Hook::PreSnapshot, &hook_ctx)?;
+        let pre_snapshot_ran = hook_manager.run(Hook::PreSnapshot, &hook_ctx)?;
         let pre_capture_payload = serde_json::json!({
             "thread": current_thread_name(repo),
             "intent": plan.intent.clone().unwrap_or_default(),
@@ -1364,14 +1374,35 @@ fn create_heddle_state(repo: &Repository, plan: &SavePlan) -> Result<CreatedStat
                 .with_recovery_commands(vec!["heddle hook list".to_string()]),
             )));
         }
+        if pre_snapshot_ran && plan.supplied_tree.is_none() {
+            // Hooks can mutate paths outside capture's preflight set. Rewalk
+            // authoritatively so a settled monitor token cannot vouch for a
+            // tree built from that stale set. No-hook captures keep the fast path.
+            let authoritative_options = WorktreeStatusOptions {
+                fsmonitor: repo::FsMonitorSettings {
+                    mode: repo::FsMonitorMode::Off,
+                },
+            };
+            post_hook_worktree_changes =
+                Some(capture_worktree_status(repo, &authoritative_options)?);
+        }
     }
-
     let mut execution = if let Some(tree) = plan.supplied_tree.clone() {
         repo.snapshot_tree_with_attribution_profiled(
             tree,
             plan.intent.clone(),
             plan.confidence,
             plan.attribution.clone(),
+        )?
+    } else if let Some(status) =
+        post_hook_worktree_changes.or_else(|| plan.known_worktree_changes.clone())
+    {
+        repo.snapshot_with_attribution_profiled_from_status(
+            plan.intent.clone(),
+            plan.confidence,
+            plan.attribution.clone(),
+            status,
+            plan.require_worktree_change,
         )?
     } else if plan.require_worktree_change {
         repo.snapshot_with_attribution_profiled_if_changed(

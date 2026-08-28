@@ -42,7 +42,12 @@ zstd = { workspace = true, optional = true }
 async-source = ["heddle-object-model/async-source"]
 bench = ["heddle-format/bench"]
 memory-backend = []
-zstd = ["dep:zstd", "heddle-format/zstd", "heddle-pack/zstd"]
+zstd = [
+    "dep:zstd",
+    "heddle-format/zstd",
+    "heddle-object-model/zstd",
+    "heddle-pack/zstd",
+]
 
 [dev-dependencies]
 criterion = "0.8"
@@ -90,6 +95,10 @@ required-features = ["bench"]
 
 [[example]]
 name = "train_tree_state_dictionary"
+required-features = ["zstd"]
+
+[[example]]
+name = "htr4_measure"
 required-features = ["zstd"]
 
 [[bench]]

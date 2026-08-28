@@ -31,6 +31,10 @@ where
     fn get_blob(&self, hash: &ContentHash) -> objects::error::Result<Option<Blob>> {
         record_decoded(self.source.get_blob(hash)?)
     }
+
+    fn decoded_blob_len(&self, hash: &ContentHash) -> objects::error::Result<Option<u64>> {
+        self.source.decoded_blob_len(hash)
+    }
 }
 
 fn record_decoded<T>(object: Option<T>) -> objects::error::Result<Option<T>> {

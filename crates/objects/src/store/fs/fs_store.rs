@@ -17,7 +17,7 @@ use heddle_format::compression::CompressionConfig;
 
 use super::{
     fs_io::{AtomicWriteMode, write_atomic},
-    fs_paths::{actions_dir, blobs_dir, packs_dir, states_dir, trees_dir},
+    fs_paths::{actions_dir, blobs_dir, packs_dir, states_dir, tree_lineage_dir, trees_dir},
 };
 use crate::{
     fs_atomic::sync_directory,
@@ -365,6 +365,7 @@ impl FsStore {
         // between mkdir and first object write (L6 residual migration).
         crate::fs_atomic::create_dir_all_durable(&blobs_dir(&self.root))?;
         crate::fs_atomic::create_dir_all_durable(&trees_dir(&self.root))?;
+        crate::fs_atomic::create_dir_all_durable(&tree_lineage_dir(&self.root))?;
         crate::fs_atomic::create_dir_all_durable(&states_dir(&self.root))?;
         crate::fs_atomic::create_dir_all_durable(&actions_dir(&self.root))?;
         crate::fs_atomic::create_dir_all_durable(&packs_dir(&self.root))?;

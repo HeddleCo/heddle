@@ -17,7 +17,7 @@ use objects::{
         PurgeEvidence, Redaction, State, StateAttachment, StateAttachmentBody, StateId,
         StateSignature, StateVisibility, SymbolAnchor, Tree, TreeEntry, VisibilityTier,
     },
-    store::{ObjectStore, Result as StoreResult, SidecarStore},
+    store::{FsStore, ObjectStore, Result as StoreResult, SidecarStore},
     transfer::{
         ObjectId, ObjectInfo, ObjectType, PlannedObject, StateClosureOptions,
         enumerate_state_closure_plan_with_options,
@@ -77,6 +77,62 @@ fn assert_contains_object(
         objects.contains(&(id.clone(), obj_type)),
         "expected closure to contain {id:?} as {obj_type:?}: {objects:?}"
     );
+}
+
+#[test]
+fn depth_one_transfer_includes_hdc1_anchor_and_installs_a_readable_tip() {
+    let source_temp = TempDir::new().unwrap();
+    let source = Repository::init_default(source_temp.path()).unwrap();
+    for index in 0..128 {
+        std::fs::write(
+            source_temp.path().join(format!("fixture-{index:03}.txt")),
+            format!("unchanged-{index}\n"),
+        )
+        .unwrap();
+    }
+    let root = source_temp.path().join("root.txt");
+    std::fs::write(&root, "v1\n").unwrap();
+    let anchor = source.snapshot(Some("anchor".to_string()), None).unwrap();
+    std::fs::write(&root, "v2\n").unwrap();
+    let middle = source.snapshot(Some("middle".to_string()), None).unwrap();
+    std::fs::write(&root, "v3\n").unwrap();
+    let tip = source.snapshot(Some("tip".to_string()), None).unwrap();
+
+    let objects = enumerate_state_closure_with_options(
+        source.store(),
+        tip.state_id,
+        StateClosureOptions {
+            depth: Some(1),
+            exclude_states: Vec::new(),
+        },
+    )
+    .unwrap();
+    let bundle = wire::build_native_pack(source.store(), &objects).unwrap();
+    let destination_temp = TempDir::new().unwrap();
+    let destination = FsStore::new(destination_temp.path().join(".heddle"));
+    destination.init().unwrap();
+
+    wire::install_received_pack(&destination, &bundle.pack_data, &bundle.index_data).unwrap();
+    assert_eq!(
+        destination.get_tree(&tip.tree).unwrap(),
+        source.store().get_tree(&tip.tree).unwrap(),
+        "the transferred HDC1 tip must reconstruct after installation",
+    );
+
+    let tip_info = objects
+        .iter()
+        .find(|info| info.id == ObjectId::Hash(tip.tree) && info.obj_type == ObjectType::Tree)
+        .unwrap();
+    assert_eq!(tip_info.delta_base, Some(anchor.tree));
+    assert!(objects.iter().any(|info| {
+        info.id == ObjectId::Hash(anchor.tree) && info.obj_type == ObjectType::Tree
+    }));
+    assert!(objects.iter().any(|info| {
+        info.id == ObjectId::StateId(middle.state_id) && info.obj_type == ObjectType::State
+    }));
+    assert!(!objects.iter().any(|info| {
+        info.id == ObjectId::StateId(anchor.state_id) && info.obj_type == ObjectType::State
+    }));
 }
 
 struct CountingStore<'a, S> {

@@ -5,6 +5,118 @@ use tempfile::TempDir;
 
 use super::*;
 
+fn warm_native_monitor(root: &std::path::Path) {
+    let envs = [("HEDDLE_FSMONITOR", "native")];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    let mut last_monitor = Value::Null;
+
+    while std::time::Instant::now() < deadline {
+        heddle_env(&["status", "--short"], Some(root), &envs).unwrap();
+        let inspect = heddle_env(
+            &["maintenance", "inspect", "--output", "json"],
+            Some(root),
+            &envs,
+        )
+        .unwrap();
+        let report: Value = serde_json::from_str(&inspect).unwrap();
+        last_monitor = report["change_monitor"].clone();
+        if last_monitor["backend"] == "native-helper" && last_monitor["status"] == "usable" {
+            heddle_env(&["status", "--short"], Some(root), &envs).unwrap();
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    panic!("native monitor did not become usable; last monitor: {last_monitor}");
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial(fsmonitor)]
+fn pre_snapshot_hook_changes_are_captured_with_native_and_off_fsmonitor() {
+    for mode in ["native", "off"] {
+        let temp = TempDir::new().unwrap();
+        heddle(&["init"], Some(temp.path())).unwrap();
+        fs::write(temp.path().join("a.txt"), "baseline a\n").unwrap();
+        fs::write(temp.path().join("b.txt"), "baseline b\n").unwrap();
+        heddle(
+            &["capture", "-m", "baseline before pre-snapshot hook"],
+            Some(temp.path()),
+        )
+        .unwrap();
+
+        let repo = Repository::open(temp.path()).unwrap();
+        let mut config = repo.config().clone();
+        config.worktree.fsmonitor.mode = match mode {
+            "native" => repo::FsMonitorMode::Native,
+            "off" => repo::FsMonitorMode::Off,
+            _ => unreachable!(),
+        };
+        config.save(&repo.heddle_dir().join("config.toml")).unwrap();
+        drop(repo);
+
+        if mode == "native" {
+            warm_native_monitor(temp.path());
+        }
+
+        fs::write(temp.path().join("a.txt"), "user change\n").unwrap();
+        if mode == "native" {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let hook_script = "#!/bin/sh\nif [ -z \"$HEDDLE_HOOK_PROTOCOL\" ]; then\n  printf 'hook change\\n' > b.txt\nfi\n";
+        let install = heddle_output_with_stdin(
+            &["hook", "install", "pre-snapshot", "--from-stdin"],
+            temp.path(),
+            hook_script,
+        )
+        .unwrap();
+        assert!(
+            install.status.success(),
+            "install hook for {mode}: {}",
+            String::from_utf8_lossy(&install.stderr)
+        );
+
+        let envs = [("HEDDLE_FSMONITOR", mode)];
+        let capture = heddle_output_env(
+            &[
+                "--output",
+                "json",
+                "capture",
+                "-m",
+                "capture user and hook changes",
+            ],
+            Some(temp.path()),
+            &envs,
+        )
+        .unwrap();
+        assert!(
+            capture.status.success(),
+            "capture with {mode}: {}",
+            String::from_utf8_lossy(&capture.stderr)
+        );
+        let report: Value = serde_json::from_slice(&capture.stdout).unwrap();
+        assert_eq!(
+            report["captured_path_count"], 2,
+            "capture with {mode} must include the path changed by the hook: {report}"
+        );
+
+        let authoritative = heddle_env(
+            &["--output", "json", "status"],
+            Some(temp.path()),
+            &[("HEDDLE_FSMONITOR", "off")],
+        )
+        .unwrap();
+        let authoritative: Value = serde_json::from_str(&authoritative).unwrap();
+        for kind in ["added", "modified", "deleted"] {
+            assert_eq!(
+                authoritative["changes"][kind],
+                serde_json::json!([]),
+                "authoritative fsmonitor-off status after {mode} capture must be clean: {authoritative}"
+            );
+        }
+    }
+}
+
 #[test]
 fn hook_install_reads_script_from_file() {
     let temp = TempDir::new().unwrap();

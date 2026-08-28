@@ -15,11 +15,11 @@ use super::{
     fs_paths::{blobs_dir, hash_path, packs_dir, state_path, states_dir, trees_dir},
 };
 use crate::{
-    object::{ContentHash, State, StateAttachment, StateAttachmentId, Tree},
+    object::{ContentHash, State, StateAttachment, StateAttachmentId},
     store::{
         FsRepackOperation, HeddleError, ObjectStore, RepackPolicy, RepackResourceLimits,
         RepackSchedule, RepackScheduler, Result, SnapshotCommitArtifact, SnapshotCommitDescriptor,
-        codec,
+        TreeWrite, codec,
         pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId, PackReader},
         snapshot_commit::snapshot_commit_marker_path,
     },
@@ -152,8 +152,8 @@ impl FsStore {
     pub fn put_committed_snapshot_objects_packed(
         &self,
         blobs: Vec<(ContentHash, Vec<u8>)>,
-        trees: Vec<Tree>,
-        tree: &Tree,
+        trees: Vec<TreeWrite>,
+        tree: &TreeWrite,
         state: &State,
         attachments: Vec<StateAttachment>,
         artifact: SnapshotCommitArtifact,
@@ -180,8 +180,8 @@ impl FsStore {
     pub(super) fn put_snapshot_objects_packed_impl(
         &self,
         blobs: Vec<(ContentHash, Vec<u8>)>,
-        trees: Vec<Tree>,
-        tree: &Tree,
+        trees: Vec<TreeWrite>,
+        tree: &TreeWrite,
         state: &State,
         attachments: Vec<StateAttachment>,
         commit_artifact: Option<SnapshotCommitArtifact>,
@@ -208,28 +208,55 @@ impl FsStore {
             builder.add(hash, PackObjectType::Blob, data);
         }
 
-        let tree_hash = tree.hash();
+        let tree_hash = tree.tree.hash();
         let mut staged_trees = Vec::with_capacity(trees.len() + 1);
+        let mut staged_encodings = Vec::with_capacity(trees.len() + 1);
         let mut seen_trees = std::collections::HashSet::with_capacity(trees.len() + 1);
         for authored_tree in trees {
-            let authored_hash = authored_tree.hash();
+            let authored_hash = authored_tree.tree.hash();
+            let reuses_materialized = self
+                .try_get_tree_serialized_once(&authored_hash)?
+                .is_some_and(|body| !crate::object::is_delta_tree(&body));
             if seen_trees.insert(authored_hash)
+                && !reuses_materialized
                 && (commit_artifact.is_some()
                     || !ObjectStore::has_tree_locally(self, &authored_hash)?)
             {
-                builder.add(
-                    authored_hash,
-                    PackObjectType::Tree,
-                    authored_tree.encode_canonical()?,
-                );
-                staged_trees.push((authored_hash, authored_tree));
+                let encoded = self.encode_tree_write(&authored_tree)?;
+                if matches!(
+                    encoded.kind,
+                    crate::store::codec::TreeEncodingKind::Delta { anchor, .. }
+                        if anchor == authored_hash
+                ) {
+                    return Err(HeddleError::InvalidObject(
+                        "HDC1 result id must differ from its anchor id".to_string(),
+                    ));
+                }
+                builder.add(authored_hash, PackObjectType::Tree, encoded.data);
+                staged_encodings.push((authored_hash, encoded.kind));
+                staged_trees.push((authored_hash, authored_tree.tree));
             }
         }
-        if (commit_artifact.is_some() || !ObjectStore::has_tree_locally(self, &tree_hash)?)
+        let reuses_materialized = self
+            .try_get_tree_serialized_once(&tree_hash)?
+            .is_some_and(|body| !crate::object::is_delta_tree(&body));
+        if !reuses_materialized
+            && (commit_artifact.is_some() || !ObjectStore::has_tree_locally(self, &tree_hash)?)
             && seen_trees.insert(tree_hash)
         {
-            builder.add(tree_hash, PackObjectType::Tree, tree.encode_canonical()?);
-            staged_trees.push((tree_hash, tree.clone()));
+            let encoded = self.encode_tree_write(tree)?;
+            if matches!(
+                encoded.kind,
+                crate::store::codec::TreeEncodingKind::Delta { anchor, .. }
+                    if anchor == tree_hash
+            ) {
+                return Err(HeddleError::InvalidObject(
+                    "HDC1 result id must differ from its anchor id".to_string(),
+                ));
+            }
+            builder.add(tree_hash, PackObjectType::Tree, encoded.data);
+            staged_encodings.push((tree_hash, encoded.kind));
+            staged_trees.push((tree_hash, tree.tree.clone()));
         }
 
         let state_id = state.id();
@@ -262,23 +289,29 @@ impl FsStore {
             .transpose()?;
         if let Some(artifact) = &commit_artifact {
             artifact.validate()?;
-            builder.add(
-                artifact.id(),
-                PackObjectType::SnapshotCommit,
-                artifact_bytes.clone().expect("artifact bytes are present"),
-            );
+            let bytes = artifact_bytes.as_ref().ok_or_else(|| {
+                HeddleError::InvalidObject(
+                    "snapshot commit artifact bytes were not encoded".to_string(),
+                )
+            })?;
+            builder.add(artifact.id(), PackObjectType::SnapshotCommit, bytes.clone());
         }
 
         let (pack_data, index_data, _stats, retained_objects) =
             builder.build_retaining_objects()?;
         let packs = packs_dir(&self.root);
         let installed_pack_name = if commit_artifact.is_some() {
+            let (Some(artifact_id), Some(artifact_bytes)) = (artifact_id, artifact_bytes) else {
+                return Err(HeddleError::InvalidObject(
+                    "snapshot commit artifact metadata is incomplete".to_string(),
+                ));
+            };
             super::pack_install_journal::install_committed_snapshot_pack_bytes(
                 &packs,
                 pack_data,
                 index_data,
-                artifact_id.expect("commit artifact id is present"),
-                artifact_bytes.expect("commit artifact bytes are present"),
+                artifact_id,
+                artifact_bytes,
             )?
         } else {
             super::pack_install_journal::install_snapshot_pack_bytes(&packs, pack_data, index_data)?
@@ -291,6 +324,9 @@ impl FsStore {
                 packs.join(format!("{installed_pack_name}.pack")),
                 packs.join(format!("{installed_pack_name}.idx")),
             )?;
+        }
+        for (hash, kind) in staged_encodings {
+            self.remember_tree_encoding(hash, kind)?;
         }
         self.materialize_packed_attachment_index(&state_id, &attachment_ids, state_was_present)?;
 
@@ -671,7 +707,11 @@ impl FsStore {
             let Some(loose_data) = read_file_bytes(&path)? else {
                 continue;
             };
-            let loose_tree = codec::decode_tree(loose_data.as_slice())?;
+            let loose_body = codec::decode_tree_body(loose_data.as_slice())?;
+            if crate::object::is_delta_tree(&loose_body) {
+                continue;
+            }
+            let loose_tree = codec::decode_tree_serialized_with_key(&loose_body, *hash, None)?;
             let found = loose_tree.hash();
             if found != *hash {
                 return Err(HeddleError::Corruption {
@@ -682,7 +722,11 @@ impl FsStore {
             // A loose current tree can intentionally shadow an older packed
             // schema at the same semantic hash. Preserve that migration copy
             // until consolidation replaces the legacy body.
-            let Ok(packed_tree) = codec::decode_tree_serialized(&packed_data) else {
+            if crate::object::is_delta_tree(&packed_data) {
+                continue;
+            }
+            let Ok(packed_tree) = codec::decode_tree_serialized_with_key(&packed_data, *hash, None)
+            else {
                 continue;
             };
             let packed_found = packed_tree.hash();

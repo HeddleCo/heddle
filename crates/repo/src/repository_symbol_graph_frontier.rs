@@ -3,21 +3,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use objects::object::{ContentHash, ReverseDependencyIndex};
+use objects::object::ReverseDependencyIndex;
 use semantic::cross_file_resolution::{FileResolution, RepositorySemanticFile};
-
-/// Paths whose semantic file node appeared, disappeared, or changed hash.
-pub(crate) fn changed_file_paths(
-    parent: &BTreeMap<String, ContentHash>,
-    current: &BTreeMap<String, ContentHash>,
-) -> BTreeSet<String> {
-    parent
-        .keys()
-        .chain(current.keys())
-        .filter(|path| parent.get(*path) != current.get(*path))
-        .cloned()
-        .collect()
-}
 
 /// Walk file → importers from `changed` to the transitive invalidation frontier.
 pub(crate) fn invalidation_frontier(

@@ -55,6 +55,7 @@ pub use action_id::ActionId;
 pub use action_operation::Operation;
 pub use action_struct::Action;
 pub use annotated_tag::{AnnotatedTag, AnnotatedTagError, AnnotatedTagMarker};
+pub use audience_tier::{AudienceParseError, AudienceTier, visible};
 pub use blob::Blob;
 pub use collaboration::*;
 pub use diff::{DiffKind, FileChange, FileChangeSet};
@@ -154,8 +155,14 @@ pub use tree::{
     validate_name as validate_tree_entry_name,
 };
 pub use tree_canonical::{
-    TREE_CANONICAL_MAGIC, TREE_ENCODING_VERSION, TREE_HEADER_LEN, TreeHeader, decode_header,
-    is_canonical_tree,
+    TREE_BLOCK_ENCODING_VERSION, TREE_BLOCK_MIN_ENTRIES, TREE_CANONICAL_MAGIC,
+    TREE_DELTA_ANCHOR_INTERVAL, TREE_DELTA_ENCODING_VERSION, TREE_DELTA_HEADER_LEN,
+    TREE_DELTA_MAGIC, TREE_DELTA_MAX_OPS, TREE_ENCODING_VERSION, TREE_HEADER_LEN,
+    TREE_LEAN_ENCODING_VERSION, TREE_LEAN_MAGIC, TreeDeltaHeader, TreeDeltaOp, TreeHeader,
+    apply_tree_delta, decode_header, decode_lean_prefix, decode_tree_delta,
+    decode_tree_delta_header, decode_tree_delta_header_prefix, decode_tree_delta_ops,
+    decode_tree_delta_ops_prefix, encode_lean_entry, encode_tree_delta, is_canonical_tree,
+    is_delta_tree, is_lean_tree, is_streamable_tree, tree_delta,
 };
 #[cfg(feature = "async-source")]
 pub use tree_diff::diff_trees_visit_async;
@@ -172,5 +179,4 @@ pub use tree_stream::{
     TreeEntryReader, TreePage, TreePageLimits, TreeResumeCursor, TreeStreamError,
 };
 pub use tree_walk::{TreeIntegrityEvent, walk_tree_integrity};
-pub use audience_tier::{AudienceParseError, AudienceTier, visible};
 pub use visibility_tier::VisibilityTier;

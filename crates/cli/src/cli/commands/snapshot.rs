@@ -589,6 +589,7 @@ pub(crate) fn create_snapshot_profiled(
         require_worktree_change: repo.capability() == RepositoryCapability::NativeHeddle
             && repo.merge_state_manager().load()?.is_none(),
         worktree_status_options: worktree_status_options(Some(repo.config())),
+        known_worktree_changes: None,
         run_hooks: true,
         commit_safe_post_verify: false,
         coalesce_snapshot_and_checkpoint: false,
@@ -643,6 +644,7 @@ pub(crate) fn create_snapshot_from_tree_profiled(
         require_clean_worktree: false,
         require_worktree_change: false,
         worktree_status_options: worktree_status_options(Some(repo.config())),
+        known_worktree_changes: None,
         run_hooks: true,
         commit_safe_post_verify: false,
         coalesce_snapshot_and_checkpoint: false,
