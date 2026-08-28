@@ -215,6 +215,14 @@ pub const SAFE_AGENT_OPERATIONS: &[&str] = &[
     "Pull",
     "ListRefs",
     "UpdateRef",
+    // Personal spool discovery + provisioning. Host-only auto-provision push
+    // (`auto_provision_hosted_repo`) resolves the caller's own spool and, when
+    // the target child spool is absent, creates it under the agent's own
+    // handle. Without these the client aborts before the RPCs are ever sent,
+    // so an unclaimed agent-rooted account cannot `heddle push <host>`. weft
+    // admits both for unclaimed agent-rooted accounts (weft#1852/#1853).
+    "GetCurrentUserSpool",
+    "CreateSpool",
     // Repository reads.
     "GetRefs",
     "ListStates",
