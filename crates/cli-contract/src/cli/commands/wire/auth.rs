@@ -94,6 +94,36 @@ pub struct ServiceTokenOutput {
     pub expires_in_days: u32,
 }
 
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "AuthSignupInviteCreatedSchema")]
+pub struct SignupInviteCreatedOutput {
+    pub output_kind: &'static str,
+    pub invite_id: String,
+    /// The server returns this code only on surfaces where it may be shown.
+    pub invite_code: String,
+    pub allowance_remaining: u32,
+}
+
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "AuthSignupInviteSchema")]
+pub struct SignupInviteOutput {
+    /// Present because `ListSignupInvites` includes it. Clients must not derive
+    /// or fabricate invite codes from IDs or other metadata.
+    pub invite_code: String,
+    pub status: String,
+    pub created_at: Option<String>,
+    pub consumed: bool,
+    pub consumed_at: Option<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "AuthSignupInviteListSchema")]
+pub struct SignupInviteListOutput {
+    pub output_kind: &'static str,
+    pub invites: Vec<SignupInviteOutput>,
+    pub allowance_remaining: u32,
+}
+
 // ---- whoami ----------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]

@@ -4,9 +4,11 @@ use std::{collections::BTreeSet, io::IsTerminal, path::Path};
 
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha1::{
-    CreateDeviceAuthorizationRequest, CreateServiceAccountRequest, DeviceAuthorizationEvent,
-    DeviceAuthorizationResponse, DeviceAuthorizationStatus, ExchangeDeviceAuthorizationRequest,
-    IssueServiceAccountCredentialRequest, WaitForDeviceAuthorizationRequest,
+    CreateDeviceAuthorizationRequest, CreateServiceAccountRequest, CreateSignupInviteRequest,
+    DeviceAuthorizationEvent, DeviceAuthorizationResponse, DeviceAuthorizationStatus,
+    ExchangeDeviceAuthorizationRequest, IssueServiceAccountCredentialRequest,
+    ListSignupInvitesRequest, SignupInviteOwnerStatus, SignupInviteSummary,
+    WaitForDeviceAuthorizationRequest,
 };
 use config::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
@@ -14,6 +16,7 @@ use heddle_cli_args::CliContext;
 use heddle_cli_contract::cli::commands::RecoveryAdvice;
 pub(crate) use heddle_cli_contract::cli::commands::wire::auth::{
     AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, ServiceTokenOutput,
+    SignupInviteCreatedOutput, SignupInviteListOutput, SignupInviteOutput,
 };
 use objects::{HeddleError, RecoveryDetails};
 use sha2::{Digest, Sha256};
@@ -70,6 +73,11 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
         },
         AuthCommand::Logout { server } => cmd_auth_logout(ctx, server.as_deref()),
         AuthCommand::Status { server } => cmd_auth_status(ctx, server.as_deref()),
+        AuthCommand::Invite {
+            email,
+            server,
+            list,
+        } => cmd_auth_invite(ctx, server.as_deref(), email, list).await,
         AuthCommand::Trust { command } => cmd_auth_trust(ctx, command),
         AuthCommand::DeriveAgent {
             server,
@@ -98,6 +106,154 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
             cmd_create_service_token(ctx, server.as_deref(), name, namespace, out.as_deref()).await
         }
     }
+}
+
+const CREATE_SIGNUP_INVITE_METHOD: &str = "heddle.api.v1alpha1.IdentityService/CreateSignupInvite";
+const SIGNUP_INVITE_PAGE_SIZE: u32 = 200;
+
+async fn cmd_auth_invite(
+    ctx: &dyn CliContext,
+    server: Option<&str>,
+    email: Option<String>,
+    list: bool,
+) -> Result<()> {
+    let server = resolve_server(server)?;
+    let user_config = UserConfig::load_default()?;
+    // HostedSession is the same authenticated credential + device-proof
+    // chokepoint used by the other durable identity writes under `auth`.
+    let session = HostedSession::build(
+        &user_config,
+        Some(server),
+        HostedAuthMode::CredentialFallback,
+    )?;
+    let mut auth_client = session.connect(([127, 0, 0, 1], 0).into()).await?;
+    let result = if list {
+        list_signup_invites_connected(ctx, &mut auth_client).await
+    } else {
+        create_signup_invite_connected(ctx, &mut auth_client, email).await
+    };
+    auth_client.close().await;
+    result
+}
+
+async fn create_signup_invite_connected(
+    ctx: &dyn CliContext,
+    auth_client: &mut HostedClient,
+    email: Option<String>,
+) -> Result<()> {
+    let operation_id =
+        ClientOperationId::caller_or_fresh(CREATE_SIGNUP_INVITE_METHOD, ctx.operation_id_wire());
+    let request = create_signup_invite_request(email, operation_id.to_wire());
+    let response = auth_client
+        .create_signup_invite(request)
+        .await
+        .map_err(|error| anyhow::anyhow!("create_signup_invite failed: {error}"))?;
+
+    if ctx.should_output_json(None) {
+        println!(
+            "{}",
+            serde_json::to_string(&SignupInviteCreatedOutput {
+                output_kind: "auth_invite",
+                invite_id: response.invite_id,
+                invite_code: response.invite_code,
+                allowance_remaining: response.allowance_remaining,
+            })?
+        );
+    } else {
+        // The code deliberately appears on exactly one output line.
+        println!("{}", response.invite_code);
+        println!("Allowance remaining: {}", response.allowance_remaining);
+    }
+    Ok(())
+}
+
+fn create_signup_invite_request(
+    recipient_email: Option<String>,
+    client_operation_id: String,
+) -> CreateSignupInviteRequest {
+    CreateSignupInviteRequest {
+        recipient_email,
+        client_operation_id,
+    }
+}
+
+async fn list_signup_invites_connected(
+    ctx: &dyn CliContext,
+    auth_client: &mut HostedClient,
+) -> Result<()> {
+    let mut page_token = String::new();
+    let mut seen_page_tokens = BTreeSet::new();
+    let mut invites = Vec::new();
+    let allowance_remaining = loop {
+        let response = auth_client
+            .list_signup_invites(list_signup_invites_request(page_token))
+            .await
+            .map_err(|error| anyhow::anyhow!("list_signup_invites failed: {error}"))?;
+        invites.extend(response.invites.into_iter().map(signup_invite_output));
+        if response.next_page_token.is_empty() {
+            break response.allowance_remaining;
+        }
+        if !seen_page_tokens.insert(response.next_page_token.clone()) {
+            bail!("list_signup_invites returned a repeated page token");
+        }
+        page_token = response.next_page_token;
+    };
+
+    if ctx.should_output_json(None) {
+        println!(
+            "{}",
+            serde_json::to_string(&SignupInviteListOutput {
+                output_kind: "auth_invite_list",
+                invites,
+                allowance_remaining,
+            })?
+        );
+    } else {
+        if invites.is_empty() {
+            println!("No signup invites.");
+        } else {
+            println!("CODE\tSTATUS\tCREATED_AT\tCONSUMED_AT");
+            for invite in invites {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    invite.invite_code,
+                    invite.status,
+                    invite.created_at.as_deref().unwrap_or("-"),
+                    invite.consumed_at.as_deref().unwrap_or("-")
+                );
+            }
+        }
+        println!("Allowance remaining: {allowance_remaining}");
+    }
+    Ok(())
+}
+
+fn list_signup_invites_request(page_token: String) -> ListSignupInvitesRequest {
+    ListSignupInvitesRequest {
+        page_size: SIGNUP_INVITE_PAGE_SIZE,
+        page_token,
+    }
+}
+
+fn signup_invite_output(invite: SignupInviteSummary) -> SignupInviteOutput {
+    let status = match SignupInviteOwnerStatus::try_from(invite.status) {
+        Ok(SignupInviteOwnerStatus::Open) => "open",
+        Ok(SignupInviteOwnerStatus::Consumed) => "consumed",
+        Ok(SignupInviteOwnerStatus::Unspecified) | Err(_) => "unknown",
+    };
+    SignupInviteOutput {
+        invite_code: invite.invite_code,
+        status: status.to_string(),
+        created_at: invite.created_at.as_ref().and_then(format_proto_timestamp),
+        consumed: invite.consumed,
+        consumed_at: invite.consumed_at.as_ref().and_then(format_proto_timestamp),
+    }
+}
+
+fn format_proto_timestamp(timestamp: &prost_types::Timestamp) -> Option<String> {
+    let nanos = u32::try_from(timestamp.nanos).ok()?;
+    chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp.seconds, nanos)
+        .map(|value| value.to_rfc3339())
 }
 
 fn cmd_auth_trust(ctx: &dyn CliContext, command: AuthTrustCommand) -> Result<()> {
@@ -1464,6 +1620,20 @@ fn open_url(url: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signup_invite_commands_construct_the_declared_requests() {
+        let create = create_signup_invite_request(
+            Some("alice@example.com".to_string()),
+            "invite-op".to_string(),
+        );
+        assert_eq!(create.recipient_email.as_deref(), Some("alice@example.com"));
+        assert_eq!(create.client_operation_id, "invite-op");
+
+        let list = list_signup_invites_request("next-page".to_string());
+        assert_eq!(list.page_size, 200);
+        assert_eq!(list.page_token, "next-page");
+    }
 
     #[test]
     fn validate_browser_url_accepts_https() {
