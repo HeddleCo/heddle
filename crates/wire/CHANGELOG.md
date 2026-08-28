@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2](https://github.com/HeddleCo/heddle/compare/heddle-wire-v0.15.1...heddle-wire-v0.15.2) - 2026-08-28
+
+### Added
+
+- productionize incremental HLR1/HDC1 tree storage ([#1587](https://github.com/HeddleCo/heddle/pull/1587))
+
+### Fixed
+
+- *(objects)* bound HTR4 v5 block raw_len to prevent decompression OOM ([#1589](https://github.com/HeddleCo/heddle/pull/1589))
+
 ## [0.15.1](https://github.com/HeddleCo/heddle/compare/heddle-wire-v0.15.0...heddle-wire-v0.15.1) - 2026-08-27
 
 ### Fixed

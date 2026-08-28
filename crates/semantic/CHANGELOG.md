@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2](https://github.com/HeddleCo/heddle/compare/heddle-semantic-v0.15.1...heddle-semantic-v0.15.2) - 2026-08-28
+
+### Other
+
+- Discuss anchors: rebind on in-file symbol rename ([#1581](https://github.com/HeddleCo/heddle/pull/1581))
+
 ## [0.15.1](https://github.com/HeddleCo/heddle/compare/heddle-semantic-v0.15.0...heddle-semantic-v0.15.1) - 2026-08-27
 
 ### Fixed
