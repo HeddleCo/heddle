@@ -205,3 +205,19 @@ fn restricted_agent_capability_keeps_the_deny_floor() {
         );
     }
 }
+
+/// Regression: the agent ceiling must carry the personal-spool discovery +
+/// provisioning ops. Without them, an unclaimed agent-rooted account's
+/// `heddle push <host>` aborts client-side inside `auto_provision_hosted_repo`
+/// before `GetCurrentUserSpool`/`CreateSpool` are ever sent — the account can
+/// mint, WhoAmI, and ListRefs, but never provision its own spool. weft admits
+/// both server-side for unclaimed agent-rooted accounts (weft#1852/#1853).
+#[test]
+fn safe_ceiling_allows_host_only_spool_provisioning() {
+    for op in ["GetCurrentUserSpool", "CreateSpool"] {
+        assert!(
+            SAFE_AGENT_OPERATIONS.contains(&op),
+            "agent ceiling missing {op}: host-only auto-provision push cannot fire it"
+        );
+    }
+}
