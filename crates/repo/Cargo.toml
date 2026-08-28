@@ -16,7 +16,7 @@ api = { workspace = true }
 blake3.workspace = true
 chrono.workspace = true
 hex.workspace = true
-heddleco-capability-verifier = "0.6"
+heddleco-capability-verifier = "0.7"
 ignore.workspace = true
 heddle-perf-contract.workspace = true
 libc.workspace = true

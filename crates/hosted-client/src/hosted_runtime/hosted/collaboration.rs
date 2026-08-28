@@ -17,10 +17,10 @@
 //! `Discussion.opened_against_state`.
 
 use api::heddle::api::v1alpha1::{
-    AppendTurnRequest, ContextAnnotationKind, Discussion as ProtoDiscussion, DiscussionSeverity,
-    DiscussionStatusFilter, ListDiscussionsByStateRequest, OpenDiscussionRequest, PathSymbolRef,
-    ResolveDiscussionRequest, StateId as ProtoStateId, list_discussions_response,
-    resolve_discussion_request,
+    AppendTurnRequest, ContextAnnotationKind, Discussion as ProtoDiscussion, DiscussionKind,
+    DiscussionSeverity, DiscussionStatusFilter, ListDiscussionsByStateRequest,
+    OpenDiscussionRequest, PathSymbolRef, ResolveDiscussionRequest, StateId as ProtoStateId,
+    list_discussions_response, resolve_discussion_request,
 };
 use objects::object::{AnnotationKind, ChangeId, StateId};
 use wire::ProtocolError;
@@ -263,6 +263,7 @@ fn open_discussion_request(
         client_operation_id,
         thread_id: String::new(),
         severity: DiscussionSeverity::Unspecified as i32,
+        kind: DiscussionKind::CodeAnchored as i32,
     }
 }
 
@@ -363,6 +364,7 @@ mod tests {
         assert_eq!(request.anchor.unwrap().file, "src/lib.rs");
         assert_eq!(request.body, "keep this stable");
         assert_eq!(request.severity, DiscussionSeverity::Unspecified as i32);
+        assert_eq!(request.kind, DiscussionKind::CodeAnchored as i32);
     }
 
     #[test]
