@@ -2214,6 +2214,8 @@ mod tests {
             "IssueServiceAccountCredential",
             "DeleteRepository",
             "DeleteNamespace",
+            "CreateSignupInvite",
+            "ListSignupInvites",
         ] {
             let error = resolve_agent_operations(None, vec![operation.to_string()])
                 .expect_err("unsafe operation must be outside CLI ceiling");
@@ -2241,6 +2243,8 @@ mod tests {
         assert!(contributor.contains(&"Push".to_string()));
         assert!(contributor.contains(&"SetContext".to_string()));
         assert!(contributor.contains(&"OpenDiscussion".to_string()));
+        assert!(!contributor.contains(&"CreateSignupInvite".to_string()));
+        assert!(!contributor.contains(&"ListSignupInvites".to_string()));
 
         let ci = resolve_agent_operations(Some(AgentTemplate::CiLanding), Vec::new())
             .expect("ci-landing template resolves");
@@ -2250,6 +2254,7 @@ mod tests {
         // CI landing grants no collaboration writes.
         assert!(!ci.contains(&"OpenDiscussion".to_string()));
         assert!(!ci.contains(&"SetContext".to_string()));
+        assert!(!ci.contains(&"CreateSignupInvite".to_string()));
     }
 
     #[test]
