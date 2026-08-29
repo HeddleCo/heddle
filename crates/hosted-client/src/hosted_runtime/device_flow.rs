@@ -223,6 +223,9 @@ pub const SAFE_AGENT_OPERATIONS: &[&str] = &[
     // admits both for unclaimed agent-rooted accounts (weft#1852/#1853).
     "GetCurrentUserSpool",
     "CreateSpool",
+    // Install the claimable deferred-human owner root (heddle#1600).
+    "BootstrapOwnerRoot",
+    "GetCurrentOwnerKeyring",
     // Repository reads.
     "GetRefs",
     "ListStates",
@@ -281,6 +284,8 @@ const TEMPLATE_READ_OPERATIONS: &[&str] = &[
     // contributor writes for host-only auto-provision push.
     "GetCurrentUserSpool",
     "WhoAmI",
+    // Read of the installed owner keyring after BootstrapOwnerRoot (heddle#1600).
+    "GetCurrentOwnerKeyring",
 ];
 
 /// Collaboration writes a `contributor` adds on top of the read set.
@@ -295,6 +300,8 @@ const TEMPLATE_CONTRIBUTOR_WRITES: &[&str] = &[
     "ResolveDiscussion",
     // Provision the caller's own child spool (host-only auto-provision push).
     "CreateSpool",
+    // Install the claimable deferred-human owner root (heddle#1600).
+    "BootstrapOwnerRoot",
 ];
 
 /// The push/pull/ref-move set a CI lander needs to run `ready`/`land`.

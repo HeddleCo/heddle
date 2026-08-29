@@ -1,11 +1,12 @@
 use api::heddle::api::v1alpha1::{
-    ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, CheckMergeEligibilityRequest,
-    CheckMergeEligibilityResponse, CreateAgentAccountRequest, CreateAgentAccountResponse,
-    CreateGrantRequest, CreateInvitationRequest, CreateServiceAccountRequest, CreateSpoolRequest,
-    DeleteGrantRequest, DeleteNamespaceRequest, DeleteRepositoryRequest,
-    GetCurrentUserSpoolRequest, GrantSupportAccessRequest, GrantTargetRef,
-    Invitation as ProtoInvitation, IssueServiceAccountCredentialRequest, IssuedCredentialResponse,
-    ListGrantsRequest, ListSpoolsRequest, ListSupportAccessGrantsRequest,
+    ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, BootstrapOwnerRootRequest,
+    BootstrapOwnerRootResponse, CheckMergeEligibilityRequest, CheckMergeEligibilityResponse,
+    CreateAgentAccountRequest, CreateAgentAccountResponse, CreateGrantRequest,
+    CreateInvitationRequest, CreateServiceAccountRequest, CreateSpoolRequest, DeleteGrantRequest,
+    DeleteNamespaceRequest, DeleteRepositoryRequest, GetCurrentOwnerKeyringRequest,
+    GetCurrentOwnerKeyringResponse, GetCurrentUserSpoolRequest, GrantSupportAccessRequest,
+    GrantTargetRef, Invitation as ProtoInvitation, IssueServiceAccountCredentialRequest,
+    IssuedCredentialResponse, ListGrantsRequest, ListSpoolsRequest, ListSupportAccessGrantsRequest,
     ListThreadApprovalsRequest, MonorepoNode, ResolveMonorepoRequest, RevokeApprovalRequest,
     RevokeSupportAccessRequest, ServiceAccountResponse, SpoolSummary, SupportAccessGrant,
     ThreadApproval, UpdateGrantRequest, UpdateNamespaceRequest, UpdateRepositoryRequest,
@@ -152,6 +153,50 @@ impl HostedClient {
         Ok(response.spools)
     }
 
+    pub(crate) async fn ensure_claimable_owner_root(&mut self) -> anyhow::Result<()> {
+        let Some(mut state) = crate::hosted_runtime::identity_state::load()? else {
+            return Ok(());
+        };
+        let signed = {
+            let Some(signer) = self.context.proof_signer() else {
+                return Ok(());
+            };
+            crate::hosted_runtime::owner_root::mint_and_record_claimable_root(
+                &mut state,
+                signer,
+                chrono::Utc::now().timestamp(),
+            )?
+        };
+        crate::hosted_runtime::owner_root::persist_claimable_root(&state)?;
+        crate::hosted_runtime::owner_root::upload_claimable_root(self, signed).await
+    }
+
+    pub async fn bootstrap_owner_root(
+        &mut self,
+        request: BootstrapOwnerRootRequest,
+    ) -> Result<BootstrapOwnerRootResponse, ProtocolError> {
+        Ok(signed_call!(
+            self,
+            auth,
+            bootstrap_owner_root,
+            "/heddle.api.v1alpha1.OwnerAuthorizationService/BootstrapOwnerRoot",
+            request
+        ))
+    }
+
+    pub async fn get_current_owner_keyring(
+        &mut self,
+        request: GetCurrentOwnerKeyringRequest,
+    ) -> Result<GetCurrentOwnerKeyringResponse, ProtocolError> {
+        Ok(signed_call!(
+            self,
+            auth,
+            get_current_owner_keyring,
+            "/heddle.api.v1alpha1.OwnerAuthorizationService/GetCurrentOwnerKeyring",
+            request
+        ))
+    }
+
     pub async fn create_spool(
         &mut self,
         parent_path: &str,
@@ -159,8 +204,16 @@ impl HostedClient {
         kind: wire::HostedSpoolKind,
         display_name: Option<String>,
     ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
+        self.ensure_claimable_owner_root()
+            .await
+            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
         let operation_id =
             ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateSpool");
+        let owner_genesis = Some(
+            self.context
+                .mint_spool_owner_genesis()
+                .map_err(hosted_to_protocol_error)?,
+        );
         let spool = authed_call!(
             self,
             create_spool,
@@ -173,8 +226,7 @@ impl HostedClient {
                 visibility: Visibility::Private as i32,
                 client_operation_id: operation_id.to_wire(),
                 settings: None,
-                // Local genesis materialization is tracked separately by weft#1532.
-                owner_genesis: None,
+                owner_genesis,
             }
         );
         Ok(to_protocol_spool(spool))

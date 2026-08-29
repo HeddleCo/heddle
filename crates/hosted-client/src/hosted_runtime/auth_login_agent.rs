@@ -20,6 +20,7 @@ use super::{
 
 pub(crate) async fn remint(server: &str) -> Result<()> {
     let stored = mint_restricted_agent_root()?;
+    record_claimable_root_for_stored_account(server, &stored.private_key_pem)?;
     store_agent_root(
         server,
         stored.token,
@@ -29,6 +30,26 @@ pub(crate) async fn remint(server: &str) -> Result<()> {
     )?;
     print_success(&stored.subject);
     Ok(())
+}
+
+pub(crate) fn record_claimable_root_for_stored_account(
+    server: &str,
+    private_key_pem: &str,
+) -> Result<()> {
+    let Some(mut state) = identity_state::load()? else {
+        return Ok(());
+    };
+    if !super::hosted::server_keys_match(&state.server, server) {
+        return Ok(());
+    }
+    let signer = Ed25519Signer::from_pem(private_key_pem)
+        .context("loading the agent proof key for the claimable owner root")?;
+    super::owner_root::mint_and_record_claimable_root(
+        &mut state,
+        &signer,
+        chrono::Utc::now().timestamp(),
+    )?;
+    identity_state::store(&state)
 }
 
 pub(crate) async fn create_with_invite(
@@ -61,9 +82,23 @@ pub(crate) async fn create_with_invite(
         .map_err(|error| {
             anyhow::anyhow!("creating placeholder account on behalf of human: {error}")
         });
-    client.close().await;
-    let response = response?;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            client.close().await;
+            return Err(error);
+        }
+    };
     let output = finish_invite_create(server, minted, response)?;
+    if let Some(state) = identity_state::load()?
+        && let Some(root) = super::owner_root::load_recorded_root(&state)?
+    {
+        let upload = super::owner_root::upload_claimable_root(&mut client, root).await;
+        client.close().await;
+        upload?;
+    } else {
+        client.close().await;
+    }
     emit_created(ctx, &output)?;
     Ok(())
 }
@@ -94,6 +129,7 @@ fn finish_invite_create(
         value => Some(value.to_string()),
     };
     let subject = minted.subject.clone();
+    let private_key_pem = minted.private_key_pem.clone();
     store_agent_root(
         server,
         minted.token,
@@ -105,14 +141,22 @@ fn finish_invite_create(
     let pet_name = response.pet_name;
     // Stored for later routing. `heddle claim` binds this to the configured
     // hosted server before minting the local claim bearer.
-    identity_state::store(&ClaimState::new(
+    let mut claim_state = ClaimState::new(
         server.to_string(),
         owner_id,
         subject.clone(),
         pet_name.clone(),
         hex::encode(minted.public_key),
         web_origin,
-    ))?;
+    );
+    let signer = Ed25519Signer::from_pem(&private_key_pem)
+        .context("loading the agent proof key for the claimable owner root")?;
+    super::owner_root::mint_and_record_claimable_root(
+        &mut claim_state,
+        &signer,
+        chrono::Utc::now().timestamp(),
+    )?;
+    identity_state::store(&claim_state)?;
     Ok(AgentAccountCreatedOutput {
         output_kind: "agent_account_created",
         account_id: account_id.clone(),

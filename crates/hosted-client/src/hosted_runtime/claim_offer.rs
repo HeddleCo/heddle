@@ -56,12 +56,18 @@ pub(crate) async fn cmd_claim(args: ClaimArgs) -> Result<()> {
         Some(server.clone()),
         HostedAuthMode::CredentialFallback,
     )?;
-    let client = session
+    let mut client = session
         .connect(([127, 0, 0, 1], 0).into())
         .await
         .with_context(|| {
             format!("connecting to {server} and bringing the claim listener online")
         })?;
+    // Upload the claimable seq-0 root before the Iroh ceremony so claim
+    // works even if this account never created a project spool.
+    if let Err(error) = client.ensure_claimable_owner_root().await {
+        client.close().await;
+        return Err(error);
+    }
     let completion = client.claim_completion();
 
     let offer = match activate_offer(&state, args.timeout) {
@@ -90,6 +96,9 @@ pub(crate) async fn cmd_claim(args: ClaimArgs) -> Result<()> {
 
     match outcome? {
         ClaimWaitOutcome::Claimed => {
+            // Human promotion attaches the handle via the Iroh ceremony.
+            // Owner-root claim is ClaimDeferredHuman over the existing
+            // sequence-0 agent key — never a replacement OwnerRootInstall.
             println!("Claim complete. This agent account now has a human owner.")
         }
         ClaimWaitOutcome::Expired => println!("Claim offer expired without changing the account."),

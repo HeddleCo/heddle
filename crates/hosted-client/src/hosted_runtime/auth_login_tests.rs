@@ -320,6 +320,10 @@ fn login_invite_create_succeeds_with_a_claim_next_directive() {
         state.web_origin.as_deref(),
         Some("https://claims.heddle.test/")
     );
+    assert!(
+        state.signed_owner_root_hex.is_some(),
+        "invite create must mint the claimable deferred-human owner root"
+    );
 }
 
 #[tokio::test]
@@ -343,4 +347,11 @@ async fn remint_uses_claim_state_when_the_keystore_row_is_missing() {
         .expect("load")
         .expect("reminted into the keystore");
     assert!(!stored.token.is_empty());
+    let state = identity_state::load()
+        .expect("load")
+        .expect("claim state");
+    assert!(
+        state.signed_owner_root_hex.is_some(),
+        "remint must lazy-mint the claimable deferred-human owner root"
+    );
 }

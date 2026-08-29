@@ -46,6 +46,15 @@ pub mod operation_dedup;
 mod owner_authorization;
 #[cfg(test)]
 mod owner_authorization_tests;
+mod owner_root;
+#[cfg(test)]
+mod owner_root_tests;
+pub use owner_root::{
+    CLAIMABLE_DEFERRED_HUMAN_TTL_SECS, ClaimDeferredHuman, authorization_key_id,
+    ed25519_verification_key, genesis_owner_public_key, require_genesis_matches_seq0,
+    seq0_authority_public_key, sign_canonical, sign_claim_deferred_human,
+    sign_claimable_deferred_human_root, sign_spool_owner_genesis,
+};
 mod repository;
 mod repository_key_binding;
 mod repository_redaction;

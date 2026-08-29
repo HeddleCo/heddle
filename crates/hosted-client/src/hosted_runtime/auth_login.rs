@@ -114,6 +114,9 @@ fn cred_bound_to_node_key(resolved: &ResolvedHostedCredential, node_id: &str) ->
 }
 
 fn reuse(server: &str, resolved: &ResolvedHostedCredential) -> Result<()> {
+    if let Some(pem) = resolved.proof_key_pem.as_deref() {
+        super::auth_login_agent::record_claimable_root_for_stored_account(server, pem)?;
+    }
     let subject = resolved
         .subject
         .clone()

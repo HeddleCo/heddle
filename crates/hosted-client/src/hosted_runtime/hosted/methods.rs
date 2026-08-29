@@ -91,6 +91,20 @@ impl HostedRoutes<'_> {
         WhoAmIRequest,
         WhoAmIResponse
     );
+    unary_method!(
+        bootstrap_owner_root,
+        "OwnerAuthorizationService",
+        "BootstrapOwnerRoot",
+        BootstrapOwnerRootRequest,
+        BootstrapOwnerRootResponse
+    );
+    unary_method!(
+        get_current_owner_keyring,
+        "OwnerAuthorizationService",
+        "GetCurrentOwnerKeyring",
+        GetCurrentOwnerKeyringRequest,
+        GetCurrentOwnerKeyringResponse
+    );
 
     unary_method!(
         create_grant,

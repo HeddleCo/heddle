@@ -59,6 +59,12 @@ pub(crate) struct ClaimState {
     status: ClaimStatus,
     prepared_handle: Option<String>,
     prepared_nonce_hash: Option<String>,
+    /// Hex of the sequence-0 owner-root authority public key, when minted.
+    #[serde(default)]
+    pub(crate) seq0_public_key_hex: Option<String>,
+    /// Canonical protobuf hex of the claimable SignedOwnerRoot, when minted.
+    #[serde(default)]
+    pub(crate) signed_owner_root_hex: Option<String>,
 }
 
 impl ClaimState {
@@ -85,7 +91,23 @@ impl ClaimState {
             status: ClaimStatus::Dormant,
             prepared_handle: None,
             prepared_nonce_hash: None,
+            seq0_public_key_hex: None,
+            signed_owner_root_hex: None,
         }
+    }
+
+    pub(crate) fn seq0_public_key(&self) -> Option<Vec<u8>> {
+        let hex = self.seq0_public_key_hex.as_deref()?;
+        hex::decode(hex).ok()
+    }
+
+    pub(crate) fn record_claimable_owner_root(
+        &mut self,
+        seq0_public_key: &[u8],
+        signed_owner_root: &[u8],
+    ) {
+        self.seq0_public_key_hex = Some(hex::encode(seq0_public_key));
+        self.signed_owner_root_hex = Some(hex::encode(signed_owner_root));
     }
 
     /// Mint and activate a fresh one-time claim capability.

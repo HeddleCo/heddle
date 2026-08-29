@@ -6,7 +6,7 @@ use std::{
 use api::{
     heddle::api::v1alpha1::{
         BearerProof, CallContext, HumanVerification, RepositoryRef, RequestProof,
-        StreamOpeningProof, TraceContext, repository_ref,
+        SignedSpoolOwnerGenesis, StreamOpeningProof, TraceContext, repository_ref,
     },
     signing,
 };
@@ -80,6 +80,40 @@ impl CallContextFactory {
 
     pub fn signing_identity(&self) -> Option<&str> {
         self.signing_identity.as_deref()
+    }
+
+    pub(super) fn proof_signer(&self) -> Option<&Ed25519Signer> {
+        self.signer.as_deref()
+    }
+
+    /// Mint CreateSpool genesis with the same device/proof key used for PoP.
+    ///
+    /// When a sequence-0 owner-root public key is already stored, refuse a
+    /// different genesis key so purge/claim stay bound to the account root.
+    pub(crate) fn mint_spool_owner_genesis(&self) -> Result<SignedSpoolOwnerGenesis> {
+        let signer = self
+            .signer
+            .as_ref()
+            .ok_or(HostedError::SigningIdentityRequired)?;
+        if let Some(seq0) = crate::hosted_runtime::owner_root::stored_seq0_public_key()
+            .map_err(|error| HostedError::Framing(error.to_string()))?
+            && seq0 != signer.public_key()
+        {
+            return Err(HostedError::Framing(
+                "CreateSpool genesis owner key does not match the account sequence-0 owner root"
+                    .to_owned(),
+            ));
+        }
+        let spool_uuid = uuid::Uuid::now_v7();
+        let signed = repo::sign_spool_owner_genesis(signer.as_ref(), *spool_uuid.as_bytes())
+            .map_err(HostedError::from)?;
+        if let Some(seq0) = crate::hosted_runtime::owner_root::stored_seq0_public_key()
+            .map_err(|error| HostedError::Framing(error.to_string()))?
+        {
+            repo::require_genesis_matches_seq0(&signed, &seq0)
+                .map_err(|error| HostedError::Framing(error.to_string()))?;
+        }
+        Ok(signed)
     }
 
     pub fn with_bearer_capability(mut self, capability: impl Into<Vec<u8>>) -> Self {
@@ -573,5 +607,36 @@ mod tests {
             )
             .unwrap();
         assert!(context.deadline.is_none());
+    }
+
+    #[test]
+    fn mint_spool_owner_genesis_requires_the_device_proof_key() {
+        let error = CallContextFactory::default()
+            .mint_spool_owner_genesis()
+            .expect_err("CreateSpool must not invent a throwaway owner key");
+        assert!(matches!(error, HostedError::SigningIdentityRequired));
+    }
+
+    #[test]
+    fn mint_spool_owner_genesis_uses_the_configured_proof_key_and_a_uuidv7() {
+        let signer = Ed25519Signer::generate().unwrap();
+        let factory = CallContextFactory::default()
+            .with_signing_key_pem(&signer.to_pem().unwrap(), "principal:test")
+            .unwrap();
+        let signed = factory.mint_spool_owner_genesis().unwrap();
+        let genesis = signed.genesis.expect("signed genesis payload");
+        let spool_uuid: [u8; 16] = genesis
+            .spool_uuid
+            .as_slice()
+            .try_into()
+            .expect("spool UUID is 16 bytes");
+        assert_eq!(uuid::Uuid::from_bytes(spool_uuid).get_version_num(), 7);
+        assert_eq!(
+            genesis
+                .owner_public_key
+                .expect("owner public key")
+                .public_key,
+            signer.public_key()
+        );
     }
 }
