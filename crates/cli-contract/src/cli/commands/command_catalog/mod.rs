@@ -1473,10 +1473,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["auth", "invite"],
         feature_gated(
             json_discriminators(
-                documented_schemas(
-                    user_scoped(NETWORK_METADATA_MUTATION_NO_OP_ID),
-                    &["auth invite"],
-                ),
+                documented_schemas(user_scoped(NETWORK_METADATA_MUTATION), &["auth invite"]),
                 &[json_discriminator(
                     Some("auth invite"),
                     "output_kind",
@@ -1490,14 +1487,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["auth", "invite", "list"],
         feature_gated(
             json_discriminators(
-                documented_schemas(
-                    user_scoped(CommandContract {
-                        observe_only: false,
-                        network_io: true,
-                        ..READ_JSON
-                    }),
-                    &["auth invite list"],
-                ),
+                documented_schemas(user_scoped(READ_JSON), &["auth invite list"]),
                 &[json_discriminator(
                     Some("auth invite list"),
                     "output_kind",

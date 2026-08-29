@@ -13521,6 +13521,12 @@
           "minimum": 0,
           "type": "integer"
         },
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "invite_code": {
           "description": "The server returns this code only on surfaces where it may be shown.",
           "type": "string"
@@ -13528,11 +13534,53 @@
         "invite_id": {
           "type": "string"
         },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "output_kind": {
           "enum": [
             "auth_invite"
           ],
           "type": "string"
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "required": [

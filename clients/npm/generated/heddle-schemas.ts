@@ -567,10 +567,14 @@ export interface AuthLogoutSchema {
 
 export interface AuthSignupInviteCreatedSchema {
   allowance_remaining: number;
+  idempotency_status?: string | null;
   /** The server returns this code only on surfaces where it may be shown. */
   invite_code: string;
   invite_id: string;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   output_kind: "auth_invite";
+  replayed?: boolean | null;
 }
 
 export interface AuthSignupInviteListSchema {
