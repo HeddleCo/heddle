@@ -2047,6 +2047,46 @@ contract.
 
 ---
 
+## `heddle auth invite --output json`
+
+```json
+{
+  "output_kind": "auth_invite",
+  "invite_id": "invite-018f",
+  "invite_code": "hdi_example_signup_code",
+  "allowance_remaining": 2
+}
+```
+
+`invite_code` is emitted once in the mint response. Treat it as a secret and
+deliver it to its recipient; the client does not derive or reconstruct it.
+
+---
+
+## `heddle auth invite list --output json`
+
+```json
+{
+  "output_kind": "auth_invite_list",
+  "invites": [
+    {
+      "invite_code": "hdi_example_signup_code",
+      "status": "open",
+      "created_at": "2026-08-28T12:00:00+00:00",
+      "consumed": false,
+      "consumed_at": null
+    }
+  ],
+  "allowance_remaining": 2
+}
+```
+
+The list includes invite codes because `ListSignupInvites` returns them. A
+future wire contract that omits codes must be rendered without fabricating
+them.
+
+---
+
 ## `heddle agent provenance begin --output json`
 
 `heddle agent provenance begin|show|end --output json` emit:
@@ -3183,26 +3223,26 @@ as one; no `help advanced`).
       "visibility set",
       "visibility promote"
     ],
-    "advanced_scope_json_commands_total": 99,
+    "advanced_scope_json_commands_total": 101,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 39,
-    "advanced_scope_mutating_commands_total": 56,
+    "advanced_scope_mutating_commands_total": 57,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 21,
-    "catalog_commands_total": 184,
-    "catalog_mutating_commands_total": 89,
-    "json_commands_total": 147,
+    "catalog_commands_total": 186,
+    "catalog_mutating_commands_total": 90,
+    "json_commands_total": 149,
     "json_commands_with_accepted_opaque_schema": 39,
-    "json_commands_with_schema": 108,
+    "json_commands_with_schema": 110,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 86,
+    "json_mutating_commands_total": 87,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 86,
+    "mutating_commands_total": 87,
     "mutating_commands_with_accepted_opaque_schema": 21,
-    "mutating_commands_with_schema": 65,
+    "mutating_commands_with_schema": 66,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 39,
     "status": "available",
-    "summary": "186 command(s), 147 JSON command(s), 89 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+    "summary": "188 command(s), 149 JSON command(s), 90 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3240,7 +3280,7 @@ as one; no `help advanced`).
     "try"
   ],
   "status": "available",
-  "summary": "186 command(s), 147 JSON command(s), 89 mutating command(s), 86 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+  "summary": "188 command(s), 149 JSON command(s), 90 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true

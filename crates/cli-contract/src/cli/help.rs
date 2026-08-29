@@ -416,6 +416,11 @@ fn command_path_from_raw_help_request(cmd: &clap::Command, raw: &[String]) -> Op
         if let Some(subcommand) = find_subcommand_or_alias(current, token) {
             path.push(subcommand.get_name().to_string());
             current = subcommand;
+        } else if current.get_subcommands().next().is_some() {
+            // An unknown token below a subcommand group is not a request for
+            // the group's help. Let clap report the invalid subcommand so the
+            // invocation keeps the EX_USAGE (64) contract.
+            return None;
         }
     }
 

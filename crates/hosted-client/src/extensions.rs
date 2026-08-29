@@ -10,7 +10,9 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use heddle_cli_args::{AgentTemplateArg, AuthCommands, AuthTrustCommands, ClaimArgs, CliContext};
+use heddle_cli_args::{
+    AgentTemplateArg, AuthCommands, AuthInviteCommands, AuthTrustCommands, ClaimArgs, CliContext,
+};
 
 use crate::hosted_runtime::{
     auth_requests::{AuthCommand, AuthTrustCommand},
@@ -65,6 +67,15 @@ fn auth_command(command: AuthCommands) -> AuthCommand {
         },
         AuthCommands::Logout { server } => AuthCommand::Logout { server },
         AuthCommands::Status { server } => AuthCommand::Status { server },
+        AuthCommands::Invite {
+            email,
+            server,
+            command,
+        } => AuthCommand::Invite {
+            email,
+            server,
+            list: matches!(command, Some(AuthInviteCommands::List)),
+        },
         AuthCommands::Trust { command } => AuthCommand::Trust {
             command: match command {
                 AuthTrustCommands::Show(args) => AuthTrustCommand::Show {

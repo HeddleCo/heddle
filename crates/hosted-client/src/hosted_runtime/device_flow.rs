@@ -113,9 +113,13 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
         "BindSignupInviteEmail",
         AgentAuthOperationDisposition::Denied,
     ),
-    // Creating an invite spends the authenticated member's allowance, so a
-    // derived agent must not issue invitations on the parent's behalf.
-    ("CreateSignupInvite", AgentAuthOperationDisposition::Denied),
+    // Everyday account-root capability (heddle#1592 lock 2026-08-28). Off the
+    // deny floor so the unclaimed agent-rooted login root can mint. Derived
+    // children stay unable to mint because this is not in SAFE_AGENT_OPERATIONS.
+    (
+        "CreateSignupInvite",
+        AgentAuthOperationDisposition::ReviewedSafe,
+    ),
     // The server derives the owner from the caller and returns no claimer
     // identity, making invite listing a caller-bound read.
     (
@@ -205,6 +209,10 @@ fn mandatory_agent_denied_operations() -> impl Iterator<Item = &'static str> {
 }
 
 /// Curated W1 operation ceiling for `heddle auth derive-agent`.
+///
+/// This is the derive-agent child ceiling only. The unclaimed agent-rooted
+/// login root is the account: `restrict_agent_account_root` applies the deny
+/// floor without this allowlist.
 ///
 /// `--allow` may select a subset of these methods. Parent and child blocks are
 /// both evaluated by the server, so sub-derivation computes an intersection
@@ -431,19 +439,12 @@ impl AgentAttenuation {
     }
 }
 
-/// Attenuate a parent Biscuit (decoded base64 string) with the
-/// supplied restrictions and return the attenuated Biscuit's
-/// base64-encoded bytes.
-///
-/// Uses `UnverifiedBiscuit` because attenuation appends a new block
-/// to bytes the parent already holds; the new block's signature
-/// chains off the parent's keys, and the server validates the full
-/// chain against its trust list when the agent presents the token.
-/// The CLI never holds the server's signing key.
-/// Narrow a client-minted agent account root with the same deny floor and
-/// safe-operation ceiling that `heddle auth derive-agent` applies. The leaf
-/// PoP stays the registered Iroh key (self-delegation) so `auth login` can
-/// remint from that seed after expiry.
+/// Narrow a client-minted agent account root with the deny floor that
+/// `heddle auth derive-agent` applies. The login-minted root IS the account:
+/// it keeps human-like everyday ops, including minting signup invites.
+/// [`SAFE_AGENT_OPERATIONS`] is the derive-agent child ceiling only — do not
+/// apply it here. The leaf PoP stays the registered Iroh key (self-delegation)
+/// so `auth login` can remint from that seed after expiry.
 pub(crate) fn restrict_agent_account_root(
     root_token: &str,
     signer: &Ed25519Signer,
@@ -454,12 +455,7 @@ pub(crate) fn restrict_agent_account_root(
         AgentAttenuation {
             agent_id: "local-agent-root".to_string(),
             expires_at,
-            allowed_operations: Some(
-                SAFE_AGENT_OPERATIONS
-                    .iter()
-                    .map(|operation| (*operation).to_string())
-                    .collect(),
-            ),
+            allowed_operations: None,
             allowed_resources: None,
             declared_scopes: Vec::new(),
         },
@@ -468,6 +464,15 @@ pub(crate) fn restrict_agent_account_root(
     )
 }
 
+/// Attenuate a parent Biscuit (decoded base64 string) with the
+/// supplied restrictions and return the attenuated Biscuit's
+/// base64-encoded bytes.
+///
+/// Uses `UnverifiedBiscuit` because attenuation appends a new block
+/// to bytes the parent already holds; the new block's signature
+/// chains off the parent's keys, and the server validates the full
+/// chain against its trust list when the agent presents the token.
+/// The CLI never holds the server's signing key.
 pub fn attenuate_for_agent(
     parent_token_b64: &str,
     restrictions: AgentAttenuation,
