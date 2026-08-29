@@ -47,7 +47,8 @@ use wire::{
 };
 
 use super::{
-    BidirectionalRequestStream, HostedClient, PullMaterialization, ServerStream, ServerStreamItem,
+    BidirectionalRequestStream, CallContextFactory, HostedClient, PullMaterialization,
+    ServerStream, ServerStreamItem,
     helpers::{
         descriptor_id, descriptor_id_from_info, hosted_to_protocol_error,
         object_descriptor_with_status, parse_descriptor_to_info, to_proto_object_info,
@@ -507,22 +508,20 @@ pub enum ExpectedRemoteHead {
 impl HostedClient {
     fn sync_stream_opening_proof(
         &self,
-        stream_id: &str,
+        transfer_id: &str,
         route: &str,
         repository: &str,
         resume_cursor: &str,
         capability_context: Vec<u8>,
     ) -> Result<StreamOpeningProof, ProtocolError> {
-        self.stream_opening_proof(
+        sync_stream_opening_proof(
+            &self.context,
+            transfer_id,
             route,
-            stream_id,
-            super::helpers::repository_ref(repository).ok_or_else(|| {
-                ProtocolError::InvalidState("invalid repository path".to_string())
-            })?,
+            repository,
             resume_cursor,
             capability_context,
         )
-        .map_err(hosted_to_protocol_error)
     }
 
     pub async fn list_refs(&mut self, repo_path: &str) -> Result<Vec<RefEntry>, ProtocolError> {
@@ -1572,8 +1571,9 @@ impl HostedClient {
             uuid::Uuid::new_v4(),
         );
         let remote_thread_id = self.pull_thread_id(repo_path, remote_thread).await?;
+        let stream_id = stream_opening_id(&transfer_id);
         let (provider_session, provider_capability_context) =
-            self.begin_provider_pull(&transfer_id, repo_path)?;
+            self.begin_provider_pull(&stream_id, repo_path)?;
         let request_message = PullClientFrame {
             frame: Some(pull_client_frame::Frame::Request(PullRequest {
                 repo_path: super::helpers::repository_ref(repo_path),
@@ -4085,6 +4085,43 @@ mod on_demand_hydration_tests {
     }
 }
 
+/// weft `verify_stream_opening` fail-closes when `stream_id` is empty or
+/// longer than this. The bound is an LRU admission cap on the request-proof
+/// cache, not a hint to grow the identifier.
+const STREAM_OPENING_ID_MAX_LEN: usize = 64;
+
+/// Short, stable StreamOpeningProof.stream_id for a transfer identity.
+///
+/// The long `transfer_id` stays on TransferCheckpoint so reconnects of one
+/// operation resume the same transfer. weft admits only `1..=64` bytes here;
+/// blake3 hex is exactly 64, which the `>` check still admits.
+fn stream_opening_id(transfer_id: &str) -> String {
+    let stream_id = hex::encode(blake3::hash(transfer_id.as_bytes()).as_bytes());
+    debug_assert!((1..=STREAM_OPENING_ID_MAX_LEN).contains(&stream_id.len()));
+    stream_id
+}
+
+fn sync_stream_opening_proof(
+    context: &CallContextFactory,
+    transfer_id: &str,
+    route: &str,
+    repository: &str,
+    resume_cursor: &str,
+    capability_context: Vec<u8>,
+) -> Result<StreamOpeningProof, ProtocolError> {
+    context
+        .stream_opening_proof(
+            route,
+            stream_opening_id(transfer_id),
+            super::helpers::repository_ref(repository).ok_or_else(|| {
+                ProtocolError::InvalidState("invalid repository path".to_string())
+            })?,
+            resume_cursor,
+            capability_context,
+        )
+        .map_err(hosted_to_protocol_error)
+}
+
 fn pull_transfer_id(
     repo_path: &str,
     remote_thread: &str,
@@ -4119,7 +4156,9 @@ fn push_transfer_id(
 mod transfer_id_tests {
     use std::{collections::HashSet, time::Instant};
 
-    use api::heddle::api::v1alpha1::PushRequest;
+    use api::{heddle::api::v1alpha1::PushRequest, signing};
+    use config::ClientConfig;
+    use crypto::{Ed25519Signer, Signer as _};
     use objects::{
         object::{Blob, ContentHash, StateId, Tree, TreeEntry},
         store::{SnapshotCommitArtifact, SnapshotCommitDescriptor, pack::PackObjectId},
@@ -4132,9 +4171,10 @@ mod transfer_id_tests {
     };
 
     use super::{
-        ExpectedRemoteHead, apply_expected_remote_head, native_push_boundaries,
+        CallContextFactory, ExpectedRemoteHead, STREAM_OPENING_ID_MAX_LEN,
+        apply_expected_remote_head, native_push_boundaries,
         native_push_boundaries_from_expected_head, pull_transfer_id, push_transfer_id,
-        select_snapshot_pack_reuse_descriptor,
+        select_snapshot_pack_reuse_descriptor, stream_opening_id, sync_stream_opening_proof,
     };
 
     fn descriptor(state: StateId, object_ids: Vec<PackObjectId>) -> SnapshotCommitDescriptor {
@@ -4354,6 +4394,109 @@ mod transfer_id_tests {
             push_transfer_id("org/repo", state, "main", "heddle:state", "op-1"),
             "transport reconnects inside one Push operation must resume the same transfer"
         );
+    }
+
+    #[test]
+    fn stream_opening_proof_admits_a_short_stable_id_for_a_realistic_transfer() {
+        let signer = Ed25519Signer::generate().unwrap();
+        let config = ClientConfig::default()
+            .with_token(wire::AuthToken::new("token", "alice"))
+            .with_auth_proof_key_pem(signer.to_pem().unwrap())
+            .with_authenticated_principal("principal:alice");
+        let context = CallContextFactory::from_client_config(&config).unwrap();
+        let state = StateId::from_bytes([0xab; 32]);
+        let repo = "cedar-jay-9dce33/spool-d";
+        let revision = format!("heddle:{}", state.to_string_full());
+        let push_route = "/heddle.api.v1alpha1.RepoSyncService/Push";
+        let pull_route = "/heddle.api.v1alpha1.RepoSyncService/Pull";
+        let first_op = "6bd5b04c-1111-4000-8000-000000000001";
+        let later_op = "6bd5b04c-1111-4000-8000-000000000002";
+
+        let push = push_transfer_id(repo, state, "main", &revision, first_op);
+        assert!(
+            push.len() > STREAM_OPENING_ID_MAX_LEN,
+            "a real Push transfer_id must exceed weft's stream_id cap so this test covers the fail-closed case (len={})",
+            push.len()
+        );
+        assert_eq!(
+            push,
+            push_transfer_id(repo, state, "main", &revision, first_op),
+            "the long transfer identity stays on the checkpoint"
+        );
+
+        let first = sync_stream_opening_proof(&context, &push, push_route, repo, "", Vec::new())
+            .expect("sign first push opening");
+        let retry = sync_stream_opening_proof(&context, &push, push_route, repo, "", Vec::new())
+            .expect("sign retried push opening");
+        let later = sync_stream_opening_proof(
+            &context,
+            &push_transfer_id(repo, state, "main", &revision, later_op),
+            push_route,
+            repo,
+            "",
+            Vec::new(),
+        )
+        .expect("sign later push opening");
+
+        assert!(
+            (1..=STREAM_OPENING_ID_MAX_LEN).contains(&first.stream_id.len()),
+            "weft admits only 1..=64 byte stream_id (len={})",
+            first.stream_id.len()
+        );
+        assert_eq!(first.stream_id, stream_opening_id(&push));
+        assert_eq!(
+            first.stream_id, retry.stream_id,
+            "retries of one operation must keep the same anti-replay stream_id"
+        );
+        assert_ne!(
+            first.stream_id, later.stream_id,
+            "a different operation id must not reuse the stream_id"
+        );
+        let canonical = signing::stream_open_bytes(
+            "principal:alice",
+            &first.stream_id,
+            push_route,
+            repo,
+            "",
+            &[],
+        );
+        Ed25519Signer::verify_with_public_key(&canonical, signer.public_key(), &first.signature)
+            .expect("opening signature must be bound to the short stream_id");
+
+        let pull_nonce = uuid::Uuid::nil();
+        let pull = pull_transfer_id(repo, "main", Some("main"), None, Some(state), pull_nonce);
+        assert!(
+            pull.len() > STREAM_OPENING_ID_MAX_LEN,
+            "a real Pull transfer_id must exceed weft's stream_id cap (len={})",
+            pull.len()
+        );
+        let pull_proof =
+            sync_stream_opening_proof(&context, &pull, pull_route, repo, "", Vec::new())
+                .expect("sign pull opening");
+        let later_pull = pull_transfer_id(
+            repo,
+            "main",
+            Some("main"),
+            None,
+            Some(state),
+            uuid::Uuid::from_u128(1),
+        );
+        let later_pull_proof =
+            sync_stream_opening_proof(&context, &later_pull, pull_route, repo, "", Vec::new())
+                .expect("sign later pull opening");
+        assert!(
+            (1..=STREAM_OPENING_ID_MAX_LEN).contains(&pull_proof.stream_id.len()),
+            "weft admits only 1..=64 byte stream_id (len={})",
+            pull_proof.stream_id.len()
+        );
+        assert_eq!(pull_proof.stream_id, stream_opening_id(&pull));
+        assert_eq!(
+            pull_proof.stream_id,
+            sync_stream_opening_proof(&context, &pull, pull_route, repo, "", Vec::new())
+                .expect("sign retried pull opening")
+                .stream_id
+        );
+        assert_ne!(pull_proof.stream_id, later_pull_proof.stream_id);
     }
 
     #[test]
