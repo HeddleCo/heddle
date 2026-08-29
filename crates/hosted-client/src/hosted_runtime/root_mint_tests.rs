@@ -188,8 +188,7 @@ fn restricted_agent_capability_keeps_the_deny_floor() {
     let block = biscuit.print_block_source(1).expect("attenuation");
     for denied in [
         "CreateServiceAccount",
-        "DeleteRepository",
-        "DeleteNamespace",
+        "DeleteSpool",
         "RevokeSession",
         "CreateAgentAccount",
         "ClaimHandle",

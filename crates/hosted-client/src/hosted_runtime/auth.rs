@@ -2212,8 +2212,7 @@ mod tests {
         for operation in [
             "CreateServiceAccount",
             "IssueServiceAccountCredential",
-            "DeleteRepository",
-            "DeleteNamespace",
+            "DeleteSpool",
             "CreateSignupInvite",
             "ListSignupInvites",
         ] {

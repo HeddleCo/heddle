@@ -149,17 +149,10 @@ impl HostedRoutes<'_> {
         DeleteResponse
     );
     unary_method!(
-        delete_namespace,
+        delete_spool,
         "RegistryService",
-        "DeleteNamespace",
-        DeleteNamespaceRequest,
-        DeleteResponse
-    );
-    unary_method!(
-        delete_repository,
-        "RegistryService",
-        "DeleteRepository",
-        DeleteRepositoryRequest,
+        "DeleteSpool",
+        DeleteSpoolRequest,
         DeleteResponse
     );
     unary_method!(
@@ -219,18 +212,11 @@ impl HostedRoutes<'_> {
         HostedGrant
     );
     unary_method!(
-        update_namespace,
+        update_spool,
         "RegistryService",
-        "UpdateNamespace",
-        UpdateNamespaceRequest,
-        HostedNamespace
-    );
-    unary_method!(
-        update_repository,
-        "RegistryService",
-        "UpdateRepository",
-        UpdateRepositoryRequest,
-        HostedRepository
+        "UpdateSpool",
+        UpdateSpoolRequest,
+        HostedSpool
     );
 
     server_stream_method!(
@@ -461,7 +447,7 @@ mod tests {
     };
 
     #[test]
-    fn shipped_native_inventory_is_38_unary_seven_server_streams_and_two_bidi() {
+    fn shipped_native_inventory_is_36_unary_seven_server_streams_and_two_bidi() {
         const ROUTES: &[MethodRoute] = &[
             MethodRoute::CollaborationServiceAppendTurn,
             MethodRoute::CollaborationServiceListByState,
@@ -477,8 +463,7 @@ mod tests {
             MethodRoute::RegistryServiceCreateInvitation,
             MethodRoute::RegistryServiceCreateSpool,
             MethodRoute::RegistryServiceDeleteGrant,
-            MethodRoute::RegistryServiceDeleteNamespace,
-            MethodRoute::RegistryServiceDeleteRepository,
+            MethodRoute::RegistryServiceDeleteSpool,
             MethodRoute::RegistryServiceGetCurrentUserSpool,
             MethodRoute::RegistryServiceGrantSupportAccess,
             MethodRoute::RegistryServiceListGrants,
@@ -487,8 +472,7 @@ mod tests {
             MethodRoute::RegistryServiceResolveMonorepo,
             MethodRoute::RegistryServiceRevokeSupportAccess,
             MethodRoute::RegistryServiceUpdateGrant,
-            MethodRoute::RegistryServiceUpdateNamespace,
-            MethodRoute::RegistryServiceUpdateRepository,
+            MethodRoute::RegistryServiceUpdateSpool,
             MethodRoute::RepoSyncServiceListRefs,
             MethodRoute::RepoSyncServicePull,
             MethodRoute::RepoSyncServicePush,
@@ -520,13 +504,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(shipped.len(), 47);
+        assert_eq!(shipped.len(), 45);
         assert_eq!(
             shipped
                 .iter()
                 .filter(|method| method.streaming == StreamingShape::Unary)
                 .count(),
-            38
+            36
         );
         assert_eq!(
             shipped
