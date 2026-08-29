@@ -46,6 +46,7 @@ pub mod operation_dedup;
 mod owner_authorization;
 #[cfg(test)]
 mod owner_authorization_tests;
+pub use owner_authorization::sign_spool_owner_genesis;
 mod repository;
 mod repository_key_binding;
 mod repository_redaction;
