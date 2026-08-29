@@ -65,6 +65,9 @@ pub(crate) struct ClaimState {
     /// Canonical protobuf hex of the claimable SignedOwnerRoot, when minted.
     #[serde(default)]
     pub(crate) signed_owner_root_hex: Option<String>,
+    /// Encoded RegisterPublicKey + ClaimDeferredHuman (tag 16), waiting to send.
+    #[serde(default)]
+    pub(crate) pending_register_public_key_hex: Option<String>,
 }
 
 impl ClaimState {
@@ -93,6 +96,7 @@ impl ClaimState {
             prepared_nonce_hash: None,
             seq0_public_key_hex: None,
             signed_owner_root_hex: None,
+            pending_register_public_key_hex: None,
         }
     }
 
@@ -108,6 +112,19 @@ impl ClaimState {
     ) {
         self.seq0_public_key_hex = Some(hex::encode(seq0_public_key));
         self.signed_owner_root_hex = Some(hex::encode(signed_owner_root));
+    }
+
+    pub(crate) fn record_pending_register_public_key(&mut self, encoded: &[u8]) {
+        self.pending_register_public_key_hex = Some(hex::encode(encoded));
+    }
+
+    pub(crate) fn take_pending_register_public_key(&mut self) -> Result<Option<Vec<u8>>> {
+        let Some(hex) = self.pending_register_public_key_hex.take() else {
+            return Ok(None);
+        };
+        Ok(Some(
+            hex::decode(hex).context("decode pending RegisterPublicKey claim")?,
+        ))
     }
 
     /// Mint and activate a fresh one-time claim capability.

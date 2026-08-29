@@ -39,7 +39,7 @@ pub(crate) fn record_claimable_root_for_stored_account(
     let Some(mut state) = identity_state::load()? else {
         return Ok(());
     };
-    if !super::hosted::server_keys_match(&state.server, server) {
+    if !super::hosted::server_keys_match(&state.server, server) || state.is_claimed() {
         return Ok(());
     }
     let signer = Ed25519Signer::from_pem(private_key_pem)
@@ -89,11 +89,13 @@ pub(crate) async fn create_with_invite(
             return Err(error);
         }
     };
+    let signer = Ed25519Signer::from_pem(&minted.private_key_pem)
+        .context("loading the agent proof key for BootstrapOwnerRoot")?;
     let output = finish_invite_create(server, minted, response)?;
     if let Some(state) = identity_state::load()?
         && let Some(root) = super::owner_root::load_recorded_root(&state)?
     {
-        let upload = super::owner_root::upload_claimable_root(&mut client, root).await;
+        let upload = super::owner_root::upload_claimable_root(&mut client, &signer, root).await;
         client.close().await;
         upload?;
     } else {

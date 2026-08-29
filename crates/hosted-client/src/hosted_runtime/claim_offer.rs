@@ -88,17 +88,24 @@ pub(crate) async fn cmd_claim(args: ClaimArgs) -> Result<()> {
     drop(offer.secret);
 
     let outcome = wait_for_claim(&offer.authorization_hash, args.timeout, completion).await;
-    let cleanup = (!matches!(outcome, Ok(ClaimWaitOutcome::Claimed)))
+    let claimed = matches!(outcome, Ok(ClaimWaitOutcome::Claimed));
+    let owner_root_claim = if claimed {
+        super::owner_root::send_pending_register_public_key_claim(&mut client).await
+    } else {
+        Ok(None)
+    };
+    let cleanup = (!claimed)
         .then(|| deactivate_offer(&offer.authorization_hash))
         .transpose();
     client.close().await;
     cleanup?;
+    owner_root_claim?;
 
     match outcome? {
         ClaimWaitOutcome::Claimed => {
-            // Human promotion attaches the handle via the Iroh ceremony.
-            // Owner-root claim is ClaimDeferredHuman over the existing
-            // sequence-0 agent key — never a replacement OwnerRootInstall.
+            // Iroh promotes the handle. Owner-root claim is RegisterPublicKey
+            // plus ClaimDeferredHuman (tag 16) over the existing sequence-0
+            // agent key — never a replacement OwnerRootInstall.
             println!("Claim complete. This agent account now has a human owner.")
         }
         ClaimWaitOutcome::Expired => println!("Claim offer expired without changing the account."),

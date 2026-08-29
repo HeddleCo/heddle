@@ -3,19 +3,28 @@
 use std::{ffi::OsString, sync::MutexGuard};
 
 use api::heddle::api::v1alpha1::{
-    CreateAgentAccountResponse, OwnerKeyTransitionKind, RecoveryGuardian, RecoveryGuardianKind,
-    RecoveryPolicy,
+    BootstrapOwnerRootRequest, CreateAgentAccountResponse, OwnerKeyBindingKind,
+    OwnerKeyTransitionKind, RecoveryGuardian, RecoveryGuardianKind, RecoveryPolicy,
+    RegisterPublicKeyRequest, SignedOwnerRoot,
 };
 use config::credentials;
 use crypto::{Ed25519Signer, Signer as _};
-use repo::{authorization_key_id, ed25519_verification_key, seq0_authority_public_key};
+use prost::Message;
+use repo::{
+    authorization_key_id, ed25519_verification_key, seq0_authority_public_key,
+    sign_agent_claim_binding,
+};
 use tempfile::TempDir;
 
 use super::{
     auth_login_agent::finish_invite_create_from_response,
     hosted::{CallContextFactory, HostedError},
     identity_state,
-    owner_root::{build_claim_deferred_human, load_recorded_root},
+    owner_root::{
+        BootstrapOwnerRootExtension, RegisterPublicKeyClaimExtension, build_claim_deferred_human,
+        encode_bootstrap_owner_root, encode_register_public_key_claim, load_recorded_root,
+        prepare_register_public_key_claim,
+    },
 };
 
 struct IsolatedHome {
@@ -222,5 +231,213 @@ fn create_spool_genesis_matches_the_stored_seq0_proof_key() {
             .expect("key")
             .public_key,
         signer.public_key()
+    );
+}
+
+#[test]
+fn bootstrap_owner_root_wire_carries_agent_claim_binding_on_tag_5() {
+    let _home = IsolatedHome::new();
+    finish_invite_create_from_response(
+        "api.bootstrap-binding.test",
+        CreateAgentAccountResponse {
+            account_id: "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28".into(),
+            pet_name: "quiet-otter".into(),
+            agent_capability: Vec::new(),
+            web_origin: String::new(),
+        },
+    )
+    .expect("signup");
+    let state = identity_state::load().expect("load").expect("state");
+    let signed = load_recorded_root(&state).expect("root").expect("minted");
+    let pem = credentials::get_server_credential("api.bootstrap-binding.test")
+        .expect("cred")
+        .expect("stored")
+        .private_key_pem
+        .expect("proof pem");
+    let agent = Ed25519Signer::from_pem(&pem).expect("agent");
+    let operation_id = "op-bootstrap-1";
+    let binding = sign_agent_claim_binding(&agent, &signed, operation_id).expect("binding");
+    assert_eq!(binding.kind(), OwnerKeyBindingKind::AgentClaim);
+    let encoded = encode_bootstrap_owner_root(
+        &BootstrapOwnerRootRequest {
+            owner_root: Some(signed.clone()),
+            approval: None,
+            client_operation_id: operation_id.to_string(),
+        },
+        &binding,
+    );
+    let official = BootstrapOwnerRootRequest::decode(encoded.as_slice()).expect("official fields");
+    assert!(official.owner_root.is_some());
+    assert_eq!(official.client_operation_id, operation_id);
+    let extension = BootstrapOwnerRootExtension::decode(encoded.as_slice()).expect("tag 5");
+    let decoded = extension.owner_key_binding.expect("owner_key_binding");
+    assert_eq!(decoded.kind(), OwnerKeyBindingKind::AgentClaim);
+    assert_eq!(decoded.challenge_nonce, binding.challenge_nonce);
+}
+
+#[test]
+fn register_public_key_claim_sends_claim_deferred_human_on_tag_16() {
+    let _home = IsolatedHome::new();
+    finish_invite_create_from_response(
+        "api.register-claim.test",
+        CreateAgentAccountResponse {
+            account_id: "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28".into(),
+            pet_name: "quiet-otter".into(),
+            agent_capability: Vec::new(),
+            web_origin: String::new(),
+        },
+    )
+    .expect("signup");
+    let state = identity_state::load().expect("load").expect("state");
+    let signed = load_recorded_root(&state).expect("root").expect("minted");
+    let pem = credentials::get_server_credential("api.register-claim.test")
+        .expect("cred")
+        .expect("stored")
+        .private_key_pem
+        .expect("proof pem");
+    let agent = Ed25519Signer::from_pem(&pem).expect("agent");
+    let human = Ed25519Signer::generate().expect("human");
+    let g1 = Ed25519Signer::generate().expect("g1");
+    let g2 = Ed25519Signer::generate().expect("g2");
+    let mut guardians = vec![
+        RecoveryGuardian {
+            kind: RecoveryGuardianKind::Paper as i32,
+            key: Some(ed25519_verification_key(g1.public_key()).expect("g1")),
+        },
+        RecoveryGuardian {
+            kind: RecoveryGuardianKind::Paper as i32,
+            key: Some(ed25519_verification_key(g2.public_key()).expect("g2")),
+        },
+    ];
+    guardians.sort_by_key(|guardian| authorization_key_id(guardian.key.as_ref().expect("key")));
+    let transition = build_claim_deferred_human(
+        &agent,
+        &human,
+        &signed,
+        RecoveryPolicy {
+            threshold: 2,
+            guardians,
+            window_secs: None,
+        },
+        &[g1, g2],
+        chrono::Utc::now().timestamp(),
+    )
+    .expect("ClaimDeferredHuman");
+    let request = RegisterPublicKeyRequest {
+        challenge_id: "challenge-1".into(),
+        device_public_key: human.public_key().to_vec(),
+        client_operation_id: "op-claim-1".into(),
+        ..Default::default()
+    };
+    let encoded = encode_register_public_key_claim(&request, &transition).expect("wire");
+    let official = RegisterPublicKeyRequest::decode(encoded.as_slice()).expect("official");
+    assert!(official.owner_root.is_none());
+    assert!(official.owner_root_proof_of_possession.is_none());
+    assert!(official.owner_key_binding.is_none());
+    assert_eq!(official.device_public_key, human.public_key());
+    let extension = RegisterPublicKeyClaimExtension::decode(encoded.as_slice()).expect("tag 16");
+    let sent = extension.claim_deferred_human.expect("claim_deferred_human");
+    assert_eq!(
+        sent.transition.as_ref().expect("body").kind(),
+        OwnerKeyTransitionKind::ClaimDeferredHuman
+    );
+    assert_eq!(
+        seq0_authority_public_key(&signed).expect("seq-0 survives claim encode"),
+        agent.public_key()
+    );
+}
+
+#[test]
+fn register_public_key_claim_refuses_a_replacement_seq0() {
+    let error = encode_register_public_key_claim(
+        &RegisterPublicKeyRequest {
+            owner_root: Some(SignedOwnerRoot::default()),
+            client_operation_id: "op-bad".into(),
+            ..Default::default()
+        },
+        &Default::default(),
+    )
+    .expect_err("replacement seq-0 must not be encoded");
+    assert!(
+        error.to_string().contains("must not send owner_root"),
+        "{error}"
+    );
+}
+
+#[test]
+fn claim_prepares_register_public_key_claim_deferred_human_for_send() {
+    let _home = IsolatedHome::new();
+    finish_invite_create_from_response(
+        "api.prepare-claim.test",
+        CreateAgentAccountResponse {
+            account_id: "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28".into(),
+            pet_name: "quiet-otter".into(),
+            agent_capability: Vec::new(),
+            web_origin: String::new(),
+        },
+    )
+    .expect("signup");
+    let mut state = identity_state::load().expect("load").expect("state");
+    let signed = load_recorded_root(&state).expect("root").expect("minted");
+    let pem = credentials::get_server_credential("api.prepare-claim.test")
+        .expect("cred")
+        .expect("stored")
+        .private_key_pem
+        .expect("proof pem");
+    let agent = Ed25519Signer::from_pem(&pem).expect("agent");
+    let human = Ed25519Signer::generate().expect("human");
+    let g1 = Ed25519Signer::generate().expect("g1");
+    let g2 = Ed25519Signer::generate().expect("g2");
+    let mut guardians = vec![
+        RecoveryGuardian {
+            kind: RecoveryGuardianKind::Paper as i32,
+            key: Some(ed25519_verification_key(g1.public_key()).expect("g1")),
+        },
+        RecoveryGuardian {
+            kind: RecoveryGuardianKind::Paper as i32,
+            key: Some(ed25519_verification_key(g2.public_key()).expect("g2")),
+        },
+    ];
+    guardians.sort_by_key(|guardian| authorization_key_id(guardian.key.as_ref().expect("key")));
+    let transition = build_claim_deferred_human(
+        &agent,
+        &human,
+        &signed,
+        RecoveryPolicy {
+            threshold: 2,
+            guardians,
+            window_secs: None,
+        },
+        &[g1, g2],
+        chrono::Utc::now().timestamp(),
+    )
+    .expect("ClaimDeferredHuman");
+    prepare_register_public_key_claim(
+        &mut state,
+        RegisterPublicKeyRequest {
+            challenge_id: "challenge-prepare".into(),
+            device_public_key: human.public_key().to_vec(),
+            client_operation_id: "op-prepare".into(),
+            ..Default::default()
+        },
+        transition,
+    )
+    .expect("prepare");
+    let encoded = state
+        .take_pending_register_public_key()
+        .expect("take")
+        .expect("pending");
+    let official = RegisterPublicKeyRequest::decode(encoded.as_slice()).expect("official");
+    assert!(official.owner_root.is_none());
+    assert!(official.owner_key_binding.is_none());
+    let extension = RegisterPublicKeyClaimExtension::decode(encoded.as_slice()).expect("tag 16");
+    assert_eq!(
+        extension
+            .claim_deferred_human
+            .expect("transition")
+            .transition
+            .expect("body")
+            .kind(),
+        OwnerKeyTransitionKind::ClaimDeferredHuman
     );
 }

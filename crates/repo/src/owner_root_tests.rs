@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use api::heddle::api::v1alpha1::{
-    OwnerKeyTransitionKind, RecoveryGuardian, RecoveryGuardianKind, RecoveryPolicy,
+    OwnerKeyBindingKind, OwnerKeyTransitionKind, RecoveryGuardian, RecoveryGuardianKind,
+    RecoveryPolicy,
 };
 use crypto::Signer;
 use heddleco_capability_verifier::{
-    VerificationLimits, apply_transition, verify_owner_root, verify_spool_owner_genesis,
+    VerificationLimits, apply_transition, verify_owner_key_binding, verify_owner_root,
+    verify_spool_owner_genesis,
 };
 
 use crate::{
-    ClaimDeferredHuman, authorization_key_id, ed25519_verification_key, require_genesis_matches_seq0,
-    seq0_authority_public_key, sign_claim_deferred_human, sign_claimable_deferred_human_root,
-    sign_spool_owner_genesis,
+    ClaimDeferredHuman, authorization_key_id, ed25519_verification_key, registration_binding_nonce,
+    require_genesis_matches_seq0, seq0_authority_public_key, sign_agent_claim_binding,
+    sign_claim_deferred_human, sign_claimable_deferred_human_root, sign_spool_owner_genesis,
 };
 
 const NOW: i64 = 1_700_000_000;
@@ -164,4 +166,21 @@ fn claim_refuses_to_install_the_agent_key_as_the_human_next_authority() {
     })
     .expect_err("human next authority is required");
     assert!(error.to_string().contains("human device root"), "{error}");
+}
+
+#[test]
+fn agent_claim_binding_uses_registration_nonce_and_verifies_against_the_root() {
+    let agent = crypto::Ed25519Signer::generate().expect("agent proof key");
+    let signed = sign_claimable_deferred_human_root(&agent, ACCOUNT, [0x5; 32], NOW)
+        .expect("mint claimable root");
+    let operation_id = "op-bind-1";
+    let binding = sign_agent_claim_binding(&agent, &signed, operation_id).expect("binding");
+    assert_eq!(binding.kind(), OwnerKeyBindingKind::AgentClaim);
+    assert_eq!(binding.binding_epoch, 1);
+    assert_eq!(
+        binding.challenge_nonce.as_slice(),
+        registration_binding_nonce(operation_id).as_slice()
+    );
+    let state = verify_owner_root(&signed).expect("root");
+    verify_owner_key_binding(&binding, &state, &ACCOUNT).expect("weft verifies the binding");
 }

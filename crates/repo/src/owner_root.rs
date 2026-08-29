@@ -9,18 +9,22 @@
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha1::{
     AuthorizationKeyAlgorithm, AuthorizationSignature, AuthorizationVerificationKey,
-    OwnerKeyTransition, OwnerKeyTransitionKind, OwnerRoot, RecoveryPolicy, SignedOwnerKeyTransition,
-    SignedOwnerRoot, SignedSpoolOwnerGenesis, SpoolOwnerGenesis,
+    OwnerKeyBinding, OwnerKeyBindingKind, OwnerKeyTransition, OwnerKeyTransitionKind, OwnerRoot,
+    RecoveryPolicy, SignedOwnerKeyTransition, SignedOwnerRoot, SignedSpoolOwnerGenesis,
+    SpoolOwnerGenesis,
 };
 use crypto::{Signer, SignerError};
 use heddleco_capability_verifier::{
-    VerificationLimits, apply_transition, verify_owner_root, verify_spool_owner_genesis,
+    VerificationLimits, apply_transition, verify_owner_key_binding, verify_owner_root,
+    verify_spool_owner_genesis,
 };
 use sha2::{Digest, Sha256};
 
 const OWNER_KEY_ID_DOMAIN: &[u8] = b"heddle-key-v1";
 const OWNER_ROOT_DOMAIN: &[u8] = b"heddle-owner-root-v1";
 const OWNER_TRANSITION_DOMAIN: &[u8] = b"heddle-owner-key-transition-v1";
+const OWNER_BINDING_DOMAIN: &[u8] = b"heddle-owner-key-binding-v1";
+const REGISTRATION_BINDING_NONCE_DOMAIN: &[u8] = b"heddle-owner-registration-binding-nonce-v1";
 const OWNER_ROOT_FORMAT_VERSION: u32 = 1;
 const DEFAULT_RECOVERY_WINDOW_SECS: u64 = 604_800;
 
@@ -191,6 +195,58 @@ pub fn genesis_owner_public_key(signed: &SignedSpoolOwnerGenesis) -> Result<&[u8
         .as_ref()
         .context("signed spool genesis has no owner key")?;
     Ok(key.public_key.as_slice())
+}
+
+/// Nonce weft hashes as `registration_binding_nonce(client_operation_id)`.
+pub fn registration_binding_nonce(client_operation_id: &str) -> [u8; 32] {
+    Sha256::new()
+        .chain_update(REGISTRATION_BINDING_NONCE_DOMAIN)
+        .chain_update(client_operation_id.as_bytes())
+        .finalize()
+        .into()
+}
+
+/// Self-asserted AgentClaim binding of the claimable seq-0 root to the account UUID.
+///
+/// `challenge_nonce` is [`registration_binding_nonce`]. The proof must verify
+/// with `verify_owner_key_binding` against the same root.
+pub fn sign_agent_claim_binding(
+    signer: &impl Signer,
+    signed_root: &SignedOwnerRoot,
+    client_operation_id: &str,
+) -> Result<OwnerKeyBinding> {
+    let state = verify_owner_root(signed_root).context("verify claimable sequence-0 root")?;
+    let root = signed_root
+        .root
+        .as_ref()
+        .context("signed owner root has no body")?;
+    let account_uuid: [u8; 16] = root
+        .account_uuid
+        .as_slice()
+        .try_into()
+        .context("owner root account_uuid must be 16 bytes")?;
+    if root
+        .authority_key
+        .as_ref()
+        .is_none_or(|key| key.public_key != signer.public_key())
+    {
+        bail!("owner-key binding signer is not the sequence-0 device/proof key");
+    }
+    let mut binding = OwnerKeyBinding {
+        format_version: OWNER_ROOT_FORMAT_VERSION,
+        stable_owner_uuid: account_uuid.to_vec(),
+        root_public_key: Some(ed25519_verification_key(signer.public_key())?),
+        root_state_hash: state.state_hash().to_vec(),
+        kind: OwnerKeyBindingKind::AgentClaim as i32,
+        binding_epoch: 1,
+        challenge_nonce: registration_binding_nonce(client_operation_id).to_vec(),
+        root_proof_of_possession: None,
+    };
+    let body = owner_binding_body(&binding)?;
+    binding.root_proof_of_possession = Some(sign_canonical(signer, OWNER_BINDING_DOMAIN, &body)?);
+    verify_owner_key_binding(&binding, &state, &account_uuid)
+        .context("minted AgentClaim binding failed local verify")?;
+    Ok(binding)
 }
 
 /// Refuse CreateSpool genesis whose owner key is not the stored sequence-0 key.
@@ -380,6 +436,24 @@ fn recovery_policy(encoder: &mut Encoder, policy: &RecoveryPolicy) -> Result<()>
     }
     encoder.u64(policy.window_secs.unwrap_or(DEFAULT_RECOVERY_WINDOW_SECS));
     Ok(())
+}
+
+fn owner_binding_body(binding: &OwnerKeyBinding) -> Result<Vec<u8>> {
+    let mut encoder = Encoder::new();
+    encoder.u32(binding.format_version);
+    encoder.bytes(&binding.stable_owner_uuid)?;
+    verification_key(
+        &mut encoder,
+        binding
+            .root_public_key
+            .as_ref()
+            .context("OwnerKeyBinding.root_public_key")?,
+    )?;
+    encoder.bytes(&binding.root_state_hash)?;
+    encoder.i32(binding.kind);
+    encoder.u64(binding.binding_epoch);
+    encoder.bytes(&binding.challenge_nonce)?;
+    Ok(encoder.finish())
 }
 
 fn owner_root_without_id(root: &OwnerRoot) -> Result<Vec<u8>> {
