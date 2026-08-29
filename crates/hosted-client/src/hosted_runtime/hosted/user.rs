@@ -1,15 +1,17 @@
 use api::heddle::api::v1alpha1::{
     ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, CheckMergeEligibilityRequest,
     CheckMergeEligibilityResponse, CreateAgentAccountRequest, CreateAgentAccountResponse,
-    CreateGrantRequest, CreateInvitationRequest, CreateServiceAccountRequest, CreateSpoolRequest,
-    DeleteGrantRequest, DeleteNamespaceRequest, DeleteRepositoryRequest,
-    GetCurrentUserSpoolRequest, GrantSupportAccessRequest, GrantTargetRef,
-    Invitation as ProtoInvitation, IssueServiceAccountCredentialRequest, IssuedCredentialResponse,
-    ListGrantsRequest, ListSpoolsRequest, ListSupportAccessGrantsRequest,
-    ListThreadApprovalsRequest, MonorepoNode, ResolveMonorepoRequest, RevokeApprovalRequest,
-    RevokeSupportAccessRequest, ServiceAccountResponse, SpoolSummary, SupportAccessGrant,
-    ThreadApproval, UpdateGrantRequest, UpdateNamespaceRequest, UpdateRepositoryRequest,
-    Visibility, grant_target_ref::Target as GrantTargetKind,
+    CreateGrantRequest, CreateInvitationRequest, CreateServiceAccountRequest,
+    CreateSignupInviteRequest, CreateSignupInviteResponse, CreateSpoolRequest, DeleteGrantRequest,
+    DeleteNamespaceRequest, DeleteRepositoryRequest, GetCurrentUserSpoolRequest,
+    GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
+    IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListGrantsRequest,
+    ListSignupInvitesRequest, ListSignupInvitesResponse, ListSpoolsRequest,
+    ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode,
+    ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
+    ServiceAccountResponse, SpoolSummary, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
+    UpdateNamespaceRequest, UpdateRepositoryRequest, Visibility,
+    grant_target_ref::Target as GrantTargetKind,
 };
 use wire::ProtocolError;
 
@@ -99,6 +101,19 @@ impl HostedClient {
         ))
     }
 
+    pub async fn create_signup_invite(
+        &mut self,
+        request: CreateSignupInviteRequest,
+    ) -> Result<CreateSignupInviteResponse, ProtocolError> {
+        Ok(signed_call!(
+            self,
+            auth,
+            create_signup_invite,
+            "/heddle.api.v1alpha1.IdentityService/CreateSignupInvite",
+            request
+        ))
+    }
+
     pub async fn issue_service_account_credential(
         &mut self,
         request: IssueServiceAccountCredentialRequest,
@@ -107,6 +122,19 @@ impl HostedClient {
             .issue_service_account_credential(&request)
             .await
             .map_err(hosted_to_protocol_error)
+    }
+
+    pub async fn list_signup_invites(
+        &mut self,
+        request: ListSignupInvitesRequest,
+    ) -> Result<ListSignupInvitesResponse, ProtocolError> {
+        Ok(signed_call!(
+            self,
+            auth,
+            list_signup_invites,
+            "/heddle.api.v1alpha1.IdentityService/ListSignupInvites",
+            request
+        ))
     }
 
     pub async fn begin_login(
@@ -638,7 +666,19 @@ mod tests {
             .create_service_account(CreateServiceAccountRequest::default())
             .await;
         let _ = client
+            .create_signup_invite(CreateSignupInviteRequest {
+                recipient_email: Some("alice@example.com".to_string()),
+                client_operation_id: "signup-invite-op".to_string(),
+            })
+            .await;
+        let _ = client
             .issue_service_account_credential(IssueServiceAccountCredentialRequest::default())
+            .await;
+        let _ = client
+            .list_signup_invites(ListSignupInvitesRequest {
+                page_size: 200,
+                page_token: String::new(),
+            })
             .await;
         client.begin_login("alice@example.com").await.unwrap();
         let _ = client.get_current_user_spool().await;

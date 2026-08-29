@@ -13,6 +13,8 @@ use std::collections::BTreeSet;
 use clap::Parser;
 
 use super::*;
+#[cfg(feature = "client")]
+use crate::cli::CliContext;
 
 struct RuntimeContractParseSample {
     path: &'static [&'static str],
@@ -125,6 +127,13 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["auth", "logout"], &["auth", "logout"]),
     #[cfg(feature = "client")]
     sample(&["auth", "status"], &["auth", "status"]),
+    #[cfg(feature = "client")]
+    sample(
+        &["auth", "invite"],
+        &["auth", "invite", "--email", "alice@example.com"],
+    ),
+    #[cfg(feature = "client")]
+    sample(&["auth", "invite", "list"], &["auth", "invite", "list"]),
     #[cfg(feature = "client")]
     sample(
         &["auth", "trust", "show"],
@@ -1513,6 +1522,8 @@ fn auth_commands_are_user_scoped() {
         &["auth", "login"][..],
         &["auth", "logout"],
         &["auth", "status"],
+        &["auth", "invite"],
+        &["auth", "invite", "list"],
         &["auth", "derive-agent"],
         &["auth", "create-service-token"],
         &["claim"],
@@ -1525,6 +1536,43 @@ fn auth_commands_are_user_scoped() {
             path.join(" "),
         );
     }
+}
+
+#[cfg(feature = "client")]
+#[test]
+fn auth_invite_accepts_op_id_and_list_is_observe_only() {
+    const OP_ID: &str = "8c576b0e-091d-4a8c-9811-db127ab36c36";
+    let cli = Cli::try_parse_from([
+        "heddle",
+        "auth",
+        "invite",
+        "--email",
+        "alice@example.com",
+        "--op-id",
+        OP_ID,
+    ])
+    .expect("auth invite should accept --op-id");
+    assert_eq!(cli.operation_id_wire(), OP_ID);
+    assert!(command_supports_op_id_for_command(&cli.command));
+
+    let catalog = build_command_catalog();
+    let create = catalog
+        .commands
+        .iter()
+        .find(|entry| entry.display == "auth invite")
+        .expect("auth invite should be cataloged");
+    assert!(create.supports_op_id);
+    assert_eq!(create.op_id_behavior, "explicit_replay");
+
+    let list = catalog
+        .commands
+        .iter()
+        .find(|entry| entry.display == "auth invite list")
+        .expect("auth invite list should be cataloged");
+    assert!(list.observe_only);
+    assert!(!list.mutates);
+    assert_eq!(list.side_effects, vec![CommandSideEffect::ObserveOnly]);
+    assert_eq!(list.side_effect_class, "observe_only");
 }
 
 #[test]
@@ -1727,6 +1775,8 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "auth login",
             "auth logout",
             "auth status",
+            "auth invite",
+            "auth invite list",
             // heddle#1130: descriptor-trust inspection and explicit
             // compare-and-swap replacement emit stable trust records.
             "auth trust show",
