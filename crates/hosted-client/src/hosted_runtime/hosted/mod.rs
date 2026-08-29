@@ -68,8 +68,7 @@ use iroh::{Endpoint, EndpointAddr};
 pub use methods::HostedRoutes;
 use prost::Message;
 pub use session::{HostedAuthMode, HostedSession};
-pub use sync::HostedRefEntry;
-pub use sync::{decode_pull_bootstrap, decode_pull_refs};
+pub use sync::{HostedRefEntry, decode_pull_bootstrap, decode_pull_refs};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RenewableAuthorityCredential {
@@ -174,6 +173,18 @@ impl HostedClient {
 
     pub(crate) fn claim_completion(&self) -> tokio::sync::watch::Receiver<bool> {
         self.connection.claim_completion()
+    }
+
+    pub(crate) async fn take_claim_owner_root_calls(
+        &self,
+    ) -> Option<
+        tokio::sync::mpsc::Receiver<crate::hosted_runtime::claim_authorization::ClaimOwnerRootCall>,
+    > {
+        self.connection.take_claim_owner_root_calls().await
+    }
+
+    pub(crate) fn claim_proof_signer(&self) -> Option<&crypto::Ed25519Signer> {
+        self.context.proof_signer()
     }
 
     pub async fn connect(descriptor: &VerifiedEndpointDescriptor) -> Result<Self> {
@@ -315,17 +326,28 @@ impl HostedClient {
         Request: Message,
         Response: Message + Default,
     {
-        let encoded = request.encode_to_vec();
+        self.call_unary_encoded(method, &request.encode_to_vec())
+            .await
+    }
+
+    /// Send a pre-encoded unary body so additive prost extensions (weft#1863
+    /// BootstrapOwnerRoot tag 5 / RegisterPublicKey tag 16) are covered by PoP.
+    pub async fn call_unary_encoded<Response>(
+        &self,
+        method: &str,
+        encoded: &[u8],
+    ) -> Result<Response>
+    where
+        Response: Message + Default,
+    {
         let descriptor = api::method_descriptor(method)
             .ok_or_else(|| HostedError::Framing(format!("unknown hosted method {method}")))?;
-        let client_operation_id = descriptor
-            .client_operation_id(&encoded)?
-            .unwrap_or_default();
+        let client_operation_id = descriptor.client_operation_id(encoded)?.unwrap_or_default();
         if descriptor.client_operation_id_required && client_operation_id.is_empty() {
             return Err(HostedError::MissingClientOperationId);
         }
-        let signed = self.context.unary(method, &encoded, client_operation_id)?;
-        match call::unary_encoded(&self.connection, method, &signed.context, &encoded).await {
+        let signed = self.context.unary(method, encoded, client_operation_id)?;
+        match call::unary_encoded(&self.connection, method, &signed.context, encoded).await {
             Ok(response) => Ok(response),
             Err(HostedError::Call {
                 code: api::heddle::api::v1alpha1::CallFailureCode::Unauthenticated,
@@ -362,7 +384,7 @@ impl HostedClient {
                         user_handle: assertion.user_handle.unwrap_or_default(),
                     },
                 )?;
-                call::unary_encoded(&self.connection, method, &context, &encoded).await
+                call::unary_encoded(&self.connection, method, &context, encoded).await
             }
             Err(error) => Err(error),
         }

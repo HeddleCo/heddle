@@ -46,7 +46,17 @@ pub mod operation_dedup;
 mod owner_authorization;
 #[cfg(test)]
 mod owner_authorization_tests;
+mod owner_root;
+#[cfg(test)]
+mod owner_root_tests;
 pub use owner_authorization::sign_spool_owner_genesis;
+pub use owner_root::{
+    CLAIMABLE_DEFERRED_HUMAN_TTL_SECS, ClaimDeferredHuman, OWNER_TRANSITION_DOMAIN,
+    authorization_key_id, claim_deferred_human_transition, ed25519_verification_key,
+    genesis_owner_public_key, owner_key_transition_body, registration_binding_nonce,
+    require_genesis_matches_seq0, seq0_authority_public_key, sign_agent_claim_binding,
+    sign_canonical, sign_claim_deferred_human, sign_claimable_deferred_human_root,
+};
 mod repository;
 mod repository_key_binding;
 mod repository_redaction;
@@ -131,12 +141,6 @@ pub mod visibility;
 
 #[path = "worktree/mod.rs"]
 pub mod worktree;
-pub(crate) use worktree::{
-    fsmonitor, stat_signature, status_tracked_refresh, status_untracked_scan, worktree_ignore,
-    worktree_state,
-};
-pub use worktree::{git_worktree_status, worktree_index, worktree_status_options, worktree_walk};
-
 // Re-export commonly used types from underlying crates.
 pub use actor_presence::{
     ActorChainNode, ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary,
@@ -169,12 +173,12 @@ pub use git_ref_name::{
 pub use grant_audience::{GrantRole, audience_tier_for_grant};
 pub use hooks::{Hook, HookContext, HookManager, HookResponse};
 pub use merge_state::{MergeState, MergeStateManager};
-pub use objects::blame::{
-    BlameFrontierGroup, BlameFrontierRecord, BlameLineMap, BlamePreparation, BlameSliceAdvance,
-    BlameSliceError, BlameSliceLimits, OriginRange, advance_file_blame_slice, blame_file,
-    finalize_file_provenance, origin_from_state, prepare_file_blame,
-};
 pub use objects::{
+    blame::{
+        BlameFrontierGroup, BlameFrontierRecord, BlameLineMap, BlamePreparation, BlameSliceAdvance,
+        BlameSliceError, BlameSliceLimits, OriginRange, advance_file_blame_slice, blame_file,
+        finalize_file_provenance, origin_from_state, prepare_file_blame,
+    },
     error::{HeddleError as StoreError, HeddleError, Result},
     object::{
         BranchCreatedV1, CursorMovedV1, NativeToolCallRefV1, TIMELINE_OPERATION_SCHEMA_VERSION,
@@ -269,6 +273,11 @@ pub use visibility::{
     AudienceParseError, AudienceTier, ScopeDropCounts, filter_for_audience,
     filter_for_audience_with_drops, visible,
 };
+pub(crate) use worktree::{
+    fsmonitor, stat_signature, status_tracked_refresh, status_untracked_scan, worktree_ignore,
+    worktree_state,
+};
+pub use worktree::{git_worktree_status, worktree_index, worktree_status_options, worktree_walk};
 pub use worktree_index::{DirectoryCacheEntry, IndexEntry, WorktreeIndex};
 pub use worktree_state::WorktreeState;
 pub use worktree_status_options::{

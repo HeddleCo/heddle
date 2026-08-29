@@ -4,18 +4,23 @@
 #![allow(clippy::result_large_err)]
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v1alpha1::{CallContext, CallFailure, CallFailureCode};
+use api::heddle::api::v1alpha1::{
+    AuthChallengeResponse, CallContext, CallFailure, CallFailureCode, RegisterPublicKeyRequest,
+    SignedOwnerKeyTransition, SignedOwnerRoot,
+};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use crypto::{Ed25519Signer, Signer as _};
+use prost::Message;
 use serde::{Deserialize, Serialize};
 
 use super::{
     auth::headless_token_metadata,
     hosted::claim_protocol::{
-        CLAIM_CONSENT_METHOD, CLAIM_RESOLVE_METHOD, ClaimHandler, ClaimSecretVerifier,
-        VerifiedClaimPrincipal,
+        CLAIM_CONSENT_METHOD, CLAIM_OWNER_ROOT_METHOD, CLAIM_RESOLVE_METHOD, ClaimHandler,
+        ClaimSecretVerifier, VerifiedClaimPrincipal,
     },
     identity_state::{self, ClaimState},
+    owner_root::BrowserClaimDeferredHuman,
     root_mint::is_local_agent_root,
 };
 
@@ -25,12 +30,146 @@ const PROMOTE_CONSENT_DOMAIN: &[u8] = b"heddle-agent-promote-consent-v1";
 #[derive(Clone, Debug)]
 pub(crate) struct StoredClaimAuthorization {
     completion: tokio::sync::watch::Sender<bool>,
+    owner_root_calls: tokio::sync::mpsc::Sender<ClaimOwnerRootCall>,
 }
 
 impl StoredClaimAuthorization {
-    pub(crate) fn new() -> (Self, tokio::sync::watch::Receiver<bool>) {
+    pub(crate) fn new() -> (
+        Self,
+        tokio::sync::watch::Receiver<bool>,
+        tokio::sync::mpsc::Receiver<ClaimOwnerRootCall>,
+    ) {
         let (completion, receiver) = tokio::sync::watch::channel(false);
-        (Self { completion }, receiver)
+        let (owner_root_calls, calls) = tokio::sync::mpsc::channel(1);
+        (
+            Self {
+                completion,
+                owner_root_calls,
+            },
+            receiver,
+            calls,
+        )
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ClaimOwnerRootOperation {
+    resolve_handle: Option<String>,
+    registration: Option<RegisterPublicKeyRequest>,
+    browser_claim: Option<BrowserClaimDeferredHuman>,
+}
+
+pub(crate) enum ClaimOwnerRootOperationRef<'a> {
+    Resolve(&'a str),
+    CoSign {
+        registration: &'a RegisterPublicKeyRequest,
+        browser_claim: &'a BrowserClaimDeferredHuman,
+    },
+}
+
+impl ClaimOwnerRootOperation {
+    fn resolve(handle: String) -> Self {
+        Self {
+            resolve_handle: Some(handle),
+            registration: None,
+            browser_claim: None,
+        }
+    }
+
+    fn co_sign(
+        registration: RegisterPublicKeyRequest,
+        browser_claim: BrowserClaimDeferredHuman,
+    ) -> Self {
+        Self {
+            resolve_handle: None,
+            registration: Some(registration),
+            browser_claim: Some(browser_claim),
+        }
+    }
+
+    pub(crate) fn as_ref(&self) -> Option<ClaimOwnerRootOperationRef<'_>> {
+        match (
+            self.resolve_handle.as_deref(),
+            self.registration.as_ref(),
+            self.browser_claim.as_ref(),
+        ) {
+            (Some(handle), None, None) => Some(ClaimOwnerRootOperationRef::Resolve(handle)),
+            (None, Some(registration), Some(browser_claim)) => {
+                Some(ClaimOwnerRootOperationRef::CoSign {
+                    registration,
+                    browser_claim,
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ClaimOwnerRootResult {
+    signed_owner_root: Option<SignedOwnerRoot>,
+    webauthn_challenge: Option<AuthChallengeResponse>,
+    signed_transition: Option<SignedOwnerKeyTransition>,
+}
+
+enum ClaimOwnerRootResultRef<'a> {
+    Resolved {
+        signed_owner_root: &'a SignedOwnerRoot,
+        webauthn_challenge: &'a AuthChallengeResponse,
+    },
+    CoSigned(&'a SignedOwnerKeyTransition),
+}
+
+impl ClaimOwnerRootResult {
+    pub(crate) fn resolved(
+        signed_owner_root: SignedOwnerRoot,
+        webauthn_challenge: AuthChallengeResponse,
+    ) -> Self {
+        Self {
+            signed_owner_root: Some(signed_owner_root),
+            webauthn_challenge: Some(webauthn_challenge),
+            signed_transition: None,
+        }
+    }
+
+    pub(crate) fn co_signed(signed_transition: SignedOwnerKeyTransition) -> Self {
+        Self {
+            signed_owner_root: None,
+            webauthn_challenge: None,
+            signed_transition: Some(signed_transition),
+        }
+    }
+
+    fn as_ref(&self) -> Option<ClaimOwnerRootResultRef<'_>> {
+        match (
+            self.signed_owner_root.as_ref(),
+            self.webauthn_challenge.as_ref(),
+            self.signed_transition.as_ref(),
+        ) {
+            (Some(signed_owner_root), Some(webauthn_challenge), None) => {
+                Some(ClaimOwnerRootResultRef::Resolved {
+                    signed_owner_root,
+                    webauthn_challenge,
+                })
+            }
+            (None, None, Some(signed_transition)) => {
+                Some(ClaimOwnerRootResultRef::CoSigned(signed_transition))
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ClaimOwnerRootCall {
+    pub(crate) principal: VerifiedClaimPrincipal,
+    pub(crate) operation: ClaimOwnerRootOperation,
+    response: tokio::sync::oneshot::Sender<Result<ClaimOwnerRootResult, CallFailure>>,
+}
+
+impl ClaimOwnerRootCall {
+    pub(crate) fn respond(self, response: Result<ClaimOwnerRootResult, CallFailure>) {
+        let _ = self.response.send(response);
     }
 }
 
@@ -66,6 +205,9 @@ impl ClaimHandler for StoredClaimAuthorization {
         principal: VerifiedClaimPrincipal,
         body: &[u8],
     ) -> Result<Vec<u8>, CallFailure> {
+        if method == CLAIM_OWNER_ROOT_METHOD {
+            return self.owner_root_reply(principal, body).await;
+        }
         // Serialize the generation check and consent write. Without this
         // lock, two browser requests verified against the same one-time
         // secret could both load Active state before either consumed it.
@@ -101,11 +243,62 @@ impl ClaimHandler for StoredClaimAuthorization {
     }
 
     async fn response_delivered(&self, method: &str, body: &[u8]) {
-        if method == CLAIM_CONSENT_METHOD
-            && matches!(parse_request(body), Ok(ClaimRequest::PromoteConsent { .. }))
+        if method == CLAIM_OWNER_ROOT_METHOD
+            && matches!(parse_request(body), Ok(ClaimRequest::ClaimOwnerRoot { .. }))
         {
             self.completion.send_replace(true);
         }
+    }
+}
+
+impl StoredClaimAuthorization {
+    async fn owner_root_reply(
+        &self,
+        principal: VerifiedClaimPrincipal,
+        body: &[u8],
+    ) -> Result<Vec<u8>, CallFailure> {
+        let operation = {
+            let _guard = identity_state::write_lock().map_err(internal_failure)?;
+            let state = identity_state::load_while_locked()
+                .map_err(internal_failure)?
+                .ok_or_else(auth_failure)?;
+            let now = chrono::Utc::now().timestamp_millis();
+            if state.owner_id.to_string() != principal.subject
+                || state.authorization_hash() != principal.authorization_hash
+                || !state.is_active(now)
+            {
+                return Err(auth_failure());
+            }
+            owner_root_operation(body)?
+        };
+        let (response, receive) = tokio::sync::oneshot::channel();
+        self.owner_root_calls
+            .send(ClaimOwnerRootCall {
+                principal,
+                operation,
+                response,
+            })
+            .await
+            .map_err(|_| internal_failure("claim owner-root session is unavailable"))?;
+        let result = receive
+            .await
+            .map_err(|_| internal_failure("claim owner-root session stopped"))??;
+        let reply = match result
+            .as_ref()
+            .ok_or_else(|| internal_failure("claim owner-root result has an invalid shape"))?
+        {
+            ClaimOwnerRootResultRef::Resolved {
+                signed_owner_root,
+                webauthn_challenge,
+            } => ClaimReply::OwnerRootResolved {
+                signed_owner_root: encode_message(signed_owner_root),
+                webauthn_challenge: encode_message(webauthn_challenge),
+            },
+            ClaimOwnerRootResultRef::CoSigned(signed_transition) => ClaimReply::OwnerRootCoSigned {
+                signed_transition: encode_message(signed_transition),
+            },
+        };
+        serde_json::to_vec(&reply).map_err(internal_failure)
     }
 }
 
@@ -118,6 +311,9 @@ impl ClaimHandler for StoredClaimAuthorization {
 )]
 enum ClaimRequest {
     Resolve,
+    ResolveOwnerRoot {
+        handle: String,
+    },
     PreConsent {
         handle: String,
         nonce: String,
@@ -126,15 +322,43 @@ enum ClaimRequest {
         handle: String,
         credential_id: String,
     },
+    ClaimOwnerRoot {
+        registration: String,
+        next_authority_key: String,
+        next_authority_key_proof: String,
+        next_recovery_policy: String,
+        next_recovery_key_proofs: Vec<String>,
+        valid_from_unix_seconds: i64,
+        nonce: String,
+    },
 }
 
 #[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 enum ClaimReply {
-    Resolved { agent: AgentAccountSummary },
-    PreConsented { consent: AgentConsent },
-    PromoteConsented { consent: AgentConsent },
-    Refused { refusal: &'static str },
+    Resolved {
+        agent: AgentAccountSummary,
+    },
+    PreConsented {
+        consent: AgentConsent,
+    },
+    PromoteConsented {
+        consent: AgentConsent,
+    },
+    OwnerRootResolved {
+        signed_owner_root: String,
+        webauthn_challenge: String,
+    },
+    OwnerRootCoSigned {
+        signed_transition: String,
+    },
+    Refused {
+        refusal: &'static str,
+    },
 }
 
 #[derive(Serialize)]
@@ -228,8 +452,79 @@ pub(crate) fn consent_reply(
             let consent = signed_promote_consent(state, &handle, &credential_id, signer)?;
             serde_json::to_vec(&ClaimReply::PromoteConsented { consent }).map_err(internal_failure)
         }
-        ClaimRequest::Resolve => Err(invalid_failure("consent body has the wrong kind")),
+        ClaimRequest::Resolve
+        | ClaimRequest::ResolveOwnerRoot { .. }
+        | ClaimRequest::ClaimOwnerRoot { .. } => {
+            Err(invalid_failure("consent body has the wrong kind"))
+        }
     }
+}
+
+fn owner_root_operation(body: &[u8]) -> Result<ClaimOwnerRootOperation, CallFailure> {
+    match parse_request(body)? {
+        ClaimRequest::ResolveOwnerRoot { handle } => {
+            validate_handle(&handle)?;
+            Ok(ClaimOwnerRootOperation::resolve(handle))
+        }
+        ClaimRequest::ClaimOwnerRoot {
+            registration,
+            next_authority_key,
+            next_authority_key_proof,
+            next_recovery_policy,
+            next_recovery_key_proofs,
+            valid_from_unix_seconds,
+            nonce,
+        } => Ok(ClaimOwnerRootOperation::co_sign(
+            decode_message(&registration, "RegisterPublicKey request")?,
+            BrowserClaimDeferredHuman {
+                next_authority_key: decode_message(&next_authority_key, "next authority key")?,
+                next_authority_key_proof: decode_message(
+                    &next_authority_key_proof,
+                    "next authority key proof",
+                )?,
+                next_recovery_policy: decode_message(
+                    &next_recovery_policy,
+                    "next recovery policy",
+                )?,
+                next_recovery_key_proofs: next_recovery_key_proofs
+                    .iter()
+                    .map(|proof| decode_message(proof, "next recovery key proof"))
+                    .collect::<Result<_, _>>()?,
+                valid_from_unix_seconds,
+                nonce: decode_fixed(&nonce, "claim transition nonce")?,
+            },
+        )),
+        ClaimRequest::Resolve
+        | ClaimRequest::PreConsent { .. }
+        | ClaimRequest::PromoteConsent { .. } => {
+            Err(invalid_failure("owner-root body has the wrong kind"))
+        }
+    }
+}
+
+fn encode_message(message: &impl Message) -> String {
+    URL_SAFE_NO_PAD.encode(message.encode_to_vec())
+}
+
+fn decode_message<M: Message + Default>(
+    encoded: &str,
+    field: &'static str,
+) -> Result<M, CallFailure> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| invalid_failure(&format!("invalid {field}")))?;
+    M::decode(bytes.as_slice()).map_err(|_| invalid_failure(&format!("invalid {field}")))
+}
+
+fn decode_fixed<const N: usize>(
+    encoded: &str,
+    field: &'static str,
+) -> Result<[u8; N], CallFailure> {
+    URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| invalid_failure(&format!("invalid {field}")))?
+        .try_into()
+        .map_err(|_| invalid_failure(&format!("{field} must contain {N} bytes")))
 }
 
 pub(crate) fn signed_pre_consent(

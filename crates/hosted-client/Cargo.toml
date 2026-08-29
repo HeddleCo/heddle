@@ -69,6 +69,7 @@ tracing-opentelemetry = { workspace = true, optional = true }
 [dev-dependencies]
 iroh-relay = { version = "=1.0.3", default-features = false, features = ["server"] }
 rcgen = "0.14.8"
+tempfile.workspace = true
 tracing-subscriber.workspace = true
 
 [features]

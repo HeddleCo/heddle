@@ -21,6 +21,9 @@ pub(crate) mod credential_file;
 pub(crate) mod device_flow;
 pub mod hosted;
 mod identity_state;
+mod owner_root;
+#[cfg(test)]
+mod owner_root_tests;
 pub(crate) mod root_mint;
 #[cfg(test)]
 mod root_mint_tests;

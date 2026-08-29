@@ -1,12 +1,13 @@
 use api::heddle::api::v1alpha1::{
-    ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, CheckMergeEligibilityRequest,
-    CheckMergeEligibilityResponse, CreateAgentAccountRequest, CreateAgentAccountResponse,
-    CreateGrantRequest, CreateInvitationRequest, CreateServiceAccountRequest,
-    CreateSignupInviteRequest, CreateSignupInviteResponse, CreateSpoolRequest, DeleteGrantRequest,
-    DeleteNamespaceRequest, DeleteRepositoryRequest, GetCurrentUserSpoolRequest,
-    GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
-    IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListGrantsRequest,
-    ListSignupInvitesRequest, ListSignupInvitesResponse, ListSpoolsRequest,
+    ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, BootstrapOwnerRootRequest,
+    BootstrapOwnerRootResponse, CheckMergeEligibilityRequest, CheckMergeEligibilityResponse,
+    CreateAgentAccountRequest, CreateAgentAccountResponse, CreateGrantRequest,
+    CreateInvitationRequest, CreateServiceAccountRequest, CreateSignupInviteRequest,
+    CreateSignupInviteResponse, CreateSpoolRequest, DeleteGrantRequest, DeleteNamespaceRequest,
+    DeleteRepositoryRequest, GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse,
+    GetCurrentUserSpoolRequest, GrantSupportAccessRequest, GrantTargetRef,
+    Invitation as ProtoInvitation, IssueServiceAccountCredentialRequest, IssuedCredentialResponse,
+    ListGrantsRequest, ListSignupInvitesRequest, ListSignupInvitesResponse, ListSpoolsRequest,
     ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode,
     ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
     ServiceAccountResponse, SpoolSummary, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
@@ -180,6 +181,60 @@ impl HostedClient {
         Ok(response.spools)
     }
 
+    pub(crate) async fn ensure_claimable_owner_root(&mut self) -> anyhow::Result<()> {
+        let Some(mut state) = crate::hosted_runtime::identity_state::load()? else {
+            return Ok(());
+        };
+        if state.is_claimed() {
+            return Ok(());
+        }
+        if let Some(server) = self.server_key.as_deref()
+            && !crate::hosted_runtime::hosted::server_keys_match(&state.server, server)
+        {
+            return Ok(());
+        }
+        let (signed, signer_pem) = {
+            let Some(signer) = self.context.proof_signer() else {
+                return Ok(());
+            };
+            let signed = crate::hosted_runtime::owner_root::mint_and_record_claimable_root(
+                &mut state,
+                signer,
+                chrono::Utc::now().timestamp(),
+            )?;
+            (signed, signer.to_pem()?)
+        };
+        crate::hosted_runtime::owner_root::persist_claimable_root(&state)?;
+        let signer = crypto::Ed25519Signer::from_pem(&signer_pem)?;
+        crate::hosted_runtime::owner_root::upload_claimable_root(self, &signer, signed).await
+    }
+
+    pub async fn bootstrap_owner_root(
+        &mut self,
+        request: BootstrapOwnerRootRequest,
+    ) -> Result<BootstrapOwnerRootResponse, ProtocolError> {
+        Ok(signed_call!(
+            self,
+            auth,
+            bootstrap_owner_root,
+            "/heddle.api.v1alpha1.OwnerAuthorizationService/BootstrapOwnerRoot",
+            request
+        ))
+    }
+
+    pub async fn get_current_owner_keyring(
+        &mut self,
+        request: GetCurrentOwnerKeyringRequest,
+    ) -> Result<GetCurrentOwnerKeyringResponse, ProtocolError> {
+        Ok(signed_call!(
+            self,
+            auth,
+            get_current_owner_keyring,
+            "/heddle.api.v1alpha1.OwnerAuthorizationService/GetCurrentOwnerKeyring",
+            request
+        ))
+    }
+
     pub async fn create_spool(
         &mut self,
         parent_path: &str,
@@ -187,6 +242,9 @@ impl HostedClient {
         kind: wire::HostedSpoolKind,
         display_name: Option<String>,
     ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
+        self.ensure_claimable_owner_root()
+            .await
+            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
         let operation_id =
             ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateSpool");
         let owner_genesis = Some(

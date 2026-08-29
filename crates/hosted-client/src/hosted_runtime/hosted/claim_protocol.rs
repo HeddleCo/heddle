@@ -26,6 +26,7 @@ use iroh::{
 pub(crate) const CLAIM_ALPN_V1: &[u8] = b"heddle-claim/1";
 pub(crate) const CLAIM_RESOLVE_METHOD: &str = "/heddle.claim.v1.ClaimService/Resolve";
 pub(crate) const CLAIM_CONSENT_METHOD: &str = "/heddle.claim.v1.ClaimService/Consent";
+pub(crate) const CLAIM_OWNER_ROOT_METHOD: &str = "/heddle.claim.v1.ClaimService/ClaimOwnerRoot";
 
 const MAX_REQUEST_FRAME: usize = 6 + MAX_METHOD_PATH + MAX_CALL_CONTEXT + MAX_CONTROL_BODY;
 
@@ -172,7 +173,10 @@ where
 }
 
 fn validate_auth_shape(method: &str, context: &CallContext) -> Result<(), CallFailure> {
-    if !matches!(method, CLAIM_RESOLVE_METHOD | CLAIM_CONSENT_METHOD) {
+    if !matches!(
+        method,
+        CLAIM_RESOLVE_METHOD | CLAIM_CONSENT_METHOD | CLAIM_OWNER_ROOT_METHOD
+    ) {
         return Err(failure(
             CallFailureCode::Unimplemented,
             "unknown claim method",

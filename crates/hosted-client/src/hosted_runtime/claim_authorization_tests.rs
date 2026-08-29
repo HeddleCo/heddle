@@ -6,25 +6,31 @@ use std::{
 
 use api::{
     framing::{ResponseFrame, decode_response_frame, encode_request_frame},
-    heddle::api::v1alpha1::{CallContext, CallFailure, CallFailureCode},
+    heddle::api::v1alpha1::{
+        AuthChallengeResponse, AuthorizationSignature, AuthorizationVerificationKey, CallContext,
+        CallFailure, CallFailureCode, RecoveryPolicy, RegisterPublicKeyRequest,
+        SignedOwnerKeyTransition, SignedOwnerRoot,
+    },
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use crypto::{Ed25519Signer, Signer as _};
 use iroh::{Endpoint, RelayMode, endpoint::presets, protocol::Router};
+use prost::Message;
 use tokio::sync::Mutex;
 
 use super::{
     agent_node_identity,
     auth_login::store_agent_root,
     claim_authorization::{
-        AgentConsent, StoredClaimAuthorization, consent_reply, pre_consent_message,
-        promote_consent_message, resolved_reply, signed_pre_consent, signed_promote_consent,
-        validate_credential_id, validate_handle, verify_promotion_consents,
+        AgentConsent, ClaimOwnerRootOperationRef, ClaimOwnerRootResult, StoredClaimAuthorization,
+        consent_reply, pre_consent_message, promote_consent_message, resolved_reply,
+        signed_pre_consent, signed_promote_consent, validate_credential_id, validate_handle,
+        verify_promotion_consents,
     },
     device_flow::restrict_agent_account_root,
     hosted::claim_protocol::{
-        CLAIM_ALPN_V1, CLAIM_CONSENT_METHOD, CLAIM_RESOLVE_METHOD, ClaimHandler, ClaimProtocol,
-        ClaimSecretVerifier, VerifiedClaimPrincipal,
+        CLAIM_ALPN_V1, CLAIM_CONSENT_METHOD, CLAIM_OWNER_ROOT_METHOD, CLAIM_RESOLVE_METHOD,
+        ClaimHandler, ClaimProtocol, ClaimSecretVerifier, VerifiedClaimPrincipal,
     },
     identity_state,
     identity_state::ClaimState,
@@ -405,6 +411,7 @@ async fn stored_endpoints() -> (
     Endpoint,
     iroh::EndpointAddr,
     tokio::sync::watch::Receiver<bool>,
+    tokio::sync::mpsc::Receiver<super::claim_authorization::ClaimOwnerRootCall>,
 ) {
     let server = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Disabled)
@@ -414,7 +421,7 @@ async fn stored_endpoints() -> (
         .await
         .unwrap();
     let address = server.addr();
-    let (authorization, completion) = StoredClaimAuthorization::new();
+    let (authorization, completion, owner_root_calls) = StoredClaimAuthorization::new();
     let authorization = Arc::new(authorization);
     let router = Router::builder(server)
         .accept(
@@ -429,7 +436,7 @@ async fn stored_endpoints() -> (
         .bind()
         .await
         .unwrap();
-    (router, client, address, completion)
+    (router, client, address, completion, owner_root_calls)
 }
 
 struct IsolatedHeddleHome {
@@ -548,7 +555,7 @@ enum OwnedResponse {
 async fn production_activation_serves_full_iroh_browser_round_trip() {
     let _home = IsolatedHeddleHome::new();
     let (secret, signer) = store_production_claim_state(true);
-    let (router, client, address, mut completion) = stored_endpoints().await;
+    let (router, client, address, completion, _owner_root_calls) = stored_endpoints().await;
 
     let OwnedResponse::Success(resolved) = call(
         &client,
@@ -611,11 +618,10 @@ async fn production_activation_serves_full_iroh_browser_round_trip() {
     };
     let promote: serde_json::Value = serde_json::from_slice(&promote).unwrap();
     let promote = consent_from_reply(&promote);
-    tokio::time::timeout(std::time::Duration::from_secs(2), completion.changed())
-        .await
-        .expect("promote response delivery signal must not hang")
-        .expect("claim listener remains online");
-    assert!(*completion.borrow());
+    assert!(
+        !*completion.borrow(),
+        "legacy string consent must not complete the MODEL B owner-root claim"
+    );
     let promote_signature = URL_SAFE_NO_PAD.decode(&promote.signature).unwrap();
     let claimed = identity_state::load().unwrap().unwrap();
     Ed25519Signer::verify_with_public_key(
@@ -656,10 +662,108 @@ async fn production_activation_serves_full_iroh_browser_round_trip() {
 }
 
 #[tokio::test]
+async fn claim_owner_root_routes_resolve_and_cosign_over_the_authenticated_channel() {
+    let _home = IsolatedHeddleHome::new();
+    let (secret, _signer) = store_production_claim_state(true);
+    let (router, client, address, mut completion, mut owner_root_calls) = stored_endpoints().await;
+
+    let resolve_client = client.clone();
+    let resolve_address = address.clone();
+    let resolve_secret = secret.clone();
+    let resolve = tokio::spawn(async move {
+        call(
+            &resolve_client,
+            resolve_address,
+            CLAIM_OWNER_ROOT_METHOD,
+            &resolve_secret,
+            br#"{"kind":"resolveOwnerRoot","handle":"human-handle"}"#,
+        )
+        .await
+    });
+    let pending = owner_root_calls
+        .recv()
+        .await
+        .expect("resolve reaches cmd_claim");
+    assert!(matches!(
+        pending.operation.as_ref(),
+        Some(ClaimOwnerRootOperationRef::Resolve("human-handle"))
+    ));
+    pending.respond(Ok(ClaimOwnerRootResult::resolved(
+        SignedOwnerRoot::default(),
+        AuthChallengeResponse {
+            challenge_id: "challenge-1".to_string(),
+            challenge: "challenge".to_string(),
+            username: "human-handle".to_string(),
+            ..Default::default()
+        },
+    )));
+    let OwnedResponse::Success(resolved) = resolve.await.expect("resolve task") else {
+        panic!("owner-root resolve must succeed");
+    };
+    let resolved: serde_json::Value = serde_json::from_slice(&resolved).expect("resolve JSON");
+    assert_eq!(resolved["kind"], "ownerRootResolved");
+    SignedOwnerRoot::decode(
+        URL_SAFE_NO_PAD
+            .decode(resolved["signedOwnerRoot"].as_str().expect("root base64"))
+            .expect("root bytes")
+            .as_slice(),
+    )
+    .expect("root protobuf");
+
+    let cosign_body = serde_json::json!({
+        "kind": "claimOwnerRoot",
+        "registration": URL_SAFE_NO_PAD.encode(RegisterPublicKeyRequest::default().encode_to_vec()),
+        "nextAuthorityKey": URL_SAFE_NO_PAD.encode(AuthorizationVerificationKey::default().encode_to_vec()),
+        "nextAuthorityKeyProof": URL_SAFE_NO_PAD.encode(AuthorizationSignature::default().encode_to_vec()),
+        "nextRecoveryPolicy": URL_SAFE_NO_PAD.encode(RecoveryPolicy::default().encode_to_vec()),
+        "nextRecoveryKeyProofs": [],
+        "validFromUnixSeconds": 1,
+        "nonce": URL_SAFE_NO_PAD.encode([0x42; 32]),
+    });
+    let cosign_client = client.clone();
+    let cosign_address = address.clone();
+    let cosign_secret = secret.clone();
+    let cosign = tokio::spawn(async move {
+        call(
+            &cosign_client,
+            cosign_address,
+            CLAIM_OWNER_ROOT_METHOD,
+            &cosign_secret,
+            &serde_json::to_vec(&cosign_body).expect("cosign JSON"),
+        )
+        .await
+    });
+    let pending = owner_root_calls
+        .recv()
+        .await
+        .expect("co-sign reaches cmd_claim");
+    assert!(matches!(
+        pending.operation.as_ref(),
+        Some(ClaimOwnerRootOperationRef::CoSign { .. })
+    ));
+    pending.respond(Ok(ClaimOwnerRootResult::co_signed(
+        SignedOwnerKeyTransition::default(),
+    )));
+    let OwnedResponse::Success(cosigned) = cosign.await.expect("co-sign task") else {
+        panic!("owner-root co-sign must succeed");
+    };
+    let cosigned: serde_json::Value = serde_json::from_slice(&cosigned).expect("co-sign JSON");
+    assert_eq!(cosigned["kind"], "ownerRootCoSigned");
+    tokio::time::timeout(std::time::Duration::from_secs(2), completion.changed())
+        .await
+        .expect("co-sign delivery signal must not hang")
+        .expect("claim listener remains online");
+    assert!(*completion.borrow());
+
+    client.close().await;
+    router.shutdown().await.expect("router shutdown");
+}
+
+#[tokio::test]
 async fn dormant_stored_claim_state_reproduces_every_call_fail_closed() {
     let _home = IsolatedHeddleHome::new();
     let (inactive_secret, _signer) = store_production_claim_state(false);
-    let (router, client, address, _completion) = stored_endpoints().await;
+    let (router, client, address, _completion, _owner_root_calls) = stored_endpoints().await;
     let requests: [(&str, &[u8]); 3] = [
         (CLAIM_RESOLVE_METHOD, br#"{"kind":"resolve"}"#),
         (

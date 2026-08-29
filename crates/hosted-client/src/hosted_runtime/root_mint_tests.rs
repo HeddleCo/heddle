@@ -298,10 +298,15 @@ fn authorize_restricted_root(
 /// both server-side for unclaimed agent-rooted accounts (weft#1852/#1853).
 #[test]
 fn safe_ceiling_allows_host_only_spool_provisioning() {
-    for op in ["GetCurrentUserSpool", "CreateSpool"] {
+    for op in [
+        "GetCurrentUserSpool",
+        "CreateSpool",
+        "BootstrapOwnerRoot",
+        "GetCurrentOwnerKeyring",
+    ] {
         assert!(
             SAFE_AGENT_OPERATIONS.contains(&op),
-            "agent ceiling missing {op}: host-only auto-provision push cannot fire it"
+            "agent ceiling missing {op}: host-only auto-provision / claimable owner-root cannot fire it"
         );
     }
 }

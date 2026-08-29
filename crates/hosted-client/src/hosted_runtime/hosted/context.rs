@@ -82,17 +82,40 @@ impl CallContextFactory {
         self.signing_identity.as_deref()
     }
 
+    pub(super) fn proof_signer(&self) -> Option<&Ed25519Signer> {
+        self.signer.as_deref()
+    }
+
     /// Mint CreateSpool genesis with the same device/proof key used for PoP.
     ///
     /// A generated-per-spool key would pass CreateSpool and fail later
     /// purge/claim: `genesis.owner_public_key` must be the account owner-root.
-    pub(super) fn mint_spool_owner_genesis(&self) -> Result<SignedSpoolOwnerGenesis> {
+    /// When a sequence-0 owner-root public key is already stored, refuse a
+    /// different genesis key so purge/claim stay bound to the account root.
+    pub(crate) fn mint_spool_owner_genesis(&self) -> Result<SignedSpoolOwnerGenesis> {
         let signer = self
             .signer
             .as_ref()
             .ok_or(HostedError::SigningIdentityRequired)?;
+        if let Some(seq0) = crate::hosted_runtime::owner_root::stored_seq0_public_key()
+            .map_err(|error| HostedError::Framing(error.to_string()))?
+            && seq0 != signer.public_key()
+        {
+            return Err(HostedError::Framing(
+                "CreateSpool genesis owner key does not match the account sequence-0 owner root"
+                    .to_owned(),
+            ));
+        }
         let spool_uuid = uuid::Uuid::now_v7();
-        repo::sign_spool_owner_genesis(signer.as_ref(), *spool_uuid.as_bytes()).map_err(Into::into)
+        let signed = repo::sign_spool_owner_genesis(signer.as_ref(), *spool_uuid.as_bytes())
+            .map_err(HostedError::from)?;
+        if let Some(seq0) = crate::hosted_runtime::owner_root::stored_seq0_public_key()
+            .map_err(|error| HostedError::Framing(error.to_string()))?
+        {
+            repo::require_genesis_matches_seq0(&signed, &seq0)
+                .map_err(|error| HostedError::Framing(error.to_string()))?;
+        }
+        Ok(signed)
     }
 
     pub fn with_bearer_capability(mut self, capability: impl Into<Vec<u8>>) -> Self {
