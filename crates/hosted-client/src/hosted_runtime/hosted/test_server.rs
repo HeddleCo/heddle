@@ -13,14 +13,15 @@ use api::{
         encode_stream_message, encode_success_response,
     },
     heddle::api::v1alpha1::{
-        BlobResponse, GetBlobRequest, GetContextHistoryPageEnd, GetContextHistoryResponse,
-        ListContextPageEnd, ListContextResponse, ListDiscussionsPageEnd, ListDiscussionsResponse,
-        ListRefsPageEnd, ListRefsResponse, ListThreadsPageEnd, ListThreadsResponse, PackChunk,
-        PackStreamKind, PullComplete, PullReady, PullServerFrame, PushClientFrame, PushComplete,
-        PushReady, PushServerFrame, SignedSpoolOwnerGenesis, StateId, TransferCheckpoint,
-        TransportMode, get_context_history_response, list_context_response,
-        list_discussions_response, list_refs_response, list_threads_response, pull_server_frame,
-        push_client_frame, push_server_frame,
+        BlobResponse, CreateSpoolRequest, GetBlobRequest, GetContextHistoryPageEnd,
+        GetContextHistoryResponse, HostedSpool, ListContextPageEnd, ListContextResponse,
+        ListDiscussionsPageEnd, ListDiscussionsResponse, ListRefsPageEnd, ListRefsResponse,
+        ListThreadsPageEnd, ListThreadsResponse, PackChunk, PackStreamKind, PullComplete,
+        PullReady, PullServerFrame, PushClientFrame, PushComplete, PushReady, PushServerFrame,
+        SignedSpoolOwnerGenesis, StateId, TransferCheckpoint, TransportMode,
+        get_context_history_response, list_context_response, list_discussions_response,
+        list_refs_response, list_threads_response, pull_server_frame, push_client_frame,
+        push_server_frame,
     },
     method_descriptor,
 };
@@ -35,6 +36,7 @@ use super::{CallContextFactory, HostedClient};
 
 const OWNER_GENESIS_FIXTURE_HEX: &str = "0a380a10222222222222222222222222222222221224080112208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c12640a20def88318e44a809464c1022f22230567bae6805d17b1ccfc2bebe5326232c58a1240bfe677c0b6fec8d28e379f584f36dee7258d834222f9b75f61dc75b7db2d836d76d4fb6eaf9e7f561925b2e6882b51eadaf3ec77c565f5b638ad0febfc8cd304";
 const GET_BLOB_METHOD: &str = "/heddle.api.v1alpha1.RepositoryService/GetBlob";
+const CREATE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/CreateSpool";
 
 fn owner_genesis_fixture() -> SignedSpoolOwnerGenesis {
     let bytes = hex::decode(OWNER_GENESIS_FIXTURE_HEX).expect("published v2 fixture hex");
@@ -42,7 +44,18 @@ fn owner_genesis_fixture() -> SignedSpoolOwnerGenesis {
 }
 
 pub(crate) async fn start() -> (HostedClient, JoinHandle<()>) {
-    start_inner(None, BlobFixture::default()).await
+    start_inner(None, BlobFixture::default(), None).await
+}
+
+pub(crate) async fn start_recording_create_spool() -> (
+    HostedClient,
+    JoinHandle<()>,
+    Arc<Mutex<Vec<CreateSpoolRequest>>>,
+) {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (client, server) =
+        start_inner(None, BlobFixture::default(), Some(Arc::clone(&captured))).await;
+    (client, server, captured)
 }
 
 pub(crate) async fn start_with_remote_state(
@@ -54,6 +67,7 @@ pub(crate) async fn start_with_remote_state(
             pack: None,
         }),
         BlobFixture::default(),
+        None,
     )
     .await
 }
@@ -69,6 +83,7 @@ pub(crate) async fn start_with_pull_pack(
             pack: Some((pack_data, index_data)),
         }),
         BlobFixture::default(),
+        None,
     )
     .await
 }
@@ -104,7 +119,7 @@ async fn start_with_get_blob_contents_and_pull(
         contents: blobs.into_iter().collect(),
         requested: Arc::clone(&requested),
     };
-    let (client, server) = start_inner(pull, fixture).await;
+    let (client, server) = start_inner(pull, fixture, None).await;
     (client, server, requested)
 }
 
@@ -123,6 +138,7 @@ struct BlobFixture {
 async fn start_inner(
     pull: Option<PullFixture>,
     blobs: BlobFixture,
+    create_spool: Option<Arc<Mutex<Vec<CreateSpoolRequest>>>>,
 ) -> (HostedClient, JoinHandle<()>) {
     let server = Endpoint::builder(presets::Minimal)
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
@@ -141,7 +157,13 @@ async fn start_inner(
             .await
             .unwrap();
         while let Ok((send, recv)) = connection.accept_bi().await {
-            tokio::spawn(serve_call(send, recv, pull.clone(), blobs.clone()));
+            tokio::spawn(serve_call(
+                send,
+                recv,
+                pull.clone(),
+                blobs.clone(),
+                create_spool.clone(),
+            ));
         }
         server.close().await;
     });
@@ -167,6 +189,7 @@ async fn serve_call(
     mut recv: iroh::endpoint::RecvStream,
     pull: Option<PullFixture>,
     blobs: BlobFixture,
+    create_spool: Option<Arc<Mutex<Vec<CreateSpoolRequest>>>>,
 ) {
     let mut request = Vec::new();
     let (method, prelude_len) = loop {
@@ -183,7 +206,9 @@ async fn serve_call(
     let descriptor = method_descriptor(&method).expect("registered hosted method");
     match descriptor.streaming {
         StreamingShape::Unary | StreamingShape::ClientStreaming => {
-            if method == GET_BLOB_METHOD && !blobs.contents.is_empty() {
+            if method == CREATE_SPOOL_METHOD {
+                serve_create_spool(&mut send, &mut recv, &mut request, create_spool).await;
+            } else if method == GET_BLOB_METHOD && !blobs.contents.is_empty() {
                 serve_get_blob(&mut send, &mut recv, &mut request, blobs).await;
             } else {
                 send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
@@ -376,6 +401,45 @@ fn bidi_responses(method: &str, pull: Option<PullFixture>) -> Vec<Vec<u8>> {
         }
         _ => Vec::new(),
     }
+}
+
+async fn serve_create_spool(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    captured: Option<Arc<Mutex<Vec<CreateSpoolRequest>>>>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| CreateSpoolRequest::decode(frame.body).ok());
+    if let (Some(captured), Some(body)) = (captured.as_ref(), body.as_ref()) {
+        captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(body.clone());
+    }
+    let response = match body {
+        Some(request) => HostedSpool {
+            full_path: format!("{}/{}", request.parent_path, request.slug),
+            kind: if request.is_repo {
+                "project".to_string()
+            } else {
+                "namespace".to_string()
+            },
+            is_repo: request.is_repo,
+            display_name: request.display_name.unwrap_or_default(),
+            ..HostedSpool::default()
+        },
+        None => HostedSpool::default(),
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
 }
 
 async fn serve_get_blob(
