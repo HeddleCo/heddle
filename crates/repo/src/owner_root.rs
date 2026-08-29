@@ -11,7 +11,6 @@ use api::heddle::api::v1alpha1::{
     AuthorizationKeyAlgorithm, AuthorizationSignature, AuthorizationVerificationKey,
     OwnerKeyBinding, OwnerKeyBindingKind, OwnerKeyTransition, OwnerKeyTransitionKind, OwnerRoot,
     RecoveryPolicy, SignedOwnerKeyTransition, SignedOwnerRoot, SignedSpoolOwnerGenesis,
-    SpoolOwnerGenesis,
 };
 use crypto::{Signer, SignerError, verify_payload_signature};
 use heddleco_capability_verifier::{
@@ -31,31 +30,6 @@ const DEFAULT_RECOVERY_WINDOW_SECS: u64 = 604_800;
 
 /// Claim window for an agent-rooted deferred human root.
 pub const CLAIMABLE_DEFERRED_HUMAN_TTL_SECS: i64 = 90 * 24 * 60 * 60;
-
-/// Protocol-2 self-signature: the owner key signs `SHA-256(public_key || uuid)`.
-///
-/// CreateSpool callers mint this locally. Use a UUIDv7 — weft checks the version.
-pub fn sign_spool_owner_genesis(
-    signer: &impl Signer,
-    spool_uuid: [u8; 16],
-) -> Result<SignedSpoolOwnerGenesis, SignerError> {
-    let owner_public_key = ed25519_verification_key(signer.public_key())?;
-    let signer_key_id = authorization_key_id(&owner_public_key).to_vec();
-    let digest = Sha256::new()
-        .chain_update(&owner_public_key.public_key)
-        .chain_update(spool_uuid)
-        .finalize();
-    Ok(SignedSpoolOwnerGenesis {
-        genesis: Some(SpoolOwnerGenesis {
-            spool_uuid: spool_uuid.to_vec(),
-            owner_public_key: Some(owner_public_key),
-        }),
-        owner_signature: Some(AuthorizationSignature {
-            signer_key_id,
-            signature: signer.sign(&digest)?,
-        }),
-    })
-}
 
 /// Protocol-1 claimable deferred-human owner root.
 ///

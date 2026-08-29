@@ -2088,6 +2088,13 @@ mod tests {
 
         let permission = ProtocolError::AuthorizationFailed("missing grant".to_string());
         assert!(!auto_provision_create_already_exists(&permission));
+
+        let missing_genesis =
+            ProtocolError::InvalidState("owner_genesis is required".to_string());
+        assert!(
+            !auto_provision_create_already_exists(&missing_genesis),
+            "weft's CreateSpool genesis require is a hard failure, not AlreadyExists"
+        );
     }
 
     #[cfg(feature = "client")]

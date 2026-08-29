@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use api::heddle::api::v1alpha1::{
-    AuthorizationKeyAlgorithm, AuthorizationSignature, AuthorizationVerificationKey,
-    PurgeOperationSigningBody, SidecarAuthorization, SignedSpoolOwnerGenesis, SpoolOwnerGenesis,
+    PurgeOperationSigningBody, SidecarAuthorization, SignedSpoolOwnerGenesis,
 };
 use crypto::Signer;
 use heddleco_capability_verifier::{
@@ -11,7 +10,6 @@ use heddleco_capability_verifier::{
     verify_authorization_bundle, verify_purge_authorization, verify_spool_owner_genesis,
 };
 use prost::Message;
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use crate::Repository;
@@ -41,32 +39,32 @@ fn pinned_repository() -> (TempDir, Repository, ConformanceFixture) {
 
 fn generated_genesis(spool_uuid: [u8; 16]) -> SignedSpoolOwnerGenesis {
     let signer = crypto::Ed25519Signer::generate().expect("owner keypair");
-    let owner_public_key = AuthorizationVerificationKey {
-        algorithm: AuthorizationKeyAlgorithm::Ed25519 as i32,
-        public_key: signer.public_key().to_vec(),
-    };
-    let mut key_id_body = Vec::with_capacity(36);
-    key_id_body.extend_from_slice(&owner_public_key.algorithm.to_be_bytes());
-    key_id_body.extend_from_slice(&owner_public_key.public_key);
-    let signer_key_id = Sha256::new()
-        .chain_update(b"heddle-key-v1")
-        .chain_update(key_id_body)
-        .finalize()
-        .to_vec();
-    let digest = Sha256::new()
-        .chain_update(&owner_public_key.public_key)
-        .chain_update(spool_uuid)
-        .finalize();
-    SignedSpoolOwnerGenesis {
-        genesis: Some(SpoolOwnerGenesis {
-            spool_uuid: spool_uuid.to_vec(),
-            owner_public_key: Some(owner_public_key),
-        }),
-        owner_signature: Some(AuthorizationSignature {
-            signer_key_id,
-            signature: signer.sign(&digest).expect("sign owner genesis"),
-        }),
-    }
+    crate::sign_spool_owner_genesis(&signer, spool_uuid).expect("sign owner genesis")
+}
+
+#[test]
+fn create_spool_genesis_is_uuidv7_self_signature_over_the_device_key() {
+    let signer = crypto::Ed25519Signer::generate().expect("device proof key");
+    let spool_uuid = uuid::Uuid::now_v7();
+    assert_eq!(spool_uuid.get_version_num(), 7);
+
+    let signed = crate::sign_spool_owner_genesis(&signer, *spool_uuid.as_bytes())
+        .expect("mint owner genesis");
+    let verified = verify_spool_owner_genesis(&signed).expect("weft-equivalent genesis verify");
+
+    assert_eq!(verified.spool_uuid(), *spool_uuid.as_bytes());
+    assert_eq!(verified.owner_public_key().public_key, signer.public_key());
+
+    let other = crypto::Ed25519Signer::generate().expect("other key");
+    let mismatched = crate::sign_spool_owner_genesis(&other, *spool_uuid.as_bytes())
+        .expect("mint with a different key");
+    let mismatched_verified =
+        verify_spool_owner_genesis(&mismatched).expect("self-signature still verifies");
+    assert_ne!(
+        mismatched_verified.owner_public_key().public_key,
+        signer.public_key(),
+        "a throwaway per-spool key must not be confused with the device proof key"
+    );
 }
 
 #[test]

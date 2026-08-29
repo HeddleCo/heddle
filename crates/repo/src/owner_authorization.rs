@@ -5,8 +5,11 @@ use std::fs;
 
 use anyhow::{Context, Result};
 use api::heddle::api::v1alpha1::{
+    AuthorizationKeyAlgorithm, AuthorizationSignature, AuthorizationVerificationKey,
     PurgeOperationSigningBody, PurgeSidecarIdentity, SidecarAuthorization, SignedSpoolOwnerGenesis,
+    SpoolOwnerGenesis,
 };
+use crypto::Signer;
 use heddleco_capability_verifier::{
     Decision, PurgeContext, VerificationLimits, verify_authorization_bundle,
     verify_purge_authorization, verify_spool_owner_genesis,
@@ -21,6 +24,44 @@ use crate::{HeddleError, Repository};
 const OWNER_GENESIS_PIN_FILE: &str = "owner-authorization.bin";
 const OWNER_AUTHORIZATION_PROTOCOL_VERSION: u32 = 2;
 const MAX_CAPABILITY_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
+const OWNER_KEY_ID_DOMAIN: &[u8] = b"heddle-key-v1";
+
+/// Protocol-2 self-signature: the owner key signs `SHA-256(public_key || uuid)`.
+///
+/// CreateSpool callers mint this locally. Weft only verifies the
+/// self-signature and takes the new spool UUID from the genesis; it has no
+/// owner private key. Use a UUIDv7 — weft checks the version.
+pub fn sign_spool_owner_genesis(
+    signer: &impl Signer,
+    spool_uuid: [u8; 16],
+) -> Result<SignedSpoolOwnerGenesis, crypto::SignerError> {
+    let owner_public_key = AuthorizationVerificationKey {
+        algorithm: AuthorizationKeyAlgorithm::Ed25519 as i32,
+        public_key: signer.public_key().to_vec(),
+    };
+    let mut key_id_body = Vec::with_capacity(4 + owner_public_key.public_key.len());
+    key_id_body.extend_from_slice(&owner_public_key.algorithm.to_be_bytes());
+    key_id_body.extend_from_slice(&owner_public_key.public_key);
+    let signer_key_id = Sha256::new()
+        .chain_update(OWNER_KEY_ID_DOMAIN)
+        .chain_update(key_id_body)
+        .finalize()
+        .to_vec();
+    let digest = Sha256::new()
+        .chain_update(&owner_public_key.public_key)
+        .chain_update(spool_uuid)
+        .finalize();
+    Ok(SignedSpoolOwnerGenesis {
+        genesis: Some(SpoolOwnerGenesis {
+            spool_uuid: spool_uuid.to_vec(),
+            owner_public_key: Some(owner_public_key),
+        }),
+        owner_signature: Some(AuthorizationSignature {
+            signer_key_id,
+            signature: signer.sign(&digest)?,
+        }),
+    })
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct PinnedOwnerGenesis {

@@ -88,6 +88,8 @@ impl CallContextFactory {
 
     /// Mint CreateSpool genesis with the same device/proof key used for PoP.
     ///
+    /// A generated-per-spool key would pass CreateSpool and fail later
+    /// purge/claim: `genesis.owner_public_key` must be the account owner-root.
     /// When a sequence-0 owner-root public key is already stored, refuse a
     /// different genesis key so purge/claim stay bound to the account root.
     pub(crate) fn mint_spool_owner_genesis(&self) -> Result<SignedSpoolOwnerGenesis> {
@@ -638,5 +640,17 @@ mod tests {
                 .public_key,
             signer.public_key()
         );
+        use sha2::{Digest, Sha256};
+
+        let digest = Sha256::new()
+            .chain_update(signer.public_key())
+            .chain_update(spool_uuid)
+            .finalize();
+        Ed25519Signer::verify_with_public_key(
+            &digest,
+            signer.public_key(),
+            &signed.owner_signature.expect("owner signature").signature,
+        )
+        .unwrap();
     }
 }
