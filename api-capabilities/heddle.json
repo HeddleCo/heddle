@@ -372,6 +372,23 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.CollaborationService/ListByThreadRef",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "heddle does not yet consume ListByThreadRef; the discuss mailbox verbs (heddle#1536/#1534) are unmerged."
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null,
+          "reason": "heddle does not yet consume ListByThreadRef; the discuss mailbox verbs (heddle#1536/#1534) are unmerged."
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.CollaborationService/ListDiscussionsByStates",
       "layers": {
         "client": {
@@ -650,21 +667,6 @@
       }
     },
     {
-      "rpc": "heddle.api.v1alpha1.IdentityService/ListSignupInvites",
-      "layers": {
-        "client": {
-          "status": "planned",
-          "evidence": [],
-          "follow_up": null
-        },
-        "cli": {
-          "status": "planned",
-          "evidence": [],
-          "follow_up": null
-        }
-      }
-    },
-    {
       "rpc": "heddle.api.v1alpha1.IdentityService/DeclareRecoveryMethod",
       "layers": {
         "client": {
@@ -847,6 +849,21 @@
       }
     },
     {
+      "rpc": "heddle.api.v1alpha1.IdentityService/ListInstallationRepositories",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        }
+      }
+    },
+    {
       "rpc": "heddle.api.v1alpha1.IdentityService/ListScopeCapabilities",
       "layers": {
         "client": {
@@ -894,6 +911,21 @@
           "evidence": [],
           "follow_up": null,
           "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+        }
+      }
+    },
+    {
+      "rpc": "heddle.api.v1alpha1.IdentityService/ListSignupInvites",
+      "layers": {
+        "client": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
+        },
+        "cli": {
+          "status": "planned",
+          "evidence": [],
+          "follow_up": null
         }
       }
     },
@@ -946,21 +978,6 @@
     },
     {
       "rpc": "heddle.api.v1alpha1.IdentityService/ProvisionAgentRootedAccount",
-      "layers": {
-        "client": {
-          "status": "planned",
-          "evidence": [],
-          "follow_up": null
-        },
-        "cli": {
-          "status": "planned",
-          "evidence": [],
-          "follow_up": null
-        }
-      }
-    },
-    {
-      "rpc": "heddle.api.v1alpha1.IdentityService/ListInstallationRepositories",
       "layers": {
         "client": {
           "status": "planned",
@@ -1719,48 +1736,6 @@
       }
     },
     {
-      "rpc": "heddle.api.v1alpha1.RegistryService/DeleteNamespace",
-      "layers": {
-        "client": {
-          "status": "shipped",
-          "evidence": [
-            {
-              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
-              "contains": "delete_namespace"
-            }
-          ],
-          "follow_up": null
-        },
-        "cli": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
-        }
-      }
-    },
-    {
-      "rpc": "heddle.api.v1alpha1.RegistryService/DeleteRepository",
-      "layers": {
-        "client": {
-          "status": "shipped",
-          "evidence": [
-            {
-              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
-              "contains": "delete_repository"
-            }
-          ],
-          "follow_up": null
-        },
-        "cli": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
-        }
-      }
-    },
-    {
       "rpc": "heddle.api.v1alpha1.RegistryService/DeleteSpool",
       "layers": {
         "client": {
@@ -2156,48 +2131,6 @@
             {
               "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
               "contains": "update_grant"
-            }
-          ],
-          "follow_up": null
-        },
-        "cli": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
-        }
-      }
-    },
-    {
-      "rpc": "heddle.api.v1alpha1.RegistryService/UpdateNamespace",
-      "layers": {
-        "client": {
-          "status": "shipped",
-          "evidence": [
-            {
-              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
-              "contains": "update_namespace"
-            }
-          ],
-          "follow_up": null
-        },
-        "cli": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
-        }
-      }
-    },
-    {
-      "rpc": "heddle.api.v1alpha1.RegistryService/UpdateRepository",
-      "layers": {
-        "client": {
-          "status": "shipped",
-          "evidence": [
-            {
-              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
-              "contains": "update_repository"
             }
           ],
           "follow_up": null
