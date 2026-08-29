@@ -5,15 +5,65 @@ use std::{ffi::OsString, sync::MutexGuard};
 use api::heddle::api::v1alpha1::{
     BootstrapOwnerRootRequest, CreateAgentAccountResponse, OwnerKeyBindingKind,
     OwnerKeyTransitionKind, RecoveryGuardian, RecoveryGuardianKind, RecoveryPolicy,
-    RegisterPublicKeyRequest, SignedOwnerRoot,
+    RegisterPublicKeyRequest, SignedOwnerKeyTransition, SignedOwnerRoot,
 };
 use config::credentials;
 use crypto::{Ed25519Signer, Signer as _};
 use prost::Message;
 use repo::{
-    authorization_key_id, ed25519_verification_key, seq0_authority_public_key,
-    sign_agent_claim_binding,
+    OWNER_TRANSITION_DOMAIN, authorization_key_id, claim_deferred_human_transition,
+    ed25519_verification_key, owner_key_transition_body, seq0_authority_public_key,
+    sign_agent_claim_binding, sign_canonical,
 };
+
+fn build_with_browser_proofs(
+    agent: &Ed25519Signer,
+    human: &Ed25519Signer,
+    signed_root: &SignedOwnerRoot,
+    policy: RecoveryPolicy,
+    guardian_signers: &[Ed25519Signer],
+    valid_from_unix_seconds: i64,
+) -> SignedOwnerKeyTransition {
+    let next_authority_key =
+        ed25519_verification_key(human.public_key()).expect("human public key");
+    let nonce = [0x91; 32];
+    let unsigned = claim_deferred_human_transition(
+        signed_root,
+        next_authority_key.clone(),
+        policy.clone(),
+        valid_from_unix_seconds,
+        nonce,
+    )
+    .expect("browser transition");
+    let body = owner_key_transition_body(&unsigned).expect("browser canonical body");
+    let next_authority_key_proof =
+        sign_canonical(human, OWNER_TRANSITION_DOMAIN, &body).expect("human proof");
+    let next_recovery_key_proofs = policy
+        .guardians
+        .iter()
+        .map(|guardian| {
+            let public_key = &guardian.key.as_ref().expect("guardian key").public_key;
+            let signer = guardian_signers
+                .iter()
+                .find(|signer| signer.public_key() == public_key)
+                .expect("guardian signer");
+            sign_canonical(signer, OWNER_TRANSITION_DOMAIN, &body).expect("guardian proof")
+        })
+        .collect();
+    build_claim_deferred_human(
+        agent,
+        signed_root,
+        BrowserClaimDeferredHuman {
+            next_authority_key,
+            next_authority_key_proof,
+            next_recovery_policy: policy,
+            next_recovery_key_proofs,
+            valid_from_unix_seconds,
+            nonce,
+        },
+    )
+    .expect("device co-signs ClaimDeferredHuman")
+}
 use tempfile::TempDir;
 
 use super::{
@@ -21,9 +71,9 @@ use super::{
     hosted::{CallContextFactory, HostedError},
     identity_state,
     owner_root::{
-        BootstrapOwnerRootExtension, RegisterPublicKeyClaimExtension, build_claim_deferred_human,
-        encode_bootstrap_owner_root, encode_register_public_key_claim, load_recorded_root,
-        prepare_register_public_key_claim,
+        BootstrapOwnerRootExtension, BrowserClaimDeferredHuman, RegisterPublicKeyClaimExtension,
+        build_claim_deferred_human, encode_bootstrap_owner_root, encode_register_public_key_claim,
+        load_recorded_root, prepare_register_public_key_claim,
     },
 };
 
@@ -145,7 +195,7 @@ fn claim_transition_is_claim_deferred_human_not_a_replacement_seq0() {
         },
     ];
     guardians.sort_by_key(|guardian| authorization_key_id(guardian.key.as_ref().expect("key")));
-    let transition = build_claim_deferred_human(
+    let transition = build_with_browser_proofs(
         &agent,
         &human,
         &signed,
@@ -156,8 +206,7 @@ fn claim_transition_is_claim_deferred_human_not_a_replacement_seq0() {
         },
         &[g1, g2],
         chrono::Utc::now().timestamp(),
-    )
-    .expect("ClaimDeferredHuman");
+    );
     let body = transition.transition.as_ref().expect("body");
     assert_eq!(body.kind(), OwnerKeyTransitionKind::ClaimDeferredHuman);
     assert_eq!(body.sequence, 1);
@@ -310,7 +359,7 @@ fn register_public_key_claim_sends_claim_deferred_human_on_tag_16() {
         },
     ];
     guardians.sort_by_key(|guardian| authorization_key_id(guardian.key.as_ref().expect("key")));
-    let transition = build_claim_deferred_human(
+    let transition = build_with_browser_proofs(
         &agent,
         &human,
         &signed,
@@ -321,8 +370,7 @@ fn register_public_key_claim_sends_claim_deferred_human_on_tag_16() {
         },
         &[g1, g2],
         chrono::Utc::now().timestamp(),
-    )
-    .expect("ClaimDeferredHuman");
+    );
     let request = RegisterPublicKeyRequest {
         challenge_id: "challenge-1".into(),
         device_public_key: human.public_key().to_vec(),
@@ -336,7 +384,9 @@ fn register_public_key_claim_sends_claim_deferred_human_on_tag_16() {
     assert!(official.owner_key_binding.is_none());
     assert_eq!(official.device_public_key, human.public_key());
     let extension = RegisterPublicKeyClaimExtension::decode(encoded.as_slice()).expect("tag 16");
-    let sent = extension.claim_deferred_human.expect("claim_deferred_human");
+    let sent = extension
+        .claim_deferred_human
+        .expect("claim_deferred_human");
     assert_eq!(
         sent.transition.as_ref().expect("body").kind(),
         OwnerKeyTransitionKind::ClaimDeferredHuman
@@ -399,7 +449,7 @@ fn claim_prepares_register_public_key_claim_deferred_human_for_send() {
         },
     ];
     guardians.sort_by_key(|guardian| authorization_key_id(guardian.key.as_ref().expect("key")));
-    let transition = build_claim_deferred_human(
+    let transition = build_with_browser_proofs(
         &agent,
         &human,
         &signed,
@@ -410,8 +460,7 @@ fn claim_prepares_register_public_key_claim_deferred_human_for_send() {
         },
         &[g1, g2],
         chrono::Utc::now().timestamp(),
-    )
-    .expect("ClaimDeferredHuman");
+    );
     prepare_register_public_key_claim(
         &mut state,
         RegisterPublicKeyRequest {

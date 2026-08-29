@@ -261,6 +261,30 @@ impl ClaimState {
         self.prepared_nonce_hash = None;
         true
     }
+
+    /// Bind the owner-root exchange to the handle and weft challenge returned
+    /// by this device's authenticated BeginWebAuthnRegistration call.
+    pub(crate) fn prepare_owner_root(&mut self, handle: &str, challenge_id: &str) -> bool {
+        self.prepare(handle, challenge_id.as_bytes())
+    }
+
+    /// Complete only the owner-root exchange opened by
+    /// [`Self::prepare_owner_root`].
+    pub(crate) fn accepts_owner_root_challenge(&self, challenge_id: &str) -> bool {
+        let challenge_hash = hex::encode(Sha256::digest(challenge_id.as_bytes()));
+        matches!(self.status, ClaimStatus::Prepared)
+            && self.prepared_handle.is_some()
+            && self.prepared_nonce_hash.as_deref() == Some(challenge_hash.as_str())
+    }
+
+    pub(crate) fn claim_owner_root(&mut self, challenge_id: &str) -> bool {
+        if !self.accepts_owner_root_challenge(challenge_id) {
+            return false;
+        }
+        self.status = ClaimStatus::Claimed;
+        self.prepared_nonce_hash = None;
+        true
+    }
 }
 
 pub(crate) fn state_path() -> PathBuf {
@@ -360,6 +384,17 @@ mod tests {
         assert!(state.reissue(b"second-secret", 2_000));
         assert!(!state.accepts(b"first-secret", 1_000));
         assert!(state.accepts(b"second-secret", 1_000));
+    }
+
+    #[test]
+    fn owner_root_completion_is_bound_to_the_exact_weft_challenge() {
+        let mut state = state();
+        assert!(state.reissue(b"claim-secret", 2_000));
+        assert!(state.prepare_owner_root("human-handle", "challenge-1"));
+        assert!(!state.accepts_owner_root_challenge("challenge-2"));
+        assert!(!state.claim_owner_root("challenge-2"));
+        assert!(state.claim_owner_root("challenge-1"));
+        assert!(state.is_claimed());
     }
 
     #[test]

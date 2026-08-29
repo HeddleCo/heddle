@@ -2,7 +2,8 @@
 
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha1::{
-    AccessTokenResponse, BootstrapOwnerRootRequest, BootstrapOwnerRootResponse, OwnerKeyBinding,
+    AccessTokenResponse, AuthorizationSignature, AuthorizationVerificationKey,
+    BootstrapOwnerRootRequest, BootstrapOwnerRootResponse, OwnerKeyBinding, RecoveryPolicy,
     RegisterPublicKeyRequest, SignedOwnerKeyTransition, SignedOwnerRoot,
 };
 use crypto::{Ed25519Signer, Signer as _};
@@ -11,6 +12,7 @@ use repo::{
     ClaimDeferredHuman, seq0_authority_public_key, sign_agent_claim_binding,
     sign_claim_deferred_human, sign_claimable_deferred_human_root,
 };
+
 use super::{
     hosted::{HostedClient, HostedError, operation_id::ClientOperationId},
     identity_state::{self, ClaimState},
@@ -153,24 +155,30 @@ pub(crate) async fn upload_claimable_root(
 
 /// Build ClaimDeferredHuman. Do not send this as ClaimAgentOwner / a
 /// replacement sequence-0 OwnerRootInstall — those rewrite genesis.
+#[derive(Clone, Debug)]
+pub(crate) struct BrowserClaimDeferredHuman {
+    pub(crate) next_authority_key: AuthorizationVerificationKey,
+    pub(crate) next_authority_key_proof: AuthorizationSignature,
+    pub(crate) next_recovery_policy: RecoveryPolicy,
+    pub(crate) next_recovery_key_proofs: Vec<AuthorizationSignature>,
+    pub(crate) valid_from_unix_seconds: i64,
+    pub(crate) nonce: [u8; 32],
+}
+
 pub(crate) fn build_claim_deferred_human(
     agent: &Ed25519Signer,
-    human: &Ed25519Signer,
     signed_root: &SignedOwnerRoot,
-    next_recovery_policy: api::heddle::api::v1alpha1::RecoveryPolicy,
-    next_guardian_signers: &[Ed25519Signer],
-    now_unix_seconds: i64,
+    browser: BrowserClaimDeferredHuman,
 ) -> Result<SignedOwnerKeyTransition> {
-    let mut nonce = [0u8; 32];
-    getrandom::fill(&mut nonce).context("minting ClaimDeferredHuman nonce")?;
     sign_claim_deferred_human(ClaimDeferredHuman {
         current_authority: agent,
-        next_authority: human,
         signed_root,
-        next_recovery_policy,
-        next_guardian_signers,
-        now_unix_seconds,
-        nonce,
+        next_authority_key: browser.next_authority_key,
+        next_authority_key_proof: browser.next_authority_key_proof,
+        next_recovery_policy: browser.next_recovery_policy,
+        next_recovery_key_proofs: browser.next_recovery_key_proofs,
+        valid_from_unix_seconds: browser.valid_from_unix_seconds,
+        nonce: browser.nonce,
     })
 }
 

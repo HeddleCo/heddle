@@ -13,7 +13,7 @@ use api::heddle::api::v1alpha1::{
     RecoveryPolicy, SignedOwnerKeyTransition, SignedOwnerRoot, SignedSpoolOwnerGenesis,
     SpoolOwnerGenesis,
 };
-use crypto::{Signer, SignerError};
+use crypto::{Signer, SignerError, verify_payload_signature};
 use heddleco_capability_verifier::{
     VerificationLimits, apply_transition, verify_owner_key_binding, verify_owner_root,
     verify_spool_owner_genesis,
@@ -22,7 +22,8 @@ use sha2::{Digest, Sha256};
 
 const OWNER_KEY_ID_DOMAIN: &[u8] = b"heddle-key-v1";
 const OWNER_ROOT_DOMAIN: &[u8] = b"heddle-owner-root-v1";
-const OWNER_TRANSITION_DOMAIN: &[u8] = b"heddle-owner-key-transition-v1";
+/// Domain separator shared by Heddle, tapestry, and weft for owner transitions.
+pub const OWNER_TRANSITION_DOMAIN: &[u8] = b"heddle-owner-key-transition-v1";
 const OWNER_BINDING_DOMAIN: &[u8] = b"heddle-owner-key-binding-v1";
 const REGISTRATION_BINDING_NONCE_DOMAIN: &[u8] = b"heddle-owner-registration-binding-nonce-v1";
 const OWNER_ROOT_FORMAT_VERSION: u32 = 1;
@@ -101,28 +102,34 @@ pub fn sign_claimable_deferred_human_root(
     Ok(signed)
 }
 
-/// Inputs for a ClaimDeferredHuman transition. Sequence-0 stays the agent key.
-pub struct ClaimDeferredHuman<'a, C, N, G> {
+/// Browser proof material for a ClaimDeferredHuman transition.
+///
+/// Sequence-0 stays the agent key. The browser owns the next authority and
+/// guardian private keys; this device receives only their public material and
+/// signatures over the canonical transition body.
+pub struct ClaimDeferredHuman<'a, C> {
     pub current_authority: &'a C,
-    pub next_authority: &'a N,
     pub signed_root: &'a SignedOwnerRoot,
+    pub next_authority_key: AuthorizationVerificationKey,
+    pub next_authority_key_proof: AuthorizationSignature,
     pub next_recovery_policy: RecoveryPolicy,
-    pub next_guardian_signers: &'a [G],
-    pub now_unix_seconds: i64,
+    pub next_recovery_key_proofs: Vec<AuthorizationSignature>,
+    pub valid_from_unix_seconds: i64,
     pub nonce: [u8; 32],
 }
 
-/// Build ClaimDeferredHuman signed by the agent proof key and the human root.
+/// Co-sign ClaimDeferredHuman with the sequence-0 agent proof key.
 ///
-/// Does not mint a replacement sequence-0 OwnerRoot. The agent key remains
-/// genesis; the human key becomes current authority at sequence 1.
-pub fn sign_claim_deferred_human<C, N, G>(
-    claim: ClaimDeferredHuman<'_, C, N, G>,
+/// The human authority and every next guardian proof are verified before the
+/// agent key signs. The transition is rebuilt from the verified sequence-0
+/// root, so browser-supplied owner ids, state hashes, or sequences never cross
+/// this seam. The complete co-signed transition is then applied locally with
+/// the shared verifier before it may be sent to weft.
+pub fn sign_claim_deferred_human<C>(
+    claim: ClaimDeferredHuman<'_, C>,
 ) -> Result<SignedOwnerKeyTransition>
 where
     C: Signer,
-    N: Signer,
-    G: Signer,
 {
     let state = verify_owner_root(claim.signed_root).context("verify claimable sequence-0 root")?;
     let root = claim
@@ -137,46 +144,83 @@ where
     if current_key.public_key != claim.current_authority.public_key() {
         bail!("claim current authority is not the sequence-0 device/proof key");
     }
-    if claim.next_authority.public_key() == claim.current_authority.public_key() {
+    if claim.next_authority_key.public_key == claim.current_authority.public_key() {
         bail!("claim next authority must be the human device root, not the agent key");
     }
-    if claim.now_unix_seconds <= 0 {
+    let transition = claim_deferred_human_transition(
+        claim.signed_root,
+        claim.next_authority_key,
+        claim.next_recovery_policy,
+        claim.valid_from_unix_seconds,
+        claim.nonce,
+    )?;
+    let body = owner_key_transition_body(&transition)?;
+    verify_browser_claim_proofs(
+        &transition,
+        &claim.next_authority_key_proof,
+        &claim.next_recovery_key_proofs,
+        &body,
+    )?;
+    let current_proof = sign_canonical(claim.current_authority, OWNER_TRANSITION_DOMAIN, &body)?;
+    let signed = SignedOwnerKeyTransition {
+        transition: Some(transition),
+        authorizations: vec![current_proof],
+        next_authority_key_proof: Some(claim.next_authority_key_proof),
+        next_recovery_key_proofs: claim.next_recovery_key_proofs,
+    };
+    let limits = VerificationLimits::new(MAX_CAPABILITY_TTL_SECONDS)
+        .context("construct claim transition verifier limits")?;
+    apply_transition(&state, &signed, claim.valid_from_unix_seconds, limits)
+        .context("minted ClaimDeferredHuman failed local verify")?;
+    Ok(signed)
+}
+
+/// Assemble the canonical sequence-0-to-human transition a browser signs.
+///
+/// The device calls the same builder again while co-signing; any browser body
+/// that substituted the owner id, previous state hash, or sequence therefore
+/// produces proofs that fail verification.
+pub fn claim_deferred_human_transition(
+    signed_root: &SignedOwnerRoot,
+    next_authority_key: AuthorizationVerificationKey,
+    next_recovery_policy: RecoveryPolicy,
+    valid_from_unix_seconds: i64,
+    nonce: [u8; 32],
+) -> Result<OwnerKeyTransition> {
+    let state = verify_owner_root(signed_root).context("verify claimable sequence-0 root")?;
+    let root = signed_root
+        .root
+        .as_ref()
+        .context("signed owner root has no body")?;
+    if state.sequence() != 0 || !root.claimable_deferred_human {
+        bail!("claim must bind to a claimable sequence-0 owner root");
+    }
+    if valid_from_unix_seconds <= 0 {
         bail!("claim clock must be a positive unix timestamp");
     }
-    let next_authority_key = ed25519_verification_key(claim.next_authority.public_key())?;
-    let transition = OwnerKeyTransition {
+    if valid_from_unix_seconds > root.claimable_until_unix_seconds {
+        bail!("claim valid_from exceeds the sequence-0 claimable deadline");
+    }
+    Ok(OwnerKeyTransition {
         format_version: OWNER_ROOT_FORMAT_VERSION,
         owner_id: state.owner_id().to_vec(),
         previous_state_hash: state.state_hash().to_vec(),
         sequence: 1,
         kind: OwnerKeyTransitionKind::ClaimDeferredHuman as i32,
         next_authority_key: Some(next_authority_key),
-        next_recovery_policy: Some(claim.next_recovery_policy),
-        valid_from_unix_seconds: claim.now_unix_seconds,
+        next_recovery_policy: Some(next_recovery_policy),
+        valid_from_unix_seconds,
         previous_key_valid_until_unix_seconds: 0,
-        nonce: claim.nonce.to_vec(),
-    };
-    let body = transition_body(&transition)?;
-    let current_proof = sign_canonical(claim.current_authority, OWNER_TRANSITION_DOMAIN, &body)?;
-    let next_proof = sign_canonical(claim.next_authority, OWNER_TRANSITION_DOMAIN, &body)?;
-    let next_recovery_key_proofs =
-        guardian_proofs_in_policy_order(&transition, claim.next_guardian_signers, &body)?;
-    let signed = SignedOwnerKeyTransition {
-        transition: Some(transition),
-        authorizations: vec![current_proof],
-        next_authority_key_proof: Some(next_proof),
-        next_recovery_key_proofs,
-    };
-    let limits = VerificationLimits::new(MAX_CAPABILITY_TTL_SECONDS)
-        .context("construct claim transition verifier limits")?;
-    apply_transition(&state, &signed, claim.now_unix_seconds, limits)
-        .context("minted ClaimDeferredHuman failed local verify")?;
-    Ok(signed)
+        nonce: nonce.to_vec(),
+    })
 }
 
 /// Sequence-0 authority public key from a verified owner root.
 pub fn seq0_authority_public_key(signed: &SignedOwnerRoot) -> Result<&[u8]> {
-    let root = signed.root.as_ref().context("signed owner root has no body")?;
+    let root = signed
+        .root
+        .as_ref()
+        .context("signed owner root has no body")?;
     let key = root
         .authority_key
         .as_ref()
@@ -303,43 +347,67 @@ pub fn sign_canonical(
 
 const MAX_CAPABILITY_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
 
-fn guardian_proofs_in_policy_order<G: Signer>(
+fn verify_browser_claim_proofs(
     transition: &OwnerKeyTransition,
-    signers: &[G],
+    next_authority_key_proof: &AuthorizationSignature,
+    next_recovery_key_proofs: &[AuthorizationSignature],
     body: &[u8],
-) -> Result<Vec<AuthorizationSignature>> {
+) -> Result<()> {
+    verify_canonical_signature(
+        transition
+            .next_authority_key
+            .as_ref()
+            .context("transition has no next authority key")?,
+        next_authority_key_proof,
+        OWNER_TRANSITION_DOMAIN,
+        body,
+    )
+    .context("verify browser human authority proof")?;
     let policy = transition
         .next_recovery_policy
         .as_ref()
         .context("transition has no next recovery policy")?;
-    if signers.len() != policy.guardians.len() {
+    if next_recovery_key_proofs.len() != policy.guardians.len() {
         bail!(
-            "claim guardian signer count {} does not match next recovery policy {}",
-            signers.len(),
+            "claim guardian proof count {} does not match next recovery policy {}",
+            next_recovery_key_proofs.len(),
             policy.guardians.len()
         );
     }
-    let mut unused: Vec<&G> = signers.iter().collect();
-    let mut proofs = Vec::with_capacity(policy.guardians.len());
-    for guardian in &policy.guardians {
-        let expected = authorization_key_id(
+    for (guardian, proof) in policy.guardians.iter().zip(next_recovery_key_proofs) {
+        verify_canonical_signature(
             guardian
                 .key
                 .as_ref()
                 .context("next recovery guardian has no key")?,
-        );
-        let index = unused
-            .iter()
-            .position(|signer| {
-                ed25519_verification_key(signer.public_key())
-                    .ok()
-                    .is_some_and(|key| authorization_key_id(&key) == expected)
-            })
-            .context("claim guardian signer does not match the next recovery policy")?;
-        let signer = unused.swap_remove(index);
-        proofs.push(sign_canonical(signer, OWNER_TRANSITION_DOMAIN, body)?);
+            proof,
+            OWNER_TRANSITION_DOMAIN,
+            body,
+        )
+        .context("verify browser next guardian proof")?;
     }
-    Ok(proofs)
+    Ok(())
+}
+
+fn verify_canonical_signature(
+    key: &AuthorizationVerificationKey,
+    proof: &AuthorizationSignature,
+    domain: &[u8],
+    body: &[u8],
+) -> Result<()> {
+    if key.algorithm != AuthorizationKeyAlgorithm::Ed25519 as i32 {
+        bail!("claim proof key must use Ed25519");
+    }
+    if proof.signer_key_id != authorization_key_id(key) {
+        bail!("claim proof signer key id does not match its public key");
+    }
+    verify_payload_signature(
+        &domain_digest(domain, body),
+        "ed25519",
+        &key.public_key,
+        &proof.signature,
+    )
+    .context("claim proof signature is invalid")
 }
 
 fn domain_digest(domain: &[u8], body: &[u8]) -> [u8; 32] {
@@ -428,9 +496,8 @@ fn recovery_policy(encoder: &mut Encoder, policy: &RecoveryPolicy) -> Result<()>
         bail!("recovery guardians are not unique and sorted by key id");
     }
     encoder.u32(policy.threshold);
-    encoder.u32(
-        u32::try_from(policy.guardians.len()).context("guardian count exceeds u32 length")?,
-    );
+    encoder
+        .u32(u32::try_from(policy.guardians.len()).context("guardian count exceeds u32 length")?);
     for value in &policy.guardians {
         guardian(encoder, value)?;
     }
@@ -501,7 +568,11 @@ fn owner_root_body(root: &OwnerRoot) -> Result<Vec<u8>> {
     Ok(encoder.finish())
 }
 
-fn transition_body(transition: &OwnerKeyTransition) -> Result<Vec<u8>> {
+/// Canonical transition body signed by owner authorities and recovery keys.
+///
+/// The field order and counted byte encoding are shared with tapestry's
+/// `transitionBody` and weft's owner-transition verifier.
+pub fn owner_key_transition_body(transition: &OwnerKeyTransition) -> Result<Vec<u8>> {
     let mut encoder = Encoder::new();
     encoder.u32(transition.format_version);
     encoder.bytes(&transition.owner_id)?;

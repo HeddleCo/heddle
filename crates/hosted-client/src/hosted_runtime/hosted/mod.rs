@@ -68,8 +68,7 @@ use iroh::{Endpoint, EndpointAddr};
 pub use methods::HostedRoutes;
 use prost::Message;
 pub use session::{HostedAuthMode, HostedSession};
-pub use sync::HostedRefEntry;
-pub use sync::{decode_pull_bootstrap, decode_pull_refs};
+pub use sync::{HostedRefEntry, decode_pull_bootstrap, decode_pull_refs};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RenewableAuthorityCredential {
@@ -174,6 +173,18 @@ impl HostedClient {
 
     pub(crate) fn claim_completion(&self) -> tokio::sync::watch::Receiver<bool> {
         self.connection.claim_completion()
+    }
+
+    pub(crate) async fn take_claim_owner_root_calls(
+        &self,
+    ) -> Option<
+        tokio::sync::mpsc::Receiver<crate::hosted_runtime::claim_authorization::ClaimOwnerRootCall>,
+    > {
+        self.connection.take_claim_owner_root_calls().await
+    }
+
+    pub(crate) fn claim_proof_signer(&self) -> Option<&crypto::Ed25519Signer> {
+        self.context.proof_signer()
     }
 
     pub async fn connect(descriptor: &VerifiedEndpointDescriptor) -> Result<Self> {
@@ -331,9 +342,7 @@ impl HostedClient {
     {
         let descriptor = api::method_descriptor(method)
             .ok_or_else(|| HostedError::Framing(format!("unknown hosted method {method}")))?;
-        let client_operation_id = descriptor
-            .client_operation_id(encoded)?
-            .unwrap_or_default();
+        let client_operation_id = descriptor.client_operation_id(encoded)?.unwrap_or_default();
         if descriptor.client_operation_id_required && client_operation_id.is_empty() {
             return Err(HostedError::MissingClientOperationId);
         }

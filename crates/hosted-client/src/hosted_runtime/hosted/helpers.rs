@@ -427,7 +427,6 @@ fn remote_stream_failure(
     }
 }
 
-
 pub(super) fn repository_ref(path: &str) -> Option<RepositoryRef> {
     Some(RepositoryRef {
         reference: Some(Reference::CanonicalPath(path.to_string())),
@@ -534,8 +533,9 @@ pub(super) fn hosted_role_proto_to_string(role: i32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use api::heddle::api::v1alpha1::{CallFailure, CallFailureCode, StreamFailure};
+
+    use super::*;
 
     #[test]
     fn grant_repository_targets_preserve_both_reference_variants() {
@@ -1211,9 +1211,11 @@ mod tests {
 
     #[test]
     fn stream_failure_round_trips_with_nested_resume_hints() {
-        use api::framing::{StreamFrame, decode_stream_frame, encode_stream_failure};
-        use api::heddle::api::v1alpha1::{
-            CursorFailure, ErrorDetail, ErrorReason, RetryAdvice, cursor_failure, error_detail,
+        use api::{
+            framing::{StreamFrame, decode_stream_frame, encode_stream_failure},
+            heddle::api::v1alpha1::{
+                CursorFailure, ErrorDetail, ErrorReason, RetryAdvice, cursor_failure, error_detail,
+            },
         };
 
         let hint = |context| ErrorDetail {
