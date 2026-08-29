@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Hash Push/Pull `StreamOpeningProof.stream_id` to 64-byte blake3 hex so weft admits the opening (the long transfer identity stays on the checkpoint).
+
 ## [0.15.3](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.15.2...heddle-hosted-client-v0.15.3) - 2026-08-28
 
 ### Fixed
