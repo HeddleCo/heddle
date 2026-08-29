@@ -27,7 +27,7 @@ use crate::{
         OpenedTreeBody, State, StateAttachment, StateAttachmentId, StateId, TREE_CANONICAL_MAGIC,
         TREE_DELTA_HEADER_LEN, TREE_DELTA_MAGIC, TREE_LEAN_MAGIC, Tree, TreeByteSource, TreeEntry,
         TreeEntryReader, TreeResumeCursor, decode_tree_delta_header,
-        decode_tree_delta_header_prefix, decode_tree_delta_ops, is_delta_tree, is_streamable_tree,
+        decode_tree_delta_header_prefix, is_delta_tree, is_streamable_tree,
     },
     store::{
         HeddleError, ObjectStore, Result, SidecarStore, SnapshotCommitDescriptor, TreeWrite, codec,
@@ -322,9 +322,43 @@ impl FsStore {
 /// (`install_pack_streaming`) both run their pack through here, so
 /// both apply the same checksum validation and report the same
 /// installed ids regardless of how the bytes reach the store.
-fn validate_and_list_pack(reader: &crate::store::pack::PackReader) -> Result<Vec<PackObjectId>> {
+fn validate_and_list_pack(
+    store: &FsStore,
+    reader: &crate::store::pack::PackReader,
+) -> Result<Vec<PackObjectId>> {
     let ids = reader.list_ids()?;
-    reader.visit_objects(|id, object_type, data| validate_pack_entry(&id, object_type, data))?;
+    reader.visit_objects(|id, object_type, data| {
+        if let (PackObjectId::Hash(hash), ObjectType::Tree) = (id, object_type)
+            && is_delta_tree(data)
+        {
+            let header = decode_tree_delta_header(data)?;
+            if header.anchor == hash {
+                return Err(HeddleError::InvalidObject(
+                    "HDC1 result id must differ from its anchor id".to_string(),
+                ));
+            }
+            let anchor_body = match reader.get_object(&PackObjectId::Hash(header.anchor))? {
+                Some((ObjectType::Tree, body)) => Some(body),
+                Some((kind, _)) => {
+                    return Err(HeddleError::InvalidObject(format!(
+                        "HDC1 anchor {} is indexed as {kind:?}, expected Tree",
+                        header.anchor
+                    )));
+                }
+                None => store.try_get_tree_serialized_once(&header.anchor)?,
+            }
+            .ok_or_else(|| HeddleError::NotFound(format!("tree delta anchor {}", header.anchor)))?;
+            if is_delta_tree(&anchor_body) {
+                return Err(HeddleError::InvalidObject(
+                    "HDC1 anchor must be materialized; delta chains are forbidden".to_string(),
+                ));
+            }
+            let anchor = codec::decode_tree_serialized_with_key(&anchor_body, header.anchor, None)?;
+            codec::decode_tree_serialized_with_key(data, hash, Some(&anchor))?;
+            return Ok(());
+        }
+        validate_pack_entry(&id, object_type, data)
+    })?;
     Ok(ids)
 }
 
@@ -381,18 +415,7 @@ pub(super) fn validate_pack_entry(
             validate_annotated_tag(data, *hash).map(|_| ())
         }
         (PackObjectId::Hash(hash), ObjectType::Tree) => {
-            if is_delta_tree(data) {
-                let header = decode_tree_delta_header(data)?;
-                let (_, _, consumed) = decode_tree_delta_ops(data, header.op_count)?;
-                if consumed != data.len() {
-                    return Err(HeddleError::InvalidObject(
-                        "HDC1 pack tree has trailing bytes".to_string(),
-                    ));
-                }
-                Ok(())
-            } else {
-                validate_tree_serialized(data, *hash).map(|_| ())
-            }
+            validate_tree_serialized(data, *hash).map(|_| ())
         }
         (PackObjectId::Hash(hash), ObjectType::Action) => {
             validate_action_serialized(data, ActionId::from_hash(*hash)).map(|_| ())
@@ -861,7 +884,10 @@ impl FsStore {
         Ok(None)
     }
 
-    fn try_get_tree_serialized_once(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
+    pub(super) fn try_get_tree_serialized_once(
+        &self,
+        hash: &ContentHash,
+    ) -> Result<Option<Vec<u8>>> {
         let path = hash_path(&trees_dir(&self.root), hash);
         if path.exists()
             && let Some(data) = read_file_bytes(&path)?
@@ -1946,7 +1972,7 @@ impl ObjectStore for FsStore {
     #[instrument(skip(self, pack_data, index_data))]
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<PackObjectId>> {
         let reader = crate::store::pack::PackReader::from_slice(pack_data, index_data)?;
-        let ids = validate_and_list_pack(&reader)?;
+        let ids = validate_and_list_pack(self, &reader)?;
         let state_entries = state_entries_from_pack(&reader, &ids)?;
         let attachment_entries = attachment_entries_from_pack(&reader, &ids)?;
         self.install_pack_files(pack_data, index_data)?;
@@ -2012,7 +2038,7 @@ impl ObjectStore for FsStore {
         // the file move isn't racing an open mapping.
         let ids = {
             let reader = crate::store::pack::PackReader::open(pack_path, index_path)?;
-            validate_and_list_pack(&reader)?
+            validate_and_list_pack(self, &reader)?
         };
         let state_entries = {
             let reader = crate::store::pack::PackReader::open(pack_path, index_path)?;
@@ -2048,11 +2074,7 @@ impl ObjectStore for FsStore {
                 Some("pack") => {
                     let index = path.with_extension("idx");
                     let valid = crate::store::pack::PackReader::open(&path, &index)
-                        .and_then(|reader| {
-                            reader.visit_objects(|id, kind, bytes| {
-                                validate_pack_entry(&id, kind, bytes)
-                            })
-                        })
+                        .and_then(|reader| validate_and_list_pack(self, &reader).map(|_| ()))
                         .is_ok();
                     if !valid {
                         let _ = fs::remove_file(&path);

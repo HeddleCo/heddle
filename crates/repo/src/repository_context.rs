@@ -446,12 +446,12 @@ fn split_path(path: &Path) -> Option<(&str, &Path)> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "tree-sitter-symbols")]
     use std::fs;
 
-    use objects::object::{
-        Annotation, AnnotationAnchorStatus, AnnotationKind, StalenessStatus, StateAttachment,
-        StateAttachmentBody,
-    };
+    use objects::object::{Annotation, AnnotationKind, StateAttachment, StateAttachmentBody};
+    #[cfg(feature = "tree-sitter-symbols")]
+    use objects::object::{AnnotationAnchorStatus, StalenessStatus};
     use tempfile::TempDir;
 
     use super::{Repository, *};

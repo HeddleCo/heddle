@@ -7,9 +7,9 @@ use crate::object::{
     AnnotationKind, Attribution, ChangeId, ContentHash, StateId, VisibilityTier,
     collaboration::{
         COLLABORATION_OPERATION_SCHEMA_VERSION, CollabOpId, CollaborationAnchor,
-        CollaborationIdempotencyKey, CollaborationOperationBodyV1, CollaborationOperationEnvelope,
-        CollaborationResolution, DiscussionRecordId, DiscussionTurnV1, LegacyDiscussionId,
-        LegacyDiscussionResolutionV1, LegacySourceLocator,
+        CollaborationAnchorStatus, CollaborationIdempotencyKey, CollaborationOperationBodyV1,
+        CollaborationOperationEnvelope, CollaborationResolution, DiscussionRecordId,
+        DiscussionTurnV1, LegacyDiscussionId, LegacyDiscussionResolutionV1, LegacySourceLocator,
     },
 };
 
@@ -43,6 +43,15 @@ enum WireAnchorV1 {
         path: String,
         symbol: String,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WireAnchorStatusV1 {
+    Current,
+    Moved,
+    Ambiguous,
+    Orphaned,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -95,6 +104,11 @@ enum WireBodyV1 {
     },
     AppendTurn {
         turn: WireTurnV1,
+    },
+    RebindAnchor {
+        anchor: WireAnchorV1,
+        status: WireAnchorStatusV1,
+        body_changed_since_open: bool,
     },
     Resolve {
         resolution: WireResolutionV1,
@@ -185,6 +199,28 @@ impl From<WireAnchorV1> for CollaborationAnchor {
                 path,
                 symbol,
             },
+        }
+    }
+}
+
+impl From<CollaborationAnchorStatus> for WireAnchorStatusV1 {
+    fn from(value: CollaborationAnchorStatus) -> Self {
+        match value {
+            CollaborationAnchorStatus::Current => Self::Current,
+            CollaborationAnchorStatus::Moved => Self::Moved,
+            CollaborationAnchorStatus::Ambiguous => Self::Ambiguous,
+            CollaborationAnchorStatus::Orphaned => Self::Orphaned,
+        }
+    }
+}
+
+impl From<WireAnchorStatusV1> for CollaborationAnchorStatus {
+    fn from(value: WireAnchorStatusV1) -> Self {
+        match value {
+            WireAnchorStatusV1::Current => Self::Current,
+            WireAnchorStatusV1::Moved => Self::Moved,
+            WireAnchorStatusV1::Ambiguous => Self::Ambiguous,
+            WireAnchorStatusV1::Orphaned => Self::Orphaned,
         }
     }
 }
@@ -304,6 +340,15 @@ impl From<CollaborationOperationBodyV1> for WireBodyV1 {
             CollaborationOperationBodyV1::AppendTurn { turn } => {
                 Self::AppendTurn { turn: turn.into() }
             }
+            CollaborationOperationBodyV1::RebindAnchor {
+                anchor,
+                status,
+                body_changed_since_open,
+            } => Self::RebindAnchor {
+                anchor: anchor.into(),
+                status: status.into(),
+                body_changed_since_open,
+            },
             CollaborationOperationBodyV1::Resolve { resolution } => Self::Resolve {
                 resolution: resolution.into(),
             },
@@ -355,6 +400,15 @@ impl From<WireBodyV1> for CollaborationOperationBodyV1 {
                 thread_ref,
             },
             WireBodyV1::AppendTurn { turn } => Self::AppendTurn { turn: turn.into() },
+            WireBodyV1::RebindAnchor {
+                anchor,
+                status,
+                body_changed_since_open,
+            } => Self::RebindAnchor {
+                anchor: anchor.into(),
+                status: status.into(),
+                body_changed_since_open,
+            },
             WireBodyV1::Resolve { resolution } => Self::Resolve {
                 resolution: resolution.into(),
             },

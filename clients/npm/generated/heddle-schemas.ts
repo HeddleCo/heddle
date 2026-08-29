@@ -3,7 +3,7 @@
 // (`schema_for_verb` / `crates/cli-contract/src/cli/commands/schemas.rs`).
 // Regenerate with `scripts/gen-ts-types.sh`; a drift test keeps it in sync.
 
-export const HEDDLE_SCHEMA_VERSION = "0.15.1" as const;
+export const HEDDLE_SCHEMA_VERSION = "0.15.3" as const;
 
 export interface AbortSchema {
   action: OperatorAction;
@@ -565,6 +565,33 @@ export interface AuthLogoutSchema {
   server: string;
 }
 
+export interface AuthSignupInviteCreatedSchema {
+  allowance_remaining: number;
+  idempotency_status?: string | null;
+  /** The server returns this code only on surfaces where it may be shown. */
+  invite_code: string;
+  invite_id: string;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "auth_invite";
+  replayed?: boolean | null;
+}
+
+export interface AuthSignupInviteListSchema {
+  allowance_remaining: number;
+  invites: AuthSignupInviteSchema[];
+  output_kind: "auth_invite_list";
+}
+
+export interface AuthSignupInviteSchema {
+  consumed: boolean;
+  consumed_at?: string | null;
+  created_at?: string | null;
+  /** Present because `ListSignupInvites` includes it. Clients must not derive or fabricate invite codes from IDs or other metadata. */
+  invite_code: string;
+  status: string;
+}
+
 export interface AuthStatusSchema {
   authenticated: boolean;
   credential_id?: string | null;
@@ -1050,6 +1077,7 @@ export interface DiscussionListSchema {
 
 export interface DiscussionOutput {
   anchor: AnchorOutput;
+  anchor_status: string;
   conflict_operation_ids: string[];
   display_head_operation_id: string;
   head_operation_ids: string[];
@@ -1068,6 +1096,7 @@ export interface DiscussionShowSchema {
 }
 
 export interface DiscussionView {
+  anchor_ambiguous: boolean;
   body_changed_since_open: boolean;
   file: string;
   id: string;
@@ -3473,6 +3502,8 @@ export interface HeddleVerbOutputs {
   "agent timeline reset": AgentTimelineResetSchema;
   "agent timeline status": TimelineStatusSchema;
   "auth create-service-token": AuthCreateServiceTokenSchema;
+  "auth invite": AuthSignupInviteCreatedSchema;
+  "auth invite list": AuthSignupInviteListSchema;
   "auth login": AgentAccountCreatedSchema;
   "auth logout": AuthLogoutSchema;
   "auth status": AuthStatusSchema;
@@ -3635,6 +3666,8 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "agent timeline reset",
   "agent timeline status",
   "auth create-service-token",
+  "auth invite",
+  "auth invite list",
   "auth login",
   "auth logout",
   "auth status",

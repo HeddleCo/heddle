@@ -214,20 +214,46 @@ impl FsStore {
         let mut seen_trees = std::collections::HashSet::with_capacity(trees.len() + 1);
         for authored_tree in trees {
             let authored_hash = authored_tree.tree.hash();
+            let reuses_materialized = self
+                .try_get_tree_serialized_once(&authored_hash)?
+                .is_some_and(|body| !crate::object::is_delta_tree(&body));
             if seen_trees.insert(authored_hash)
+                && !reuses_materialized
                 && (commit_artifact.is_some()
                     || !ObjectStore::has_tree_locally(self, &authored_hash)?)
             {
                 let encoded = self.encode_tree_write(&authored_tree)?;
+                if matches!(
+                    encoded.kind,
+                    crate::store::codec::TreeEncodingKind::Delta { anchor, .. }
+                        if anchor == authored_hash
+                ) {
+                    return Err(HeddleError::InvalidObject(
+                        "HDC1 result id must differ from its anchor id".to_string(),
+                    ));
+                }
                 builder.add(authored_hash, PackObjectType::Tree, encoded.data);
                 staged_encodings.push((authored_hash, encoded.kind));
                 staged_trees.push((authored_hash, authored_tree.tree));
             }
         }
-        if (commit_artifact.is_some() || !ObjectStore::has_tree_locally(self, &tree_hash)?)
+        let reuses_materialized = self
+            .try_get_tree_serialized_once(&tree_hash)?
+            .is_some_and(|body| !crate::object::is_delta_tree(&body));
+        if !reuses_materialized
+            && (commit_artifact.is_some() || !ObjectStore::has_tree_locally(self, &tree_hash)?)
             && seen_trees.insert(tree_hash)
         {
             let encoded = self.encode_tree_write(tree)?;
+            if matches!(
+                encoded.kind,
+                crate::store::codec::TreeEncodingKind::Delta { anchor, .. }
+                    if anchor == tree_hash
+            ) {
+                return Err(HeddleError::InvalidObject(
+                    "HDC1 result id must differ from its anchor id".to_string(),
+                ));
+            }
             builder.add(tree_hash, PackObjectType::Tree, encoded.data);
             staged_encodings.push((tree_hash, encoded.kind));
             staged_trees.push((tree_hash, tree.tree.clone()));
@@ -679,6 +705,7 @@ impl FsStore {
                 continue;
             };
             let loose_body = codec::decode_tree_body(loose_data.as_slice())?;
+            let loose_is_delta = crate::object::is_delta_tree(&loose_body);
             let loose_tree = self.decode_tree_storage_body(*hash, &loose_body)?;
             let found = loose_tree.hash();
             if found != *hash {
@@ -699,6 +726,11 @@ impl FsStore {
                     bytes_freed = bytes_freed.saturating_add(bytes);
                     removed += 1;
                 }
+                continue;
+            }
+            // Keep main's HDC1 hot-tier safety rule unless an identical,
+            // materialized NPK1 tree has already made the delta redundant.
+            if loose_is_delta {
                 continue;
             }
             let packed = self

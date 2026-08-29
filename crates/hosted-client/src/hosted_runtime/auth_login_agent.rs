@@ -160,7 +160,7 @@ fn mint_restricted_agent_root() -> Result<RestrictedAgentRoot> {
         bail!("agent independent root is not bound to this node key");
     }
     let restricted = restrict_agent_account_root(&root.token, &signer, root.expires_at)
-        .context("applying the local agent deny floor and safe operation ceiling")?;
+        .context("applying the local agent account-root deny floor")?;
     let metadata = headless_token_metadata(&restricted)
         .context("validating the restricted client-minted agent capability")?;
     if !metadata.proof_public_key_hex.eq_ignore_ascii_case(&node_id)

@@ -446,13 +446,15 @@ impl SnapshotMutation<'_> {
             state = state.with_lineage(self.details.lineage.clone());
         }
 
-        let mut inherited_context = if let Some(parent_id) = self.prev_head
+        let inherited_context = if let Some(parent_id) = self.prev_head
             && let Some(parent_state) = self.repo.store.get_state(&parent_id)?
         {
             self.repo.inherit_parent_context(&parent_state)?
         } else {
             None
         };
+        #[cfg(feature = "tree-sitter-symbols")]
+        let mut inherited_context = inherited_context;
 
         #[cfg(feature = "tree-sitter-symbols")]
         let mut risk_signals = None;
@@ -560,6 +562,7 @@ impl SnapshotMutation<'_> {
                 }
                 match self.repo.compute_and_persist_discussion_anchor_travel(
                     parent_state,
+                    &state,
                     &tree,
                     source_blobs.as_ref(),
                 ) {
@@ -640,8 +643,12 @@ impl SnapshotMutation<'_> {
                 .flatten()
                 .map(|state| state.tree);
             let root_write = match parent_tree {
-                Some(parent) => TreeWrite::descendant(tree.clone(), parent),
-                None => TreeWrite::anchor(tree.clone()),
+                Some(parent)
+                    if parent != tree_hash && !self.repo.store.has_tree_locally(&tree_hash)? =>
+                {
+                    TreeWrite::descendant(tree.clone(), parent)
+                }
+                Some(_) | None => TreeWrite::anchor(tree.clone()),
             };
             self.prepared_artifact = Some(PreparedSnapshotArtifact {
                 blobs,

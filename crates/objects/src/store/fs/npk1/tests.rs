@@ -10,7 +10,7 @@ use crate::{
     object::{Attribution, ContentHash, Principal, SpoolId, State, StateId, Tree, TreeEntry},
     store::{
         FsRepackOperation, FsStore, ObjectStore, RepackPolicy, RepackResourceLimits,
-        RepackSchedule, RepackScheduler,
+        RepackSchedule, RepackScheduler, TreeWrite,
     },
 };
 
@@ -130,6 +130,63 @@ fn pack_roundtrip_direct_lookup_and_loose_coexistence() {
             .get_tree(&trees[3].hash())
             .expect("read old packed tree"),
         Some(trees[3].clone())
+    );
+}
+
+#[test]
+fn loose_hlr1_and_hdc1_settle_to_identical_npk1_trees() {
+    let (_temp, store) = store();
+    let anchor = related_tree(0, 240);
+    let anchor_hash = store.put_tree(&anchor).expect("put HLR1 anchor");
+    let anchor_body = store
+        .get_tree_serialized(&anchor_hash)
+        .expect("read HLR1 anchor")
+        .expect("HLR1 anchor body");
+    assert!(crate::object::is_lean_tree(&anchor_body));
+
+    let descendant = related_tree(17, 240);
+    let encoded = store
+        .encode_tree_write(&TreeWrite::descendant(descendant.clone(), anchor_hash))
+        .expect("encode HDC1 descendant");
+    assert!(crate::object::is_delta_tree(&encoded.data));
+    store
+        .put_tree_serialized(&encoded.data, encoded.hash)
+        .expect("put HDC1 descendant");
+    assert_eq!(
+        store.get_tree(&anchor_hash).expect("decode loose HLR1"),
+        Some(anchor.clone())
+    );
+    assert_eq!(
+        store.get_tree(&encoded.hash).expect("decode loose HDC1"),
+        Some(descendant.clone())
+    );
+
+    repack(&store);
+    store.reload_packs().expect("reload settled generation");
+    let manager = store.npk1_manager().read().expect("NPK1 manager");
+    assert!(manager.has_tree(&anchor_hash).expect("settled HLR1 anchor"));
+    assert!(
+        manager
+            .has_tree(&encoded.hash)
+            .expect("settled HDC1 result")
+    );
+    drop(manager);
+    let trees = super::super::fs_paths::trees_dir(store.root());
+    assert!(!super::super::fs_paths::hash_path(&trees, &anchor_hash).exists());
+    assert!(!super::super::fs_paths::hash_path(&trees, &encoded.hash).exists());
+
+    let reopened = FsStore::new(store.root());
+    assert_eq!(
+        reopened
+            .get_tree(&anchor_hash)
+            .expect("decode settled HLR1 tree from NPK1"),
+        Some(anchor)
+    );
+    assert_eq!(
+        reopened
+            .get_tree(&encoded.hash)
+            .expect("decode settled HDC1 tree from NPK1"),
+        Some(descendant)
     );
 }
 

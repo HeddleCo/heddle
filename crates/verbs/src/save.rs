@@ -1345,9 +1345,10 @@ struct CreatedState {
 fn create_heddle_state(repo: &Repository, plan: &SavePlan) -> Result<CreatedState> {
     let hook_manager = HookManager::new(repo);
     let hook_ctx = HookContext::new(repo);
+    let mut post_hook_worktree_changes = None;
 
     if plan.run_hooks {
-        hook_manager.run(Hook::PreSnapshot, &hook_ctx)?;
+        let pre_snapshot_ran = hook_manager.run(Hook::PreSnapshot, &hook_ctx)?;
         let pre_capture_payload = serde_json::json!({
             "thread": current_thread_name(repo),
             "intent": plan.intent.clone().unwrap_or_default(),
@@ -1373,8 +1374,19 @@ fn create_heddle_state(repo: &Repository, plan: &SavePlan) -> Result<CreatedStat
                 .with_recovery_commands(vec!["heddle hook list".to_string()]),
             )));
         }
+        if pre_snapshot_ran && plan.supplied_tree.is_none() {
+            // Hooks can mutate paths outside capture's preflight set. Rewalk
+            // authoritatively so a settled monitor token cannot vouch for a
+            // tree built from that stale set. No-hook captures keep the fast path.
+            let authoritative_options = WorktreeStatusOptions {
+                fsmonitor: repo::FsMonitorSettings {
+                    mode: repo::FsMonitorMode::Off,
+                },
+            };
+            post_hook_worktree_changes =
+                Some(capture_worktree_status(repo, &authoritative_options)?);
+        }
     }
-
     let mut execution = if let Some(tree) = plan.supplied_tree.clone() {
         repo.snapshot_tree_with_attribution_profiled(
             tree,
@@ -1382,7 +1394,9 @@ fn create_heddle_state(repo: &Repository, plan: &SavePlan) -> Result<CreatedStat
             plan.confidence,
             plan.attribution.clone(),
         )?
-    } else if let Some(status) = plan.known_worktree_changes.clone() {
+    } else if let Some(status) =
+        post_hook_worktree_changes.or_else(|| plan.known_worktree_changes.clone())
+    {
         repo.snapshot_with_attribution_profiled_from_status(
             plan.intent.clone(),
             plan.confidence,

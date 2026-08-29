@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.3](https://github.com/HeddleCo/heddle/compare/heddle-cli-v0.15.2...heddle-cli-v0.15.3) - 2026-08-28
+
+### Other
+
+- update Cargo.toml dependencies
+
+## [0.15.2](https://github.com/HeddleCo/heddle/compare/heddle-cli-v0.15.1...heddle-cli-v0.15.2) - 2026-08-28
+
+### Added
+
+- productionize incremental HLR1/HDC1 tree storage ([#1587](https://github.com/HeddleCo/heddle/pull/1587))
+
+### Other
+
+- Discuss anchors: rebind on in-file symbol rename ([#1581](https://github.com/HeddleCo/heddle/pull/1581))
+- Rematch context anchors across file renames ([#1580](https://github.com/HeddleCo/heddle/pull/1580))
+- Add last-turn diff base ([#1582](https://github.com/HeddleCo/heddle/pull/1582))
+
 ## [0.15.1](https://github.com/HeddleCo/heddle/compare/heddle-cli-v0.15.0...heddle-cli-v0.15.1) - 2026-08-27
 
 ### Fixed

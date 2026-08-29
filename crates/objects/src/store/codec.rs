@@ -77,6 +77,13 @@ pub fn encode_tree_hot(tree: &Tree, base: Option<TreeDeltaBase<'_>>) -> Result<E
             kind: TreeEncodingKind::Lean,
         });
     };
+    if hash == base.anchor_id {
+        return Ok(EncodedTree {
+            hash,
+            data: lean,
+            kind: TreeEncodingKind::Lean,
+        });
+    }
     let Some(depth) = base.parent_depth.checked_add(1) else {
         return Ok(EncodedTree {
             hash,
@@ -163,6 +170,12 @@ pub fn decode_tree_serialized_with_key(
     let tree = if is_lean_tree(data) {
         Tree::decode_lean(data, expected)?
     } else if is_delta_tree(data) {
+        let header = decode_tree_delta_header(data)?;
+        if header.anchor == expected {
+            return Err(HeddleError::InvalidObject(
+                "HDC1 result id must differ from its anchor id".to_string(),
+            ));
+        }
         let anchor = anchor.ok_or_else(|| {
             HeddleError::InvalidObject("HDC1 tree is missing its materialized anchor".to_string())
         })?;
@@ -287,6 +300,23 @@ mod tests {
             decode_tree_with_key(&delta.data, current.hash(), Some(&anchor)).unwrap(),
             current
         );
+    }
+
+    #[test]
+    fn result_equal_to_anchor_is_materialized_instead_of_delta_encoded() {
+        let anchor = tree_fixture(240, None);
+        let encoded = encode_tree_hot(
+            &anchor,
+            Some(TreeDeltaBase {
+                anchor_id: anchor.hash(),
+                anchor: &anchor,
+                parent_depth: 1,
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(encoded.kind, TreeEncodingKind::Lean);
+        assert!(crate::object::is_lean_tree(&encoded.data));
     }
 
     #[test]

@@ -123,6 +123,22 @@ pub enum AuthCommands {
         server: Option<String>,
     },
 
+    /// Create or list signup invites owned by the signed-in account.
+    #[command(args_conflicts_with_subcommands = true)]
+    Invite {
+        /// Bind the new invite to an email address.
+        #[arg(long)]
+        email: Option<String>,
+
+        /// Heddle server address. Omit to use the configured default
+        /// (`api.heddle.sh` when none is stored).
+        #[arg(long, global = true)]
+        server: Option<String>,
+
+        #[command(subcommand)]
+        command: Option<AuthInviteCommands>,
+    },
+
     /// Inspect or explicitly replace descriptor-signing trust
     Trust {
         #[command(subcommand)]
@@ -184,6 +200,12 @@ pub enum AuthCommands {
 }
 
 #[derive(Subcommand, Clone, Debug)]
+pub enum AuthInviteCommands {
+    /// List signup invites owned by the signed-in account.
+    List,
+}
+
+#[derive(Subcommand, Clone, Debug)]
 pub enum AuthTrustCommands {
     /// Show the descriptor trust controlling a server connection
     Show(AuthTrustShowArgs),
@@ -218,7 +240,7 @@ pub struct AuthTrustReplaceArgs {
 mod tests {
     use clap::Parser;
 
-    use crate::cli::{AuthCommands, AuthTrustCommands, Cli, Commands};
+    use crate::cli::{AuthCommands, AuthInviteCommands, AuthTrustCommands, Cli, Commands};
 
     #[test]
     fn trust_replace_parses_compare_and_swap_inputs() {
@@ -369,6 +391,70 @@ mod tests {
         assert_eq!(invite.as_deref(), Some("invite-secret"));
         assert_eq!(credential, None);
         assert!(!open_browser);
+    }
+
+    #[test]
+    fn signup_invite_create_and_list_parse() {
+        let create = Cli::try_parse_from([
+            "heddle",
+            "auth",
+            "invite",
+            "--server",
+            "api.heddle.test",
+            "--email",
+            "alice@example.com",
+        ])
+        .expect("auth invite create flags parse");
+        let Commands::Auth {
+            command:
+                AuthCommands::Invite {
+                    email,
+                    server,
+                    command,
+                },
+        } = create.command
+        else {
+            panic!("expected auth invite");
+        };
+        assert_eq!(email.as_deref(), Some("alice@example.com"));
+        assert_eq!(server.as_deref(), Some("api.heddle.test"));
+        assert!(command.is_none());
+
+        let list = Cli::try_parse_from([
+            "heddle",
+            "auth",
+            "invite",
+            "list",
+            "--server",
+            "api.heddle.test",
+        ])
+        .expect("auth invite list flags parse");
+        let Commands::Auth {
+            command:
+                AuthCommands::Invite {
+                    email,
+                    server,
+                    command: Some(AuthInviteCommands::List),
+                },
+        } = list.command
+        else {
+            panic!("expected auth invite list");
+        };
+        assert_eq!(email, None);
+        assert_eq!(server.as_deref(), Some("api.heddle.test"));
+
+        assert!(
+            Cli::try_parse_from([
+                "heddle",
+                "auth",
+                "invite",
+                "--email",
+                "alice@example.com",
+                "list",
+            ])
+            .is_err(),
+            "create-only --email must not be accepted by list"
+        );
     }
 
     #[test]

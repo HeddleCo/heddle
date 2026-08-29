@@ -1,15 +1,17 @@
 use api::heddle::api::v1alpha1::{
     ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, CheckMergeEligibilityRequest,
     CheckMergeEligibilityResponse, CreateAgentAccountRequest, CreateAgentAccountResponse,
-    CreateGrantRequest, CreateInvitationRequest, CreateServiceAccountRequest, CreateSpoolRequest,
-    DeleteGrantRequest, DeleteNamespaceRequest, DeleteRepositoryRequest,
-    GetCurrentUserSpoolRequest, GrantSupportAccessRequest, GrantTargetRef,
-    Invitation as ProtoInvitation, IssueServiceAccountCredentialRequest, IssuedCredentialResponse,
-    ListGrantsRequest, ListSpoolsRequest, ListSupportAccessGrantsRequest,
-    ListThreadApprovalsRequest, MonorepoNode, ResolveMonorepoRequest, RevokeApprovalRequest,
-    RevokeSupportAccessRequest, ServiceAccountResponse, SpoolSummary, SupportAccessGrant,
-    ThreadApproval, UpdateGrantRequest, UpdateNamespaceRequest, UpdateRepositoryRequest,
-    Visibility, grant_target_ref::Target as GrantTargetKind,
+    CreateGrantRequest, CreateInvitationRequest, CreateServiceAccountRequest,
+    CreateSignupInviteRequest, CreateSignupInviteResponse, CreateSpoolRequest, DeleteGrantRequest,
+    DeleteNamespaceRequest, DeleteRepositoryRequest, GetCurrentUserSpoolRequest,
+    GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
+    IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListGrantsRequest,
+    ListSignupInvitesRequest, ListSignupInvitesResponse, ListSpoolsRequest,
+    ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode,
+    ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
+    ServiceAccountResponse, SpoolSummary, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
+    UpdateNamespaceRequest, UpdateRepositoryRequest, Visibility,
+    grant_target_ref::Target as GrantTargetKind,
 };
 use wire::ProtocolError;
 
@@ -99,6 +101,19 @@ impl HostedClient {
         ))
     }
 
+    pub async fn create_signup_invite(
+        &mut self,
+        request: CreateSignupInviteRequest,
+    ) -> Result<CreateSignupInviteResponse, ProtocolError> {
+        Ok(signed_call!(
+            self,
+            auth,
+            create_signup_invite,
+            "/heddle.api.v1alpha1.IdentityService/CreateSignupInvite",
+            request
+        ))
+    }
+
     pub async fn issue_service_account_credential(
         &mut self,
         request: IssueServiceAccountCredentialRequest,
@@ -107,6 +122,19 @@ impl HostedClient {
             .issue_service_account_credential(&request)
             .await
             .map_err(hosted_to_protocol_error)
+    }
+
+    pub async fn list_signup_invites(
+        &mut self,
+        request: ListSignupInvitesRequest,
+    ) -> Result<ListSignupInvitesResponse, ProtocolError> {
+        Ok(signed_call!(
+            self,
+            auth,
+            list_signup_invites,
+            "/heddle.api.v1alpha1.IdentityService/ListSignupInvites",
+            request
+        ))
     }
 
     pub async fn begin_login(
@@ -161,6 +189,11 @@ impl HostedClient {
     ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
         let operation_id =
             ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateSpool");
+        let owner_genesis = Some(
+            self.context
+                .mint_spool_owner_genesis()
+                .map_err(hosted_to_protocol_error)?,
+        );
         let spool = authed_call!(
             self,
             create_spool,
@@ -173,8 +206,7 @@ impl HostedClient {
                 visibility: Visibility::Private as i32,
                 client_operation_id: operation_id.to_wire(),
                 settings: None,
-                // Local genesis materialization is tracked separately by weft#1532.
-                owner_genesis: None,
+                owner_genesis,
             }
         );
         Ok(to_protocol_spool(spool))
@@ -638,19 +670,32 @@ mod tests {
             .create_service_account(CreateServiceAccountRequest::default())
             .await;
         let _ = client
+            .create_signup_invite(CreateSignupInviteRequest {
+                recipient_email: Some("alice@example.com".to_string()),
+                client_operation_id: "signup-invite-op".to_string(),
+            })
+            .await;
+        let _ = client
             .issue_service_account_credential(IssueServiceAccountCredentialRequest::default())
+            .await;
+        let _ = client
+            .list_signup_invites(ListSignupInvitesRequest {
+                page_size: 200,
+                page_token: String::new(),
+            })
             .await;
         client.begin_login("alice@example.com").await.unwrap();
         let _ = client.get_current_user_spool().await;
         assert!(client.list_spools(true).await.unwrap().is_empty());
-        let _ = client
+        client
             .create_spool(
                 "acme",
                 "widgets",
                 wire::HostedSpoolKind::Project,
                 Some("Widgets".to_string()),
             )
-            .await;
+            .await
+            .expect("CreateSpool mints owner genesis and reaches the server");
         client
             .create_invitation("alice@example.com", "acme", "developer")
             .await
@@ -780,5 +825,62 @@ mod tests {
         assert!(build_target_ref(Some(""), None).is_err());
         assert!(build_target_ref(None, Some("")).is_err());
         assert!(build_target_ref(Some(""), Some("")).is_err());
+    }
+
+    #[tokio::test]
+    async fn create_spool_sends_device_key_signed_uuidv7_owner_genesis() {
+        use sha2::{Digest, Sha256};
+
+        use crypto::Ed25519Signer;
+
+        let (mut client, server, captured) =
+            crate::hosted_runtime::hosted::test_server::start_recording_create_spool().await;
+        let created = client
+            .create_spool(
+                "cedar-jay-9dce33",
+                "spool-d",
+                wire::HostedSpoolKind::Project,
+                None,
+            )
+            .await
+            .expect("CreateSpool with minted genesis");
+        assert_eq!(created.full_path, "cedar-jay-9dce33/spool-d");
+
+        let request = captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .pop()
+            .expect("CreateSpool reached the server");
+        let signed = request
+            .owner_genesis
+            .expect("CreateSpool must send SignedSpoolOwnerGenesis");
+        let genesis = signed.genesis.expect("signed genesis payload");
+        let spool_uuid: [u8; 16] = genesis
+            .spool_uuid
+            .as_slice()
+            .try_into()
+            .expect("spool UUID is 16 bytes");
+        assert_eq!(
+            uuid::Uuid::from_bytes(spool_uuid).get_version_num(),
+            7,
+            "weft takes the new spool UUID from genesis and checks version 7"
+        );
+        let owner_public_key = genesis
+            .owner_public_key
+            .expect("owner public key")
+            .public_key;
+        let digest = Sha256::new()
+            .chain_update(&owner_public_key)
+            .chain_update(spool_uuid)
+            .finalize();
+        Ed25519Signer::verify_with_public_key(
+            &digest,
+            &owner_public_key,
+            &signed.owner_signature.expect("owner signature").signature,
+        )
+        .expect("genesis is a protocol-2 self-signature");
+
+        client.close().await;
+        server.await.unwrap();
     }
 }

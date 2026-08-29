@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "0.15.1",
+  "schemaVersion": "0.15.3",
   "verbs": {
     "abort": {
       "$defs": {
@@ -13513,6 +13513,148 @@
       "title": "AuthCreateServiceTokenSchema",
       "type": "object"
     },
+    "auth invite": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "allowance_remaining": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "invite_code": {
+          "description": "The server returns this code only on surfaces where it may be shown.",
+          "type": "string"
+        },
+        "invite_id": {
+          "type": "string"
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "auth_invite"
+          ],
+          "type": "string"
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "output_kind",
+        "invite_id",
+        "invite_code",
+        "allowance_remaining"
+      ],
+      "title": "AuthSignupInviteCreatedSchema",
+      "type": "object"
+    },
+    "auth invite list": {
+      "$defs": {
+        "AuthSignupInviteSchema": {
+          "properties": {
+            "consumed": {
+              "type": "boolean"
+            },
+            "consumed_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "created_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "invite_code": {
+              "description": "Present because `ListSignupInvites` includes it. Clients must not derive\nor fabricate invite codes from IDs or other metadata.",
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "invite_code",
+            "status",
+            "consumed"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "allowance_remaining": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "invites": {
+          "items": {
+            "$ref": "#/$defs/AuthSignupInviteSchema"
+          },
+          "type": "array"
+        },
+        "output_kind": {
+          "enum": [
+            "auth_invite_list"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "invites",
+        "allowance_remaining"
+      ],
+      "title": "AuthSignupInviteListSchema",
+      "type": "object"
+    },
     "auth login": {
       "$defs": {
         "HumanPromotionDirective": {
@@ -17088,6 +17230,9 @@
             "anchor": {
               "$ref": "#/$defs/AnchorOutput"
             },
+            "anchor_status": {
+              "type": "string"
+            },
             "conflict_operation_ids": {
               "items": {
                 "type": "string"
@@ -17142,6 +17287,7 @@
             "id",
             "title",
             "anchor",
+            "anchor_status",
             "visibility",
             "status",
             "conflict_operation_ids",
@@ -17459,6 +17605,9 @@
             "anchor": {
               "$ref": "#/$defs/AnchorOutput"
             },
+            "anchor_status": {
+              "type": "string"
+            },
             "conflict_operation_ids": {
               "items": {
                 "type": "string"
@@ -17513,6 +17662,7 @@
             "id",
             "title",
             "anchor",
+            "anchor_status",
             "visibility",
             "status",
             "conflict_operation_ids",
@@ -17785,6 +17935,9 @@
             "anchor": {
               "$ref": "#/$defs/AnchorOutput"
             },
+            "anchor_status": {
+              "type": "string"
+            },
             "conflict_operation_ids": {
               "items": {
                 "type": "string"
@@ -17839,6 +17992,7 @@
             "id",
             "title",
             "anchor",
+            "anchor_status",
             "visibility",
             "status",
             "conflict_operation_ids",
@@ -18164,6 +18318,9 @@
             "anchor": {
               "$ref": "#/$defs/AnchorOutput"
             },
+            "anchor_status": {
+              "type": "string"
+            },
             "conflict_operation_ids": {
               "items": {
                 "type": "string"
@@ -18218,6 +18375,7 @@
             "id",
             "title",
             "anchor",
+            "anchor_status",
             "visibility",
             "status",
             "conflict_operation_ids",
@@ -18543,6 +18701,9 @@
             "anchor": {
               "$ref": "#/$defs/AnchorOutput"
             },
+            "anchor_status": {
+              "type": "string"
+            },
             "conflict_operation_ids": {
               "items": {
                 "type": "string"
@@ -18597,6 +18758,7 @@
             "id",
             "title",
             "anchor",
+            "anchor_status",
             "visibility",
             "status",
             "conflict_operation_ids",
@@ -18914,6 +19076,9 @@
             "anchor": {
               "$ref": "#/$defs/AnchorOutput"
             },
+            "anchor_status": {
+              "type": "string"
+            },
             "conflict_operation_ids": {
               "items": {
                 "type": "string"
@@ -18968,6 +19133,7 @@
             "id",
             "title",
             "anchor",
+            "anchor_status",
             "visibility",
             "status",
             "conflict_operation_ids",
@@ -29913,6 +30079,9 @@
       "$defs": {
         "DiscussionView": {
           "properties": {
+            "anchor_ambiguous": {
+              "type": "boolean"
+            },
             "body_changed_since_open": {
               "type": "boolean"
             },
@@ -29938,6 +30107,7 @@
             "symbol",
             "status",
             "body_changed_since_open",
+            "anchor_ambiguous",
             "orphaned"
           ],
           "type": "object"

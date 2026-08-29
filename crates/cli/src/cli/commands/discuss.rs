@@ -4,10 +4,17 @@
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
+// The discussion wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::collab::{
+    AnchorOutput, DiscussionListOutput, DiscussionOutput, DiscussionShowOutput,
+    DiscussionWriteOutput, ResolutionOutput, TurnOutput,
+};
 use objects::object::{
-    AnnotationKind, CollabOpId, CollaborationAnchor, CollaborationIdempotencyKey,
-    CollaborationOperationBodyV1, CollaborationOperationEnvelope, CollaborationResolution,
-    DiscussionRecordId, DiscussionTurnV1, MaterializedDiscussion, StateId, VisibilityTier,
+    AnnotationKind, CollabOpId, CollaborationAnchor, CollaborationAnchorStatus,
+    CollaborationIdempotencyKey, CollaborationOperationBodyV1, CollaborationOperationEnvelope,
+    CollaborationResolution, DiscussionRecordId, DiscussionTurnV1, MaterializedDiscussion, StateId,
+    VisibilityTier,
 };
 use repo::{
     CollaborationStore, CollaborationWriteDisposition, CollaborationWriteOutcome,
@@ -36,13 +43,6 @@ use crate::{
         should_output_json,
     },
     config::UserConfig,
-};
-
-// The discussion wire payloads live in cli-contract so the schema registry
-// registers the real serialization types.
-pub(crate) use heddle_cli_contract::cli::commands::wire::collab::{
-    AnchorOutput, DiscussionListOutput, DiscussionOutput, DiscussionShowOutput,
-    DiscussionWriteOutput, ResolutionOutput, TurnOutput,
 };
 
 pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
@@ -385,7 +385,15 @@ fn emit_show(cli: &Cli, output: &DiscussionShowOutput) -> Result<()> {
     let discussion = &output.discussion;
     println!("discussion {} [{}]", discussion.id, discussion.status);
     println!("  title: {}", discussion.title);
-    println!("  anchor: {}", anchor_label(&discussion.anchor));
+    let anchor_status = match discussion.anchor_status {
+        "current" => String::new(),
+        status => format!(" [{status}]"),
+    };
+    println!(
+        "  anchor: {}{}",
+        anchor_label(&discussion.anchor),
+        anchor_status
+    );
     println!("  visibility: {}", discussion.visibility);
     if let Some(thread_ref) = &discussion.thread_ref {
         println!("  thread: {thread_ref}");
@@ -432,6 +440,7 @@ fn to_view(store: &CollaborationStore, value: &MaterializedDiscussion) -> Result
         id: value.discussion_id.to_string(),
         title: value.title.clone(),
         anchor: anchor_output(&value.anchor),
+        anchor_status: anchor_status_token(value.anchor_status),
         visibility: visibility_token(&value.visibility),
         thread_ref: value.thread_ref.clone(),
         status,
@@ -445,6 +454,15 @@ fn to_view(store: &CollaborationStore, value: &MaterializedDiscussion) -> Result
         display_head_operation_id: value.display_head.to_string_full(),
         turns,
     })
+}
+
+fn anchor_status_token(status: CollaborationAnchorStatus) -> &'static str {
+    match status {
+        CollaborationAnchorStatus::Current => "current",
+        CollaborationAnchorStatus::Moved => "moved",
+        CollaborationAnchorStatus::Ambiguous => "ambiguous",
+        CollaborationAnchorStatus::Orphaned => "orphaned",
+    }
 }
 
 fn matches_filters(

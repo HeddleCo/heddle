@@ -11,6 +11,7 @@ pub struct DiscussionOutput {
     pub id: String,
     pub title: String,
     pub anchor: AnchorOutput,
+    pub anchor_status: &'static str,
     pub visibility: String,
     pub thread_ref: Option<String>,
     pub status: &'static str,
@@ -135,6 +136,7 @@ pub struct DiscussionView {
     pub symbol: String,
     pub status: String,
     pub body_changed_since_open: bool,
+    pub anchor_ambiguous: bool,
     pub orphaned: bool,
 }
 

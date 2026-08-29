@@ -18,6 +18,11 @@ pub enum AuthCommand {
     Status {
         server: Option<String>,
     },
+    Invite {
+        email: Option<String>,
+        server: Option<String>,
+        list: bool,
+    },
     Trust {
         command: AuthTrustCommand,
     },

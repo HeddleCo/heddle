@@ -5,9 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CollabOpId, CollaborationAnchor, CollaborationCodecError, CollaborationOperationBodyV1,
-    CollaborationResolution, DecodedCollaborationOperation, DiscussionRecordId, DiscussionTurnV1,
-    LegacyDiscussionResolutionV1,
+    CollabOpId, CollaborationAnchor, CollaborationAnchorStatus, CollaborationCodecError,
+    CollaborationOperationBodyV1, CollaborationResolution, DecodedCollaborationOperation,
+    DiscussionRecordId, DiscussionTurnV1, LegacyDiscussionResolutionV1,
 };
 use crate::object::VisibilityTier;
 
@@ -96,6 +96,8 @@ pub struct MaterializedDiscussion {
     pub discussion_id: DiscussionRecordId,
     pub title: String,
     pub anchor: CollaborationAnchor,
+    pub anchor_status: CollaborationAnchorStatus,
+    pub body_changed_since_open: bool,
     pub visibility: VisibilityTier,
     pub thread_ref: Option<String>,
     pub turns: Vec<(CollabOpId, DiscussionTurnV1)>,
@@ -192,7 +194,7 @@ fn materialize_discussion(
     }
     let root_id = roots[0];
     let root = &all[&root_id].operation.body;
-    let (title, anchor, visibility, thread_ref, root_turns, base_resolution) = match root {
+    let (title, root_anchor, visibility, thread_ref, root_turns, base_resolution) = match root {
         CollaborationOperationBodyV1::Open {
             title,
             anchor,
@@ -234,9 +236,13 @@ fn materialize_discussion(
         .map(|turn| (root_id, turn))
         .collect::<Vec<_>>();
     let mut state_operations = BTreeSet::new();
+    let mut anchor_operations = BTreeSet::new();
     for id in ids.iter().copied().filter(|id| *id != root_id) {
         match &all[&id].operation.body {
             CollaborationOperationBodyV1::AppendTurn { turn } => turns.push((id, turn.clone())),
+            CollaborationOperationBodyV1::RebindAnchor { .. } => {
+                anchor_operations.insert(id);
+            }
             CollaborationOperationBodyV1::Resolve { .. }
             | CollaborationOperationBodyV1::Reopen { .. }
             | CollaborationOperationBodyV1::ResolveConflict { .. } => {
@@ -250,6 +256,9 @@ fn materialize_discussion(
             }
         }
     }
+
+    let (anchor, anchor_status, body_changed_since_open) =
+        materialize_anchor(root_anchor, &anchor_operations, all)?;
 
     let maximal_state = state_operations
         .iter()
@@ -294,6 +303,8 @@ fn materialize_discussion(
         discussion_id,
         title,
         anchor,
+        anchor_status,
+        body_changed_since_open,
         visibility,
         thread_ref,
         turns,
@@ -302,6 +313,49 @@ fn materialize_discussion(
         heads,
         display_head,
     })
+}
+
+fn materialize_anchor(
+    root_anchor: CollaborationAnchor,
+    anchor_operations: &BTreeSet<CollabOpId>,
+    all: &BTreeMap<CollabOpId, DecodedCollaborationOperation>,
+) -> Result<(CollaborationAnchor, CollaborationAnchorStatus, bool), CollaborationCodecError> {
+    let maximal = anchor_operations
+        .iter()
+        .filter(|candidate| {
+            !anchor_operations
+                .iter()
+                .any(|other| candidate != &other && precedes(**candidate, *other, all))
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    let mut outcomes = Vec::with_capacity(maximal.len());
+    for id in maximal {
+        let CollaborationOperationBodyV1::RebindAnchor {
+            anchor,
+            status,
+            body_changed_since_open,
+        } = &all[&id].operation.body
+        else {
+            return Err(CollaborationCodecError::Invalid(format!(
+                "anchor operation {id} is not an anchor rebind"
+            )));
+        };
+        outcomes.push((anchor.clone(), *status, *body_changed_since_open));
+    }
+    let Some(first) = outcomes.first().cloned() else {
+        return Ok((root_anchor, CollaborationAnchorStatus::Current, false));
+    };
+    if outcomes.iter().all(|outcome| outcome == &first) {
+        return Ok(first);
+    }
+    Ok((
+        root_anchor,
+        CollaborationAnchorStatus::Ambiguous,
+        outcomes
+            .iter()
+            .any(|(_, _, body_changed_since_open)| *body_changed_since_open),
+    ))
 }
 
 fn resolution_outcome(
@@ -381,6 +435,7 @@ mod tests {
     use super::*;
     use crate::object::{
         Attribution, CollaborationIdempotencyKey, CollaborationOperationEnvelope, Principal,
+        StateId,
     };
 
     fn discussion_id() -> DiscussionRecordId {
@@ -425,6 +480,25 @@ mod tests {
         )
     }
 
+    fn symbol_root() -> DecodedCollaborationOperation {
+        decoded(
+            vec![],
+            "symbol-root",
+            1,
+            CollaborationOperationBodyV1::Open {
+                title: "Review".to_string(),
+                anchor: CollaborationAnchor::Symbol {
+                    state_id: StateId::from_bytes([1; 32]),
+                    path: "main.rs".to_string(),
+                    symbol: "foo".to_string(),
+                },
+                visibility: VisibilityTier::default(),
+                turn: DiscussionTurnV1::new("first").unwrap(),
+                thread_ref: None,
+            },
+        )
+    }
+
     #[test]
     fn op_set_union_converges_independent_of_arrival_order() {
         let root = root();
@@ -454,6 +528,73 @@ mod tests {
         assert_eq!(
             discussion.display_head,
             *discussion.heads.iter().next().unwrap()
+        );
+    }
+
+    #[test]
+    fn anchor_rebind_materializes_as_the_durable_anchor() {
+        let root = symbol_root();
+        let rebound = decoded(
+            vec![root.operation_id],
+            "rebind",
+            2,
+            CollaborationOperationBodyV1::RebindAnchor {
+                anchor: CollaborationAnchor::Symbol {
+                    state_id: StateId::from_bytes([2; 32]),
+                    path: "main.rs".to_string(),
+                    symbol: "bar".to_string(),
+                },
+                status: CollaborationAnchorStatus::Moved,
+                body_changed_since_open: true,
+            },
+        );
+        let view = materialize_repository_collaboration(vec![root, rebound]).unwrap();
+        let discussion = &view.discussions[&discussion_id()];
+        assert_eq!(
+            discussion.anchor,
+            CollaborationAnchor::Symbol {
+                state_id: StateId::from_bytes([2; 32]),
+                path: "main.rs".to_string(),
+                symbol: "bar".to_string(),
+            }
+        );
+        assert_eq!(discussion.anchor_status, CollaborationAnchorStatus::Moved);
+        assert!(discussion.body_changed_since_open);
+    }
+
+    #[test]
+    fn concurrent_different_anchor_rebinds_materialize_as_ambiguous() {
+        let root = symbol_root();
+        let rebind = |key: &str, symbol: &str| {
+            decoded(
+                vec![root.operation_id],
+                key,
+                2,
+                CollaborationOperationBodyV1::RebindAnchor {
+                    anchor: CollaborationAnchor::Symbol {
+                        state_id: StateId::from_bytes([2; 32]),
+                        path: "main.rs".to_string(),
+                        symbol: symbol.to_string(),
+                    },
+                    status: CollaborationAnchorStatus::Moved,
+                    body_changed_since_open: false,
+                },
+            )
+        };
+        let left = rebind("left", "bar");
+        let right = rebind("right", "baz");
+        let view = materialize_repository_collaboration(vec![root.clone(), left, right]).unwrap();
+        let discussion = &view.discussions[&discussion_id()];
+        assert_eq!(
+            discussion.anchor,
+            match root.operation.body {
+                CollaborationOperationBodyV1::Open { anchor, .. } => anchor,
+                _ => unreachable!(),
+            }
+        );
+        assert_eq!(
+            discussion.anchor_status,
+            CollaborationAnchorStatus::Ambiguous
         );
     }
 

@@ -8,7 +8,7 @@ use super::root_mint::{
 };
 use crate::hosted_runtime::{
     auth::headless_token_metadata,
-    device_flow::{SAFE_AGENT_OPERATIONS, restrict_agent_account_root},
+    device_flow::{AgentTemplate, SAFE_AGENT_OPERATIONS, restrict_agent_account_root},
 };
 
 #[test]
@@ -192,16 +192,116 @@ fn restricted_agent_capability_keeps_the_deny_floor() {
         "DeleteNamespace",
         "RevokeSession",
         "CreateAgentAccount",
+        "ClaimHandle",
+        "ClaimSignupInvite",
+        "PromoteAgentAccount",
     ] {
         assert!(
             block.contains(&format!(r#"$op != "{denied}""#)),
             "deny floor missing {denied}: {block}"
         );
     }
-    for allowed in SAFE_AGENT_OPERATIONS {
+    for everyday in ["CreateSignupInvite", "ListSignupInvites"] {
         assert!(
-            block.contains(&format!(r#"$op == "{allowed}""#)),
-            "safe ceiling missing {allowed}: {block}"
+            !block.contains(&format!(r#"$op != "{everyday}""#)),
+            "account-root deny floor must not include {everyday}: {block}"
+        );
+    }
+    assert!(
+        !block.contains("$op =="),
+        "account root must not carry the SAFE child allowlist: {block}"
+    );
+}
+
+/// The unclaimed agent-rooted login root is the account. Remint keeps the
+/// deny floor but not the derive-agent child ceiling, so everyday account
+/// ops including signup-invite mint/list must authorize.
+#[test]
+fn restricted_agent_root_can_mint_and_list_signup_invites() {
+    let signer = Ed25519Signer::generate().expect("seed");
+    let seed = signer.to_seed();
+    let root = mint_agent_root(&seed).expect("agent root");
+    let restricted =
+        restrict_agent_account_root(&root.token, &signer, root.expires_at).expect("restrict");
+    for allowed in ["CreateSignupInvite", "ListSignupInvites", "WhoAmI"] {
+        authorize_restricted_root(&restricted, &seed, allowed)
+            .unwrap_or_else(|error| panic!("account root must authorize {allowed}: {error}"));
+    }
+    for denied in [
+        "CreateServiceAccount",
+        "CreateAgentAccount",
+        "RevokeSession",
+        "ClaimSignupInvite",
+    ] {
+        assert!(
+            authorize_restricted_root(&restricted, &seed, denied).is_err(),
+            "account root must still deny {denied}"
+        );
+    }
+}
+
+/// Derived children stay on the SAFE / template ceiling. Invite mint and
+/// list are everyday account-root ops, not child grants.
+#[test]
+fn derived_contributor_cannot_mint_or_list_signup_invites() {
+    let contributor = AgentTemplate::Contributor.operations();
+    for template in AgentTemplate::ALL {
+        let operations = template.operations();
+        for denied in ["CreateSignupInvite", "ListSignupInvites"] {
+            assert!(
+                !operations.iter().any(|operation| operation == denied),
+                "template {:?} must not grant {denied}",
+                template.as_str()
+            );
+        }
+    }
+    for denied in ["CreateSignupInvite", "ListSignupInvites"] {
+        assert!(
+            !SAFE_AGENT_OPERATIONS.contains(&denied),
+            "SAFE_AGENT_OPERATIONS is the derive-agent child ceiling and must not include {denied}"
+        );
+        assert!(
+            !contributor.iter().any(|operation| operation == denied),
+            "contributor child must not receive {denied}"
+        );
+    }
+}
+
+fn authorize_restricted_root(
+    token: &str,
+    seed: &[u8; 32],
+    operation: &str,
+) -> Result<(), biscuit_auth::error::Token> {
+    use biscuit_auth::{builder::AuthorizerBuilder, datalog::RunLimits};
+
+    let authority = authority_keypair(seed).expect("authority");
+    let root_public = authority.public();
+    let biscuit = biscuit_auth::Biscuit::from_base64(token.as_bytes(), move |_| Ok(root_public))?;
+    let mut authorizer = AuthorizerBuilder::new()
+        .set_limits(RunLimits {
+            max_facts: 1000,
+            max_iterations: 100,
+            max_time: std::time::Duration::from_secs(1),
+        })
+        .fact(format!("time({})", Utc::now().to_rfc3339()).as_str())?
+        .fact(format!(r#"operation("{operation}")"#).as_str())?
+        .policy("allow if true")?
+        .build(&biscuit)?;
+    authorizer.authorize().map(|_| ())
+}
+
+/// Regression: the agent ceiling must carry the personal-spool discovery +
+/// provisioning ops. Without them, an unclaimed agent-rooted account's
+/// `heddle push <host>` aborts client-side inside `auto_provision_hosted_repo`
+/// before `GetCurrentUserSpool`/`CreateSpool` are ever sent — the account can
+/// mint, WhoAmI, and ListRefs, but never provision its own spool. weft admits
+/// both server-side for unclaimed agent-rooted accounts (weft#1852/#1853).
+#[test]
+fn safe_ceiling_allows_host_only_spool_provisioning() {
+    for op in ["GetCurrentUserSpool", "CreateSpool"] {
+        assert!(
+            SAFE_AGENT_OPERATIONS.contains(&op),
+            "agent ceiling missing {op}: host-only auto-provision push cannot fire it"
         );
     }
 }
