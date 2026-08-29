@@ -5,9 +5,7 @@ use std::{
     fs::File,
 };
 
-use heddle_object_model::compact::{
-    decode_state_frame, decode_tree_frame, encode_state_frame, encode_tree_frame, encoded_tree_size,
-};
+use heddle_object_model::compact::{decode_state_frame, encode_state_frame};
 
 use super::{
     super::FsStore, blob_lineage::blob_lineage_order, blob_writer::add_blob_frames,
@@ -30,6 +28,12 @@ use state_writer::add_state_frames;
 
 pub(super) const FRAME_LIMIT: usize = 12 * 1024 * 1024;
 
+pub(super) struct CompactMetadata {
+    pub(super) logical_bytes: u64,
+    pub(super) tree_order: Vec<ContentHash>,
+    pub(super) tree_parents: HashMap<ContentHash, ContentHash>,
+}
+
 pub(super) fn add_compact_metadata(
     store: &FsStore,
     builder: &mut StreamingPackBuilder<File>,
@@ -38,17 +42,19 @@ pub(super) fn add_compact_metadata(
     blob_hashes: &[ContentHash],
     context: &RepackContext,
     corrupt_first: &mut bool,
-) -> Result<u64, BuildError> {
+) -> Result<CompactMetadata, BuildError> {
     let states = load_states(store, state_ids)?;
     let state_order = newest_first_topology(&states)?;
     let tree_order = tree_path_order(store, tree_hashes, &states, &state_order)?;
+    let tree_parents = historical_tree_parents(store, tree_hashes, &states, &state_order)?;
     let blob_order = blob_lineage_order(store, &states, &state_order, blob_hashes)?;
     let blob_bytes = add_blob_frames(store, builder, &blob_order, context, corrupt_first)?;
     let state_bytes = add_state_frames(builder, &states, &state_order, context, corrupt_first)?;
-    let tree_bytes = add_tree_frames(store, builder, &tree_order, context, corrupt_first)?;
-    Ok(blob_bytes
-        .saturating_add(state_bytes)
-        .saturating_add(tree_bytes))
+    Ok(CompactMetadata {
+        logical_bytes: blob_bytes.saturating_add(state_bytes),
+        tree_order,
+        tree_parents,
+    })
 }
 
 fn load_states(store: &FsStore, ids: &[StateId]) -> Result<HashMap<StateId, State>, BuildError> {
@@ -132,6 +138,69 @@ fn tree_path_order(
     Ok(order)
 }
 
+fn historical_tree_parents(
+    store: &FsStore,
+    hashes: &[ContentHash],
+    states: &HashMap<StateId, State>,
+    state_order: &[StateId],
+) -> Result<HashMap<ContentHash, ContentHash>, BuildError> {
+    let allowed = hashes.iter().copied().collect::<HashSet<_>>();
+    let mut parents = HashMap::new();
+    let mut seen_pairs = HashSet::new();
+    for state_id in state_order {
+        let state = &states[state_id];
+        for parent_id in &state.parents {
+            let Some(parent) = states.get(parent_id) else {
+                continue;
+            };
+            visit_tree_pairs(
+                store,
+                state.tree,
+                parent.tree,
+                &allowed,
+                &mut seen_pairs,
+                &mut parents,
+            )?;
+        }
+    }
+    Ok(parents)
+}
+
+fn visit_tree_pairs(
+    store: &FsStore,
+    current: ContentHash,
+    parent: ContentHash,
+    allowed: &HashSet<ContentHash>,
+    seen_pairs: &mut HashSet<(ContentHash, ContentHash)>,
+    parents: &mut HashMap<ContentHash, ContentHash>,
+) -> Result<(), BuildError> {
+    let mut stack = vec![(current, parent)];
+    while let Some((current, parent)) = stack.pop() {
+        if current == parent || !seen_pairs.insert((current, parent)) {
+            continue;
+        }
+        if !allowed.contains(&current) || !allowed.contains(&parent) {
+            continue;
+        }
+        parents.entry(current).or_insert(parent);
+        let current_tree = load_tree(store, current)?;
+        let parent_tree = load_tree(store, parent)?;
+        for entry in current_tree.entries().iter().rev() {
+            let Some(current_child) = entry.tree_hash() else {
+                continue;
+            };
+            let Some(parent_child) = parent_tree
+                .get(entry.name())
+                .and_then(|entry| entry.tree_hash())
+            else {
+                continue;
+            };
+            stack.push((current_child, parent_child));
+        }
+    }
+    Ok(())
+}
+
 fn visit_tree(
     store: &FsStore,
     root: ContentHash,
@@ -166,90 +235,6 @@ fn visit_tree(
                 };
                 stack.push((child, child_path));
             }
-        }
-    }
-    Ok(())
-}
-
-fn add_tree_frames(
-    store: &FsStore,
-    builder: &mut StreamingPackBuilder<File>,
-    order: &[ContentHash],
-    context: &RepackContext,
-    corrupt_first: &mut bool,
-) -> Result<u64, BuildError> {
-    let mut trees = Vec::new();
-    let mut ids = Vec::new();
-    let mut tree_bytes = 0usize;
-    let mut logical_bytes = 0u64;
-    for hash in order {
-        let tree = load_tree(store, *hash)?;
-        let tree_size = encoded_tree_size(&tree);
-        let proposed_size = 4usize
-            .saturating_add(unsigned_varint_len(trees.len() + 1))
-            .saturating_add(tree_bytes)
-            .saturating_add(tree_size)
-            .saturating_add(32);
-        if !trees.is_empty() && proposed_size > FRAME_LIMIT {
-            write_tree_frame(builder, &ids, &trees, corrupt_first)?;
-            trees.clear();
-            ids.clear();
-            tree_bytes = 0;
-        }
-        let source = tree.encode_canonical().map_err(HeddleError::from)?;
-        logical_bytes = logical_bytes.saturating_add(source.len() as u64);
-        tree_bytes = tree_bytes.saturating_add(tree_size);
-        trees.push(tree);
-        ids.push(PackObjectId::Hash(*hash));
-        context
-            .checkpoint(tree_size as u64)
-            .map_err(BuildError::Cancelled)?;
-    }
-    if !trees.is_empty() {
-        write_tree_frame(builder, &ids, &trees, corrupt_first)?;
-    }
-    Ok(logical_bytes)
-}
-
-fn unsigned_varint_len(mut value: usize) -> usize {
-    let mut len = 1;
-    while value >= 0x80 {
-        value >>= 7;
-        len += 1;
-    }
-    len
-}
-
-fn write_tree_frame(
-    builder: &mut StreamingPackBuilder<File>,
-    ids: &[PackObjectId],
-    trees: &[Tree],
-    corrupt_first: &mut bool,
-) -> Result<(), BuildError> {
-    let mut frame = encode_tree_frame(trees).map_err(compact_error)?;
-    verify_tree_frame(ids, trees, &frame)?;
-    corrupt_if_requested(&mut frame, corrupt_first);
-    let stored = compress_compact_frame(&frame)?;
-    builder.add_shared_frame(ids, ObjectType::Tree, frame.len(), &stored)?;
-    Ok(())
-}
-
-fn verify_tree_frame(
-    ids: &[PackObjectId],
-    expected: &[Tree],
-    frame: &[u8],
-) -> Result<(), BuildError> {
-    let decoded = decode_tree_frame(frame).map_err(compact_error)?;
-    if decoded != expected || decoded.len() != ids.len() {
-        return Err(
-            HeddleError::InvalidObject("compact tree frame changed object values".into()).into(),
-        );
-    }
-    for (id, tree) in ids.iter().zip(decoded) {
-        if *id != PackObjectId::Hash(tree.hash()) {
-            return Err(
-                HeddleError::InvalidObject("compact tree frame changed a typed id".into()).into(),
-            );
         }
     }
     Ok(())

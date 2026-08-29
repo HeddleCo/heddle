@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use crate::object::{
     Action, ActionId, AnnotatedTag, Blob, ContentHash, OpenedTreeBody, State, StateAttachment,
-    StateAttachmentId, StateId, Tree, TreeEntryReader, TreeResumeCursor, is_streamable_tree,
+    StateAttachmentId, StateId, Tree, TreeEntry, TreeEntryReader, TreeResumeCursor,
+    is_streamable_tree,
 };
 
 pub mod codec;
@@ -317,6 +318,14 @@ pub trait ObjectStore: SidecarStore + Send + Sync {
         self.has_blob(hash)
     }
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>>;
+    /// Resolve one named tree entry. Pack-capable stores override this so a
+    /// lookup can use a restartable packed record instead of materializing the
+    /// complete tree.
+    fn get_tree_entry(&self, hash: &ContentHash, name: &str) -> Result<Option<TreeEntry>> {
+        Ok(self
+            .get_tree(hash)?
+            .and_then(|tree| tree.get(name).cloned()))
+    }
     fn put_tree(&self, tree: &Tree) -> Result<ContentHash>;
     fn has_tree(&self, hash: &ContentHash) -> Result<bool>;
     /// Return whether the tree is owned by this store, excluding any configured

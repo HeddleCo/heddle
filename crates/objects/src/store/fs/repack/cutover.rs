@@ -11,7 +11,7 @@ use std::{
 use fs2::FileExt;
 
 use super::{
-    super::{FsStore, fs_paths::packs_dir},
+    super::{FsStore, fs_paths::packs_dir, npk1::Npk1Manager},
     staging::RepackSnapshot,
 };
 use crate::{
@@ -35,12 +35,18 @@ pub(super) fn cutover(
     store: &FsStore,
     snapshot: &RepackSnapshot,
     new_name: &str,
+    new_npk1_name: Option<&str>,
     replacement_preexisting: bool,
+    npk1_preexisting: bool,
 ) -> Result<CutoverStats> {
     let mut manager = store
         .pack_manager()
         .write()
         .map_err(|_| HeddleError::Config("Failed to acquire pack manager lock".to_string()))?;
+    let mut npk1_manager = store
+        .npk1_manager()
+        .write()
+        .map_err(|_| HeddleError::Config("Failed to acquire NPK1 manager lock".to_string()))?;
     let mut removed_bytes = 0u64;
     let mut first_error = None;
     for (pack, index) in &snapshot.old_pack_files {
@@ -62,24 +68,61 @@ pub(super) fn cutover(
             let _ = fs::remove_file(marker);
         }
     }
+    for path in &snapshot.old_npk1_files {
+        if path.file_stem().and_then(|stem| stem.to_str()) == new_npk1_name {
+            continue;
+        }
+        let bytes = file_len(path);
+        match fs::remove_file(path) {
+            Ok(()) => removed_bytes = removed_bytes.saturating_add(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
     sync_directory(&packs_dir(store.root()))?;
     *manager = SnapshotPackManager::new(packs_dir(store.root()));
+    *npk1_manager = Npk1Manager::new(packs_dir(store.root()));
     drop(manager);
+    drop(npk1_manager);
     store.clear_recent_object_caches();
     if let Some(error) = first_error {
         return Err(error.into());
     }
-    let replacement_bytes = if replacement_preexisting {
+    let mut replacement_bytes = if replacement_preexisting {
         0
     } else {
         file_len(&packs_dir(store.root()).join(format!("{new_name}.pack"))).saturating_add(
             file_len(&packs_dir(store.root()).join(format!("{new_name}.idx"))),
         )
     };
+    if !npk1_preexisting && let Some(name) = new_npk1_name {
+        replacement_bytes = replacement_bytes.saturating_add(file_len(
+            &packs_dir(store.root()).join(format!("{name}.npk")),
+        ));
+    }
     Ok(CutoverStats {
         removed_pack_bytes: removed_bytes,
         replacement_bytes,
     })
+}
+
+pub(super) fn publish_npk1(packs: &Path, staged: &Path) -> Result<(String, bool)> {
+    let name = hash_file(staged)?;
+    let target = packs.join(format!("{name}.npk"));
+    if target.exists() {
+        if hash_file(&target)? != name {
+            return Err(HeddleError::InvalidObject(
+                "existing NPK1 filename does not match its contents".to_string(),
+            ));
+        }
+        fs::remove_file(staged)?;
+        return Ok((name, true));
+    }
+    fs::rename(staged, &target)?;
+    sync_directory(packs)?;
+    Ok((name, false))
 }
 
 pub(super) fn preserve_commit_markers(

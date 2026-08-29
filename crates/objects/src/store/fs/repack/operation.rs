@@ -7,10 +7,12 @@ use super::{
         FsStore,
         fs_io::{list_hashes_from_dir, list_state_ids_from_dir},
         fs_paths::{blobs_dir, packs_dir, state_path, states_dir, trees_dir},
+        npk1::{Npk1Build, Npk1BuildError, build_npk1_pack},
     },
     compact::add_compact_metadata,
     cutover::{
-        acquire_repack_lock, cutover, file_len, hash_file, object_file_len, preserve_commit_markers,
+        acquire_repack_lock, cutover, file_len, hash_file, object_file_len,
+        preserve_commit_markers, publish_npk1,
     },
     staging::{BuildError, RepackSnapshot, RepackStaging, verify_staged},
 };
@@ -22,15 +24,22 @@ use crate::store::{
     },
 };
 
+type StagedBuild = (
+    HashSet<PackObjectId>,
+    HashSet<crate::object::ContentHash>,
+    u64,
+    Option<Npk1Build>,
+);
+
 /// Compact native encoder wired behind the generic background repack seam.
 ///
-/// It streams one object at a time (bounded memory), verifies every typed id
-/// and the exact expected object set, then installs the immutable replacement
-/// before retiring source packs under the pack-manager write lock. The
-/// scheduler itself has no native-pack knowledge.
+/// It loads trees one at a time while retaining pack-wide dictionaries and
+/// sketches, verifies every typed id and the exact expected object set, then
+/// installs the immutable replacement before retiring source packs under the
+/// pack-manager write lock. The scheduler itself has no native-pack knowledge.
 pub struct FsRepackOperation {
     store: FsStore,
-    excluded: HashSet<PackObjectId>,
+    excluded_blobs: HashSet<crate::object::ContentHash>,
     #[cfg(test)]
     corrupt_first_object: bool,
 }
@@ -40,7 +49,7 @@ impl FsRepackOperation {
     pub fn new(store: FsStore) -> Self {
         Self {
             store,
-            excluded: HashSet::new(),
+            excluded_blobs: HashSet::new(),
             #[cfg(test)]
             corrupt_first_object: false,
         }
@@ -52,7 +61,7 @@ impl FsRepackOperation {
     /// source pack only after the replacement has been verified without the
     /// excluded identity.
     pub fn excluding_blob(mut self, hash: crate::object::ContentHash) -> Self {
-        self.excluded.insert(PackObjectId::Hash(hash));
+        self.excluded_blobs.insert(hash);
         self
     }
 
@@ -85,17 +94,27 @@ impl FsRepackOperation {
                 HeddleError::Config("Failed to acquire pack manager lock".to_string())
             })?;
         let paths = manager.pack_file_paths();
-        let pack_bytes = paths
+        let generic_pack_count = paths.len();
+        let mut pack_bytes: u64 = paths
             .iter()
             .flat_map(|(pack, index)| [*pack, *index])
             .map(file_len)
             .sum();
-        let ids = manager.list_all_ids()?;
+        let mut ids = manager.list_all_ids()?;
+        drop(manager);
+        let npk1 =
+            self.store.npk1_manager().read().map_err(|_| {
+                HeddleError::Config("Failed to acquire NPK1 manager lock".to_string())
+            })?;
+        let npk1_paths = npk1.file_paths();
+        pack_bytes =
+            pack_bytes.saturating_add(npk1_paths.iter().map(|path| file_len(path)).sum::<u64>());
+        ids.extend(npk1.list_ids()?.into_iter().map(PackObjectId::Hash));
         let unique = ids.iter().copied().collect::<HashSet<_>>().len() as u64;
         Ok(RepackInventory {
             loose_objects: (loose_blobs.len() + loose_trees.len() + loose_states.len()) as u64,
             loose_bytes,
-            pack_count: paths.len() as u64,
+            pack_count: (generic_pack_count + npk1_paths.len()) as u64,
             pack_bytes,
             duplicate_objects: ids.len() as u64 - unique,
             packed_objects: ids.len() as u64,
@@ -118,17 +137,24 @@ impl FsRepackOperation {
         }
 
         let staging = RepackStaging::new(&packs).map_err(RepackError::operation)?;
-        let (expected, logical_bytes) =
-            self.build_staged(&snapshot, &staging, context)
-                .map_err(|error| match error {
-                    BuildError::Cancelled(error) => error,
-                    BuildError::Store(error) => RepackError::operation(error),
-                })?;
-        verify_staged(&staging, &expected, context)?;
+        let (expected_generic, expected_trees, logical_bytes, npk1_build) = self
+            .build_staged(&snapshot, &staging, context)
+            .map_err(|error| match error {
+                BuildError::Cancelled(error) => error,
+                BuildError::Store(error) => RepackError::operation(error),
+            })?;
+        verify_staged(&staging, &expected_generic, &expected_trees, context)?;
         context.checkpoint(0)?;
 
         // Cutover starts here and is intentionally non-cancellable. The new
-        // pair is durable before any source path is retired.
+        // immutable files are durable before any source path is retired.
+        let (new_npk1_name, npk1_preexisting) = if npk1_build.is_some() {
+            let (name, preexisting) =
+                publish_npk1(&packs, &staging.npk1).map_err(RepackError::operation)?;
+            (Some(name), preexisting)
+        } else {
+            (None, false)
+        };
         let new_pack_name = hash_file(&staging.pack).map_err(RepackError::operation)?;
         let replacement_preexisting = packs.join(format!("{new_pack_name}.pack")).exists()
             && packs.join(format!("{new_pack_name}.idx")).exists();
@@ -140,7 +166,9 @@ impl FsRepackOperation {
             &self.store,
             &snapshot,
             &new_pack_name,
+            new_npk1_name.as_deref(),
             replacement_preexisting,
+            npk1_preexisting,
         )
         .map_err(RepackError::operation)?;
         // The replacement is authoritative before loose copies are pruned.
@@ -156,7 +184,7 @@ impl FsRepackOperation {
             .saturating_sub(cutover.replacement_bytes);
 
         Ok(RepackOutcome {
-            objects_repacked: expected.len() as u64,
+            objects_repacked: (expected_generic.len() + expected_trees.len()) as u64,
             bytes_repacked: logical_bytes,
             bytes_reclaimed: reclaimed,
         })
@@ -167,7 +195,7 @@ impl FsRepackOperation {
         snapshot: &RepackSnapshot,
         staging: &RepackStaging,
         context: &RepackContext,
-    ) -> std::result::Result<(HashSet<PackObjectId>, u64), BuildError> {
+    ) -> std::result::Result<StagedBuild, BuildError> {
         let pack_file = OpenOptions::new()
             .create_new(true)
             .read(true)
@@ -182,6 +210,7 @@ impl FsRepackOperation {
             staging.buckets.clone(),
         )?;
         let mut expected = HashSet::new();
+        let mut expected_trees = HashSet::new();
         let mut state_ids = Vec::new();
         let mut tree_hashes = Vec::new();
         let mut blob_hashes = Vec::new();
@@ -195,7 +224,9 @@ impl FsRepackOperation {
             let reader = PackReader::open(pack, index)?;
             let mut checkpoint_error = None;
             let visit = reader.visit_objects(|id, object_type, data| {
-                if self.excluded.contains(&id) {
+                if object_type == ObjectType::Blob
+                    && matches!(id, PackObjectId::Hash(hash) if self.excluded_blobs.contains(&hash))
+                {
                     if let Err(error) = context.checkpoint(data.len() as u64) {
                         checkpoint_error = Some(error);
                         return Err(HeddleError::InvalidObject(
@@ -204,16 +235,28 @@ impl FsRepackOperation {
                     }
                     return Ok(());
                 }
-                if !expected.insert(id) {
-                    return Ok(());
-                }
                 match (id, object_type) {
-                    (PackObjectId::Hash(hash), ObjectType::Blob) => blob_hashes.push(hash),
-                    (PackObjectId::Hash(hash), ObjectType::Tree) => tree_hashes.push(hash),
+                    (PackObjectId::Hash(hash), ObjectType::Tree) => {
+                        if expected_trees.insert(hash) {
+                            tree_hashes.push(hash);
+                        }
+                    }
+                    (PackObjectId::Hash(hash), ObjectType::Blob) => {
+                        if !expected.insert(id) {
+                            return Ok(());
+                        }
+                        blob_hashes.push(hash);
+                    }
                     (PackObjectId::StateId(state_id), ObjectType::State) => {
+                        if !expected.insert(id) {
+                            return Ok(());
+                        }
                         state_ids.push(state_id);
                     }
                     _ => {
+                        if !expected.insert(id) {
+                            return Ok(());
+                        }
                         let mut data = data.to_vec();
                         if corrupt_first {
                             data.push(0xff);
@@ -236,9 +279,14 @@ impl FsRepackOperation {
             }
             visit?;
         }
+        for hash in &snapshot.npk1_trees {
+            if expected_trees.insert(*hash) {
+                tree_hashes.push(*hash);
+            }
+        }
         for hash in &snapshot.loose_blobs {
             let id = PackObjectId::Hash(*hash);
-            if self.excluded.contains(&id) {
+            if self.excluded_blobs.contains(hash) {
                 continue;
             }
             if expected.insert(id) {
@@ -246,8 +294,7 @@ impl FsRepackOperation {
             }
         }
         for hash in &snapshot.loose_trees {
-            let id = PackObjectId::Hash(*hash);
-            if expected.insert(id) {
+            if expected_trees.insert(*hash) {
                 tree_hashes.push(*hash);
             }
         }
@@ -257,7 +304,7 @@ impl FsRepackOperation {
                 state_ids.push(*id);
             }
         }
-        logical_bytes = logical_bytes.saturating_add(add_compact_metadata(
+        let compact = add_compact_metadata(
             &self.store,
             &mut builder,
             &state_ids,
@@ -265,9 +312,27 @@ impl FsRepackOperation {
             &blob_hashes,
             context,
             &mut corrupt_first,
-        )?);
+        )?;
+        logical_bytes = logical_bytes.saturating_add(compact.logical_bytes);
         builder.finalize()?;
-        Ok((expected, logical_bytes))
+        let npk1_build = if compact.tree_order.is_empty() {
+            None
+        } else {
+            let build = build_npk1_pack(
+                &self.store,
+                &compact.tree_order,
+                &compact.tree_parents,
+                &staging.npk1,
+                context,
+            )
+            .map_err(|error| match error {
+                Npk1BuildError::Store(error) => BuildError::Store(error),
+                Npk1BuildError::Cancelled(error) => BuildError::Cancelled(error),
+            })?;
+            logical_bytes = logical_bytes.saturating_add(build.logical_bytes);
+            Some(build)
+        };
+        Ok((expected, expected_trees, logical_bytes, npk1_build))
     }
 }
 

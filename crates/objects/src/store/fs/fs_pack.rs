@@ -681,13 +681,16 @@ impl FsStore {
         let trees = list_hashes_from_dir(&trees_dir(&self.root))?;
         let states = list_state_ids_from_dir(&states_dir(&self.root))?;
 
-        let pack_manager = self
-            .pack_manager()
-            .read()
-            .map_err(|_| HeddleError::Config("Failed to acquire pack manager lock".to_string()))?;
-
         for hash in &blobs {
-            if pack_manager.get_hashed_object(hash)?.is_some() {
+            let packed = self
+                .pack_manager()
+                .read()
+                .map_err(|_| {
+                    HeddleError::Config("Failed to acquire pack manager lock".to_string())
+                })?
+                .get_hashed_object(hash)?
+                .is_some();
+            if packed {
                 let path = hash_path(&blobs_dir(&self.root), hash);
                 if let Some(bytes) = remove_file_counted(&path)? {
                     bytes_freed = bytes_freed.saturating_add(bytes);
@@ -697,27 +700,51 @@ impl FsStore {
         }
 
         for hash in &trees {
-            let Some((obj_type, packed_data)) = pack_manager.get_hashed_object(hash)? else {
-                continue;
-            };
-            if obj_type != PackObjectType::Tree {
-                continue;
-            }
             let path = hash_path(&trees_dir(&self.root), hash);
             let Some(loose_data) = read_file_bytes(&path)? else {
                 continue;
             };
             let loose_body = codec::decode_tree_body(loose_data.as_slice())?;
-            if crate::object::is_delta_tree(&loose_body) {
-                continue;
-            }
-            let loose_tree = codec::decode_tree_serialized_with_key(&loose_body, *hash, None)?;
+            let loose_is_delta = crate::object::is_delta_tree(&loose_body);
+            let loose_tree = self.decode_tree_storage_body(*hash, &loose_body)?;
             let found = loose_tree.hash();
             if found != *hash {
                 return Err(HeddleError::Corruption {
                     expected: *hash,
                     found,
                 });
+            }
+            let npk1_tree = self
+                .npk1_manager()
+                .read()
+                .map_err(|_| {
+                    HeddleError::Config("Failed to acquire NPK1 manager lock".to_string())
+                })?
+                .get_tree(hash)?;
+            if npk1_tree.as_ref() == Some(&loose_tree) {
+                if let Some(bytes) = remove_file_counted(&path)? {
+                    bytes_freed = bytes_freed.saturating_add(bytes);
+                    removed += 1;
+                }
+                continue;
+            }
+            // Keep main's HDC1 hot-tier safety rule unless an identical,
+            // materialized NPK1 tree has already made the delta redundant.
+            if loose_is_delta {
+                continue;
+            }
+            let packed = self
+                .pack_manager()
+                .read()
+                .map_err(|_| {
+                    HeddleError::Config("Failed to acquire pack manager lock".to_string())
+                })?
+                .get_hashed_object(hash)?;
+            let Some((obj_type, packed_data)) = packed else {
+                continue;
+            };
+            if obj_type != PackObjectType::Tree {
+                continue;
             }
             // A loose current tree can intentionally shadow an older packed
             // schema at the same semantic hash. Preserve that migration copy
@@ -745,9 +772,14 @@ impl FsStore {
         }
 
         for id in &states {
-            let Some((obj_type, packed_data)) =
-                pack_manager.get_object(&PackObjectId::StateId(*id))?
-            else {
+            let packed = self
+                .pack_manager()
+                .read()
+                .map_err(|_| {
+                    HeddleError::Config("Failed to acquire pack manager lock".to_string())
+                })?
+                .get_object(&PackObjectId::StateId(*id))?;
+            let Some((obj_type, packed_data)) = packed else {
                 continue;
             };
             if obj_type != PackObjectType::State {

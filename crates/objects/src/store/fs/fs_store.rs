@@ -18,6 +18,7 @@ use heddle_format::compression::CompressionConfig;
 use super::{
     fs_io::{AtomicWriteMode, write_atomic},
     fs_paths::{actions_dir, blobs_dir, packs_dir, states_dir, tree_lineage_dir, trees_dir},
+    npk1::Npk1Manager,
 };
 use crate::{
     fs_atomic::sync_directory,
@@ -257,6 +258,7 @@ pub struct FsStore {
     pub(super) compression: CompressionConfig,
     pub(super) snapshot_delta_search: bool,
     pack_manager: RwLock<SnapshotPackManager>,
+    npk1_manager: RwLock<Npk1Manager>,
     pub(super) recent_blobs: RwLock<RecentObjectCache<ContentHash, Blob>>,
     pub(super) recent_trees: RwLock<RecentObjectCache<ContentHash, Tree>>,
     pub(super) recent_states: RwLock<RecentObjectCache<StateId, State>>,
@@ -305,11 +307,13 @@ impl FsStore {
     pub fn new(root: impl AsRef<Path>) -> Self {
         let root = root.as_ref().to_path_buf();
         let pack_manager = SnapshotPackManager::new(packs_dir(&root));
+        let npk1_manager = Npk1Manager::new(packs_dir(&root));
         Self {
             root,
             compression: CompressionConfig::default(),
             snapshot_delta_search: false,
             pack_manager: RwLock::new(pack_manager),
+            npk1_manager: RwLock::new(npk1_manager),
             recent_blobs: RwLock::new(RecentObjectCache::with_byte_budget(
                 RECENT_BLOB_CACHE_CAPACITY,
                 RECENT_BLOB_CACHE_MAX_TOTAL_BYTES,
@@ -334,11 +338,13 @@ impl FsStore {
     pub fn with_compression(root: impl AsRef<Path>, compression: CompressionConfig) -> Self {
         let root = root.as_ref().to_path_buf();
         let pack_manager = SnapshotPackManager::new(packs_dir(&root));
+        let npk1_manager = Npk1Manager::new(packs_dir(&root));
         Self {
             root,
             compression,
             snapshot_delta_search: false,
             pack_manager: RwLock::new(pack_manager),
+            npk1_manager: RwLock::new(npk1_manager),
             recent_blobs: RwLock::new(RecentObjectCache::with_byte_budget(
                 RECENT_BLOB_CACHE_CAPACITY,
                 RECENT_BLOB_CACHE_MAX_TOTAL_BYTES,
@@ -449,7 +455,12 @@ impl FsStore {
         let mut manager = self.pack_manager.write().map_err(|_| {
             crate::store::HeddleError::Config("Failed to acquire pack manager lock".to_string())
         })?;
-        manager.reload()
+        manager.reload()?;
+        drop(manager);
+        let mut npk1 = self.npk1_manager.write().map_err(|_| {
+            crate::store::HeddleError::Config("Failed to acquire NPK1 manager lock".to_string())
+        })?;
+        npk1.reload()
     }
 
     /// Reload pack files only if the immutable pack set changed on disk.
@@ -467,13 +478,20 @@ impl FsStore {
     /// view escalates and does the reload.
     pub(super) fn reload_packs_if_stale(&self) -> Result<bool> {
         // Fast path: read-lock and bail out if the disk snapshot still matches.
-        {
+        let generic_stale = {
             let manager = self.pack_manager.read().map_err(|_| {
                 crate::store::HeddleError::Config("Failed to acquire pack manager lock".to_string())
             })?;
-            if !manager.needs_reload()? {
-                return Ok(false);
-            }
+            manager.needs_reload()?
+        };
+        let npk1_stale = {
+            let manager = self.npk1_manager.read().map_err(|_| {
+                crate::store::HeddleError::Config("Failed to acquire NPK1 manager lock".to_string())
+            })?;
+            manager.needs_reload()?
+        };
+        if !generic_stale && !npk1_stale {
+            return Ok(false);
         }
         // Slow path: take the write lock and re-check (another
         // thread may have already reloaded between our drop and
@@ -481,12 +499,27 @@ impl FsStore {
         let mut manager = self.pack_manager.write().map_err(|_| {
             crate::store::HeddleError::Config("Failed to acquire pack manager lock".to_string())
         })?;
-        manager.reload_if_stale()
+        let generic_reloaded = manager.reload_if_stale()?;
+        drop(manager);
+        let mut npk1 = self.npk1_manager.write().map_err(|_| {
+            crate::store::HeddleError::Config("Failed to acquire NPK1 manager lock".to_string())
+        })?;
+        let npk1_reloaded = if npk1.needs_reload()? {
+            npk1.reload()?;
+            true
+        } else {
+            false
+        };
+        Ok(generic_reloaded || npk1_reloaded)
     }
 
     /// Get the pack manager for pack operations.
     pub fn pack_manager(&self) -> &RwLock<SnapshotPackManager> {
         &self.pack_manager
+    }
+
+    pub(super) fn npk1_manager(&self) -> &RwLock<Npk1Manager> {
+        &self.npk1_manager
     }
 
     pub fn clear_recent_object_caches(&self) {
@@ -523,7 +556,15 @@ impl FsStore {
         let manager = self.pack_manager.read().map_err(|_| {
             crate::store::HeddleError::Config("Failed to acquire pack manager lock".to_string())
         })?;
-        manager.list_all_ids()
+        let mut ids = manager.list_all_ids()?;
+        drop(manager);
+        let npk1 = self.npk1_manager.read().map_err(|_| {
+            crate::store::HeddleError::Config("Failed to acquire NPK1 manager lock".to_string())
+        })?;
+        ids.extend(npk1.list_ids()?.into_iter().map(PackObjectId::Hash));
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
     }
 
     pub(super) fn write_loose_object_atomic(&self, path: &Path, data: &[u8]) -> Result<()> {
