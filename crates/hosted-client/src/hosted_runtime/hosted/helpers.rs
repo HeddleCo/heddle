@@ -2,10 +2,9 @@ use core::convert::TryFrom;
 use std::time::Duration;
 
 use api::heddle::api::v1alpha1::{
-    HostedGrant, HostedNamespace, HostedObjectType, HostedRepository, HostedSpool,
-    ObjectAvailabilityStatus, ObjectDescriptor, RepositoryRef,
-    StateAttachmentKind as ProtoStateAttachmentKind, StateId as ProtoStateId, TransferCheckpoint,
-    TransportMode, repository_ref::Reference,
+    HostedGrant, HostedObjectType, HostedSpool, ObjectAvailabilityStatus, ObjectDescriptor,
+    RepositoryRef, StateAttachmentKind as ProtoStateAttachmentKind, StateId as ProtoStateId,
+    TransferCheckpoint, TransportMode, repository_ref::Reference,
 };
 use base64::Engine as _;
 use config::ClientConfig;
@@ -461,34 +460,6 @@ pub(super) fn parse_proto_state_id(
             Ok(StateId::from_bytes(value))
         })
         .transpose()
-}
-
-pub(super) fn to_protocol_namespace(namespace: HostedNamespace) -> wire::HostedNamespaceInfo {
-    use api::heddle::api::v1alpha1::NamespaceKind;
-    let kind = match NamespaceKind::try_from(namespace.kind).unwrap_or(NamespaceKind::Unspecified) {
-        NamespaceKind::User => "user",
-        NamespaceKind::Org => "namespace",
-        NamespaceKind::Team => "team",
-        NamespaceKind::Unspecified => "",
-    };
-    wire::HostedNamespaceInfo {
-        namespace_id: namespace.namespace_id,
-        kind: kind.to_string(),
-        slug: namespace.slug,
-        parent_id: (!namespace.parent_id.is_empty()).then_some(namespace.parent_id),
-        display_name: (!namespace.display_name.is_empty()).then_some(namespace.display_name),
-        full_path: namespace.full_path,
-    }
-}
-
-pub(super) fn to_protocol_repository(repository: HostedRepository) -> wire::HostedRepositoryInfo {
-    wire::HostedRepositoryInfo {
-        repo_id: repository.repo_id,
-        namespace_id: repository.namespace_id,
-        slug: repository.slug,
-        path: repository.path.into(),
-        full_path: repository.full_path,
-    }
 }
 
 pub(super) fn to_protocol_spool(spool: HostedSpool) -> wire::HostedSpoolInfo {
@@ -948,42 +919,10 @@ mod tests {
     }
 
     #[test]
-    fn protocol_namespace_repo_spool_grant_and_role_mappers() {
+    fn protocol_spool_grant_and_role_mappers() {
         use api::heddle::api::v1alpha1::{
-            GrantTargetRef, HostedGrant, HostedNamespace, HostedRepository, HostedRole,
-            HostedSpool, NamespaceKind, grant_target_ref::Target,
+            GrantTargetRef, HostedGrant, HostedRole, HostedSpool, grant_target_ref::Target,
         };
-
-        for (kind, expected) in [
-            (NamespaceKind::User, "user"),
-            (NamespaceKind::Org, "namespace"),
-            (NamespaceKind::Team, "team"),
-            (NamespaceKind::Unspecified, ""),
-        ] {
-            let ns = to_protocol_namespace(HostedNamespace {
-                namespace_id: "ns1".into(),
-                kind: kind as i32,
-                slug: "acme".into(),
-                parent_id: "parent".into(),
-                display_name: "Acme".into(),
-                full_path: "acme".into(),
-                ..Default::default()
-            });
-            assert_eq!(ns.kind, expected);
-            assert_eq!(ns.full_path, "acme");
-            assert_eq!(ns.parent_id.as_deref(), Some("parent"));
-            assert_eq!(ns.display_name.as_deref(), Some("Acme"));
-        }
-
-        let repo = to_protocol_repository(HostedRepository {
-            repo_id: "r1".into(),
-            namespace_id: "ns1".into(),
-            slug: "widgets".into(),
-            path: "widgets".into(),
-            full_path: "acme/widgets".into(),
-            ..Default::default()
-        });
-        assert_eq!(repo.full_path, "acme/widgets");
 
         let spool = to_protocol_spool(HostedSpool {
             spool_id: "s1".into(),

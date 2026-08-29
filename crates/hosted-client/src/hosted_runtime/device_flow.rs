@@ -196,7 +196,7 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
 /// Destructive non-auth methods that remain mandatory denials for every
 /// derived token, even when the caller constructs [`AgentAttenuation`]
 /// directly without an allowlist.
-const NON_AUTH_AGENT_OPERATION_DENY_FLOOR: &[&str] = &["DeleteRepository", "DeleteNamespace"];
+const NON_AUTH_AGENT_OPERATION_DENY_FLOOR: &[&str] = &["DeleteSpool"];
 
 fn mandatory_agent_denied_operations() -> impl Iterator<Item = &'static str> {
     NON_AUTH_AGENT_OPERATION_DENY_FLOOR.iter().copied().chain(

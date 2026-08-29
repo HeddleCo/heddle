@@ -3,25 +3,21 @@ use api::heddle::api::v1alpha1::{
     BootstrapOwnerRootResponse, CheckMergeEligibilityRequest, CheckMergeEligibilityResponse,
     CreateAgentAccountRequest, CreateAgentAccountResponse, CreateGrantRequest,
     CreateInvitationRequest, CreateServiceAccountRequest, CreateSignupInviteRequest,
-    CreateSignupInviteResponse, CreateSpoolRequest, DeleteGrantRequest, DeleteNamespaceRequest,
-    DeleteRepositoryRequest, GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse,
-    GetCurrentUserSpoolRequest, GrantSupportAccessRequest, GrantTargetRef,
-    Invitation as ProtoInvitation, IssueServiceAccountCredentialRequest, IssuedCredentialResponse,
-    ListGrantsRequest, ListSignupInvitesRequest, ListSignupInvitesResponse, ListSpoolsRequest,
+    CreateSignupInviteResponse, CreateSpoolRequest, DeleteGrantRequest, DeleteSpoolRequest,
+    GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse, GetCurrentUserSpoolRequest,
+    GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
+    IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListGrantsRequest,
+    ListSignupInvitesRequest, ListSignupInvitesResponse, ListSpoolsRequest,
     ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode,
     ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
     ServiceAccountResponse, SpoolSummary, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
-    UpdateNamespaceRequest, UpdateRepositoryRequest, Visibility,
-    grant_target_ref::Target as GrantTargetKind,
+    UpdateSpoolRequest, Visibility, grant_target_ref::Target as GrantTargetKind,
 };
 use wire::ProtocolError;
 
 use super::{
     HostedClient,
-    helpers::{
-        hosted_to_protocol_error, to_protocol_grant, to_protocol_namespace, to_protocol_repository,
-        to_protocol_spool,
-    },
+    helpers::{hosted_to_protocol_error, to_protocol_grant, to_protocol_spool},
     operation_id::ClientOperationId,
 };
 
@@ -293,82 +289,72 @@ impl HostedClient {
         ))
     }
 
-    pub async fn update_namespace(
+    pub async fn update_spool(
         &mut self,
         full_path: &str,
         new_slug: Option<&str>,
         display_name: Option<Option<String>>,
-    ) -> Result<wire::HostedNamespaceInfo, ProtocolError> {
+    ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
         let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/UpdateNamespace");
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/UpdateSpool");
         let (display_name, clear_display_name) = match display_name {
-            Some(Some(value)) => (value, false),
-            Some(None) => (String::new(), true),
-            None => (String::new(), false),
+            Some(Some(value)) => (Some(value), false),
+            Some(None) => (None, true),
+            None => (None, false),
         };
-        let namespace = authed_call!(
+        let spool = authed_call!(
             self,
-            update_namespace,
-            "UpdateNamespace",
-            UpdateNamespaceRequest {
+            update_spool,
+            "UpdateSpool",
+            UpdateSpoolRequest {
                 full_path: full_path.to_string(),
-                new_slug: new_slug.unwrap_or_default().to_string(),
+                new_slug: new_slug.map(ToOwned::to_owned),
                 display_name,
                 clear_display_name,
                 client_operation_id: operation_id.to_wire(),
             }
         );
-        Ok(to_protocol_namespace(namespace))
+        Ok(to_protocol_spool(spool))
     }
 
-    pub async fn delete_namespace(&mut self, full_path: &str) -> Result<(), ProtocolError> {
+    pub async fn delete_spool(&mut self, full_path: &str) -> Result<(), ProtocolError> {
         let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/DeleteNamespace");
+            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/DeleteSpool");
         authed_call!(
             self,
-            delete_namespace,
-            "DeleteNamespace",
-            DeleteNamespaceRequest {
+            delete_spool,
+            "DeleteSpool",
+            DeleteSpoolRequest {
                 full_path: full_path.to_string(),
                 client_operation_id: operation_id.to_wire(),
             }
         );
         Ok(())
+    }
+
+    pub async fn update_namespace(
+        &mut self,
+        full_path: &str,
+        new_slug: Option<&str>,
+        display_name: Option<Option<String>>,
+    ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
+        self.update_spool(full_path, new_slug, display_name).await
+    }
+
+    pub async fn delete_namespace(&mut self, full_path: &str) -> Result<(), ProtocolError> {
+        self.delete_spool(full_path).await
     }
 
     pub async fn update_repository(
         &mut self,
         full_path: &str,
         new_slug: &str,
-    ) -> Result<wire::HostedRepositoryInfo, ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/UpdateRepository");
-        let repo = authed_call!(
-            self,
-            update_repository,
-            "UpdateRepository",
-            UpdateRepositoryRequest {
-                full_path: full_path.to_string(),
-                new_slug: new_slug.to_string(),
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
-        Ok(to_protocol_repository(repo))
+    ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
+        self.update_spool(full_path, Some(new_slug), None).await
     }
 
     pub async fn delete_repository(&mut self, full_path: &str) -> Result<(), ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/DeleteRepository");
-        authed_call!(
-            self,
-            delete_repository,
-            "DeleteRepository",
-            DeleteRepositoryRequest {
-                full_path: full_path.to_string(),
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
-        Ok(())
+        self.delete_spool(full_path).await
     }
 
     pub async fn create_grant(
@@ -850,6 +836,49 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn namespace_and_repository_mutations_use_spool_requests() {
+        let (mut client, server, captured) =
+            crate::hosted_runtime::hosted::test_server::start_recording_spool_mutations().await;
+
+        client
+            .update_namespace("acme", Some("acme-new"), Some(None))
+            .await
+            .unwrap();
+        client.delete_namespace("acme-new").await.unwrap();
+        client
+            .update_repository("acme/widgets", "widgets-new")
+            .await
+            .unwrap();
+        client.delete_repository("acme/widgets-new").await.unwrap();
+
+        client.close().await;
+        server.await.unwrap();
+
+        let captured = captured.lock().unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(captured.updates.len(), 2);
+        assert_eq!(captured.deletes.len(), 2);
+
+        let namespace_update = &captured.updates[0];
+        assert_eq!(namespace_update.full_path, "acme");
+        assert_eq!(namespace_update.new_slug.as_deref(), Some("acme-new"));
+        assert_eq!(namespace_update.display_name, None);
+        assert!(namespace_update.clear_display_name);
+        assert!(!namespace_update.client_operation_id.is_empty());
+
+        let repository_update = &captured.updates[1];
+        assert_eq!(repository_update.full_path, "acme/widgets");
+        assert_eq!(repository_update.new_slug.as_deref(), Some("widgets-new"));
+        assert_eq!(repository_update.display_name, None);
+        assert!(!repository_update.clear_display_name);
+        assert!(!repository_update.client_operation_id.is_empty());
+
+        assert_eq!(captured.deletes[0].full_path, "acme-new");
+        assert!(!captured.deletes[0].client_operation_id.is_empty());
+        assert_eq!(captured.deletes[1].full_path, "acme/widgets-new");
+        assert!(!captured.deletes[1].client_operation_id.is_empty());
+    }
+
     #[test]
     fn parse_hosted_role_arg_accepts_every_role_and_rejects_unknown() {
         assert_eq!(parse_hosted_role_arg("reader").unwrap(), HostedRole::Reader);
@@ -887,9 +916,8 @@ mod tests {
 
     #[tokio::test]
     async fn create_spool_sends_device_key_signed_uuidv7_owner_genesis() {
-        use sha2::{Digest, Sha256};
-
         use crypto::Ed25519Signer;
+        use sha2::{Digest, Sha256};
 
         let (mut client, server, captured) =
             crate::hosted_runtime::hosted::test_server::start_recording_create_spool().await;
