@@ -3,8 +3,9 @@
 //!
 //! `heddle ci run --local` is one verb: find exactly one `ci.*` source,
 //! compile into `.heddle/` when needed, then run. `--config` to a `.bin`
-//! still means "run this blob." Rust and Go are registered so a lone
-//! `ci.rs` / `ci.go` fails closed instead of being ignored.
+//! still means "run this blob." `--config` to a source chooses the driver
+//! by extension and skips the root scan. Rust and Go are registered so a
+//! lone `ci.rs` / `ci.go` fails closed instead of being ignored.
 
 use std::{
     collections::BTreeSet,
@@ -108,14 +109,11 @@ pub(crate) fn prepare_definition(repo: &Repository, explicit: Option<&Path>) -> 
 }
 
 fn discover(repo_root: &Path, heddle_dir: &Path, explicit: Option<&Path>) -> Result<Discovered> {
-    let mut found = Vec::new();
     if let Some(path) = explicit {
-        match driver_for_path(path) {
-            None => {
-                return Ok(Discovered::Bin {
-                    path: path.to_path_buf(),
-                });
-            }
+        return match driver_for_extension(path) {
+            None => Ok(Discovered::Bin {
+                path: path.to_path_buf(),
+            }),
             Some(driver) => {
                 if !path.is_file() {
                     return Err(anyhow!(compile_advice(
@@ -124,19 +122,15 @@ fn discover(repo_root: &Path, heddle_dir: &Path, explicit: Option<&Path>) -> Res
                         AUTHORING_OR_BIN_HINT,
                     )));
                 }
-                found.push((resolved_path(path)?, driver));
+                Ok(Discovered::Source {
+                    path: resolved_path(path)?,
+                    driver,
+                })
             }
-        }
-    }
-    for (path, driver) in scan_repo_root(repo_root)? {
-        if !found
-            .iter()
-            .any(|(existing, _)| paths_equal(existing, &path))
-        {
-            found.push((path, driver));
-        }
+        };
     }
 
+    let mut found = scan_repo_root(repo_root)?;
     match found.len() {
         0 => Ok(Discovered::Bin {
             path: heddle_dir.join(DEFAULT_DEFINITION_FILE),
@@ -160,12 +154,13 @@ fn scan_repo_root(repo_root: &Path) -> Result<Vec<(PathBuf, CompileDriver)>> {
     Ok(found)
 }
 
-fn driver_for_path(path: &Path) -> Option<CompileDriver> {
-    let name = path.file_name()?.to_str()?;
-    AUTHORING_FILES
-        .iter()
-        .find(|(file, _)| *file == name)
-        .map(|(_, driver)| *driver)
+fn driver_for_extension(path: &Path) -> Option<CompileDriver> {
+    match path.extension()?.to_str()? {
+        "ts" | "mts" | "mjs" | "js" | "cts" => Some(CompileDriver::JavaScript),
+        "rs" => Some(CompileDriver::Rust),
+        "go" => Some(CompileDriver::Go),
+        _ => None,
+    }
 }
 
 fn needs_compile(source: &Path, out_dir: &Path) -> Result<bool> {
@@ -332,10 +327,6 @@ fn resolved_path(path: &Path) -> Result<PathBuf> {
         .join(path))
 }
 
-fn paths_equal(left: &Path, right: &Path) -> bool {
-    left == right
-}
-
 fn ambiguous_authoring(found: &[(PathBuf, CompileDriver)]) -> RecoveryAdvice {
     let languages: BTreeSet<CompileDriver> = found.iter().map(|(_, driver)| *driver).collect();
     let listed = found
@@ -482,10 +473,10 @@ mod tests {
     }
 
     #[test]
-    fn config_source_compiles_that_file() {
+    fn config_source_by_extension_is_javascript() {
         let root = tempfile::tempdir().expect("root");
         let heddle = root.path().join(".heddle");
-        let source = root.path().join("nested").join("ci.ts");
+        let source = root.path().join("nested").join("fast-lane-host.mjs");
         write(&source, "export {}");
         let discovered = discover(root.path(), &heddle, Some(&source)).expect("source");
         match discovered {
@@ -493,23 +484,25 @@ mod tests {
                 assert_eq!(driver, CompileDriver::JavaScript);
                 assert_eq!(path, fs::canonicalize(&source).expect("canon"));
             }
-            Discovered::Bin { .. } => panic!("--config to ci.ts must compile"),
+            Discovered::Bin { .. } => panic!("--config to a .mjs source must compile"),
         }
     }
 
     #[test]
-    fn config_source_plus_other_language_at_root_fails() {
+    fn config_source_wins_over_root_authoring_files() {
         let root = tempfile::tempdir().expect("root");
         let heddle = root.path().join(".heddle");
         write(&root.path().join("ci.rs"), "fn main() {}");
         let source = root.path().join("nested").join("ci.ts");
         write(&source, "export {}");
-        let error = discover(root.path(), &heddle, Some(&source)).expect_err("two languages");
-        let advice = error
-            .downcast_ref::<RecoveryAdvice>()
-            .expect("typed advice");
-        assert_eq!(advice.kind, "ci_authoring_ambiguous");
-        assert!(advice.error.contains("more than one language"));
+        let discovered = discover(root.path(), &heddle, Some(&source)).expect("config wins");
+        match discovered {
+            Discovered::Source { path, driver } => {
+                assert_eq!(driver, CompileDriver::JavaScript);
+                assert_eq!(path, fs::canonicalize(&source).expect("canon"));
+            }
+            Discovered::Bin { .. } => panic!("--config to a source must compile that file"),
+        }
     }
 
     #[test]

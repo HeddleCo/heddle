@@ -23,7 +23,7 @@ pub struct CiRunArgs {
     #[arg(long, value_name = "STATE")]
     pub state: Option<String>,
 
-    /// Run this `.bin` (lock next to it, do not compile), or compile this `ci.*` source into `.heddle/` then run.
+    /// Run this `.bin` (lock next to it, do not compile), or compile this source (`.ts`/`.mjs`/`.rs`/`.go`) into `.heddle/` then run.
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
