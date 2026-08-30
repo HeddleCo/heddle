@@ -271,11 +271,11 @@ fn escaping_cache_path_refuses_host_exec() {
 
     let mut check = argv_check("unit", "/bin/true", &[]);
     check.cache_paths.push("../escape".to_string());
-    let definition = definition("local", "local", vec![check]);
-    let (bytes, _) = canonical_definition(&definition).expect("canonical");
-    let loaded = load(&bytes).expect("load");
+    let authored = definition("local", "local", vec![check]);
+    // The api canonical writer already refuses this path; admit still
+    // guards the proto in case a caller skips that writer.
     assert!(matches!(
-        admit_host_exec(&loaded.definition, &[]).expect_err("escape"),
+        admit_host_exec(&authored, &[]).expect_err("escape"),
         ConfigError::InvalidCachePath { path, .. } if path == "../escape"
     ));
 }
