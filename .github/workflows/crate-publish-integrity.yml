@@ -1,0 +1,82 @@
+name: Crate publish integrity
+
+# The workspace graph is always self-consistent because path dependencies win.
+# These checks cover the two boundaries that workspace-only CI cannot see:
+# dependency changes that need fresh crate versions, and the artifacts that are
+# already published on crates.io.
+on:
+  pull_request:
+    branches:
+      - main
+  # Re-check the registry after the main-branch publisher completes. This is a
+  # separate workflow so the read-only tripwire does not alter or weaken the
+  # credentialed publish trust gate.
+  workflow_run:
+    workflows:
+      - Publish crates
+    branches:
+      - main
+    types:
+      - completed
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crate-publish-integrity-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  dependency-version-bump:
+    name: Dependency change requires version bump
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # NOTE: release-plz should eventually own the automatic version bump.
+    # This manual-bump gate is the concrete stopgap, not the auto-bump half.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          # The gate reads both immutable PR endpoint commits with `git show`.
+          fetch-depth: 0
+
+      - name: Prove the gate passes and fails in the intended cases
+        run: >-
+          python3 -m unittest
+          scripts.tests.test_crate_publish_integrity.DependencyVersionGateTests -v
+
+      - name: Compare publishable dependency contracts
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/check-dependency-version-bump.py "$BASE_SHA" "$HEAD_SHA"
+
+  published-api-graph:
+    name: Published crates use one heddle-api line
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Prove a synthetic published split is rejected
+        run: >-
+          python3 -m unittest
+          scripts.tests.test_crate_publish_integrity.PublishedGraphTests -v
+
+      - name: Resolve the current crates.io sparse-index graph
+        run: python3 scripts/check-published-api-graph.py
