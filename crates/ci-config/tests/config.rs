@@ -8,9 +8,9 @@ use api::{
     treadle::treadle_definition_blake3,
 };
 use ci_config::{
-    CheckClass, ConfigError, Trigger, admit_host_exec, argv_check, canonical_definition,
-    definition, host_oci_platform, host_pipeline_fixture, host_pipeline_with_required_failure,
-    load, lock_json, read_lock, verify_lock,
+    CheckClass, ConfigError, Trigger, admit_host_exec, argv_check, cache_path_is_worktree_relative,
+    canonical_definition, definition, host_oci_platform, host_pipeline_fixture,
+    host_pipeline_with_required_failure, load, load_lock_file, lock_json, read_lock, verify_lock,
 };
 
 fn unix_true() -> (String, Vec<&'static str>) {
@@ -201,4 +201,88 @@ fn two_job_pipeline_flattens_to_three_host_exec_checks() {
             .collect::<Vec<_>>(),
         ["fail", "later", "sibling"]
     );
+}
+
+#[test]
+fn cpu_millis_and_named_profile_refuse_host_exec() {
+    let mut cpu = argv_check("cpu", "/bin/true", &[]);
+    cpu.isolation.as_mut().expect("isolation").cpu_millis = 1000;
+    let authored = definition("local", "local", vec![cpu]);
+    let (bytes, _) = canonical_definition(&authored).expect("canonical");
+    let loaded = load(&bytes).expect("load");
+    assert!(matches!(
+        admit_host_exec(&loaded.definition, &[]).expect_err("cpu"),
+        ConfigError::UnsupportedIsolation { name, detail }
+            if name == "cpu" && detail.contains("cpu_millis")
+    ));
+
+    let mut memory = argv_check("mem", "/bin/true", &[]);
+    memory.isolation.as_mut().expect("isolation").memory_bytes = 1;
+    let authored = definition("local", "local", vec![memory]);
+    let (bytes, _) = canonical_definition(&authored).expect("canonical");
+    let loaded = load(&bytes).expect("load");
+    assert!(matches!(
+        admit_host_exec(&loaded.definition, &[]).expect_err("memory"),
+        ConfigError::UnsupportedIsolation { detail, .. } if detail.contains("memory_bytes")
+    ));
+
+    let mut processes = argv_check("nproc", "/bin/true", &[]);
+    processes
+        .isolation
+        .as_mut()
+        .expect("isolation")
+        .process_limit = 8;
+    let authored = definition("local", "local", vec![processes]);
+    let (bytes, _) = canonical_definition(&authored).expect("canonical");
+    let loaded = load(&bytes).expect("load");
+    assert!(matches!(
+        admit_host_exec(&loaded.definition, &[]).expect_err("nproc"),
+        ConfigError::UnsupportedIsolation { detail, .. } if detail.contains("process_limit")
+    ));
+
+    let mut profile = argv_check("bench", "/bin/true", &[]);
+    profile.isolation.as_mut().expect("isolation").profile = "bench".to_string();
+    let authored = definition("local", "local", vec![profile]);
+    let (bytes, _) = canonical_definition(&authored).expect("canonical");
+    let loaded = load(&bytes).expect("load");
+    assert!(matches!(
+        admit_host_exec(&loaded.definition, &[]).expect_err("profile"),
+        ConfigError::UnsupportedIsolation { detail, .. } if detail.contains("profile=bench")
+    ));
+}
+
+#[test]
+fn network_none_is_still_admitted() {
+    let mut check = argv_check("unit", "/bin/true", &[]);
+    check.isolation.as_mut().expect("isolation").network_access = TreadleNetworkAccess::None as i32;
+    let definition = definition("local", "local", vec![check]);
+    let (bytes, _) = canonical_definition(&definition).expect("canonical");
+    let loaded = load(&bytes).expect("load");
+    admit_host_exec(&loaded.definition, &[]).expect("NONE is host-ok in v0");
+}
+
+#[test]
+fn escaping_cache_path_refuses_host_exec() {
+    assert!(!cache_path_is_worktree_relative("/tmp/target"));
+    assert!(!cache_path_is_worktree_relative("../escape"));
+    assert!(!cache_path_is_worktree_relative("foo/../../etc"));
+    assert!(cache_path_is_worktree_relative("target"));
+    assert!(cache_path_is_worktree_relative("foo/bar"));
+
+    let mut check = argv_check("unit", "/bin/true", &[]);
+    check.cache_paths.push("../escape".to_string());
+    let definition = definition("local", "local", vec![check]);
+    let (bytes, _) = canonical_definition(&definition).expect("canonical");
+    let loaded = load(&bytes).expect("load");
+    assert!(matches!(
+        admit_host_exec(&loaded.definition, &[]).expect_err("escape"),
+        ConfigError::InvalidCachePath { path, .. } if path == "../escape"
+    ));
+}
+
+#[test]
+fn missing_lock_file_fails_closed() {
+    let error = load_lock_file(std::path::Path::new("/no/such/treadle.lock.json"))
+        .expect_err("missing lock");
+    assert!(matches!(error, ConfigError::LockMissing { .. }));
 }

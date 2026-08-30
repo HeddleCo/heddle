@@ -1,7 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Engine-facing check model mapped from a canonical `TreadleDefinition`.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    path::{Component, Path},
+};
+
+/// A `cache_paths` entry the host can persist under the evaluated worktree.
+///
+/// Absolute paths and `..` are refused. Empty is not a directory.
+#[must_use]
+pub fn cache_path_is_worktree_relative(path: &str) -> bool {
+    !path.is_empty()
+        && !Path::new(path).is_absolute()
+        && Path::new(path)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
 
 /// Default per-check timeout used by engine tests that construct [`Check`] directly.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 3600;

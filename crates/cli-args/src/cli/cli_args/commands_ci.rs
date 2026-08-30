@@ -23,7 +23,7 @@ pub struct CiRunArgs {
     #[arg(long, value_name = "STATE")]
     pub state: Option<String>,
 
-    /// Read a canonical TreadleDefinition protobuf instead of the SDK compile output at `.heddle/treadle.definition.bin`.
+    /// Read a canonical TreadleDefinition protobuf instead of `.heddle/treadle.definition.bin`. `treadle.lock.json` next to the bin is required.
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 

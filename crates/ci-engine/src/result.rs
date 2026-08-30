@@ -12,7 +12,6 @@ use crate::{
     exec::ResolvedRun,
     model::{AttemptRecord, CheckResult, ExecutionContext},
     process::RunOutput,
-    service::ServiceError,
     strip_ansi,
 };
 
@@ -108,10 +107,10 @@ pub(crate) fn infra_result(
     run: &ResolvedRun<'_>,
     started_at: String,
     duration: Duration,
-    error: &ServiceError,
+    subclass: &str,
+    detail: &str,
 ) -> CheckResult {
-    let detail = format!("service provisioning failed: {error}");
-    let excerpt = cap_bytes(&strip_ansi(&detail), EXCERPT_CAP_BYTES);
+    let excerpt = cap_bytes(&strip_ansi(detail), EXCERPT_CAP_BYTES);
     let environment = BTreeMap::new();
     CheckResult {
         body: build_body(
@@ -121,7 +120,7 @@ pub(crate) fn infra_result(
                 conclusion: Conclusion::InfraError,
                 failure: Some(FailureDetail {
                     class: FailureClass::Infra,
-                    subclass: Some("service_provisioning".to_string()),
+                    subclass: Some(subclass.to_string()),
                     failing_step: Some(check.name.clone()),
                     excerpt,
                     excerpt_encoding: "utf8".to_string(),
@@ -134,7 +133,7 @@ pub(crate) fn infra_result(
                 duration,
             },
         ),
-        combined_output: detail,
+        combined_output: detail.to_string(),
         attempts: 0,
         attempt_records: Vec::new(),
     }

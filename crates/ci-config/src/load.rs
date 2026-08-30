@@ -112,6 +112,32 @@ pub enum ConfigError {
         /// Offending check.
         name: String,
     },
+    /// Local host-exec does not apply cgroups, rlimits, or named isolation profiles.
+    #[error(
+        "check {name:?} requests isolation {detail}; refusing local host-exec rather than running unbounded"
+    )]
+    UnsupportedIsolation {
+        /// Offending check.
+        name: String,
+        /// The hint the host cannot apply (`cpu_millis=…`, `profile=…`, …).
+        detail: String,
+    },
+    /// A declared cache path would escape the evaluated worktree.
+    #[error(
+        "check {name:?} cache path {path:?} is not a worktree-relative directory (absolute paths and .. are refused)"
+    )]
+    InvalidCachePath {
+        /// Offending check.
+        name: String,
+        /// Declared path.
+        path: String,
+    },
+    /// The lockfile next to the definition blob is required.
+    #[error("treadle.lock.json is required next to the definition at {path}")]
+    LockMissing {
+        /// Expected lock path.
+        path: String,
+    },
 }
 
 impl From<TreadleDefinitionError> for ConfigError {
@@ -166,6 +192,22 @@ pub fn load(bytes: &[u8]) -> Result<LoadedDefinition, ConfigError> {
 /// Hex BLAKE3 of the canonical protobuf encoding. Reuses the api hasher.
 pub fn definition_digest(definition: &TreadleDefinition) -> Result<String, ConfigError> {
     Ok(hex::encode(treadle_definition_blake3(definition)?))
+}
+
+/// Read and parse the lockfile that must sit next to a definition blob.
+pub fn load_lock_file(path: &Path) -> Result<TreadleLockfile, ConfigError> {
+    match std::fs::read(path) {
+        Ok(bytes) => read_lock(&bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(ConfigError::LockMissing {
+                path: path.display().to_string(),
+            })
+        }
+        Err(error) => Err(ConfigError::Lock(format!(
+            "read {}: {error}",
+            path.display()
+        ))),
+    }
 }
 
 /// Parse a `treadle.lock.json` body.
@@ -280,7 +322,39 @@ fn admit_check(check: &TreadleCheck, definition: &TreadleDefinition) -> Result<(
             name: check.name.clone(),
         });
     }
+    // NONE is admitted: v0 has no netns; that stay is explicit.
+    if let Some(detail) = unenforceable_isolation(check) {
+        return Err(ConfigError::UnsupportedIsolation {
+            name: check.name.clone(),
+            detail,
+        });
+    }
+    for path in &check.cache_paths {
+        if !crate::cache_path_is_worktree_relative(path) {
+            return Err(ConfigError::InvalidCachePath {
+                name: check.name.clone(),
+                path: path.clone(),
+            });
+        }
+    }
     Ok(())
+}
+
+fn unenforceable_isolation(check: &TreadleCheck) -> Option<String> {
+    let isolation = check.isolation.as_ref()?;
+    if isolation.cpu_millis != 0 {
+        return Some(format!("cpu_millis={}", isolation.cpu_millis));
+    }
+    if isolation.memory_bytes != 0 {
+        return Some(format!("memory_bytes={}", isolation.memory_bytes));
+    }
+    if isolation.process_limit != 0 {
+        return Some(format!("process_limit={}", isolation.process_limit));
+    }
+    if !isolation.profile.is_empty() {
+        return Some(format!("profile={}", isolation.profile));
+    }
+    None
 }
 
 fn trusted_runner_secret(check: &TreadleCheck, definition: &TreadleDefinition) -> Option<String> {

@@ -135,13 +135,13 @@ fn unsupported_local_service_is_an_honest_infra_verdict() {
 }
 
 #[test]
-fn cache_environment_points_outside_the_source_tree() {
+fn cache_environment_exports_the_worktree_directory() {
     let workdir = tempfile::tempdir().expect("workdir");
     let cache = tempfile::tempdir().expect("cache");
     let mut check = Check::new("cache", vec!["/usr/bin/env".to_string()]);
     check.cache_paths = vec!["cargo".to_string()];
     let config = CiConfig::from_checks(vec![check]);
-    let expected = cache.path().join("CARGO").display().to_string();
+    let expected = workdir.path().join("cargo").display().to_string();
     let environment = HermeticEnv::with_host(BTreeMap::from([("EXPECTED".to_string(), expected)]));
     let provider = NoopProvider;
     let controls = RunControls {
@@ -161,10 +161,9 @@ fn cache_environment_points_outside_the_source_tree() {
     )
     .expect("run");
     assert_eq!(results[0].conclusion(), Conclusion::Success);
-    assert!(results[0]
-        .combined_output
-        .lines()
-        .any(|line| line == format!("HCI_CACHE_CARGO={}", cache.path().join("CARGO").display())));
+    assert!(results[0].combined_output.lines().any(|line| {
+        line == format!("HCI_CACHE_CARGO={}", workdir.path().join("cargo").display())
+    }));
 }
 
 #[test]
@@ -328,4 +327,126 @@ fn proto_working_directory_is_honored() {
     std::fs::write(nested.join("here.txt"), "ok").expect("marker");
     let results = run(&CiConfig::from_checks(vec![check]), workdir.path());
     assert_eq!(results[0].conclusion(), Conclusion::Success);
+}
+
+#[test]
+fn cache_paths_hydrate_across_two_runs_without_result_cache() {
+    let workdir = tempfile::tempdir().expect("workdir");
+    let cache = tempfile::tempdir().expect("cache");
+    let mut writer = sh("stash", "mkdir -p stash && echo persisted > stash/marker");
+    writer.cache_paths = vec!["stash".to_string()];
+    let controls = RunControls {
+        cache_root: Some(cache.path()),
+        ..RunControls::default()
+    };
+    let first = run_checks_with(
+        &CiConfig::from_checks(vec![writer]),
+        &context(),
+        &RunOptions {
+            workdir: workdir.path(),
+            services: &NoopProvider,
+            now_rfc3339: &fixed_clock,
+        },
+        &controls,
+    )
+    .expect("first run");
+    assert_eq!(first[0].conclusion(), Conclusion::Success);
+    assert!(
+        !workdir.path().join("stash/marker").exists(),
+        "slot is the durable copy; worktree is restored after save"
+    );
+
+    let mut reader = sh("stash", "test -f stash/marker");
+    reader.cache_paths = vec!["stash".to_string()];
+    let second = run_checks_with(
+        &CiConfig::from_checks(vec![reader]),
+        &context(),
+        &RunOptions {
+            workdir: workdir.path(),
+            services: &NoopProvider,
+            now_rfc3339: &fixed_clock,
+        },
+        &controls,
+    )
+    .expect("second run");
+    assert_eq!(
+        second[0].conclusion(),
+        Conclusion::Success,
+        "second run must see the hydrated marker: {}",
+        second[0].combined_output
+    );
+}
+
+#[test]
+fn cache_paths_do_not_clobber_across_checks() {
+    let workdir = tempfile::tempdir().expect("workdir");
+    let cache = tempfile::tempdir().expect("cache");
+    let mut alpha = sh("alpha", "mkdir -p stash && echo from-alpha > stash/who");
+    alpha.cache_paths = vec!["stash".to_string()];
+    let mut beta = sh("beta", "mkdir -p stash && echo from-beta > stash/who");
+    beta.cache_paths = vec!["stash".to_string()];
+    let controls = RunControls {
+        cache_root: Some(cache.path()),
+        ..RunControls::default()
+    };
+    run_checks_with(
+        &CiConfig::from_checks(vec![alpha, beta]),
+        &context(),
+        &RunOptions {
+            workdir: workdir.path(),
+            services: &NoopProvider,
+            now_rfc3339: &fixed_clock,
+        },
+        &controls,
+    )
+    .expect("seed both slots");
+
+    let mut read_alpha = sh("alpha", "test \"$(cat stash/who)\" = from-alpha");
+    read_alpha.cache_paths = vec!["stash".to_string()];
+    let results = run_checks_with(
+        &CiConfig::from_checks(vec![read_alpha]),
+        &context(),
+        &RunOptions {
+            workdir: workdir.path(),
+            services: &NoopProvider,
+            now_rfc3339: &fixed_clock,
+        },
+        &controls,
+    )
+    .expect("read alpha");
+    assert_eq!(results[0].conclusion(), Conclusion::Success);
+}
+
+#[test]
+fn escaping_cache_path_is_infra_and_does_not_run() {
+    let workdir = tempfile::tempdir().expect("workdir");
+    let cache = tempfile::tempdir().expect("cache");
+    let mut check = sh("escape", "touch ran.txt");
+    check.cache_paths = vec!["../escape".to_string()];
+    let controls = RunControls {
+        cache_root: Some(cache.path()),
+        ..RunControls::default()
+    };
+    let results = run_checks_with(
+        &CiConfig::from_checks(vec![check]),
+        &context(),
+        &RunOptions {
+            workdir: workdir.path(),
+            services: &NoopProvider,
+            now_rfc3339: &fixed_clock,
+        },
+        &controls,
+    )
+    .expect("run");
+    assert_eq!(results[0].conclusion(), Conclusion::InfraError);
+    assert_eq!(
+        results[0]
+            .body
+            .outcome
+            .failure
+            .as_ref()
+            .and_then(|failure| failure.subclass.as_deref()),
+        Some("cache_paths")
+    );
+    assert!(!workdir.path().join("ran.txt").exists());
 }

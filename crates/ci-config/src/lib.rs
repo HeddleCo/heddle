@@ -5,9 +5,9 @@
 //! - `.heddle/treadle.definition.bin` — canonical `TreadleDefinition` bytes
 //! - `.heddle/treadle.lock.json` — `format_version` + hex BLAKE3 `definition_digest`
 //!
-//! `heddle ci run --local` decodes with the api canonical reader, checks the
-//! lockfile when present, then maps each `TreadleCheck` onto the engine. The
-//! bin + lock pair is the TypeScript SDK compile output (`emitPipeline`).
+//! `heddle ci run --local` decodes with the api canonical reader, requires
+//! the lockfile, then maps each `TreadleCheck` onto the engine. The bin + lock
+//! pair is the TypeScript SDK compile output (`emitPipeline`).
 
 mod authoring;
 mod load;
@@ -20,6 +20,10 @@ pub use authoring::{
 };
 pub use load::{
     ConfigError, DEFAULT_DEFINITION_FILE, DEFAULT_LOCK_FILE, LoadedDefinition, TreadleLockfile,
-    admit_host_exec, definition_digest, host_oci_platform, load, lock_path, read_lock, verify_lock,
+    admit_host_exec, definition_digest, host_oci_platform, load, load_lock_file, lock_path,
+    read_lock, verify_lock,
 };
-pub use model::{Check, CheckClass, CiConfig, DEFAULT_TIMEOUT_SECS, Retry, Service, Trigger};
+pub use model::{
+    Check, CheckClass, CiConfig, DEFAULT_TIMEOUT_SECS, Retry, Service, Trigger,
+    cache_path_is_worktree_relative,
+};

@@ -31,15 +31,16 @@ pub(crate) fn run_local(cli: &Cli, args: &CiRunArgs) -> Result<()> {
         .with_context(|| format!("read TreadleDefinition {}", path.display()))?;
     let mut loaded = ci_config::load(&raw)
         .with_context(|| format!("decode canonical TreadleDefinition {}", path.display()))?;
-    if let Some(lock) = read_optional_lock(&ci_config::lock_path(&path))? {
-        ci_config::verify_lock(&lock, &loaded.definition_digest).with_context(|| {
-            format!(
-                "treadle lockfile {} does not match {}",
-                ci_config::lock_path(&path).display(),
-                path.display()
-            )
-        })?;
-    }
+    let lock_path = ci_config::lock_path(&path);
+    let lock = ci_config::load_lock_file(&lock_path)
+        .with_context(|| format!("treadle.lock.json is required next to {}", path.display()))?;
+    ci_config::verify_lock(&lock, &loaded.definition_digest).with_context(|| {
+        format!(
+            "treadle lockfile {} does not match {}",
+            lock_path.display(),
+            path.display()
+        )
+    })?;
     apply_check_filter(&mut loaded.config, &args.checks)?;
     if !args.checks.is_empty() {
         let omitted: Vec<&str> = loaded
@@ -104,18 +105,6 @@ pub(crate) fn run_local(cli: &Cli, args: &CiRunArgs) -> Result<()> {
         return Err(OutcomeExit::data_err().into());
     }
     Ok(())
-}
-
-fn read_optional_lock(path: &std::path::Path) -> Result<Option<ci_config::TreadleLockfile>> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(ci_config::read_lock(&bytes).with_context(|| {
-            format!("parse treadle lockfile {}", path.display())
-        })?)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => {
-            Err(error).with_context(|| format!("read treadle lockfile {}", path.display()))
-        }
-    }
 }
 
 fn apply_check_filter(config: &mut CiConfig, filter: &[String]) -> Result<()> {

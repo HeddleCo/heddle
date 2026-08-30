@@ -26,31 +26,29 @@ struct Fixture {
 
 impl Fixture {
     fn new(checks: Vec<TreadleCheck>) -> Self {
-        Self::write(checks, true)
+        Self::write(checks)
     }
 
-    fn write(checks: Vec<TreadleCheck>, with_lock: bool) -> Self {
-        Self::write_definition(definition("local", "local", checks), with_lock)
+    fn write(checks: Vec<TreadleCheck>) -> Self {
+        Self::write_definition(definition("local", "local", checks))
     }
 
     fn from_definition(definition: TreadleDefinition) -> Self {
-        Self::write_definition(definition, true)
+        Self::write_definition(definition)
     }
 
-    fn write_definition(definition: TreadleDefinition, with_lock: bool) -> Self {
+    fn write_definition(definition: TreadleDefinition) -> Self {
         let root = tempfile::tempdir().expect("repo root");
         let home = tempfile::tempdir().expect("heddle home");
         let repo = Repository::init_default(root.path()).expect("init repo");
         let (bytes, digest) = canonical_definition(&definition).expect("canonical definition");
         std::fs::write(repo.heddle_dir().join(DEFAULT_DEFINITION_FILE), bytes)
             .expect("write definition");
-        if with_lock {
-            std::fs::write(
-                repo.heddle_dir().join(DEFAULT_LOCK_FILE),
-                lock_json(&digest),
-            )
-            .expect("write lock");
-        }
+        std::fs::write(
+            repo.heddle_dir().join(DEFAULT_LOCK_FILE),
+            lock_json(&digest),
+        )
+        .expect("write lock");
         write_device(home.path());
         Self {
             repo,
@@ -71,6 +69,18 @@ impl Fixture {
             .env("HEDDLE_PRINCIPAL_NAME", "CI Test")
             .env("HEDDLE_PRINCIPAL_EMAIL", "ci@example.invalid");
         command.output().expect("run heddle")
+    }
+
+    fn replace_checks(&self, checks: Vec<TreadleCheck>) {
+        let definition = definition("local", "local", checks);
+        let (bytes, digest) = canonical_definition(&definition).expect("canonical definition");
+        std::fs::write(self.repo.heddle_dir().join(DEFAULT_DEFINITION_FILE), bytes)
+            .expect("rewrite definition");
+        std::fs::write(
+            self.repo.heddle_dir().join(DEFAULT_LOCK_FILE),
+            lock_json(&digest),
+        )
+        .expect("rewrite lock");
     }
 }
 
@@ -335,7 +345,7 @@ fn mutated_lock_digest_fails_closed() {
 
 #[test]
 fn non_canonical_definition_fails_closed() {
-    let fixture = Fixture::write(vec![argv_check("unit", "/bin/true", &[])], false);
+    let fixture = Fixture::write(vec![argv_check("unit", "/bin/true", &[])]);
     let path = fixture.repo.heddle_dir().join(DEFAULT_DEFINITION_FILE);
     std::fs::write(&path, non_canonical_bytes()).expect("write non-canonical definition");
     let output = fixture.run(&["ci", "run", "--local"]);
@@ -373,4 +383,57 @@ fn full_network_refuses_without_pretending_hermeticity() {
     assert!(!output.status.success());
     assert!(!fixture.repo.root().join("ran.txt").exists());
     assert!(stderr(&output).contains("FULL"));
+}
+
+#[test]
+fn cpu_millis_refuses_without_running() {
+    let mut check = argv_check("unit", "/bin/sh", &["-c", "touch ran.txt"]);
+    check.isolation.as_mut().expect("isolation").cpu_millis = 1000;
+    let fixture = Fixture::new(vec![check]);
+    let output = fixture.run(&["ci", "run", "--local"]);
+    assert!(!output.status.success());
+    assert!(!fixture.repo.root().join("ran.txt").exists());
+    assert!(
+        stderr(&output).contains("cpu_millis"),
+        "stderr: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn missing_lock_refuses_to_run() {
+    let fixture = Fixture::new(vec![argv_check(
+        "unit",
+        "/bin/sh",
+        &["-c", "touch ran.txt"],
+    )]);
+    std::fs::remove_file(fixture.repo.heddle_dir().join(DEFAULT_LOCK_FILE)).expect("remove lock");
+    let output = fixture.run(&["ci", "run", "--local"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!fixture.repo.root().join("ran.txt").exists());
+    assert!(
+        stderr(&output).contains("treadle.lock.json"),
+        "stderr: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn cache_paths_hydrate_across_two_local_runs() {
+    let mut writer = sh("stash", "mkdir -p stash && echo persisted > stash/marker");
+    writer.cache_paths.push("stash".to_string());
+    let fixture = Fixture::new(vec![writer]);
+    let first = fixture.run(&["--output", "json", "ci", "run", "--local"]);
+    assert!(first.status.success(), "first run: {}", stderr(&first));
+    let _ = std::fs::remove_dir_all(fixture.repo.heddle_dir().join("cache/ci-results"));
+    let mut reader = sh("stash", "test -f stash/marker");
+    reader.cache_paths.push("stash".to_string());
+    fixture.replace_checks(vec![reader]);
+    let second = fixture.run(&["--output", "json", "ci", "run", "--local"]);
+    assert!(
+        second.status.success(),
+        "second run must see the hydrated marker: {}",
+        stderr(&second)
+    );
 }

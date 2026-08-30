@@ -15,7 +15,7 @@ mod result_cache;
 mod service;
 
 pub use ansi::strip_ansi;
-pub use cache::{CACHE_ENV_PREFIX, PreparedCaches, prepare_caches};
+pub use cache::{CACHE_ENV_PREFIX, CachePathError, PreparedCaches, prepare_caches, save_caches};
 pub use classify::{Disposition, EXCERPT_CAP_BYTES, classify, extract_excerpt};
 pub use env::{BASE_ALLOWLIST, GIT_IDENTITY_EMAIL, GIT_IDENTITY_NAME, HermeticEnv};
 pub use exec::{run_checks, run_checks_with};
