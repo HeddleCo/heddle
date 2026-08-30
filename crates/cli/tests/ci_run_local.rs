@@ -60,6 +60,10 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.run_with_env(args, &[])
+    }
+
+    fn run_with_env(&self, args: &[&str], extra_env: &[(&str, &std::ffi::OsStr)]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_heddle"));
         command
             .args(["--repo", self.repo.root().to_str().expect("UTF-8 root")])
@@ -68,6 +72,9 @@ impl Fixture {
             .env("HEDDLE_FSMONITOR", "off")
             .env("HEDDLE_PRINCIPAL_NAME", "CI Test")
             .env("HEDDLE_PRINCIPAL_EMAIL", "ci@example.invalid");
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
         command.output().expect("run heddle")
     }
 
@@ -250,13 +257,15 @@ fn proto_digest_on_a_passing_local_run_matches_the_lock() {
 }
 
 #[test]
-fn human_render_prints_definition_digest_above_the_table() {
+fn human_default_omits_definition_digest_verbose_prints_it() {
     let fixture = Fixture::new(vec![argv_check("unit", "/bin/true", &[])]);
+    let digest_line = format!("heddle ci: definition_digest {}", fixture.digest);
+
     let output = fixture.run(&["ci", "run", "--local"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert!(
-        stderr(&output).contains(&format!("heddle ci: definition_digest {}", fixture.digest)),
-        "operators must see the digest without --output json: {}",
+        !stderr(&output).contains("definition_digest"),
+        "human default must not print the hex digest: {}",
         stderr(&output)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -268,6 +277,33 @@ fn human_render_prints_definition_digest_above_the_table() {
     }
     assert!(stdout.contains("unit"));
     assert!(stdout.contains("success"));
+
+    let verbose = fixture.run(&["-v", "ci", "run", "--local"]);
+    assert!(verbose.status.success(), "stderr: {}", stderr(&verbose));
+    assert!(
+        stderr(&verbose).contains(&digest_line),
+        "-v must print the digest: {}",
+        stderr(&verbose)
+    );
+
+    let quiet = fixture.run(&["-q", "ci", "run", "--local"]);
+    assert!(quiet.status.success(), "stderr: {}", stderr(&quiet));
+    assert!(
+        !stderr(&quiet).contains("definition_digest"),
+        "-q stays quiet: {}",
+        stderr(&quiet)
+    );
+
+    let json = fixture.run(&["--output", "json", "ci", "run", "--local"]);
+    assert!(json.status.success(), "stderr: {}", stderr(&json));
+    let verdicts: Vec<SignedVerdict> =
+        serde_json::from_slice(&json.stdout).expect("signed verdict JSON");
+    assert_eq!(verdicts[0].body.check.definition_digest, fixture.digest);
+    assert!(
+        !stderr(&json).contains("heddle ci: definition_digest"),
+        "JSON mode must not duplicate a hex digest line: {}",
+        stderr(&json)
+    );
 }
 
 #[test]
@@ -463,6 +499,138 @@ fn cache_paths_share_across_checks_in_one_local_run() {
     assert!(
         !fixture.repo.root().join("stash/hit").exists(),
         "pipeline restore must strip the worktree cache dir"
+    );
+}
+
+fn write_compile_stub(dir: &Path, bin_bytes: &[u8], lock: &str) -> PathBuf {
+    std::fs::write(dir.join("fixture.bin"), bin_bytes).expect("fixture bin");
+    std::fs::write(dir.join("fixture.lock.json"), lock).expect("fixture lock");
+    let stub = dir.join("treadle-compile");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\nset -eu\nout_dir=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --out-dir) out_dir=\"$2\"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\nmkdir -p \"$out_dir\"\ncp \"{}\" \"$out_dir/{}\"\ncp \"{}\" \"$out_dir/{}\"\n",
+            dir.join("fixture.bin").display(),
+            DEFAULT_DEFINITION_FILE,
+            dir.join("fixture.lock.json").display(),
+            DEFAULT_LOCK_FILE,
+        ),
+    )
+    .expect("stub");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub");
+    }
+    stub
+}
+
+fn remove_compiled_outputs(fixture: &Fixture) {
+    let _ = std::fs::remove_file(fixture.repo.heddle_dir().join(DEFAULT_DEFINITION_FILE));
+    let _ = std::fs::remove_file(fixture.repo.heddle_dir().join(DEFAULT_LOCK_FILE));
+}
+
+#[test]
+fn js_source_at_repo_root_compiles_then_runs() {
+    let fixture = Fixture::new(vec![sh("compiled", "touch compiled-ran.txt")]);
+    let stub_dir = tempfile::tempdir().expect("stub dir");
+    let stub = write_compile_stub(
+        stub_dir.path(),
+        &std::fs::read(fixture.repo.heddle_dir().join(DEFAULT_DEFINITION_FILE)).expect("bin"),
+        &lock_json(&fixture.digest),
+    );
+    remove_compiled_outputs(&fixture);
+    std::fs::write(fixture.repo.root().join("ci.mjs"), "export default {}\n").expect("ci.mjs");
+    let output = fixture.run_with_env(
+        &["--output", "json", "ci", "run", "--local"],
+        &[("HEDDLE_TREADLE_COMPILE", stub.as_os_str())],
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        fixture.repo.root().join("compiled-ran.txt").exists(),
+        "compiled pipeline must run"
+    );
+    assert!(
+        fixture
+            .repo
+            .heddle_dir()
+            .join(DEFAULT_DEFINITION_FILE)
+            .is_file(),
+        "compile must write the bin"
+    );
+    assert!(
+        fixture.repo.heddle_dir().join(DEFAULT_LOCK_FILE).is_file(),
+        "compile must write the lock"
+    );
+    let verdicts: Vec<SignedVerdict> =
+        serde_json::from_slice(&output.stdout).expect("signed verdict JSON");
+    assert_eq!(verdicts[0].body.check.name, "compiled");
+    assert_eq!(verdicts[0].body.check.definition_digest, fixture.digest);
+}
+
+#[test]
+fn js_and_rust_authoring_files_fail_closed_without_running() {
+    let fixture = Fixture::new(vec![sh("would-run", "touch ran.txt")]);
+    std::fs::write(fixture.repo.root().join("ci.ts"), "export default {}\n").expect("ci.ts");
+    std::fs::write(fixture.repo.root().join("ci.rs"), "fn main() {}\n").expect("ci.rs");
+    let output = fixture.run(&["ci", "run", "--local"]);
+    assert!(!output.status.success());
+    assert!(!fixture.repo.root().join("ran.txt").exists());
+    assert!(
+        stderr(&output).contains("more than one language"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    assert!(stderr(&output).contains("Next: heddle ci run --local"));
+}
+
+#[test]
+fn rust_authoring_file_alone_fails_closed_sdk_not_shipped() {
+    let fixture = Fixture::new(vec![sh("would-run", "touch ran.txt")]);
+    std::fs::write(fixture.repo.root().join("ci.rs"), "fn main() {}\n").expect("ci.rs");
+    let output = fixture.run(&["ci", "run", "--local"]);
+    assert!(!output.status.success());
+    assert!(!fixture.repo.root().join("ran.txt").exists());
+    assert!(
+        stderr(&output).contains("Rust") && stderr(&output).contains("not shipped"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    assert!(stderr(&output).contains("Next: heddle ci run --local"));
+}
+
+#[test]
+fn no_source_with_bin_and_lock_still_runs() {
+    let fixture = Fixture::new(vec![argv_check("unit", "/bin/true", &[])]);
+    assert!(!fixture.repo.root().join("ci.ts").exists());
+    assert!(!fixture.repo.root().join("ci.rs").exists());
+    let output = fixture.run(&["--output", "json", "ci", "run", "--local"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let verdicts: Vec<SignedVerdict> =
+        serde_json::from_slice(&output.stdout).expect("signed verdict JSON");
+    assert_eq!(verdicts[0].body.check.name, "unit");
+    assert_eq!(verdicts[0].body.check.definition_digest, fixture.digest);
+}
+
+#[test]
+fn config_bin_runs_even_when_ci_rs_is_present() {
+    let fixture = Fixture::new(vec![argv_check("unit", "/bin/true", &[])]);
+    std::fs::write(fixture.repo.root().join("ci.rs"), "fn main() {}\n").expect("ci.rs");
+    let bin = fixture.repo.heddle_dir().join(DEFAULT_DEFINITION_FILE);
+    let output = fixture.run(&[
+        "--output",
+        "json",
+        "ci",
+        "run",
+        "--local",
+        "--config",
+        bin.to_str().expect("UTF-8 bin"),
+    ]);
+    assert!(
+        output.status.success(),
+        "--config to a .bin must skip compile: {}",
+        stderr(&output)
     );
 }
 

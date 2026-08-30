@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `heddle ci` local executor.
 
+mod compile;
 mod render;
 mod run;
 mod target;

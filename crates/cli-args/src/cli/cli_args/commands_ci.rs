@@ -8,7 +8,7 @@ use clap::{Args, Subcommand};
 /// CI executor subcommands.
 #[derive(Clone, Debug, Subcommand)]
 pub enum CiCommands {
-    /// Run the SDK compile output at `.heddle/treadle.definition.bin`.
+    /// Compile an SDK authoring file if needed, then run `.heddle/treadle.definition.bin`.
     Run(CiRunArgs),
 }
 
@@ -23,7 +23,7 @@ pub struct CiRunArgs {
     #[arg(long, value_name = "STATE")]
     pub state: Option<String>,
 
-    /// Read a canonical TreadleDefinition protobuf instead of `.heddle/treadle.definition.bin`. `treadle.lock.json` next to the bin is required.
+    /// Run this `.bin` (lock next to it, do not compile), or compile this `ci.*` source into `.heddle/` then run.
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 

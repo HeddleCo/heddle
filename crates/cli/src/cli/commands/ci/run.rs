@@ -17,16 +17,13 @@ use crypto::{
 use heddle_cli_args::{CiRunArgs, Cli};
 use repo::Repository;
 
-use super::{
-    render,
-    target::{EvaluationTarget, definition_path},
-};
+use super::{compile, render, target::EvaluationTarget};
 use crate::exit::OutcomeExit;
 
 pub(crate) fn run_local(cli: &Cli, args: &CiRunArgs) -> Result<()> {
     ensure!(args.local, "`heddle ci run` currently requires `--local`");
     let repo = cli.open_repo()?;
-    let path = definition_path(&repo, args.config.as_deref());
+    let path = compile::prepare_definition(&repo, args.config.as_deref())?;
     let raw = std::fs::read(&path)
         .with_context(|| format!("read TreadleDefinition {}", path.display()))?;
     let mut loaded = ci_config::load(&raw)

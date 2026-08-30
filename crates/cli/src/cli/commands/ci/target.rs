@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Exact working-tree and named-state evaluation targets.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use objects::{
@@ -99,10 +99,4 @@ impl EvaluationTarget {
         }
         Ok(())
     }
-}
-
-pub(crate) fn definition_path(repo: &Repository, explicit: Option<&Path>) -> PathBuf {
-    explicit
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| repo.heddle_dir().join(ci_config::DEFAULT_DEFINITION_FILE))
 }

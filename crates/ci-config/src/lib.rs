@@ -7,7 +7,9 @@
 //!
 //! `heddle ci run --local` decodes with the api canonical reader, requires
 //! the lockfile, then maps each `TreadleCheck` onto the engine. The bin + lock
-//! pair is the TypeScript SDK compile output (`emitPipeline`).
+//! pair is SDK compile output (`emitPipeline` / `treadle-compile`). These
+//! helpers are not a Rust SDK; authoring for real pipelines lives in the
+//! language SDKs.
 
 mod authoring;
 mod load;

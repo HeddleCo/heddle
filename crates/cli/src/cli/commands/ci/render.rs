@@ -16,7 +16,10 @@ pub(crate) fn render(cli: &Cli, verdicts: &[SignedVerdict]) -> Result<()> {
             NextActionValidationContext::without_repo(&["ci", "run"]),
         )
     } else {
-        if let Some(digest) = definition_digest(verdicts) {
+        if !cli.quiet
+            && cli.verbose >= 1
+            && let Some(digest) = definition_digest(verdicts)
+        {
             eprintln!("heddle ci: definition_digest {digest}");
         }
         write_stdout(&render_table(verdicts))
