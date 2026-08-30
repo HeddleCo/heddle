@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use ci_config::{Check, CiConfig, Retry, Service};
 use ci_engine::{
     ExecutionContext, HermeticEnv, NoopProvider, RunControls, RunOptions, run_checks,
     run_checks_with,
@@ -33,11 +34,10 @@ fn fixed_clock() -> String {
     "2026-08-14T12:00:00Z".to_string()
 }
 
-fn run(raw: &str, workdir: &std::path::Path) -> Vec<ci_engine::CheckResult> {
-    let config = ci_config::parse(raw).expect("config");
+fn run(config: &CiConfig, workdir: &std::path::Path) -> Vec<ci_engine::CheckResult> {
     let provider = NoopProvider;
     run_checks(
-        &config,
+        config,
         &context(),
         &RunOptions {
             workdir,
@@ -48,20 +48,24 @@ fn run(raw: &str, workdir: &std::path::Path) -> Vec<ci_engine::CheckResult> {
     .expect("run")
 }
 
+fn sh(name: &str, script: &str) -> Check {
+    Check::new(
+        name,
+        vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+    )
+}
+
 #[test]
 fn executes_argv_and_classifies_treadle_failure_shapes() {
     let workdir = tempfile::tempdir().expect("workdir");
     let results = run(
-        r#"
-[meta]
-schema = 1
-[[check]]
-name = "ok"
-command = ['/bin/sh', '-c', 'printf "\033[32mok\033[0m"']
-[[check]]
-name = "compile"
-command = ["/bin/sh", "-c", "echo 'error[E0432]: unresolved import'; exit 101"]
-"#,
+        &CiConfig::from_checks(vec![
+            sh("ok", r#"printf "\033[32mok\033[0m""#),
+            sh(
+                "compile",
+                "echo 'error[E0432]: unresolved import'; exit 101",
+            ),
+        ]),
         workdir.path(),
     );
     assert_eq!(results[0].conclusion(), Conclusion::Success);
@@ -81,19 +85,15 @@ command = ["/bin/sh", "-c", "echo 'error[E0432]: unresolved import'; exit 101"]
 #[test]
 fn retries_only_when_output_matches_a_flake_signature() {
     let workdir = tempfile::tempdir().expect("workdir");
-    let config = ci_config::parse(
-        r#"
-[meta]
-schema = 1
-[[check]]
-name = "flaky"
-command = ["/bin/sh", "-c", "if test -e retry-marker; then exit 0; else : > retry-marker; echo FLAKE; exit 1; fi"]
-[check.retry]
-max = 1
-flake_signatures = ["FLAKE"]
-"#,
-    )
-    .expect("config");
+    let mut check = sh(
+        "flaky",
+        "if test -e retry-marker; then exit 0; else : > retry-marker; echo FLAKE; exit 1; fi",
+    );
+    check.retry = Retry {
+        max: 1,
+        flake_signatures: vec!["FLAKE".to_string()],
+    };
+    let config = CiConfig::from_checks(vec![check]);
     let provider = NoopProvider;
     let environment = HermeticEnv::with_host(BTreeMap::new());
     let controls = RunControls {
@@ -119,19 +119,15 @@ flake_signatures = ["FLAKE"]
 #[test]
 fn unsupported_local_service_is_an_honest_infra_verdict() {
     let workdir = tempfile::tempdir().expect("workdir");
-    let results = run(
-        r#"
-[meta]
-schema = 1
-[[check]]
-name = "database"
-command = ["/bin/true"]
-[[check.services]]
-name = "postgres"
-image = "postgres:17"
-"#,
-        workdir.path(),
-    );
+    let mut check = Check::new("database", vec!["/bin/true".to_string()]);
+    check.services.push(Service {
+        name: "postgres".to_string(),
+        image: "postgres:17".to_string(),
+        ports: Vec::new(),
+        env: BTreeMap::new(),
+        ready_cmd: None,
+    });
+    let results = run(&CiConfig::from_checks(vec![check]), workdir.path());
     assert_eq!(results[0].conclusion(), Conclusion::InfraError);
     let failure = results[0].body.outcome.failure.as_ref().expect("failure");
     assert_eq!(failure.class, FailureClass::Infra);
@@ -142,17 +138,9 @@ image = "postgres:17"
 fn cache_environment_points_outside_the_source_tree() {
     let workdir = tempfile::tempdir().expect("workdir");
     let cache = tempfile::tempdir().expect("cache");
-    let config = ci_config::parse(
-        r#"
-[meta]
-schema = 1
-[[check]]
-name = "cache"
-command = ["/usr/bin/env"]
-cache_paths = ["cargo"]
-"#,
-    )
-    .expect("config");
+    let mut check = Check::new("cache", vec!["/usr/bin/env".to_string()]);
+    check.cache_paths = vec!["cargo".to_string()];
+    let config = CiConfig::from_checks(vec![check]);
     let expected = cache.path().join("CARGO").display().to_string();
     let environment = HermeticEnv::with_host(BTreeMap::from([("EXPECTED".to_string(), expected)]));
     let provider = NoopProvider;
@@ -197,18 +185,15 @@ fn timeout_kills_the_entire_process_group() {
 
     let workdir = tempfile::tempdir().expect("workdir");
     let pidfile = workdir.path().join("grandchild.pid");
-    let config = format!(
-        r#"
-[meta]
-schema = 1
-[[check]]
-name = "timeout"
-command = ["/bin/sh", "-c", "/bin/sleep 120 & echo $! > '{}'; /bin/sleep 120"]
-timeout_secs = 1
-"#,
-        pidfile.display()
+    let mut check = sh(
+        "timeout",
+        &format!(
+            "/bin/sleep 120 & echo $! > '{}'; /bin/sleep 120",
+            pidfile.display()
+        ),
     );
-    let results = run(&config, workdir.path());
+    check.timeout_secs = 1;
+    let results = run(&CiConfig::from_checks(vec![check]), workdir.path());
     assert_eq!(results[0].conclusion(), Conclusion::TimedOut);
     let pid: i32 = std::fs::read_to_string(&pidfile)
         .expect("grandchild pid")
@@ -225,4 +210,56 @@ timeout_secs = 1
         }
         panic!("grandchild {pid} survived the timeout process-group kill");
     }
+}
+
+#[test]
+fn proto_definition_digest_is_bound_on_an_executed_check() {
+    let workdir = tempfile::tempdir().expect("workdir");
+    let definition = ci_config::definition(
+        "local",
+        "local",
+        vec![ci_config::argv_check("unit", "/bin/true", &[])],
+    );
+    let (bytes, digest) = ci_config::canonical_definition(&definition).expect("canonical");
+    let loaded = ci_config::load(&bytes).expect("load");
+    assert_eq!(loaded.definition_digest, digest);
+    ci_config::admit_host_exec(&loaded.definition, &[]).expect("host-exec");
+
+    let mut context = context();
+    context.definition_digest = loaded.definition_digest.clone();
+    let results = run_checks(
+        &loaded.config,
+        &context,
+        &RunOptions {
+            workdir: workdir.path(),
+            services: &NoopProvider,
+            now_rfc3339: &fixed_clock,
+        },
+    )
+    .expect("run");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].conclusion(), Conclusion::Success);
+    assert_eq!(results[0].body.check.name, "unit");
+    assert_eq!(results[0].body.check.class, crypto::CheckClass::Required);
+    assert_eq!(results[0].body.check.definition_digest, digest);
+    assert_eq!(results[0].body.check.command, ["/bin/true"]);
+}
+
+#[test]
+fn proto_working_directory_is_honored() {
+    let workdir = tempfile::tempdir().expect("workdir");
+    let nested = workdir.path().join("nested");
+    std::fs::create_dir(&nested).expect("nested");
+    let mut check = Check::new(
+        "cwd",
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "test -f here.txt".to_string(),
+        ],
+    );
+    check.working_directory = "nested".to_string();
+    std::fs::write(nested.join("here.txt"), "ok").expect("marker");
+    let results = run(&CiConfig::from_checks(vec![check]), workdir.path());
+    assert_eq!(results[0].conclusion(), Conclusion::Success);
 }

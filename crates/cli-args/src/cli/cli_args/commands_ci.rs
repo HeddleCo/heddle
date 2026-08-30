@@ -23,7 +23,7 @@ pub struct CiRunArgs {
     #[arg(long, value_name = "STATE")]
     pub state: Option<String>,
 
-    /// Read a CI definition from this path instead of `.heddle/ci.toml`.
+    /// Read a canonical TreadleDefinition protobuf instead of `.heddle/treadle.definition.bin`.
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 

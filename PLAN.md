@@ -15,9 +15,13 @@ heddle ci run --local [--state <STATE>] [--config <PATH>] [--check <NAME>]...
 - With `--state`, Heddle resolves the state, visibility-gates its checkout into
   an isolated temporary directory, and runs the same engine there.
 - The default definition is the repository metadata file
-  `<shared .heddle>/ci.toml`; `--config` overrides it. This deliberately uses
-  `Repository::heddle_dir()` rather than assuming `.heddle` is a directory in
-  every checkout (isolated Heddle checkouts use a `.heddle` pointer file).
+  `<shared .heddle>/treadle.definition.bin` (canonical `TreadleDefinition`
+  protobuf). If `<shared .heddle>/treadle.lock.json` is present it must carry
+  the matching hex BLAKE3 `definition_digest`. `--config` overrides the bin
+  path; the lockfile is still `treadle.lock.json` next to that bin. This
+  deliberately uses `Repository::heddle_dir()` rather than assuming `.heddle`
+  is a directory in every checkout (isolated Heddle checkouts use a `.heddle`
+  pointer file).
 - `--check` is repeatable and preserves definition order. An unknown name is a
   hard usage error.
 - Human output is the treadle check summary table. Heddle's global

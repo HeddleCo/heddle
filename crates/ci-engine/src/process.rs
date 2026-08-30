@@ -42,10 +42,15 @@ pub(crate) fn run_process(
         return RunOutput::default();
     };
 
+    let cwd = if check.working_directory.is_empty() {
+        workdir.to_path_buf()
+    } else {
+        workdir.join(&check.working_directory)
+    };
     let mut command = Command::new(program);
     command
         .args(args)
-        .current_dir(workdir)
+        .current_dir(cwd)
         .env_clear()
         .envs(environment)
         .stdin(Stdio::null())

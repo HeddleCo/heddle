@@ -101,8 +101,8 @@ impl EvaluationTarget {
     }
 }
 
-pub(crate) fn config_path(repo: &Repository, explicit: Option<&Path>) -> PathBuf {
+pub(crate) fn definition_path(repo: &Repository, explicit: Option<&Path>) -> PathBuf {
     explicit
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| repo.heddle_dir().join("ci.toml"))
+        .unwrap_or_else(|| repo.heddle_dir().join(ci_config::DEFAULT_DEFINITION_FILE))
 }
