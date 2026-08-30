@@ -509,3 +509,100 @@ fn escaping_cache_path_is_infra_and_does_not_run() {
     );
     assert!(!workdir.path().join("ran.txt").exists());
 }
+
+#[test]
+fn hermetic_env_forwards_tmpdir_and_can_write_ci_tmp() {
+    let workdir = tempfile::tempdir().expect("workdir");
+    let environment = HermeticEnv::new();
+    let built = environment.build(&BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new());
+    match std::env::var("TMPDIR") {
+        Ok(host) => {
+            assert_eq!(
+                built.get("TMPDIR").map(String::as_str),
+                Some(host.as_str()),
+                "TMPDIR must come from the host allowlist when present"
+            );
+        }
+        Err(_) => {
+            assert!(
+                !built.contains_key("TMPDIR"),
+                "unset host TMPDIR stays unset after env_clear + allowlist"
+            );
+        }
+    }
+    if let Ok(host) = std::env::var("TEMP") {
+        assert_eq!(built.get("TEMP").map(String::as_str), Some(host.as_str()));
+    }
+    assert!(built.contains_key("PATH"));
+    assert!(built.contains_key("HOME") || std::env::var_os("HOME").is_none());
+
+    let check = sh(
+        "tmpdir",
+        r#"if test -n "$TMPDIR"; then echo ok > "$TMPDIR/ci-tmp"; else echo unset; fi"#,
+    );
+    let controls = RunControls {
+        hermetic_env: Some(&environment),
+        ..RunControls::default()
+    };
+    let results = run_checks_with(
+        &CiConfig::from_checks(vec![check]),
+        &context(),
+        &RunOptions {
+            workdir: workdir.path(),
+            services: &NoopProvider,
+            now_rfc3339: &fixed_clock,
+        },
+        &controls,
+    )
+    .expect("run");
+    assert_eq!(results[0].conclusion(), Conclusion::Success);
+    if let Some(dir) = built.get("TMPDIR") {
+        let marker = std::path::Path::new(dir).join("ci-tmp");
+        assert_eq!(
+            std::fs::read_to_string(&marker).expect("wrote $TMPDIR/ci-tmp"),
+            "ok\n"
+        );
+        let _ = std::fs::remove_file(marker);
+    }
+}
+
+#[test]
+fn rust_pack_host_exec_can_run_cargo_version() {
+    let workdir = tempfile::tempdir().expect("workdir");
+    let environment = HermeticEnv::new();
+    let built = environment.build(&BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new());
+    assert!(
+        built.contains_key("PATH"),
+        "hermetic env must keep PATH so cargo is findable"
+    );
+    let check = Check::new(
+        "cargo-version",
+        vec!["cargo".to_string(), "--version".to_string()],
+    );
+    let controls = RunControls {
+        hermetic_env: Some(&environment),
+        ..RunControls::default()
+    };
+    let results = run_checks_with(
+        &CiConfig::from_checks(vec![check]),
+        &context(),
+        &RunOptions {
+            workdir: workdir.path(),
+            services: &NoopProvider,
+            now_rfc3339: &fixed_clock,
+        },
+        &controls,
+    )
+    .expect("run cargo --version");
+    assert_eq!(
+        results[0].conclusion(),
+        Conclusion::Success,
+        "rust-pack host-exec smoke: cargo --version under hermetic env: {}",
+        results[0].combined_output
+    );
+    assert!(
+        results[0].combined_output.contains("cargo"),
+        "expected cargo version text, got: {}",
+        results[0].combined_output
+    );
+}

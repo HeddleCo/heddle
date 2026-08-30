@@ -250,6 +250,27 @@ fn proto_digest_on_a_passing_local_run_matches_the_lock() {
 }
 
 #[test]
+fn human_render_prints_definition_digest_above_the_table() {
+    let fixture = Fixture::new(vec![argv_check("unit", "/bin/true", &[])]);
+    let output = fixture.run(&["ci", "run", "--local"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains(&format!("heddle ci: definition_digest {}", fixture.digest)),
+        "operators must see the digest without --output json: {}",
+        stderr(&output)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for header in ["CHECK", "CLASS", "CONCLUSION", "DURATION", "FAILING STEP"] {
+        assert!(
+            stdout.contains(header),
+            "human table kept {header}: {stdout}"
+        );
+    }
+    assert!(stdout.contains("unit"));
+    assert!(stdout.contains("success"));
+}
+
+#[test]
 fn two_job_pipeline_runs_every_check_and_binds_the_lock_digest() {
     let fixture = Fixture::from_definition(host_pipeline_fixture());
     let output = fixture.run(&["--output", "json", "ci", "run", "--local"]);
