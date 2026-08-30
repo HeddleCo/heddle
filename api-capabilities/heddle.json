@@ -309,16 +309,24 @@
       "rpc": "heddle.api.v1alpha1.CollaborationService/AppendTurn",
       "layers": {
         "client": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle hosted-client mapping is shipped."
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/collaboration.rs",
+              "contains": "append_turn"
+            }
+          ],
+          "follow_up": null
         },
         "cli": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/client/discussion_sync.rs",
+              "contains": ".append_turn("
+            }
+          ],
+          "follow_up": null
         }
       }
     },
@@ -409,16 +417,24 @@
       "rpc": "heddle.api.v1alpha1.CollaborationService/OpenDiscussion",
       "layers": {
         "client": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle hosted-client mapping is shipped."
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/collaboration.rs",
+              "contains": "open_discussion"
+            }
+          ],
+          "follow_up": null
         },
         "cli": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/client/discussion_sync.rs",
+              "contains": ".open_discussion("
+            }
+          ],
+          "follow_up": null
         }
       }
     },
@@ -426,16 +442,24 @@
       "rpc": "heddle.api.v1alpha1.CollaborationService/ResolveDiscussion",
       "layers": {
         "client": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle hosted-client mapping is shipped."
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/collaboration.rs",
+              "contains": ".resolve_discussion("
+            }
+          ],
+          "follow_up": null
         },
         "cli": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle CLI surface is shipped for this canonical RPC."
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/client/discussion_sync.rs",
+              "contains": ".resolve_discussion_into_annotation("
+            }
+          ],
+          "follow_up": null
         }
       }
     },
@@ -590,13 +614,23 @@
       "rpc": "heddle.api.v1alpha1.IdentityService/CreateAgentAccount",
       "layers": {
         "client": {
-          "status": "planned",
-          "evidence": [],
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
+              "contains": "create_agent_account"
+            }
+          ],
           "follow_up": null
         },
         "cli": {
-          "status": "planned",
-          "evidence": [],
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/auth_login_agent.rs",
+              "contains": ".create_agent_account("
+            }
+          ],
           "follow_up": null
         }
       }
@@ -655,13 +689,23 @@
       "rpc": "heddle.api.v1alpha1.IdentityService/CreateSignupInvite",
       "layers": {
         "client": {
-          "status": "planned",
-          "evidence": [],
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
+              "contains": "create_signup_invite"
+            }
+          ],
           "follow_up": null
         },
         "cli": {
-          "status": "planned",
-          "evidence": [],
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/auth.rs",
+              "contains": ".create_signup_invite("
+            }
+          ],
           "follow_up": null
         }
       }
@@ -918,13 +962,23 @@
       "rpc": "heddle.api.v1alpha1.IdentityService/ListSignupInvites",
       "layers": {
         "client": {
-          "status": "planned",
-          "evidence": [],
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
+              "contains": "list_signup_invites"
+            }
+          ],
           "follow_up": null
         },
         "cli": {
-          "status": "planned",
-          "evidence": [],
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/auth.rs",
+              "contains": ".list_signup_invites("
+            }
+          ],
           "follow_up": null
         }
       }
@@ -1248,16 +1302,24 @@
       "rpc": "heddle.api.v1alpha1.IdentityService/WhoAmI",
       "layers": {
         "client": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "The hosted client has no callable WhoAmI wrapper; the only method-path occurrence is test data."
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
+              "contains": "who_am_i"
+            }
+          ],
+          "follow_up": null
         },
         "cli": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "The CLI auth surface does not call this canonical RPC."
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/whoami.rs",
+              "contains": ".who_am_i("
+            }
+          ],
+          "follow_up": null
         }
       }
     },
@@ -1446,8 +1508,13 @@
       "rpc": "heddle.api.v1alpha1.OwnerAuthorizationService/BootstrapOwnerRoot",
       "layers": {
         "client": {
-          "status": "planned",
-          "evidence": [],
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
+              "contains": "bootstrap_owner_root"
+            }
+          ],
           "follow_up": null
         },
         "cli": {
@@ -1491,14 +1558,20 @@
       "rpc": "heddle.api.v1alpha1.OwnerAuthorizationService/GetCurrentOwnerKeyring",
       "layers": {
         "client": {
-          "status": "planned",
-          "evidence": [],
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
+              "contains": "get_current_owner_keyring"
+            }
+          ],
           "follow_up": null
         },
         "cli": {
-          "status": "planned",
+          "status": "intentionally-unsupported",
           "evidence": [],
-          "follow_up": null
+          "follow_up": null,
+          "reason": "No Heddle CLI command calls GetCurrentOwnerKeyring."
         }
       }
     },
@@ -1739,14 +1812,20 @@
       "rpc": "heddle.api.v1alpha1.RegistryService/DeleteSpool",
       "layers": {
         "client": {
-          "status": "planned",
-          "evidence": [],
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
+              "contains": "delete_spool"
+            }
+          ],
           "follow_up": null
         },
         "cli": {
-          "status": "planned",
+          "status": "intentionally-unsupported",
           "evidence": [],
-          "follow_up": null
+          "follow_up": null,
+          "reason": "No Heddle CLI command calls DeleteSpool."
         }
       }
     },
@@ -2147,14 +2226,20 @@
       "rpc": "heddle.api.v1alpha1.RegistryService/UpdateSpool",
       "layers": {
         "client": {
-          "status": "planned",
-          "evidence": [],
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/user.rs",
+              "contains": "update_spool"
+            }
+          ],
           "follow_up": null
         },
         "cli": {
-          "status": "planned",
+          "status": "intentionally-unsupported",
           "evidence": [],
-          "follow_up": null
+          "follow_up": null,
+          "reason": "No Heddle CLI command calls UpdateSpool."
         }
       }
     },
@@ -2626,10 +2711,14 @@
       "rpc": "heddle.api.v1alpha1.RepositoryService/SubscribeRepoEvents",
       "layers": {
         "client": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle hosted-client mapping is shipped."
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/client/repo_events.rs",
+              "contains": ".subscribe_repo_events("
+            }
+          ],
+          "follow_up": null
         },
         "cli": {
           "status": "intentionally-unsupported",
@@ -2773,14 +2862,23 @@
       "rpc": "heddle.api.v1alpha1.StateReviewService/SignState",
       "layers": {
         "client": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle hosted-client mapping is shipped."
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/state_review.rs",
+              "contains": "sign_state"
+            }
+          ],
+          "follow_up": null
         },
         "cli": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/cli/src/cli/commands/review.rs",
+              "contains": ".sign_state("
+            }
+          ],
           "follow_up": null
         }
       }
@@ -2941,13 +3039,23 @@
       "rpc": "heddle.api.v1alpha1.WorkflowService/GetThread",
       "layers": {
         "client": {
-          "status": "planned",
-          "evidence": [],
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/sync.rs",
+              "contains": ".get_thread("
+            }
+          ],
           "follow_up": null
         },
         "cli": {
-          "status": "planned",
-          "evidence": [],
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/cli/src/cli/commands/remote/remote_ops.rs",
+              "contains": ".get_thread_metadata("
+            }
+          ],
           "follow_up": null
         }
       }
@@ -3047,10 +3155,14 @@
       "rpc": "heddle.api.v1alpha1.WorkflowService/ListThreads",
       "layers": {
         "client": {
-          "status": "intentionally-unsupported",
-          "evidence": [],
-          "follow_up": null,
-          "reason": "No Heddle hosted-client mapping is shipped."
+          "status": "shipped",
+          "evidence": [
+            {
+              "path": "crates/hosted-client/src/hosted_runtime/hosted/thread_identity.rs",
+              "contains": ".list_threads("
+            }
+          ],
+          "follow_up": null
         },
         "cli": {
           "status": "intentionally-unsupported",

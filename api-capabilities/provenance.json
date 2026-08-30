@@ -5,6 +5,6 @@
   "api_revision": "120fa6ecfc3b710b8a234c90e5e24f0de2f2decd",
   "api_snapshot": "capabilities/declarations/heddle.json",
   "local_declaration": "heddle.json",
-  "local_sha256": "95c3da55b0136df95ad02e93a885b8bb867044907c04c584ad8ae0efce05afa5",
-  "sanitized_sha256": "a239180aeae1bde91d9f48f42df9d23ffdff63ef7951abd1dcc6a28526b2cc04"
+  "local_sha256": "bb366ccef31fc0df1be6895fd78360a3904131f77d5ce3ca37fd2312a06a695e",
+  "sanitized_sha256": "e626fec424e1dd9e2c2802964805b80fceb4985e1390c8ed9735499bcd98de21"
 }
