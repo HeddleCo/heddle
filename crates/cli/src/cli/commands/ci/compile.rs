@@ -81,6 +81,7 @@ impl CompileDriver {
     }
 }
 
+#[derive(Debug)]
 enum Discovered {
     Bin {
         path: PathBuf,
@@ -244,6 +245,7 @@ fn invoke_javascript(compiler: &JsCompiler, source: &Path, out_dir: &Path) -> Re
     Ok(())
 }
 
+#[derive(Debug)]
 enum JsCompiler {
     Direct(PathBuf),
     NodeScript(PathBuf),
@@ -370,7 +372,7 @@ fn sdk_not_shipped(language: &str, file_name: &str) -> RecoveryAdvice {
     )
 }
 
-fn compile_advice(kind: &'static str, error: String, hint: &str) -> RecoveryAdvice {
+fn compile_advice(kind: &'static str, error: impl Into<String>, hint: &str) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         kind,
         error,
