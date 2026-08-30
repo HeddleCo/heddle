@@ -35,7 +35,7 @@ fn marker_config() -> CiConfig {
     env_config(None)
 }
 
-fn env_config(foo: Option<&str>) -> CiConfig {
+fn env_config(override_value: Option<&str>) -> CiConfig {
     let mut check = Check::new(
         "marker",
         vec![
@@ -44,7 +44,7 @@ fn env_config(foo: Option<&str>) -> CiConfig {
             "echo ran >> marker; echo ok".to_string(),
         ],
     );
-    if let Some(value) = foo {
+    if let Some(value) = override_value {
         check.env.insert("FOO".to_string(), value.to_string());
     }
     CiConfig::from_checks(vec![check])
