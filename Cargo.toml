@@ -35,7 +35,7 @@ default-members = ["crates/cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.15.5"
+version = "0.15.6"
 edition = "2024"
 authors = ["Luke"]
 description = "An AI-native version control system"
@@ -46,7 +46,7 @@ categories = ["development-tools"]
 
 [workspace.dependencies]
 anyhow = "1"
-api = { package = "heddle-api", version = "0.20.0" }
+api = { package = "heddle-api", version = "0.21.0" }
 async-trait = "0.1"
 base32 = "0.5"
 base64 = "0.22"

@@ -312,6 +312,7 @@ fn bootstrap_owner_root_wire_carries_agent_claim_binding_on_tag_5() {
             owner_root: Some(signed.clone()),
             approval: None,
             client_operation_id: operation_id.to_string(),
+            owner_key_binding: None,
         },
         &binding,
     );
