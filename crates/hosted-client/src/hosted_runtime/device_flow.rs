@@ -146,12 +146,6 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
     // Consumes a human invite to open an unclaimed placeholder account;
     // provisioning stays parent-only even though the RPC is public.
     ("CreateAgentAccount", AgentAuthOperationDisposition::Denied),
-    // Legacy generated-handle variant of create-on-behalf. It remains in the
-    // shared contract but is not the pet-name claim path used by this CLI.
-    (
-        "ProvisionAgentRootedAccount",
-        AgentAuthOperationDisposition::Denied,
-    ),
     // Claim promotion is authorized by the browser's verified passkey and the
     // agent's dedicated Iroh consent, never by an attached derived bearer.
     ("PromoteAgentAccount", AgentAuthOperationDisposition::Denied),

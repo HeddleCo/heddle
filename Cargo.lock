@@ -2086,9 +2086,9 @@ dependencies = [
 
 [[package]]
 name = "heddle-api"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "184dae4d574220a294850876b6f400864b6e6e75def89e53b1efc272d44cc0c8"
+checksum = "afb287405dd5ebd1a5ce2c6424ac8cbb47d2c03b6d5bc68b6da8e16afa82a589"
 dependencies = [
  "blake3",
  "bytes",
@@ -2733,9 +2733,9 @@ dependencies = [
 
 [[package]]
 name = "heddleco-capability-verifier"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcab89b5d2c914c0d3250a4df0c7d04a72d734a5920eaabcd0d39bee61406806"
+checksum = "b4bc19b683ad966d72dbb46f949e33cea0766c581cafc12b904a443708b6033e"
 dependencies = [
  "biscuit-auth",
  "ed25519-dalek 3.0.0",

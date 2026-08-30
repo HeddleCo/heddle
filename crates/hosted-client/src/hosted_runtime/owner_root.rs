@@ -137,6 +137,11 @@ pub(crate) async fn upload_claimable_root(
         owner_root: Some(signed),
         approval: None,
         client_operation_id: operation_id.to_wire(),
+        // Additive api 0.21.0 field (tag 5). This client carries its
+        // UUID-to-key binding in the appended AgentClaim extension
+        // (`encode_bootstrap_owner_root`), so the inline binding stays empty,
+        // which preserves prior bootstrap behavior.
+        owner_key_binding: None,
     };
     let encoded = encode_bootstrap_owner_root(&request, &binding);
     match client
