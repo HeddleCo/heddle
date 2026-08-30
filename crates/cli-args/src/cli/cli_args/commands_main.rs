@@ -158,7 +158,7 @@ Examples:
     /// Create or resume an isolated thread for focused work.
     Start(ThreadStartArgs),
 
-    /// Run Heddle CI checks.
+    /// Run Heddle CI checks from `.heddle/treadle.definition.bin` (SDK compile output).
     #[cfg(feature = "ci")]
     Ci {
         #[command(subcommand)]

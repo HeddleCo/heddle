@@ -9,7 +9,8 @@ use api::{
 };
 use ci_config::{
     CheckClass, ConfigError, Trigger, admit_host_exec, argv_check, canonical_definition,
-    definition, host_oci_platform, load, lock_json, read_lock, verify_lock,
+    definition, host_oci_platform, host_pipeline_fixture, host_pipeline_with_required_failure,
+    load, lock_json, read_lock, verify_lock,
 };
 
 fn unix_true() -> (String, Vec<&'static str>) {
@@ -169,4 +170,35 @@ fn host_matching_definition_is_admitted() {
     let loaded = load(&bytes).expect("load");
     admit_host_exec(&loaded.definition, &[]).expect("host-exec eligible");
     admit_host_exec(&loaded.definition, &["unit".to_string()]).expect("selected");
+}
+
+#[test]
+fn two_job_pipeline_flattens_to_three_host_exec_checks() {
+    let definition = host_pipeline_fixture();
+    assert_eq!(definition.jobs.len(), 2);
+    let (bytes, digest) = canonical_definition(&definition).expect("canonical");
+    let loaded = load(&bytes).expect("load");
+    assert_eq!(loaded.definition_digest, digest);
+    admit_host_exec(&loaded.definition, &[]).expect("host-exec");
+    let names: Vec<_> = loaded
+        .config
+        .checks
+        .iter()
+        .map(|check| check.name.as_str())
+        .collect();
+    assert_eq!(names, ["docs-ok", "echo", "ok"]);
+    assert_eq!(loaded.config.checks[1].command, ["/bin/echo", "pipeline"]);
+
+    let failing = host_pipeline_with_required_failure();
+    let (bytes, _) = canonical_definition(&failing).expect("canonical");
+    let loaded = load(&bytes).expect("load");
+    assert_eq!(
+        loaded
+            .config
+            .checks
+            .iter()
+            .map(|check| check.name.as_str())
+            .collect::<Vec<_>>(),
+        ["fail", "later", "sibling"]
+    );
 }

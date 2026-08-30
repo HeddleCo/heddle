@@ -16,14 +16,17 @@ heddle ci run --local [--state <STATE>] [--config <PATH>] [--check <NAME>]...
   an isolated temporary directory, and runs the same engine there.
 - The default definition is the repository metadata file
   `<shared .heddle>/treadle.definition.bin` (canonical `TreadleDefinition`
-  protobuf). If `<shared .heddle>/treadle.lock.json` is present it must carry
-  the matching hex BLAKE3 `definition_digest`. `--config` overrides the bin
-  path; the lockfile is still `treadle.lock.json` next to that bin. This
-  deliberately uses `Repository::heddle_dir()` rather than assuming `.heddle`
-  is a directory in every checkout (isolated Heddle checkouts use a `.heddle`
-  pointer file).
-- `--check` is repeatable and preserves definition order. An unknown name is a
-  hard usage error.
+  protobuf, the TypeScript SDK compile output). If
+  `<shared .heddle>/treadle.lock.json` is present it must carry the matching
+  hex BLAKE3 `definition_digest`. `--config` overrides the bin path; the
+  lockfile is still `treadle.lock.json` next to that bin. This runner does
+  not compile definitions and does not shell to node. This deliberately uses
+  `Repository::heddle_dir()` rather than assuming `.heddle` is a directory in
+  every checkout (isolated Heddle checkouts use a `.heddle` pointer file).
+- `--check` selects by check name, not job name. It is repeatable and
+  preserves definition order. Unlisted checks are omitted (named on stderr).
+  An unknown name is a hard usage error. Execution is sequential: a required
+  failure still runs later checks. This is not a `needs` DAG.
 - Human output is the treadle check summary table. Heddle's global
   `--output json` emits the complete signed-verdict array.
 - Exit nonzero when any authored `required` check ends in `failure`,

@@ -53,20 +53,71 @@ pub fn argv_check(name: &str, command: &str, args: &[&str]) -> TreadleCheck {
     }
 }
 
-/// Pipeline with one job containing `checks`.
+/// One concrete job.
 #[must_use]
-pub fn definition(name: &str, job: &str, checks: Vec<TreadleCheck>) -> TreadleDefinition {
+pub fn job(name: &str, checks: Vec<TreadleCheck>) -> TreadleJob {
+    TreadleJob {
+        name: name.to_string(),
+        matrix: Vec::new(),
+        checks,
+    }
+}
+
+/// Pipeline with the given jobs. Matrix expansion is already done.
+#[must_use]
+pub fn pipeline(name: &str, jobs: Vec<TreadleJob>) -> TreadleDefinition {
     TreadleDefinition {
         format_version: 1,
         name: name.to_string(),
-        jobs: vec![TreadleJob {
-            name: job.to_string(),
-            matrix: Vec::new(),
-            checks,
-        }],
+        jobs,
         services: Vec::new(),
         secret_refs: Vec::new(),
     }
+}
+
+/// Pipeline with one job containing `checks`.
+#[must_use]
+pub fn definition(name: &str, job_name: &str, checks: Vec<TreadleCheck>) -> TreadleDefinition {
+    pipeline(name, vec![job(job_name, checks)])
+}
+
+/// Two-job host-exec pipeline: `/bin/true`, `/bin/echo`, and another `/bin/true`.
+///
+/// Proof tests write the canonical bytes + lock and run every check.
+#[must_use]
+pub fn host_pipeline_fixture() -> TreadleDefinition {
+    pipeline(
+        "local",
+        vec![
+            job(
+                "unit",
+                vec![
+                    argv_check("ok", "/bin/true", &[]),
+                    argv_check("echo", "/bin/echo", &["pipeline"]),
+                ],
+            ),
+            job("docs", vec![argv_check("docs-ok", "/bin/true", &[])]),
+        ],
+    )
+}
+
+/// Two-job pipeline whose first required check fails. The engine is sequential,
+/// not a `needs` DAG: later checks still run.
+#[must_use]
+pub fn host_pipeline_with_required_failure() -> TreadleDefinition {
+    pipeline(
+        "local",
+        vec![
+            job(
+                "first",
+                vec![
+                    argv_check("fail", "/bin/false", &[]),
+                    argv_check("later", "/bin/true", &[]),
+                ],
+            ),
+            job("second", vec![argv_check("sibling", "/bin/true", &[])]),
+        ],
+    )
 }
 
 /// Host platform plus a stub image digest. Host-exec v0 does not pull the image.

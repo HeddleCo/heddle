@@ -41,6 +41,22 @@ pub(crate) fn run_local(cli: &Cli, args: &CiRunArgs) -> Result<()> {
         })?;
     }
     apply_check_filter(&mut loaded.config, &args.checks)?;
+    if !args.checks.is_empty() {
+        let omitted: Vec<&str> = loaded
+            .definition
+            .jobs
+            .iter()
+            .flat_map(|job| job.checks.iter().map(|check| check.name.as_str()))
+            .filter(|name| !args.checks.iter().any(|selected| selected == name))
+            .collect();
+        if !omitted.is_empty() {
+            eprintln!(
+                "heddle ci: --check selected {}; omitted {}",
+                args.checks.join(", "),
+                omitted.join(", ")
+            );
+        }
+    }
     let selected: Vec<String> = loaded
         .config
         .checks

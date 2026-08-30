@@ -6,15 +6,17 @@
 //! - `.heddle/treadle.lock.json` — `format_version` + hex BLAKE3 `definition_digest`
 //!
 //! `heddle ci run --local` decodes with the api canonical reader, checks the
-//! lockfile when present, then maps each `TreadleCheck` onto the engine.
+//! lockfile when present, then maps each `TreadleCheck` onto the engine. The
+//! bin + lock pair is the TypeScript SDK compile output (`emitPipeline`).
 
 mod authoring;
 mod load;
 mod model;
 
 pub use authoring::{
-    TREADLE_LOCK_FORMAT, argv_check, canonical_definition, definition, host_target_environment,
-    lock_json, non_canonical_bytes,
+    TREADLE_LOCK_FORMAT, argv_check, canonical_definition, definition, host_pipeline_fixture,
+    host_pipeline_with_required_failure, host_target_environment, job, lock_json,
+    non_canonical_bytes, pipeline,
 };
 pub use load::{
     ConfigError, DEFAULT_DEFINITION_FILE, DEFAULT_LOCK_FILE, LoadedDefinition, TreadleLockfile,

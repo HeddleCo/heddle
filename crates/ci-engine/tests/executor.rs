@@ -161,12 +161,10 @@ fn cache_environment_points_outside_the_source_tree() {
     )
     .expect("run");
     assert_eq!(results[0].conclusion(), Conclusion::Success);
-    assert!(
-        results[0]
-            .combined_output
-            .lines()
-            .any(|line| line == format!("HCI_CACHE_CARGO={}", cache.path().join("CARGO").display()))
-    );
+    assert!(results[0]
+        .combined_output
+        .lines()
+        .any(|line| line == format!("HCI_CACHE_CARGO={}", cache.path().join("CARGO").display())));
 }
 
 #[test]
@@ -243,6 +241,74 @@ fn proto_definition_digest_is_bound_on_an_executed_check() {
     assert_eq!(results[0].body.check.class, crypto::CheckClass::Required);
     assert_eq!(results[0].body.check.definition_digest, digest);
     assert_eq!(results[0].body.check.command, ["/bin/true"]);
+}
+
+#[test]
+fn proto_pipeline_executes_every_check_and_binds_digest() {
+    let workdir = tempfile::tempdir().expect("workdir");
+    let definition = ci_config::host_pipeline_fixture();
+    assert_eq!(definition.jobs.len(), 2);
+    let (bytes, digest) = ci_config::canonical_definition(&definition).expect("canonical");
+    let loaded = ci_config::load(&bytes).expect("load");
+    assert_eq!(loaded.config.checks.len(), 3);
+    ci_config::admit_host_exec(&loaded.definition, &[]).expect("host-exec");
+
+    let mut context = context();
+    context.definition_digest = loaded.definition_digest.clone();
+    let results = run_checks(
+        &loaded.config,
+        &context,
+        &RunOptions {
+            workdir: workdir.path(),
+            services: &NoopProvider,
+            now_rfc3339: &fixed_clock,
+        },
+    )
+    .expect("run");
+    assert_eq!(results.len(), 3);
+    for result in &results {
+        assert_eq!(result.conclusion(), Conclusion::Success);
+        assert_eq!(result.body.check.definition_digest, digest);
+    }
+    let names: Vec<_> = results
+        .iter()
+        .map(|result| result.body.check.name.as_str())
+        .collect();
+    assert_eq!(names, ["docs-ok", "echo", "ok"]);
+    assert!(results[1].combined_output.contains("pipeline"));
+    assert_eq!(results[1].body.check.command, ["/bin/echo", "pipeline"]);
+}
+
+#[test]
+fn required_failure_still_executes_later_checks_this_is_not_a_dag() {
+    let workdir = tempfile::tempdir().expect("workdir");
+    let definition = ci_config::host_pipeline_with_required_failure();
+    let (bytes, digest) = ci_config::canonical_definition(&definition).expect("canonical");
+    let loaded = ci_config::load(&bytes).expect("load");
+    let mut context = context();
+    context.definition_digest = loaded.definition_digest.clone();
+    let results = run_checks(
+        &loaded.config,
+        &context,
+        &RunOptions {
+            workdir: workdir.path(),
+            services: &NoopProvider,
+            now_rfc3339: &fixed_clock,
+        },
+    )
+    .expect("run");
+    assert_eq!(results.len(), 3, "sequential engine does not stop at fail");
+    assert_eq!(results[0].body.check.name, "fail");
+    assert_eq!(results[0].conclusion(), Conclusion::Failure);
+    assert_eq!(results[1].body.check.name, "later");
+    assert_eq!(results[1].conclusion(), Conclusion::Success);
+    assert_eq!(results[2].body.check.name, "sibling");
+    assert_eq!(results[2].conclusion(), Conclusion::Success);
+    assert!(
+        results
+            .iter()
+            .all(|result| result.body.check.definition_digest == digest)
+    );
 }
 
 #[test]

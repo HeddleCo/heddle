@@ -8,7 +8,7 @@ use clap::{Args, Subcommand};
 /// CI executor subcommands.
 #[derive(Clone, Debug, Subcommand)]
 pub enum CiCommands {
-    /// Run the configured checks against a local working tree or state.
+    /// Run the SDK compile output at `.heddle/treadle.definition.bin`.
     Run(CiRunArgs),
 }
 
@@ -23,11 +23,11 @@ pub struct CiRunArgs {
     #[arg(long, value_name = "STATE")]
     pub state: Option<String>,
 
-    /// Read a canonical TreadleDefinition protobuf instead of `.heddle/treadle.definition.bin`.
+    /// Read a canonical TreadleDefinition protobuf instead of the SDK compile output at `.heddle/treadle.definition.bin`.
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
-    /// Run only this named check; may be repeated.
+    /// Run only this named check (not a job); may be repeated. Unlisted checks are omitted.
     #[arg(long = "check", value_name = "NAME")]
     pub checks: Vec<String>,
 }

@@ -6,11 +6,12 @@ use std::{
 };
 
 use api::heddle::api::v1alpha1::{
-    TreadleCheck, TreadleCheckClass, TreadleNetworkAccess, TreadlePlatform,
+    TreadleCheck, TreadleCheckClass, TreadleDefinition, TreadleNetworkAccess, TreadlePlatform,
 };
 use ci_config::{
     DEFAULT_DEFINITION_FILE, DEFAULT_LOCK_FILE, argv_check, canonical_definition, definition,
-    host_oci_platform, lock_json, non_canonical_bytes,
+    host_oci_platform, host_pipeline_fixture, host_pipeline_with_required_failure, lock_json,
+    non_canonical_bytes,
 };
 use crypto::{Conclusion, Ed25519Signer, SignedVerdict, Signer, SignerKind};
 use repo::{Repository, identity::DeviceIdentity};
@@ -29,10 +30,17 @@ impl Fixture {
     }
 
     fn write(checks: Vec<TreadleCheck>, with_lock: bool) -> Self {
+        Self::write_definition(definition("local", "local", checks), with_lock)
+    }
+
+    fn from_definition(definition: TreadleDefinition) -> Self {
+        Self::write_definition(definition, true)
+    }
+
+    fn write_definition(definition: TreadleDefinition, with_lock: bool) -> Self {
         let root = tempfile::tempdir().expect("repo root");
         let home = tempfile::tempdir().expect("heddle home");
         let repo = Repository::init_default(root.path()).expect("init repo");
-        let definition = definition("local", "local", checks);
         let (bytes, digest) = canonical_definition(&definition).expect("canonical definition");
         std::fs::write(repo.heddle_dir().join(DEFAULT_DEFINITION_FILE), bytes)
             .expect("write definition");
@@ -197,6 +205,11 @@ fn check_filter_is_exact_and_a_typo_is_an_error() {
         serde_json::from_slice(&output.stdout).expect("filtered verdict JSON");
     assert_eq!(verdicts.len(), 1);
     assert_eq!(verdicts[0].body.check.name, "selected");
+    assert!(
+        stderr(&output).contains("omitted not-selected"),
+        "stderr must name dropped checks: {}",
+        stderr(&output)
+    );
 
     let typo = fixture.run(&["ci", "run", "--local", "--check", "missing"]);
     assert!(!typo.status.success());
@@ -224,6 +237,86 @@ fn proto_digest_on_a_passing_local_run_matches_the_lock() {
     assert_eq!(verdicts[0].body.outcome.conclusion, Conclusion::Success);
     assert_eq!(verdicts[0].body.check.definition_digest, fixture.digest);
     assert_eq!(verdicts[0].body.check.command, ["/bin/true"]);
+}
+
+#[test]
+fn two_job_pipeline_runs_every_check_and_binds_the_lock_digest() {
+    let fixture = Fixture::from_definition(host_pipeline_fixture());
+    let output = fixture.run(&["--output", "json", "ci", "run", "--local"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let verdicts: Vec<SignedVerdict> =
+        serde_json::from_slice(&output.stdout).expect("signed verdict JSON");
+    assert_eq!(
+        verdicts.len(),
+        3,
+        "every argv check in both jobs must run and sign"
+    );
+    assert_eq!(
+        verdicts
+            .iter()
+            .map(|verdict| verdict.body.check.name.as_str())
+            .collect::<Vec<_>>(),
+        ["docs-ok", "echo", "ok"]
+    );
+    for verdict in &verdicts {
+        verdict.verify().expect("verdict verifies");
+        assert_eq!(verdict.signer_kind, SignerKind::Device);
+        assert_eq!(verdict.body.outcome.conclusion, Conclusion::Success);
+        assert_eq!(verdict.body.check.definition_digest, fixture.digest);
+    }
+    assert_eq!(
+        verdict_named(&verdicts, "echo").body.check.command,
+        ["/bin/echo", "pipeline"]
+    );
+}
+
+#[test]
+fn required_failure_still_executes_later_checks_this_is_not_a_dag() {
+    let fixture = Fixture::from_definition(host_pipeline_with_required_failure());
+    let output = fixture.run(&["--output", "json", "ci", "run", "--local"]);
+    assert_eq!(
+        output.status.code(),
+        Some(65),
+        "required failure fails closed: {}",
+        stderr(&output)
+    );
+    let verdicts: Vec<SignedVerdict> =
+        serde_json::from_slice(&output.stdout).expect("signed verdict JSON");
+    assert_eq!(
+        verdicts.len(),
+        3,
+        "engine is sequential, not a DAG: later and sibling still execute after fail"
+    );
+    assert_eq!(verdicts[0].body.check.name, "fail");
+    assert_eq!(verdicts[0].body.outcome.conclusion, Conclusion::Failure);
+    assert_eq!(verdicts[1].body.check.name, "later");
+    assert_eq!(verdicts[1].body.outcome.conclusion, Conclusion::Success);
+    assert_eq!(verdicts[2].body.check.name, "sibling");
+    assert_eq!(verdicts[2].body.outcome.conclusion, Conclusion::Success);
+    assert!(
+        verdicts
+            .iter()
+            .all(|verdict| verdict.body.check.definition_digest == fixture.digest)
+    );
+}
+
+#[test]
+fn check_filter_lists_omitted_checks_from_the_other_job() {
+    let fixture = Fixture::from_definition(host_pipeline_fixture());
+    let output = fixture.run(&[
+        "--output", "json", "ci", "run", "--local", "--check", "echo",
+    ]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("omitted docs-ok, ok"),
+        "stderr must name dropped checks from both jobs: {}",
+        stderr(&output)
+    );
+    let verdicts: Vec<SignedVerdict> =
+        serde_json::from_slice(&output.stdout).expect("filtered verdict JSON");
+    assert_eq!(verdicts.len(), 1);
+    assert_eq!(verdicts[0].body.check.name, "echo");
+    assert_eq!(verdicts[0].body.check.definition_digest, fixture.digest);
 }
 
 #[test]
