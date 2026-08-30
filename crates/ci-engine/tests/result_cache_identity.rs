@@ -2,11 +2,12 @@
 
 use std::{collections::BTreeMap, path::Path};
 
+use ci_config::{Check, CheckClass, CiConfig};
 use ci_engine::{
     ExecutionContext, FsResultCache, HermeticEnv, MemoryResultCache, NoopProvider, ResultCache,
     RunControls, RunOptions, SpotCheck, run_checks_with,
 };
-use crypto::{Basis, BasisKind, CheckClass, StateRef};
+use crypto::{Basis, BasisKind, CheckClass as VerdictClass, StateRef};
 
 fn context() -> ExecutionContext {
     ExecutionContext {
@@ -29,28 +30,27 @@ fn context() -> ExecutionContext {
     }
 }
 
-fn echo_ok(name: &str, class: &str) -> String {
-    format!(
-        r#"
-[meta]
-schema = 1
-[[check]]
-name = "{name}"
-class = "{class}"
-command = ["/bin/sh", "-c", "echo ran >> marker; echo ok"]
-"#
-    )
+fn echo_ok(name: &str, class: CheckClass) -> CiConfig {
+    let mut check = Check::new(
+        name,
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo ran >> marker; echo ok".to_string(),
+        ],
+    );
+    check.class = class;
+    CiConfig::from_checks(vec![check])
 }
 
 fn run(
-    raw: &str,
+    config: &CiConfig,
     workdir: &Path,
     cache: &dyn ResultCache,
 ) -> Result<Vec<ci_engine::CheckResult>, ci_engine::ResultCacheError> {
-    let config = ci_config::parse(raw).expect("config");
     let environment = HermeticEnv::with_host(BTreeMap::new());
     run_checks_with(
-        &config,
+        config,
         &context(),
         &RunOptions {
             workdir,
@@ -93,18 +93,18 @@ fn planted_output_digest_from_a_different_check_identity_does_not_hit() {
     let workdir = tempfile::tempdir().expect("workdir");
     let cache_dir = tempfile::tempdir().expect("cache");
     let cache = FsResultCache::new(cache_dir.path());
-    let required = echo_ok("required", "required");
+    let required = echo_ok("required", CheckClass::Required);
     run(&required, workdir.path(), &cache).expect("seed required");
 
     let planted_cache = MemoryResultCache::new();
     run(
-        &echo_ok("untrusted", "informational"),
+        &echo_ok("untrusted", CheckClass::Informational),
         workdir.path(),
         &planted_cache,
     )
     .expect("seed untrusted");
     let planted = planted_cache.entries().pop().expect("untrusted entry");
-    assert_eq!(planted.body.check.class, CheckClass::Informational);
+    assert_eq!(planted.body.check.class, VerdictClass::Informational);
     assert_eq!(planted.combined_output, "ok\n");
 
     let mut slotted = planted.clone();
@@ -121,7 +121,7 @@ fn planted_output_digest_from_a_different_check_identity_does_not_hit() {
         .expect_err("same output from another check must not verify");
 
     let hit = run(&required, workdir.path(), &cache).expect("required must miss the plant");
-    assert_eq!(hit[0].body.check.class, CheckClass::Required);
+    assert_eq!(hit[0].body.check.class, VerdictClass::Required);
     assert_eq!(
         marker_runs(workdir.path()),
         4,

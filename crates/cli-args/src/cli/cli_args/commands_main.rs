@@ -158,7 +158,7 @@ Examples:
     /// Create or resume an isolated thread for focused work.
     Start(ThreadStartArgs),
 
-    /// Run Heddle CI checks.
+    /// Run Heddle CI checks. Finds `ci.ts` / `ci.rs` / `ci.go`, compiles if needed, then runs.
     #[cfg(feature = "ci")]
     Ci {
         #[command(subcommand)]

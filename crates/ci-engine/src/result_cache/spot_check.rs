@@ -65,6 +65,9 @@ mod tests {
     use crate::model::ExecutionContext;
 
     fn key() -> CacheKey {
+        let mut check = ci_config::Check::new("build", vec!["true".to_string()]);
+        check.timeout_secs = 1;
+        check.supersede = false;
         CacheKey::derive(
             &std::collections::BTreeMap::new(),
             &ExecutionContext {
@@ -85,19 +88,7 @@ mod tests {
                 runner: None,
                 image_digest: None,
             },
-            &ci_config::Check {
-                name: "build".to_string(),
-                class: ci_config::CheckClass::Required,
-                command: vec!["true".to_string()],
-                timeout_secs: 1,
-                env: std::collections::BTreeMap::new(),
-                services: Vec::new(),
-                cache_paths: Vec::new(),
-                retry: ci_config::Retry::default(),
-                triggers: Vec::new(),
-                supersede: false,
-                isolation: None,
-            },
+            &check,
         )
     }
 

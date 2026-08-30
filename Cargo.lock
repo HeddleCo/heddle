@@ -2106,11 +2106,13 @@ dependencies = [
 name = "heddle-ci-config"
 version = "0.15.5"
 dependencies = [
- "heddle-object-model",
+ "heddle-api",
+ "hex",
+ "prost 0.14.1",
  "regex",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
- "toml 1.1.4+spec-1.1.0",
 ]
 
 [[package]]

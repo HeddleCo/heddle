@@ -17,28 +17,56 @@ use crypto::{
 use heddle_cli_args::{CiRunArgs, Cli};
 use repo::Repository;
 
-use super::{
-    render,
-    target::{EvaluationTarget, config_path},
-};
+use super::{compile, render, target::EvaluationTarget};
 use crate::exit::OutcomeExit;
 
 pub(crate) fn run_local(cli: &Cli, args: &CiRunArgs) -> Result<()> {
     ensure!(args.local, "`heddle ci run` currently requires `--local`");
     let repo = cli.open_repo()?;
-    let path = config_path(&repo, args.config.as_deref());
-    let raw =
-        std::fs::read(&path).with_context(|| format!("read CI definition {}", path.display()))?;
-    let text = std::str::from_utf8(&raw)
-        .with_context(|| format!("CI definition {} is not UTF-8", path.display()))?;
-    let definition_digest = ci_config::definition_digest(&raw);
-    let mut config = ci_config::parse(text)
-        .with_context(|| format!("parse CI definition {}", path.display()))?;
-    apply_check_filter(&mut config, &args.checks)?;
+    let path = compile::prepare_definition(&repo, args.config.as_deref())?;
+    let raw = std::fs::read(&path)
+        .with_context(|| format!("read TreadleDefinition {}", path.display()))?;
+    let mut loaded = ci_config::load(&raw)
+        .with_context(|| format!("decode canonical TreadleDefinition {}", path.display()))?;
+    let lock_path = ci_config::lock_path(&path);
+    let lock = ci_config::load_lock_file(&lock_path)
+        .with_context(|| format!("treadle.lock.json is required next to {}", path.display()))?;
+    ci_config::verify_lock(&lock, &loaded.definition_digest).with_context(|| {
+        format!(
+            "treadle lockfile {} does not match {}",
+            lock_path.display(),
+            path.display()
+        )
+    })?;
+    apply_check_filter(&mut loaded.config, &args.checks)?;
+    if !args.checks.is_empty() {
+        let omitted: Vec<&str> = loaded
+            .definition
+            .jobs
+            .iter()
+            .flat_map(|job| job.checks.iter().map(|check| check.name.as_str()))
+            .filter(|name| !args.checks.iter().any(|selected| selected == name))
+            .collect();
+        if !omitted.is_empty() {
+            eprintln!(
+                "heddle ci: --check selected {}; omitted {}",
+                args.checks.join(", "),
+                omitted.join(", ")
+            );
+        }
+    }
+    let selected: Vec<String> = loaded
+        .config
+        .checks
+        .iter()
+        .map(|check| check.name.clone())
+        .collect();
+    ci_config::admit_host_exec(&loaded.definition, &selected)
+        .context("local host-exec refused this definition")?;
     let signer = load_device_signer()?;
     let mut target = EvaluationTarget::prepare(&repo, args.state.as_deref())?;
 
-    let context = execution_context(&repo, &target, definition_digest);
+    let context = execution_context(&repo, &target, loaded.definition_digest.clone());
     let provider = NoopProvider;
     let now = now_rfc3339;
     let options = RunOptions {
@@ -54,15 +82,12 @@ pub(crate) fn run_local(cli: &Cli, args: &CiRunArgs) -> Result<()> {
         result_cache: Some(&result_cache),
         ..RunControls::default()
     };
-    let results = run_checks_with(&config, &context, &options, &controls)
+    let results = run_checks_with(&loaded.config, &context, &options, &controls)
         .context("run checks (including result-cache spot-check)")?;
     target.ensure_unchanged(&repo)?;
     target.cleanup(&repo)?;
 
     let verdicts = sign_results(results, &target, &signer)?;
-    for warning in &config.warnings {
-        eprintln!("heddle ci: warning: {warning}");
-    }
     render::render(cli, &verdicts)?;
     eprintln!("heddle ci: ran {}", path.display());
     let advisory = render::non_passing_advisory(&verdicts);

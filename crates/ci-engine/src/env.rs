@@ -14,6 +14,8 @@ pub const BASE_ALLOWLIST: &[&str] = &[
     "LC_ALL",
     "CARGO_HOME",
     "RUSTUP_HOME",
+    "TMPDIR",
+    "TEMP",
 ];
 /// Deterministic Git author/committer name.
 pub const GIT_IDENTITY_NAME: &str = "heddle ci";

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Local checks are mapped from a canonical `TreadleDefinition`. The
+  executor still runs argv, timeouts, classify, and the result cache.
+
 ## [0.15.1](https://github.com/HeddleCo/heddle/compare/heddle-ci-engine-v0.15.0...heddle-ci-engine-v0.15.1) - 2026-08-27
 
 ### Other

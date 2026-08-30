@@ -7,7 +7,7 @@ use ci_config::{Check, CiConfig, Trigger};
 use crypto::{Conclusion, FailureClass};
 
 use crate::{
-    cache::prepare_caches,
+    cache::{prepare_caches, restore_worktree_cache_dirs, save_caches},
     classify::{Disposition, classify},
     env::HermeticEnv,
     model::{AttemptRecord, CheckResult, ExecutionContext, RunControls, RunOptions},
@@ -45,7 +45,7 @@ pub fn run_checks_with(
         result_cache: controls.result_cache,
         spot_check: controls.spot_check,
     };
-    config
+    let results = config
         .checks
         .iter()
         .map(|check| match &controls.trigger {
@@ -54,7 +54,9 @@ pub fn run_checks_with(
             }
             _ => run_one_check(check, context, &resolved),
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    restore_worktree_cache_dirs(options.workdir, &config.checks);
+    Ok(results)
 }
 
 pub(crate) struct ResolvedRun<'a> {
@@ -101,11 +103,37 @@ fn run_one_check_uncached(
 ) -> CheckResult {
     let started_at = (run.options.now_rfc3339)();
     let started = Instant::now();
-    let caches = prepare_caches(&check.cache_paths, run.cache_root);
+    let caches = match prepare_caches(
+        &check.name,
+        &check.cache_paths,
+        run.options.workdir,
+        run.cache_root,
+    ) {
+        Ok(caches) => caches,
+        Err(error) => {
+            return infra_result(
+                check,
+                context,
+                run,
+                started_at,
+                started.elapsed(),
+                "cache_paths",
+                &error.to_string(),
+            );
+        }
+    };
     let services = match run.options.services.up(&check.services) {
         Ok(services) => services,
         Err(error) => {
-            return infra_result(check, context, run, started_at, started.elapsed(), &error);
+            return infra_result(
+                check,
+                context,
+                run,
+                started_at,
+                started.elapsed(),
+                "service_provisioning",
+                &format!("service provisioning failed: {error}"),
+            );
         }
     };
     let environment = run
@@ -113,6 +141,17 @@ fn run_one_check_uncached(
         .build(&check.env, service_environment, &caches.env);
     let (last, attempts) = run_attempts(check, run, &environment);
     let _ = run.options.services.down(services);
+    if let Err(error) = save_caches(&caches) {
+        return infra_result(
+            check,
+            context,
+            run,
+            started_at,
+            started.elapsed(),
+            "cache_save",
+            &error.to_string(),
+        );
+    }
     finalize(
         check,
         context,

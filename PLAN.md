@@ -15,11 +15,19 @@ heddle ci run --local [--state <STATE>] [--config <PATH>] [--check <NAME>]...
 - With `--state`, Heddle resolves the state, visibility-gates its checkout into
   an isolated temporary directory, and runs the same engine there.
 - The default definition is the repository metadata file
-  `<shared .heddle>/ci.toml`; `--config` overrides it. This deliberately uses
-  `Repository::heddle_dir()` rather than assuming `.heddle` is a directory in
-  every checkout (isolated Heddle checkouts use a `.heddle` pointer file).
-- `--check` is repeatable and preserves definition order. An unknown name is a
-  hard usage error.
+  `<shared .heddle>/treadle.definition.bin` (canonical `TreadleDefinition`
+  protobuf, the TypeScript SDK compile output).
+  `<shared .heddle>/treadle.lock.json` is required and must carry the matching
+  hex BLAKE3 `definition_digest`. `--config` overrides the bin path; the
+  lockfile is still required as `treadle.lock.json` next to that bin. This
+  runner does not compile definitions and does not shell to node. This
+  deliberately uses `Repository::heddle_dir()` rather than assuming `.heddle`
+  is a directory in every checkout (isolated Heddle checkouts use a `.heddle`
+  pointer file).
+- `--check` selects by check name, not job name. It is repeatable and
+  preserves definition order. Unlisted checks are omitted (named on stderr).
+  An unknown name is a hard usage error. Execution is sequential: a required
+  failure still runs later checks. This is not a `needs` DAG.
 - Human output is the treadle check summary table. Heddle's global
   `--output json` emits the complete signed-verdict array.
 - Exit nonzero when any authored `required` check ends in `failure`,
@@ -74,7 +82,9 @@ Lift the established treadle model rather than create another CI scheme:
    tree digest. Run it from a visibility-gated temporary checkout and clean the
    temporary materialization record afterward.
 5. Keep caches outside the evaluated tree under `.heddle/cache/ci`; a cache is
-   an accelerator, never evidence. Local mode uses treadle's `NoopProvider`, so
+   an accelerator, never evidence. `cache_paths` share one slot per declared
+   worktree-relative path (not per check) so rust.test and rust.clippy both
+   see `target/`. Local mode uses treadle's `NoopProvider`, so
    a definition requesting services produces an honest `infra_error` verdict.
    Docker/service execution remains available at the engine boundary but is not
    silently enabled by the local CLI.

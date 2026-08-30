@@ -20,7 +20,7 @@ pub struct CacheKey {
     pub env_digest: String,
     /// Sorted, tagged content-addresses of the evaluated inputs.
     pub input_digests: Vec<String>,
-    /// Digest of the authored definition (`ci.toml` typed-blob hash).
+    /// Hex BLAKE3 of the canonical `TreadleDefinition` bytes.
     pub definition_digest: String,
     /// Repository the verdict was produced for.
     pub repo: String,
@@ -159,26 +159,17 @@ fn hash_json(label: &[u8], value: &impl Serialize) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
-    use ci_config::{CheckClass as ConfigClass, Retry};
+    use ci_config::CheckClass as ConfigClass;
     use crypto::{Basis, BasisKind, StateRef};
 
     use super::*;
     use crate::model::ExecutionContext;
 
     fn check() -> Check {
-        Check {
-            name: "marker".to_string(),
-            class: ConfigClass::Required,
-            command: vec!["echo".to_string(), "ok".to_string()],
-            timeout_secs: 60,
-            env: BTreeMap::new(),
-            services: Vec::new(),
-            cache_paths: Vec::new(),
-            retry: Retry::default(),
-            triggers: Vec::new(),
-            supersede: false,
-            isolation: None,
-        }
+        let mut check = Check::new("marker", vec!["echo".to_string(), "ok".to_string()]);
+        check.timeout_secs = 60;
+        check.supersede = false;
+        check
     }
 
     fn context() -> ExecutionContext {

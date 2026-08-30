@@ -16,6 +16,12 @@ pub(crate) fn render(cli: &Cli, verdicts: &[SignedVerdict]) -> Result<()> {
             NextActionValidationContext::without_repo(&["ci", "run"]),
         )
     } else {
+        if !cli.quiet
+            && cli.verbose >= 1
+            && let Some(digest) = definition_digest(verdicts)
+        {
+            eprintln!("heddle ci: definition_digest {digest}");
+        }
         write_stdout(&render_table(verdicts))
     }
 }
@@ -43,6 +49,13 @@ fn is_failing(conclusion: Conclusion) -> bool {
         conclusion,
         Conclusion::Failure | Conclusion::TimedOut | Conclusion::InfraError
     )
+}
+
+fn definition_digest(verdicts: &[SignedVerdict]) -> Option<&str> {
+    verdicts
+        .first()
+        .map(|verdict| verdict.body.check.definition_digest.as_str())
+        .filter(|digest| !digest.is_empty())
 }
 
 fn render_table(verdicts: &[SignedVerdict]) -> String {
@@ -149,5 +162,10 @@ mod tests {
         assert_eq!(format_duration(850), "850ms");
         assert_eq!(format_duration(3_400), "3.4s");
         assert_eq!(format_duration(125_000), "2m05s");
+    }
+
+    #[test]
+    fn empty_verdicts_have_no_digest_line() {
+        assert_eq!(definition_digest(&[]), None);
     }
 }

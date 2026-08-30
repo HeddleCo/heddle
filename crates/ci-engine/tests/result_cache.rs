@@ -2,20 +2,13 @@
 
 use std::{collections::BTreeMap, path::Path};
 
+use ci_config::{Check, CiConfig};
 use ci_engine::{
     CheckResult, ExecutionContext, FsResultCache, HermeticEnv, MemoryResultCache, NoopProvider,
     ResultCache, ResultCacheEntry, ResultCacheError, RunControls, RunOptions, SpotCheck,
     SpotCheckDivergence, run_checks_with,
 };
 use crypto::{Basis, BasisKind, Conclusion, StateRef};
-
-const MARKER_CHECK: &str = r#"
-[meta]
-schema = 1
-[[check]]
-name = "marker"
-command = ["/bin/sh", "-c", "echo ran >> marker; echo ok"]
-"#;
 
 fn context() -> ExecutionContext {
     ExecutionContext {
@@ -38,18 +31,36 @@ fn context() -> ExecutionContext {
     }
 }
 
+fn marker_config() -> CiConfig {
+    env_config(None)
+}
+
+fn env_config(override_value: Option<&str>) -> CiConfig {
+    let mut check = Check::new(
+        "marker",
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo ran >> marker; echo ok".to_string(),
+        ],
+    );
+    if let Some(value) = override_value {
+        check.env.insert("FOO".to_string(), value.to_string());
+    }
+    CiConfig::from_checks(vec![check])
+}
+
 fn run_cached(
-    raw: &str,
+    config: &CiConfig,
     workdir: &Path,
     context: &ExecutionContext,
     cache: &dyn ResultCache,
     spot_check: SpotCheck,
 ) -> Result<Vec<CheckResult>, ResultCacheError> {
-    let config = ci_config::parse(raw).expect("config");
     let provider = NoopProvider;
     let environment = HermeticEnv::with_host(BTreeMap::new());
     run_checks_with(
-        &config,
+        config,
         context,
         &RunOptions {
             workdir,
@@ -73,30 +84,17 @@ fn marker_runs(workdir: &Path) -> usize {
         .count()
 }
 
-fn seed(raw: &str, workdir: &Path, context: &ExecutionContext, cache: &dyn ResultCache) {
-    run_cached(raw, workdir, context, cache, SpotCheck::Never).expect("seed");
-}
-
-fn env_check(value: &str) -> String {
-    format!(
-        r#"
-[meta]
-schema = 1
-[[check]]
-name = "marker"
-command = ["/bin/sh", "-c", "echo ran >> marker; echo ok"]
-[check.env]
-FOO = "{value}"
-"#
-    )
+fn seed(config: &CiConfig, workdir: &Path, context: &ExecutionContext, cache: &dyn ResultCache) {
+    run_cached(config, workdir, context, cache, SpotCheck::Never).expect("seed");
 }
 
 #[test]
 fn cache_hit_reuses_result_and_does_not_rerun() {
     let workdir = tempfile::tempdir().expect("workdir");
     let cache = MemoryResultCache::new();
+    let config = marker_config();
     let first = run_cached(
-        MARKER_CHECK,
+        &config,
         workdir.path(),
         &context(),
         &cache,
@@ -108,7 +106,7 @@ fn cache_hit_reuses_result_and_does_not_rerun() {
     assert_eq!(marker_runs(workdir.path()), 1);
 
     let second = run_cached(
-        MARKER_CHECK,
+        &config,
         workdir.path(),
         &context(),
         &cache,
@@ -124,8 +122,8 @@ fn cache_hit_reuses_result_and_does_not_rerun() {
 fn changed_env_is_a_cache_miss() {
     let workdir = tempfile::tempdir().expect("workdir");
     let cache = MemoryResultCache::new();
-    seed(&env_check("one"), workdir.path(), &context(), &cache);
-    seed(&env_check("two"), workdir.path(), &context(), &cache);
+    seed(&env_config(Some("one")), workdir.path(), &context(), &cache);
+    seed(&env_config(Some("two")), workdir.path(), &context(), &cache);
     assert_eq!(
         marker_runs(workdir.path()),
         2,
@@ -137,11 +135,12 @@ fn changed_env_is_a_cache_miss() {
 fn changed_input_is_a_cache_miss() {
     let workdir = tempfile::tempdir().expect("workdir");
     let cache = MemoryResultCache::new();
-    seed(MARKER_CHECK, workdir.path(), &context(), &cache);
+    let config = marker_config();
+    seed(&config, workdir.path(), &context(), &cache);
 
     let mut changed = context();
     changed.basis.evaluated_tree_digest = "tree-changed".to_string();
-    seed(MARKER_CHECK, workdir.path(), &changed, &cache);
+    seed(&config, workdir.path(), &changed, &cache);
     assert_eq!(
         marker_runs(workdir.path()),
         2,
@@ -150,7 +149,7 @@ fn changed_input_is_a_cache_miss() {
 
     changed = context();
     changed.state.content_hash = "state-changed".to_string();
-    seed(MARKER_CHECK, workdir.path(), &changed, &cache);
+    seed(&config, workdir.path(), &changed, &cache);
     assert_eq!(
         marker_runs(workdir.path()),
         3,
@@ -162,10 +161,11 @@ fn changed_input_is_a_cache_miss() {
 fn changed_definition_is_a_cache_miss() {
     let workdir = tempfile::tempdir().expect("workdir");
     let cache = MemoryResultCache::new();
-    seed(MARKER_CHECK, workdir.path(), &context(), &cache);
+    let config = marker_config();
+    seed(&config, workdir.path(), &context(), &cache);
     let mut changed = context();
     changed.definition_digest = "definition-changed".to_string();
-    seed(MARKER_CHECK, workdir.path(), &changed, &cache);
+    seed(&config, workdir.path(), &changed, &cache);
     assert_eq!(
         marker_runs(workdir.path()),
         2,
@@ -177,7 +177,8 @@ fn changed_definition_is_a_cache_miss() {
 fn serialized_entry_seeds_a_separate_cache_instance() {
     let workdir = tempfile::tempdir().expect("workdir");
     let seed_cache = MemoryResultCache::new();
-    seed(MARKER_CHECK, workdir.path(), &context(), &seed_cache);
+    let config = marker_config();
+    seed(&config, workdir.path(), &context(), &seed_cache);
     assert_eq!(marker_runs(workdir.path()), 1);
 
     let stored = seed_cache.entries();
@@ -188,14 +189,8 @@ fn serialized_entry_seeds_a_separate_cache_instance() {
     let peer = FsResultCache::new(peer_dir.path());
     peer.put(&restored).expect("seed peer");
 
-    let hit = run_cached(
-        MARKER_CHECK,
-        workdir.path(),
-        &context(),
-        &peer,
-        SpotCheck::Never,
-    )
-    .expect("cross-instance hit");
+    let hit = run_cached(&config, workdir.path(), &context(), &peer, SpotCheck::Never)
+        .expect("cross-instance hit");
     assert_eq!(hit[0].conclusion(), Conclusion::Success);
     assert_eq!(hit[0].combined_output, "ok\n");
     assert_eq!(marker_runs(workdir.path()), 1, "portable entry must hit");
@@ -205,14 +200,15 @@ fn serialized_entry_seeds_a_separate_cache_instance() {
 fn spot_check_fails_closed_on_a_divergent_entry() {
     let workdir = tempfile::tempdir().expect("workdir");
     let cache = MemoryResultCache::new();
-    seed(MARKER_CHECK, workdir.path(), &context(), &cache);
+    let config = marker_config();
+    seed(&config, workdir.path(), &context(), &cache);
 
     let mut tampered = cache.entries().pop().expect("seeded entry");
     tampered.body.outcome.conclusion = Conclusion::Failure;
     cache.put(&tampered).expect("store divergent entry");
 
     let error = run_cached(
-        MARKER_CHECK,
+        &config,
         workdir.path(),
         &context(),
         &cache,
@@ -246,9 +242,10 @@ fn spot_check_fails_closed_on_a_divergent_entry() {
 fn honest_spot_check_accepts_a_matching_entry() {
     let workdir = tempfile::tempdir().expect("workdir");
     let cache = MemoryResultCache::new();
-    seed(MARKER_CHECK, workdir.path(), &context(), &cache);
+    let config = marker_config();
+    seed(&config, workdir.path(), &context(), &cache);
     let verified = run_cached(
-        MARKER_CHECK,
+        &config,
         workdir.path(),
         &context(),
         &cache,

@@ -5,6 +5,14 @@ use std::{
     process::{Command, Output},
 };
 
+use api::heddle::api::v1alpha1::{
+    TreadleCheck, TreadleCheckClass, TreadleDefinition, TreadleNetworkAccess, TreadlePlatform,
+};
+use ci_config::{
+    DEFAULT_DEFINITION_FILE, DEFAULT_LOCK_FILE, argv_check, canonical_definition, definition,
+    host_oci_platform, host_pipeline_fixture, host_pipeline_with_required_failure, lock_json,
+    non_canonical_bytes,
+};
 use crypto::{Conclusion, Ed25519Signer, SignedVerdict, Signer, SignerKind};
 use repo::{Repository, identity::DeviceIdentity};
 
@@ -13,24 +21,49 @@ struct Fixture {
     _home: tempfile::TempDir,
     repo: Repository,
     home: PathBuf,
+    digest: String,
 }
 
 impl Fixture {
-    fn new(config: &str) -> Self {
+    fn new(checks: Vec<TreadleCheck>) -> Self {
+        Self::write(checks)
+    }
+
+    fn write(checks: Vec<TreadleCheck>) -> Self {
+        Self::write_definition(definition("local", "local", checks))
+    }
+
+    fn from_definition(definition: TreadleDefinition) -> Self {
+        Self::write_definition(definition)
+    }
+
+    fn write_definition(definition: TreadleDefinition) -> Self {
         let root = tempfile::tempdir().expect("repo root");
         let home = tempfile::tempdir().expect("heddle home");
         let repo = Repository::init_default(root.path()).expect("init repo");
-        std::fs::write(repo.heddle_dir().join("ci.toml"), config).expect("write CI config");
+        let (bytes, digest) = canonical_definition(&definition).expect("canonical definition");
+        std::fs::write(repo.heddle_dir().join(DEFAULT_DEFINITION_FILE), bytes)
+            .expect("write definition");
+        std::fs::write(
+            repo.heddle_dir().join(DEFAULT_LOCK_FILE),
+            lock_json(&digest),
+        )
+        .expect("write lock");
         write_device(home.path());
         Self {
             repo,
             home: home.path().to_path_buf(),
+            digest,
             _root: root,
             _home: home,
         }
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.run_with_env(args, &[])
+    }
+
+    fn run_with_env(&self, args: &[&str], extra_env: &[(&str, &std::ffi::OsStr)]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_heddle"));
         command
             .args(["--repo", self.repo.root().to_str().expect("UTF-8 root")])
@@ -39,7 +72,22 @@ impl Fixture {
             .env("HEDDLE_FSMONITOR", "off")
             .env("HEDDLE_PRINCIPAL_NAME", "CI Test")
             .env("HEDDLE_PRINCIPAL_EMAIL", "ci@example.invalid");
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
         command.output().expect("run heddle")
+    }
+
+    fn replace_checks(&self, checks: Vec<TreadleCheck>) {
+        let definition = definition("local", "local", checks);
+        let (bytes, digest) = canonical_definition(&definition).expect("canonical definition");
+        std::fs::write(self.repo.heddle_dir().join(DEFAULT_DEFINITION_FILE), bytes)
+            .expect("rewrite definition");
+        std::fs::write(
+            self.repo.heddle_dir().join(DEFAULT_LOCK_FILE),
+            lock_json(&digest),
+        )
+        .expect("rewrite lock");
     }
 }
 
@@ -65,22 +113,22 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn sh(name: &str, script: &str) -> TreadleCheck {
+    argv_check(name, "/bin/sh", &["-c", script])
+}
+
+fn verdict_named<'a>(verdicts: &'a [SignedVerdict], name: &str) -> &'a SignedVerdict {
+    verdicts
+        .iter()
+        .find(|verdict| verdict.body.check.name == name)
+        .unwrap_or_else(|| panic!("missing check {name}"))
+}
+
 #[test]
 fn json_verdicts_are_device_signed_and_verify() {
-    let fixture = Fixture::new(
-        r#"
-[meta]
-schema = 1
-[[check]]
-name = "build"
-class = "required"
-command = ["/bin/sh", "-c", "echo ok"]
-[[check]]
-name = "advice"
-class = "advisory"
-command = ["/bin/sh", "-c", "echo 'test result: FAILED'; exit 1"]
-"#,
-    );
+    let mut advice = sh("advice", "echo 'test result: FAILED'; exit 1");
+    advice.class = TreadleCheckClass::Advisory as i32;
+    let fixture = Fixture::new(vec![sh("build", "echo ok"), advice]);
     let output = fixture.run(&["--output", "json", "ci", "run", "--local"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let verdicts: Vec<SignedVerdict> =
@@ -94,24 +142,22 @@ command = ["/bin/sh", "-c", "echo 'test result: FAILED'; exit 1"]
             verdict.body.basis.evaluated_tree_digest,
             verdict.tree_digest.to_hex()
         );
+        assert_eq!(verdict.body.check.definition_digest, fixture.digest);
     }
-    assert_eq!(verdicts[0].body.outcome.conclusion, Conclusion::Success);
-    assert_eq!(verdicts[1].body.outcome.conclusion, Conclusion::Failure);
+    assert_eq!(
+        verdict_named(&verdicts, "build").body.outcome.conclusion,
+        Conclusion::Success
+    );
+    assert_eq!(
+        verdict_named(&verdicts, "advice").body.outcome.conclusion,
+        Conclusion::Failure
+    );
     assert!(stderr(&output).contains("advisory"));
 }
 
 #[test]
 fn required_failure_renders_once_and_exits_nonzero() {
-    let fixture = Fixture::new(
-        r#"
-[meta]
-schema = 1
-[[check]]
-name = "build"
-class = "required"
-command = ["/bin/false"]
-"#,
-    );
+    let fixture = Fixture::new(vec![argv_check("build", "/bin/false", &[])]);
     let output = fixture.run(&["--output", "json", "ci", "run", "--local"]);
     assert_eq!(
         output.status.code(),
@@ -122,21 +168,13 @@ command = ["/bin/false"]
     let verdicts: Vec<SignedVerdict> =
         serde_json::from_slice(&output.stdout).expect("single JSON report");
     assert_eq!(verdicts[0].body.outcome.conclusion, Conclusion::Failure);
+    assert_eq!(verdicts[0].body.check.definition_digest, fixture.digest);
     assert!(!stderr(&output).contains("\"error\""));
 }
 
 #[test]
 fn named_state_runs_in_an_exact_isolated_checkout() {
-    let fixture = Fixture::new(
-        r#"
-[meta]
-schema = 1
-[[check]]
-name = "clean-state"
-class = "required"
-command = ["/bin/sh", "-c", "test ! -e dirty.txt"]
-"#,
-    );
+    let fixture = Fixture::new(vec![sh("clean-state", "test ! -e dirty.txt")]);
     std::fs::write(fixture.repo.root().join("dirty.txt"), "working tree only")
         .expect("write dirty file");
     let output = fixture.run(&[
@@ -152,16 +190,7 @@ command = ["/bin/sh", "-c", "test ! -e dirty.txt"]
 
 #[test]
 fn refuses_to_sign_when_a_check_mutates_the_working_tree() {
-    let fixture = Fixture::new(
-        r#"
-[meta]
-schema = 1
-[[check]]
-name = "mutating"
-class = "required"
-command = ["/bin/sh", "-c", "echo changed > tracked.txt"]
-"#,
-    );
+    let fixture = Fixture::new(vec![sh("mutating", "echo changed > tracked.txt")]);
     let output = fixture.run(&["--output", "json", "ci", "run", "--local"]);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty(), "no stale verdict may be emitted");
@@ -170,15 +199,7 @@ command = ["/bin/sh", "-c", "echo changed > tracked.txt"]
 
 #[test]
 fn missing_device_identity_fails_before_running_checks() {
-    let fixture = Fixture::new(
-        r#"
-[meta]
-schema = 1
-[[check]]
-name = "would-run"
-command = ["/bin/sh", "-c", "touch ran.txt"]
-"#,
-    );
+    let fixture = Fixture::new(vec![sh("would-run", "touch ran.txt")]);
     std::fs::remove_file(fixture.home.join(repo::identity::DEVICE_IDENTITY_FILE))
         .expect("remove identity");
     let output = fixture.run(&["ci", "run", "--local"]);
@@ -189,18 +210,10 @@ command = ["/bin/sh", "-c", "touch ran.txt"]
 
 #[test]
 fn check_filter_is_exact_and_a_typo_is_an_error() {
-    let fixture = Fixture::new(
-        r#"
-[meta]
-schema = 1
-[[check]]
-name = "selected"
-command = ["/bin/true"]
-[[check]]
-name = "not-selected"
-command = ["/bin/false"]
-"#,
-    );
+    let fixture = Fixture::new(vec![
+        argv_check("selected", "/bin/true", &[]),
+        argv_check("not-selected", "/bin/false", &[]),
+    ]);
     let output = fixture.run(&[
         "--output", "json", "ci", "run", "--local", "--check", "selected",
     ]);
@@ -209,16 +222,429 @@ command = ["/bin/false"]
         serde_json::from_slice(&output.stdout).expect("filtered verdict JSON");
     assert_eq!(verdicts.len(), 1);
     assert_eq!(verdicts[0].body.check.name, "selected");
+    assert!(
+        stderr(&output).contains("omitted not-selected"),
+        "stderr must name dropped checks: {}",
+        stderr(&output)
+    );
 
     let typo = fixture.run(&["ci", "run", "--local", "--check", "missing"]);
     assert!(!typo.status.success());
-    assert!(stderr(&typo).contains("available checks: selected, not-selected"));
+    assert!(stderr(&typo).contains("available checks:"));
+    assert!(stderr(&typo).contains("selected"));
+    assert!(stderr(&typo).contains("not-selected"));
 }
 
 #[test]
 fn local_mode_must_be_selected_explicitly() {
-    let fixture = Fixture::new("[meta]\nschema = 1\n");
+    let fixture = Fixture::new(vec![argv_check("unit", "/bin/true", &[])]);
     let output = fixture.run(&["ci", "run"]);
     assert_eq!(output.status.code(), Some(64));
     assert!(stderr(&output).contains("--local"));
+}
+
+#[test]
+fn proto_digest_on_a_passing_local_run_matches_the_lock() {
+    let fixture = Fixture::new(vec![argv_check("unit", "/bin/true", &[])]);
+    let output = fixture.run(&["--output", "json", "ci", "run", "--local"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let verdicts: Vec<SignedVerdict> =
+        serde_json::from_slice(&output.stdout).expect("signed verdict JSON");
+    assert_eq!(verdicts.len(), 1);
+    assert_eq!(verdicts[0].body.outcome.conclusion, Conclusion::Success);
+    assert_eq!(verdicts[0].body.check.definition_digest, fixture.digest);
+    assert_eq!(verdicts[0].body.check.command, ["/bin/true"]);
+}
+
+#[test]
+fn human_default_omits_definition_digest_verbose_prints_it() {
+    let fixture = Fixture::new(vec![argv_check("unit", "/bin/true", &[])]);
+    let digest_line = format!("heddle ci: definition_digest {}", fixture.digest);
+
+    let output = fixture.run(&["ci", "run", "--local"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        !stderr(&output).contains("definition_digest"),
+        "human default must not print the hex digest: {}",
+        stderr(&output)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for header in ["CHECK", "CLASS", "CONCLUSION", "DURATION", "FAILING STEP"] {
+        assert!(
+            stdout.contains(header),
+            "human table kept {header}: {stdout}"
+        );
+    }
+    assert!(stdout.contains("unit"));
+    assert!(stdout.contains("success"));
+
+    let verbose = fixture.run(&["-v", "ci", "run", "--local"]);
+    assert!(verbose.status.success(), "stderr: {}", stderr(&verbose));
+    assert!(
+        stderr(&verbose).contains(&digest_line),
+        "-v must print the digest: {}",
+        stderr(&verbose)
+    );
+
+    let quiet = fixture.run(&["-q", "ci", "run", "--local"]);
+    assert!(quiet.status.success(), "stderr: {}", stderr(&quiet));
+    assert!(
+        !stderr(&quiet).contains("definition_digest"),
+        "-q stays quiet: {}",
+        stderr(&quiet)
+    );
+
+    let json = fixture.run(&["--output", "json", "ci", "run", "--local"]);
+    assert!(json.status.success(), "stderr: {}", stderr(&json));
+    let verdicts: Vec<SignedVerdict> =
+        serde_json::from_slice(&json.stdout).expect("signed verdict JSON");
+    assert_eq!(verdicts[0].body.check.definition_digest, fixture.digest);
+    assert!(
+        !stderr(&json).contains("heddle ci: definition_digest"),
+        "JSON mode must not duplicate a hex digest line: {}",
+        stderr(&json)
+    );
+}
+
+#[test]
+fn two_job_pipeline_runs_every_check_and_binds_the_lock_digest() {
+    let fixture = Fixture::from_definition(host_pipeline_fixture());
+    let output = fixture.run(&["--output", "json", "ci", "run", "--local"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let verdicts: Vec<SignedVerdict> =
+        serde_json::from_slice(&output.stdout).expect("signed verdict JSON");
+    assert_eq!(
+        verdicts.len(),
+        3,
+        "every argv check in both jobs must run and sign"
+    );
+    assert_eq!(
+        verdicts
+            .iter()
+            .map(|verdict| verdict.body.check.name.as_str())
+            .collect::<Vec<_>>(),
+        ["docs-ok", "echo", "ok"]
+    );
+    for verdict in &verdicts {
+        verdict.verify().expect("verdict verifies");
+        assert_eq!(verdict.signer_kind, SignerKind::Device);
+        assert_eq!(verdict.body.outcome.conclusion, Conclusion::Success);
+        assert_eq!(verdict.body.check.definition_digest, fixture.digest);
+    }
+    assert_eq!(
+        verdict_named(&verdicts, "echo").body.check.command,
+        ["/bin/echo", "pipeline"]
+    );
+}
+
+#[test]
+fn required_failure_still_executes_later_checks_this_is_not_a_dag() {
+    let fixture = Fixture::from_definition(host_pipeline_with_required_failure());
+    let output = fixture.run(&["--output", "json", "ci", "run", "--local"]);
+    assert_eq!(
+        output.status.code(),
+        Some(65),
+        "required failure fails closed: {}",
+        stderr(&output)
+    );
+    let verdicts: Vec<SignedVerdict> =
+        serde_json::from_slice(&output.stdout).expect("signed verdict JSON");
+    assert_eq!(
+        verdicts.len(),
+        3,
+        "engine is sequential, not a DAG: later and sibling still execute after fail"
+    );
+    assert_eq!(verdicts[0].body.check.name, "fail");
+    assert_eq!(verdicts[0].body.outcome.conclusion, Conclusion::Failure);
+    assert_eq!(verdicts[1].body.check.name, "later");
+    assert_eq!(verdicts[1].body.outcome.conclusion, Conclusion::Success);
+    assert_eq!(verdicts[2].body.check.name, "sibling");
+    assert_eq!(verdicts[2].body.outcome.conclusion, Conclusion::Success);
+    assert!(
+        verdicts
+            .iter()
+            .all(|verdict| verdict.body.check.definition_digest == fixture.digest)
+    );
+}
+
+#[test]
+fn check_filter_lists_omitted_checks_from_the_other_job() {
+    let fixture = Fixture::from_definition(host_pipeline_fixture());
+    let output = fixture.run(&[
+        "--output", "json", "ci", "run", "--local", "--check", "echo",
+    ]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("omitted docs-ok, ok"),
+        "stderr must name dropped checks from both jobs: {}",
+        stderr(&output)
+    );
+    let verdicts: Vec<SignedVerdict> =
+        serde_json::from_slice(&output.stdout).expect("filtered verdict JSON");
+    assert_eq!(verdicts.len(), 1);
+    assert_eq!(verdicts[0].body.check.name, "echo");
+    assert_eq!(verdicts[0].body.check.definition_digest, fixture.digest);
+}
+
+#[test]
+fn mutated_lock_digest_fails_closed() {
+    let fixture = Fixture::new(vec![argv_check("unit", "/bin/true", &[])]);
+    std::fs::write(
+        fixture.repo.heddle_dir().join(DEFAULT_LOCK_FILE),
+        lock_json(&"ab".repeat(32)),
+    )
+    .expect("mutate lock");
+    let output = fixture.run(&["ci", "run", "--local"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(stderr(&output).contains("does not match"));
+}
+
+#[test]
+fn non_canonical_definition_fails_closed() {
+    let fixture = Fixture::write(vec![argv_check("unit", "/bin/true", &[])]);
+    let path = fixture.repo.heddle_dir().join(DEFAULT_DEFINITION_FILE);
+    std::fs::write(&path, non_canonical_bytes()).expect("write non-canonical definition");
+    let output = fixture.run(&["ci", "run", "--local"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(stderr(&output).contains("not canonical"));
+}
+
+#[test]
+fn platform_mismatch_refuses_without_running() {
+    let (host_os, host_arch) = host_oci_platform();
+    let foreign_os = if host_os == "linux" {
+        "darwin"
+    } else {
+        "linux"
+    };
+    let mut check = argv_check("unit", "/bin/sh", &["-c", "touch ran.txt"]);
+    check.target_environment.as_mut().expect("target").platform = Some(TreadlePlatform {
+        os: foreign_os.to_string(),
+        arch: host_arch,
+    });
+    let fixture = Fixture::new(vec![check]);
+    let output = fixture.run(&["ci", "run", "--local"]);
+    assert!(!output.status.success());
+    assert!(!fixture.repo.root().join("ran.txt").exists());
+    assert!(stderr(&output).contains("host-exec"));
+}
+
+#[test]
+fn full_network_refuses_without_pretending_hermeticity() {
+    let mut check = argv_check("unit", "/bin/sh", &["-c", "touch ran.txt"]);
+    check.isolation.as_mut().expect("isolation").network_access = TreadleNetworkAccess::Full as i32;
+    let fixture = Fixture::new(vec![check]);
+    let output = fixture.run(&["ci", "run", "--local"]);
+    assert!(!output.status.success());
+    assert!(!fixture.repo.root().join("ran.txt").exists());
+    assert!(stderr(&output).contains("FULL"));
+}
+
+#[test]
+fn cpu_millis_refuses_without_running() {
+    let mut check = argv_check("unit", "/bin/sh", &["-c", "touch ran.txt"]);
+    check.isolation.as_mut().expect("isolation").cpu_millis = 1000;
+    let fixture = Fixture::new(vec![check]);
+    let output = fixture.run(&["ci", "run", "--local"]);
+    assert!(!output.status.success());
+    assert!(!fixture.repo.root().join("ran.txt").exists());
+    assert!(
+        stderr(&output).contains("cpu_millis"),
+        "stderr: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn missing_lock_refuses_to_run() {
+    let fixture = Fixture::new(vec![argv_check(
+        "unit",
+        "/bin/sh",
+        &["-c", "touch ran.txt"],
+    )]);
+    std::fs::remove_file(fixture.repo.heddle_dir().join(DEFAULT_LOCK_FILE)).expect("remove lock");
+    let output = fixture.run(&["ci", "run", "--local"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!fixture.repo.root().join("ran.txt").exists());
+    assert!(
+        stderr(&output).contains("treadle.lock.json"),
+        "stderr: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn cache_paths_share_across_checks_in_one_local_run() {
+    let mut writer = sh("alpha", "mkdir -p stash && echo hit > stash/hit");
+    writer.cache_paths.push("stash".to_string());
+    let mut reader = sh("beta", "test -f stash/hit");
+    reader.cache_paths.push("stash".to_string());
+    let fixture = Fixture::new(vec![writer, reader]);
+    let output = fixture.run(&["--output", "json", "ci", "run", "--local"]);
+    assert!(
+        output.status.success(),
+        "shared stash in one pipeline: {}",
+        stderr(&output)
+    );
+    let verdicts: Vec<SignedVerdict> =
+        serde_json::from_slice(&output.stdout).expect("signed verdict JSON");
+    assert_eq!(verdicts.len(), 2);
+    assert_eq!(verdicts[0].body.check.name, "alpha");
+    assert_eq!(verdicts[0].body.outcome.conclusion, Conclusion::Success);
+    assert_eq!(verdicts[1].body.check.name, "beta");
+    assert_eq!(verdicts[1].body.outcome.conclusion, Conclusion::Success);
+    assert!(
+        !fixture.repo.root().join("stash/hit").exists(),
+        "pipeline restore must strip the worktree cache dir"
+    );
+}
+
+fn write_compile_stub(dir: &Path, bin_bytes: &[u8], lock: &str) -> PathBuf {
+    std::fs::write(dir.join("fixture.bin"), bin_bytes).expect("fixture bin");
+    std::fs::write(dir.join("fixture.lock.json"), lock).expect("fixture lock");
+    let stub = dir.join("treadle-compile");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\nset -eu\nout_dir=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --out-dir) out_dir=\"$2\"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\nmkdir -p \"$out_dir\"\ncp \"{}\" \"$out_dir/{}\"\ncp \"{}\" \"$out_dir/{}\"\n",
+            dir.join("fixture.bin").display(),
+            DEFAULT_DEFINITION_FILE,
+            dir.join("fixture.lock.json").display(),
+            DEFAULT_LOCK_FILE,
+        ),
+    )
+    .expect("stub");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub");
+    }
+    stub
+}
+
+fn remove_compiled_outputs(fixture: &Fixture) {
+    let _ = std::fs::remove_file(fixture.repo.heddle_dir().join(DEFAULT_DEFINITION_FILE));
+    let _ = std::fs::remove_file(fixture.repo.heddle_dir().join(DEFAULT_LOCK_FILE));
+}
+
+#[test]
+fn js_source_at_repo_root_compiles_then_runs() {
+    let fixture = Fixture::new(vec![argv_check("compiled", "/bin/true", &[])]);
+    let stub_dir = tempfile::tempdir().expect("stub dir");
+    let stub = write_compile_stub(
+        stub_dir.path(),
+        &std::fs::read(fixture.repo.heddle_dir().join(DEFAULT_DEFINITION_FILE)).expect("bin"),
+        &lock_json(&fixture.digest),
+    );
+    remove_compiled_outputs(&fixture);
+    std::fs::write(fixture.repo.root().join("ci.mjs"), "export default {}\n").expect("ci.mjs");
+    let output = fixture.run_with_env(
+        &["--output", "json", "ci", "run", "--local"],
+        &[("HEDDLE_TREADLE_COMPILE", stub.as_os_str())],
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(
+        fixture
+            .repo
+            .heddle_dir()
+            .join(DEFAULT_DEFINITION_FILE)
+            .is_file(),
+        "compile must write the bin"
+    );
+    assert!(
+        fixture.repo.heddle_dir().join(DEFAULT_LOCK_FILE).is_file(),
+        "compile must write the lock"
+    );
+    let verdicts: Vec<SignedVerdict> =
+        serde_json::from_slice(&output.stdout).expect("signed verdict JSON");
+    assert_eq!(verdicts[0].body.check.name, "compiled");
+    assert_eq!(verdicts[0].body.check.definition_digest, fixture.digest);
+}
+
+#[test]
+fn js_and_rust_authoring_files_fail_closed_without_running() {
+    let fixture = Fixture::new(vec![sh("would-run", "touch ran.txt")]);
+    std::fs::write(fixture.repo.root().join("ci.ts"), "export default {}\n").expect("ci.ts");
+    std::fs::write(fixture.repo.root().join("ci.rs"), "fn main() {}\n").expect("ci.rs");
+    let output = fixture.run(&["ci", "run", "--local"]);
+    assert!(!output.status.success());
+    assert!(!fixture.repo.root().join("ran.txt").exists());
+    assert!(
+        stderr(&output).contains("more than one language"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    assert!(stderr(&output).contains("Next: heddle ci run --local"));
+}
+
+#[test]
+fn rust_authoring_file_alone_fails_closed_sdk_not_shipped() {
+    let fixture = Fixture::new(vec![sh("would-run", "touch ran.txt")]);
+    std::fs::write(fixture.repo.root().join("ci.rs"), "fn main() {}\n").expect("ci.rs");
+    let output = fixture.run(&["ci", "run", "--local"]);
+    assert!(!output.status.success());
+    assert!(!fixture.repo.root().join("ran.txt").exists());
+    assert!(
+        stderr(&output).contains("Rust") && stderr(&output).contains("not shipped"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    assert!(stderr(&output).contains("Next: heddle ci run --local"));
+}
+
+#[test]
+fn no_source_with_bin_and_lock_still_runs() {
+    let fixture = Fixture::new(vec![argv_check("unit", "/bin/true", &[])]);
+    assert!(!fixture.repo.root().join("ci.ts").exists());
+    assert!(!fixture.repo.root().join("ci.rs").exists());
+    let output = fixture.run(&["--output", "json", "ci", "run", "--local"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let verdicts: Vec<SignedVerdict> =
+        serde_json::from_slice(&output.stdout).expect("signed verdict JSON");
+    assert_eq!(verdicts[0].body.check.name, "unit");
+    assert_eq!(verdicts[0].body.check.definition_digest, fixture.digest);
+}
+
+#[test]
+fn config_bin_runs_even_when_ci_rs_is_present() {
+    let fixture = Fixture::new(vec![argv_check("unit", "/bin/true", &[])]);
+    std::fs::write(fixture.repo.root().join("ci.rs"), "fn main() {}\n").expect("ci.rs");
+    let bin = fixture.repo.heddle_dir().join(DEFAULT_DEFINITION_FILE);
+    let output = fixture.run(&[
+        "--output",
+        "json",
+        "ci",
+        "run",
+        "--local",
+        "--config",
+        bin.to_str().expect("UTF-8 bin"),
+    ]);
+    assert!(
+        output.status.success(),
+        "--config to a .bin must skip compile: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn cache_paths_hydrate_across_two_local_runs() {
+    let mut writer = sh("stash", "mkdir -p stash && echo persisted > stash/marker");
+    writer.cache_paths.push("stash".to_string());
+    let fixture = Fixture::new(vec![writer]);
+    let first = fixture.run(&["--output", "json", "ci", "run", "--local"]);
+    assert!(first.status.success(), "first run: {}", stderr(&first));
+    let _ = std::fs::remove_dir_all(fixture.repo.heddle_dir().join("cache/ci-results"));
+    let mut reader = sh("stash", "test -f stash/marker");
+    reader.cache_paths.push("stash".to_string());
+    fixture.replace_checks(vec![reader]);
+    let second = fixture.run(&["--output", "json", "ci", "run", "--local"]);
+    assert!(
+        second.status.success(),
+        "second run must see the hydrated marker: {}",
+        stderr(&second)
+    );
 }
