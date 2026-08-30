@@ -7,7 +7,7 @@ use ci_config::{Check, CiConfig, Trigger};
 use crypto::{Conclusion, FailureClass};
 
 use crate::{
-    cache::{prepare_caches, save_caches},
+    cache::{prepare_caches, restore_worktree_cache_dirs, save_caches},
     classify::{Disposition, classify},
     env::HermeticEnv,
     model::{AttemptRecord, CheckResult, ExecutionContext, RunControls, RunOptions},
@@ -45,7 +45,7 @@ pub fn run_checks_with(
         result_cache: controls.result_cache,
         spot_check: controls.spot_check,
     };
-    config
+    let results = config
         .checks
         .iter()
         .map(|check| match &controls.trigger {
@@ -54,7 +54,9 @@ pub fn run_checks_with(
             }
             _ => run_one_check(check, context, &resolved),
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    restore_worktree_cache_dirs(options.workdir, &config.checks);
+    Ok(results)
 }
 
 pub(crate) struct ResolvedRun<'a> {

@@ -82,7 +82,9 @@ Lift the established treadle model rather than create another CI scheme:
    tree digest. Run it from a visibility-gated temporary checkout and clean the
    temporary materialization record afterward.
 5. Keep caches outside the evaluated tree under `.heddle/cache/ci`; a cache is
-   an accelerator, never evidence. Local mode uses treadle's `NoopProvider`, so
+   an accelerator, never evidence. `cache_paths` share one slot per declared
+   worktree-relative path (not per check) so rust.test and rust.clippy both
+   see `target/`. Local mode uses treadle's `NoopProvider`, so
    a definition requesting services produces an honest `infra_error` verdict.
    Docker/service execution remains available at the engine boundary but is not
    silently enabled by the local CLI.

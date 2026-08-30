@@ -420,6 +420,32 @@ fn missing_lock_refuses_to_run() {
 }
 
 #[test]
+fn cache_paths_share_across_checks_in_one_local_run() {
+    let mut writer = sh("alpha", "mkdir -p stash && echo hit > stash/hit");
+    writer.cache_paths.push("stash".to_string());
+    let mut reader = sh("beta", "test -f stash/hit");
+    reader.cache_paths.push("stash".to_string());
+    let fixture = Fixture::new(vec![writer, reader]);
+    let output = fixture.run(&["--output", "json", "ci", "run", "--local"]);
+    assert!(
+        output.status.success(),
+        "shared stash in one pipeline: {}",
+        stderr(&output)
+    );
+    let verdicts: Vec<SignedVerdict> =
+        serde_json::from_slice(&output.stdout).expect("signed verdict JSON");
+    assert_eq!(verdicts.len(), 2);
+    assert_eq!(verdicts[0].body.check.name, "alpha");
+    assert_eq!(verdicts[0].body.outcome.conclusion, Conclusion::Success);
+    assert_eq!(verdicts[1].body.check.name, "beta");
+    assert_eq!(verdicts[1].body.outcome.conclusion, Conclusion::Success);
+    assert!(
+        !fixture.repo.root().join("stash/hit").exists(),
+        "pipeline restore must strip the worktree cache dir"
+    );
+}
+
+#[test]
 fn cache_paths_hydrate_across_two_local_runs() {
     let mut writer = sh("stash", "mkdir -p stash && echo persisted > stash/marker");
     writer.cache_paths.push("stash".to_string());

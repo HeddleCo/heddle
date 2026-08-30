@@ -353,7 +353,7 @@ fn cache_paths_hydrate_across_two_runs_without_result_cache() {
     assert_eq!(first[0].conclusion(), Conclusion::Success);
     assert!(
         !workdir.path().join("stash/marker").exists(),
-        "slot is the durable copy; worktree is restored after save"
+        "slot is the durable copy; worktree is restored after the pipeline"
     );
 
     let mut reader = sh("stash", "test -f stash/marker");
@@ -378,33 +378,19 @@ fn cache_paths_hydrate_across_two_runs_without_result_cache() {
 }
 
 #[test]
-fn cache_paths_do_not_clobber_across_checks() {
+fn cache_paths_share_one_slot_across_checks_in_one_run() {
     let workdir = tempfile::tempdir().expect("workdir");
     let cache = tempfile::tempdir().expect("cache");
-    let mut alpha = sh("alpha", "mkdir -p stash && echo from-alpha > stash/who");
-    alpha.cache_paths = vec!["stash".to_string()];
-    let mut beta = sh("beta", "mkdir -p stash && echo from-beta > stash/who");
-    beta.cache_paths = vec!["stash".to_string()];
+    let mut writer = sh("alpha", "mkdir -p stash && echo hit > stash/hit");
+    writer.cache_paths = vec!["stash".to_string()];
+    let mut reader = sh("beta", "test -f stash/hit");
+    reader.cache_paths = vec!["stash".to_string()];
     let controls = RunControls {
         cache_root: Some(cache.path()),
         ..RunControls::default()
     };
-    run_checks_with(
-        &CiConfig::from_checks(vec![alpha, beta]),
-        &context(),
-        &RunOptions {
-            workdir: workdir.path(),
-            services: &NoopProvider,
-            now_rfc3339: &fixed_clock,
-        },
-        &controls,
-    )
-    .expect("seed both slots");
-
-    let mut read_alpha = sh("alpha", "test \"$(cat stash/who)\" = from-alpha");
-    read_alpha.cache_paths = vec!["stash".to_string()];
     let results = run_checks_with(
-        &CiConfig::from_checks(vec![read_alpha]),
+        &CiConfig::from_checks(vec![writer, reader]),
         &context(),
         &RunOptions {
             workdir: workdir.path(),
@@ -413,8 +399,81 @@ fn cache_paths_do_not_clobber_across_checks() {
         },
         &controls,
     )
-    .expect("read alpha");
+    .expect("shared stash");
     assert_eq!(results[0].conclusion(), Conclusion::Success);
+    assert_eq!(
+        results[1].conclusion(),
+        Conclusion::Success,
+        "later check must see the hot worktree: {}",
+        results[1].combined_output
+    );
+    assert!(
+        !workdir.path().join("stash/hit").exists(),
+        "pipeline restore strips the worktree after both checks"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_paths_copy_symlink_metadata() {
+    let workdir = tempfile::tempdir().expect("workdir");
+    let cache = tempfile::tempdir().expect("cache");
+    let mut writer = sh(
+        "alpha",
+        "mkdir -p stash && echo persisted > stash/marker && ln -s marker stash/link",
+    );
+    writer.cache_paths = vec!["stash".to_string()];
+    let controls = RunControls {
+        cache_root: Some(cache.path()),
+        ..RunControls::default()
+    };
+    let first = run_checks_with(
+        &CiConfig::from_checks(vec![writer]),
+        &context(),
+        &RunOptions {
+            workdir: workdir.path(),
+            services: &NoopProvider,
+            now_rfc3339: &fixed_clock,
+        },
+        &controls,
+    )
+    .expect("write symlink");
+    assert_eq!(first[0].conclusion(), Conclusion::Success);
+    let slot_link = cache.path().join("stash/link");
+    assert!(
+        slot_link
+            .symlink_metadata()
+            .expect("slot link")
+            .is_symlink(),
+        "durable slot must keep the symlink, not the follow-target file"
+    );
+    assert_eq!(
+        std::fs::read_link(&slot_link).expect("readlink"),
+        std::path::Path::new("marker")
+    );
+
+    let mut reader = sh(
+        "beta",
+        "test -L stash/link && test \"$(readlink stash/link)\" = marker",
+    );
+    reader.cache_paths = vec!["stash".to_string()];
+    let second = run_checks_with(
+        &CiConfig::from_checks(vec![reader]),
+        &context(),
+        &RunOptions {
+            workdir: workdir.path(),
+            services: &NoopProvider,
+            now_rfc3339: &fixed_clock,
+        },
+        &controls,
+    )
+    .expect("hydrate symlink");
+    assert_eq!(
+        second[0].conclusion(),
+        Conclusion::Success,
+        "hydrated symlink: {}",
+        second[0].combined_output
+    );
 }
 
 #[test]
