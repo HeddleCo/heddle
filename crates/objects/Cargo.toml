@@ -101,6 +101,10 @@ required-features = ["zstd"]
 name = "htr4_measure"
 required-features = ["zstd"]
 
+[[example]]
+name = "delta_encoding_spike"
+required-features = ["bench", "zstd"]
+
 [[bench]]
 name = "delta"
 harness = false
