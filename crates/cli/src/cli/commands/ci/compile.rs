@@ -613,7 +613,7 @@ mod tests {
         let node_dir = root.path().join("node-bin");
         fs::create_dir_all(&node_dir).expect("node dir");
         write(&node_dir.join("node"), "#!/bin/sh\n");
-        fs::set_permissions(&node_dir.join("node"), fs::Permissions::from_mode(0o755))
+        fs::set_permissions(node_dir.join("node"), fs::Permissions::from_mode(0o755))
             .expect("chmod node");
         let compiler =
             resolve_javascript_compiler(root.path(), None, Some(node_dir.clone().into_os_string()))
