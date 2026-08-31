@@ -151,6 +151,28 @@ impl HostedSession {
             .await;
         Ok(client)
     }
+
+    /// Connect for outbound calls only, on an ephemeral endpoint node id.
+    ///
+    /// `heddle claim` uses this so its authenticated weft calls never bind
+    /// the device node id the box network daemon serves the claim router
+    /// on (heddle#1620).
+    pub async fn connect_outbound(
+        &self,
+        fallback_addr: SocketAddr,
+    ) -> Result<HostedClient, ProtocolError> {
+        let descriptor = self
+            .discover_endpoint(fallback_addr)
+            .await
+            .map_err(|error| ProtocolError::Remote(error.to_string()))?;
+        let mut client = HostedClient::connect_outbound_with_config(&descriptor, &self.config)
+            .await
+            .map_err(|error| ProtocolError::Remote(error.to_string()))?;
+        client
+            .auto_rotate_if_needed(self.renewable_authority_credential.as_ref())
+            .await;
+        Ok(client)
+    }
 }
 
 impl HostedClient {

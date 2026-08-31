@@ -1,3 +1,7 @@
+// The canned owner-root worker returns `Result<_, CallFailure>` by value,
+// mirroring the production co-sign seam.
+#![allow(clippy::result_large_err)]
+
 use std::{
     ffi::OsString,
     net::Ipv4Addr,
@@ -22,11 +26,12 @@ use super::{
     agent_node_identity,
     auth_login::store_agent_root,
     claim_authorization::{
-        AgentConsent, ClaimOwnerRootOperationRef, ClaimOwnerRootResult, StoredClaimAuthorization,
-        consent_reply, pre_consent_message, promote_consent_message, resolved_reply,
+        AgentConsent, ClaimOwnerRootResult, StoredClaimAuthorization, consent_reply,
+        encode_owner_root_reply, pre_consent_message, promote_consent_message, resolved_reply,
         signed_pre_consent, signed_promote_consent, validate_credential_id, validate_handle,
         verify_promotion_consents,
     },
+    claim_bridge::{ClaimBridgeWorker, claim_bridge_socket_path, mount_claim_router},
     device_flow::restrict_agent_account_root,
     hosted::claim_protocol::{
         CLAIM_ALPN_V1, CLAIM_CONSENT_METHOD, CLAIM_OWNER_ROOT_METHOD, CLAIM_RESOLVE_METHOD,
@@ -683,12 +688,14 @@ async fn claim_owner_root_routes_resolve_and_cosign_over_the_authenticated_chann
     let pending = owner_root_calls
         .recv()
         .await
-        .expect("resolve reaches cmd_claim");
-    assert!(matches!(
-        pending.operation.as_ref(),
-        Some(ClaimOwnerRootOperationRef::Resolve("human-handle"))
-    ));
-    pending.respond(Ok(ClaimOwnerRootResult::resolved(
+        .expect("resolve reaches the foreground signer");
+    // The daemon forwards the raw request body — never a parsed operation
+    // and never a signer — so a foreground worker parses and co-signs it.
+    let forwarded: serde_json::Value =
+        serde_json::from_slice(pending.body()).expect("forwarded owner-root body");
+    assert_eq!(forwarded["kind"], "resolveOwnerRoot");
+    assert_eq!(forwarded["handle"], "human-handle");
+    let resolved_reply = encode_owner_root_reply(&ClaimOwnerRootResult::resolved(
         SignedOwnerRoot::default(),
         AuthChallengeResponse {
             challenge_id: "challenge-1".to_string(),
@@ -696,7 +703,9 @@ async fn claim_owner_root_routes_resolve_and_cosign_over_the_authenticated_chann
             username: "human-handle".to_string(),
             ..Default::default()
         },
-    )));
+    ))
+    .expect("encode owner-root resolved reply");
+    pending.respond(Ok(resolved_reply));
     let OwnedResponse::Success(resolved) = resolve.await.expect("resolve task") else {
         panic!("owner-root resolve must succeed");
     };
@@ -736,14 +745,15 @@ async fn claim_owner_root_routes_resolve_and_cosign_over_the_authenticated_chann
     let pending = owner_root_calls
         .recv()
         .await
-        .expect("co-sign reaches cmd_claim");
-    assert!(matches!(
-        pending.operation.as_ref(),
-        Some(ClaimOwnerRootOperationRef::CoSign { .. })
-    ));
-    pending.respond(Ok(ClaimOwnerRootResult::co_signed(
+        .expect("co-sign reaches the foreground signer");
+    let forwarded: serde_json::Value =
+        serde_json::from_slice(pending.body()).expect("forwarded co-sign body");
+    assert_eq!(forwarded["kind"], "claimOwnerRoot");
+    let cosign_reply = encode_owner_root_reply(&ClaimOwnerRootResult::co_signed(
         SignedOwnerKeyTransition::default(),
-    )));
+    ))
+    .expect("encode owner-root co-signed reply");
+    pending.respond(Ok(cosign_reply));
     let OwnedResponse::Success(cosigned) = cosign.await.expect("co-sign task") else {
         panic!("owner-root co-sign must succeed");
     };
@@ -1024,4 +1034,297 @@ async fn expired_claim_state_is_rejected_before_resolve() {
 
     client.close().await;
     router.shutdown().await.unwrap();
+}
+
+// ---- Piece 3 (heddle#1620): daemon-hosted router + foreground co-sign bridge ----
+
+async fn device_endpoint() -> Endpoint {
+    let identity = agent_node_identity::load_or_create().expect("persisted device identity");
+    Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .secret_key(identity.secret_key())
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .expect("device bind addr")
+        .bind()
+        .await
+        .expect("device endpoint")
+}
+
+async fn browser_endpoint() -> Endpoint {
+    Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .expect("browser bind addr")
+        .bind()
+        .await
+        .expect("browser endpoint")
+}
+
+/// The co-sign bridge socket is bound asynchronously inside the daemon's
+/// serve task, so a freshly-spawned daemon (or one just restarted) may not
+/// be listening yet. Mirror the foreground's real re-arm retry.
+async fn arm_worker(socket: &std::path::Path) -> ClaimBridgeWorker {
+    for _ in 0..100 {
+        if let Ok(worker) = ClaimBridgeWorker::arm(socket).await {
+            return worker;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("could not arm the owner-root co-sign bridge worker");
+}
+
+fn resolved_owner_root_reply() -> Vec<u8> {
+    encode_owner_root_reply(&ClaimOwnerRootResult::resolved(
+        SignedOwnerRoot::default(),
+        AuthChallengeResponse {
+            challenge_id: "challenge-1".to_string(),
+            challenge: "challenge".to_string(),
+            username: "human-handle".to_string(),
+            ..Default::default()
+        },
+    ))
+    .expect("encode owner-root resolved reply")
+}
+
+fn cosigned_owner_root_reply() -> Vec<u8> {
+    encode_owner_root_reply(&ClaimOwnerRootResult::co_signed(
+        SignedOwnerKeyTransition::default(),
+    ))
+    .expect("encode owner-root co-signed reply")
+}
+
+fn cosign_owner_root_body() -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "kind": "claimOwnerRoot",
+        "registration": URL_SAFE_NO_PAD.encode(RegisterPublicKeyRequest::default().encode_to_vec()),
+        "nextAuthorityKey": URL_SAFE_NO_PAD.encode(AuthorizationVerificationKey::default().encode_to_vec()),
+        "nextAuthorityKeyProof": URL_SAFE_NO_PAD.encode(AuthorizationSignature::default().encode_to_vec()),
+        "nextRecoveryPolicy": URL_SAFE_NO_PAD.encode(RecoveryPolicy::default().encode_to_vec()),
+        "nextRecoveryKeyProofs": [],
+        "validFromUnixSeconds": 1,
+        "nonce": URL_SAFE_NO_PAD.encode([0x42; 32]),
+    }))
+    .expect("cosign body json")
+}
+
+/// Dial one owner-root call at the daemon's node id and serve it through
+/// the foreground worker with a canned reply, recording the exact body the
+/// daemon forwarded so the test can prove the co-sign left the daemon.
+async fn bridged_owner_root(
+    browser: &Endpoint,
+    address: &iroh::EndpointAddr,
+    secret: &[u8],
+    request_body: &[u8],
+    worker: &mut ClaimBridgeWorker,
+    observed: &std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    reply: Vec<u8>,
+) -> serde_json::Value {
+    let dial = {
+        let browser = browser.clone();
+        let address = address.clone();
+        let secret = secret.to_vec();
+        let body = request_body.to_vec();
+        tokio::spawn(async move {
+            call(&browser, address, CLAIM_OWNER_ROOT_METHOD, &secret, &body).await
+        })
+    };
+    let observed = std::sync::Arc::clone(observed);
+    let served = worker
+        .serve_next_canned(move |_subject, _authorization_hash, forwarded_body| {
+            observed.lock().expect("observed lock").push(forwarded_body.to_vec());
+            Ok(reply)
+        })
+        .await
+        .expect("foreground worker serves one owner-root call");
+    assert!(served, "the daemon forwarded one owner-root call to co-sign");
+    let OwnedResponse::Success(reply_bytes) = dial.await.expect("owner-root dial task") else {
+        panic!("bridged owner-root call must succeed");
+    };
+    serde_json::from_slice(&reply_bytes).expect("owner-root reply json")
+}
+
+#[tokio::test]
+async fn daemon_router_forwards_owner_root_cosign_to_the_foreground_signer() {
+    let _home = IsolatedHeddleHome::new();
+    let (secret, _signer) = store_production_claim_state(true);
+
+    let endpoint = device_endpoint().await;
+    let address = endpoint.addr();
+    let node_id = endpoint.id();
+
+    let socket = claim_bridge_socket_path(&repo::identity::heddle_home_dir());
+    let daemon = mount_claim_router(endpoint.clone());
+    let bridge = tokio::spawn(daemon.serve_owner_root_bridge(socket.clone()));
+
+    // Resolve is served inline by the daemon-hosted router — no foreground
+    // process is involved for it.
+    let browser = browser_endpoint().await;
+    let OwnedResponse::Success(resolved) = call(
+        &browser,
+        address.clone(),
+        CLAIM_RESOLVE_METHOD,
+        &secret,
+        br#"{"kind":"resolve"}"#,
+    )
+    .await
+    else {
+        panic!("the daemon-hosted router must resolve");
+    };
+    let resolved: serde_json::Value = serde_json::from_slice(&resolved).unwrap();
+    assert_eq!(resolved["agent"]["petName"], "steady-heron");
+
+    // Owner-root resolve + co-sign are forwarded across the UDS bridge to a
+    // foreground worker that holds the signer; the daemon relays the reply.
+    let mut worker = arm_worker(&socket).await;
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let resolve_reply = bridged_owner_root(
+        &browser,
+        &address,
+        &secret,
+        br#"{"kind":"resolveOwnerRoot","handle":"human-handle"}"#,
+        &mut worker,
+        &observed,
+        resolved_owner_root_reply(),
+    )
+    .await;
+    assert_eq!(resolve_reply["kind"], "ownerRootResolved");
+
+    let cosign_reply = bridged_owner_root(
+        &browser,
+        &address,
+        &secret,
+        &cosign_owner_root_body(),
+        &mut worker,
+        &observed,
+        cosigned_owner_root_reply(),
+    )
+    .await;
+    assert_eq!(cosign_reply["kind"], "ownerRootCoSigned");
+
+    // The foreground worker — not the daemon — received both owner-root
+    // bodies. The daemon holds no signer and never co-signs itself.
+    let bodies = observed.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 2, "both owner-root calls crossed the bridge");
+    let first: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
+    assert_eq!(first["kind"], "resolveOwnerRoot");
+    let second: serde_json::Value = serde_json::from_slice(&bodies[1]).unwrap();
+    assert_eq!(second["kind"], "claimOwnerRoot");
+
+    assert_eq!(
+        node_id,
+        agent_node_identity::load().unwrap().unwrap().node_id(),
+        "the advertised claim node id is the persisted device node id"
+    );
+
+    drop(worker);
+    browser.close().await;
+    bridge.abort();
+    let _ = bridge.await;
+    endpoint.close().await;
+}
+
+#[tokio::test]
+async fn owner_root_cosign_fails_closed_when_no_foreground_signer_is_armed() {
+    let _home = IsolatedHeddleHome::new();
+    let (secret, _signer) = store_production_claim_state(true);
+
+    let endpoint = device_endpoint().await;
+    let address = endpoint.addr();
+    let socket = claim_bridge_socket_path(&repo::identity::heddle_home_dir());
+    let daemon = mount_claim_router(endpoint.clone());
+    let bridge = tokio::spawn(daemon.serve_owner_root_bridge(socket.clone()));
+
+    // No foreground `heddle claim` is armed. The daemon must never co-sign
+    // the owner root itself — it holds no signer — so the call fails closed.
+    let browser = browser_endpoint().await;
+    let OwnedResponse::Failure(failure) = call(
+        &browser,
+        address,
+        CLAIM_OWNER_ROOT_METHOD,
+        &secret,
+        br#"{"kind":"resolveOwnerRoot","handle":"human-handle"}"#,
+    )
+    .await
+    else {
+        panic!("owner-root co-sign without a foreground signer must fail closed");
+    };
+    assert_eq!(failure.code, CallFailureCode::FailedPrecondition as i32);
+
+    browser.close().await;
+    bridge.abort();
+    let _ = bridge.await;
+    endpoint.close().await;
+}
+
+#[tokio::test]
+async fn daemon_claim_router_re_mounts_on_the_persisted_node_id_after_restart() {
+    let _home = IsolatedHeddleHome::new();
+    let (secret, _signer) = store_production_claim_state(true);
+    let socket = claim_bridge_socket_path(&repo::identity::heddle_home_dir());
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let browser = browser_endpoint().await;
+
+    // First daemon incarnation serves one owner-root call over the bridge.
+    let endpoint_a = device_endpoint().await;
+    let address_a = endpoint_a.addr();
+    let node_id_a = endpoint_a.id();
+    let daemon_a = mount_claim_router(endpoint_a.clone());
+    let bridge_a = tokio::spawn(daemon_a.serve_owner_root_bridge(socket.clone()));
+    let mut worker_a = arm_worker(&socket).await;
+    let before = bridged_owner_root(
+        &browser,
+        &address_a,
+        &secret,
+        br#"{"kind":"resolveOwnerRoot","handle":"human-handle"}"#,
+        &mut worker_a,
+        &observed,
+        resolved_owner_root_reply(),
+    )
+    .await;
+    assert_eq!(before["kind"], "ownerRootResolved");
+
+    // Restart mid-window: stop the bridge, tear the endpoint down, drop the
+    // foreground worker's connection.
+    bridge_a.abort();
+    let _ = bridge_a.await;
+    drop(worker_a);
+    endpoint_a.close().await;
+
+    // Second incarnation rebinds the SAME persisted device node id.
+    let endpoint_b = device_endpoint().await;
+    let node_id_b = endpoint_b.id();
+    assert_eq!(
+        node_id_a, node_id_b,
+        "the claim link node id must survive the daemon restart"
+    );
+    let address_b = endpoint_b.addr();
+    let daemon_b = mount_claim_router(endpoint_b.clone());
+    let bridge_b = tokio::spawn(daemon_b.serve_owner_root_bridge(socket.clone()));
+
+    // Re-dial the same node id and re-arm the foreground signer; the
+    // ceremony completes again against the re-mounted router.
+    let mut worker_b = arm_worker(&socket).await;
+    let after = bridged_owner_root(
+        &browser,
+        &address_b,
+        &secret,
+        br#"{"kind":"resolveOwnerRoot","handle":"human-handle"}"#,
+        &mut worker_b,
+        &observed,
+        resolved_owner_root_reply(),
+    )
+    .await;
+    assert_eq!(after["kind"], "ownerRootResolved");
+    assert_eq!(
+        observed.lock().unwrap().len(),
+        2,
+        "both daemon incarnations forwarded the co-sign to a foreground signer"
+    );
+
+    drop(worker_b);
+    browser.close().await;
+    bridge_b.abort();
+    let _ = bridge_b.await;
+    endpoint_b.close().await;
 }

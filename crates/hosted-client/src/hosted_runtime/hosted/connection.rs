@@ -19,26 +19,49 @@ const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug)]
 pub(super) struct HostedConnection {
+    // A transient inbound claim listener on this connection's endpoint.
+    // It serves resolve/consent for a browser that reaches this process's
+    // endpoint, but it holds no owner-root co-sign consumer: the persisted
+    // box network daemon owns that, and the owner-root co-sign is bridged
+    // to a foreground signer (heddle#1620). A co-sign dialed here therefore
+    // fails closed rather than being performed without a foreground owner.
     router: Router,
     pub(super) endpoint: Endpoint,
     pub(super) connection: iroh::endpoint::Connection,
     provider_transport: Option<ProviderWebSocketTransport>,
     provider_connections:
         Mutex<HashMap<EndpointId, Arc<Mutex<Option<iroh::endpoint::Connection>>>>>,
-    claim_completion: tokio::sync::watch::Receiver<bool>,
-    claim_owner_root_calls: Mutex<
-        Option<
-            tokio::sync::mpsc::Receiver<
-                crate::hosted_runtime::claim_authorization::ClaimOwnerRootCall,
-            >,
-        >,
-    >,
 }
 
 impl HostedConnection {
     pub(super) async fn connect_verified(
         descriptor: &VerifiedEndpointDescriptor,
         config: &ClientConfig,
+    ) -> Result<Arc<Self>> {
+        Self::connect_verified_inner(descriptor, config, EndpointIdentity::Device).await
+    }
+
+    /// Connect for outbound calls only, on an *ephemeral* endpoint node id.
+    ///
+    /// The persistent box network daemon owns the device node id and the
+    /// inbound `heddle-claim/1` router (heddle#1620). A foreground
+    /// `heddle claim` that also bound the device node id would fight the
+    /// daemon for the relay's home registration and strand browsers
+    /// dialing the advertised node id. Its weft auth is carried entirely
+    /// by the credential proof key (bearer + PoP + request proof), which
+    /// is independent of the endpoint node id, so an ephemeral endpoint
+    /// makes the same authenticated calls without the collision.
+    pub(super) async fn connect_verified_outbound(
+        descriptor: &VerifiedEndpointDescriptor,
+        config: &ClientConfig,
+    ) -> Result<Arc<Self>> {
+        Self::connect_verified_inner(descriptor, config, EndpointIdentity::Ephemeral).await
+    }
+
+    async fn connect_verified_inner(
+        descriptor: &VerifiedEndpointDescriptor,
+        config: &ClientConfig,
+        identity: EndpointIdentity,
     ) -> Result<Arc<Self>> {
         heddle_perf_contract::record_network_client_initialization();
         let relays = descriptor.relay_urls()?;
@@ -56,7 +79,8 @@ impl HostedConnection {
             } else {
                 RelayMode::custom(relays.clone())
             };
-            let endpoint = bind_endpoint(relay_mode, Some(provider_transport.clone())).await?;
+            let endpoint =
+                bind_endpoint(relay_mode, Some(provider_transport.clone()), identity).await?;
             if relays.is_empty() {
                 return Self::connect_inner(endpoint, direct_address, Some(provider_transport))
                     .await;
@@ -84,7 +108,8 @@ impl HostedConnection {
             RelayMode::custom(relays)
         };
         let provider_transport = ProviderWebSocketTransport::new(config.clone());
-        let endpoint = bind_endpoint(relay_mode, Some(provider_transport.clone())).await?;
+        let endpoint =
+            bind_endpoint(relay_mode, Some(provider_transport.clone()), identity).await?;
         Self::connect_inner(endpoint, address, Some(provider_transport)).await
     }
 
@@ -105,15 +130,13 @@ impl HostedConnection {
                 return Err(HostedError::transport(error));
             }
         };
-        let (router, claim_completion, claim_owner_root_calls) = claim_router(endpoint.clone());
+        let router = claim_router(endpoint.clone());
         Ok(Arc::new(Self {
             router,
             endpoint,
             connection,
             provider_transport,
             provider_connections: Mutex::new(HashMap::new()),
-            claim_completion,
-            claim_owner_root_calls: Mutex::new(Some(claim_owner_root_calls)),
         }))
     }
 
@@ -123,18 +146,6 @@ impl HostedConnection {
 
     pub(super) fn supports_provider_transport(&self) -> bool {
         self.provider_transport.is_some()
-    }
-
-    pub(super) fn claim_completion(&self) -> tokio::sync::watch::Receiver<bool> {
-        self.claim_completion.clone()
-    }
-
-    pub(super) async fn take_claim_owner_root_calls(
-        &self,
-    ) -> Option<
-        tokio::sync::mpsc::Receiver<crate::hosted_runtime::claim_authorization::ClaimOwnerRootCall>,
-    > {
-        self.claim_owner_root_calls.lock().await.take()
     }
 
     pub(super) async fn provider_connection(
@@ -187,39 +198,54 @@ impl HostedConnection {
     }
 }
 
+/// Which node identity a hosted endpoint binds.
+#[derive(Clone, Copy, Debug)]
+enum EndpointIdentity {
+    /// The persisted device node id — the machine's single stable
+    /// address, also served by the box network daemon.
+    Device,
+    /// A fresh per-process node id, for outbound-only connections that
+    /// must not contend with the daemon for the device node id.
+    Ephemeral,
+}
+
 async fn bind_endpoint(
     relay_mode: RelayMode,
     provider_transport: Option<ProviderWebSocketTransport>,
+    identity: EndpointIdentity,
 ) -> Result<Endpoint> {
-    let identity = crate::hosted_runtime::agent_node_identity::load_or_create()
-        .map_err(HostedError::transport)?;
     let mut builder = Endpoint::builder(presets::Minimal)
         .transport_config(transport_config())
-        .relay_mode(relay_mode)
-        .secret_key(identity.secret_key());
+        .relay_mode(relay_mode);
+    if let EndpointIdentity::Device = identity {
+        let device = crate::hosted_runtime::agent_node_identity::load_or_create()
+            .map_err(HostedError::transport)?;
+        builder = builder.secret_key(device.secret_key());
+    }
     if let Some(provider_transport) = provider_transport {
         builder = builder.add_custom_transport(Arc::new(provider_transport));
     }
     builder.bind().await.map_err(HostedError::transport)
 }
 
-fn claim_router(
-    endpoint: Endpoint,
-) -> (
-    Router,
-    tokio::sync::watch::Receiver<bool>,
-    tokio::sync::mpsc::Receiver<crate::hosted_runtime::claim_authorization::ClaimOwnerRootCall>,
-) {
-    let (authorization, completion, owner_root_calls) =
+/// Mount a transient claim listener on this connection's endpoint.
+///
+/// The completion watcher and owner-root call receiver are dropped here
+/// on purpose: this endpoint has no foreground signer arming it, so an
+/// owner-root co-sign dialed against it fails closed at
+/// `StoredClaimAuthorization` (the send finds no receiver) rather than
+/// being co-signed without a foreground owner. Persistent, foreground-
+/// bridged co-sign is the box network daemon's job (heddle#1620).
+fn claim_router(endpoint: Endpoint) -> Router {
+    let (authorization, _completion, _owner_root_calls) =
         crate::hosted_runtime::claim_authorization::StoredClaimAuthorization::new();
     let authorization = Arc::new(authorization);
-    let router = Router::builder(endpoint)
+    Router::builder(endpoint)
         .accept(
             CLAIM_ALPN_V1,
             ClaimProtocol::new(Arc::clone(&authorization), authorization),
         )
-        .spawn();
-    (router, completion, owner_root_calls)
+        .spawn()
 }
 
 impl Drop for HostedConnection {

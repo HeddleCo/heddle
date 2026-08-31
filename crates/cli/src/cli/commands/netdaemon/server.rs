@@ -81,18 +81,23 @@ pub async fn run_network_daemon() -> Result<()> {
     .context("binding persistent device endpoint")?;
     let node_id = endpoint.id().to_string();
 
-    // ---- PIECE 3 (heddle#1620) MOUNT SEAM ----
-    // The endpoint is live, relay-reachable, and pinned to the
-    // persisted node id. Piece 3 mounts the claim protocol here,
-    // without tearing this daemon down:
+    // ---- PIECE 3 (heddle#1620): mount the claim-ALPN router ----
+    // The endpoint is live, relay-reachable, and pinned to the persisted
+    // node id. Mount the persistent `heddle-claim/1` router on it and
+    // serve its owner-root co-sign bridge for the daemon's lifetime.
     //
-    //     use hosted_client::network::Router;
-    //     let router = Router::builder(endpoint.clone())
-    //         .accept(CLAIM_ALPN_V1, claim_protocol)
-    //         .spawn();
-    //
-    // Hold the returned `router` alongside `endpoint` for the daemon's
-    // lifetime and shut it down in the cleanup block below.
+    // The daemon drives Resolve / preConsent / promoteConsent inline
+    // against the file-backed claim state, but it deliberately holds no
+    // agent owner-root signer (decision D3): when a browser reaches the
+    // owner-root co-sign, the router forwards it over `claim_socket` to a
+    // foreground `heddle claim` process, which holds the signer and a live
+    // HostedClient and completes the co-sign. The bridge task is aborted
+    // and its socket removed in the cleanup block below; because the
+    // router re-mounts on the persisted node id, a daemon restart mid-
+    // window keeps outstanding claim links resolving.
+    let claim_socket = hosted_client::network::claim_bridge_socket_path(&heddle_home);
+    let claim_router = hosted_client::network::mount_claim_router(endpoint.clone());
+    let claim_bridge = tokio::spawn(claim_router.serve_owner_root_bridge(claim_socket.clone()));
 
     let advertised = EndpointState {
         version: NETWORK_DAEMON_PROTOCOL_VERSION,
@@ -129,12 +134,15 @@ pub async fn run_network_daemon() -> Result<()> {
 
     let loop_result = control.await;
 
-    // Cleanup ordering: close the endpoint first, then unlink our own
-    // discovery file (only if it still advertises us) and the socket.
-    // `remove_endpoint_if_owned` makes the unlink single-writer safe —
-    // a successor that raced in keeps its file.
+    // Cleanup ordering: stop the claim bridge, close the endpoint (which
+    // tears the router down), then unlink our own discovery file (only if
+    // it still advertises us) and the sockets. `remove_endpoint_if_owned`
+    // makes the unlink single-writer safe — a successor that raced in
+    // keeps its file.
+    claim_bridge.abort();
     endpoint.close().await;
     remove_endpoint_if_owned(&endpoint_path, &advertised);
+    let _ = std::fs::remove_file(&claim_socket);
     let _ = std::fs::remove_file(&socket_path);
     info!("heddle network daemon exiting");
 

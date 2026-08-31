@@ -160,15 +160,30 @@ impl ClaimOwnerRootResult {
     }
 }
 
+/// One owner-root call the daemon-hosted router forwards to a foreground
+/// signer. It carries only the verified principal and the raw request
+/// body — never a parsed operation and never a signer — so the daemon can
+/// relay it across the co-sign bridge without interpreting it. The
+/// `response` oneshot is daemon-local and never crosses the socket.
 #[derive(Debug)]
 pub(crate) struct ClaimOwnerRootCall {
-    pub(crate) principal: VerifiedClaimPrincipal,
-    pub(crate) operation: ClaimOwnerRootOperation,
-    response: tokio::sync::oneshot::Sender<Result<ClaimOwnerRootResult, CallFailure>>,
+    principal: VerifiedClaimPrincipal,
+    body: Vec<u8>,
+    response: tokio::sync::oneshot::Sender<Result<Vec<u8>, CallFailure>>,
 }
 
 impl ClaimOwnerRootCall {
-    pub(crate) fn respond(self, response: Result<ClaimOwnerRootResult, CallFailure>) {
+    pub(crate) fn principal(&self) -> &VerifiedClaimPrincipal {
+        &self.principal
+    }
+
+    pub(crate) fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// Relay the foreground worker's reply bytes (or a failure) back to
+    /// the browser call awaiting on the daemon.
+    pub(crate) fn respond(self, response: Result<Vec<u8>, CallFailure>) {
         let _ = self.response.send(response);
     }
 }
@@ -252,54 +267,67 @@ impl ClaimHandler for StoredClaimAuthorization {
 }
 
 impl StoredClaimAuthorization {
+    /// Forward an owner-root call to the foreground signer over the
+    /// co-sign bridge and relay its reply back to the browser.
+    ///
+    /// The daemon performs a fail-fast active-state gate for this
+    /// principal, then hands the raw body to a foreground `heddle claim`
+    /// worker (which holds the signer and re-checks the state under the
+    /// write lock before signing). The reply bytes come back verbatim —
+    /// the daemon neither parses the body nor encodes the reply, and so
+    /// never touches the agent owner-root signer.
     async fn owner_root_reply(
         &self,
         principal: VerifiedClaimPrincipal,
         body: &[u8],
     ) -> Result<Vec<u8>, CallFailure> {
-        let operation = {
-            let _guard = identity_state::write_lock().map_err(internal_failure)?;
-            let state = identity_state::load_while_locked()
-                .map_err(internal_failure)?
-                .ok_or_else(auth_failure)?;
-            let now = chrono::Utc::now().timestamp_millis();
-            if state.owner_id.to_string() != principal.subject
-                || state.authorization_hash() != principal.authorization_hash
-                || !state.is_active(now)
-            {
-                return Err(auth_failure());
-            }
-            owner_root_operation(body)?
-        };
+        let state = identity_state::load()
+            .map_err(internal_failure)?
+            .ok_or_else(auth_failure)?;
+        let now = chrono::Utc::now().timestamp_millis();
+        if state.owner_id.to_string() != principal.subject
+            || state.authorization_hash() != principal.authorization_hash
+            || !state.is_active(now)
+        {
+            return Err(auth_failure());
+        }
         let (response, receive) = tokio::sync::oneshot::channel();
         self.owner_root_calls
             .send(ClaimOwnerRootCall {
                 principal,
-                operation,
+                body: body.to_vec(),
                 response,
             })
             .await
             .map_err(|_| internal_failure("claim owner-root session is unavailable"))?;
-        let result = receive
+        receive
             .await
-            .map_err(|_| internal_failure("claim owner-root session stopped"))??;
-        let reply = match result
-            .as_ref()
-            .ok_or_else(|| internal_failure("claim owner-root result has an invalid shape"))?
-        {
-            ClaimOwnerRootResultRef::Resolved {
-                signed_owner_root,
-                webauthn_challenge,
-            } => ClaimReply::OwnerRootResolved {
-                signed_owner_root: encode_message(signed_owner_root),
-                webauthn_challenge: encode_message(webauthn_challenge),
-            },
-            ClaimOwnerRootResultRef::CoSigned(signed_transition) => ClaimReply::OwnerRootCoSigned {
-                signed_transition: encode_message(signed_transition),
-            },
-        };
-        serde_json::to_vec(&reply).map_err(internal_failure)
+            .map_err(|_| internal_failure("claim owner-root session stopped"))?
     }
+}
+
+/// Encode an owner-root result into the exact `heddle-claim/1` reply the
+/// browser consumes. Runs in the foreground worker (which produced the
+/// result), never in the daemon.
+pub(crate) fn encode_owner_root_reply(
+    result: &ClaimOwnerRootResult,
+) -> Result<Vec<u8>, CallFailure> {
+    let reply = match result
+        .as_ref()
+        .ok_or_else(|| internal_failure("claim owner-root result has an invalid shape"))?
+    {
+        ClaimOwnerRootResultRef::Resolved {
+            signed_owner_root,
+            webauthn_challenge,
+        } => ClaimReply::OwnerRootResolved {
+            signed_owner_root: encode_message(signed_owner_root),
+            webauthn_challenge: encode_message(webauthn_challenge),
+        },
+        ClaimOwnerRootResultRef::CoSigned(signed_transition) => ClaimReply::OwnerRootCoSigned {
+            signed_transition: encode_message(signed_transition),
+        },
+    };
+    serde_json::to_vec(&reply).map_err(internal_failure)
 }
 
 #[derive(Deserialize)]
@@ -460,7 +488,7 @@ pub(crate) fn consent_reply(
     }
 }
 
-fn owner_root_operation(body: &[u8]) -> Result<ClaimOwnerRootOperation, CallFailure> {
+pub(crate) fn owner_root_operation(body: &[u8]) -> Result<ClaimOwnerRootOperation, CallFailure> {
     match parse_request(body)? {
         ClaimRequest::ResolveOwnerRoot { handle } => {
             validate_handle(&handle)?;

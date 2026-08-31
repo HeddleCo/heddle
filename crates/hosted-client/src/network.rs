@@ -34,6 +34,14 @@ pub use iroh::protocol::Router;
 #[cfg(feature = "client")]
 pub use iroh::{Endpoint, EndpointId, RelayMode};
 
+/// Owner-root claim router hosted on the daemon endpoint, and the socket
+/// convention for bridging its co-sign step to a foreground signer
+/// (heddle#1620, piece 3). See [`crate::hosted_runtime::claim_bridge`].
+#[cfg(feature = "client")]
+pub use crate::hosted_runtime::claim_bridge::{
+    DaemonClaimRouter, claim_bridge_socket_path, mount_claim_router,
+};
+
 /// Relay mode that keeps the endpoint reachable through the default
 /// (number-0) relay servers.
 ///
