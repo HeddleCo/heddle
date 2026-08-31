@@ -1,0 +1,101 @@
+{
+  "$comment": "Published golden vectors for the heddle-claim/1 two-phase claim protocol. These are the SOURCE OF TRUTH for browser/TS clients: do not hand-mirror the private Rust enums in crates/hosted-client/src/hosted_runtime/claim_authorization.rs. A Rust test (mod contract in that file) serializes each request/reply variant through the real serde enums and asserts equality with these vectors, so any drift in a field name, serde rename, or enum tagging turns the build red. Regenerate/adjust here only alongside the Rust change. Values below are representative examples; only the SHAPE (keys, casing, tag) is contractual, not the specific string values.",
+  "protocol": {
+    "alpn": "heddle-claim/1",
+    "service": "heddle.claim.v1.ClaimService",
+    "encoding": "serde_json (NOT protobuf); request bodies are serde_json::from_slice, reply bodies are #[derive(Serialize)]",
+    "enumRepresentation": "internally tagged on the \"kind\" discriminant; variant names and all fields are camelCase; requests deny unknown fields",
+    "bearerCapability": "The one-time claim secret rides in CallContext.bearer_capability (the transport frame), NOT in any JSON body.",
+    "methods": {
+      "/heddle.claim.v1.ClaimService/Resolve": {
+        "requestKinds": ["resolve"],
+        "replyKinds": ["resolved", "refused"]
+      },
+      "/heddle.claim.v1.ClaimService/Consent": {
+        "requestKinds": ["preConsent", "promoteConsent"],
+        "replyKinds": ["preConsented", "promoteConsented"]
+      },
+      "/heddle.claim.v1.ClaimService/ClaimOwnerRoot": {
+        "requestKinds": ["resolveOwnerRoot", "claimOwnerRoot"],
+        "replyKinds": ["ownerRootResolved", "ownerRootCoSigned"]
+      }
+    }
+  },
+  "requests": {
+    "resolve": {
+      "kind": "resolve"
+    },
+    "resolveOwnerRoot": {
+      "kind": "resolveOwnerRoot",
+      "handle": "human-handle"
+    },
+    "preConsent": {
+      "kind": "preConsent",
+      "handle": "human-handle",
+      "nonce": "MDEyMzQ1Njc4OWFiY2RlZg"
+    },
+    "promoteConsent": {
+      "kind": "promoteConsent",
+      "handle": "human-handle",
+      "credentialId": "Y3JlZGVudGlhbA"
+    },
+    "claimOwnerRoot": {
+      "kind": "claimOwnerRoot",
+      "registration": "cmVnaXN0cmF0aW9u",
+      "nextAuthorityKey": "bmV4dC1hdXRob3JpdHkta2V5",
+      "nextAuthorityKeyProof": "bmV4dC1hdXRob3JpdHkta2V5LXByb29m",
+      "nextRecoveryPolicy": "bmV4dC1yZWNvdmVyeS1wb2xpY3k",
+      "nextRecoveryKeyProofs": ["cmVjb3Zlcnkta2V5LXByb29m"],
+      "validFromUnixSeconds": 1,
+      "nonce": "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI"
+    }
+  },
+  "replies": {
+    "resolved": {
+      "kind": "resolved",
+      "agent": {
+        "accountId": "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28",
+        "petName": "steady-heron",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "lastActiveAt": null,
+        "spools": [],
+        "repos": [],
+        "changeCount": null,
+        "agentLabel": null
+      }
+    },
+    "preConsented": {
+      "kind": "preConsented",
+      "consent": {
+        "accountId": "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28",
+        "nodeId": "1111111111111111111111111111111111111111111111111111111111111111",
+        "signature": "cHJlLWNvbnNlbnQtc2lnbmF0dXJl",
+        "authorizationHash": "authorization-hash-abc123",
+        "expiresAt": 1700000000000
+      }
+    },
+    "promoteConsented": {
+      "kind": "promoteConsented",
+      "consent": {
+        "accountId": "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28",
+        "nodeId": "1111111111111111111111111111111111111111111111111111111111111111",
+        "signature": "cHJvbW90ZS1jb25zZW50LXNpZ25hdHVyZQ",
+        "authorizationHash": "authorization-hash-abc123",
+        "expiresAt": 1700000000000
+      }
+    },
+    "ownerRootResolved": {
+      "kind": "ownerRootResolved",
+      "signedOwnerRoot": "c2lnbmVkLW93bmVyLXJvb3Q",
+      "webauthnChallenge": "d2ViYXV0aG4tY2hhbGxlbmdl"
+    },
+    "ownerRootCoSigned": {
+      "kind": "ownerRootCoSigned",
+      "signedTransition": "c2lnbmVkLXRyYW5zaXRpb24"
+    },
+    "refused": {
+      "kind": "refused",
+      "refusal": "claimed"
+    }
+  }
+}

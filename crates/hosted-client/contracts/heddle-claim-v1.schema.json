@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heddle.co/contracts/heddle-claim-v1.schema.json",
+  "title": "heddle-claim/1",
+  "description": "JSON contract for the heddle-claim/1 two-phase browser claim protocol. Request and reply bodies are serde_json over the iroh ALPN 'heddle-claim/1', methods /heddle.claim.v1.ClaimService/{Resolve,Consent,ClaimOwnerRoot}. Both enums are internally tagged on 'kind'; variant names and fields are camelCase; requests reject unknown fields. The one-time claim secret travels in CallContext.bearer_capability on the transport frame, never in these bodies. Source of truth: crates/hosted-client/src/hosted_runtime/claim_authorization.rs (private Rust enums ClaimRequest/ClaimReply); a Rust divergence test pins this schema's golden vectors to those enums.",
+  "$defs": {
+    "ClaimRequest": {
+      "description": "A request body sent by the browser claim client.",
+      "oneOf": [
+        { "$ref": "#/$defs/ResolveRequest" },
+        { "$ref": "#/$defs/ResolveOwnerRootRequest" },
+        { "$ref": "#/$defs/PreConsentRequest" },
+        { "$ref": "#/$defs/PromoteConsentRequest" },
+        { "$ref": "#/$defs/ClaimOwnerRootRequest" }
+      ]
+    },
+    "ResolveRequest": {
+      "type": "object",
+      "description": "Method /heddle.claim.v1.ClaimService/Resolve. Reply: resolved or refused.",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "resolve" }
+      }
+    },
+    "ResolveOwnerRootRequest": {
+      "type": "object",
+      "description": "Method /heddle.claim.v1.ClaimService/ClaimOwnerRoot. Reply: ownerRootResolved.",
+      "additionalProperties": false,
+      "required": ["kind", "handle"],
+      "properties": {
+        "kind": { "const": "resolveOwnerRoot" },
+        "handle": { "type": "string" }
+      }
+    },
+    "PreConsentRequest": {
+      "type": "object",
+      "description": "Method /heddle.claim.v1.ClaimService/Consent, phase 1. Reply: preConsented.",
+      "additionalProperties": false,
+      "required": ["kind", "handle", "nonce"],
+      "properties": {
+        "kind": { "const": "preConsent" },
+        "handle": { "type": "string" },
+        "nonce": {
+          "type": "string",
+          "description": "base64url (no padding) of the ceremony nonce; 16..=1024 decoded bytes."
+        }
+      }
+    },
+    "PromoteConsentRequest": {
+      "type": "object",
+      "description": "Method /heddle.claim.v1.ClaimService/Consent, phase 2. Reply: promoteConsented.",
+      "additionalProperties": false,
+      "required": ["kind", "handle", "credentialId"],
+      "properties": {
+        "kind": { "const": "promoteConsent" },
+        "handle": { "type": "string" },
+        "credentialId": {
+          "type": "string",
+          "description": "base64url (no padding) of the WebAuthn credential id."
+        }
+      }
+    },
+    "ClaimOwnerRootRequest": {
+      "type": "object",
+      "description": "Method /heddle.claim.v1.ClaimService/ClaimOwnerRoot co-sign. Reply: ownerRootCoSigned. Each *proof/key/policy/registration field is base64url (no padding) of the corresponding protobuf message.",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "registration",
+        "nextAuthorityKey",
+        "nextAuthorityKeyProof",
+        "nextRecoveryPolicy",
+        "nextRecoveryKeyProofs",
+        "validFromUnixSeconds",
+        "nonce"
+      ],
+      "properties": {
+        "kind": { "const": "claimOwnerRoot" },
+        "registration": { "type": "string" },
+        "nextAuthorityKey": { "type": "string" },
+        "nextAuthorityKeyProof": { "type": "string" },
+        "nextRecoveryPolicy": { "type": "string" },
+        "nextRecoveryKeyProofs": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "validFromUnixSeconds": { "type": "integer" },
+        "nonce": { "type": "string" }
+      }
+    },
+    "ClaimReply": {
+      "description": "A reply body returned by heddle.",
+      "oneOf": [
+        { "$ref": "#/$defs/ResolvedReply" },
+        { "$ref": "#/$defs/PreConsentedReply" },
+        { "$ref": "#/$defs/PromoteConsentedReply" },
+        { "$ref": "#/$defs/OwnerRootResolvedReply" },
+        { "$ref": "#/$defs/OwnerRootCoSignedReply" },
+        { "$ref": "#/$defs/RefusedReply" }
+      ]
+    },
+    "ResolvedReply": {
+      "type": "object",
+      "required": ["kind", "agent"],
+      "properties": {
+        "kind": { "const": "resolved" },
+        "agent": { "$ref": "#/$defs/AgentAccountSummary" }
+      }
+    },
+    "PreConsentedReply": {
+      "type": "object",
+      "required": ["kind", "consent"],
+      "properties": {
+        "kind": { "const": "preConsented" },
+        "consent": { "$ref": "#/$defs/AgentConsent" }
+      }
+    },
+    "PromoteConsentedReply": {
+      "type": "object",
+      "required": ["kind", "consent"],
+      "properties": {
+        "kind": { "const": "promoteConsented" },
+        "consent": { "$ref": "#/$defs/AgentConsent" }
+      }
+    },
+    "OwnerRootResolvedReply": {
+      "type": "object",
+      "required": ["kind", "signedOwnerRoot", "webauthnChallenge"],
+      "properties": {
+        "kind": { "const": "ownerRootResolved" },
+        "signedOwnerRoot": {
+          "type": "string",
+          "description": "base64url (no padding) of the SignedOwnerRoot protobuf."
+        },
+        "webauthnChallenge": {
+          "type": "string",
+          "description": "base64url (no padding) of the AuthChallengeResponse protobuf."
+        }
+      }
+    },
+    "OwnerRootCoSignedReply": {
+      "type": "object",
+      "required": ["kind", "signedTransition"],
+      "properties": {
+        "kind": { "const": "ownerRootCoSigned" },
+        "signedTransition": {
+          "type": "string",
+          "description": "base64url (no padding) of the SignedOwnerKeyTransition protobuf."
+        }
+      }
+    },
+    "RefusedReply": {
+      "type": "object",
+      "required": ["kind", "refusal"],
+      "properties": {
+        "kind": { "const": "refused" },
+        "refusal": {
+          "type": "string",
+          "description": "Terminal refusal reason, e.g. \"claimed\" when the account is already claimed."
+        }
+      }
+    },
+    "AgentAccountSummary": {
+      "type": "object",
+      "description": "The resolved agent account. lastActiveAt, changeCount and agentLabel are always present but may be null (serde emits None as null).",
+      "required": [
+        "accountId",
+        "petName",
+        "createdAt",
+        "lastActiveAt",
+        "spools",
+        "repos",
+        "changeCount",
+        "agentLabel"
+      ],
+      "properties": {
+        "accountId": { "type": "string" },
+        "petName": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "lastActiveAt": { "type": ["string", "null"] },
+        "spools": { "type": "array", "items": true },
+        "repos": { "type": "array", "items": true },
+        "changeCount": { "type": ["integer", "null"], "minimum": 0 },
+        "agentLabel": { "type": ["string", "null"] }
+      }
+    },
+    "AgentConsent": {
+      "type": "object",
+      "description": "A signed consent tuple. signature is base64url (no padding) over weft's exact counted-tuple statement; expiresAt is Unix milliseconds.",
+      "required": [
+        "accountId",
+        "nodeId",
+        "signature",
+        "authorizationHash",
+        "expiresAt"
+      ],
+      "properties": {
+        "accountId": { "type": "string" },
+        "nodeId": { "type": "string" },
+        "signature": { "type": "string" },
+        "authorizationHash": { "type": "string" },
+        "expiresAt": { "type": "integer" }
+      }
+    }
+  }
+}
