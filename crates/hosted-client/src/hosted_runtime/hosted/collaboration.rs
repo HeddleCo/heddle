@@ -407,6 +407,7 @@ mod tests {
                     seconds: 42,
                     nanos: 0,
                 }),
+                ..Default::default()
             }],
             ..Default::default()
         };
