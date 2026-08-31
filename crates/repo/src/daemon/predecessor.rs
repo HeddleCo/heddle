@@ -49,6 +49,7 @@ mod tests {
             port,
             pid: Some(pid),
             socket_path: None,
+            node_id: None,
         }
     }
 
@@ -98,6 +99,7 @@ mod tests {
             port: 0,
             pid: Some(1),
             socket_path: Some("/tmp/heddled.sock".into()),
+            node_id: None,
         };
         refuse_live_legacy_tcp_endpoint(&endpoint).expect("current UDS must be usable");
     }

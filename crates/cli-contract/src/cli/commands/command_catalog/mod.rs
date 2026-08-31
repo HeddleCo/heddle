@@ -20,7 +20,7 @@ use crate::cli::SemanticCommands;
 use crate::cli::cli_args::SyncCommands;
 use crate::cli::{
     AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands, HookCommands,
-    INIT_VERB, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
+    INIT_VERB, IntegrationCommands, MaintenanceCommands, NetdCommands, OplogCommands, PurgeCommands,
     RedactCommands, RemoteCommands, ShellCommands, ThreadCommands, ThreadMarkerCommands,
     TimelineCommands, VisibilityCommands,
     cli_args::{
@@ -1880,6 +1880,39 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["daemon", "status"],
         surface(opaque_schemas(READ_JSON, &["daemon status"]), "admin"),
+    ),
+    entry(&["netd"], front_door(surface(GROUP, "admin"), 196)),
+    entry(
+        &["netd", "serve"],
+        surface(opaque_schemas(DAEMON_MUTATION, &["netd serve"]), "admin"),
+    ),
+    entry(
+        &["netd", "status"],
+        surface(
+            json_discriminators(
+                opaque_schemas(READ_JSON, &["netd status"]),
+                &[json_discriminator(
+                    Some("netd status"),
+                    "output_kind",
+                    "netd_status",
+                )],
+            ),
+            "admin",
+        ),
+    ),
+    entry(
+        &["netd", "stop"],
+        surface(
+            json_discriminators(
+                opaque_schemas(DAEMON_MUTATION, &["netd stop"]),
+                &[json_discriminator(
+                    Some("netd stop"),
+                    "output_kind",
+                    "netd_stop",
+                )],
+            ),
+            "admin",
+        ),
     ),
     entry(
         &["daemon", "stop"],
@@ -4606,6 +4639,11 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             DaemonCommands::Serve => vec!["daemon", "serve"],
             DaemonCommands::Status => vec!["daemon", "status"],
             DaemonCommands::Stop => vec!["daemon", "stop"],
+        },
+        Commands::Netd { command } => match command {
+            NetdCommands::Serve => vec!["netd", "serve"],
+            NetdCommands::Status => vec!["netd", "status"],
+            NetdCommands::Stop => vec!["netd", "stop"],
         },
         Commands::Agent { command } => match command {
             AgentCommands::Reserve(_) => vec!["agent", "reserve"],

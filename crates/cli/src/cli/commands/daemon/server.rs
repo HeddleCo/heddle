@@ -52,6 +52,7 @@ pub fn run_mount_daemon(repo_root: &Path) -> Result<()> {
             port: 0,
             pid: Some(std::process::id()),
             socket_path: Some(socket_path.clone()),
+            node_id: None,
         },
     )
     .context("persist daemon endpoint")?;

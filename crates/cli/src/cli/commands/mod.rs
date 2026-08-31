@@ -45,6 +45,7 @@ mod marker;
 mod merge;
 mod mount_lifecycle;
 pub(crate) mod native_scope;
+mod netdaemon;
 mod next_action;
 mod operator_core;
 mod operator_loop;
@@ -118,6 +119,7 @@ pub use context::{
 #[allow(unused_imports)]
 pub(crate) use daemon::client as daemon_client;
 pub use daemon::{cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop};
+pub use netdaemon::{cmd_netd_serve, cmd_netd_status, cmd_netd_stop};
 pub use diff::cmd_diff;
 pub use discuss::run as cmd_discuss;
 pub use doctor::cmd_doctor;

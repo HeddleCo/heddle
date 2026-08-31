@@ -463,6 +463,7 @@ mod tests {
                 port: 0,
                 pid: Some(1),
                 socket_path: Some(tmp.path().join("heddled.sock")),
+                node_id: None,
             },
         );
         let endpoint_path = mount_daemon_endpoint_path(tmp.path());
@@ -488,6 +489,7 @@ mod tests {
                 port: 0,
                 pid: Some(1),
                 socket_path: Some(tmp.path().join("heddled.sock")),
+                node_id: None,
             },
         );
         let endpoint_path = mount_daemon_endpoint_path(tmp.path());
@@ -509,6 +511,7 @@ mod tests {
                 port: 0,
                 pid: Some(0x7fff_fffe),
                 socket_path: Some(tmp.path().join("heddled.sock")),
+                node_id: None,
             },
         );
         let endpoint_path = mount_daemon_endpoint_path(tmp.path());
@@ -529,6 +532,7 @@ mod tests {
                 port: 9999,
                 pid: Some(1),
                 socket_path: None,
+                node_id: None,
             },
         );
         let endpoint_path = mount_daemon_endpoint_path(tmp.path());
@@ -610,6 +614,7 @@ mod tests {
                         port: 0,
                         pid: Some(1),
                         socket_path: Some(server_socket),
+                        node_id: None,
                     },
                 )
                 .unwrap();
@@ -627,6 +632,7 @@ mod tests {
                 // the file as live and we exercise the decode path.
                 pid: Some(1),
                 socket_path: Some(socket_path),
+                node_id: None,
             },
         );
 
@@ -677,6 +683,7 @@ mod tests {
                 port: 9,
                 pid: Some(pid),
                 socket_path: None,
+                node_id: None,
             },
         );
 

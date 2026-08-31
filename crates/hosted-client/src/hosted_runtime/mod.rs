@@ -21,6 +21,7 @@ pub(crate) mod credential_file;
 pub(crate) mod device_flow;
 pub mod hosted;
 mod identity_state;
+pub(crate) mod net_endpoint;
 mod owner_root;
 #[cfg(test)]
 mod owner_root_tests;

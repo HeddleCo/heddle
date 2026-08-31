@@ -12,6 +12,7 @@ pub mod client;
 pub mod extensions;
 #[cfg(feature = "client")]
 pub mod hosted_runtime;
+pub mod network;
 
 /// Register factories needed to reopen CLI-owned lazy hosted repositories.
 #[cfg(feature = "client")]
