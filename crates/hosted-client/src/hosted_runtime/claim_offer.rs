@@ -1,5 +1,10 @@
 //! Resident agent side of the human claim ceremony.
 
+// The transport contract owns `CallFailure` by value at the owner-root
+// seam (`handle_owner_root_body`), matching `claim_authorization` and
+// `claim_protocol`; boxing it would only fragment that seam's error type.
+#![allow(clippy::result_large_err)]
+
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -13,10 +18,11 @@ use super::{
     HostedAuthMode, HostedSession, agent_node_identity,
     auth::resolve_server,
     claim_authorization::{
-        ClaimOwnerRootCall, ClaimOwnerRootOperationRef, ClaimOwnerRootResult,
-        validate_stored_claim_signer,
+        ClaimOwnerRootOperation, ClaimOwnerRootOperationRef, ClaimOwnerRootResult,
+        encode_owner_root_reply, owner_root_operation, validate_stored_claim_signer,
     },
-    hosted::{canonical_server_authority, server_keys_match},
+    claim_bridge::ClaimBridgeWorker,
+    hosted::{canonical_server_authority, claim_protocol::VerifiedClaimPrincipal, server_keys_match},
     identity_state::{self, ClaimIssuanceStatus, ClaimSecret, ClaimState},
 };
 
@@ -58,29 +64,32 @@ pub(crate) async fn cmd_claim(args: ClaimArgs) -> Result<()> {
         bail!("agent-node-identity.toml does not match the account waiting to be claimed");
     }
 
+    // The persistent box network daemon serves the `heddle-claim/1`
+    // router on this device node id (heddle#1620). A foreground
+    // `heddle claim` does not host the endpoint or the router; it arms
+    // itself as the owner-root co-sign signer over the daemon's UDS
+    // bridge and observes the shared, file-backed claim state.
+    let heddle_home = repo::identity::heddle_home_dir();
+    let claim_socket = crate::hosted_runtime::claim_bridge::claim_bridge_socket_path(&heddle_home);
+
     let user_config = UserConfig::load_default()?;
     let session = HostedSession::build(
         &user_config,
         Some(server.clone()),
         HostedAuthMode::CredentialFallback,
     )?;
+    // Outbound only: an ephemeral endpoint that does not bind the device
+    // node id the daemon serves the claim router on.
     let mut client = session
-        .connect(([127, 0, 0, 1], 0).into())
+        .connect_outbound(([127, 0, 0, 1], 0).into())
         .await
-        .with_context(|| {
-            format!("connecting to {server} and bringing the claim listener online")
-        })?;
+        .with_context(|| format!("connecting to {server} for the claim ceremony"))?;
     // Upload the claimable seq-0 root before the Iroh ceremony so claim
     // works even if this account never created a project spool.
     if let Err(error) = client.ensure_claimable_owner_root().await {
         client.close().await;
         return Err(error);
     }
-    let completion = client.claim_completion();
-    let mut owner_root_calls = client
-        .take_claim_owner_root_calls()
-        .await
-        .context("claim owner-root listener is already in use")?;
 
     let offer = match activate_offer(&state, args.timeout) {
         Ok(offer) => offer,
@@ -99,14 +108,8 @@ pub(crate) async fn cmd_claim(args: ClaimArgs) -> Result<()> {
     drop(claim_link);
     drop(offer.secret);
 
-    let outcome = wait_for_claim(
-        &offer.authorization_hash,
-        args.timeout,
-        completion,
-        &mut owner_root_calls,
-        &client,
-    )
-    .await;
+    let outcome =
+        wait_for_claim(&offer.authorization_hash, args.timeout, &claim_socket, &client).await;
     let claimed = matches!(outcome, Ok(ClaimWaitOutcome::Claimed));
     let owner_root_claim = if claimed {
         super::owner_root::send_pending_register_public_key_claim(&mut client).await
@@ -186,37 +189,36 @@ fn activate_offer(expected: &ClaimState, timeout: Duration) -> Result<ActiveClai
 async fn wait_for_claim(
     authorization_hash: &str,
     timeout: Duration,
-    mut completion: tokio::sync::watch::Receiver<bool>,
-    owner_root_calls: &mut tokio::sync::mpsc::Receiver<ClaimOwnerRootCall>,
+    claim_socket: &std::path::Path,
     client: &super::hosted::HostedClient,
 ) -> Result<ClaimWaitOutcome> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut poll = tokio::time::interval(CLAIM_STATUS_POLL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Arm as the daemon-hosted router's owner-root co-sign signer for this
+    // window. The daemon drives resolve/preConsent/promoteConsent itself
+    // and forwards only the owner-root co-sign here, where the signer lives.
+    let mut worker = ClaimBridgeWorker::arm(claim_socket).await.context(
+        "arming the owner-root co-sign bridge; is `heddle netd serve` running on this machine?",
+    )?;
     loop {
         tokio::select! {
             biased;
 
-            delivered = completion.changed() => {
-                delivered.context("claim listener stopped before promotion was delivered")?;
-                if *completion.borrow() {
-                    let state = identity_state::load()?
-                        .context("agent claim state disappeared after promotion")?;
-                    if state.issuance_status(
-                        authorization_hash,
-                        chrono::Utc::now().timestamp_millis(),
-                    ) == ClaimIssuanceStatus::Claimed
-                    {
-                        return Ok(ClaimWaitOutcome::Claimed);
+            served = worker.serve_next(client) => {
+                let alive = served.unwrap_or_else(|error| {
+                    tracing::warn!(%error, "owner-root co-sign bridge failed; will re-arm");
+                    false
+                });
+                if !alive {
+                    // The daemon closed the bridge — it may be restarting
+                    // mid-window. Re-arm so a re-dial after the router
+                    // re-mounts still reaches this foreground signer.
+                    match rearm(claim_socket, authorization_hash, deadline).await? {
+                        RearmOutcome::Rearmed(next) => worker = next,
+                        RearmOutcome::Terminal(outcome) => return Ok(outcome),
                     }
                 }
-            }
-            call = owner_root_calls.recv() => {
-                let call = call.context("claim owner-root listener stopped")?;
-                let response = handle_owner_root_call(client, &call)
-                    .await
-                    .map_err(CallFailure::from);
-                call.respond(response);
             }
             result = tokio::signal::ctrl_c() => {
                 result.context("waiting for Ctrl-C")?;
@@ -226,18 +228,9 @@ async fn wait_for_claim(
                 return Ok(ClaimWaitOutcome::Expired);
             }
             _ = poll.tick() => {
-                let Some(state) = identity_state::load()? else {
-                    return Ok(ClaimWaitOutcome::Replaced);
-                };
-                match state.issuance_status(
-                    authorization_hash,
-                    chrono::Utc::now().timestamp_millis(),
-                ) {
+                match observe_issuance(authorization_hash)? {
                     ClaimIssuanceStatus::Active => {}
-                    // ClaimState flips before the response is written. Wait
-                    // for the delivery signal so shutdown cannot race the
-                    // browser's ClaimOwnerRoot response.
-                    ClaimIssuanceStatus::Claimed => {}
+                    ClaimIssuanceStatus::Claimed => return Ok(ClaimWaitOutcome::Claimed),
                     ClaimIssuanceStatus::Expired => return Ok(ClaimWaitOutcome::Expired),
                     ClaimIssuanceStatus::Replaced => return Ok(ClaimWaitOutcome::Replaced),
                 }
@@ -246,11 +239,74 @@ async fn wait_for_claim(
     }
 }
 
+enum RearmOutcome {
+    Rearmed(ClaimBridgeWorker),
+    Terminal(ClaimWaitOutcome),
+}
+
+/// Re-establish the co-sign bridge after the daemon closed it (a
+/// mid-window restart), or report a terminal outcome if the ceremony
+/// resolved or the deadline passed while the daemon was away.
+async fn rearm(
+    claim_socket: &std::path::Path,
+    authorization_hash: &str,
+    deadline: tokio::time::Instant,
+) -> Result<RearmOutcome> {
+    loop {
+        match observe_issuance(authorization_hash)? {
+            ClaimIssuanceStatus::Active => {}
+            ClaimIssuanceStatus::Claimed => {
+                return Ok(RearmOutcome::Terminal(ClaimWaitOutcome::Claimed));
+            }
+            ClaimIssuanceStatus::Expired => {
+                return Ok(RearmOutcome::Terminal(ClaimWaitOutcome::Expired));
+            }
+            ClaimIssuanceStatus::Replaced => {
+                return Ok(RearmOutcome::Terminal(ClaimWaitOutcome::Replaced));
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(RearmOutcome::Terminal(ClaimWaitOutcome::Expired));
+        }
+        match ClaimBridgeWorker::arm(claim_socket).await {
+            Ok(worker) => return Ok(RearmOutcome::Rearmed(worker)),
+            Err(_) => tokio::time::sleep(CLAIM_STATUS_POLL).await,
+        }
+    }
+}
+
+fn observe_issuance(authorization_hash: &str) -> Result<ClaimIssuanceStatus> {
+    let Some(state) = identity_state::load()? else {
+        return Ok(ClaimIssuanceStatus::Replaced);
+    };
+    Ok(state.issuance_status(authorization_hash, chrono::Utc::now().timestamp_millis()))
+}
+
+/// Complete one forwarded owner-root call from the daemon-hosted router.
+///
+/// The daemon relays only the verified principal and the raw request
+/// body; parsing, the weft `BeginWebAuthnRegistration` round trip, the
+/// owner-root co-sign with the agent signer, and reply encoding all
+/// happen here in the foreground process. The daemon never holds the
+/// agent signer.
+pub(crate) async fn handle_owner_root_body(
+    client: &super::hosted::HostedClient,
+    principal: &VerifiedClaimPrincipal,
+    body: &[u8],
+) -> std::result::Result<Vec<u8>, CallFailure> {
+    let operation = owner_root_operation(body)?;
+    let result = handle_owner_root_call(client, principal, &operation)
+        .await
+        .map_err(CallFailure::from)?;
+    encode_owner_root_reply(&result)
+}
+
 async fn handle_owner_root_call(
     client: &super::hosted::HostedClient,
-    call: &ClaimOwnerRootCall,
+    principal: &VerifiedClaimPrincipal,
+    operation: &ClaimOwnerRootOperation,
 ) -> std::result::Result<ClaimOwnerRootResult, OwnerRootFailure> {
-    match call.operation.as_ref().ok_or_else(|| {
+    match operation.as_ref().ok_or_else(|| {
         owner_root_failure(
             CallFailureCode::Internal,
             "claim owner-root operation has an invalid shape",
@@ -279,7 +335,7 @@ async fn handle_owner_root_call(
             }
             let signed_owner_root = {
                 let _guard = identity_state::write_lock().map_err(owner_root_internal)?;
-                let mut state = active_owner_root_state(call)?;
+                let mut state = active_owner_root_state(principal)?;
                 let signed = super::owner_root::load_recorded_root(&state)
                     .map_err(owner_root_internal)?
                     .ok_or_else(|| {
@@ -317,7 +373,7 @@ async fn handle_owner_root_call(
             })?;
             let signed_transition = {
                 let _guard = identity_state::write_lock().map_err(owner_root_internal)?;
-                let mut state = active_owner_root_state(call)?;
+                let mut state = active_owner_root_state(principal)?;
                 if !state.accepts_owner_root_challenge(&registration.challenge_id) {
                     return Err(owner_root_failure(
                         CallFailureCode::PermissionDenied,
@@ -371,7 +427,7 @@ async fn handle_owner_root_call(
 }
 
 fn active_owner_root_state(
-    call: &ClaimOwnerRootCall,
+    principal: &VerifiedClaimPrincipal,
 ) -> std::result::Result<ClaimState, OwnerRootFailure> {
     let state = identity_state::load_while_locked()
         .map_err(owner_root_internal)?
@@ -381,8 +437,8 @@ fn active_owner_root_state(
                 "claim authorization failed",
             )
         })?;
-    if state.owner_id.to_string() != call.principal.subject
-        || state.authorization_hash() != call.principal.authorization_hash
+    if state.owner_id.to_string() != principal.subject
+        || state.authorization_hash() != principal.authorization_hash
         || !state.is_active(chrono::Utc::now().timestamp_millis())
     {
         return Err(owner_root_failure(

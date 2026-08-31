@@ -171,18 +171,6 @@ impl HostedClient {
         HostedRoutes::new(self)
     }
 
-    pub(crate) fn claim_completion(&self) -> tokio::sync::watch::Receiver<bool> {
-        self.connection.claim_completion()
-    }
-
-    pub(crate) async fn take_claim_owner_root_calls(
-        &self,
-    ) -> Option<
-        tokio::sync::mpsc::Receiver<crate::hosted_runtime::claim_authorization::ClaimOwnerRootCall>,
-    > {
-        self.connection.take_claim_owner_root_calls().await
-    }
-
     pub(crate) fn claim_proof_signer(&self) -> Option<&crypto::Ed25519Signer> {
         self.context.proof_signer()
     }
@@ -205,6 +193,25 @@ impl HostedClient {
         let context = CallContextFactory::from_client_config(config)?;
         Ok(Self {
             connection: HostedConnection::connect_verified(descriptor, config).await?,
+            context,
+            transport: helpers::HostedTransportPolicy::from_client_config(config),
+            on_human_signature: None,
+            server_key: config.server_key.clone(),
+        })
+    }
+
+    /// Connect for outbound calls only, on an ephemeral endpoint node id
+    /// that does not contend with the box network daemon for the device
+    /// node id. Used by `heddle claim`, whose inbound claim serving is the
+    /// daemon's job while this client only makes authenticated weft calls
+    /// (BeginWebAuthnRegistration, BootstrapOwnerRoot, RegisterPublicKey).
+    pub(crate) async fn connect_outbound_with_config(
+        descriptor: &VerifiedEndpointDescriptor,
+        config: &ClientConfig,
+    ) -> Result<Self> {
+        let context = CallContextFactory::from_client_config(config)?;
+        Ok(Self {
+            connection: HostedConnection::connect_verified_outbound(descriptor, config).await?,
             context,
             transport: helpers::HostedTransportPolicy::from_client_config(config),
             on_human_signature: None,
