@@ -796,3 +796,236 @@ fn failure(code: CallFailureCode, message: impl Into<String>) -> CallFailure {
         error: None,
     }
 }
+
+/// Pins the published `heddle-claim/1` JSON contract to these private serde
+/// enums. The golden vectors and JSON Schema under `contracts/` are the source
+/// of truth browser/TS clients consume; if a field name, `#[serde(rename)]`,
+/// the `kind` tag, or the camelCase casing here ever drifts from what is
+/// published, one of these assertions fails and the build goes red.
+///
+/// See `crates/hosted-client/contracts/README.md`.
+#[cfg(test)]
+mod contract {
+    use super::{
+        AgentAccountSummary, AgentConsent, ClaimReply, ClaimRequest, parse_request,
+    };
+    use serde_json::{Value, json};
+
+    const GOLDEN: &str = include_str!("../../contracts/heddle-claim-v1.golden.json");
+    const SCHEMA: &str = include_str!("../../contracts/heddle-claim-v1.schema.json");
+
+    fn golden() -> Value {
+        serde_json::from_str(GOLDEN).expect("golden vectors parse as JSON")
+    }
+
+    fn sample_consent(signature: &str) -> AgentConsent {
+        AgentConsent {
+            account_id: "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28".to_string(),
+            node_id: "11".repeat(32),
+            signature: signature.to_string(),
+            authorization_hash: "authorization-hash-abc123".to_string(),
+            expires_at: 1_700_000_000_000,
+        }
+    }
+
+    /// Every reply variant, serialized through the real enum, must equal its
+    /// published golden vector — this is what catches a rename/casing/tag drift
+    /// on the reply side that a hand-mirror would silently diverge on.
+    #[test]
+    fn reply_variants_match_published_golden() {
+        let golden = golden();
+        let replies = &golden["replies"];
+
+        let cases: Vec<(&str, ClaimReply)> = vec![
+            (
+                "resolved",
+                ClaimReply::Resolved {
+                    agent: AgentAccountSummary {
+                        account_id: "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28".to_string(),
+                        pet_name: "steady-heron".to_string(),
+                        created_at: "2026-01-01T00:00:00Z".to_string(),
+                        last_active_at: None,
+                        spools: Vec::new(),
+                        repos: Vec::new(),
+                        change_count: None,
+                        agent_label: None,
+                    },
+                },
+            ),
+            (
+                "preConsented",
+                ClaimReply::PreConsented {
+                    consent: sample_consent("cHJlLWNvbnNlbnQtc2lnbmF0dXJl"),
+                },
+            ),
+            (
+                "promoteConsented",
+                ClaimReply::PromoteConsented {
+                    consent: sample_consent("cHJvbW90ZS1jb25zZW50LXNpZ25hdHVyZQ"),
+                },
+            ),
+            (
+                "ownerRootResolved",
+                ClaimReply::OwnerRootResolved {
+                    signed_owner_root: "c2lnbmVkLW93bmVyLXJvb3Q".to_string(),
+                    webauthn_challenge: "d2ViYXV0aG4tY2hhbGxlbmdl".to_string(),
+                },
+            ),
+            (
+                "ownerRootCoSigned",
+                ClaimReply::OwnerRootCoSigned {
+                    signed_transition: "c2lnbmVkLXRyYW5zaXRpb24".to_string(),
+                },
+            ),
+            ("refused", ClaimReply::Refused { refusal: "claimed" }),
+        ];
+
+        for (kind, reply) in cases {
+            let produced = serde_json::to_value(&reply).expect("reply serializes");
+            assert_eq!(
+                produced["kind"], kind,
+                "{kind} reply must carry its own internal tag"
+            );
+            assert_eq!(
+                produced, replies[kind],
+                "{kind} reply diverged from the published golden vector"
+            );
+        }
+
+        // Every published reply vector is covered by a case above.
+        let published: std::collections::BTreeSet<String> = replies
+            .as_object()
+            .expect("replies is an object")
+            .keys()
+            .cloned()
+            .collect();
+        let covered: std::collections::BTreeSet<String> = [
+            "resolved",
+            "preConsented",
+            "promoteConsented",
+            "ownerRootResolved",
+            "ownerRootCoSigned",
+            "refused",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(
+            published, covered,
+            "published reply vectors and the pinned cases must be the same set"
+        );
+    }
+
+    /// Every request variant's published golden vector must parse through the
+    /// real deserialize enum with the expected fields. `deny_unknown_fields`
+    /// plus the internal tag mean a rename/casing drift makes the published
+    /// vector fail to parse — turning this red.
+    #[test]
+    fn request_variants_match_published_golden() {
+        let golden = golden();
+        let requests = &golden["requests"];
+
+        let bytes = |kind: &str| serde_json::to_vec(&requests[kind]).expect("request re-serializes");
+
+        assert!(matches!(
+            parse_request(&bytes("resolve")).expect("resolve parses"),
+            ClaimRequest::Resolve
+        ));
+
+        match parse_request(&bytes("resolveOwnerRoot")).expect("resolveOwnerRoot parses") {
+            ClaimRequest::ResolveOwnerRoot { handle } => assert_eq!(handle, "human-handle"),
+            _ => panic!("resolveOwnerRoot parsed as the wrong variant"),
+        }
+
+        match parse_request(&bytes("preConsent")).expect("preConsent parses") {
+            ClaimRequest::PreConsent { handle, nonce } => {
+                assert_eq!(handle, "human-handle");
+                assert_eq!(nonce, "MDEyMzQ1Njc4OWFiY2RlZg");
+            }
+            _ => panic!("preConsent parsed as the wrong variant"),
+        }
+
+        match parse_request(&bytes("promoteConsent")).expect("promoteConsent parses") {
+            ClaimRequest::PromoteConsent {
+                handle,
+                credential_id,
+            } => {
+                assert_eq!(handle, "human-handle");
+                assert_eq!(credential_id, "Y3JlZGVudGlhbA");
+            }
+            _ => panic!("promoteConsent parsed as the wrong variant"),
+        }
+
+        match parse_request(&bytes("claimOwnerRoot")).expect("claimOwnerRoot parses") {
+            ClaimRequest::ClaimOwnerRoot {
+                registration,
+                next_authority_key,
+                next_authority_key_proof,
+                next_recovery_policy,
+                next_recovery_key_proofs,
+                valid_from_unix_seconds,
+                nonce,
+            } => {
+                assert_eq!(registration, "cmVnaXN0cmF0aW9u");
+                assert_eq!(next_authority_key, "bmV4dC1hdXRob3JpdHkta2V5");
+                assert_eq!(next_authority_key_proof, "bmV4dC1hdXRob3JpdHkta2V5LXByb29m");
+                assert_eq!(next_recovery_policy, "bmV4dC1yZWNvdmVyeS1wb2xpY3k");
+                assert_eq!(next_recovery_key_proofs, vec!["cmVjb3Zlcnkta2V5LXByb29m"]);
+                assert_eq!(valid_from_unix_seconds, 1);
+                assert_eq!(nonce, "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI");
+            }
+            _ => panic!("claimOwnerRoot parsed as the wrong variant"),
+        }
+
+        // An unknown field must be rejected — proves the published vectors are
+        // exhaustive, not merely a permissive subset.
+        let mut poisoned = requests["preConsent"].clone();
+        poisoned["unexpected"] = json!(true);
+        assert!(
+            parse_request(&serde_json::to_vec(&poisoned).unwrap()).is_err(),
+            "requests must deny unknown fields"
+        );
+    }
+
+    /// The hand-maintained JSON Schema must declare exactly the `kind`
+    /// discriminants the golden vectors (and therefore the enums) carry, so a
+    /// new/removed variant cannot land in the golden without the schema
+    /// following.
+    #[test]
+    fn schema_declares_the_same_variants_as_the_golden() {
+        let golden = golden();
+        let schema: Value = serde_json::from_str(SCHEMA).expect("schema parses as JSON");
+
+        let mut schema_kinds = std::collections::BTreeSet::new();
+        for def in schema["$defs"]
+            .as_object()
+            .expect("schema $defs is an object")
+            .values()
+        {
+            if let Some(kind) = def
+                .get("properties")
+                .and_then(|properties| properties.get("kind"))
+                .and_then(|kind| kind.get("const"))
+                .and_then(Value::as_str)
+            {
+                schema_kinds.insert(kind.to_string());
+            }
+        }
+
+        let mut golden_kinds = std::collections::BTreeSet::new();
+        for group in ["requests", "replies"] {
+            for kind in golden[group]
+                .as_object()
+                .expect("golden group is an object")
+                .keys()
+            {
+                golden_kinds.insert(kind.clone());
+            }
+        }
+
+        assert_eq!(
+            schema_kinds, golden_kinds,
+            "the JSON Schema and golden vectors must declare the same variants"
+        );
+    }
+}
