@@ -37,6 +37,14 @@ pub struct EndpointState {
     /// this is missing (heddle#901).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket_path: Option<PathBuf>,
+    /// Cryptographic Iroh node id this daemon binds, lower-hex.
+    /// Present only for the box-scoped network daemon, whose
+    /// discovery file must advertise the persisted device node id so
+    /// a browser or weft can dial it by name. Absent for the mount
+    /// daemon and the fsmonitor TCP helper, which are located by
+    /// socket path / host:port instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
 }
 
 /// Default state directory under a Heddle repo root:
@@ -49,6 +57,24 @@ pub fn default_state_dir(repo_root: &Path) -> PathBuf {
 /// `<repo_root>/.heddle/state/<name>.endpoint.json`.
 pub fn endpoint_path_for(repo_root: &Path, name: &str) -> PathBuf {
     default_state_dir(repo_root).join(format!("{name}.endpoint.json"))
+}
+
+/// Box-scoped state directory: `<heddle_home>/state`.
+///
+/// The box network daemon is anchored at the machine's Heddle home
+/// (`repo::identity::heddle_home_dir()`), not a repository root — it
+/// owns the single device-wide Iroh endpoint, which outlives any one
+/// repo. Callers resolve `heddle_home` and pass it in so the path is
+/// pure and testable without mutating process env.
+pub fn box_state_dir_in(heddle_home: &Path) -> PathBuf {
+    heddle_home.join("state")
+}
+
+/// Box-scoped endpoint file location:
+/// `<heddle_home>/state/<name>.endpoint.json`. The `<heddle_home>`
+/// analogue of [`endpoint_path_for`].
+pub fn box_endpoint_path_in(heddle_home: &Path, name: &str) -> PathBuf {
+    box_state_dir_in(heddle_home).join(format!("{name}.endpoint.json"))
 }
 
 pub fn load_endpoint(path: &Path) -> Result<EndpointState, HeddleError> {
@@ -141,6 +167,7 @@ mod tests {
             port: 9999,
             pid: Some(12345),
             socket_path: None,
+            node_id: None,
         };
         persist_endpoint(&path, &original).unwrap();
         let loaded = load_endpoint(&path).unwrap();
@@ -174,6 +201,7 @@ mod tests {
             port: 8001,
             pid: Some(100),
             socket_path: None,
+            node_id: None,
         };
         let replacement = EndpointState {
             port: 8002,
@@ -209,5 +237,52 @@ mod tests {
         // 0x7fff_fffe is just below i32::MAX; the kernel never
         // assigns PIDs that high in practice.
         assert!(!pid_alive(0x7fff_fffe));
+    }
+
+    #[test]
+    fn box_endpoint_path_uses_heddle_home_state_dir() {
+        let tmp = TempDir::new().unwrap();
+        let path = box_endpoint_path_in(tmp.path(), "heddle-netd");
+        assert_eq!(
+            path,
+            tmp.path().join("state").join("heddle-netd.endpoint.json")
+        );
+        assert!(path.starts_with(box_state_dir_in(tmp.path())));
+    }
+
+    /// Single-writer round-trip for the box network daemon: a running
+    /// owner's advertisement survives a foreign `remove_endpoint_if_owned`
+    /// but is reclaimed by its own owner. Mirrors the repo-scoped
+    /// `owned_removal_preserves_a_replacement_endpoint` test, but over a
+    /// `<heddle_home>`-anchored path carrying the persisted node id.
+    #[test]
+    fn box_endpoint_owned_removal_round_trips() {
+        let tmp = TempDir::new().unwrap();
+        let path = box_endpoint_path_in(tmp.path(), "heddle-netd");
+        let owner = EndpointState {
+            version: 1,
+            host: "iroh".to_string(),
+            port: 0,
+            pid: Some(4242),
+            socket_path: Some(box_state_dir_in(tmp.path()).join("heddle-netd.sock")),
+            node_id: Some("aa".repeat(32)),
+        };
+        persist_endpoint(&path, &owner).unwrap();
+
+        let loaded = load_endpoint(&path).unwrap();
+        assert_eq!(loaded, owner);
+        assert_eq!(loaded.node_id.as_deref(), Some("aa".repeat(32).as_str()));
+
+        // A stale/foreign expectation must not unlink a live owner's file.
+        let stranger = EndpointState {
+            pid: Some(9999),
+            ..owner.clone()
+        };
+        assert!(!remove_endpoint_if_owned(&path, &stranger));
+        assert!(path.exists());
+
+        // The genuine owner reclaims its own advertisement.
+        assert!(remove_endpoint_if_owned(&path, &owner));
+        assert!(!path.exists());
     }
 }

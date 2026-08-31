@@ -449,6 +449,21 @@ Examples:
         command: DaemonCommands,
     },
 
+    /// Box-scoped network daemon control plane — distinct from
+    /// `daemon` (FUSE mounts).
+    ///
+    /// `heddle netd serve` runs a long-lived async daemon that binds
+    /// the machine's single persistent Iroh endpoint on the persisted
+    /// device node id and keeps it relay-reachable, so outstanding
+    /// claim links keep resolving across restarts. Unlike `daemon`, it
+    /// is not gated on Linux/FUSE and never idle-exits. `status`
+    /// reports liveness and the advertised node id; `stop` asks a
+    /// running daemon to close its endpoint and exit.
+    Netd {
+        #[command(subcommand)]
+        command: NetdCommands,
+    },
+
     /// Agent reservation and one-shot orchestration API.
     ///
     /// `heddle agent reserve|capture|ready|release|list|heartbeat` is the stable
@@ -534,5 +549,21 @@ pub enum DaemonCommands {
     /// Ask the running daemon to drain its mounts and exit. Sweeps
     /// any leftover registry entries with `fusermount -u` as a
     /// safety net before returning.
+    Stop,
+}
+
+/// Box-scoped network daemon subcommands. See `Commands::Netd`.
+#[derive(Clone, Debug, clap::Subcommand)]
+pub enum NetdCommands {
+    /// Run the foreground network daemon: bind the persistent device
+    /// endpoint, keep relays online, and serve same-uid control RPCs.
+    /// Never idle-exits.
+    Serve,
+
+    /// Report network-daemon liveness and the advertised device node
+    /// id. No-op success when the daemon isn't running.
+    Status,
+
+    /// Ask the running network daemon to close its endpoint and exit.
     Stop,
 }

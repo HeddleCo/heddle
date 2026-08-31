@@ -23,6 +23,9 @@ use super::*;
 /// can't drive them here.
 const SKIP: &[&str] = &[
     "daemon serve",
+    // Box network daemon: a foreground daemon that binds an endpoint
+    // and blocks, exactly like `daemon serve`.
+    "netd serve",
     "monitor",
     "watch",
     "shell",

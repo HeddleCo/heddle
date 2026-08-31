@@ -74,7 +74,7 @@ pub use commands_integration::{
 };
 pub use commands_main::{
     Commands, DaemonCommands, FsckArgs, FsckCommands, FsckRepairCommands, FsckRepairGitArgs,
-    MaintenanceCommands,
+    MaintenanceCommands, NetdCommands,
 };
 pub use commands_oplog::OplogCommands;
 pub use commands_query::QueryArgs;

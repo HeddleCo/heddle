@@ -43,8 +43,8 @@ mod unix_probe;
 pub mod unix_server;
 
 pub use endpoint::{
-    EndpointState, default_state_dir, endpoint_path_for, load_endpoint, persist_endpoint,
-    pid_alive, remove_endpoint, remove_endpoint_if_owned,
+    EndpointState, box_endpoint_path_in, box_state_dir_in, default_state_dir, endpoint_path_for,
+    load_endpoint, persist_endpoint, pid_alive, remove_endpoint, remove_endpoint_if_owned,
 };
 pub use mount_auth::{
     MountAuthDenied, MountClientAuth, authorize_mount_request, trusted_mount_path,

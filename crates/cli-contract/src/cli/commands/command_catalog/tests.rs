@@ -230,6 +230,9 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["daemon", "serve"], &["daemon", "serve"]),
     sample(&["daemon", "status"], &["daemon", "status"]),
     sample(&["daemon", "stop"], &["daemon", "stop"]),
+    sample(&["netd", "serve"], &["netd", "serve"]),
+    sample(&["netd", "status"], &["netd", "status"]),
+    sample(&["netd", "stop"], &["netd", "stop"]),
     sample(&["diff"], &["diff"]),
     sample(
         &["discuss", "open"],
@@ -1808,6 +1811,11 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "context check",
             "context suggest",
             "context audit",
+            // heddle#1533: box network daemon status/stop emit
+            // `output_kind` (netd_status / netd_stop). `netd serve` is
+            // a foreground daemon and stays unswept (see UNSWEPT_TODO).
+            "netd status",
+            "netd stop",
             "daemon stop",
             "diff",
             "discuss open",

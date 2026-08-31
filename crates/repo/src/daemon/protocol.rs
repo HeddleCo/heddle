@@ -154,6 +154,7 @@ mod tests {
             port: 9,
             pid: Some(1),
             socket_path: None,
+            node_id: None,
         };
         let error = send_mount_daemon_request::<_, serde_json::Value>(
             &endpoint,

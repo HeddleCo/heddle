@@ -22,7 +22,8 @@ use cli::cli::{
 use cli::{
     cli::{
         Cli, CloneArgs, Commands, ContextCommands, DaemonCommands, DiffArgs, IntegrationCommands,
-        LogArgs, MaintenanceCommands, ResolveArgs, RevertArgs, ThreadCommands, UndoArgs,
+        LogArgs, MaintenanceCommands, NetdCommands, ResolveArgs, RevertArgs, ThreadCommands,
+        UndoArgs,
         cli_args::LandArgs,
         commands::{
             LogCommandOptions, SnapshotAgentOverrides, build_command_catalog, cmd_abort, cmd_adopt,
@@ -32,7 +33,8 @@ use cli::{
             cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
             cmd_daemon_status, cmd_daemon_stop, cmd_diff, cmd_discuss, cmd_doctor, cmd_doctor_docs,
             cmd_doctor_schemas, cmd_hook, cmd_init, cmd_integration, cmd_land, cmd_log,
-            cmd_maintenance, cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_redo, cmd_remote,
+            cmd_maintenance, cmd_netd_serve, cmd_netd_status, cmd_netd_stop, cmd_pull, cmd_push,
+            cmd_query, cmd_ready, cmd_redo, cmd_remote,
             cmd_resolve, cmd_revert, cmd_review, cmd_shell, cmd_show, cmd_snapshot, cmd_start,
             cmd_status, cmd_sync_smart, cmd_thread, cmd_undo, cmd_undo_recover, cmd_verify,
             cmd_watch, command_runtime_contract_for_command, print_error_with_hint,
@@ -767,6 +769,12 @@ async fn async_main() -> Result<()> {
             DaemonCommands::Stop => cmd_daemon_stop(&cli),
         },
 
+        Commands::Netd { command } => match command {
+            NetdCommands::Serve => cmd_netd_serve(&cli).await,
+            NetdCommands::Status => cmd_netd_status(&cli),
+            NetdCommands::Stop => cmd_netd_stop(&cli),
+        },
+
         Commands::Agent { command } => cmd_agent(&cli, command).await,
 
         Commands::Discuss { command } => cmd_discuss(&cli, command).await,
@@ -1074,6 +1082,8 @@ fn is_daemon_invocation(command: &Commands) -> bool {
         command,
         Commands::Daemon {
             command: DaemonCommands::Serve
+        } | Commands::Netd {
+            command: NetdCommands::Serve
         }
     )
 }

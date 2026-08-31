@@ -451,6 +451,7 @@ pub fn run_local_monitor_helper(repo_root: &Path) -> Result<(), HeddleError> {
         port,
         pid: Some(std::process::id()),
         socket_path: None,
+        node_id: None,
     };
     persist_endpoint(&endpoint_path, &endpoint)?;
     remove_starting_helper_if_owned(&state_path, std::process::id());
@@ -1596,6 +1597,7 @@ mod tests {
                             port: 9911,
                             pid: Some(std::process::id()),
                             socket_path: None,
+                            node_id: None,
                         },
                     )
                 })
@@ -1688,6 +1690,7 @@ mod tests {
                 // reused, so liveness alone cannot prove the socket is live.
                 pid: Some(std::process::id()),
                 socket_path: None,
+                node_id: None,
             },
         )
         .unwrap();
