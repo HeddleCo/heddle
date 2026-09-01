@@ -18,8 +18,8 @@ use api::{
         ListContextResponse, ListDiscussionsPageEnd, ListDiscussionsResponse, ListRefsPageEnd,
         ListRefsResponse, ListThreadsPageEnd, ListThreadsResponse, PackChunk, PackStreamKind,
         PullComplete, PullReady, PullServerFrame, PushClientFrame, PushComplete, PushReady,
-        PushServerFrame, SignedSpoolOwnerGenesis, StateId, TransferCheckpoint, TransportMode,
-        UpdateSpoolRequest, get_context_history_response, list_context_response,
+        PushRequest, PushServerFrame, SignedSpoolOwnerGenesis, StateId, TransferCheckpoint,
+        TransportMode, UpdateSpoolRequest, get_context_history_response, list_context_response,
         list_discussions_response, list_refs_response, list_threads_response, pull_server_frame,
         push_client_frame, push_server_frame,
     },
@@ -52,7 +52,21 @@ fn owner_genesis_fixture() -> SignedSpoolOwnerGenesis {
 }
 
 pub(crate) async fn start() -> (HostedClient, JoinHandle<()>) {
-    start_inner(None, BlobFixture::default(), None, None).await
+    start_inner(None, BlobFixture::default(), None, None, None).await
+}
+
+pub(crate) async fn start_recording_push()
+-> (HostedClient, JoinHandle<()>, Arc<Mutex<Vec<PushRequest>>>) {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (client, server) = start_inner(
+        None,
+        BlobFixture::default(),
+        None,
+        None,
+        Some(Arc::clone(&captured)),
+    )
+    .await;
+    (client, server, captured)
 }
 
 pub(crate) async fn start_recording_create_spool() -> (
@@ -65,6 +79,7 @@ pub(crate) async fn start_recording_create_spool() -> (
         None,
         BlobFixture::default(),
         Some(Arc::clone(&captured)),
+        None,
         None,
     )
     .await;
@@ -82,6 +97,7 @@ pub(crate) async fn start_recording_spool_mutations() -> (
         BlobFixture::default(),
         None,
         Some(Arc::clone(&captured)),
+        None,
     )
     .await;
     (client, server, captured)
@@ -96,6 +112,7 @@ pub(crate) async fn start_with_remote_state(
             pack: None,
         }),
         BlobFixture::default(),
+        None,
         None,
         None,
     )
@@ -113,6 +130,7 @@ pub(crate) async fn start_with_pull_pack(
             pack: Some((pack_data, index_data)),
         }),
         BlobFixture::default(),
+        None,
         None,
         None,
     )
@@ -150,7 +168,7 @@ async fn start_with_get_blob_contents_and_pull(
         contents: blobs.into_iter().collect(),
         requested: Arc::clone(&requested),
     };
-    let (client, server) = start_inner(pull, fixture, None, None).await;
+    let (client, server) = start_inner(pull, fixture, None, None, None).await;
     (client, server, requested)
 }
 
@@ -171,6 +189,7 @@ async fn start_inner(
     blobs: BlobFixture,
     create_spool: Option<Arc<Mutex<Vec<CreateSpoolRequest>>>>,
     spool_mutations: Option<Arc<Mutex<SpoolMutationCapture>>>,
+    push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
 ) -> (HostedClient, JoinHandle<()>) {
     let server = Endpoint::builder(presets::Minimal)
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
@@ -196,6 +215,7 @@ async fn start_inner(
                 blobs.clone(),
                 create_spool.clone(),
                 spool_mutations.clone(),
+                push_requests.clone(),
             ));
         }
         server.close().await;
@@ -224,6 +244,7 @@ async fn serve_call(
     blobs: BlobFixture,
     create_spool: Option<Arc<Mutex<Vec<CreateSpoolRequest>>>>,
     spool_mutations: Option<Arc<Mutex<SpoolMutationCapture>>>,
+    push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
 ) {
     let mut request = Vec::new();
     let (method, prelude_len) = loop {
@@ -262,7 +283,7 @@ async fn serve_call(
         }
         StreamingShape::Bidirectional => {
             if method == "/heddle.api.v1alpha1.RepoSyncService/Push" {
-                serve_push(send, recv, request.split_off(prelude_len)).await;
+                serve_push(send, recv, request.split_off(prelude_len), push_requests).await;
                 return;
             }
             tokio::spawn(async move {
@@ -286,8 +307,9 @@ async fn serve_push(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     mut buffered: Vec<u8>,
+    captured: Option<Arc<Mutex<Vec<PushRequest>>>>,
 ) {
-    let advertised = loop {
+    let request = loop {
         if let Some((frame, consumed)) = decode_stream_frame(&buffered).unwrap() {
             let request = match frame {
                 StreamFrame::Message(body) => PushClientFrame::decode(body).unwrap(),
@@ -295,7 +317,7 @@ async fn serve_push(
             };
             buffered.drain(..consumed);
             if let Some(push_client_frame::Frame::Request(request)) = request.frame {
-                break request.objects;
+                break *request;
             }
             continue;
         }
@@ -306,6 +328,13 @@ async fn serve_push(
             .expect("push request frame");
         buffered.extend_from_slice(&chunk);
     };
+    let advertised = request.objects.clone();
+    if let Some(captured) = captured {
+        captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(request);
+    }
 
     let ready = PushServerFrame {
         frame: Some(push_server_frame::Frame::Ready(PushReady {

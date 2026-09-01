@@ -690,6 +690,7 @@ impl HostedClient {
                     metadata,
                     (!thread_id.is_empty()).then_some(thread_id.as_str()),
                     remote_refs.as_deref().unwrap_or_default(),
+                    new_value,
                 )
             })
             .transpose()?;
@@ -938,16 +939,21 @@ impl HostedClient {
             operation_id.as_str(),
         );
         let transport_mode = preferred_transport_mode(&self.transport, object_count);
-        let thread_metadata = load_thread_metadata(repo, target_thread, local_state)?
-            .as_ref()
-            .map(|metadata| {
-                to_proto_thread_metadata(
-                    metadata,
-                    (!target_thread_id.is_empty()).then_some(target_thread_id.as_str()),
-                    &remote_refs,
-                )
-            })
-            .transpose()?;
+        let local_thread_metadata = load_thread_metadata(repo, target_thread, local_state)?;
+        let thread_metadata = match local_thread_metadata.as_ref() {
+            Some(metadata) => Some(to_proto_thread_metadata(
+                metadata,
+                (!target_thread_id.is_empty()).then_some(target_thread_id.as_str()),
+                &remote_refs,
+                local_state,
+            )?),
+            None if git_lane.is_none() => {
+                return Err(ProtocolError::InvalidState(format!(
+                    "native push target '{target_thread}' has no local thread record with a stable identity"
+                )));
+            }
+            None => None,
+        };
         let mut push_request = PushRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             local_state: super::helpers::proto_state_id(local_state),
@@ -3530,12 +3536,9 @@ mod pull_bootstrap_tests {
     }
 }
 
-fn state_id_string_to_bytes(s: &str) -> Vec<u8> {
-    if s.is_empty() {
-        return Vec::new();
-    }
-    objects::object::StateId::parse(s)
-        .map(|id| id.as_bytes().to_vec())
+fn content_hash_string_to_bytes(value: &str) -> Vec<u8> {
+    ContentHash::from_hex(value)
+        .map(|hash| hash.as_bytes().to_vec())
         .unwrap_or_default()
 }
 
@@ -3563,9 +3566,10 @@ fn to_proto_thread_metadata(
     metadata: &SyncedThreadMetadata,
     thread_id: Option<&str>,
     remote_refs: &[HostedRefEntry],
+    pushed_state: StateId,
 ) -> Result<ThreadMetadata, ProtocolError> {
     Ok(ThreadMetadata {
-        name: metadata.thread.clone(),
+        name: metadata.id.clone(),
         target_thread: metadata.target_thread.clone(),
         parent_thread: metadata.parent_thread.clone(),
         task: metadata.task.clone(),
@@ -3591,12 +3595,8 @@ fn to_proto_thread_metadata(
         base_state: StateId::parse(&metadata.base_state)
             .ok()
             .and_then(super::helpers::proto_state_id),
-        base_root: state_id_string_to_bytes(&metadata.base_root),
-        current_state: metadata.current_state.as_deref().and_then(|state| {
-            StateId::parse(state)
-                .ok()
-                .and_then(super::helpers::proto_state_id)
-        }),
+        base_root: content_hash_string_to_bytes(&metadata.base_root),
+        current_state: super::helpers::proto_state_id(pushed_state),
         merged_state: metadata.merged_state.as_deref().and_then(|state| {
             StateId::parse(state)
                 .ok()
@@ -3727,6 +3727,10 @@ fn partial_fetch_status_for_repo(repo: &Repository) -> i32 {
 #[cfg(test)]
 mod native_exchange_tests {
     use objects::object::{Attribution, Principal};
+    use repo::{
+        ThreadFreshness, ThreadManager, ThreadMode, ThreadRecord, ThreadState,
+        ThreadVerificationSummary,
+    };
     use tempfile::TempDir;
 
     use super::*;
@@ -3745,11 +3749,150 @@ mod native_exchange_tests {
         (repo, state)
     }
 
+    fn save_thread_record(
+        repo: &Repository,
+        state: StateId,
+        stable_id: &str,
+        thread: &str,
+    ) -> ThreadRecord {
+        let stored_state = repo.store().get_state(&state).unwrap().unwrap();
+        let now = chrono::Utc::now();
+        let record = ThreadRecord {
+            id: stable_id.to_string(),
+            thread: thread.to_string(),
+            target_thread: None,
+            parent_thread: None,
+            mode: ThreadMode::Solid,
+            state: ThreadState::Active,
+            base_state: state.to_string_full(),
+            base_root: stored_state.tree.to_hex(),
+            current_state: Some(state.to_string_full()),
+            merged_state: None,
+            task: Some("prove first-push identity".to_string()),
+            changed_paths: vec!["tracked.txt".to_string()],
+            impact_categories: Vec::new(),
+            heavy_impact_paths: Vec::new(),
+            promotion_suggested: false,
+            freshness: ThreadFreshness::Current,
+            verification_summary: ThreadVerificationSummary::default(),
+            confidence_summary: Default::default(),
+            integration_policy_result: Default::default(),
+            created_at: now,
+            updated_at: now,
+            ephemeral: None,
+            auto: false,
+            shared_target_dir: None,
+        };
+        ThreadManager::new(repo.heddle_dir())
+            .save_record(&record)
+            .unwrap();
+        record
+    }
+
+    #[tokio::test]
+    async fn native_first_push_sends_complete_stable_local_thread_metadata() {
+        let (mut client, server, captured) =
+            crate::hosted_runtime::hosted::test_server::start_recording_push().await;
+        let source = TempDir::new().unwrap();
+        let (repo, state) = repository(&source);
+        let record = save_thread_record(&repo, state, "thread-stable-01", "main");
+
+        let pushed = client
+            .push_with_expected_head_profiled(
+                &repo,
+                "acme/widgets",
+                state,
+                "main",
+                false,
+                ExpectedRemoteHead::Missing,
+                "first-push-metadata-test-op".to_string(),
+            )
+            .await
+            .unwrap()
+            .0;
+        assert!(!pushed.success);
+
+        let request = captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .first()
+            .cloned()
+            .expect("test server must capture the first push request");
+        assert!(request.create_thread, "empty ListRefs means a first push");
+        assert!(request.target_thread_id.is_empty());
+        assert_eq!(request.target_thread, record.thread);
+
+        let metadata = request
+            .thread_metadata
+            .expect("a native first push must carry local thread metadata");
+        assert_eq!(
+            metadata.name, record.id,
+            "weft persists metadata.name as the stable thread identity"
+        );
+        assert!(
+            metadata.thread_id.is_empty(),
+            "the remote has no identity yet"
+        );
+        assert!(metadata.base_state.is_some());
+        assert!(!metadata.base_root.is_empty());
+        assert_eq!(metadata.current_state, request.local_state);
+        assert_eq!(
+            metadata.thread_mode,
+            ProtoThreadMode::Solid as i32,
+            "weft must be able to parse the local thread mode"
+        );
+        assert_eq!(
+            metadata.thread_state,
+            ProtoThreadState::ThreadStateActive as i32,
+            "weft must be able to parse the local lifecycle state"
+        );
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_push_without_local_stable_identity_fails_before_sending_request() {
+        let (mut client, server, captured) =
+            crate::hosted_runtime::hosted::test_server::start_recording_push().await;
+        let source = TempDir::new().unwrap();
+        let (repo, state) = repository(&source);
+
+        let error = client
+            .push_with_expected_head_profiled(
+                &repo,
+                "acme/widgets",
+                state,
+                "main",
+                false,
+                ExpectedRemoteHead::Missing,
+                "missing-local-metadata-test-op".to_string(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no local thread record with a stable identity")
+        );
+        assert!(
+            captured
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .is_empty(),
+            "native push must not send an identity-less request"
+        );
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn native_push_and_clone_pull_complete_the_real_framed_exchange() {
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
+        save_thread_record(&repo, state, "thread-stable-main", "main");
 
         assert!(client.list_refs("acme/widgets").await.unwrap().is_empty());
         let pushed = client
