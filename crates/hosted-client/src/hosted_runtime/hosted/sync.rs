@@ -2032,6 +2032,14 @@ impl HostedClient {
                     let decode_elapsed = decode_start.elapsed();
                     profile.store_receive_object += decode_elapsed;
                 }
+                Some(pull_server_frame::Frame::StateAttachment(_)) => {
+                    // Recognized and ignored. Weft streams attachments on this
+                    // frame, not in the native pack. Discussions are a v2
+                    // named-map chain; this client decodes v1 positional
+                    // DiscussionsBlob and must not treat the chain as
+                    // transport. resolve() ListByState-falls-back when
+                    // discussions_from_pack is advertised but unconsumable.
+                }
                 Some(pull_server_frame::Frame::Complete(complete)) => {
                     tx.take();
                     request_pump
@@ -2206,10 +2214,6 @@ impl HostedClient {
                         owned_repo,
                     ));
                 }
-                // weft may send Frame::StateAttachment here. That is not the
-                // live discussions transport (v2 named-map chain vs this
-                // client's v1 blob). resolve() ListByState-falls-back when the
-                // advertised pack attachment is missing or undecodable.
                 _ => {}
             }
         }

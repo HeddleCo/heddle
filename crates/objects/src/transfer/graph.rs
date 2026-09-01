@@ -165,10 +165,11 @@ impl ObjectType {
 
     /// Whether this object type may ride the server→client **pull/clone** pack.
     ///
-    /// Identical to [`ObjectType::packable`]: attachments are carried in the
-    /// pull pack exactly as today. The push/pull split exists solely so the
-    /// push direction can exclude `StateAttachment` without disturbing the
-    /// working pull carriage.
+    /// Same boolean as [`ObjectType::packable`] so planners still list
+    /// `StateAttachment`. Weft does not put those records in the native pack:
+    /// it streams `PullServerFrame::StateAttachment`. Discussions attachments
+    /// are not the live transport (v2 chain vs this client's v1 blob); clone
+    /// treats an advertised-but-unconsumable pack as a ListByState fallback.
     pub fn packable_for_pull(self) -> bool {
         self.packable()
     }
@@ -1015,10 +1016,7 @@ fn missing_blob(hash: ContentHash) -> HeddleError {
     }
 }
 
-fn blob_has_purge_evidence(
-    store: &impl ObjectStore,
-    hash: &ContentHash,
-) -> Result<bool> {
+fn blob_has_purge_evidence(store: &impl ObjectStore, hash: &ContentHash) -> Result<bool> {
     let Some(bytes) = store.get_redactions_bytes_for_blob(hash)? else {
         return Ok(false);
     };
