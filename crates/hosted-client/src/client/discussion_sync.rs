@@ -12,7 +12,10 @@
 //!   signed). #549 rejects attachments in the pack, so they cannot ride it.
 //! * **Pull/clone (read path):** after a successful clone/pull, consume the
 //!   pull bootstrap's discussions when present, falling back to `ListByState`
-//!   for older servers, and materialize unseen turns into the local op-log.
+//!   for older servers and when the server advertised `discussions_from_pack`
+//!   but this client cannot consume the attachment (missing / wrong kind /
+//!   version skew). Live discussions are not a pack snapshot. Materialize
+//!   unseen turns into the local op-log.
 //!
 //! ## Turn identity
 //!
@@ -528,6 +531,10 @@ pub async fn pull_discussions(
     };
     let change_id = state.change_id;
 
+    // `None` is ListByState: older servers, or `discussions_from_pack`
+    // advertised a snapshot this client cannot consume (missing attachment /
+    // version skew). `Some` is the packed or inline bootstrap set, including
+    // an explicit empty page.
     let hosted = match bootstrap {
         Some(discussions) => discussions
             .iter()

@@ -26,8 +26,9 @@ use objects::{
     Progress,
     error::HeddleError,
     object::{
-        AnnotationStatus, ContentHash, ContextBlob, ContextTarget, Discussion, DiscussionsBlob,
-        MarkerName, StateAttachmentBody, StateAttachmentKind, StateId, ThreadName, TreeEntryTarget,
+        AnnotationStatus, ContentHash, ContextBlob, ContextTarget, Discussion, DiscussionError,
+        DiscussionsBlob, MarkerName, StateAttachmentBody, StateAttachmentKind, StateId, ThreadName,
+        TreeEntryTarget,
     },
     store::{FsStore, ObjectStore, PackObjectId, SnapshotCommitDescriptor},
 };
@@ -97,7 +98,16 @@ pub struct PullBootstrapMetadata {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedPullBootstrapMetadata {
-    pub discussions: Vec<Discussion>,
+    /// Packed or inline bootstrap discussions. `None` means the server
+    /// advertised `discussions_from_pack` and this client cannot consume the
+    /// attachment (missing, wrong kind, or version skew) — callers pass that
+    /// to `pull_discussions` so it ListByState-falls-back instead of treating
+    /// an empty vec as "no discussions".
+    pub discussions: Option<Vec<Discussion>>,
+    /// Human-facing reason when [`Self::discussions`] is `None` because the
+    /// packed attachment was unconsumable. Absent on the inline-bootstrap path
+    /// and when the pack decoded.
+    pub discussions_pack_fallback: Option<String>,
     pub context: Vec<(ContextTarget, ContextBlob)>,
 }
 
@@ -116,10 +126,22 @@ impl PullBootstrapMetadata {
         let state_id = state_id.ok_or_else(|| {
             ProtocolError::InvalidState("pull bootstrap is missing its final state".to_string())
         })?;
-        let discussions = if self.discussions_from_pack {
-            discussions_from_pull_pack(repo, state_id)?
+        let (discussions, discussions_pack_fallback) = if self.discussions_from_pack {
+            match discussions_from_pull_pack(repo, state_id)? {
+                PackedDiscussions::Ready(discussions) => (Some(discussions), None),
+                PackedDiscussions::Unconsumable(reason) => {
+                    let warning = format!(
+                        "pull bootstrap advertised packed discussions but this client cannot consume them ({reason}); falling back to ListByState"
+                    );
+                    eprintln!(
+                        "{} {warning}",
+                        heddle_cli_render::cli::style::warn_marker()
+                    );
+                    (None, Some(warning))
+                }
+            }
         } else {
-            self.discussions.clone()
+            (Some(self.discussions.clone()), None)
         };
         let context = if self.context_from_pack {
             context_from_pull_pack(repo, state_id)?
@@ -128,6 +150,7 @@ impl PullBootstrapMetadata {
         };
         Ok(ResolvedPullBootstrapMetadata {
             discussions,
+            discussions_pack_fallback,
             context,
         })
     }
@@ -221,21 +244,27 @@ fn decode_bootstrap_state_id(value: Vec<u8>, field: &str) -> Result<StateId, Pro
     Ok(StateId::from_bytes(value))
 }
 
+enum PackedDiscussions {
+    Ready(Vec<Discussion>),
+    /// Server advertised a pack optimization this client cannot consume.
+    /// Clone/pull must ListByState instead of exiting 76.
+    Unconsumable(String),
+}
+
 pub(crate) fn discussions_from_pull_pack(
     repo: &Repository,
     state_id: StateId,
-) -> Result<Vec<Discussion>, ProtocolError> {
+) -> Result<PackedDiscussions, ProtocolError> {
     let Some(attachment) =
         repo.latest_state_attachment(&state_id, StateAttachmentKind::Discussions)?
     else {
-        return Err(ProtocolError::InvalidState(
-            "pull bootstrap advertised packed discussions but the attachment is missing"
-                .to_string(),
+        return Ok(PackedDiscussions::Unconsumable(
+            "the attachment is missing".to_string(),
         ));
     };
     let StateAttachmentBody::Discussions(hash) = attachment.body else {
-        return Err(ProtocolError::InvalidState(
-            "packed discussions attachment has the wrong kind".to_string(),
+        return Ok(PackedDiscussions::Unconsumable(
+            "the attachment has the wrong kind".to_string(),
         ));
     };
     let blob = repo.store().get_blob(&hash)?.ok_or_else(|| {
@@ -243,9 +272,16 @@ pub(crate) fn discussions_from_pull_pack(
             "packed discussions attachment references missing blob {hash}"
         ))
     })?;
-    DiscussionsBlob::decode(blob.content())
-        .map(|blob| blob.discussions)
-        .map_err(|error| ProtocolError::InvalidState(error.to_string()))
+    match DiscussionsBlob::decode(blob.content()) {
+        Ok(blob) => Ok(PackedDiscussions::Ready(blob.discussions)),
+        Err(DiscussionError::UnsupportedVersion(version)) => Ok(PackedDiscussions::Unconsumable(
+            format!("unsupported blob version {version}"),
+        )),
+        Err(DiscussionError::Encoding(error)) => Ok(PackedDiscussions::Unconsumable(format!(
+            "blob encoding is not this client's DiscussionsBlob v1: {error}"
+        ))),
+        Err(error) => Err(ProtocolError::InvalidState(error.to_string())),
+    }
 }
 
 pub(crate) fn context_from_pull_pack(
@@ -2173,6 +2209,10 @@ impl HostedClient {
                         owned_repo,
                     ));
                 }
+                // weft may send Frame::StateAttachment here. That is not the
+                // live discussions transport (v2 named-map chain vs this
+                // client's v1 blob). resolve() ListByState-falls-back when the
+                // advertised pack attachment is missing or undecodable.
                 _ => {}
             }
         }
@@ -3159,9 +3199,9 @@ mod pull_bootstrap_tests {
     use chrono::Utc;
     use objects::{
         object::{
-            Annotation, AnnotationKind, AnnotationScope, Attribution, Blob, DiscussionResolution,
-            DiscussionTurn, Principal, State, StateAttachment, SymbolAnchor, Tree, TreeEntry,
-            VisibilityTier,
+            Annotation, AnnotationKind, AnnotationScope, Attribution, Blob, ContentHash,
+            Discussion, DiscussionResolution, DiscussionTurn, DiscussionsBlob, Principal, State,
+            StateAttachment, StateAttachmentBody, SymbolAnchor, Tree, TreeEntry, VisibilityTier,
         },
         store::ObjectStore,
     };
@@ -3535,8 +3575,194 @@ mod pull_bootstrap_tests {
         .resolve(&repo, Some(snapshot.state_id))
         .expect("resolve packed bootstrap");
 
-        assert_eq!(resolved.discussions, vec![discussion]);
+        assert_eq!(resolved.discussions, Some(vec![discussion]));
+        assert!(resolved.discussions_pack_fallback.is_none());
         assert_eq!(resolved.context, vec![(target, context_blob)]);
+    }
+
+    fn seed_snapshot() -> (TempDir, Repository, StateId) {
+        let temp = TempDir::new().expect("temp repo");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").expect("write source");
+        let snapshot = repo
+            .snapshot(Some("seed".to_string()), None)
+            .expect("snapshot");
+        (temp, repo, snapshot.state_id)
+    }
+
+    fn sample_discussion(state_id: StateId) -> Discussion {
+        Discussion {
+            id: "discussion-1".to_string(),
+            anchor: SymbolAnchor::new("lib.rs", "run"),
+            opened_against_state: state_id,
+            opened_at: 1_700_000_000,
+            thread_ref: None,
+            turns: vec![DiscussionTurn {
+                author: Principal::new("Ada", "ada@example.com"),
+                body: "keep this invariant".to_string(),
+                posted_at: 1_700_000_001,
+                references: Vec::new(),
+            }],
+            resolution: DiscussionResolution::Open,
+            body_changed_since_open: false,
+            anchor_ambiguous: false,
+            orphaned: false,
+            visibility: VisibilityTier::Public,
+            resolved_annotation_id: None,
+        }
+    }
+
+    fn packed_metadata() -> PullBootstrapMetadata {
+        PullBootstrapMetadata {
+            discussions_from_pack: true,
+            discussions: Vec::new(),
+            context_from_pack: false,
+            context: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn packed_bootstrap_falls_back_when_discussions_attachment_is_missing() {
+        let (_temp, repo, state_id) = seed_snapshot();
+        let resolved = packed_metadata()
+            .resolve(&repo, Some(state_id))
+            .expect("missing packed discussions must not clone-kill");
+        assert!(
+            resolved.discussions.is_none(),
+            "None means ListByState, not an empty inline set"
+        );
+        let warning = resolved
+            .discussions_pack_fallback
+            .expect("warned fallback");
+        assert!(
+            warning.contains("the attachment is missing"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("falling back to ListByState"),
+            "{warning}"
+        );
+        assert!(
+            !warning.contains("pull bootstrap advertised packed discussions but the attachment is missing"),
+            "the clone-killer error string must not return as success warning verbatim: {warning}"
+        );
+    }
+
+    #[test]
+    fn packed_bootstrap_falls_back_on_version_skew() {
+        let (_temp, repo, state_id) = seed_snapshot();
+        let principal = Principal::new("Ada", "ada@example.com");
+        #[derive(serde::Serialize)]
+        struct NamedV2 {
+            format_version: u8,
+            discussions: Vec<Discussion>,
+        }
+        let bytes = rmp_serde::to_vec_named(&NamedV2 {
+            format_version: 2,
+            discussions: vec![sample_discussion(state_id)],
+        })
+        .expect("encode weft-like named-map v2");
+        let hash = repo
+            .store()
+            .put_blob(&Blob::from(bytes))
+            .expect("store v2 blob");
+        repo.put_state_attachment(&StateAttachment {
+            state_id,
+            body: StateAttachmentBody::Discussions(hash),
+            attribution: Attribution::human(principal),
+            created_at: Utc::now(),
+            supersedes: None,
+        })
+        .expect("attach v2 discussions");
+
+        let resolved = packed_metadata()
+            .resolve(&repo, Some(state_id))
+            .expect("version skew must not clone-kill");
+        assert!(resolved.discussions.is_none());
+        let warning = resolved
+            .discussions_pack_fallback
+            .expect("warned fallback");
+        assert!(
+            warning.contains("falling back to ListByState"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("unsupported blob version")
+                || warning.contains("blob encoding is not this client's DiscussionsBlob v1"),
+            "{warning}"
+        );
+    }
+
+    #[test]
+    fn packed_bootstrap_fail_closes_when_discussions_blob_is_corrupt() {
+        let (_temp, repo, state_id) = seed_snapshot();
+        let mut discussion = sample_discussion(state_id);
+        discussion.id.clear();
+        let blob = DiscussionsBlob {
+            format_version: DiscussionsBlob::FORMAT_VERSION,
+            discussions: vec![discussion],
+        };
+        let bytes = rmp_serde::to_vec(&blob).expect("encode corrupt v1 without validate");
+        let hash = repo
+            .store()
+            .put_blob(&Blob::from(bytes))
+            .expect("store corrupt blob");
+        repo.put_state_attachment(&StateAttachment {
+            state_id,
+            body: StateAttachmentBody::Discussions(hash),
+            attribution: Attribution::human(Principal::new("Ada", "ada@example.com")),
+            created_at: Utc::now(),
+            supersedes: None,
+        })
+        .expect("attach corrupt discussions");
+
+        let error = packed_metadata()
+            .resolve(&repo, Some(state_id))
+            .expect_err("decoded v1 with invalid items is true corruption");
+        assert!(
+            error.to_string().contains("discussion id must not be empty"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn packed_bootstrap_fail_closes_when_discussions_blob_is_missing() {
+        let (_temp, repo, state_id) = seed_snapshot();
+        let missing = ContentHash::compute(b"not-stored-discussions");
+        repo.put_state_attachment(&StateAttachment {
+            state_id,
+            body: StateAttachmentBody::Discussions(missing),
+            attribution: Attribution::human(Principal::new("Ada", "ada@example.com")),
+            created_at: Utc::now(),
+            supersedes: None,
+        })
+        .expect("attach dangling discussions hash");
+
+        let error = packed_metadata()
+            .resolve(&repo, Some(state_id))
+            .expect_err("attachment present with missing blob is corruption");
+        assert!(
+            error
+                .to_string()
+                .contains("packed discussions attachment references missing blob"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn unpacked_bootstrap_keeps_inline_discussions() {
+        let (_temp, repo, state_id) = seed_snapshot();
+        let discussion = sample_discussion(state_id);
+        let resolved = PullBootstrapMetadata {
+            discussions_from_pack: false,
+            discussions: vec![discussion.clone()],
+            context_from_pack: false,
+            context: Vec::new(),
+        }
+        .resolve(&repo, Some(state_id))
+        .expect("inline bootstrap");
+        assert_eq!(resolved.discussions, Some(vec![discussion]));
+        assert!(resolved.discussions_pack_fallback.is_none());
     }
 }
 
