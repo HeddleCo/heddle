@@ -11,7 +11,10 @@ use super::{
     agent_node_identity,
     auth::headless_token_metadata,
     auth_login::{LoginInputs, LoginPath, login, login_path, store_agent_root},
-    auth_login_agent::finish_invite_create_from_response,
+    auth_login_agent::{
+        finish_invite_create_from_response, remint_with_client_for_test,
+        test_support::start_recording_client,
+    },
     device_flow::restrict_agent_account_root,
     identity_state::{self, ClaimState},
     root_mint::mint_agent_root,
@@ -327,7 +330,7 @@ fn login_invite_create_succeeds_with_a_claim_next_directive() {
 }
 
 #[tokio::test]
-async fn remint_uses_claim_state_when_the_keystore_row_is_missing() {
+async fn remint_uses_claim_state_and_uploads_owner_root_at_enrollment() {
     let _home = IsolatedHome::new();
     let server = "api.claim-state.test";
     let identity = agent_node_identity::load_or_create().expect("node identity");
@@ -340,18 +343,24 @@ async fn remint_uses_claim_state_when_the_keystore_row_is_missing() {
         None,
     ))
     .expect("store claim state");
-    login(&TextCtx, server, false, None, false)
+    let (mut client, server_task, calls, _) = start_recording_client().await;
+    remint_with_client_for_test(server, &mut client)
         .await
-        .expect("missing cred + claim state remints");
+        .expect("missing cred + claim state remints and uploads");
+    client.close().await;
+    server_task.await.expect("recording server");
     let stored = credentials::get_server_credential(server)
         .expect("load")
         .expect("reminted into the keystore");
     assert!(!stored.token.is_empty());
-    let state = identity_state::load()
-        .expect("load")
-        .expect("claim state");
+    let state = identity_state::load().expect("load").expect("claim state");
     assert!(
         state.signed_owner_root_hex.is_some(),
         "remint must lazy-mint the claimable deferred-human owner root"
+    );
+    assert_eq!(
+        *calls.lock().unwrap_or_else(|poison| poison.into_inner()),
+        ["/heddle.api.v1alpha1.OwnerAuthorizationService/BootstrapOwnerRoot"],
+        "remint must install the owner root during enrollment"
     );
 }
