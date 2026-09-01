@@ -867,6 +867,14 @@ fn sample_main_thread(current_state: &str, materialized: &str) -> Thread {
     }
 }
 
+const ATOMIC_RECORD_THREAD: &str = "atomic-record-test";
+
+fn sample_atomic_record_thread(current_state: &str, materialized: &str) -> Thread {
+    let mut record = sample_main_thread(current_state, materialized);
+    record.thread = ATOMIC_RECORD_THREAD.to_string();
+    record
+}
+
 fn encode_thread_record_set(manager: &ThreadManager, records: &[Thread]) -> Vec<Vec<u8>> {
     records
         .iter()
@@ -1106,7 +1114,7 @@ fn step_nonatomic_restores_record_and_workspace_on_save_failure() {
 
     // R0: the prior persisted record (record half: current_state; workspace
     // half: materialized_path).
-    let r0 = sample_main_thread("current-A", "/work/A");
+    let r0 = sample_atomic_record_thread("current-A", "/work/A");
     manager.save(&r0).unwrap();
 
     // R1: what the (faulted) save writes — different in BOTH halves.
@@ -1118,7 +1126,10 @@ fn step_nonatomic_restores_record_and_workspace_on_save_failure() {
         with_nonatomic_forward_fault(0, || repo::atomic::execute(&repo, SaveOnly { record: r1 }));
     assert!(result.is_err(), "the injected save fault must fail the op");
 
-    let restored = manager.find_by_thread("main").unwrap().unwrap();
+    let restored = manager
+        .find_by_thread(ATOMIC_RECORD_THREAD)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         restored.current_state.as_deref(),
         Some("current-A"),
@@ -1144,8 +1155,8 @@ fn step_nonatomic_restores_replacement_save_deleting_leaked_new_record() {
     let repo = Repository::init_default(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
-    // R0: the prior persisted record for thread "main".
-    let mut r0 = sample_main_thread("current-A", "/work/A");
+    // R0: the prior persisted record for the isolated test thread.
+    let mut r0 = sample_atomic_record_thread("current-A", "/work/A");
     r0.id = "thread-main-v1".to_string();
     r0.updated_at = chrono::Utc::now();
     manager.save(&r0).unwrap();
@@ -1165,13 +1176,21 @@ fn step_nonatomic_restores_replacement_save_deleting_leaked_new_record() {
         manager.load("thread-main-v2").unwrap().is_none(),
         "the leaked new_id record must be deleted on rollback"
     );
-    let remaining = manager.list().unwrap();
+    let remaining: Vec<_> = manager
+        .list()
+        .unwrap()
+        .into_iter()
+        .filter(|record| record.thread == ATOMIC_RECORD_THREAD)
+        .collect();
     assert_eq!(
         remaining.len(),
         1,
         "only the prior record survives for the thread, no leaked newer record"
     );
-    let restored = manager.find_by_thread("main").unwrap().unwrap();
+    let restored = manager
+        .find_by_thread(ATOMIC_RECORD_THREAD)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         restored.id, "thread-main-v1",
         "find_by_thread returns ONLY prev"
@@ -1188,7 +1207,7 @@ fn step_nonatomic_create_save_rollback_removes_created_record() {
     let repo = Repository::init_default(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
-    let mut created = sample_main_thread("current-A", "/work/A");
+    let mut created = sample_atomic_record_thread("current-A", "/work/A");
     created.id = "thread-main-new".to_string();
 
     let result = with_nonatomic_forward_fault(0, || {
@@ -1201,7 +1220,10 @@ fn step_nonatomic_create_save_rollback_removes_created_record() {
         "the created record must be removed on rollback"
     );
     assert!(
-        manager.find_by_thread("main").unwrap().is_none(),
+        manager
+            .find_by_thread(ATOMIC_RECORD_THREAD)
+            .unwrap()
+            .is_none(),
         "no record survives for a rolled-back create save"
     );
 }
@@ -1251,8 +1273,8 @@ fn step_nonatomic_restores_redo_snapshot_deleting_leaked_record() {
     let repo = Repository::init_default(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
-    // R0: the prior persisted record for thread "main".
-    let mut r0 = sample_main_thread("current-A", "/work/A");
+    // R0: the prior persisted record for the isolated test thread.
+    let mut r0 = sample_atomic_record_thread("current-A", "/work/A");
     r0.id = "thread-main-v1".to_string();
     r0.updated_at = chrono::Utc::now();
     manager.save(&r0).unwrap();
@@ -1265,10 +1287,18 @@ fn step_nonatomic_restores_redo_snapshot_deleting_leaked_record() {
     snap_rec.current_state = Some("current-B".to_string());
     snap_rec.updated_at = r0.updated_at + chrono::Duration::seconds(60);
     manager.save(&snap_rec).unwrap();
-    let snapshot = manager.snapshot_thread_record("main").unwrap().unwrap();
+    let snapshot = manager
+        .snapshot_thread_record(ATOMIC_RECORD_THREAD)
+        .unwrap()
+        .unwrap();
     manager.delete("thread-main-v2").unwrap();
     assert_eq!(
-        manager.list().unwrap().len(),
+        manager
+            .list()
+            .unwrap()
+            .iter()
+            .filter(|record| record.thread == ATOMIC_RECORD_THREAD)
+            .count(),
         1,
         "precondition: only the prior record exists at capture time"
     );
@@ -1277,7 +1307,7 @@ fn step_nonatomic_restores_redo_snapshot_deleting_leaked_record() {
         repo::atomic::execute(
             &repo,
             RestoreSnapshotOnly {
-                name: "main".to_string(),
+                name: ATOMIC_RECORD_THREAD.to_string(),
                 bytes: snapshot,
             },
         )
@@ -1292,11 +1322,19 @@ fn step_nonatomic_restores_redo_snapshot_deleting_leaked_record() {
         "the leaked snapshot-id record must be deleted on rollback"
     );
     assert_eq!(
-        manager.list().unwrap().len(),
+        manager
+            .list()
+            .unwrap()
+            .iter()
+            .filter(|record| record.thread == ATOMIC_RECORD_THREAD)
+            .count(),
         1,
         "only the prior record survives, no leaked newer record"
     );
-    let restored = manager.find_by_thread("main").unwrap().unwrap();
+    let restored = manager
+        .find_by_thread(ATOMIC_RECORD_THREAD)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         restored.id, "thread-main-v1",
         "find_by_thread returns ONLY prev"
@@ -1319,16 +1357,19 @@ fn redo_restore_thread_record_converges_away_preexisting_duplicate() {
     let manager = ThreadManager::new(repo.heddle_dir());
 
     // The record the redo snapshot will restore (older timestamp).
-    let mut to_restore = sample_main_thread("current-restored", "/work/R");
+    let mut to_restore = sample_atomic_record_thread("current-restored", "/work/R");
     to_restore.id = "rec-restored".to_string();
     to_restore.updated_at = chrono::Utc::now();
     manager.save(&to_restore).unwrap();
-    let snapshot = manager.snapshot_thread_record("main").unwrap().unwrap();
+    let snapshot = manager
+        .snapshot_thread_record(ATOMIC_RECORD_THREAD)
+        .unwrap()
+        .unwrap();
     manager.delete("rec-restored").unwrap();
 
     // A pre-existing DUPLICATE under the same name with a NEWER timestamp, so
     // a raw-save redo would leave it winning `find_by_thread`.
-    let mut dup = sample_main_thread("current-dup", "/work/D");
+    let mut dup = sample_atomic_record_thread("current-dup", "/work/D");
     dup.id = "rec-dup".to_string();
     dup.updated_at = to_restore.updated_at + chrono::Duration::seconds(60);
     manager.save(&dup).unwrap();
@@ -1337,7 +1378,7 @@ fn redo_restore_thread_record_converges_away_preexisting_duplicate() {
             .list()
             .unwrap()
             .iter()
-            .filter(|t| t.thread == "main")
+            .filter(|t| t.thread == ATOMIC_RECORD_THREAD)
             .count(),
         1,
         "precondition: only the duplicate is filed at redo time"
@@ -1347,7 +1388,7 @@ fn redo_restore_thread_record_converges_away_preexisting_duplicate() {
     repo::atomic::execute(
         &repo,
         RestoreSnapshotOnly {
-            name: "main".to_string(),
+            name: ATOMIC_RECORD_THREAD.to_string(),
             bytes: snapshot,
         },
     )
@@ -1357,7 +1398,7 @@ fn redo_restore_thread_record_converges_away_preexisting_duplicate() {
         .list()
         .unwrap()
         .into_iter()
-        .filter(|t| t.thread == "main")
+        .filter(|t| t.thread == ATOMIC_RECORD_THREAD)
         .collect();
     assert_eq!(
         under_name.len(),
@@ -1366,7 +1407,11 @@ fn redo_restore_thread_record_converges_away_preexisting_duplicate() {
     );
     assert_eq!(under_name[0].id, "rec-restored");
     assert_eq!(
-        manager.find_by_thread("main").unwrap().unwrap().id,
+        manager
+            .find_by_thread(ATOMIC_RECORD_THREAD)
+            .unwrap()
+            .unwrap()
+            .id,
         "rec-restored",
         "find_by_thread returns the restored record, not the leaked duplicate"
     );
@@ -1419,17 +1464,22 @@ fn remove_thread_manager_record_converges_name_to_empty() {
     let repo = Repository::init_default(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
-    // Two records under "main": a winner (newer) + an older duplicate.
-    let mut winner = sample_main_thread("current-A", "/work/A");
+    // Two records under the isolated test thread: a winner + an older duplicate.
+    let mut winner = sample_atomic_record_thread("current-A", "/work/A");
     winner.id = "rec-winner".to_string();
     winner.updated_at = chrono::Utc::now();
     manager.save(&winner).unwrap();
-    let mut older = sample_main_thread("current-B", "/work/B");
+    let mut older = sample_atomic_record_thread("current-B", "/work/B");
     older.id = "rec-older".to_string();
     older.updated_at = winner.updated_at - chrono::Duration::seconds(60);
     manager.save(&older).unwrap();
     assert_eq!(
-        manager.list().unwrap().len(),
+        manager
+            .list()
+            .unwrap()
+            .iter()
+            .filter(|record| record.thread == ATOMIC_RECORD_THREAD)
+            .count(),
         2,
         "precondition: two records"
     );
@@ -1437,17 +1487,24 @@ fn remove_thread_manager_record_converges_name_to_empty() {
     repo::atomic::execute(
         &repo,
         RemoveRecordOnly {
-            name: "main".to_string(),
+            name: ATOMIC_RECORD_THREAD.to_string(),
         },
     )
     .unwrap();
 
     assert!(
-        manager.find_by_thread("main").unwrap().is_none(),
+        manager
+            .find_by_thread(ATOMIC_RECORD_THREAD)
+            .unwrap()
+            .is_none(),
         "converge-to-empty: no record survives under the name"
     );
     assert!(
-        manager.list().unwrap().iter().all(|t| t.thread != "main"),
+        manager
+            .list()
+            .unwrap()
+            .iter()
+            .all(|t| t.thread != ATOMIC_RECORD_THREAD),
         "EVERY same-name record removed, not just the find_by_thread winner"
     );
 }
@@ -1465,11 +1522,11 @@ fn remove_thread_manager_record_rollback_resaves_all_records() {
     let repo = Repository::init_default(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
-    let mut winner = sample_main_thread("current-A", "/work/A");
+    let mut winner = sample_atomic_record_thread("current-A", "/work/A");
     winner.id = "rec-winner".to_string();
     winner.updated_at = chrono::Utc::now();
     manager.save(&winner).unwrap();
-    let mut older = sample_main_thread("current-B", "/work/B");
+    let mut older = sample_atomic_record_thread("current-B", "/work/B");
     older.id = "rec-older".to_string();
     older.updated_at = winner.updated_at - chrono::Duration::seconds(60);
     manager.save(&older).unwrap();
@@ -1481,7 +1538,7 @@ fn remove_thread_manager_record_rollback_resaves_all_records() {
         repo::atomic::execute(
             &repo,
             RemoveRecordOnly {
-                name: "main".to_string(),
+                name: ATOMIC_RECORD_THREAD.to_string(),
             },
         )
     });
@@ -1490,7 +1547,12 @@ fn remove_thread_manager_record_rollback_resaves_all_records() {
         "the injected forward fault must fail the op"
     );
 
-    let remaining = manager.list().unwrap();
+    let remaining: Vec<_> = manager
+        .list()
+        .unwrap()
+        .into_iter()
+        .filter(|record| record.thread == ATOMIC_RECORD_THREAD)
+        .collect();
     assert_eq!(
         remaining.len(),
         2,
@@ -1502,7 +1564,11 @@ fn remove_thread_manager_record_rollback_resaves_all_records() {
         "both the winner and the older duplicate were restored"
     );
     assert_eq!(
-        manager.find_by_thread("main").unwrap().unwrap().id,
+        manager
+            .find_by_thread(ATOMIC_RECORD_THREAD)
+            .unwrap()
+            .unwrap()
+            .id,
         "rec-winner",
         "find_by_thread still selects the newer winner after rollback"
     );

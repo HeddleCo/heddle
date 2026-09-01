@@ -127,8 +127,6 @@ mod repository_operation_status;
 pub use repository_operation_status::{OperationKind, OperationScope, RepositoryOperationStatus};
 #[path = "repository_identity.rs"]
 mod repository_identity;
-pub use repository_identity::is_synthetic_root;
-use repository_identity::seed_principal;
 #[cfg(test)]
 use discovery::bounded_ancestor_paths_with_device;
 #[cfg(test)]
@@ -143,6 +141,8 @@ use overlay::{GitHeadState, detect_git_head_state, detect_git_in_progress_branch
 pub use overlay::{
     GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitOverlayShortStatus, GitOverlayTagTip,
 };
+pub use repository_identity::is_synthetic_root;
+use repository_identity::seed_principal;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryCapability {
@@ -807,10 +807,11 @@ impl Repository {
 
     /// Seed a `main` thread pointing at an empty-tree root state.
     ///
-    /// The seeded state is written to the object store and pointed at by the
-    /// `main` thread ref, but is deliberately NOT recorded in the oplog: `init`
-    /// is a point-of-creation event, not user work, and should not be
-    /// undoable. No-op if `main` already exists.
+    /// The seeded state is written to the object store, pointed at by the
+    /// `main` thread ref, and given a stable persisted thread record. It is
+    /// deliberately NOT recorded in the oplog: `init` is a point-of-creation
+    /// event, not user work, and should not be undoable. If `main` already
+    /// exists, its missing legacy record is materialized without moving the ref.
     ///
     /// The seed state uses a stable `Heddle <init@heddle>` attribution
     /// instead of the user's principal because the user's principal may
@@ -821,15 +822,24 @@ impl Repository {
     /// user-facing log output (see `repository_history::is_synthetic_root`).
     pub fn seed_default_thread(&self) -> Result<()> {
         let main_thread = ThreadName::from("main");
-        if self.refs.get_thread(&main_thread)?.is_some() {
-            return Ok(());
+        if self.refs.get_thread(&main_thread)?.is_none() {
+            let empty_tree = Tree::new();
+            let tree_hash = self.store.put_tree(&empty_tree)?;
+            let state =
+                State::new_snapshot(tree_hash, vec![], Attribution::human(seed_principal()));
+            self.store.put_state(&state)?;
+            self.refs.set_thread(&main_thread, &state.id())?;
         }
 
-        let empty_tree = Tree::new();
-        let tree_hash = self.store.put_tree(&empty_tree)?;
-        let state = State::new_snapshot(tree_hash, vec![], Attribution::human(seed_principal()));
-        self.store.put_state(&state)?;
-        self.refs.set_thread(&main_thread, &state.id())?;
+        let manager = crate::ThreadManager::new(self.heddle_dir());
+        if manager
+            .find_or_materialize_synced_record_by_thread(self, "main", None)?
+            .is_none()
+        {
+            return Err(HeddleError::Config(
+                "default main thread ref disappeared while persisting its record".to_string(),
+            ));
+        }
         Ok(())
     }
 

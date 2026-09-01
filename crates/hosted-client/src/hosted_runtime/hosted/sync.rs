@@ -2844,7 +2844,11 @@ fn load_thread_metadata(
     local_state: StateId,
 ) -> Result<Option<SyncedThreadMetadata>, ProtocolError> {
     let thread_manager = ThreadManager::new(repo.heddle_dir());
-    Ok(thread_manager.find_synced_record_by_thread(repo, target_thread, Some(local_state))?)
+    Ok(thread_manager.find_or_materialize_synced_record_by_thread(
+        repo,
+        target_thread,
+        Some(local_state),
+    )?)
 }
 
 fn first_blob_path_in_state(
@@ -3795,7 +3799,10 @@ mod native_exchange_tests {
             crate::hosted_runtime::hosted::test_server::start_recording_push().await;
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
-        let record = save_thread_record(&repo, state, "thread-stable-01", "main");
+        let record = ThreadManager::new(repo.heddle_dir())
+            .find_synced_record_by_thread(&repo, "main", Some(state))
+            .unwrap()
+            .expect("init_default must persist main thread metadata");
 
         let pushed = client
             .push_with_expected_head_profiled(
@@ -3838,7 +3845,7 @@ mod native_exchange_tests {
         assert_eq!(metadata.current_state, request.local_state);
         assert_eq!(
             metadata.thread_mode,
-            ProtoThreadMode::Solid as i32,
+            ProtoThreadMode::Materialized as i32,
             "weft must be able to parse the local thread mode"
         );
         assert_eq!(
@@ -3846,6 +3853,71 @@ mod native_exchange_tests {
             ProtoThreadState::ThreadStateActive as i32,
             "weft must be able to parse the local lifecycle state"
         );
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_ref_only_main_push_materializes_once_and_reuses_stable_identity() {
+        let (mut client, server, captured) =
+            crate::hosted_runtime::hosted::test_server::start_recording_push().await;
+        let source = TempDir::new().unwrap();
+        let (repo, state) = repository(&source);
+        let manager = ThreadManager::new(repo.heddle_dir());
+        if let Some(existing) = manager.find_by_thread("main").unwrap() {
+            manager.delete(&existing.id).unwrap();
+        }
+        assert!(
+            manager
+                .find_synced_record_by_thread(&repo, "main", Some(state))
+                .unwrap()
+                .is_none(),
+            "fixture must match a legacy ref-only main thread"
+        );
+
+        for operation_id in ["legacy-main-push-1", "legacy-main-push-2"] {
+            let pushed = client
+                .push_with_expected_head_profiled(
+                    &repo,
+                    "acme/widgets",
+                    state,
+                    "main",
+                    false,
+                    ExpectedRemoteHead::Missing,
+                    operation_id.to_string(),
+                )
+                .await
+                .unwrap()
+                .0;
+            assert!(!pushed.success);
+        }
+
+        let requests = captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        assert_eq!(requests.len(), 2);
+        let first_metadata = requests[0]
+            .thread_metadata
+            .as_ref()
+            .expect("first legacy main push must carry materialized metadata");
+        let second_metadata = requests[1]
+            .thread_metadata
+            .as_ref()
+            .expect("second legacy main push must reuse materialized metadata");
+        assert_eq!(first_metadata.name, second_metadata.name);
+        assert_eq!(requests[0].target_thread, "main");
+        assert_eq!(requests[1].target_thread, "main");
+        assert_eq!(first_metadata.current_state, requests[0].local_state);
+        assert_eq!(second_metadata.current_state, requests[1].local_state);
+
+        let persisted = manager
+            .find_synced_record_by_thread(&repo, "main", Some(state))
+            .unwrap()
+            .expect("legacy main metadata must be persisted after the first push");
+        assert_eq!(persisted.id, first_metadata.name);
+        assert_eq!(persisted.thread, "main");
 
         client.close().await;
         server.await.unwrap();
@@ -3863,17 +3935,16 @@ mod native_exchange_tests {
                 &repo,
                 "acme/widgets",
                 state,
-                "main",
+                "missing",
                 false,
                 ExpectedRemoteHead::Missing,
                 "missing-local-metadata-test-op".to_string(),
             )
             .await
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("no local thread record with a stable identity")
+        assert_eq!(
+            error.to_string(),
+            "invalid state: native push target 'missing' has no local thread record with a stable identity"
         );
         assert!(
             captured

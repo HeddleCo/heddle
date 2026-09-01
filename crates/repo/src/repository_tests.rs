@@ -32,6 +32,40 @@ fn create_test_repo() -> (TempDir, Repository) {
 }
 
 #[test]
+fn init_default_persists_and_reuses_stable_main_thread_record() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let main_state = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .expect("init_default must seed the main ref");
+    let manager = ThreadManager::new(repo.heddle_dir());
+
+    let first = manager
+        .find_synced_record_by_thread(&repo, "main", Some(main_state))
+        .unwrap()
+        .expect("init_default must persist main thread metadata");
+    assert!(uuid::Uuid::parse_str(&first.id).is_ok());
+    assert_eq!(first.thread, "main");
+    assert_eq!(
+        first.current_state.as_deref(),
+        Some(main_state.to_string_full().as_str())
+    );
+
+    drop(repo);
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    let second = ThreadManager::new(reopened.heddle_dir())
+        .find_or_materialize_synced_record_by_thread(&reopened, "main", Some(main_state))
+        .unwrap()
+        .expect("reopening must reuse the persisted main thread metadata");
+    assert_eq!(
+        second.id, first.id,
+        "main's stable id must not be regenerated"
+    );
+}
+
+#[test]
 fn snapshot_modify_then_revert_keeps_epoch_anchor_readable_after_reopen() {
     let (temp_dir, repo) = create_test_repo();
     for index in 0..128 {
