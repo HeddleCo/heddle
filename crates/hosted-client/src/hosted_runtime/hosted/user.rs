@@ -238,9 +238,6 @@ impl HostedClient {
         kind: wire::HostedSpoolKind,
         display_name: Option<String>,
     ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
-        self.ensure_claimable_owner_root()
-            .await
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
         let operation_id =
             ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateSpool");
         let owner_genesis = Some(
@@ -701,9 +698,42 @@ fn parse_hosted_role_arg(
 
 #[cfg(test)]
 mod tests {
+    use std::{ffi::OsString, sync::MutexGuard};
+
     use api::heddle::api::v1alpha1::{HostedRole, grant_target_ref::Target};
 
     use super::*;
+
+    struct IsolatedHeddleHome {
+        _guard: MutexGuard<'static, ()>,
+        _temp: tempfile::TempDir,
+        previous_home: Option<OsString>,
+    }
+
+    impl IsolatedHeddleHome {
+        fn new() -> Self {
+            let guard = config::credentials::lock_test_env();
+            let temp = tempfile::TempDir::new().expect("temporary Heddle home");
+            let previous_home = std::env::var_os("HEDDLE_HOME");
+            unsafe { std::env::set_var("HEDDLE_HOME", temp.path()) };
+            Self {
+                _guard: guard,
+                _temp: temp,
+                previous_home,
+            }
+        }
+    }
+
+    impl Drop for IsolatedHeddleHome {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous_home {
+                    Some(value) => std::env::set_var("HEDDLE_HOME", value),
+                    None => std::env::remove_var("HEDDLE_HOME"),
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn administration_facade_builds_and_dispatches_every_native_request() {
@@ -968,5 +998,43 @@ mod tests {
 
         client.close().await;
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_spool_provision_sequence_excludes_owner_root_ceremony() {
+        use crypto::{Ed25519Signer, Signer as _};
+
+        let _home = IsolatedHeddleHome::new();
+        let (mut client, server, calls, signer_pem) =
+            crate::hosted_runtime::auth_login_agent::test_support::start_recording_client().await;
+        let signer = Ed25519Signer::from_pem(&signer_pem).expect("test signer");
+        let mut state = crate::hosted_runtime::identity_state::ClaimState::new(
+            "api.provision.test".to_string(),
+            uuid::Uuid::parse_str("7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28").expect("account id"),
+            "subject-1".to_string(),
+            "quiet-otter".to_string(),
+            hex::encode(signer.public_key()),
+            None,
+        );
+        state.record_claimable_owner_root(signer.public_key(), b"invalid owner-root ceremony");
+        crate::hosted_runtime::identity_state::store(&state).expect("store claim state");
+
+        client
+            .create_spool(
+                "quiet-otter",
+                "spool-d",
+                wire::HostedSpoolKind::Project,
+                None,
+            )
+            .await
+            .expect("CreateSpool must not read or upload the claimable owner root");
+        client.close().await;
+        server.await.expect("recording server");
+
+        assert_eq!(
+            *calls.lock().unwrap_or_else(|poison| poison.into_inner()),
+            ["/heddle.api.v1alpha1.RegistryService/CreateSpool"],
+            "auto-provision must issue CreateSpool without BootstrapOwnerRoot"
+        );
     }
 }

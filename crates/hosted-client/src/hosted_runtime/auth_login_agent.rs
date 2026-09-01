@@ -1,7 +1,9 @@
 //! Node-key remint and invite-create for `heddle auth login`.
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v1alpha1::{CreateAgentAccountRequest, CreateAgentAccountResponse};
+use api::heddle::api::v1alpha1::{
+    CreateAgentAccountRequest, CreateAgentAccountResponse, SignedOwnerRoot,
+};
 use config::UserConfig;
 use crypto::{Ed25519Signer, Signer as _};
 use heddle_cli_args::CliContext;
@@ -20,7 +22,22 @@ use super::{
 
 pub(crate) async fn remint(server: &str) -> Result<()> {
     let stored = mint_restricted_agent_root()?;
-    record_claimable_root_for_stored_account(server, &stored.private_key_pem)?;
+    let claimable_root = claimable_root_for_stored_account(server, &stored.private_key_pem)?;
+    if let Some(root) = claimable_root {
+        let user_config = UserConfig::load_default()?;
+        let session = HostedSession::build(
+            &user_config,
+            Some(server.to_string()),
+            HostedAuthMode::ProofOnly {
+                proof_key_pem: stored.private_key_pem.clone(),
+                signing_identity: format!("principal:{}", stored.subject),
+            },
+        )?;
+        let mut client = session.connect(([127, 0, 0, 1], 0).into()).await?;
+        let upload = upload_reminted_owner_root(&mut client, &stored.private_key_pem, root).await;
+        client.close().await;
+        upload?;
+    }
     store_agent_root(
         server,
         stored.token,
@@ -36,20 +53,56 @@ pub(crate) fn record_claimable_root_for_stored_account(
     server: &str,
     private_key_pem: &str,
 ) -> Result<()> {
+    claimable_root_for_stored_account(server, private_key_pem).map(|_| ())
+}
+
+fn claimable_root_for_stored_account(
+    server: &str,
+    private_key_pem: &str,
+) -> Result<Option<SignedOwnerRoot>> {
     let Some(mut state) = identity_state::load()? else {
-        return Ok(());
+        return Ok(None);
     };
     if !super::hosted::server_keys_match(&state.server, server) || state.is_claimed() {
-        return Ok(());
+        return Ok(None);
     }
     let signer = Ed25519Signer::from_pem(private_key_pem)
         .context("loading the agent proof key for the claimable owner root")?;
-    super::owner_root::mint_and_record_claimable_root(
+    let root = super::owner_root::mint_and_record_claimable_root(
         &mut state,
         &signer,
         chrono::Utc::now().timestamp(),
     )?;
-    identity_state::store(&state)
+    identity_state::store(&state)?;
+    Ok(Some(root))
+}
+
+async fn upload_reminted_owner_root(
+    client: &mut super::HostedClient,
+    private_key_pem: &str,
+    root: SignedOwnerRoot,
+) -> Result<()> {
+    let signer = Ed25519Signer::from_pem(private_key_pem)
+        .context("loading the agent proof key for BootstrapOwnerRoot")?;
+    super::owner_root::upload_claimable_root(client, &signer, root).await
+}
+
+#[cfg(test)]
+pub(crate) async fn remint_with_client_for_test(
+    server: &str,
+    client: &mut super::HostedClient,
+) -> Result<()> {
+    let stored = mint_restricted_agent_root()?;
+    if let Some(root) = claimable_root_for_stored_account(server, &stored.private_key_pem)? {
+        upload_reminted_owner_root(client, &stored.private_key_pem, root).await?;
+    }
+    store_agent_root(
+        server,
+        stored.token,
+        stored.subject,
+        stored.private_key_pem,
+        stored.expires_at,
+    )
 }
 
 pub(crate) async fn create_with_invite(
@@ -222,4 +275,106 @@ fn mint_restricted_agent_root() -> Result<RestrictedAgentRoot> {
         private_key_pem: root.private_key_pem,
         expires_at: root.expires_at,
     })
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::{
+        net::Ipv4Addr,
+        sync::{Arc, Mutex},
+    };
+
+    use api::{
+        framing::{decode_request_prelude, encode_success_response},
+        heddle::api::v1alpha1::HostedSpool,
+    };
+    use bytes::Bytes;
+    use crypto::Ed25519Signer;
+    use iroh::{Endpoint, RelayMode, endpoint::presets};
+    use prost::Message;
+    use tokio::task::JoinHandle;
+
+    use crate::hosted_runtime::hosted::{CallContextFactory, HostedClient};
+
+    const CREATE_SPOOL: &str = "/heddle.api.v1alpha1.RegistryService/CreateSpool";
+
+    pub(crate) async fn start_recording_client() -> (
+        HostedClient,
+        JoinHandle<()>,
+        Arc<Mutex<Vec<String>>>,
+        String,
+    ) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let server_calls = Arc::clone(&calls);
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .expect("test server address")
+            .bind()
+            .await
+            .expect("test server endpoint");
+        let server_addr = server.addr();
+        let server_task = tokio::spawn(async move {
+            let connection = server
+                .accept()
+                .await
+                .expect("hosted test connection")
+                .await
+                .expect("connect hosted test client");
+            while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+                let mut request = Vec::new();
+                let method = loop {
+                    let chunk = recv
+                        .read_chunk(api::framing::MAX_CONTROL_BODY + 6)
+                        .await
+                        .expect("read request")
+                        .expect("request prelude");
+                    request.extend_from_slice(&chunk);
+                    if let Some((prelude, _)) =
+                        decode_request_prelude(&request).expect("decode request prelude")
+                    {
+                        break prelude.method.to_string();
+                    }
+                };
+                server_calls
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .push(method.clone());
+                while recv
+                    .read_chunk(api::framing::MAX_CONTROL_BODY + 6)
+                    .await
+                    .is_ok_and(|chunk| chunk.is_some())
+                {}
+                let body = if method == CREATE_SPOOL {
+                    HostedSpool::default().encode_to_vec()
+                } else {
+                    Vec::new()
+                };
+                send.write_chunk(Bytes::from(
+                    encode_success_response(&body).expect("encode response"),
+                ))
+                .await
+                .expect("write response");
+                send.finish().expect("finish response");
+            }
+            server.close().await;
+        });
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .expect("test client address")
+            .bind()
+            .await
+            .expect("test client endpoint");
+        let signer = Ed25519Signer::generate().expect("test signer");
+        let signer_pem = signer.to_pem().expect("test signer pem");
+        let context = CallContextFactory::default()
+            .with_signing_key_pem(&signer_pem, "principal:test")
+            .expect("test call context");
+        let client = HostedClient::connect_addr_with_context(endpoint, server_addr, context)
+            .await
+            .expect("connect test client");
+        (client, server_task, calls, signer_pem)
+    }
 }
