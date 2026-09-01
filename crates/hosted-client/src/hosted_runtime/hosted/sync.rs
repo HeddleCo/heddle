@@ -248,7 +248,7 @@ enum PackedDiscussions {
     Unconsumable(String),
 }
 
-pub(crate) fn discussions_from_pull_pack(
+fn discussions_from_pull_pack(
     repo: &Repository,
     state_id: StateId,
 ) -> Result<PackedDiscussions, ProtocolError> {
