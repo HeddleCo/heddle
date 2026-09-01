@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Thread storage and lifecycle management.
 
-use schemars::JsonSchema;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -10,11 +9,13 @@ use std::{
 use chrono::{DateTime, Utc};
 use objects::{
     lock::RepoLock,
-    object::StateId,
+    object::{StateId, ThreadName},
     store::{HeddleError, ObjectStore, Result},
 };
+use schemars::JsonSchema;
 
 use crate::{
+    summarize_confidence, summarize_verification,
     thread_model::{
         EphemeralMarker, ThreadConfidenceSummary, ThreadFreshness, ThreadImpactCategory,
         ThreadIntegrationPolicy, ThreadMode, ThreadRecord, ThreadRuntimeOverlay, ThreadState,
@@ -401,17 +402,15 @@ impl ThreadManager {
     }
 
     pub fn find_record_by_thread(&self, thread: &str) -> Result<Option<ThreadRecord>> {
-        let mut records = self
-            .list_records()?
+        Ok(self
+            .list_record_files()?
             .into_iter()
             .filter(|record| record.thread == thread)
-            .collect::<Vec<_>>();
-        records.sort_by(|a, b| {
-            a.updated_at
-                .cmp(&b.updated_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        Ok(records.pop())
+            .max_by(|a, b| {
+                a.updated_at
+                    .cmp(&b.updated_at)
+                    .then_with(|| a.id.cmp(&b.id))
+            }))
     }
 
     pub fn find_synced_record_by_thread(
@@ -423,6 +422,75 @@ impl ThreadManager {
         self.find_record_by_thread(thread)?
             .map(|record| SyncedThreadMetadata::from_record(repo, &record, current_state_override))
             .transpose()
+    }
+
+    /// Return persisted sync metadata for `thread`, materializing it once when
+    /// a real local ref predates the thread-record store.
+    ///
+    /// The second lookup under the record lock closes the race between two
+    /// pushes that both observe a legacy ref-only thread. Exactly one UUID is
+    /// persisted; every later metadata build reuses that stable identity.
+    pub fn find_or_materialize_synced_record_by_thread(
+        &self,
+        repo: &crate::Repository,
+        thread: &str,
+        current_state_override: Option<StateId>,
+    ) -> Result<Option<SyncedThreadMetadata>> {
+        if let Some(record) = self.find_record_by_thread(thread)? {
+            return SyncedThreadMetadata::from_record(repo, &record, current_state_override)
+                .map(Some);
+        }
+
+        let _lock = self.write_lock()?;
+        if let Some(record) = self.find_record_by_thread(thread)? {
+            return SyncedThreadMetadata::from_record(repo, &record, current_state_override)
+                .map(Some);
+        }
+
+        let Some(ref_state) = repo.refs().get_thread(&ThreadName::from(thread))? else {
+            return Ok(None);
+        };
+        let state = repo.store().get_state(&ref_state)?.ok_or_else(|| {
+            HeddleError::NotFound(format!(
+                "thread '{thread}' points to missing state {}",
+                ref_state.to_string_full()
+            ))
+        })?;
+        let now = Utc::now();
+        let materialized = Thread {
+            id: uuid::Uuid::now_v7().to_string(),
+            thread: thread.to_string(),
+            target_thread: None,
+            parent_thread: None,
+            mode: ThreadMode::Materialized,
+            state: ThreadState::Active,
+            base_state: ref_state.to_string_full(),
+            base_root: state.tree.to_hex(),
+            current_state: Some(ref_state.to_string_full()),
+            merged_state: None,
+            task: None,
+            execution_path: repo.root().to_path_buf(),
+            materialized_path: None,
+            changed_paths: Vec::new(),
+            impact_categories: Vec::new(),
+            heavy_impact_paths: Vec::new(),
+            promotion_suggested: false,
+            freshness: ThreadFreshness::Current,
+            verification_summary: summarize_verification(state.verification.as_ref()),
+            confidence_summary: summarize_confidence(state.confidence),
+            integration_policy_result: ThreadIntegrationPolicy::default(),
+            created_at: now,
+            updated_at: now,
+            ephemeral: None,
+            auto: false,
+            shared_target_dir: None,
+        };
+        let record = materialized.to_record();
+        self.save_record_file(&record)?;
+        objects::fault_inject::maybe_fail_at("thread_manager_save_before_workspace")?;
+        self.save_workspace_file(&materialized.id, &materialized.workspace_state())?;
+
+        SyncedThreadMetadata::from_record(repo, &record, current_state_override).map(Some)
     }
 
     pub fn delete_record(&self, record_id: &str) -> Result<()> {
