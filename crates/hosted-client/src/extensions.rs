@@ -96,6 +96,7 @@ fn auth_command(command: AuthCommands) -> AuthCommand {
             scopes,
             allowed_operations,
             template,
+            runner,
             out,
         } => AuthCommand::DeriveAgent {
             server,
@@ -103,7 +104,11 @@ fn auth_command(command: AuthCommands) -> AuthCommand {
             ttl_secs,
             scopes,
             allowed_operations,
-            template: template.map(agent_template),
+            template: if runner {
+                Some(AgentTemplate::Runner)
+            } else {
+                template.map(agent_template)
+            },
             out,
         },
         AuthCommands::CreateServiceToken {

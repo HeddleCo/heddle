@@ -32,7 +32,8 @@ pub enum AuthCommand {
         ttl_secs: u64,
         scopes: Vec<String>,
         allowed_operations: Vec<String>,
-        /// Preset operation ceiling (`reviewer` | `contributor` | `ci-landing`).
+        /// Preset operation ceiling (`reviewer` | `contributor` | `ci-landing`
+        /// or the internal `--runner` persona).
         /// Expands to a curated `--allow` set; a combined explicit `--allow`
         /// may only narrow it.
         template: Option<crate::hosted_runtime::device_flow::AgentTemplate>,

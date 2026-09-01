@@ -160,11 +160,11 @@ pub enum AuthCommands {
         #[arg(long = "ttl", default_value_t = 3600)]
         ttl_secs: u64,
 
-        /// Forward-compatible resource scope (`repo:org/name`, `namespace:org`, or a bare repo path).
+        /// Resource scope (`repo:org/name`, `namespace:org`, `spool:org/name`, or a bare repo path).
         #[arg(long = "scope")]
         scopes: Vec<String>,
 
-        /// Narrow the safe operation set (repeatable, using hosted method names such as `Push`).
+        /// Narrow the safe operation set (repeatable, using hosted operation names such as `Push`).
         #[arg(long = "allow")]
         allowed_operations: Vec<String>,
 
@@ -174,6 +174,11 @@ pub enum AuthCommands {
         /// A combined `--allow` may only narrow the template.
         #[arg(long, value_enum)]
         template: Option<AgentTemplateArg>,
+
+        /// Derive a CI-verdict runner: `ci-verdict:write` on the required
+        /// `spool:` scope(s), without Push, UpdateRef, or other source writes.
+        #[arg(long, conflicts_with_all = ["template", "allowed_operations"])]
+        runner: bool,
 
         /// Write a single self-verifying `<name>.hcred` credential file to this
         /// path instead of installing the child into the keystore.
@@ -508,5 +513,46 @@ mod tests {
             .is_err(),
             "token-only child export is unsafe because it cannot carry its proof key"
         );
+    }
+
+    #[test]
+    fn derive_agent_parses_the_runner_persona_and_rejects_wider_overrides() {
+        let cli = Cli::try_parse_from([
+            "heddle",
+            "auth",
+            "derive-agent",
+            "--server",
+            "api.heddle.test",
+            "--runner",
+            "--scope",
+            "spool:acme/api",
+        ])
+        .expect("runner flags parse");
+
+        let Commands::Auth {
+            command: AuthCommands::DeriveAgent { runner, scopes, .. },
+        } = cli.command
+        else {
+            panic!("expected auth derive-agent");
+        };
+        assert!(runner);
+        assert_eq!(scopes, ["spool:acme/api"]);
+
+        for conflicting in [["--allow", "Push"], ["--template", "ci-landing"]] {
+            assert!(
+                Cli::try_parse_from([
+                    "heddle",
+                    "auth",
+                    "derive-agent",
+                    "--server",
+                    "api.heddle.test",
+                    "--runner",
+                    conflicting[0],
+                    conflicting[1],
+                ])
+                .is_err(),
+                "runner persona must reject authority-changing overrides"
+            );
+        }
     }
 }

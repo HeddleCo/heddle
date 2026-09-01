@@ -132,6 +132,22 @@ heddle auth derive-agent \
   --allow GetState
 ```
 
+For a human-delegated CI verdict runner, use a concrete spool scope and the
+fixed runner persona:
+
+```bash
+heddle auth derive-agent \
+  --server grpc.heddle.sh \
+  --agent-id ci-main \
+  --runner \
+  --scope spool:org/acme \
+  --out ci-main.hcred
+```
+
+The canonical weft scope is `spool:org/acme ci-verdict:write`. The Biscuit's
+request-operation fence uses weft's corresponding `CiVerdictWrite` operation;
+it does not admit `Push`, `UpdateRef`, or ordinary spool write.
+
 ## What gets emitted in the attenuation block
 
 Each restriction translates to a Biscuit Datalog clause that the
