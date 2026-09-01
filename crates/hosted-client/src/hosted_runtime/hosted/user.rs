@@ -737,6 +737,7 @@ mod tests {
 
     #[tokio::test]
     async fn administration_facade_builds_and_dispatches_every_native_request() {
+        let _home = IsolatedHeddleHome::new();
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
 
         client.who_am_i().await.unwrap();
@@ -949,6 +950,7 @@ mod tests {
         use crypto::Ed25519Signer;
         use sha2::{Digest, Sha256};
 
+        let _home = IsolatedHeddleHome::new();
         let (mut client, server, captured) =
             crate::hosted_runtime::hosted::test_server::start_recording_create_spool().await;
         let created = client
