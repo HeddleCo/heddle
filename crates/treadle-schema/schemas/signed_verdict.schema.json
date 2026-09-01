@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heddle.co/schemas/ci/v2/signed_verdict.schema.json",
+  "title": "SignedVerdict",
+  "description": "A CiVerdictBody plus its ed25519 signature and signer identity (treadle-schema v2). The on-the-wire JSON OSS contract. Hand-maintained to mirror crates/schema/src/signed.rs; schema_export.rs asserts the invariants. additionalProperties is intentionally TRUE (forward-compat: deny_unknown_fields is OFF). New signatures use the DOMAIN-SEPARATED v2 preimage (tag b'heddle-ci-verdict-v2\\x00' || body_digest || 0x00 || signer_kind || 0x00 || signed_at || 0x00), NOT the bare digest string. Verification retains the equivalent v1-tag path for schema-v1 verdicts.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["body", "body_digest", "public_key", "signature", "signed_at", "signer_kind"],
+  "properties": {
+    "body": { "$ref": "ci_verdict_body.schema.json" },
+    "body_digest": {
+      "type": "string",
+      "pattern": "^b3:[0-9a-f]+$",
+      "description": "'b3:'+hex BLAKE3-256 of the body's canonical bytes; recomputed and checked on verify."
+    },
+    "public_key": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{64}$",
+      "description": "Signer's ed25519 public key, hex-encoded (32 bytes). Trust keys on THIS, never on an actor name."
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{128}$",
+      "description": "ed25519 signature over the domain-separated preimage, hex-encoded (64 bytes)."
+    },
+    "signed_at": {
+      "type": "string",
+      "description": "RFC3339 timestamp. Part of the signed preimage (cannot be rewritten without breaking the signature)."
+    },
+    "signer_kind": {
+      "type": "string",
+      "enum": ["service_account", "delegated", "device"],
+      "description": "Part of the signed preimage. 'delegated' and legacy 'service_account' may satisfy a required gate; 'device' is advisory-only. Authorization and trust remain the caller's responsibility."
+    }
+  }
+}

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/treadle-schema",
     "crates/cli",
     "crates/agent-relay",
     "crates/cli-args",
@@ -159,6 +160,7 @@ zstd = "0.13"
 # Cargo forbids a member from turning a workspace dependency's defaults off, so
 # the baseline lives here and the few members that want the defaults re-list
 # them explicitly under `features`.
+treadle-schema = { path = "crates/treadle-schema", version = "0.17.0" }
 heddle-cli-args = { path = "crates/cli-args", version = "0.17.0", default-features = false }
 heddle-cli-contract = { path = "crates/cli-contract", version = "0.17.0", default-features = false }
 heddle-cli-render = { path = "crates/cli-render", version = "0.17.0", default-features = false }

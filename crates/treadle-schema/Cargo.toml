@@ -1,0 +1,21 @@
+[package]
+name = "treadle-schema"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "The OSS heddle CI Verdict contract: signed CiVerdictBody + SignedVerdict."
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+blake3.workspace = true
+ed25519-dalek.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+jsonschema = { version = "0.46", default-features = false }
+rand.workspace = true
