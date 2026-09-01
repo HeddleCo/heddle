@@ -906,6 +906,12 @@ impl HostedClient {
             |expected| native_push_boundaries_from_expected_head(repo, expected, local_state),
         )?;
         profile.remote_ref_discovery = remote_ref_discovery_started.elapsed();
+        // Discussions live in the op-log. Fold them onto the pushed tip before
+        // closure planning so the sidecar lane advertises
+        // `StateAttachmentKind::Discussions` + blob (exact-tip push included).
+        // Pull bootstrap fail-closes if weft sets `discussions_from_pack`
+        // without this attachment.
+        repo.persist_discussions_snapshot(local_state)?;
         let closure_planning_started = std::time::Instant::now();
         let closure = if native_boundaries.is_empty() {
             wire::enumerate_state_closure_transfer_with_options(
@@ -3537,6 +3543,87 @@ mod pull_bootstrap_tests {
 
         assert_eq!(resolved.discussions, vec![discussion]);
         assert_eq!(resolved.context, vec![(target, context_blob)]);
+    }
+
+    #[test]
+    fn packed_bootstrap_fail_closes_when_discussions_attachment_is_missing() {
+        let temp = TempDir::new().expect("temp repo");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").expect("write source");
+        let snapshot = repo
+            .snapshot(Some("seed".to_string()), None)
+            .expect("snapshot");
+
+        let error = PullBootstrapMetadata {
+            discussions_from_pack: true,
+            discussions: Vec::new(),
+            context_from_pack: false,
+            context: Vec::new(),
+        }
+        .resolve(&repo, Some(snapshot.state_id))
+        .expect_err("missing packed discussions must fail closed");
+
+        assert!(
+            error.to_string().contains(
+                "pull bootstrap advertised packed discussions but the attachment is missing"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn persist_then_resolve_reads_op_log_discussions_from_the_pack_attachment() {
+        let temp = TempDir::new().expect("temp repo");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").expect("write source");
+        let snapshot = repo
+            .snapshot_with_attribution(
+                Some("seed".to_string()),
+                None,
+                Attribution::human(Principal::new("Ada", "ada@example.com")),
+            )
+            .expect("snapshot");
+        let store = repo::CollaborationStore::open(repo.heddle_dir()).expect("open collab");
+        let discussion_id = objects::object::DiscussionRecordId::generate();
+        store
+            .write_operation(
+                &objects::object::CollaborationOperationEnvelope::new(
+                    discussion_id,
+                    Vec::new(),
+                    objects::object::CollaborationIdempotencyKey::new("open-1").unwrap(),
+                    Attribution::human(Principal::new("Ada", "ada@example.com")),
+                    1_700_000_000_000,
+                    objects::object::CollaborationOperationBodyV1::Open {
+                        title: "run".to_string(),
+                        anchor: objects::object::CollaborationAnchor::Symbol {
+                            state_id: snapshot.state_id,
+                            path: "lib.rs".to_string(),
+                            symbol: "run".to_string(),
+                        },
+                        visibility: VisibilityTier::Internal,
+                        turn: objects::object::DiscussionTurnV1::new("keep this invariant")
+                            .unwrap(),
+                        thread_ref: Some("alice".to_string()),
+                    },
+                )
+                .unwrap(),
+            )
+            .expect("write open");
+        repo.persist_discussions_snapshot(snapshot.state_id)
+            .expect("persist snapshot")
+            .expect("snapshot hash");
+
+        let resolved = PullBootstrapMetadata {
+            discussions_from_pack: true,
+            discussions: Vec::new(),
+            context_from_pack: false,
+            context: Vec::new(),
+        }
+        .resolve(&repo, Some(snapshot.state_id))
+        .expect("resolve packed bootstrap after persist");
+        assert_eq!(resolved.discussions.len(), 1);
+        assert_eq!(resolved.discussions[0].id, discussion_id.to_string());
+        assert_eq!(resolved.discussions[0].turns[0].body, "keep this invariant");
     }
 }
 
@@ -6231,6 +6318,112 @@ mod attachment_sidecar_tests {
         assert_eq!(transfer.attachment_object, canonical.data);
         assert!(!ObjectType::StateAttachment.packable_for_push());
         assert!(ObjectType::StateAttachment.packable_for_pull());
+    }
+
+    #[test]
+    fn discussions_snapshot_is_advertised_and_emits_sidecar_carrier() {
+        let temp = TempDir::new().expect("temp repo");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").expect("write source");
+        let snapshot = repo
+            .snapshot_with_attribution(
+                Some("seed".to_string()),
+                None,
+                Attribution::human(Principal::new("Ada", "ada@example.com")),
+            )
+            .expect("snapshot");
+        let store = repo::CollaborationStore::open(repo.heddle_dir()).expect("open collab");
+        store
+            .write_operation(
+                &objects::object::CollaborationOperationEnvelope::new(
+                    objects::object::DiscussionRecordId::generate(),
+                    Vec::new(),
+                    objects::object::CollaborationIdempotencyKey::new("open-1").unwrap(),
+                    Attribution::human(Principal::new("Ada", "ada@example.com")),
+                    1_700_000_000_000,
+                    objects::object::CollaborationOperationBodyV1::Open {
+                        title: "run".to_string(),
+                        anchor: objects::object::CollaborationAnchor::Symbol {
+                            state_id: snapshot.state_id,
+                            path: "lib.rs".to_string(),
+                            symbol: "run".to_string(),
+                        },
+                        visibility: objects::object::VisibilityTier::Internal,
+                        turn: objects::object::DiscussionTurnV1::new("review this").unwrap(),
+                        thread_ref: Some("alice".to_string()),
+                    },
+                )
+                .unwrap(),
+            )
+            .expect("write open");
+        let hash = repo
+            .persist_discussions_snapshot(snapshot.state_id)
+            .expect("persist")
+            .expect("hash");
+        let attachment = repo
+            .latest_state_attachment(&snapshot.state_id, objects::object::StateAttachmentKind::Discussions)
+            .expect("list")
+            .expect("attachment");
+
+        let transfer = wire::enumerate_state_closure_transfer_with_options(
+            repo.store(),
+            snapshot.state_id,
+            wire::StateClosureOptions::default(),
+            512,
+        )
+        .expect("plan push closure");
+        let planned = transfer.planned_objects;
+        assert!(
+            planned.iter().any(|object| {
+                matches!(
+                    (&object.id, object.obj_type),
+                    (
+                        wire::ObjectId::StateAttachment {
+                            kind: objects::object::StateAttachmentKind::Discussions,
+                            ..
+                        },
+                        ObjectType::StateAttachment
+                    )
+                )
+            }),
+            "push plan must advertise the Discussions attachment: {planned:?}"
+        );
+        assert!(
+            planned.iter().any(|object| {
+                matches!(
+                    (&object.id, object.obj_type),
+                    (wire::ObjectId::Hash(blob), ObjectType::Blob) if *blob == hash
+                )
+            }),
+            "push plan must advertise the Discussions blob: {planned:?}"
+        );
+
+        let id = ObjectId::StateAttachment {
+            state: snapshot.state_id,
+            id: attachment.id(),
+            kind: attachment.body.kind(),
+        };
+        let canonical = wire::load_object_data(repo.store(), &id, ObjectType::StateAttachment)
+            .expect("load canonical attachment");
+        let message = sidecar_push_message(
+            &repo,
+            ObjectInfo {
+                id,
+                obj_type: ObjectType::StateAttachment,
+                size: canonical.data.len() as u64,
+                delta_base: None,
+            },
+            "op-discuss",
+        )
+        .expect("build attachment sidecar");
+        let Some(push_client_frame::Frame::StateAttachment(transfer)) = message.frame else {
+            panic!("expected StateAttachmentTransfer")
+        };
+        assert_eq!(
+            transfer.attachment_kind,
+            ProtoStateAttachmentKind::Discussions as i32
+        );
+        assert_eq!(transfer.attachment_object, canonical.data);
     }
 }
 

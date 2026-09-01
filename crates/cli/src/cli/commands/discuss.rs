@@ -101,6 +101,17 @@ fn open_store(repo: &repo::Repository) -> Result<CollaborationStore> {
     Ok(store)
 }
 
+/// Hosted pull bootstrap reads `StateAttachmentKind::Discussions` on the tip.
+/// Persist the live op-log onto HEAD so `heddle push` can emit the attachment.
+fn persist_tip_discussions_snapshot(repo: &repo::Repository) -> Result<()> {
+    let Some(state_id) = repo.head().context("resolve HEAD for discussion snapshot")? else {
+        return Ok(());
+    };
+    repo.persist_discussions_snapshot(state_id)
+        .context("persist discussions snapshot for push")?;
+    Ok(())
+}
+
 fn run_open(
     cli: &Cli,
     repo: &repo::Repository,
@@ -140,6 +151,7 @@ fn run_open(
         },
     )?;
     let outcome = store.write_operation(&operation)?;
+    persist_tip_discussions_snapshot(repo)?;
     emit_locality_notice_once(repo, AnnotationSurface::Discuss);
     emit_write(cli, "discuss_open", store, discussion_id, outcome)
 }
@@ -269,6 +281,7 @@ fn write_descendant(
         body,
     )?;
     let outcome = store.write_operation(&operation)?;
+    persist_tip_discussions_snapshot(repo)?;
     emit_write(cli, output_kind, store, discussion_id, outcome)
 }
 

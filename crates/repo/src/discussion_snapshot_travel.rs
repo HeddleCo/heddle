@@ -18,8 +18,8 @@ use oplog::OpLogBackend;
 use refs::RefBackend;
 
 use crate::{
-    CollaborationStore, HeddleError, Repository, Result,
     discussion_anchor_travel::{travel_anchors, travel_symbol_anchor},
+    CollaborationStore, HeddleError, Repository, Result,
 };
 
 impl<R, O, S> Repository<R, O, S>
@@ -75,7 +75,10 @@ where
         }
 
         let Some(parent_discussions_hash) = parent_discussions_hash else {
-            return Ok(None);
+            // First snapshot after `discuss open`: the op-log has discussions
+            // but no parent attachment yet. Seed the hosted blob so push can
+            // emit `StateAttachmentKind::Discussions`.
+            return self.encode_collaboration_discussions_blob();
         };
         let parent_blob = self
             .store()
@@ -324,8 +327,10 @@ mod tests {
     use std::fs;
 
     use objects::object::{
-        Attribution, Discussion, DiscussionTurn, Principal, StateAttachment, StateId, SymbolAnchor,
-        TreeEntry, VisibilityTier,
+        Attribution, CollaborationAnchor, CollaborationIdempotencyKey,
+        CollaborationOperationBodyV1, CollaborationOperationEnvelope, Discussion,
+        DiscussionRecordId, DiscussionTurn, DiscussionTurnV1, Principal, StateAttachment, StateId,
+        SymbolAnchor, TreeEntry, VisibilityTier,
     };
     use tempfile::TempDir;
 
@@ -388,6 +393,67 @@ mod tests {
             .expect("snapshot should carry discussions");
         let blob = repo.store().get_blob(&hash).unwrap().unwrap();
         DiscussionsBlob::decode(blob.content()).unwrap()
+    }
+
+    #[test]
+    fn snapshot_seeds_discussions_attachment_from_collaboration_op_log() {
+        let (temp, repo) = create_test_repo();
+        fs::write(
+            temp.path().join("src.rs"),
+            "fn foo() {\n    let x = 1;\n}\n",
+        )
+        .unwrap();
+        let first = repo
+            .snapshot_with_attribution(
+                Some("first".to_string()),
+                None,
+                Attribution::human(Principal::new("Alice", "alice@example.com")),
+            )
+            .unwrap();
+        let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+        let discussion_id = DiscussionRecordId::generate();
+        let open = CollaborationOperationEnvelope::new(
+            discussion_id,
+            Vec::new(),
+            CollaborationIdempotencyKey::new("seed-open").unwrap(),
+            Attribution::human(Principal::new("Alice", "alice@example.com")),
+            1_700_000_000_000,
+            CollaborationOperationBodyV1::Open {
+                title: "foo".to_string(),
+                anchor: CollaborationAnchor::Symbol {
+                    state_id: first.id(),
+                    path: "src.rs".to_string(),
+                    symbol: "foo".to_string(),
+                },
+                visibility: VisibilityTier::Internal,
+                turn: DiscussionTurnV1::new("please check this").unwrap(),
+                thread_ref: Some("alice".to_string()),
+            },
+        )
+        .unwrap();
+        store.write_operation(&open).unwrap();
+
+        fs::write(
+            temp.path().join("src.rs"),
+            "fn foo() {\n    let x = 2;\n}\n",
+        )
+        .unwrap();
+        let second = repo
+            .snapshot_with_attribution(
+                Some("second".to_string()),
+                None,
+                Attribution::human(Principal::new("Alice", "alice@example.com")),
+            )
+            .unwrap();
+
+        let persisted = read_discussions(&repo, &second);
+        assert_eq!(persisted.discussions.len(), 1);
+        assert_eq!(persisted.discussions[0].id, discussion_id.to_string());
+        assert_eq!(persisted.discussions[0].anchor.symbol, "foo");
+        assert_eq!(
+            persisted.discussions[0].thread_ref.as_deref(),
+            Some("alice")
+        );
     }
 
     #[test]

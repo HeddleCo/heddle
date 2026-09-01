@@ -9,7 +9,8 @@
 //! * **Push (write path):** after a successful `heddle push`, replay local
 //!   symbol-anchored discussion turns *we authored* to the server via the
 //!   caller-authenticated `OpenDiscussion` / `AppendTurn` RPCs (enforce-mode
-//!   signed). #549 rejects attachments in the pack, so they cannot ride it.
+//!   signed). The per-state `Discussions` snapshot attachment rides the
+//!   out-of-pack sidecar (weft#549 rejects attachments in the push pack).
 //! * **Pull/clone (read path):** after a successful clone/pull, consume the
 //!   pull bootstrap's discussions when present, falling back to `ListByState`
 //!   for older servers, and materialize unseen turns into the local op-log.

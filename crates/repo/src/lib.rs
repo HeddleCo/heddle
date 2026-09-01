@@ -29,6 +29,7 @@ mod context_anchor_travel;
 #[cfg(feature = "tree-sitter-symbols")]
 mod context_snapshot_travel;
 pub mod daemon;
+mod discussion_snapshot;
 #[cfg(feature = "tree-sitter-symbols")]
 mod discussion_anchor_travel;
 #[cfg(feature = "tree-sitter-symbols")]
