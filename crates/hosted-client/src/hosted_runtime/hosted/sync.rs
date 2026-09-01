@@ -133,10 +133,7 @@ impl PullBootstrapMetadata {
                     let warning = format!(
                         "pull bootstrap advertised packed discussions but this client cannot consume them ({reason}); falling back to ListByState"
                     );
-                    eprintln!(
-                        "{} {warning}",
-                        heddle_cli_render::cli::style::warn_marker()
-                    );
+                    eprintln!("{} {warning}", heddle_cli_render::cli::style::warn_marker());
                     (None, Some(warning))
                 }
             }
@@ -3631,19 +3628,13 @@ mod pull_bootstrap_tests {
             resolved.discussions.is_none(),
             "None means ListByState, not an empty inline set"
         );
-        let warning = resolved
-            .discussions_pack_fallback
-            .expect("warned fallback");
+        let warning = resolved.discussions_pack_fallback.expect("warned fallback");
+        assert!(warning.contains("the attachment is missing"), "{warning}");
+        assert!(warning.contains("falling back to ListByState"), "{warning}");
         assert!(
-            warning.contains("the attachment is missing"),
-            "{warning}"
-        );
-        assert!(
-            warning.contains("falling back to ListByState"),
-            "{warning}"
-        );
-        assert!(
-            !warning.contains("pull bootstrap advertised packed discussions but the attachment is missing"),
+            !warning.contains(
+                "pull bootstrap advertised packed discussions but the attachment is missing"
+            ),
             "the clone-killer error string must not return as success warning verbatim: {warning}"
         );
     }
@@ -3679,13 +3670,8 @@ mod pull_bootstrap_tests {
             .resolve(&repo, Some(state_id))
             .expect("version skew must not clone-kill");
         assert!(resolved.discussions.is_none());
-        let warning = resolved
-            .discussions_pack_fallback
-            .expect("warned fallback");
-        assert!(
-            warning.contains("falling back to ListByState"),
-            "{warning}"
-        );
+        let warning = resolved.discussions_pack_fallback.expect("warned fallback");
+        assert!(warning.contains("falling back to ListByState"), "{warning}");
         assert!(
             warning.contains("unsupported blob version")
                 || warning.contains("blob encoding is not this client's DiscussionsBlob v1"),
@@ -3720,7 +3706,9 @@ mod pull_bootstrap_tests {
             .resolve(&repo, Some(state_id))
             .expect_err("decoded v1 with invalid items is true corruption");
         assert!(
-            error.to_string().contains("discussion id must not be empty"),
+            error
+                .to_string()
+                .contains("discussion id must not be empty"),
             "{error}"
         );
     }
