@@ -2079,6 +2079,27 @@ mod tests {
 
     #[cfg(feature = "client")]
     #[test]
+    fn auto_provision_persists_hostname_authority() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+
+        let configured =
+            persist_auto_provisioned_remote(&repo, None, "api-staging.heddle.sh", "org/repo")
+                .unwrap();
+
+        assert_eq!(configured.as_deref(), Some("origin"));
+        let remote = RemoteConfig::open(&repo).unwrap().get("origin").unwrap();
+        assert_eq!(remote.url, "heddle://api-staging.heddle.sh/org/repo");
+        let RemoteTarget::Network { authority, .. } = RemoteTarget::parse(&remote.url).unwrap()
+        else {
+            panic!("persisted hosted remote must remain a network target");
+        };
+        assert_eq!(authority, "api-staging.heddle.sh");
+        assert!(authority.parse::<std::net::IpAddr>().is_err());
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
     fn auto_provision_reuses_create_spool_already_exists() {
         let typed_already_exists = ProtocolError::AlreadyExists("luke/demo-repo".to_string());
         assert!(auto_provision_create_already_exists(&typed_already_exists));

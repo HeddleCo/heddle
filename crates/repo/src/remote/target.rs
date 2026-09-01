@@ -180,6 +180,23 @@ mod tests {
     use super::RemoteTarget;
 
     #[test]
+    fn heddle_url_preserves_hostname_authority() {
+        let target = RemoteTarget::parse("heddle://api-staging.heddle.sh/org/repo")
+            .expect("parse hosted hostname");
+        match target {
+            RemoteTarget::Network {
+                authority,
+                repo_path,
+            } => {
+                assert_eq!(authority, "api-staging.heddle.sh");
+                assert_eq!(repo_path.as_deref(), Some("org/repo"));
+                assert!(authority.parse::<std::net::IpAddr>().is_err());
+            }
+            other => panic!("expected network target, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_hostname_without_repo_path() {
         let target = RemoteTarget::parse("localhost:8421").expect("parse localhost");
         match target {
