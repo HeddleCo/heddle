@@ -1,5 +1,4 @@
 use std::{
-    net::ToSocketAddrs,
     sync::{Arc, Mutex, OnceLock, mpsc},
     thread,
     time::Duration,
@@ -187,22 +186,6 @@ enum HydrateMessage {
 
 impl HydrationBridge {
     fn connect(endpoint: &str) -> objects::error::Result<Self> {
-        // Resolve DNS at connect time so a hostname that's persisted
-        // (rather than a frozen IP) re-resolves on every process start.
-        let addr = endpoint
-            .to_socket_addrs()
-            .map_err(|err| {
-                HeddleError::Config(format!(
-                    "lazy hosted hydrator: resolve endpoint '{endpoint}': {err}",
-                ))
-            })?
-            .next()
-            .ok_or_else(|| {
-                HeddleError::Config(format!(
-                    "lazy hosted hydrator: DNS returned no addresses for '{endpoint}'",
-                ))
-            })?;
-
         let user_config = config::UserConfig::load_default().map_err(|err| {
             HeddleError::Config(format!("lazy hosted hydrator: load user config: {err}"))
         })?;
@@ -260,12 +243,13 @@ impl HydrationBridge {
                     // before its async close can run. The caller still times
                     // out below; this private worker finishes the dial and
                     // closes the client if the caller has gone away.
-                    let client = session.connect(addr).await.map_err(|err: ProtocolError| {
-                        HeddleError::Config(format!(
-                            "lazy hosted hydrator: connect to '{endpoint_for_thread}' \
-                                     (resolved to {addr}): {err}",
-                        ))
-                    })?;
+                    let client = session.connect(&endpoint_for_thread).await.map_err(
+                        |err: ProtocolError| {
+                            HeddleError::Config(format!(
+                                "lazy hosted hydrator: connect to '{endpoint_for_thread}': {err}",
+                            ))
+                        },
+                    )?;
                     Ok::<_, HeddleError>(client)
                 });
                 let mut client = match connect_result {
@@ -1045,7 +1029,7 @@ mod connect_path_tests {
             "hydration.rs must build its session through the shared HostedSession seam",
         );
         assert!(
-            source.contains("session.connect(addr)"),
+            source.contains("session.connect(&endpoint_for_thread)"),
             "hydration.rs must connect via HostedSession::connect, which owns rotation",
         );
     }

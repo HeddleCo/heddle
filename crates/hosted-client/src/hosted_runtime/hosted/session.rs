@@ -1,7 +1,5 @@
 //! Validated native hosted-session assembly and signed descriptor bootstrap.
 
-use std::net::SocketAddr;
-
 use anyhow::{Context, Result};
 use biscuit_auth::builder::BlockBuilder;
 use config::{ClientConfig, UserConfig};
@@ -127,20 +125,14 @@ impl HostedSession {
 
     pub async fn discover_endpoint(
         &self,
-        fallback_addr: SocketAddr,
+        server: &str,
     ) -> super::Result<super::VerifiedEndpointDescriptor> {
-        let server = self
-            .config
-            .server_key
-            .as_deref()
-            .map(str::to_string)
-            .unwrap_or_else(|| fallback_addr.to_string());
-        resolve_and_verify_endpoint_descriptor(&server, &self.config).await
+        resolve_and_verify_endpoint_descriptor(server, &self.config).await
     }
 
-    pub async fn connect(&self, fallback_addr: SocketAddr) -> Result<HostedClient, ProtocolError> {
+    pub async fn connect(&self, server: &str) -> Result<HostedClient, ProtocolError> {
         let descriptor = self
-            .discover_endpoint(fallback_addr)
+            .discover_endpoint(server)
             .await
             .map_err(|error| ProtocolError::Remote(error.to_string()))?;
         let mut client = HostedClient::connect_with_config(&descriptor, &self.config)
@@ -157,12 +149,9 @@ impl HostedSession {
     /// `heddle claim` uses this so its authenticated weft calls never bind
     /// the device node id the box network daemon serves the claim router
     /// on (heddle#1620).
-    pub async fn connect_outbound(
-        &self,
-        fallback_addr: SocketAddr,
-    ) -> Result<HostedClient, ProtocolError> {
+    pub async fn connect_outbound(&self, server: &str) -> Result<HostedClient, ProtocolError> {
         let descriptor = self
-            .discover_endpoint(fallback_addr)
+            .discover_endpoint(server)
             .await
             .map_err(|error| ProtocolError::Remote(error.to_string()))?;
         let mut client = HostedClient::connect_outbound_with_config(&descriptor, &self.config)
@@ -188,16 +177,16 @@ impl HostedClient {
     }
 
     pub async fn open_session(
-        addr: SocketAddr,
+        server: &str,
         user_config: &UserConfig,
         server_key: Option<String>,
         mode: HostedAuthMode,
     ) -> Result<Self> {
-        Self::open_session_with_insecure(addr, user_config, server_key, mode, false).await
+        Self::open_session_with_insecure(server, user_config, server_key, mode, false).await
     }
 
     pub async fn open_session_with_insecure(
-        addr: SocketAddr,
+        server: &str,
         user_config: &UserConfig,
         server_key: Option<String>,
         mode: HostedAuthMode,
@@ -205,7 +194,7 @@ impl HostedClient {
     ) -> Result<Self> {
         Ok(HostedSession::build(user_config, server_key, mode)?
             .with_allow_insecure(allow_insecure)
-            .connect(addr)
+            .connect(server)
             .await?)
     }
 }

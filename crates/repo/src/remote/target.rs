@@ -1,17 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Remote target resolution.
 
-use std::{
-    net::{SocketAddr, ToSocketAddrs},
-    path::PathBuf,
-};
+use std::{net::Ipv6Addr, path::PathBuf};
 
 /// A remote target - either a network address or a local path.
 #[derive(Debug, Clone)]
 pub enum RemoteTarget {
-    /// Network address (host:port).
+    /// Network authority (host or host:port).
     Network {
-        addr: SocketAddr,
+        authority: String,
         repo_path: Option<String>,
     },
     /// Local filesystem path (file:// URL).
@@ -24,6 +21,7 @@ impl RemoteTarget {
     /// Accepts:
     /// - `file:///path/to/repo` or `file://path/to/repo`
     /// - `/path/to/repo` (raw path, if it exists as a directory)
+    /// - `heddle://host[:port]/repo` (port defaults to HTTPS 443)
     /// - `host:port` (network address)
     pub fn parse(s: &str) -> Result<Self, String> {
         // Check for file:// protocol
@@ -37,20 +35,17 @@ impl RemoteTarget {
             ));
         }
 
-        if let Some((addr, repo_path)) = parse_network_with_repo_path(s) {
-            return Ok(RemoteTarget::Network { addr, repo_path });
+        if let Some((authority, repo_path)) = parse_network_with_repo_path(s) {
+            return Ok(RemoteTarget::Network {
+                authority,
+                repo_path,
+            });
         }
 
         // Check if it's a raw path (exists as a directory)
         let path = PathBuf::from(s);
         if path.exists() && path.is_dir() {
             return Ok(RemoteTarget::Local(path));
-        }
-
-        if s.starts_with("heddle://") {
-            return Err(format!(
-                "invalid remote url: {s} (`heddle://` carries no addressing that push can use; use https://<host>/<repo> or host:port/repo)"
-            ));
         }
 
         if looks_like_unresolved_local_path(s) {
@@ -73,9 +68,12 @@ impl RemoteTarget {
     /// retain their existing transport classification.
     pub fn parse_native(s: &str) -> Result<Self, String> {
         if let Some(rest) = s.strip_prefix("https://") {
-            let (addr, repo_path) = parse_https_network_with_repo_path(rest)
+            let (authority, repo_path) = parse_https_network_with_repo_path(rest)
                 .ok_or_else(|| format!("invalid native HTTPS remote url: {s}"))?;
-            return Ok(RemoteTarget::Network { addr, repo_path });
+            return Ok(RemoteTarget::Network {
+                authority,
+                repo_path,
+            });
         }
         Self::parse(s)
     }
@@ -94,11 +92,14 @@ impl RemoteTarget {
 impl std::fmt::Display for RemoteTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RemoteTarget::Network { addr, repo_path } => {
+            RemoteTarget::Network {
+                authority,
+                repo_path,
+            } => {
                 if let Some(repo_path) = repo_path {
-                    write!(f, "heddle://{}/{}", addr, repo_path)
+                    write!(f, "heddle://{authority}/{repo_path}")
                 } else {
-                    write!(f, "{}", addr)
+                    write!(f, "{authority}")
                 }
             }
             RemoteTarget::Local(path) => write!(f, "file://{}", path.display()),
@@ -106,30 +107,21 @@ impl std::fmt::Display for RemoteTarget {
     }
 }
 
-fn parse_network_with_repo_path(s: &str) -> Option<(SocketAddr, Option<String>)> {
+fn parse_network_with_repo_path(s: &str) -> Option<(String, Option<String>)> {
     if let Some(rest) = s.strip_prefix("heddle://") {
-        return parse_network_with_repo_path(rest);
+        return parse_authority_with_repo_path(rest, true);
     }
-
-    if let Ok(addr) = s.parse::<SocketAddr>() {
-        return Some((addr, None));
-    }
-
-    if let Some(addr) = resolve_socket_addr(s) {
-        return Some((addr, None));
-    }
-
-    let slash = s.find('/')?;
-    let (addr_part, repo_part) = s.split_at(slash);
-    let addr = resolve_socket_addr(addr_part)?;
-    let repo_path = repo_part.trim_start_matches('/');
-    if repo_path.is_empty() {
-        return Some((addr, None));
-    }
-    Some((addr, Some(repo_path.to_string())))
+    parse_authority_with_repo_path(s, false)
 }
 
-fn parse_https_network_with_repo_path(s: &str) -> Option<(SocketAddr, Option<String>)> {
+fn parse_https_network_with_repo_path(s: &str) -> Option<(String, Option<String>)> {
+    parse_authority_with_repo_path(s, true)
+}
+
+fn parse_authority_with_repo_path(
+    s: &str,
+    allow_default_https_port: bool,
+) -> Option<(String, Option<String>)> {
     if s.is_empty() || s.contains(['?', '#', '@']) {
         return None;
     }
@@ -140,25 +132,38 @@ fn parse_https_network_with_repo_path(s: &str) -> Option<(SocketAddr, Option<Str
     if authority.is_empty() {
         return None;
     }
-    let addr = resolve_socket_addr(authority).or_else(|| {
-        let host = authority
-            .strip_prefix('[')
-            .and_then(|host| host.strip_suffix(']'))
-            .unwrap_or(authority);
-        (host, 443).to_socket_addrs().ok()?.next()
-    })?;
+    validate_authority(authority, allow_default_https_port)?;
     let repo_path = repo_path
         .filter(|path| !path.is_empty())
         .map(str::to_string);
-    Some((addr, repo_path))
+    Some((authority.to_string(), repo_path))
 }
 
-fn resolve_socket_addr(addr: &str) -> Option<SocketAddr> {
-    if let Ok(parsed) = addr.parse::<SocketAddr>() {
-        return Some(parsed);
+fn validate_authority(authority: &str, allow_default_https_port: bool) -> Option<()> {
+    if authority.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return None;
     }
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let (host, suffix) = bracketed.split_once(']')?;
+        host.parse::<Ipv6Addr>().ok()?;
+        return match suffix {
+            "" if allow_default_https_port => Some(()),
+            suffix if suffix.starts_with(':') => validate_port(&suffix[1..]),
+            _ => None,
+        };
+    }
+    if authority.contains(['[', ']']) {
+        return None;
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && !host.contains(':') => validate_port(port),
+        None if allow_default_https_port && !authority.is_empty() => Some(()),
+        _ => None,
+    }
+}
 
-    addr.to_socket_addrs().ok()?.next()
+fn validate_port(port: &str) -> Option<()> {
+    port.parse::<u16>().ok().map(|_| ())
 }
 
 fn looks_like_unresolved_local_path(value: &str) -> bool {
@@ -175,12 +180,31 @@ mod tests {
     use super::RemoteTarget;
 
     #[test]
+    fn heddle_url_preserves_hostname_authority() {
+        let target = RemoteTarget::parse("heddle://api-staging.heddle.sh/org/repo")
+            .expect("parse hosted hostname");
+        match target {
+            RemoteTarget::Network {
+                authority,
+                repo_path,
+            } => {
+                assert_eq!(authority, "api-staging.heddle.sh");
+                assert_eq!(repo_path.as_deref(), Some("org/repo"));
+                assert!(authority.parse::<std::net::IpAddr>().is_err());
+            }
+            other => panic!("expected network target, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_hostname_without_repo_path() {
         let target = RemoteTarget::parse("localhost:8421").expect("parse localhost");
         match target {
-            RemoteTarget::Network { addr, repo_path } => {
-                assert_eq!(addr.port(), 8421);
-                assert!(addr.ip().is_loopback());
+            RemoteTarget::Network {
+                authority,
+                repo_path,
+            } => {
+                assert_eq!(authority, "localhost:8421");
                 assert!(repo_path.is_none());
             }
             other => panic!("expected network target, got {other:?}"),
@@ -192,9 +216,11 @@ mod tests {
         let target =
             RemoteTarget::parse("localhost:8421/acme/heddle").expect("parse localhost repo path");
         match target {
-            RemoteTarget::Network { addr, repo_path } => {
-                assert_eq!(addr.port(), 8421);
-                assert!(addr.ip().is_loopback());
+            RemoteTarget::Network {
+                authority,
+                repo_path,
+            } => {
+                assert_eq!(authority, "localhost:8421");
                 assert_eq!(repo_path.as_deref(), Some("acme/heddle"));
             }
             other => panic!("expected network target, got {other:?}"),
@@ -208,8 +234,11 @@ mod tests {
         let target = RemoteTarget::parse_native("https://127.0.0.1:8431/acme/heddle")
             .expect("parse native HTTPS URL");
         match target {
-            RemoteTarget::Network { addr, repo_path } => {
-                assert_eq!(addr, "127.0.0.1:8431".parse().unwrap());
+            RemoteTarget::Network {
+                authority,
+                repo_path,
+            } => {
+                assert_eq!(authority, "127.0.0.1:8431");
                 assert_eq!(repo_path.as_deref(), Some("acme/heddle"));
             }
             other => panic!("expected network target, got {other:?}"),
@@ -221,20 +250,15 @@ mod tests {
         let target =
             RemoteTarget::parse_native("https://127.0.0.1/acme/heddle").expect("parse HTTPS URL");
         match target {
-            RemoteTarget::Network { addr, .. } => assert_eq!(addr.port(), 443),
+            RemoteTarget::Network { authority, .. } => assert_eq!(authority, "127.0.0.1"),
             other => panic!("expected network target, got {other:?}"),
         }
     }
 
     #[test]
-    fn heddle_scheme_without_port_is_not_a_push_url() {
-        let error = RemoteTarget::parse("heddle://api.heddle.sh/luke/tiny-notes")
-            .expect_err("schemeless heddle:// host has no addressing");
-        assert!(
-            error.contains("heddle://") && error.contains("no addressing"),
-            "refusal must name the scheme gap: {error}"
-        );
-        assert!(RemoteTarget::parse_native("heddle://api.heddle.sh/luke/tiny-notes").is_err());
+    fn heddle_scheme_without_port_uses_default_https_port() {
+        assert!(RemoteTarget::parse("heddle://api.heddle.sh/luke/tiny-notes").is_ok());
+        assert!(RemoteTarget::parse_native("heddle://api.heddle.sh/luke/tiny-notes").is_ok());
         assert!(RemoteTarget::parse("heddle://127.0.0.1:8421/luke/tiny-notes").is_ok());
     }
 

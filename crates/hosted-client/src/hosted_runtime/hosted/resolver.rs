@@ -119,7 +119,7 @@ fn now_unix_millis() -> Result<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{descriptor_key_url, descriptor_url};
+    use super::{canonical_server_authority, descriptor_key_url, descriptor_url};
 
     #[test]
     fn descriptor_bootstrap_is_https_and_well_known() {
@@ -131,6 +131,20 @@ mod tests {
             descriptor_key_url("https://weft.example:8421"),
             "https://weft.example:8421/.well-known/heddle/iroh-descriptor-key"
         );
+    }
+
+    #[test]
+    fn descriptor_bootstrap_urls_preserve_hostname_authority() {
+        let canonical = canonical_server_authority("api-staging.heddle.sh").unwrap();
+        assert_eq!(
+            descriptor_url(&canonical),
+            "https://api-staging.heddle.sh/.well-known/heddle/iroh-endpoint"
+        );
+        assert_eq!(
+            descriptor_key_url(&canonical),
+            "https://api-staging.heddle.sh/.well-known/heddle/iroh-descriptor-key"
+        );
+        assert!(!descriptor_key_url(&canonical).contains("104.18."));
     }
 
     #[tokio::test]

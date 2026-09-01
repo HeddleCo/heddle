@@ -1,25 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pull, remote management, and serve commands.
 
-#[cfg(feature = "client")]
-use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-#[cfg(feature = "client")]
-use verbs::{
-    HostedPullResult, HostedPullResultFields, format_connected_to,
-    heddle_pull_execution_facts_from_hosted, parse_hosted_pull_result, pull_tip_changed,
-};
-use verbs::{
-    LocalTransferSummary, PullFailure, PullOutcome, PullPlan, PullPlanRequest, RemoteInfo,
-    RemoteListReport, build_pull_outcome, format_pull_outcome_text, format_pulling_from,
-    git_overlay_pull_execution_facts, heddle_pull_execution_facts_from_local,
-    is_native_transport_mismatch, list_plain_git_remotes, list_remotes, local_pull_changed,
-    plan_pull, pull_should_materialize, show_plain_git_remote, show_remote,
+/// CLI machine envelope: domain [`PullOutcome`] plus repository verification.
+// The wire payload lives in cli-contract so the schema registry registers
+// the real serialization type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::remote::{
+    PullOutput, RemoteMutationOutput,
 };
 // Re-export under the historical crate-local names for sibling modules.
 use heddle_git_projection::credential::EmbeddingSafeCredentialProvider;
+#[cfg(feature = "client")]
+use hosted_client::client::HostedClient;
+use hosted_client::client::LocalSync;
+#[cfg(feature = "client")]
+use hosted_client::hosted_runtime::hosted::{HostedAuthMode, PullMaterialization};
 use objects::{
     object::{StateId, ThreadName, Tree},
     store::ObjectStore,
@@ -32,6 +29,18 @@ use sley::{
     remote::{
         FetchOptions, PackGenerationProgress, ProgressSink as SleyProgressSink, TransferProgress,
     },
+};
+#[cfg(feature = "client")]
+use verbs::{
+    HostedPullResult, HostedPullResultFields, format_connected_to,
+    heddle_pull_execution_facts_from_hosted, parse_hosted_pull_result, pull_tip_changed,
+};
+use verbs::{
+    LocalTransferSummary, PullFailure, PullOutcome, PullPlan, PullPlanRequest, RemoteInfo,
+    RemoteListReport, build_pull_outcome, format_pull_outcome_text, format_pulling_from,
+    git_overlay_pull_execution_facts, heddle_pull_execution_facts_from_local,
+    is_native_transport_mismatch, list_plain_git_remotes, list_remotes, local_pull_changed,
+    plan_pull, pull_should_materialize, show_plain_git_remote, show_remote,
 };
 pub(crate) use verbs::{resolve_default_remote_name, resolved_default_remote_name};
 
@@ -54,18 +63,6 @@ use crate::{
     },
     config::UserConfig,
     remote::{Remote, RemoteConfig, RemoteTarget, resolve_remote_with_key},
-};
-#[cfg(feature = "client")]
-use hosted_client::client::HostedClient;
-use hosted_client::client::LocalSync;
-#[cfg(feature = "client")]
-use hosted_client::hosted_runtime::hosted::{HostedAuthMode, PullMaterialization};
-
-/// CLI machine envelope: domain [`PullOutcome`] plus repository verification.
-// The wire payload lives in cli-contract so the schema registry registers
-// the real serialization type.
-pub(crate) use heddle_cli_contract::cli::commands::wire::remote::{
-    PullOutput, RemoteMutationOutput,
 };
 
 fn heddle_pull_output_from_local(
@@ -275,12 +272,15 @@ pub async fn cmd_pull(
             )
             .await?;
         }
-        RemoteTarget::Network { addr, repo_path } => {
+        RemoteTarget::Network {
+            authority,
+            repo_path,
+        } => {
             #[cfg(feature = "client")]
             pull_network(
                 &repo,
                 PullNetworkOptions {
-                    addr,
+                    authority: &authority,
                     repo_path: repo_path.as_deref(),
                     user_config: &user_config,
                     server_key,
@@ -295,7 +295,7 @@ pub async fn cmd_pull(
             )
             .await?;
             #[cfg(not(feature = "client"))]
-            let _ = (addr, repo_path, insecure);
+            let _ = (authority, repo_path, insecure);
             #[cfg(not(feature = "client"))]
             anyhow::bail!(RecoveryAdvice::network_feature_unavailable("pull"));
         }
@@ -1085,7 +1085,7 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
         .repo_path
         .context("network remotes must include a hosted repository path")?;
     let mut client = HostedClient::open_session_with_insecure(
-        options.addr,
+        options.authority,
         options.user_config,
         options.server_key.clone(),
         HostedAuthMode::CredentialFallback,
@@ -1106,7 +1106,7 @@ async fn pull_network_connected(
     options: PullNetworkOptions<'_>,
 ) -> Result<()> {
     if !should_output_json(options.cli, Some(repo.config())) {
-        let line = format_connected_to(&options.addr.to_string());
+        let line = format_connected_to(options.authority);
         if let Some(addr) = line.strip_prefix("connected to ") {
             println!("{} connected to {}", style::ok_marker(), style::dim(addr));
         } else {
@@ -1723,7 +1723,7 @@ fn render_remote_info(output: &RemoteInfo, json: bool) -> Result<()> {
 
 #[cfg(feature = "client")]
 struct PullNetworkOptions<'a> {
-    addr: SocketAddr,
+    authority: &'a str,
     repo_path: Option<&'a str>,
     user_config: &'a UserConfig,
     server_key: Option<String>,

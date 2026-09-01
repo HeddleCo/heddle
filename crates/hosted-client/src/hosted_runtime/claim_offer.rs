@@ -22,7 +22,9 @@ use super::{
         encode_owner_root_reply, owner_root_operation, validate_stored_claim_signer,
     },
     claim_bridge::ClaimBridgeWorker,
-    hosted::{canonical_server_authority, claim_protocol::VerifiedClaimPrincipal, server_keys_match},
+    hosted::{
+        canonical_server_authority, claim_protocol::VerifiedClaimPrincipal, server_keys_match,
+    },
     identity_state::{self, ClaimIssuanceStatus, ClaimSecret, ClaimState},
 };
 
@@ -81,7 +83,7 @@ pub(crate) async fn cmd_claim(args: ClaimArgs) -> Result<()> {
     // Outbound only: an ephemeral endpoint that does not bind the device
     // node id the daemon serves the claim router on.
     let mut client = session
-        .connect_outbound(([127, 0, 0, 1], 0).into())
+        .connect_outbound(&server)
         .await
         .with_context(|| format!("connecting to {server} for the claim ceremony"))?;
     // Upload the claimable seq-0 root before the Iroh ceremony so claim
@@ -108,8 +110,13 @@ pub(crate) async fn cmd_claim(args: ClaimArgs) -> Result<()> {
     drop(claim_link);
     drop(offer.secret);
 
-    let outcome =
-        wait_for_claim(&offer.authorization_hash, args.timeout, &claim_socket, &client).await;
+    let outcome = wait_for_claim(
+        &offer.authorization_hash,
+        args.timeout,
+        &claim_socket,
+        &client,
+    )
+    .await;
     let claimed = matches!(outcome, Ok(ClaimWaitOutcome::Claimed));
     let owner_root_claim = if claimed {
         super::owner_root::send_pending_register_public_key_claim(&mut client).await

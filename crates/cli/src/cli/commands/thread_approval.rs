@@ -17,6 +17,12 @@
 use anyhow::{Context, Result, anyhow};
 use api::heddle::api::v1alpha1::{RepositoryRef, StateId as ApiStateId, repository_ref::Reference};
 use heddle_cli_args::CliContext as _;
+// The approval wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::thread::{
+    ApprovalOutput, ApprovalRevokeOutput, EligibilityOutput, UnmetOutput,
+};
+use hosted_client::client::{HostedAuthMode, HostedClient};
 use objects::object::ThreadName;
 use repo::Repository;
 use verbs::approval_plan::{
@@ -27,8 +33,10 @@ use verbs::approval_plan::{
     timestamp_secs_u64, unmet_requirement_line,
 };
 
-use super::RecoveryAdvice;
-use super::next_action::{NextActionValidationContext, write_full_command_json};
+use super::{
+    RecoveryAdvice,
+    next_action::{NextActionValidationContext, write_full_command_json},
+};
 use crate::{
     cli::{
         Cli,
@@ -39,13 +47,6 @@ use crate::{
     },
     config::UserConfig,
     remote::{RemoteTarget, resolve_remote_with_key},
-};
-use hosted_client::client::{HostedAuthMode, HostedClient};
-
-// The approval wire payloads live in cli-contract so the schema registry
-// registers the real serialization types.
-pub(crate) use heddle_cli_contract::cli::commands::wire::thread::{
-    ApprovalOutput, ApprovalRevokeOutput, EligibilityOutput, UnmetOutput,
 };
 
 fn ts_secs(ts: &Option<prost_types::Timestamp>) -> u64 {
@@ -73,9 +74,12 @@ async fn open_hosted_session(
     remote_name: &str,
 ) -> Result<(HostedClient, String)> {
     let (target, server_key) = resolve_remote_with_key(repo, Some(remote_name))?;
-    let (addr, repo_path) = match target {
-        RemoteTarget::Network { addr, repo_path } => (
-            addr,
+    let (authority, repo_path) = match target {
+        RemoteTarget::Network {
+            authority,
+            repo_path,
+        } => (
+            authority,
             repo_path.context("hosted remote must include a repository path")?,
         ),
         RemoteTarget::Local(_) => {
@@ -97,7 +101,7 @@ async fn open_hosted_session(
     // CredentialFallback (resolves the credential store's proof key) rather
     // than a token-only ConfigToken session.
     let client = HostedClient::open_session(
-        addr,
+        &authority,
         &user_config,
         server_key,
         HostedAuthMode::CredentialFallback,

@@ -256,9 +256,8 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use crate::Repository;
-
     use super::*;
+    use crate::Repository;
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -350,8 +349,11 @@ mod tests {
             resolve_remote_with_key_and_insecure(&repo, Some("127.0.0.1:8421"))
                 .expect("resolve host:port-named remote");
         match target {
-            RemoteTarget::Network { addr, repo_path } => {
-                assert_eq!(addr.port(), 9999);
+            RemoteTarget::Network {
+                authority,
+                repo_path,
+            } => {
+                assert_eq!(authority, "127.0.0.1:9999");
                 assert_eq!(repo_path.as_deref(), Some("acme/repo"));
             }
             other => panic!("expected network target, got {other:?}"),
