@@ -33,7 +33,7 @@ pub(crate) async fn remint(server: &str) -> Result<()> {
                 signing_identity: format!("principal:{}", stored.subject),
             },
         )?;
-        let mut client = session.connect(([127, 0, 0, 1], 0).into()).await?;
+        let mut client = session.connect(server).await?;
         let upload = upload_reminted_owner_root(&mut client, &stored.private_key_pem, root).await;
         client.close().await;
         upload?;
