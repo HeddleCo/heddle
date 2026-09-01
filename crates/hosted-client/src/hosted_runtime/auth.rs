@@ -25,8 +25,8 @@ use super::{
     auth_requests::{AuthCommand, AuthTrustCommand},
     credential_file::{self, CredentialKind, CredentialProvenance, VerifiedCredential},
     device_flow::{
-        AgentAttenuation, AgentTemplate, SAFE_AGENT_OPERATIONS, attenuate_for_agent,
-        effective_pop_public_key_hex,
+        AgentAttenuation, AgentTemplate, CI_VERDICT_WRITE_ACTION, SAFE_AGENT_OPERATIONS,
+        attenuate_for_agent, effective_pop_public_key_hex,
     },
     hosted::{
         HostedAuthMode, HostedClient, HostedError, HostedSession, ResolvedHostedCredential,
@@ -407,6 +407,7 @@ pub(crate) fn cmd_auth_derive_agent(
     let agent_id = agent_id.unwrap_or_else(|| format!("agent-{}", uuid::Uuid::new_v4()));
     let allowed_operations = resolve_agent_operations(template, requested_operations)?;
     let declared_scopes = parse_agent_scopes(scopes)?;
+    validate_runner_scopes(template, &declared_scopes)?;
     validate_scope_narrowing(&parent_token.id, &declared_scopes)?;
     let child_signer = Ed25519Signer::generate()
         .map_err(|error| anyhow::anyhow!("failed to generate child proof key: {error}"))?;
@@ -462,6 +463,9 @@ pub(crate) fn cmd_auth_derive_agent(
             println!("Template: {} ceiling", template.as_str());
         }
         println!("Allowed operations: {}", allowed_operations.join(", "));
+        if let Some(scope) = rendered_agent_scope(template, &declared_scopes) {
+            println!("Scope: {scope}");
+        }
         println!("{DERIVED_TOKEN_SECURITY_NOTE}");
         return Ok(());
     }
@@ -492,6 +496,8 @@ pub(crate) fn cmd_auth_derive_agent(
         println!("Allowed operations: {}", allowed_operations.join(", "));
         if declared_scopes.is_empty() {
             println!("Scopes: none (full resource authority inherited from parent)");
+        } else if let Some(scope) = rendered_agent_scope(template, &declared_scopes) {
+            println!("Scope: {scope} (enforced server-side per request)");
         } else {
             println!(
                 "Scopes: {} (enforced server-side per request)",
@@ -505,6 +511,21 @@ pub(crate) fn cmd_auth_derive_agent(
         println!("{DERIVED_TOKEN_SECURITY_NOTE}");
     }
     Ok(())
+}
+
+fn rendered_agent_scope(
+    template: Option<AgentTemplate>,
+    scopes: &[(String, String)],
+) -> Option<String> {
+    if template != Some(AgentTemplate::Runner) || scopes.is_empty() {
+        return None;
+    }
+    let mut tokens = scopes
+        .iter()
+        .map(|(kind, path)| format!("{kind}:{path}"))
+        .collect::<Vec<_>>();
+    tokens.push(CI_VERDICT_WRITE_ACTION.to_string());
+    Some(tokens.join(" "))
 }
 
 /// Resolve the final operation ceiling for a derived agent.
@@ -557,8 +578,9 @@ fn parse_agent_scopes(scopes: Vec<String>) -> Result<Vec<(String, String)>> {
         let (kind, path) = match scope.split_once(':') {
             Some(("repo", path)) => ("repo", path),
             Some(("namespace" | "ns", path)) => ("namespace", path),
+            Some(("spool", path)) => ("spool", path),
             Some((kind, _)) => bail!(
-                "unsupported scope kind {kind:?}; use repo:<path>, namespace:<path>, or a bare repo path"
+                "unsupported scope kind {kind:?}; use repo:<path>, namespace:<path>, spool:<path>, or a bare repo path"
             ),
             None => ("repo", scope.as_str()),
         };
@@ -569,6 +591,25 @@ fn parse_agent_scopes(scopes: Vec<String>) -> Result<Vec<(String, String)>> {
         parsed.insert((kind.to_string(), path.to_string()));
     }
     Ok(parsed.into_iter().collect())
+}
+
+fn validate_runner_scopes(
+    template: Option<AgentTemplate>,
+    scopes: &[(String, String)],
+) -> Result<()> {
+    if template != Some(AgentTemplate::Runner) {
+        return Ok(());
+    }
+    if scopes.is_empty() {
+        bail!("--runner requires at least one --scope spool:<path>");
+    }
+    if let Some((kind, path)) = scopes.iter().find(|(kind, _)| kind != "spool") {
+        bail!("--runner scope {kind}:{path} is not a spool; use --scope spool:<path>");
+    }
+    if let Some((_, path)) = scopes.iter().find(|(_, path)| path.contains('*')) {
+        bail!("--runner scope spool:{path} must name a concrete spool path");
+    }
+    Ok(())
 }
 
 fn validate_scope_narrowing(parent_token: &str, child: &[(String, String)]) -> Result<()> {
@@ -638,6 +679,7 @@ fn scope_is_within(child: &(String, String), parent: &(String, String)) -> bool 
         ("repo", "repo") => path_is_within,
         ("namespace", "namespace") => path_is_within,
         ("namespace", "repo") => child.1 != parent.1 && path_is_within,
+        ("spool", "spool") => path_is_within,
         _ => false,
     }
 }
@@ -1620,6 +1662,7 @@ fn open_url(url: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hosted_runtime::device_flow::CI_VERDICT_WRITE_OPERATION;
 
     #[test]
     fn signup_invite_commands_construct_the_declared_requests() {
@@ -1994,22 +2037,25 @@ mod tests {
         }
     }
 
-    fn stored_device_parent() -> (ServerCredential, String) {
+    fn stored_device_parent() -> (ServerCredential, String, biscuit_auth::KeyPair) {
         let signer = Ed25519Signer::generate().expect("device key");
         let private_key_pem = signer.to_pem().expect("device PEM");
         let expires_at = chrono::Utc::now() + chrono::Duration::hours(2);
+        let root = biscuit_auth::KeyPair::new();
         let token = biscuit_auth::Biscuit::builder()
             .fact(r#"user("alice")"#)
             .expect("user fact")
             .fact(r#"credential_id("root-credential")"#)
             .expect("credential fact")
+            .fact(format!("right(\"spool\", \"org/acme\", \"{CI_VERDICT_WRITE_ACTION}\")").as_str())
+            .expect("CI-verdict authority right")
             .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
             .expect("device PoP fact")
             .fact(format!("expires_at({})", expires_at.to_rfc3339()).as_str())
             .expect("expiry fact")
             .check(format!("check if time($now), $now < {}", expires_at.to_rfc3339()).as_str())
             .expect("expiry check")
-            .build(&biscuit_auth::KeyPair::new())
+            .build(&root)
             .expect("build parent")
             .to_base64()
             .expect("encode parent");
@@ -2023,14 +2069,56 @@ mod tests {
                 expires_at: Some(expires_at.to_rfc3339()),
             },
             private_key_pem,
+            root,
         )
+    }
+
+    fn runner_request_is_authorized(
+        token: &str,
+        root: &biscuit_auth::KeyPair,
+        operation: &str,
+        spool: &str,
+    ) -> bool {
+        use biscuit_auth::{builder::AuthorizerBuilder, datalog::RunLimits};
+
+        let root_public = root.public();
+        let biscuit = biscuit_auth::Biscuit::from_base64(token, move |_| Ok(root_public))
+            .expect("verify runner Biscuit");
+        let mut builder = AuthorizerBuilder::new()
+            .set_limits(RunLimits {
+                max_facts: 1000,
+                max_iterations: 100,
+                max_time: std::time::Duration::from_secs(1),
+            })
+            .fact(format!("time({})", chrono::Utc::now().to_rfc3339()).as_str())
+            .expect("request time fact")
+            .fact(format!("operation(\"{operation}\")").as_str())
+            .expect("request operation fact")
+            .fact(format!("resource(\"spool\", \"{spool}\")").as_str())
+            .expect("request spool fact");
+        if operation == CI_VERDICT_WRITE_OPERATION {
+            builder = builder
+                .check(
+                format!(
+                    "check if resource(\"spool\", $path), right(\"spool\", $path, \"{CI_VERDICT_WRITE_ACTION}\") trusting authority"
+                )
+                .as_str(),
+            )
+                .expect("CI-verdict authority check");
+        }
+        let mut authorizer = builder
+            .policy("allow if true")
+            .expect("allow policy")
+            .build(&biscuit)
+            .expect("build runner authorizer");
+        authorizer.authorize().is_ok()
     }
 
     #[test]
     fn derive_agent_installs_fresh_pop_child_and_supports_narrower_subderivation() {
         with_isolated_home(|| {
             let server = "api.S";
-            let (parent, private_key_pem) = stored_device_parent();
+            let (parent, private_key_pem, _root) = stored_device_parent();
             credentials::store_server_credential(server, parent).expect("store parent");
 
             cmd_auth_derive_agent(
@@ -2140,7 +2228,7 @@ mod tests {
     fn derive_agent_out_writes_one_verifiable_hcred_with_a_fresh_child_key() {
         with_isolated_home(|| {
             let server = "api.S";
-            let (parent, private_key_pem) = stored_device_parent();
+            let (parent, private_key_pem, _root) = stored_device_parent();
             credentials::store_server_credential(server, parent).expect("store parent");
             let out = repo::identity::heddle_home_dir().join("agent-export.hcred");
 
@@ -2208,6 +2296,105 @@ mod tests {
     }
 
     #[test]
+    fn derive_agent_runner_hcred_is_human_delegated_and_least_privileged() {
+        with_isolated_home(|| {
+            let server = "api.S";
+            let (parent, parent_private_key_pem, root) = stored_device_parent();
+            credentials::store_server_credential(server, parent).expect("store human parent");
+            let out = repo::identity::heddle_home_dir().join("runner.hcred");
+
+            cmd_auth_derive_agent(
+                server,
+                Some("ci-runner".to_string()),
+                900,
+                vec!["spool:org/acme".to_string()],
+                Vec::new(),
+                Some(AgentTemplate::Runner),
+                Some(&out),
+                false,
+            )
+            .expect("derive portable runner credential offline");
+
+            let loaded = credential_file::load_credential_file(&out).expect("load runner .hcred");
+            assert_eq!(loaded.subject, "alice");
+            assert_ne!(
+                loaded.proof_key_pem, parent_private_key_pem,
+                "runner must carry a fresh PoP key, never the human device key"
+            );
+            let child_signer =
+                Ed25519Signer::from_pem(&loaded.proof_key_pem).expect("parse runner PoP key");
+            let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(loaded.token.as_bytes())
+                .expect("runner token is a Biscuit");
+            let authority = parsed.print_block_source(0).expect("authority block");
+            let attenuation = parsed.print_block_source(1).expect("runner block");
+            assert!(
+                authority.contains("user(\"alice\")"),
+                "runner must retain the human subject in the authority block: {authority}"
+            );
+            assert!(
+                authority.contains("right(\"spool\", \"org/acme\", \"ci-verdict:write\")"),
+                "runner must retain the human's exact CI-verdict authority right: {authority}"
+            );
+            assert!(
+                attenuation.contains(&hex::encode(child_signer.public_key())),
+                "runner attenuation must bind its fresh PoP public key"
+            );
+            assert!(
+                attenuation.contains("agent_scope(\"spool\", \"org/acme\")"),
+                "runner must declare the exact spool scope: {attenuation}"
+            );
+            assert!(
+                attenuation.contains(format!("$op == \"{CI_VERDICT_WRITE_OPERATION}\"").as_str()),
+                "runner must carry weft's exact verdict request operation: {attenuation}"
+            );
+
+            let provenance = loaded.provenance.expect("runner provenance");
+            assert_eq!(provenance.template.as_deref(), Some("runner"));
+            assert_eq!(
+                provenance.scopes.as_deref(),
+                Some(["spool:org/acme".to_string()].as_slice())
+            );
+            let operations = provenance
+                .allowed_operations
+                .expect("runner operation ceiling");
+            assert_eq!(operations, [CI_VERDICT_WRITE_OPERATION.to_string()]);
+            assert_eq!(
+                rendered_agent_scope(
+                    Some(AgentTemplate::Runner),
+                    &[("spool".to_string(), "org/acme".to_string())]
+                )
+                .as_deref(),
+                Some("spool:org/acme ci-verdict:write")
+            );
+            for forbidden in ["Push", "UpdateRef", "CreateSpool", "spool:write"] {
+                assert!(
+                    !operations.iter().any(|operation| operation == forbidden),
+                    "runner .hcred must not carry source-write operation {forbidden}"
+                );
+                assert!(
+                    !runner_request_is_authorized(&loaded.token, &root, forbidden, "org/acme"),
+                    "runner Biscuit must deny source-write operation {forbidden}"
+                );
+            }
+            assert!(runner_request_is_authorized(
+                &loaded.token,
+                &root,
+                CI_VERDICT_WRITE_OPERATION,
+                "org/acme"
+            ));
+            assert!(
+                !runner_request_is_authorized(
+                    &loaded.token,
+                    &root,
+                    CI_VERDICT_WRITE_OPERATION,
+                    "org/other"
+                ),
+                "runner verdict authority must not escape its spool scope"
+            );
+        });
+    }
+
+    #[test]
     fn derive_agent_allow_flag_cannot_select_unsafe_operations() {
         for operation in [
             "CreateServiceAccount",
@@ -2224,6 +2411,36 @@ mod tests {
                     .contains("outside the safe agent operation ceiling")
             );
         }
+    }
+
+    #[test]
+    fn runner_requires_concrete_spool_scopes() {
+        let missing = validate_runner_scopes(Some(AgentTemplate::Runner), &[])
+            .expect_err("an unscoped runner must be rejected");
+        assert!(missing.to_string().contains("requires at least one"));
+
+        let wrong_kind = validate_runner_scopes(
+            Some(AgentTemplate::Runner),
+            &[("repo".to_string(), "org/acme".to_string())],
+        )
+        .expect_err("a repo-scoped runner must be rejected");
+        assert!(wrong_kind.to_string().contains("is not a spool"));
+
+        let wildcard = validate_runner_scopes(
+            Some(AgentTemplate::Runner),
+            &[("spool".to_string(), "*".to_string())],
+        )
+        .expect_err("a wildcard runner must be rejected");
+        assert!(wildcard.to_string().contains("concrete spool path"));
+
+        validate_runner_scopes(
+            Some(AgentTemplate::Runner),
+            &[
+                ("spool".to_string(), "org/acme".to_string()),
+                ("spool".to_string(), "org/docs".to_string()),
+            ],
+        )
+        .expect("one or more concrete spool scopes are valid");
     }
 
     #[test]

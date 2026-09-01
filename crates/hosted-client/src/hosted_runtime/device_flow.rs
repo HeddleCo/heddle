@@ -202,6 +202,11 @@ fn mandatory_agent_denied_operations() -> impl Iterator<Item = &'static str> {
     )
 }
 
+/// Scope token and authority-right action parsed by weft-authz.
+pub const CI_VERDICT_WRITE_ACTION: &str = "ci-verdict:write";
+/// Request-time operation injected by weft's CI-verdict authorization gate.
+pub const CI_VERDICT_WRITE_OPERATION: &str = "CiVerdictWrite";
+
 /// Curated W1 operation ceiling for `heddle auth derive-agent`.
 ///
 /// This is the derive-agent child ceiling only. The unclaimed agent-rooted
@@ -212,6 +217,10 @@ fn mandatory_agent_denied_operations() -> impl Iterator<Item = &'static str> {
 /// both evaluated by the server, so sub-derivation computes an intersection
 /// and cannot widen an ancestor's selection.
 pub const SAFE_AGENT_OPERATIONS: &[&str] = &[
+    // CI runners submit signed verdicts without receiving source-write
+    // authority. Weft gates this operation on the distinct authority action
+    // `ci-verdict:write` for the request's spool.
+    CI_VERDICT_WRITE_OPERATION,
     // Hosted push and pull.
     "Push",
     "Pull",
@@ -292,6 +301,7 @@ const TEMPLATE_READ_OPERATIONS: &[&str] = &[
 
 /// Collaboration writes a `contributor` adds on top of the read set.
 const TEMPLATE_CONTRIBUTOR_WRITES: &[&str] = &[
+    CI_VERDICT_WRITE_OPERATION,
     "Push",
     "UpdateRef",
     "SetContext",
@@ -308,6 +318,9 @@ const TEMPLATE_CONTRIBUTOR_WRITES: &[&str] = &[
 
 /// The push/pull/ref-move set a CI lander needs to run `ready`/`land`.
 const TEMPLATE_CI_LANDING_WRITES: &[&str] = &["Push", "UpdateRef"];
+
+/// The sole write capability a human delegates to a CI runner.
+const TEMPLATE_RUNNER_WRITES: &[&str] = &[CI_VERDICT_WRITE_OPERATION];
 
 /// Preset operation ceilings for `heddle auth derive-agent --template`.
 ///
@@ -334,16 +347,19 @@ pub enum AgentTemplate {
     /// Read + `Pull` + the `Push`/`UpdateRef` a CI lander needs to run
     /// `ready`/`land`. No context or discussion writes.
     CiLanding,
+    /// CI verdict submission only. No source reads, writes, or ref moves.
+    Runner,
 }
 
 impl AgentTemplate {
-    /// Every template variant, in privilege order. A new variant added to the
-    /// enum must be added here too — the `operations()` match already forces
-    /// handling it, and the template invariant tests iterate `ALL` so a new
-    /// variant is automatically held to the safe-ceiling and ordering checks.
+    /// Every template variant. A new variant added to the enum must be added
+    /// here too — the `operations()` match already forces handling it, and the
+    /// template invariant tests iterate `ALL` so a new variant is
+    /// automatically held to the safe-ceiling checks.
     #[cfg(test)]
-    pub const ALL: [AgentTemplate; 3] = [
+    pub const ALL: [AgentTemplate; 4] = [
         AgentTemplate::Reviewer,
+        AgentTemplate::Runner,
         AgentTemplate::CiLanding,
         AgentTemplate::Contributor,
     ];
@@ -354,6 +370,7 @@ impl AgentTemplate {
             AgentTemplate::Reviewer => "reviewer",
             AgentTemplate::Contributor => "contributor",
             AgentTemplate::CiLanding => "ci-landing",
+            AgentTemplate::Runner => "runner",
         }
     }
 
@@ -371,6 +388,10 @@ impl AgentTemplate {
             }
             AgentTemplate::CiLanding => {
                 set.extend(TEMPLATE_CI_LANDING_WRITES.iter().copied());
+            }
+            AgentTemplate::Runner => {
+                set.clear();
+                set.extend(TEMPLATE_RUNNER_WRITES.iter().copied());
             }
         }
         set.into_iter().map(str::to_string).collect()
@@ -397,16 +418,16 @@ pub struct AgentAttenuation {
     /// `expires_at`, the chain rejects regardless of the parent's
     /// own expiry.
     pub expires_at: DateTime<Utc>,
-    /// When `Some`, the agent is restricted to the listed hosted
-    /// operations. Each entry is the bare method name (e.g.
-    /// `"GetState"`, `"ListRefs"`).
+    /// When `Some`, the agent is restricted to the listed hosted operations.
+    /// Each entry is a bare method name (e.g. `"GetState"`, `"ListRefs"`) or
+    /// a verifier operation such as `"CiVerdictWrite"`.
     pub allowed_operations: Option<Vec<String>>,
     /// When `Some`, the agent is restricted to resources whose path matches
     /// one of the entries. Format: `(kind, path)` where
-    /// `kind ∈ {"repo", "namespace"}`. Emits an ENFORCEABLE
-    /// `check if resource($k, $p), …` caveat against the `resource("repo", …)`
-    /// fact the server injects per request (weft#644): a `repo` entry matches
-    /// that exact repo or any subtree path, a `namespace` entry matches the
+    /// `kind ∈ {"repo", "namespace", "spool"}`. Emits an ENFORCEABLE
+    /// `check if resource($k, $p), …` caveat against the resource fact the
+    /// server injects per request (weft#644). A `repo` or `spool` entry matches
+    /// that exact path or any subtree path; a `namespace` entry matches the
     /// whole `<namespace>/` repo subtree. An entry rejects a request whose
     /// target the caveat does not cover; a full-authority token (`None`) is
     /// unaffected because facts never reject, only caveats do.
@@ -920,7 +941,8 @@ mod tests {
             .into_iter()
             .collect();
         let ci: BTreeSet<String> = AgentTemplate::CiLanding.operations().into_iter().collect();
-        // Reviewer is the read-only floor; both write templates are supersets.
+        let runner: BTreeSet<String> = AgentTemplate::Runner.operations().into_iter().collect();
+        // Reviewer is the read-only floor for contributor and CI landing.
         assert!(reviewer.is_subset(&contributor));
         assert!(reviewer.is_subset(&ci));
         // CI landing sits between reviewer and contributor: it adds only
@@ -929,6 +951,23 @@ mod tests {
         // Contributor carries collaboration writes CI landing does not.
         assert!(contributor.contains("OpenDiscussion"));
         assert!(!ci.contains("OpenDiscussion"));
+        assert!(runner.is_subset(&contributor));
+    }
+
+    #[test]
+    fn runner_template_can_write_verdicts_but_cannot_write_source() {
+        let runner: BTreeSet<String> = AgentTemplate::Runner.operations().into_iter().collect();
+
+        assert_eq!(
+            runner,
+            BTreeSet::from([CI_VERDICT_WRITE_OPERATION.to_string()])
+        );
+        for forbidden in ["Push", "UpdateRef", "spool:write", "spool-write"] {
+            assert!(
+                !runner.contains(forbidden),
+                "runner operation ceiling must deny source-write operation {forbidden}"
+            );
+        }
     }
 
     /// Mint a parent Biscuit using biscuit-auth directly. We avoid
