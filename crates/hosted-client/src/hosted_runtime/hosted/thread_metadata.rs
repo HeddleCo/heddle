@@ -21,6 +21,12 @@ pub(super) fn from_summary(
             format!("was named '{}'", summary.name),
         ));
     }
+    if summary.thread_id.is_empty() {
+        return Err(invalid_metadata(
+            remote_thread,
+            "is missing its stable identity",
+        ));
+    }
     let base_state = super::helpers::parse_proto_state_id(summary.base_state)?
         .ok_or_else(|| invalid_metadata(remote_thread, "is missing its managed base state"))?;
     let advertised_current = super::helpers::parse_proto_state_id(summary.current_state)?;
@@ -45,7 +51,7 @@ pub(super) fn from_summary(
     let now = chrono::Utc::now();
 
     Ok(SyncedThreadMetadata {
-        id: remote_thread.to_string(),
+        id: summary.thread_id,
         thread: remote_thread.to_string(),
         target_thread: summary.target_thread,
         parent_thread: summary.parent_thread,
@@ -206,6 +212,7 @@ mod tests {
         let tip = repo.snapshot(Some("runner".to_string()), None).unwrap();
         let summary = ThreadSummary {
             name: "shuttle/runner".to_string(),
+            thread_id: "thread-stable-runner".to_string(),
             base_state: super::super::helpers::proto_state_id(base.state_id),
             current_state: super::super::helpers::proto_state_id(tip.state_id),
             target_thread: Some("main".to_string()),
@@ -218,6 +225,7 @@ mod tests {
         };
 
         let metadata = from_summary(&repo, "shuttle/runner", tip.state_id, summary).unwrap();
+        assert_eq!(metadata.id, "thread-stable-runner");
         assert_eq!(metadata.thread, "shuttle/runner");
         assert_eq!(metadata.target_thread.as_deref(), Some("main"));
         assert_eq!(metadata.state, repo::ThreadState::Ready);
