@@ -34,12 +34,11 @@ where
             return Ok(None);
         };
         let prior = self.latest_state_attachment(&state_id, StateAttachmentKind::Discussions)?;
-        if let Some(prior_attachment) = &prior {
-            if let StateAttachmentBody::Discussions(existing) = &prior_attachment.body {
-                if *existing == hash {
-                    return Ok(Some(hash));
-                }
-            }
+        if let Some(prior_attachment) = &prior
+            && let StateAttachmentBody::Discussions(existing) = &prior_attachment.body
+            && *existing == hash
+        {
+            return Ok(Some(hash));
         }
         if !self.store().has_state(&state_id)? {
             return Err(HeddleError::StateNotFound(state_id));
