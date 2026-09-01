@@ -185,7 +185,7 @@ async fn fetch_identity(server: &str) -> Result<WhoamiIdentity> {
     )
     .map_err(|error| anyhow::anyhow!(error))?;
     let mut client = session
-        .connect(([127, 0, 0, 1], 0).into())
+        .connect(server)
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
     let response = client

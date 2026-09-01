@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Remote operations (push, pull, remote management).
 
-#[cfg(feature = "client")]
-use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
@@ -14,6 +12,11 @@ use heddle_git_projection::{
         AuthoritativeGitPushOptions, GitPushScope, push_authoritative_git_refs, set_reference,
     },
 };
+#[cfg(feature = "client")]
+use hosted_client::client::HostedClient;
+use hosted_client::client::LocalSync;
+#[cfg(feature = "client")]
+use hosted_client::client::{HostedAuthMode, HostedSession};
 use objects::object::ThreadName;
 use repo::{Repository, RepositoryCapability};
 use sley::{
@@ -67,18 +70,12 @@ use crate::{
     config::UserConfig,
     remote::{RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
-#[cfg(feature = "client")]
-use hosted_client::client::HostedClient;
-use hosted_client::client::LocalSync;
-#[cfg(feature = "client")]
-use hosted_client::client::{HostedAuthMode, HostedSession};
 
 mod remote_ops;
 
 // The wire payload lives in cli-contract so the schema registry registers
 // the real serialization type.
 pub(crate) use heddle_cli_contract::cli::commands::wire::remote::PushOutput;
-
 pub use remote_ops::{cmd_pull, cmd_remote};
 pub(crate) use remote_ops::{
     pull_current_git_overlay_authoritative, resolve_default_remote_name,
@@ -411,12 +408,15 @@ pub async fn cmd_push(
                 push_local(&repo, &path, state_id, track_name, &plan, cli).await?;
             }
         }
-        RemoteTarget::Network { addr, repo_path } => {
+        RemoteTarget::Network {
+            authority,
+            repo_path,
+        } => {
             #[cfg(feature = "client")]
             push_network(
                 &repo,
                 PushNetworkOptions {
-                    addr,
+                    authority: &authority,
                     repo_path: repo_path.as_deref(),
                     remote_arg: remote.as_deref(),
                     session: network_session
@@ -431,7 +431,7 @@ pub async fn cmd_push(
             )
             .await?;
             #[cfg(not(feature = "client"))]
-            let _ = (addr, repo_path, single_state_id, insecure);
+            let _ = (authority, repo_path, single_state_id, insecure);
             #[cfg(not(feature = "client"))]
             anyhow::bail!(RecoveryAdvice::network_feature_unavailable("push"));
         }
@@ -922,7 +922,7 @@ pub(super) fn admit_git_overlay_remote_url(url: &str) -> Result<()> {
 
 #[cfg(feature = "client")]
 async fn discover_native_https_remote(spec: &str, action: &str) -> Result<()> {
-    let RemoteTarget::Network { addr, .. } =
+    let RemoteTarget::Network { authority, .. } =
         RemoteTarget::parse_native(spec).map_err(anyhow::Error::msg)?
     else {
         anyhow::bail!("native HTTPS discovery requires a network remote");
@@ -933,7 +933,7 @@ async fn discover_native_https_remote(spec: &str, action: &str) -> Result<()> {
         server_key,
         HostedAuthMode::Unauthenticated,
     )?;
-    match session.discover_endpoint(addr).await {
+    match session.discover_endpoint(&authority).await {
         Ok(_) => Ok(()),
         Err(hosted_client::hosted_runtime::hosted::HostedError::EndpointDescriptorUnavailable) => {
             Err(RecoveryAdvice::native_https_iroh_endpoint_missing(action, spec).into())
@@ -1383,7 +1383,7 @@ async fn push_local_all_threads(
 async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Result<()> {
     let mut client = options
         .session
-        .connect(options.addr)
+        .connect(options.authority)
         .await?
         .with_human_signature_callback(hosted_client::client::cli_human_signature_callback());
     let result = push_network_connected(repo, &mut client, options).await;
@@ -1398,7 +1398,7 @@ async fn push_network_connected(
     options: PushNetworkOptions<'_>,
 ) -> Result<()> {
     if !should_output_json(options.cli, Some(repo.config())) {
-        let line = format_connected_to(&options.addr.to_string());
+        let line = format_connected_to(options.authority);
         if let Some(addr) = line.strip_prefix("connected to ") {
             println!("{} connected to {}", style::ok_marker(), style::dim(addr));
         } else {
@@ -1765,7 +1765,7 @@ async fn auto_provision_hosted_repo(
     let configured_remote = persist_auto_provisioned_remote(
         repo,
         options.remote_arg,
-        options.addr,
+        options.authority,
         provisioned_repo.full_path(),
     )?;
 
@@ -1789,14 +1789,17 @@ async fn auto_provision_hosted_repo(
                     &format!(
                         "{} -> {}",
                         style::bold(&remote_name),
-                        style::dim(&format!("heddle://{}/{}", options.addr, display_full_path))
+                        style::dim(&format!(
+                            "heddle://{}/{}",
+                            options.authority, display_full_path
+                        ))
                     )
                 )
             );
         } else {
             print_next(&format!(
                 "heddle remote add origin heddle://{}/{}",
-                options.addr, display_full_path
+                options.authority, display_full_path
             ));
         }
     }
@@ -1856,7 +1859,7 @@ fn auto_provision_create_error_message(slug: &str, err: &ProtocolError) -> Strin
 fn persist_auto_provisioned_remote(
     repo: &Repository,
     remote_arg: Option<&str>,
-    addr: SocketAddr,
+    authority: &str,
     full_path: &str,
 ) -> Result<Option<String>> {
     let Some(remote_name) = auto_provision_remote_name(repo, remote_arg)? else {
@@ -1866,7 +1869,7 @@ fn persist_auto_provisioned_remote(
     cfg.add(
         &remote_name,
         Remote {
-            url: format!("heddle://{addr}/{full_path}"),
+            url: format!("heddle://{authority}/{full_path}"),
             insecure: false,
         },
     )
@@ -1941,7 +1944,7 @@ fn spool_slug_from_local_name(name: &str) -> String {
 
 #[cfg(feature = "client")]
 struct PushNetworkOptions<'a> {
-    addr: SocketAddr,
+    authority: &'a str,
     repo_path: Option<&'a str>,
     remote_arg: Option<&'a str>,
     session: &'a HostedSession,
@@ -2019,7 +2022,7 @@ mod tests {
         );
         assert_eq!(
             classify_push_remote_spec(&native, Some("heddle://api.heddle.sh/luke/tiny-notes")),
-            Some(RemoteTransportKind::Unknown)
+            Some(RemoteTransportKind::NetworkHeddle)
         );
 
         let overlay_dir = tempfile::TempDir::new().unwrap();
@@ -2089,8 +2092,7 @@ mod tests {
         let permission = ProtocolError::AuthorizationFailed("missing grant".to_string());
         assert!(!auto_provision_create_already_exists(&permission));
 
-        let missing_genesis =
-            ProtocolError::InvalidState("owner_genesis is required".to_string());
+        let missing_genesis = ProtocolError::InvalidState("owner_genesis is required".to_string());
         assert!(
             !auto_provision_create_already_exists(&missing_genesis),
             "weft's CreateSpool genesis require is a hard failure, not AlreadyExists"

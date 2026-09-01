@@ -87,7 +87,7 @@ impl RepoEventClient {
     pub async fn connect(server: &str) -> Result<Self, RepoEventError> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let target = RemoteTarget::parse_native(server).map_err(RepoEventError::InvalidServer)?;
-        let RemoteTarget::Network { addr, .. } = target else {
+        let RemoteTarget::Network { authority, .. } = target else {
             return Err(RepoEventError::LocalServer);
         };
         let server_key = repo::remote::credential_key_from_remote_url(server);
@@ -97,7 +97,7 @@ impl RepoEventClient {
             HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)
                 .map_err(|error| RepoEventError::Configuration(error.to_string()))?;
         let client = session
-            .connect(addr)
+            .connect(&authority)
             .await
             .map_err(|error| RepoEventError::Connection(error.to_string()))?;
         Ok(Self { client })

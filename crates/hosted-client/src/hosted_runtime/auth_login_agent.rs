@@ -67,7 +67,7 @@ pub(crate) async fn create_with_invite(
             signing_identity: format!("principal:{}", minted.subject),
         },
     )?;
-    let mut client = session.connect(([127, 0, 0, 1], 0).into()).await?;
+    let mut client = session.connect(server).await?;
     let operation_id = match ctx.operation_id_wire() {
         value if value.is_empty() => uuid::Uuid::new_v4().to_string(),
         value => value,

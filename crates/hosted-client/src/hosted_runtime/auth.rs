@@ -123,10 +123,10 @@ async fn cmd_auth_invite(
     // chokepoint used by the other durable identity writes under `auth`.
     let session = HostedSession::build(
         &user_config,
-        Some(server),
+        Some(server.clone()),
         HostedAuthMode::CredentialFallback,
     )?;
-    let mut auth_client = session.connect(([127, 0, 0, 1], 0).into()).await?;
+    let mut auth_client = session.connect(&server).await?;
     let result = if list {
         list_signup_invites_connected(ctx, &mut auth_client).await
     } else {
@@ -1098,7 +1098,7 @@ async fn cmd_create_service_token(
         Some(server.clone()),
         HostedAuthMode::CredentialFallback,
     )?;
-    let mut auth_client = session.connect(([127, 0, 0, 1], 0).into()).await?;
+    let mut auth_client = session.connect(&server).await?;
     let result = create_service_token_connected(
         ctx,
         &mut auth_client,
@@ -1342,7 +1342,7 @@ async fn connect_auth_client(server: &str) -> Result<HostedClient> {
         Some(server.to_string()),
         HostedAuthMode::Unauthenticated,
     )?
-    .connect(([127, 0, 0, 1], 0).into())
+    .connect(server)
     .await
     .map_err(hosted_bootstrap_connect_error)
 }

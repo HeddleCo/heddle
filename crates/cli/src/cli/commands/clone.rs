@@ -17,9 +17,19 @@ use std::{
 #[cfg(feature = "client")]
 use anyhow::Context;
 use anyhow::{Result, anyhow};
+/// `output_kind` value carried by the final `heddle clone --output json`
+/// payload. Referenced by the command catalog and the catalog/runtime
+/// invariant test to keep the runtime emission and the advertised
+/// discriminator from drifting apart.
+// The wire payload lives in cli-contract so the schema registry registers
+// the real serialization type.
+pub use heddle_cli_contract::cli::commands::wire::remote::CloneOutput;
 use heddle_git_projection::git_core::{
     clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference, write_head_symref,
 };
+use hosted_client::client::LocalSync;
+#[cfg(feature = "client")]
+use hosted_client::hosted_runtime::hosted::{HostedClient, HostedRefEntry, PullMaterialization};
 use ingest::ImportOptions;
 #[cfg(feature = "client")]
 use objects::fs_atomic::CloneDurabilityBatch;
@@ -72,17 +82,6 @@ use crate::{
     perf::{ProfileField, emit_profile},
     remote::{Remote, RemoteConfig, RemoteTarget},
 };
-use hosted_client::client::LocalSync;
-#[cfg(feature = "client")]
-use hosted_client::hosted_runtime::hosted::{HostedClient, HostedRefEntry, PullMaterialization};
-
-/// `output_kind` value carried by the final `heddle clone --output json`
-/// payload. Referenced by the command catalog and the catalog/runtime
-/// invariant test to keep the runtime emission and the advertised
-/// discriminator from drifting apart.
-// The wire payload lives in cli-contract so the schema registry registers
-// the real serialization type.
-pub use heddle_cli_contract::cli::commands::wire::remote::CloneOutput;
 
 pub const CLONE_OUTPUT_KIND: &str = "clone";
 
@@ -239,8 +238,11 @@ pub async fn cmd_clone(
             clone_git_overlay_url(cli, &remote, &plan.destination, &options)?;
         }
         CloneMode::NetworkHosted { recursive } => {
-            let (addr, repo_path) = match parse_result {
-                Ok(RemoteTarget::Network { addr, repo_path }) => (addr, repo_path),
+            let (authority, repo_path) = match parse_result {
+                Ok(RemoteTarget::Network {
+                    authority,
+                    repo_path,
+                }) => (authority, repo_path),
                 _ => {
                     return Err(anyhow!(clone_invalid_remote_url_advice(&remote)));
                 }
@@ -254,7 +256,7 @@ pub async fn cmd_clone(
                 if recursive {
                     clone_monorepo(
                         cli,
-                        addr,
+                        &authority,
                         repo_path.as_deref(),
                         &plan.destination,
                         &options,
@@ -265,7 +267,7 @@ pub async fn cmd_clone(
                 } else {
                     clone_network(
                         cli,
-                        addr,
+                        &authority,
                         repo_path.as_deref(),
                         &plan.destination,
                         &options,
@@ -277,7 +279,7 @@ pub async fn cmd_clone(
             }
             #[cfg(not(feature = "client"))]
             {
-                let _ = (addr, repo_path, recursive, &plan.security);
+                let _ = (authority, repo_path, recursive, &plan.security);
                 return Err(anyhow!(network_clone_unavailable_advice()));
             }
         }
@@ -1395,9 +1397,9 @@ fn clone_remote_thread_not_found_advice(track_name: &str, remote_path: &Path) ->
 }
 
 /// Extract the `host:port` substring from a raw remote URL so the lazy
-/// hydrator config can persist it instead of the post-DNS `SocketAddr`.
+/// hydrator config can persist it as the descriptor-trust authority.
 /// Keeping the hostname matters when the upstream service rotates IPs
-/// (e.g. behind a load balancer): a SocketAddr baked into the marker at
+/// (e.g. behind a load balancer): an IP baked into the marker at
 /// clone time would pin to a stale IP and break later hydrate calls even
 /// though the original URL still resolves. The hydrator re-resolves DNS
 /// on every process start when given a hostname spec.
@@ -1536,15 +1538,16 @@ impl Drop for CloneDestinationCleanup<'_> {
 #[cfg(feature = "client")]
 async fn clone_network(
     cli: &Cli,
-    addr: std::net::SocketAddr,
+    authority: &str,
     repo_path: Option<&str>,
     local_path: &Path,
     options: &CloneOptions,
     server_key: Option<String>,
     endpoint_spec: String,
 ) -> Result<()> {
-    use crate::config::UserConfig;
     use hosted_client::client::{HostedAuthMode, HostedSession};
+
+    use crate::config::UserConfig;
 
     let user_config = UserConfig::load_default()?;
     // On every network-connecting command, TLS/auth config validation
@@ -1557,10 +1560,10 @@ async fn clone_network(
             .with_allow_insecure(options.insecure);
     let repo_path = repo_path.context("network remotes must include a hosted repository path")?;
 
-    let mut client = session.connect(addr).await?;
+    let mut client = session.connect(authority).await?;
     let result = clone_network_connected(
         cli,
-        addr,
+        authority,
         repo_path,
         local_path,
         options,
@@ -1575,7 +1578,7 @@ async fn clone_network(
 #[cfg(feature = "client")]
 async fn clone_network_connected(
     cli: &Cli,
-    addr: std::net::SocketAddr,
+    authority: &str,
     repo_path: &str,
     local_path: &Path,
     options: &CloneOptions,
@@ -1601,11 +1604,11 @@ async fn clone_network_connected(
             serde_json::json!({
                 "output_kind": CLONE_CONNECTION_OUTPUT_KIND,
                 "status": "connected",
-                "address": addr.to_string(),
+                "address": authority,
             })
         );
     } else {
-        println!("Connected to {}", addr);
+        println!("Connected to {authority}");
     }
 
     let mut cleanup = CloneDestinationCleanup::new(local_path);
@@ -1877,8 +1880,9 @@ async fn clone_network_connected(
 
 #[cfg(feature = "client")]
 pub async fn recover_interrupted_clone(cli: &Cli, start: &Path) -> Result<bool> {
-    use crate::config::UserConfig;
     use hosted_client::client::{HostedAuthMode, HostedSession};
+
+    use crate::config::UserConfig;
 
     let Some(root) = repo::clone_intent::find_clone_intent_root(start) else {
         return Ok(false);
@@ -1886,7 +1890,7 @@ pub async fn recover_interrupted_clone(cli: &Cli, start: &Path) -> Result<bool> 
     let intent = CloneIntent::load(&root)?
         .context("clone intent disappeared while recovery was starting")?;
     let target = RemoteTarget::parse(&intent.origin).map_err(anyhow::Error::msg)?;
-    let RemoteTarget::Network { addr, .. } = target else {
+    let RemoteTarget::Network { authority, .. } = target else {
         anyhow::bail!(
             "clone intent origin is not a hosted remote: {}",
             intent.origin
@@ -1896,7 +1900,7 @@ pub async fn recover_interrupted_clone(cli: &Cli, start: &Path) -> Result<bool> 
     let server_key = credential_key_from_remote_url(&intent.origin);
     let session =
         HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?;
-    let mut client = session.connect(addr).await?;
+    let mut client = session.connect(&authority).await?;
     let recovered = recover_interrupted_clone_connected(cli, &root, &intent, &mut client).await;
     client.close().await;
     recovered?;
@@ -2100,15 +2104,16 @@ fn verify_hosted_clone(
 #[cfg(feature = "client")]
 async fn clone_monorepo(
     cli: &Cli,
-    addr: std::net::SocketAddr,
+    authority: &str,
     repo_path: Option<&str>,
     local_path: &Path,
     options: &CloneOptions,
     server_key: Option<String>,
     endpoint_spec: String,
 ) -> Result<()> {
-    use crate::config::UserConfig;
     use hosted_client::client::{HostedAuthMode, HostedSession};
+
+    use crate::config::UserConfig;
 
     // Monorepo clone materializes each node at a resolved state; the shallow /
     // lazy / partial knobs don't compose with the multi-spool walk in this
@@ -2125,10 +2130,16 @@ async fn clone_monorepo(
         HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?
             .with_allow_insecure(options.insecure);
 
-    let mut client = session.connect(addr).await?;
-    let result =
-        clone_monorepo_connected(cli, addr, root_path, local_path, endpoint_spec, &mut client)
-            .await;
+    let mut client = session.connect(authority).await?;
+    let result = clone_monorepo_connected(
+        cli,
+        authority,
+        root_path,
+        local_path,
+        endpoint_spec,
+        &mut client,
+    )
+    .await;
     client.close().await;
     result
 }
@@ -2136,7 +2147,7 @@ async fn clone_monorepo(
 #[cfg(feature = "client")]
 async fn clone_monorepo_connected(
     cli: &Cli,
-    addr: std::net::SocketAddr,
+    authority: &str,
     root_path: &str,
     local_path: &Path,
     endpoint_spec: String,
@@ -2149,11 +2160,11 @@ async fn clone_monorepo_connected(
             serde_json::json!({
                 "output_kind": CLONE_CONNECTION_OUTPUT_KIND,
                 "status": "connected",
-                "address": addr.to_string(),
+                "address": authority,
             })
         );
     } else {
-        println!("Connected to {}", addr);
+        println!("Connected to {authority}");
     }
 
     // Resolve the whole child tree into the caller's coherent visible slice,
