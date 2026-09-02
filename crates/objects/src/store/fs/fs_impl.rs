@@ -818,12 +818,6 @@ impl FsStore {
             let body = codec::decode_tree_body(data.as_slice())?;
             let tree = validate_loaded_tree(self.decode_tree_storage_body(*hash, &body)?)?;
             heddle_perf_contract::record_object_decode();
-            if tree.hash() != *hash {
-                return Err(HeddleError::Corruption {
-                    expected: *hash,
-                    found: tree.hash(),
-                });
-            }
             if let Ok(mut cache) = self.recent_trees.write() {
                 cache.insert(*hash, tree.clone());
             }
@@ -845,12 +839,6 @@ impl FsStore {
             trace!("Found tree in packfile");
             let tree = validate_loaded_tree(self.decode_tree_storage_body(*hash, &data)?)?;
             heddle_perf_contract::record_object_decode();
-            if tree.hash() != *hash {
-                return Err(HeddleError::Corruption {
-                    expected: *hash,
-                    found: tree.hash(),
-                });
-            }
             if let Ok(mut cache) = self.recent_trees.write() {
                 cache.insert(*hash, tree.clone());
             }
@@ -959,19 +947,33 @@ impl FsStore {
             if lineage.anchor != header.anchor || lineage.depth == 0 {
                 return codec::encode_tree_hot(&write.tree, None);
             }
-            let Some(anchor_body) = self.try_get_tree_serialized_once(&lineage.anchor)? else {
-                return codec::encode_tree_hot(&write.tree, None);
+            let anchor = if let Some((_, anchor, _)) =
+                write
+                    .anchor
+                    .as_ref()
+                    .filter(|(anchor_id, _, parent_depth)| {
+                        *anchor_id == lineage.anchor && *parent_depth == lineage.depth
+                    }) {
+                anchor.clone()
+            } else if let Some(anchor) = self.recent_tree(&lineage.anchor) {
+                anchor
+            } else {
+                let Some(anchor_body) = self.try_get_tree_serialized_once(&lineage.anchor)? else {
+                    return codec::encode_tree_hot(&write.tree, None);
+                };
+                if is_delta_tree(&anchor_body) {
+                    return Err(HeddleError::InvalidObject(
+                        "HDC1 lineage points to another delta".to_string(),
+                    ));
+                }
+                codec::decode_tree_serialized_with_key(&anchor_body, lineage.anchor, None)?
             };
-            if is_delta_tree(&anchor_body) {
-                return Err(HeddleError::InvalidObject(
-                    "HDC1 lineage points to another delta".to_string(),
-                ));
-            }
-            let anchor =
-                codec::decode_tree_serialized_with_key(&anchor_body, lineage.anchor, None)?;
             Some((lineage.anchor, anchor, lineage.depth))
         } else {
-            let anchor = codec::decode_tree_serialized_with_key(&parent_body, parent, None)?;
+            let anchor = match write.anchor.as_ref() {
+                Some((anchor_id, anchor, 0)) if *anchor_id == parent => anchor.clone(),
+                _ => codec::decode_tree_serialized_with_key(&parent_body, parent, None)?,
+            };
             Some((parent, anchor, 0))
         };
         let Some((anchor_id, anchor, parent_depth)) = base else {

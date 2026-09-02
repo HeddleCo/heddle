@@ -62,18 +62,31 @@ pub use writer_lease::{
 pub struct TreeWrite {
     pub tree: Tree,
     pub parent: Option<ContentHash>,
+    pub anchor: Option<(ContentHash, Tree, u8)>,
 }
 
 impl TreeWrite {
     pub fn anchor(tree: Tree) -> Self {
-        Self { tree, parent: None }
+        Self {
+            tree,
+            parent: None,
+            anchor: None,
+        }
     }
 
     pub fn descendant(tree: Tree, parent: ContentHash) -> Self {
         Self {
             tree,
             parent: Some(parent),
+            anchor: None,
         }
+    }
+
+    /// Supply a materialized delta anchor and the immediate parent's depth
+    /// within that anchor's epoch.
+    pub fn with_anchor(mut self, hash: ContentHash, tree: Tree, parent_depth: u8) -> Self {
+        self.anchor = Some((hash, tree, parent_depth));
+        self
     }
 }
 

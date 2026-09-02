@@ -17,10 +17,11 @@ use crate::{
     fs_atomic::temp_path,
     object::{
         Action, Agent, Attribution, Blob, ContentHash, Operation, Principal, State, StateId, Tree,
-        TreeEntry,
+        TreeEntry, decode_tree_delta_header,
     },
     store::{
         ExternalObjectSource, HeddleError, ObjectStore, Result as StoreResult, TreeWrite,
+        codec::TreeEncodingKind,
         pack::{
             ObjectType as PackObjectType, PackBuilder, PackIndex, PackObjectId,
             decode_tagged_entry_header,
@@ -1221,6 +1222,81 @@ fn loose_hdc1_reconstructs_from_one_materialized_anchor() {
     assert_eq!(rest.entries, current.entries()[100..]);
     reader.finish_and_verify().unwrap();
     assert_eq!(reopened.get_tree(&encoded.hash).unwrap(), Some(current));
+}
+
+#[test]
+fn direct_parent_hint_does_not_create_a_delta_chain() {
+    let (_temp, store) = create_test_store();
+    let anchor = Tree::from_entries(
+        (0..240)
+            .map(|index| {
+                TreeEntry::file(
+                    format!("module_{index:04}.rs"),
+                    ContentHash::compute(format!("anchor-{index}").as_bytes()),
+                    false,
+                )
+                .unwrap()
+            })
+            .collect(),
+    );
+    let anchor_id = store.put_tree(&anchor).unwrap();
+
+    let mut first_entries = anchor.entries().to_vec();
+    first_entries[117] = TreeEntry::file(
+        "module_0117.rs",
+        ContentHash::compute(b"first change"),
+        false,
+    )
+    .unwrap();
+    let first = Tree::from_entries(first_entries);
+    let first_encoded = store
+        .encode_tree_write(
+            &TreeWrite::descendant(first.clone(), anchor_id).with_anchor(
+                anchor_id,
+                anchor.clone(),
+                0,
+            ),
+        )
+        .unwrap();
+    store
+        .put_tree_serialized(&first_encoded.data, first_encoded.hash)
+        .unwrap();
+    store
+        .remember_tree_encoding(first_encoded.hash, first_encoded.kind)
+        .unwrap();
+
+    let mut second_entries = first.entries().to_vec();
+    second_entries[118] = TreeEntry::file(
+        "module_0118.rs",
+        ContentHash::compute(b"second change"),
+        false,
+    )
+    .unwrap();
+    let second = Tree::from_entries(second_entries);
+    let second_encoded = store
+        .encode_tree_write(
+            &TreeWrite::descendant(second, first_encoded.hash).with_anchor(
+                first_encoded.hash,
+                first,
+                0,
+            ),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        second_encoded.kind,
+        TreeEncodingKind::Delta {
+            anchor,
+            depth: 2,
+            ..
+        } if anchor == anchor_id
+    ));
+    assert_eq!(
+        decode_tree_delta_header(&second_encoded.data)
+            .unwrap()
+            .anchor,
+        anchor_id
+    );
 }
 
 #[test]

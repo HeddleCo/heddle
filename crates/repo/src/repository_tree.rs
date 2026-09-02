@@ -14,9 +14,8 @@ use objects::{
     util::gitlink_placeholder_bytes,
     worktree::WorktreeStatus,
 };
-use tracing::{debug, instrument, trace, warn};
-
 use serde::{Deserialize, Serialize};
+use tracing::{debug, instrument, trace, warn};
 
 use super::{
     HeddleError, Repository, Result,
@@ -85,6 +84,7 @@ pub(crate) type SnapshotTreeBuildOutput = (
     Vec<(ContentHash, Vec<u8>)>,
     Vec<TreeWrite>,
     Option<ChangeMonitorToken>,
+    Option<Tree>,
 );
 
 #[derive(Debug, Clone, Default)]
@@ -160,7 +160,9 @@ fn rewrite_single_tracked_file(
             return Ok(None);
         };
         let updated_hash = updated_child.hash();
-        descendant_trees.push(TreeWrite::descendant(updated_child, child_hash));
+        descendant_trees.push(
+            TreeWrite::descendant(updated_child, child_hash).with_anchor(child_hash, child, 0),
+        );
         TreeEntry::directory((*name).to_string(), updated_hash)?
     };
     let mut updated = tree.clone();
@@ -291,6 +293,7 @@ impl Repository {
                 output.pending_blobs,
                 output.pending_trees,
                 output.monitor_token,
+                baseline_tree.cloned(),
             ));
         }
         // Capture preflight may have advanced an fsmonitor cursor while
@@ -316,6 +319,7 @@ impl Repository {
                     output.pending_blobs,
                     output.pending_trees,
                     output.monitor_token,
+                    baseline_tree.cloned(),
                 )
             })
     }
@@ -1507,8 +1511,10 @@ fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Resul
 mod tests {
     use std::path::Path;
 
-    use objects::object::{ContentHash, LeafPolicy, Tree, TreeEntry, resolve_tree_path};
-    use objects::store::ObjectStore;
+    use objects::{
+        object::{ContentHash, LeafPolicy, Tree, TreeEntry, resolve_tree_path},
+        store::ObjectStore,
+    };
     use tempfile::TempDir;
 
     use crate::{

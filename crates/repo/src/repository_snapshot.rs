@@ -381,11 +381,11 @@ impl SnapshotMutation<'_> {
         debug!("Building tree from worktree");
         let (tree, tree_profile, supplied_blobs) = match &self.source {
             SnapshotSource::Worktree => {
-                let (tree, profile, revalidation_files, blobs, trees, monitor_token) =
+                let (tree, profile, revalidation_files, blobs, trees, monitor_token, baseline_tree) =
                     self.build_worktree_tree()?;
                 self.worktree_revalidation_files = Some(revalidation_files);
                 self.worktree_monitor_token = monitor_token;
-                (tree, profile, Some((blobs, trees)))
+                (tree, profile, Some((blobs, trees, baseline_tree)))
             }
             SnapshotSource::SuppliedTree(tree) => (tree.clone(), TreeBuildProfile::default(), None),
             SnapshotSource::SuppliedTreeWithBlobs { tree, blobs } => (
@@ -397,6 +397,7 @@ impl SnapshotMutation<'_> {
                         .map(|blob| (blob.hash(), blob.content().to_vec()))
                         .collect(),
                     Vec::new(),
+                    None,
                 )),
             ),
         };
@@ -471,7 +472,7 @@ impl SnapshotMutation<'_> {
             };
             // Eager semantic index first so risk-signal prune can use merkle
             // digests (`semantic_changed`) instead of an empty SemanticContext.
-            let semantic_result = if let Some((blobs, trees)) = supplied_blobs.as_ref() {
+            let semantic_result = if let Some((blobs, trees, _)) = supplied_blobs.as_ref() {
                 let source_blobs = blobs
                     .iter()
                     .map(|(hash, bytes)| (*hash, bytes.as_slice()))
@@ -499,7 +500,7 @@ impl SnapshotMutation<'_> {
             match semantic_result {
                 Ok((Some(hash), pending)) => {
                     semantic_index = Some(hash);
-                    if let Some((blobs, _)) = supplied_blobs.as_mut() {
+                    if let Some((blobs, _, _)) = supplied_blobs.as_mut() {
                         blobs.extend(pending);
                     }
                 }
@@ -515,7 +516,7 @@ impl SnapshotMutation<'_> {
             // resolve new.tree without a store read.
             let mut source_blobs = std::collections::HashMap::new();
             let mut source_trees = std::collections::HashMap::new();
-            if let Some((blobs, trees)) = supplied_blobs.as_ref() {
+            if let Some((blobs, trees, _)) = supplied_blobs.as_ref() {
                 source_blobs.extend(blobs.iter().map(|(hash, bytes)| (*hash, bytes.as_slice())));
                 source_trees.extend(
                     trees
@@ -543,7 +544,7 @@ impl SnapshotMutation<'_> {
             }
 
             if let Some(parent_state) = prior_state.as_ref() {
-                let source_blobs = supplied_blobs.as_ref().map(|(blobs, _)| {
+                let source_blobs = supplied_blobs.as_ref().map(|(blobs, _, _)| {
                     blobs
                         .iter()
                         .map(|(hash, bytes)| (*hash, bytes.as_slice()))
@@ -632,10 +633,10 @@ impl SnapshotMutation<'_> {
         }
         let worktree_tree_chain = supplied_blobs
             .as_ref()
-            .filter(|(_, trees)| trees.len() <= 32)
-            .map(|(_, trees)| trees.iter().map(|write| write.tree.clone()).collect())
+            .filter(|(_, trees, _)| trees.len() <= 32)
+            .map(|(_, trees, _)| trees.iter().map(|write| write.tree.clone()).collect())
             .unwrap_or_default();
-        if let Some((blobs, trees)) = supplied_blobs {
+        if let Some((blobs, trees, baseline_tree)) = supplied_blobs {
             let parent_tree = self
                 .prev_head
                 .map(|id| self.repo.store.get_state(&id))
@@ -646,7 +647,11 @@ impl SnapshotMutation<'_> {
                 Some(parent)
                     if parent != tree_hash && !self.repo.store.has_tree_locally(&tree_hash)? =>
                 {
-                    TreeWrite::descendant(tree.clone(), parent)
+                    let write = TreeWrite::descendant(tree.clone(), parent);
+                    match baseline_tree.filter(|baseline| baseline.hash() == parent) {
+                        Some(baseline) => write.with_anchor(parent, baseline, 0),
+                        None => write,
+                    }
                 }
                 Some(_) | None => TreeWrite::anchor(tree.clone()),
             };
