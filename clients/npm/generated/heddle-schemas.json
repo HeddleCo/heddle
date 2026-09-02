@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "0.15.8",
+  "schemaVersion": "0.16.0",
   "verbs": {
     "abort": {
       "$defs": {
@@ -24968,6 +24968,46 @@
         "bytes_reclaimed"
       ],
       "title": "MaintenanceRepackSchema",
+      "type": "object"
+    },
+    "netd serve": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "title": "GenericJsonObjectSchema",
+      "type": "object"
+    },
+    "netd status": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "output_kind": {
+          "enum": [
+            "netd_status"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind"
+      ],
+      "title": "GenericJsonObjectSchema",
+      "type": "object"
+    },
+    "netd stop": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "output_kind": {
+          "enum": [
+            "netd_stop"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind"
+      ],
+      "title": "GenericJsonObjectSchema",
       "type": "object"
     },
     "pull": {
