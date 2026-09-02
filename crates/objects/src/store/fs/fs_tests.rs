@@ -20,10 +20,11 @@ use crate::{
         TreeEntry, decode_tree_delta_header,
     },
     store::{
-        ExternalObjectSource, HeddleError, ObjectStore, Result as StoreResult, TreeWrite,
+        ExternalObjectSource, HeddleError, ObjectStore, Result as StoreResult,
+        SNAPSHOT_COMMIT_ARTIFACT_SCHEMA, SnapshotCommitArtifact, TreeWrite,
         codec::TreeEncodingKind,
         pack::{
-            ObjectType as PackObjectType, PackBuilder, PackIndex, PackObjectId,
+            ObjectType as PackObjectType, PackBuilder, PackIndex, PackObjectId, PackReader,
             decode_tagged_entry_header,
         },
     },
@@ -711,6 +712,62 @@ fn install_pack_accepts_valid_mixed_native_pack() {
         store.get_action(&action_id).unwrap().unwrap().description,
         "packed action",
     );
+}
+
+#[test]
+fn committed_snapshot_descriptor_reuses_built_ids_and_pack_remains_readable() {
+    let (_temp, store) = create_test_store();
+
+    let blob = Blob::from("committed snapshot blob");
+    let blob_hash = blob.hash();
+    let tree = Tree::from_entries(vec![TreeEntry::file("file.txt", blob_hash, false).unwrap()]);
+    let tree_hash = tree.hash();
+    let attribution = Attribution::human(Principal::new("Pack Test", "pack@example.com"));
+    let state = State::new(tree_hash, vec![], attribution).with_intent("committed snapshot");
+    let artifact = SnapshotCommitArtifact {
+        schema: SNAPSHOT_COMMIT_ARTIFACT_SCHEMA,
+        transaction_id: "tx-reader-reuse".to_string(),
+        scope: "snapshot".to_string(),
+        base_oplog_head_id: 0,
+        state: state.id(),
+        encoded_records: vec![vec![1]],
+    };
+
+    let descriptor = store
+        .put_committed_snapshot_objects_packed(
+            vec![(blob_hash, blob.clone().into_content())],
+            Vec::new(),
+            &TreeWrite::anchor(tree.clone()),
+            &state,
+            Vec::new(),
+            artifact.clone(),
+        )
+        .unwrap();
+
+    let reader = PackReader::open(
+        &descriptor.pack_path,
+        &descriptor.pack_path.with_extension("idx"),
+    )
+    .unwrap();
+    assert_eq!(descriptor.object_ids, reader.list_ids().unwrap());
+    let mut expected_ids = vec![
+        PackObjectId::Hash(blob_hash),
+        PackObjectId::Hash(tree_hash),
+        PackObjectId::Hash(artifact.id()),
+        PackObjectId::StateId(state.id()),
+    ];
+    expected_ids.sort_unstable();
+    assert_eq!(descriptor.object_ids, expected_ids);
+    assert_eq!(store.get_blob(&blob_hash).unwrap(), Some(blob));
+    assert_eq!(store.get_tree(&tree_hash).unwrap(), Some(tree));
+    assert_eq!(store.get_state(&state.id()).unwrap(), Some(state));
+
+    let indexed = store.snapshot_commit_descriptors().unwrap();
+    assert_eq!(indexed.len(), 1);
+    assert_eq!(indexed[0].object_ids, descriptor.object_ids);
+    let recovered = store.snapshot_commit_recovery_descriptors().unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].artifact, artifact);
 }
 
 #[cfg(feature = "zstd")]
