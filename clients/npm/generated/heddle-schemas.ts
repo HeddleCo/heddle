@@ -3,7 +3,7 @@
 // (`schema_for_verb` / `crates/cli-contract/src/cli/commands/schemas.rs`).
 // Regenerate with `scripts/gen-ts-types.sh`; a drift test keeps it in sync.
 
-export const HEDDLE_SCHEMA_VERSION = "0.15.8" as const;
+export const HEDDLE_SCHEMA_VERSION = "0.16.0" as const;
 
 export interface AbortSchema {
   action: OperatorAction;
@@ -1740,6 +1740,18 @@ export interface MaterializedThreadInfo {
   stale: boolean;
   state_id: string;
   tree_hash_short: string;
+}
+
+export type NetdServeSchema = Record<string, unknown>;
+
+export interface NetdStatusSchema {
+  output_kind: "netd_status";
+  [key: string]: unknown;
+}
+
+export interface NetdStopSchema {
+  output_kind: "netd_stop";
+  [key: string]: unknown;
 }
 
 /** The pending review state echoed under `review next`'s `next` field. */
@@ -3566,6 +3578,9 @@ export interface HeddleVerbOutputs {
   "maintenance oplog recover": MaintenanceOplogRecoverSchema;
   "maintenance refresh": MaintenanceRefreshSchema;
   "maintenance repack": MaintenanceRepackSchema;
+  "netd serve": NetdServeSchema;
+  "netd status": NetdStatusSchema;
+  "netd stop": NetdStopSchema;
   pull: PullOutput;
   push: PushOutput;
   query: QueryReport;
@@ -3730,6 +3745,9 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "maintenance oplog recover",
   "maintenance refresh",
   "maintenance repack",
+  "netd serve",
+  "netd status",
+  "netd stop",
   "pull",
   "push",
   "query",
