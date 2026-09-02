@@ -8,6 +8,8 @@ use super::{
     NAME_MAGIC, NAME_RESTART, RECORD_BLOCK_ENTRIES, TARGET_MAGIC, checked_slice, invalid,
     put_varint, read_u16, read_u32, shared_prefix, take_varint,
 };
+#[cfg(feature = "zstd")]
+use crate::store::HeddleError;
 use crate::{
     object::{
         ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeDeltaOp, TreeEntry,
@@ -15,6 +17,11 @@ use crate::{
     },
     store::Result,
 };
+
+#[cfg(test)]
+thread_local! {
+    static DECODED_RECORD_BLOCKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Debug)]
 pub(super) struct Dictionary {
@@ -389,6 +396,127 @@ pub(super) struct RecordHeader {
     pub(super) blocks: Vec<BlockDescriptor>,
 }
 
+pub(super) struct RawRecord {
+    tag: u8,
+    prefix: Vec<usize>,
+    blocks: Vec<(u32, Vec<u8>)>,
+}
+
+impl RawRecord {
+    pub(super) fn encode(&self, encoder: &mut RecordEncoder) -> Result<Vec<u8>> {
+        let mut stored_blocks = Vec::with_capacity(self.blocks.len());
+        for (first_name, raw) in &self.blocks {
+            let encoded = encoder.compress_block(raw)?;
+            stored_blocks.push((*first_name, raw.len(), encoded));
+        }
+        let mut out = Vec::new();
+        out.push(self.tag);
+        for value in &self.prefix {
+            put_varint(*value, &mut out);
+        }
+        put_varint(stored_blocks.len(), &mut out);
+        for (first_name, raw_len, stored) in &stored_blocks {
+            put_varint(*first_name as usize, &mut out);
+            put_varint(*raw_len, &mut out);
+            put_varint(stored.len(), &mut out);
+        }
+        for (_, _, stored) in stored_blocks {
+            out.extend_from_slice(&stored);
+        }
+        Ok(out)
+    }
+
+    #[cfg(feature = "zstd")]
+    pub(super) fn samples(&self) -> impl Iterator<Item = &[u8]> {
+        self.blocks.iter().map(|(_, raw)| raw.as_slice())
+    }
+}
+
+pub(super) struct RecordEncoder {
+    #[cfg(feature = "zstd")]
+    compressor: zstd::bulk::Compressor<'static>,
+}
+
+impl RecordEncoder {
+    pub(super) fn new(dictionary: &[u8]) -> Result<Self> {
+        #[cfg(feature = "zstd")]
+        {
+            let compressor =
+                zstd::bulk::Compressor::with_dictionary(super::RECORD_LEVEL, dictionary)
+                    .map_err(|error| HeddleError::Compression(error.to_string()))?;
+            Ok(Self { compressor })
+        }
+        #[cfg(not(feature = "zstd"))]
+        {
+            let _ = dictionary;
+            Ok(Self {})
+        }
+    }
+
+    fn compress_block(&mut self, raw: &[u8]) -> Result<Vec<u8>> {
+        #[cfg(feature = "zstd")]
+        {
+            let candidate = self
+                .compressor
+                .compress(raw)
+                .map_err(|error| HeddleError::Compression(error.to_string()))?;
+            if candidate.len() < raw.len() {
+                return Ok(candidate);
+            }
+        }
+        Ok(raw.to_vec())
+    }
+}
+
+pub(super) struct RecordDecoder {
+    #[cfg(feature = "zstd")]
+    dictionary: Option<zstd::dict::DecoderDictionary<'static>>,
+}
+
+impl RecordDecoder {
+    pub(super) fn new(dictionary: &[u8]) -> Self {
+        #[cfg(feature = "zstd")]
+        {
+            Self {
+                dictionary: (!dictionary.is_empty())
+                    .then(|| zstd::dict::DecoderDictionary::copy(dictionary)),
+            }
+        }
+        #[cfg(not(feature = "zstd"))]
+        {
+            let _ = dictionary;
+            Self {}
+        }
+    }
+
+    fn decompress(&self, stored: &[u8], raw_len: usize) -> Result<Vec<u8>> {
+        #[cfg(feature = "zstd")]
+        {
+            let decoded = match &self.dictionary {
+                Some(dictionary) => {
+                    let mut decompressor =
+                        zstd::bulk::Decompressor::with_prepared_dictionary(dictionary)
+                            .map_err(|error| HeddleError::Compression(error.to_string()))?;
+                    decompressor.decompress(stored, raw_len)
+                }
+                None => zstd::bulk::decompress(stored, raw_len),
+            }
+            .map_err(|error| HeddleError::Compression(error.to_string()))?;
+            if decoded.len() != raw_len {
+                return Err(invalid("decoded block length mismatch"));
+            }
+            Ok(decoded)
+        }
+        #[cfg(not(feature = "zstd"))]
+        {
+            let _ = (stored, raw_len);
+            Err(invalid(
+                "compressed record requires a build with zstd support",
+            ))
+        }
+    }
+}
+
 pub(super) fn parse_record_header(bytes: &[u8]) -> Result<RecordHeader> {
     let tag = *bytes.first().ok_or_else(|| invalid("empty record"))?;
     if tag != b'A' && tag != b'D' {
@@ -441,19 +569,13 @@ pub(super) fn parse_record_header(bytes: &[u8]) -> Result<RecordHeader> {
     })
 }
 
-fn compress_block(raw: &[u8]) -> Result<Vec<u8>> {
-    #[cfg(feature = "zstd")]
-    {
-        let candidate = zstd::bulk::compress(raw, super::RECORD_LEVEL)
-            .map_err(|error| crate::store::HeddleError::Compression(error.to_string()))?;
-        if candidate.len() < raw.len() {
-            return Ok(candidate);
-        }
-    }
-    Ok(raw.to_vec())
-}
-
-pub(super) fn decode_block(bytes: &[u8], block: &BlockDescriptor) -> Result<Vec<u8>> {
+pub(super) fn decode_block(
+    bytes: &[u8],
+    block: &BlockDescriptor,
+    decoder: &RecordDecoder,
+) -> Result<Vec<u8>> {
+    #[cfg(test)]
+    DECODED_RECORD_BLOCKS.with(|count| count.set(count.get().saturating_add(1)));
     let stored = checked_slice(
         bytes,
         block.payload_offset,
@@ -463,48 +585,10 @@ pub(super) fn decode_block(bytes: &[u8], block: &BlockDescriptor) -> Result<Vec<
     if block.stored_len == block.raw_len {
         return Ok(stored.to_vec());
     }
-    #[cfg(feature = "zstd")]
-    {
-        let decoded = zstd::bulk::decompress(stored, block.raw_len)
-            .map_err(|error| crate::store::HeddleError::Compression(error.to_string()))?;
-        if decoded.len() != block.raw_len {
-            return Err(invalid("decoded block length mismatch"));
-        }
-        Ok(decoded)
-    }
-    #[cfg(not(feature = "zstd"))]
-    {
-        let _ = stored;
-        Err(invalid(
-            "compressed record requires a build with zstd support",
-        ))
-    }
+    decoder.decompress(stored, block.raw_len)
 }
 
-fn finish_record(tag: u8, prefix: &[usize], raw_blocks: Vec<(u32, Vec<u8>)>) -> Result<Vec<u8>> {
-    let mut stored_blocks = Vec::with_capacity(raw_blocks.len());
-    for (first_name, raw) in raw_blocks {
-        let encoded = compress_block(&raw)?;
-        stored_blocks.push((first_name, raw.len(), encoded));
-    }
-    let mut out = Vec::new();
-    out.push(tag);
-    for value in prefix {
-        put_varint(*value, &mut out);
-    }
-    put_varint(stored_blocks.len(), &mut out);
-    for (first_name, raw_len, stored) in &stored_blocks {
-        put_varint(*first_name as usize, &mut out);
-        put_varint(*raw_len, &mut out);
-        put_varint(stored.len(), &mut out);
-    }
-    for (_, _, stored) in stored_blocks {
-        out.extend_from_slice(&stored);
-    }
-    Ok(out)
-}
-
-pub(super) fn encode_anchor(tree: &Tree, dictionary: &Dictionary) -> Result<Vec<u8>> {
+pub(super) fn encode_anchor(tree: &Tree, dictionary: &Dictionary) -> Result<RawRecord> {
     let mut blocks = Vec::new();
     for entries in tree.entries().chunks(RECORD_BLOCK_ENTRIES) {
         let first_name = entries
@@ -528,7 +612,11 @@ pub(super) fn encode_anchor(tree: &Tree, dictionary: &Dictionary) -> Result<Vec<
         }
         blocks.push((first_name, raw));
     }
-    finish_record(b'A', &[tree.len()], blocks)
+    Ok(RawRecord {
+        tag: b'A',
+        prefix: vec![tree.len()],
+        blocks,
+    })
 }
 
 pub(super) fn encode_delta(
@@ -536,7 +624,7 @@ pub(super) fn encode_delta(
     current: &Tree,
     ops: &[TreeDeltaOp],
     dictionary: &Dictionary,
-) -> Result<Vec<u8>> {
+) -> Result<RawRecord> {
     if base_distance == 0 {
         return Err(invalid("delta base distance is zero"));
     }
@@ -569,7 +657,11 @@ pub(super) fn encode_delta(
         }
         blocks.push((first_name, raw));
     }
-    finish_record(b'D', &[base_distance, current.len(), ops.len()], blocks)
+    Ok(RawRecord {
+        tag: b'D',
+        prefix: vec![base_distance, current.len(), ops.len()],
+        blocks,
+    })
 }
 
 pub(super) fn record_base_distance(bytes: &[u8]) -> Result<Option<usize>> {
@@ -587,11 +679,12 @@ fn decode_rows(
     bytes: &[u8],
     header: &RecordHeader,
     dictionary: &Dictionary,
+    decoder: &RecordDecoder,
 ) -> Result<Vec<TreeDeltaOp>> {
     let mut ops = Vec::new();
     let mut previous_global = None;
     for block in &header.blocks {
-        let raw = decode_block(bytes, block)?;
+        let raw = decode_block(bytes, block, decoder)?;
         let mut offset = 0usize;
         let mut name_id = 0u32;
         let mut ordinal = 0usize;
@@ -637,13 +730,17 @@ fn decode_rows(
     Ok(ops)
 }
 
-pub(super) fn decode_anchor(bytes: &[u8], dictionary: &Dictionary) -> Result<Tree> {
+pub(super) fn decode_anchor(
+    bytes: &[u8],
+    dictionary: &Dictionary,
+    decoder: &RecordDecoder,
+) -> Result<Tree> {
     let header = parse_record_header(bytes)?;
     if header.tag != b'A' {
         return Err(invalid("anchor record expected"));
     }
     let expected_entries = header.prefix[0];
-    let ops = decode_rows(bytes, &header, dictionary)?;
+    let ops = decode_rows(bytes, &header, dictionary, decoder)?;
     if ops.len() != expected_entries {
         return Err(invalid("anchor entry count mismatch"));
     }
@@ -657,14 +754,19 @@ pub(super) fn decode_anchor(bytes: &[u8], dictionary: &Dictionary) -> Result<Tre
     Ok(Tree::try_from_decoded_entries(entries)?)
 }
 
-pub(super) fn decode_delta(bytes: &[u8], base: &Tree, dictionary: &Dictionary) -> Result<Tree> {
+pub(super) fn decode_delta(
+    bytes: &[u8],
+    base: &Tree,
+    dictionary: &Dictionary,
+    decoder: &RecordDecoder,
+) -> Result<Tree> {
     let header = parse_record_header(bytes)?;
     if header.tag != b'D' {
         return Err(invalid("delta record expected"));
     }
     let result_entries = header.prefix[1];
     let expected_ops = header.prefix[2];
-    let ops = decode_rows(bytes, &header, dictionary)?;
+    let ops = decode_rows(bytes, &header, dictionary, decoder)?;
     if ops.len() != expected_ops {
         return Err(invalid("delta operation count mismatch"));
     }
@@ -686,6 +788,7 @@ pub(super) fn lookup_record(
     bytes: &[u8],
     dictionary: &Dictionary,
     wanted_name: u32,
+    decoder: &RecordDecoder,
 ) -> Result<(LookupState, Option<TreeEntry>)> {
     let header = parse_record_header(bytes)?;
     let Some(block_index) = header
@@ -695,7 +798,7 @@ pub(super) fn lookup_record(
     else {
         return Ok((LookupState::Missing, None));
     };
-    let raw = decode_block(bytes, &header.blocks[block_index])?;
+    let raw = decode_block(bytes, &header.blocks[block_index], decoder)?;
     let mut offset = 0usize;
     let mut name_id = 0u32;
     let mut ordinal = 0usize;
@@ -744,6 +847,16 @@ pub(super) fn lookup_record(
         ordinal += 1;
     }
     Ok((LookupState::Missing, None))
+}
+
+#[cfg(test)]
+pub(super) fn reset_decoded_record_blocks() {
+    DECODED_RECORD_BLOCKS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn decoded_record_blocks() -> usize {
+    DECODED_RECORD_BLOCKS.with(std::cell::Cell::get)
 }
 
 pub(super) fn note_tree_dictionary_rows(
