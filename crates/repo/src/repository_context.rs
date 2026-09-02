@@ -274,8 +274,10 @@ impl Repository {
                     }
                     if let Some(blob_hash) = entry.blob_hash()
                         && let Some(blob) = self.store.get_blob(&blob_hash)?
-                        && let Ok(context) = ContextBlob::decode(blob.content())
                     {
+                        let context = ContextBlob::decode(blob.content()).map_err(|error| {
+                            HeddleError::InvalidObject(format!("invalid context blob: {error}"))
+                        })?;
                         results.insert(context_entry_key(&target), (target, context));
                     }
                 }
