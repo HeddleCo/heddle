@@ -670,7 +670,7 @@ fn discussion_sync_state(repo: &Repository, against: Option<StateId>) -> Result<
 
 /// Import one already-fetched hosted discussion into the local op-log.
 /// Persists the mirror. Used by the live event consumer after GetDiscussion
-/// or a self-contained event payload.
+/// (opened/resolved, or an unmirrored append) and the mirrored-append fast path.
 pub fn apply_hosted_discussion(
     repo: &Repository,
     repo_path: &str,

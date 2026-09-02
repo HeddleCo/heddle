@@ -70,9 +70,28 @@ pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
                 );
             }
         },
+        #[cfg(feature = "client")]
+        DiscussCommands::Wait(args) => {
+            // Like clone/pull: do not run legacy blob→op-log migration first.
+            // Hosted bootstrap claims the marker, then GetDiscussion / ListByState
+            // are authoritative. Migrating pulled Discussions attachments here
+            // would duplicate every hosted discussion.
+            let repo = cli.open_repo().context("open Heddle repository")?;
+            return run_wait(cli, &repo, args).await;
+        }
+        #[cfg(not(feature = "client"))]
+        DiscussCommands::Wait(_) => {
+            return Err(anyhow!(
+                "discuss wait requires the hosted client feature"
+            ));
+        }
         _ => cli.open_repo().context("open Heddle repository")?,
     };
-    let store = open_store(&repo)?;
+    let store = if migrates_legacy_on_entry(command) {
+        open_store(&repo)?
+    } else {
+        CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?
+    };
     match command {
         DiscussCommands::Open(args) => run_open(cli, &repo, &store, args),
         DiscussCommands::Append(args) => run_append(cli, &repo, &store, args),
@@ -80,13 +99,18 @@ pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
         DiscussCommands::Reopen(args) => run_reopen(cli, &repo, &store, args),
         DiscussCommands::List(args) => run_list(cli, &repo, &store, args),
         DiscussCommands::Show(args) => run_show(cli, &store, args),
-        #[cfg(feature = "client")]
-        DiscussCommands::Wait(args) => run_wait(cli, &repo, args).await,
-        #[cfg(not(feature = "client"))]
-        DiscussCommands::Wait(_) => Err(anyhow!(
-            "discuss wait requires the hosted client feature"
-        )),
+        DiscussCommands::Wait(_) => unreachable!("wait returns before opening the store"),
     }
+}
+
+fn migrates_legacy_on_entry(command: &DiscussCommands) -> bool {
+    matches!(
+        command,
+        DiscussCommands::Open(_)
+            | DiscussCommands::Append(_)
+            | DiscussCommands::Resolve(_)
+            | DiscussCommands::Reopen(_)
+    )
 }
 
 impl CompactProjection for DiscussionWriteOutput {
@@ -828,6 +852,43 @@ fn anchor_path(value: &CollaborationAnchor) -> Option<&str> {
             Some(path)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::cli_args::{DiscussListArgs, DiscussShowArgs, DiscussWaitArgs};
+
+    #[test]
+    fn wait_does_not_run_legacy_migration_on_entry() {
+        let wait = DiscussCommands::Wait(DiscussWaitArgs {
+            after: None,
+            remote: None,
+            thread: None,
+            max_events: None,
+        });
+        assert!(
+            !migrates_legacy_on_entry(&wait),
+            "discuss wait must not migrate legacy discussions before hosted bootstrap"
+        );
+        let list = DiscussCommands::List(DiscussListArgs {
+            state: None,
+            file: None,
+            symbol: None,
+            status: "open".to_string(),
+        });
+        assert!(
+            !migrates_legacy_on_entry(&list),
+            "discuss list stays read-only"
+        );
+        let show = DiscussCommands::Show(DiscussShowArgs {
+            discussion_id: "disc-1".to_string(),
+        });
+        assert!(
+            !migrates_legacy_on_entry(&show),
+            "discuss show stays read-only"
+        );
     }
 }
 
