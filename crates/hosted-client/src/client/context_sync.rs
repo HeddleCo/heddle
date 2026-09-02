@@ -74,7 +74,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha1::{
     AnnotationScope as ProtoScope, ContextAnnotation, ContextAnnotationKind,
     ContextAnnotationStatus, LineRange, SymbolScope, annotation_scope::Scope,
@@ -218,15 +218,6 @@ fn local_id_for_server(
         .map(|entry| entry.local_id.clone())
 }
 
-fn server_id_is_linked(mirror: &HostedContextMirror, repo_path: &str, server_id: &str) -> bool {
-    mirror.repos.get(repo_path).is_some_and(|repo_mirror| {
-        repo_mirror
-            .annotations
-            .iter()
-            .any(|entry| entry.server_id == server_id)
-    })
-}
-
 fn add_revision_link(
     mirror: &mut HostedContextMirror,
     repo_path: &str,
@@ -281,16 +272,6 @@ fn scope_from_proto(scope: Option<&ProtoScope>) -> AnnotationScope {
             },
         },
         Some(Scope::Lines(range)) => AnnotationScope::Lines(range.start, range.end),
-    }
-}
-
-/// Scope identity ignoring `resolved_lines` (the server may resolve a symbol's
-/// lines even when the local scope has none), for matching recovered annotations.
-fn scope_ident(scope: &AnnotationScope) -> String {
-    match scope {
-        AnnotationScope::File => "file".to_string(),
-        AnnotationScope::Symbol { name, .. } => format!("symbol:{name}"),
-        AnnotationScope::Lines(start, end) => format!("lines:{start}-{end}"),
     }
 }
 
@@ -484,8 +465,6 @@ async fn push_one(
             annotation,
             superseded_server.as_deref(),
             &op_id,
-            username,
-            mirror,
         )
         .await?;
 
@@ -530,8 +509,6 @@ async fn create_on_server(
     annotation: &Annotation,
     superseded_server: Option<&str>,
     op_id: &str,
-    username: Option<&str>,
-    mirror: &HostedContextMirror,
 ) -> Result<(String, String)> {
     let first = annotation
         .revisions
@@ -562,7 +539,9 @@ async fn create_on_server(
             .with_context(|| format!("supersede hosted annotation {superseded}"))?;
         response.new_annotation_id
     } else {
-        client
+        // Client-sovereign id: propose our local `ann-` id and take the server's
+        // authoritative echo from the response — no author+content recovery.
+        let response = client
             .set_context(
                 repo_path,
                 &path,
@@ -574,28 +553,17 @@ async fn create_on_server(
                 None,
                 None,
                 op_id.to_string(),
+                annotation.annotation_id.as_str(),
             )
             .await
             .with_context(|| format!("set hosted context for {}", annotation.annotation_id))?;
-
-        // Recover the minted id author-aware (weft returns only a count): the
-        // annotation at the target stamped with OUR hosted username, matching
-        // content + scope, whose id is not already linked (re-link safe).
-        let hosted = hosted_attribution(username);
-        list_server_targets(client, repo_path)
-            .await?
-            .into_iter()
-            .rev()
-            .find(|(candidate_target, candidate)| {
-                candidate_target == target
-                    && Some(candidate.attribution.as_str()) == hosted.as_deref()
-                    && candidate.content == first.content
-                    && scope_ident(&scope_from_proto(candidate.scope.as_ref()))
-                        == scope_ident(&annotation.scope)
-                    && !server_id_is_linked(mirror, repo_path, &candidate.id)
-            })
-            .map(|(_, candidate)| candidate.id)
-            .context("could not recover the minted annotation id (author + content)")?
+        if response.annotation_id.trim().is_empty() {
+            bail!(
+                "weft did not return an annotation id for {}",
+                annotation.annotation_id
+            );
+        }
+        response.annotation_id
     };
 
     let first_server_rev = first_server_revision_id(client, repo_path, &server_id).await?;
@@ -1183,19 +1151,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn scope_ident_ignores_resolved_lines() {
-        let a = AnnotationScope::Symbol {
-            name: "greet".to_string(),
-            resolved_lines: Some((1, 2)),
-        };
-        let b = AnnotationScope::Symbol {
-            name: "greet".to_string(),
-            resolved_lines: None,
-        };
-        assert_eq!(scope_ident(&a), scope_ident(&b));
-    }
-
     // P1-2: two clones concurrently revise one annotation. Alice already holds
     // r1 (pulled) and her own r3 (linked to server sA3); Bob's r2 arrives in the
     // middle. Pull must yield all three in SERVER order, keep Alice's local id
@@ -1348,16 +1303,6 @@ mod tests {
         get_or_create_entry(&mut mirror, "ns/repo", "in-flight").pending_create_op =
             Some("op".into());
         assert_eq!(server_id_for_local(&mirror, "ns/repo", "in-flight"), None);
-    }
-
-    // Minted-id recovery must not adopt a server id that is already linked to a
-    // different local annotation (the re-link-safe / concurrent-writer guard).
-    #[test]
-    fn server_id_is_linked_detects_prior_links() {
-        let mut mirror = HostedContextMirror::default();
-        get_or_create_entry(&mut mirror, "ns/repo", "local-a").server_id = "srv-1".into();
-        assert!(server_id_is_linked(&mirror, "ns/repo", "srv-1"));
-        assert!(!server_id_is_linked(&mirror, "ns/repo", "srv-2"));
     }
 
     #[tokio::test]

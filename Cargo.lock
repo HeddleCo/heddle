@@ -1166,7 +1166,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -2086,9 +2086,9 @@ dependencies = [
 
 [[package]]
 name = "heddle-api"
-version = "0.24.0"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c66a7868c6fdcb25b05d7b1a90008adeb21c30ccea387c3e7397af1c277704c0"
+checksum = "62e8486926f5cafd3292428704df00061da5ee729ab4a24c29410baf284b0340"
 dependencies = [
  "blake3",
  "bytes",
@@ -2733,9 +2733,9 @@ dependencies = [
 
 [[package]]
 name = "heddleco-capability-verifier"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "513d588f63cec67467e14b805feb1d7ba536cd8db58216f61f501a3fecf2bbc7"
+checksum = "501f7b6f413dac4236c7d6b30242c798fa11bd06b0dcfa33728feb98c084324d"
 dependencies = [
  "biscuit-auth",
  "ed25519-dalek 3.0.0",
@@ -5087,7 +5087,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac6c3320f9abac597dcbc668774ef006702672474aad53c6d596b62e487b40b1"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "once_cell",
@@ -5120,7 +5120,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -6898,7 +6898,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.52.0",
