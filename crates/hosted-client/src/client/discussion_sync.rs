@@ -410,6 +410,7 @@ async fn push_one(
                     return Ok(false);
                 }
                 let (open_turn_id, open_body) = candidates[0].clone();
+                let proposed_id = local_id.to_string();
                 let hosted = client
                     .open_discussion(
                         repo_path,
@@ -420,6 +421,7 @@ async fn push_one(
                         &visibility,
                         discussion.thread_ref.as_deref(),
                         open_op_id(repo_path, local_id),
+                        &proposed_id,
                     )
                     .await
                     .with_context(|| format!("open hosted discussion for {local_id}"))?;
@@ -816,6 +818,16 @@ fn import_hosted_discussion(
     )
 }
 
+/// Choose the local `DiscussionRecordId` for a hosted discussion: adopt the id
+/// carried on the wire when it is a valid `disc-<UUIDv7>` (the client-sovereign
+/// id the originator minted), otherwise derive a deterministic id from the
+/// hosted id so every clone of a legacy `hc-` discussion still agrees.
+fn adopt_or_derive_local_id(hosted_id: &str) -> DiscussionRecordId {
+    hosted_id
+        .parse::<DiscussionRecordId>()
+        .unwrap_or_else(|_| DiscussionRecordId::for_hosted_source(hosted_id))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn pull_one(
     store: &CollaborationStore,
@@ -829,18 +841,47 @@ fn pull_one(
     if discussion.turns.is_empty() && matches!(discussion.resolution, HostedResolution::Open) {
         return Ok(false);
     }
-    let repo_mirror = mirror.repos.entry(repo_path.to_string()).or_default();
-    let entry_index = repo_mirror
+    let mut entry_index = mirror
+        .repos
+        .entry(repo_path.to_string())
+        .or_default()
         .discussions
         .iter()
         .position(|entry| entry.server_id == discussion.id);
+
+    // Client-sovereign id + resume guard: when there is no mirror entry yet but
+    // the op-log already holds this discussion under its adopted (or derived)
+    // local id — we pulled our own discussion back, or the mirror file was lost
+    // — re-establish the mirror link and resume into the `Some` arm instead of
+    // writing a duplicate `Open` root (materialize rejects a second root).
+    if entry_index.is_none() && !discussion.turns.is_empty() {
+        let candidate = adopt_or_derive_local_id(&discussion.id);
+        if store
+            .materialize_discussion(&candidate)
+            .context("check op-log for an existing discussion before pull")?
+            .is_some()
+        {
+            let repo_mirror = mirror.repos.entry(repo_path.to_string()).or_default();
+            repo_mirror.discussions.push(MirrorEntry {
+                local_id: candidate.to_string(),
+                server_id: discussion.id.clone(),
+                links: Vec::new(),
+                resolved_into_annotation_operation_id: None,
+                pulled_resolution_key: None,
+            });
+            entry_index = Some(repo_mirror.discussions.len() - 1);
+        }
+    }
 
     let mut changed = match entry_index {
         None => {
             if discussion.turns.is_empty() {
                 return Ok(false);
             }
-            let local_id = DiscussionRecordId::generate();
+            // Adopt the id the originator minted (carried on the wire) so the
+            // discussion is addressable by the same id on every clone; fall back
+            // to a deterministic derivation for legacy `hc-` ids.
+            let local_id = adopt_or_derive_local_id(&discussion.id);
             let anchor = hosted_open_anchor(discussion, head_state);
             let title = derive_title(&discussion.turns[0].body, &discussion.symbol);
             let visibility = parse_visibility_token(&discussion.visibility);
@@ -902,6 +943,7 @@ fn pull_one(
             true
         }
         Some(index) => {
+            let repo_mirror = mirror.repos.entry(repo_path.to_string()).or_default();
             let local_id: DiscussionRecordId = repo_mirror.discussions[index]
                 .local_id
                 .parse()
@@ -2028,5 +2070,144 @@ mod tests {
         );
         let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
         assert_eq!(store.materialize().unwrap().discussions.len(), 2);
+    }
+
+    #[test]
+    fn adopt_or_derive_local_id_adopts_valid_disc_and_derives_legacy() {
+        // A valid `disc-<UUIDv7>` on the wire is adopted verbatim (client-sovereign).
+        let minted = DiscussionRecordId::generate();
+        assert_eq!(adopt_or_derive_local_id(&minted.to_string()), minted);
+        // A legacy `hc-` id has no `disc-` form; it is derived deterministically.
+        let a = adopt_or_derive_local_id("hc-legacy-xyz");
+        assert_eq!(a, DiscussionRecordId::for_hosted_source("hc-legacy-xyz"));
+        assert_ne!(a, adopt_or_derive_local_id("hc-other"));
+    }
+
+    fn seed_repo_with_state() -> (TempDir, Repository, StateId) {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
+        let state = repo
+            .snapshot_with_attribution(
+                Some("seed".to_string()),
+                None,
+                Attribution::human(Principal::new("Test", "test@example.com")),
+            )
+            .unwrap()
+            .id();
+        (temp, repo, state)
+    }
+
+    fn bootstrap_discussion(id: &str, state: StateId) -> Discussion {
+        Discussion {
+            id: id.to_string(),
+            anchor: SymbolAnchor::new("lib.rs", "run"),
+            opened_against_state: state,
+            opened_at: 1_700_000_000,
+            thread_ref: None,
+            turns: vec![DiscussionTurn {
+                author: Principal::new("Reviewer", "reviewer@example.com"),
+                body: "keep this invariant".to_string(),
+                posted_at: 1_700_000_001,
+                references: Vec::new(),
+            }],
+            resolution: DiscussionResolution::Open,
+            body_changed_since_open: false,
+            anchor_ambiguous: false,
+            orphaned: false,
+            visibility: VisibilityTier::Internal,
+            resolved_annotation_id: None,
+        }
+    }
+
+    // Falsifier: the originator's `disc-` id must be the id every clone can
+    // address, and two clones of one source must agree. Pre-fix the pull path
+    // minted a fresh UUIDv7 per clone, so neither held.
+    #[tokio::test]
+    async fn pull_adopts_the_originators_disc_id_so_clones_agree() {
+        let originator = DiscussionRecordId::generate();
+        let wire_id = originator.to_string();
+
+        let mut materialized_ids = Vec::new();
+        for _ in 0..2 {
+            let (_temp, repo, state) = seed_repo_with_state();
+            let bootstrap = vec![bootstrap_discussion(&wire_id, state)];
+            let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+            assert_eq!(
+                pull_discussions(&repo, &mut client, "acme/widgets", Some(&bootstrap), Some(state))
+                    .await
+                    .unwrap(),
+                1
+            );
+            client.close().await;
+            server.await.unwrap();
+
+            let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+            // Addressable by the ORIGINATOR's id on this clone.
+            assert!(
+                store.materialize_discussion(&originator).unwrap().is_some(),
+                "clone must be addressable by the originator's id {originator}"
+            );
+            let ids: Vec<DiscussionRecordId> =
+                store.materialize().unwrap().discussions.keys().copied().collect();
+            materialized_ids.push(ids);
+        }
+        assert_eq!(
+            materialized_ids[0], materialized_ids[1],
+            "two clones of one source must materialize the same discussion id set"
+        );
+    }
+
+    // Falsifier for the resume guard: if the op-log already holds the discussion
+    // (its own id came back over the wire) but the mirror has no entry, pull must
+    // resume rather than write a second `Open` root (materialize rejects two roots).
+    #[tokio::test]
+    async fn pull_resumes_when_oplog_has_it_but_mirror_is_missing() {
+        let (_temp, repo, state) = seed_repo_with_state();
+        let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+        // This discussion already exists in the op-log under its own id, with the
+        // open turn copied verbatim from the server (author + timestamp), so the
+        // resumed pull reconciles the one turn rather than appending a copy.
+        let local_id = DiscussionRecordId::generate();
+        write_local_operation(
+            &store,
+            local_id,
+            Vec::new(),
+            Attribution::human(Principal::new("Reviewer", "reviewer@example.com")),
+            1_700_000_001_000,
+            CollaborationOperationBodyV1::Open {
+                title: "run contract".to_string(),
+                anchor: CollaborationAnchor::Symbol {
+                    state_id: state,
+                    path: "lib.rs".to_string(),
+                    symbol: "run".to_string(),
+                },
+                visibility: VisibilityTier::Internal,
+                turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
+                thread_ref: None,
+            },
+        )
+        .unwrap();
+        let ops_before = store.operation_ids().unwrap().len();
+
+        // A pulls its own discussion back — same id on the wire, mirror empty.
+        let bootstrap = vec![bootstrap_discussion(&local_id.to_string(), state)];
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        pull_discussions(&repo, &mut client, "acme/widgets", Some(&bootstrap), Some(state))
+            .await
+            .unwrap();
+        client.close().await;
+        server.await.unwrap();
+
+        // No duplicate `Open` root: exactly one discussion, still addressable, and
+        // the single seeded turn reconciled rather than duplicated.
+        let materialized = store.materialize().unwrap();
+        assert_eq!(materialized.discussions.len(), 1, "must not duplicate the discussion");
+        assert!(materialized.discussions.contains_key(&local_id));
+        assert_eq!(
+            store.operation_ids().unwrap().len(),
+            ops_before,
+            "resume must not write a duplicate Open root for the reconciled turn"
+        );
     }
 }

@@ -184,6 +184,7 @@ impl HostedClient {
         visibility: &str,
         thread_ref: Option<&str>,
         client_operation_id: String,
+        discussion_id: &str,
     ) -> Result<HostedDiscussion, ProtocolError> {
         let request = open_discussion_request(
             repo_path,
@@ -194,6 +195,7 @@ impl HostedClient {
             visibility,
             thread_ref,
             client_operation_id,
+            discussion_id,
         );
         let response = self
             .routes()
@@ -340,6 +342,7 @@ fn open_discussion_request(
     visibility: &str,
     thread_ref: Option<&str>,
     client_operation_id: String,
+    discussion_id: &str,
 ) -> OpenDiscussionRequest {
     OpenDiscussionRequest {
         repo_path: super::helpers::repository_ref(repo_path),
@@ -355,6 +358,7 @@ fn open_discussion_request(
         thread_id: String::new(),
         severity: DiscussionSeverity::Unspecified as i32,
         kind: DiscussionKind::CodeAnchored as i32,
+        discussion_id: discussion_id.to_string(),
     }
 }
 
@@ -461,12 +465,17 @@ mod tests {
             "internal",
             Some("refs/heads/feature/run"),
             "open-op".to_string(),
+            "disc-018f0000-0000-7000-8000-000000000000",
         );
         assert_eq!(request.thread_ref, "refs/heads/feature/run");
         assert_eq!(request.anchor.unwrap().file, "src/lib.rs");
         assert_eq!(request.body, "keep this stable");
         assert_eq!(request.severity, DiscussionSeverity::Unspecified as i32);
         assert_eq!(request.kind, DiscussionKind::CodeAnchored as i32);
+        assert_eq!(
+            request.discussion_id,
+            "disc-018f0000-0000-7000-8000-000000000000"
+        );
     }
 
     #[test]

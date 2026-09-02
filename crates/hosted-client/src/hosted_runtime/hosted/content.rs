@@ -114,6 +114,7 @@ impl HostedClient {
         agent_provider: Option<&str>,
         agent_model: Option<&str>,
         client_operation_id: String,
+        annotation_id: &str,
     ) -> Result<SetContextResponse, ProtocolError> {
         let operation_id =
             ClientOperationId::for_required_method(SET_CONTEXT, client_operation_id)?;
@@ -130,6 +131,7 @@ impl HostedClient {
                 .and_then(super::helpers::proto_state_id),
             kind: kind as i32,
             client_operation_id: operation_id.to_wire(),
+            annotation_id: annotation_id.to_string(),
         };
         self.routes()
             .set_context(&request)
@@ -375,6 +377,7 @@ mod tests {
                 Some("codex"),
                 Some("test"),
                 "set-context-op".to_string(),
+                "",
             )
             .await
             .unwrap();

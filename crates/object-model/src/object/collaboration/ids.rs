@@ -120,6 +120,20 @@ impl DiscussionRecordId {
         bytes[8] = (bytes[8] & 0x3f) | 0x80;
         Self(Uuid::from_bytes(bytes))
     }
+
+    /// Deterministic local id for a hosted discussion whose wire id is not a
+    /// `disc-<UUIDv7>` (a legacy `hc-` id opened before clients carried their
+    /// own id). Derived solely from the hosted id so every clone that pulls the
+    /// same discussion agrees on one id, and shaped as a valid UUIDv7 so
+    /// [`Self::from_uuid`] accepts it.
+    pub fn for_hosted_source(hosted_id: &str) -> Self {
+        let hash = ContentHash::compute_typed("hosted-discussion", hosted_id.as_bytes());
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&hash.as_bytes()[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x70;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Self(Uuid::from_bytes(bytes))
+    }
 }
 
 impl fmt::Display for DiscussionRecordId {
@@ -243,6 +257,21 @@ mod tests {
         let bytes = rmp_serde::to_vec_named("").unwrap();
         assert!(rmp_serde::from_slice::<CollaborationIdempotencyKey>(&bytes).is_err());
         assert!(rmp_serde::from_slice::<LegacyDiscussionId>(&bytes).is_err());
+    }
+
+    #[test]
+    fn for_hosted_source_is_deterministic_and_valid_v7() {
+        // Falsifier for the clone-agreement of the legacy `hc-` fallback: two
+        // clones deriving from the same hosted id must land on the same local id.
+        let a = DiscussionRecordId::for_hosted_source("hc-abc123");
+        let b = DiscussionRecordId::for_hosted_source("hc-abc123");
+        assert_eq!(a, b, "same hosted id must derive the same local id");
+        // Distinct hosted ids must not collide.
+        assert_ne!(a, DiscussionRecordId::for_hosted_source("hc-xyz789"));
+        // The derived id must round-trip through the `disc-<UUIDv7>` gate.
+        let text = a.to_string();
+        assert!(text.starts_with("disc-"));
+        assert_eq!(text.parse::<DiscussionRecordId>().unwrap(), a);
     }
 
     #[test]
