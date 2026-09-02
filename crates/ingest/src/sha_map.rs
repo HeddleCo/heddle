@@ -121,6 +121,13 @@ pub enum ShaMapError {
     },
     #[error("serialize lossy tree entries: {0}")]
     LossySerialize(#[from] serde_json::Error),
+    #[error("corrupt stored {kind:?} mapping for git={git}: {heddle_repr:?}: {reason}")]
+    CorruptStoredValue {
+        git: String,
+        kind: MapKind,
+        heddle_repr: String,
+        reason: String,
+    },
 }
 
 impl Default for ShaMap {
@@ -394,15 +401,33 @@ impl ShaMap {
     }
 
     /// Look up the Heddle `StateId` for a git commit SHA.
-    pub fn get_commit(&self, git_sha: &str) -> Option<StateId> {
-        let heddle = self.get_for_kind(git_sha, MapKind::Commit)?;
-        StateId::parse(&heddle).ok()
+    pub fn get_commit(&self, git_sha: &str) -> Result<Option<StateId>, ShaMapError> {
+        let Some(heddle) = self.get_for_kind(git_sha, MapKind::Commit)? else {
+            return Ok(None);
+        };
+        StateId::parse(&heddle)
+            .map(Some)
+            .map_err(|error| ShaMapError::CorruptStoredValue {
+                git: git_sha.to_string(),
+                kind: MapKind::Commit,
+                heddle_repr: heddle,
+                reason: error.to_string(),
+            })
     }
 
     /// Look up the Heddle `ContentHash` for a git tree SHA.
-    pub fn get_tree(&self, git_sha: &str) -> Option<ContentHash> {
-        let heddle = self.get_for_kind(git_sha, MapKind::Tree)?;
-        ContentHash::from_hex(&heddle).ok()
+    pub fn get_tree(&self, git_sha: &str) -> Result<Option<ContentHash>, ShaMapError> {
+        let Some(heddle) = self.get_for_kind(git_sha, MapKind::Tree)? else {
+            return Ok(None);
+        };
+        ContentHash::from_hex(&heddle)
+            .map(Some)
+            .map_err(|error| ShaMapError::CorruptStoredValue {
+                git: git_sha.to_string(),
+                kind: MapKind::Tree,
+                heddle_repr: heddle,
+                reason: error.to_string(),
+            })
     }
 
     /// Look up persisted lossy entries for a git tree SHA.
@@ -432,64 +457,60 @@ impl ShaMap {
     }
 
     /// Look up the Heddle `ContentHash` for a git blob SHA.
-    pub fn get_blob(&self, git_sha: &str) -> Option<ContentHash> {
-        let heddle = self.get_for_kind(git_sha, MapKind::Blob)?;
-        ContentHash::from_hex(&heddle).ok()
+    pub fn get_blob(&self, git_sha: &str) -> Result<Option<ContentHash>, ShaMapError> {
+        let Some(heddle) = self.get_for_kind(git_sha, MapKind::Blob)? else {
+            return Ok(None);
+        };
+        ContentHash::from_hex(&heddle)
+            .map(Some)
+            .map_err(|error| ShaMapError::CorruptStoredValue {
+                git: git_sha.to_string(),
+                kind: MapKind::Blob,
+                heddle_repr: heddle,
+                reason: error.to_string(),
+            })
     }
 
-    fn get_for_kind(&self, git_sha: &str, want: MapKind) -> Option<String> {
-        let git_sha = normalize_git_sha(git_sha).ok()?;
+    fn get_for_kind(&self, git_sha: &str, want: MapKind) -> Result<Option<String>, ShaMapError> {
+        let git_sha = normalize_git_sha(git_sha)?;
         let mut stmt = self
             .conn
-            .prepare_cached("SELECT heddle_repr FROM sha_map WHERE git_sha = ? AND kind = ?")
-            .ok()?;
-        stmt.query_row(params![git_sha, want.as_i64()], |r| r.get(0))
-            .optional()
-            .ok()?
+            .prepare_cached("SELECT heddle_repr FROM sha_map WHERE git_sha = ? AND kind = ?")?;
+        Ok(stmt
+            .query_row(params![git_sha, want.as_i64()], |r| r.get(0))
+            .optional()?)
     }
 
     /// Reverse lookup: the git SHA that produced a given Heddle repr.
     /// Returns `None` if no record matches; the secondary index makes
     /// this an O(log n) lookup against `heddle_repr`.
-    pub fn get_git_for_heddle(&self, heddle_repr: &str) -> Option<String> {
+    pub fn get_git_for_heddle(&self, heddle_repr: &str) -> Result<Option<String>, ShaMapError> {
         let mut stmt = self
             .conn
-            .prepare_cached("SELECT git_sha FROM sha_map WHERE heddle_repr = ?")
-            .ok()?;
-        stmt.query_row(params![heddle_repr], |r| r.get(0))
-            .optional()
-            .ok()?
+            .prepare_cached("SELECT git_sha FROM sha_map WHERE heddle_repr = ?")?;
+        Ok(stmt
+            .query_row(params![heddle_repr], |r| r.get(0))
+            .optional()?)
     }
 
     /// How many commits have been mapped (used for progress reporting).
-    pub fn commit_count(&self) -> usize {
-        self.conn
-            .query_row(
-                "SELECT COUNT(*) FROM sha_map WHERE kind = ?",
-                params![MapKind::Commit.as_i64()],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|n| n as usize)
-            .unwrap_or(0)
+    pub fn commit_count(&self) -> Result<usize, ShaMapError> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM sha_map WHERE kind = ?",
+            params![MapKind::Commit.as_i64()],
+            |r| r.get::<_, i64>(0),
+        )? as usize)
     }
 
     /// Every git commit SHA currently in the map. Order is unspecified
     /// (B-tree iteration on `git_sha`); callers that want a stable
     /// order should sort.
-    pub fn commit_shas(&self) -> Vec<String> {
-        let mut stmt = match self
+    pub fn commit_shas(&self) -> Result<Vec<String>, ShaMapError> {
+        let mut stmt = self
             .conn
-            .prepare_cached("SELECT git_sha FROM sha_map WHERE kind = ?")
-        {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let rows =
-            match stmt.query_map(params![MapKind::Commit.as_i64()], |r| r.get::<_, String>(0)) {
-                Ok(r) => r,
-                Err(_) => return Vec::new(),
-            };
-        rows.filter_map(|r| r.ok()).collect()
+            .prepare_cached("SELECT git_sha FROM sha_map WHERE kind = ?")?;
+        let rows = stmt.query_map(params![MapKind::Commit.as_i64()], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Every mapped Heddle content hash of the requested source kind.
@@ -609,9 +630,9 @@ mod tests {
         let sha = "ca1af22000000000000000000000000000000000";
         let cid = test_state_id();
         m.insert_commit(sha, cid).unwrap();
-        assert_eq!(m.get_commit(sha), Some(cid));
+        assert_eq!(m.get_commit(sha).unwrap(), Some(cid));
         assert_eq!(m.len(), 1);
-        assert_eq!(m.commit_count(), 1);
+        assert_eq!(m.commit_count().unwrap(), 1);
     }
 
     #[test]
@@ -623,9 +644,9 @@ mod tests {
 
         // Same git sha looked up as commit/blob must miss because kind
         // is part of the semantic identity.
-        assert!(m.get_commit(sha).is_none());
-        assert!(m.get_blob(sha).is_none());
-        assert_eq!(m.get_tree(sha), Some(tree_hash));
+        assert!(m.get_commit(sha).unwrap().is_none());
+        assert!(m.get_blob(sha).unwrap().is_none());
+        assert_eq!(m.get_tree(sha).unwrap(), Some(tree_hash));
     }
 
     #[test]
@@ -647,6 +668,28 @@ mod tests {
         m.insert_commit(sha, cid1).unwrap();
         let err = m.insert_commit(sha, cid2).unwrap_err();
         assert!(matches!(err, ShaMapError::Conflict { .. }));
+    }
+
+    #[test]
+    fn corrupt_stored_commit_is_an_error_not_a_miss() {
+        let mut m = ShaMap::new();
+        let sha = "ca1af22000000000000000000000000000000000";
+        m.insert_commit(sha, test_state_id()).unwrap();
+        m.conn
+            .execute(
+                "UPDATE sha_map SET heddle_repr = 'not-a-state-id' WHERE git_sha = ?",
+                params![sha],
+            )
+            .unwrap();
+
+        let error = m.get_commit(sha).unwrap_err();
+        assert!(matches!(
+            error,
+            ShaMapError::CorruptStoredValue {
+                kind: MapKind::Commit,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -673,9 +716,9 @@ mod tests {
         // Reopen — every record must round-trip.
         let reloaded = ShaMap::open(&path).unwrap();
         assert_eq!(reloaded.len(), 3);
-        assert_eq!(reloaded.get_commit(sha1), Some(cid));
-        assert_eq!(reloaded.get_tree(sha2), Some(tree_h));
-        assert_eq!(reloaded.get_blob(sha3), Some(blob_h));
+        assert_eq!(reloaded.get_commit(sha1).unwrap(), Some(cid));
+        assert_eq!(reloaded.get_tree(sha2).unwrap(), Some(tree_h));
+        assert_eq!(reloaded.get_blob(sha3).unwrap(), Some(blob_h));
     }
 
     #[test]
@@ -697,7 +740,7 @@ mod tests {
         }
 
         let reloaded = ShaMap::open(&path).unwrap();
-        assert_eq!(reloaded.get_tree(sha), Some(tree_h));
+        assert_eq!(reloaded.get_tree(sha).unwrap(), Some(tree_h));
         assert_eq!(
             reloaded.get_tree_lossy_entries(sha).unwrap().unwrap(),
             entries
@@ -756,8 +799,8 @@ mod tests {
 
         let reloaded = ShaMap::open(&path).unwrap();
         assert_eq!(reloaded.len(), 2);
-        assert_eq!(reloaded.get_commit(sha1), Some(cid));
-        assert_eq!(reloaded.get_tree(sha2), Some(tree_h));
+        assert_eq!(reloaded.get_commit(sha1).unwrap(), Some(cid));
+        assert_eq!(reloaded.get_tree(sha2).unwrap(), Some(tree_h));
     }
 
     #[test]
@@ -767,7 +810,9 @@ mod tests {
         let cid = test_state_id();
         m.insert_commit(sha, cid).unwrap();
         assert_eq!(
-            m.get_git_for_heddle(&cid.to_string_full()).as_deref(),
+            m.get_git_for_heddle(&cid.to_string_full())
+                .unwrap()
+                .as_deref(),
             Some(sha)
         );
     }
@@ -796,23 +841,26 @@ mod tests {
         m.abort_append_batch();
 
         assert_eq!(m.len(), 1, "batch inserts must be rolled back");
-        assert_eq!(m.get_commit(pre_sha), Some(pre_cid));
+        assert_eq!(m.get_commit(pre_sha).unwrap(), Some(pre_cid));
         assert_eq!(
-            m.get_commit(in_batch_sha),
+            m.get_commit(in_batch_sha).unwrap(),
             None,
             "aborted commit must not survive"
         );
         assert!(
-            m.get_tree(in_batch_tree_sha).is_none(),
+            m.get_tree(in_batch_tree_sha).unwrap().is_none(),
             "aborted tree must not survive"
         );
         assert!(
             m.get_git_for_heddle(&in_batch_cid.to_string_full())
+                .unwrap()
                 .is_none(),
             "aborted commit must not survive in reverse lookup"
         );
         assert!(
-            m.get_git_for_heddle(&in_batch_tree.to_hex()).is_none(),
+            m.get_git_for_heddle(&in_batch_tree.to_hex())
+                .unwrap()
+                .is_none(),
             "aborted tree must not survive in reverse lookup"
         );
     }
@@ -846,7 +894,7 @@ mod tests {
         // Reopen. Only the original record should survive.
         let reloaded = ShaMap::open(&path).unwrap();
         assert_eq!(reloaded.len(), 1);
-        assert_eq!(reloaded.get_commit(pre_sha), Some(pre_cid));
+        assert_eq!(reloaded.get_commit(pre_sha).unwrap(), Some(pre_cid));
     }
 
     #[test]
@@ -868,7 +916,7 @@ mod tests {
         m.abort_append_batch();
 
         assert_eq!(m.len(), 1);
-        assert_eq!(m.get_commit(sha), Some(cid));
+        assert_eq!(m.get_commit(sha).unwrap(), Some(cid));
         assert_eq!(ShaMap::open(&path).unwrap().len(), 1);
     }
 
@@ -890,14 +938,14 @@ mod tests {
         m.begin_append_batch().unwrap();
         m.insert_commit(inner_sha, inner_cid).unwrap();
         m.abort_append_batch(); // rolls back inner only
-        assert_eq!(m.get_commit(inner_sha), None);
-        assert_eq!(m.get_commit(outer_sha), Some(outer_cid));
+        assert_eq!(m.get_commit(inner_sha).unwrap(), None);
+        assert_eq!(m.get_commit(outer_sha).unwrap(), Some(outer_cid));
         m.flush_append_batch().unwrap();
         drop(m);
 
         let reloaded = ShaMap::open(&path).unwrap();
         assert_eq!(reloaded.len(), 1);
-        assert_eq!(reloaded.get_commit(outer_sha), Some(outer_cid));
+        assert_eq!(reloaded.get_commit(outer_sha).unwrap(), Some(outer_cid));
     }
 
     #[test]
@@ -920,11 +968,14 @@ mod tests {
             m.insert_commit(&sha, cid).unwrap();
         }
         m.flush_append_batch().unwrap();
-        assert_eq!(m.commit_count(), 10_000);
+        assert_eq!(m.commit_count().unwrap(), 10_000);
         // Spot-check round-trip across the range.
         for i in [0u32, 1, 99, 1_234, 5_000, 9_999] {
             let sha = format!("{:040x}", i);
-            assert!(m.get_commit(&sha).is_some(), "missing commit {sha}");
+            assert!(
+                m.get_commit(&sha).unwrap().is_some(),
+                "missing commit {sha}"
+            );
         }
     }
 }

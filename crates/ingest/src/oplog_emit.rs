@@ -119,11 +119,13 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
 
         for entry in entries {
             match classify(&entry.ref_name) {
-                RefKind::Head => self.emit_head(entry, scope, &mut groups, &mut stats),
+                RefKind::Head => self.emit_head(entry, scope, &mut groups, &mut stats)?,
                 RefKind::Branch(name) => {
-                    self.emit_branch(entry, &name, scope, &mut groups, &mut stats)
+                    self.emit_branch(entry, &name, scope, &mut groups, &mut stats)?
                 }
-                RefKind::Tag(name) => self.emit_tag(entry, &name, scope, &mut groups, &mut stats),
+                RefKind::Tag(name) => {
+                    self.emit_tag(entry, &name, scope, &mut groups, &mut stats)?
+                }
                 RefKind::Other => {
                     stats.skipped_noop += 1;
                 }
@@ -149,30 +151,32 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
         scope: Option<&'g str>,
         groups: &mut Vec<(Vec<OpRecord>, Option<&'g str>)>,
         stats: &mut OplogEmitStats,
-    ) {
+    ) -> crate::Result<()> {
         // Only `checkout:` is a pure navigation event; other HEAD movements
         // are handled from the corresponding branch reflog.
         if !entry.message.starts_with("checkout:") {
             stats.skipped_noop += 1;
-            return;
+            return Ok(());
         }
         let Some(new_sha) = &entry.new_sha else {
             stats.skipped_noop += 1;
-            return;
+            return Ok(());
         };
-        let Some(cid) = self.map.get_commit(new_sha) else {
+        let Some(cid) = self.map.get_commit(new_sha)? else {
             warn!(
                 ref_name = %entry.ref_name,
                 sha = %new_sha,
                 "dropping HEAD checkout — target commit not in sha map",
             );
             stats.skipped_unmapped += 1;
-            return;
+            return Ok(());
         };
         let prev_cid = entry
             .previous_sha
             .as_deref()
-            .and_then(|s| self.map.get_commit(s));
+            .map(|sha| self.map.get_commit(sha))
+            .transpose()?
+            .flatten();
         // Mirrors `OpLogRecorder::record_goto`: the `head` field is the goto
         // target. Pushed as its own group so it stays an independent undo
         // unit (one `record_goto` == one batch).
@@ -185,6 +189,7 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
             scope,
         ));
         stats.gotos += 1;
+        Ok(())
     }
 
     fn emit_branch<'g>(
@@ -194,15 +199,15 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
         scope: Option<&'g str>,
         groups: &mut Vec<(Vec<OpRecord>, Option<&'g str>)>,
         stats: &mut OplogEmitStats,
-    ) {
+    ) -> crate::Result<()> {
         match (&entry.previous_sha, &entry.new_sha) {
             (None, None) => {
                 stats.skipped_noop += 1;
             }
             (None, Some(new_sha)) => {
-                let Some(cid) = self.map.get_commit(new_sha) else {
+                let Some(cid) = self.map.get_commit(new_sha)? else {
                     stats.skipped_unmapped += 1;
-                    return;
+                    return Ok(());
                 };
                 // Git-history ingest does not write a ThreadManager
                 // record — those exist for native heddle threads. Pass
@@ -220,9 +225,9 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
                 stats.thread_creates += 1;
             }
             (Some(prev_sha), None) => {
-                let Some(cid) = self.map.get_commit(prev_sha) else {
+                let Some(cid) = self.map.get_commit(prev_sha)? else {
                     stats.skipped_unmapped += 1;
-                    return;
+                    return Ok(());
                 };
                 // Mirrors `record_thread_delete`.
                 groups.push((
@@ -241,10 +246,10 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
             }
             (Some(prev), Some(new)) => {
                 let (Some(old_cid), Some(new_cid)) =
-                    (self.map.get_commit(prev), self.map.get_commit(new))
+                    (self.map.get_commit(prev)?, self.map.get_commit(new)?)
                 else {
                     stats.skipped_unmapped += 1;
-                    return;
+                    return Ok(());
                 };
                 groups.push((
                     vec![OpRecord::ThreadUpdate {
@@ -258,6 +263,7 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
                 stats.thread_updates += 1;
             }
         }
+        Ok(())
     }
 
     fn emit_tag<'g>(
@@ -267,12 +273,12 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
         scope: Option<&'g str>,
         groups: &mut Vec<(Vec<OpRecord>, Option<&'g str>)>,
         stats: &mut OplogEmitStats,
-    ) {
+    ) -> crate::Result<()> {
         match (&entry.previous_sha, &entry.new_sha) {
             (None, Some(new)) => {
-                let Some(cid) = self.map.get_commit(new) else {
+                let Some(cid) = self.map.get_commit(new)? else {
                     stats.skipped_unmapped += 1;
-                    return;
+                    return Ok(());
                 };
                 // Mirrors `record_marker_create`, which records with scope
                 // `None` (it goes through `record_batch`, not the scoped
@@ -287,9 +293,9 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
                 stats.marker_creates += 1;
             }
             (Some(prev), None) => {
-                let Some(cid) = self.map.get_commit(prev) else {
+                let Some(cid) = self.map.get_commit(prev)? else {
                     stats.skipped_unmapped += 1;
-                    return;
+                    return Ok(());
                 };
                 // Mirrors `record_marker_delete` — scope `None`.
                 groups.push((
@@ -312,10 +318,10 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
                 // This arm uses the emitter scope (it always did, via the
                 // earlier inline `record_batch_scoped(_, self.scope)`).
                 let (Some(old_cid), Some(new_cid)) =
-                    (self.map.get_commit(prev), self.map.get_commit(new))
+                    (self.map.get_commit(prev)?, self.map.get_commit(new)?)
                 else {
                     stats.skipped_unmapped += 1;
-                    return;
+                    return Ok(());
                 };
                 groups.push((
                     vec![
@@ -337,6 +343,7 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
                 stats.skipped_noop += 1;
             }
         }
+        Ok(())
     }
 }
 
