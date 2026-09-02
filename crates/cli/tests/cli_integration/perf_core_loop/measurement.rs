@@ -46,6 +46,8 @@ pub(super) enum CaseKind {
     CaptureOne,
     DiffOne,
     LogBounded,
+    DiffOneRepacked,
+    LogBoundedRepacked,
     ThreadListBounded,
 }
 
@@ -59,6 +61,8 @@ impl CaseKind {
             Self::CaptureOne => "capture_one",
             Self::DiffOne => "diff_one",
             Self::LogBounded => "log_bounded",
+            Self::DiffOneRepacked => "diff_one_repacked",
+            Self::LogBoundedRepacked => "log_bounded_repacked",
             Self::ThreadListBounded => "thread_list_bounded",
         }
     }
@@ -69,8 +73,10 @@ impl CaseKind {
             Self::Help => &["help"],
             Self::StatusClean | Self::StatusDirty => &["--output", "json", "status"],
             Self::CaptureOne => &["--output", "json", "capture", "-m", "perf sample"],
-            Self::DiffOne => &["--output", "json", "diff"],
-            Self::LogBounded => &["--output", "json", "log", "--limit", "20"],
+            Self::DiffOne | Self::DiffOneRepacked => &["--output", "json", "diff"],
+            Self::LogBounded | Self::LogBoundedRepacked => {
+                &["--output", "json", "log", "--limit", "20"]
+            }
             Self::ThreadListBounded => &["--output", "json", "thread", "list"],
         }
     }
@@ -80,7 +86,11 @@ impl CaseKind {
             Self::Version | Self::Help => 0,
             Self::StatusClean | Self::StatusDirty => 1,
             Self::CaptureOne => 2,
-            Self::DiffOne | Self::LogBounded | Self::ThreadListBounded => 1,
+            Self::DiffOne
+            | Self::LogBounded
+            | Self::DiffOneRepacked
+            | Self::LogBoundedRepacked
+            | Self::ThreadListBounded => 1,
         }
     }
 }
@@ -141,6 +151,10 @@ pub(super) struct Counters {
     pub network_client_initialized: bool,
     pub ancestors_visited: u64,
     pub history_objects_decoded: u64,
+    pub pack_frame_decompressions: u64,
+    pub pack_frame_cache_hits: u64,
+    pub pack_blob_bodies_hashed: u64,
+    pub pack_state_frames_decoded: u64,
 }
 
 impl Sample {
@@ -203,6 +217,10 @@ impl Counters {
         self.network_client_initialized |= other.network_client_initialized;
         self.ancestors_visited += other.ancestors_visited;
         self.history_objects_decoded += other.history_objects_decoded;
+        self.pack_frame_decompressions += other.pack_frame_decompressions;
+        self.pack_frame_cache_hits += other.pack_frame_cache_hits;
+        self.pack_blob_bodies_hashed += other.pack_blob_bodies_hashed;
+        self.pack_state_frames_decoded += other.pack_state_frames_decoded;
     }
 }
 
@@ -278,7 +296,7 @@ impl CaseResult {
             self.metric(|sample| sample.network_ms),
         );
         println!(
-            "COUNTERS case={} paths={} dirs_scanned={} dirs_skipped={} files_hashed={} monitor_paths={} object_decodes={} ref_reads={} oplog_reads={} repo_opens={} network_initialized={} ancestors_visited={} history_objects_decoded={}",
+            "COUNTERS case={} paths={} dirs_scanned={} dirs_skipped={} files_hashed={} monitor_paths={} object_decodes={} ref_reads={} oplog_reads={} repo_opens={} network_initialized={} ancestors_visited={} history_objects_decoded={} pack_frame_decompressions={} pack_frame_cache_hits={} pack_blob_bodies_hashed={} pack_state_frames_decoded={}",
             self.kind.name(),
             self.path_count,
             self.counter(|value| value.directories_scanned),
@@ -294,6 +312,10 @@ impl CaseResult {
                 .any(|sample| sample.counters.network_client_initialized),
             self.counter(|value| value.ancestors_visited),
             self.counter(|value| value.history_objects_decoded),
+            self.counter(|value| value.pack_frame_decompressions),
+            self.counter(|value| value.pack_frame_cache_hits),
+            self.counter(|value| value.pack_blob_bodies_hashed),
+            self.counter(|value| value.pack_state_frames_decoded),
         );
     }
 }

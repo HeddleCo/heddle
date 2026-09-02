@@ -20,6 +20,10 @@ static NETWORK_CLIENT_INITIALIZATIONS: AtomicU64 = AtomicU64::new(0);
 static ANCESTORS_VISITED: AtomicU64 = AtomicU64::new(0);
 static HISTORY_OBJECTS_DECODED: AtomicU64 = AtomicU64::new(0);
 static GIT_REACHABLE_COPY_OPERATIONS: AtomicU64 = AtomicU64::new(0);
+static PACK_FRAME_DECOMPRESSIONS: AtomicU64 = AtomicU64::new(0);
+static PACK_FRAME_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static PACK_BLOB_BODIES_HASHED: AtomicU64 = AtomicU64::new(0);
+static PACK_STATE_FRAMES_DECODED: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct StructuralCounters {
@@ -36,6 +40,10 @@ pub struct StructuralCounters {
     pub ancestors_visited: u64,
     pub history_objects_decoded: u64,
     pub git_reachable_copy_operations: u64,
+    pub pack_frame_decompressions: u64,
+    pub pack_frame_cache_hits: u64,
+    pub pack_blob_bodies_hashed: u64,
+    pub pack_state_frames_decoded: u64,
 }
 
 fn enabled() -> bool {
@@ -101,6 +109,22 @@ pub fn record_git_reachable_copy_operation() {
     add(&GIT_REACHABLE_COPY_OPERATIONS, 1);
 }
 
+pub fn record_pack_frame_decompression() {
+    add(&PACK_FRAME_DECOMPRESSIONS, 1);
+}
+
+pub fn record_pack_frame_cache_hit() {
+    add(&PACK_FRAME_CACHE_HITS, 1);
+}
+
+pub fn record_pack_blob_bodies_hashed(count: usize) {
+    add(&PACK_BLOB_BODIES_HASHED, count as u64);
+}
+
+pub fn record_pack_state_frame_decode() {
+    add(&PACK_STATE_FRAMES_DECODED, 1);
+}
+
 pub fn snapshot() -> StructuralCounters {
     StructuralCounters {
         directories_scanned: DIRECTORIES_SCANNED.load(Ordering::Relaxed),
@@ -116,5 +140,9 @@ pub fn snapshot() -> StructuralCounters {
         ancestors_visited: ANCESTORS_VISITED.load(Ordering::Relaxed),
         history_objects_decoded: HISTORY_OBJECTS_DECODED.load(Ordering::Relaxed),
         git_reachable_copy_operations: GIT_REACHABLE_COPY_OPERATIONS.load(Ordering::Relaxed),
+        pack_frame_decompressions: PACK_FRAME_DECOMPRESSIONS.load(Ordering::Relaxed),
+        pack_frame_cache_hits: PACK_FRAME_CACHE_HITS.load(Ordering::Relaxed),
+        pack_blob_bodies_hashed: PACK_BLOB_BODIES_HASHED.load(Ordering::Relaxed),
+        pack_state_frames_decoded: PACK_STATE_FRAMES_DECODED.load(Ordering::Relaxed),
     }
 }

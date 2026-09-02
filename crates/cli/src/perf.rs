@@ -176,6 +176,16 @@ fn record_structural_counters() {
                 "git_reachable_copy_operations",
                 counters.git_reachable_copy_operations,
             ),
+            ProfileField::count(
+                "pack_frame_decompressions",
+                counters.pack_frame_decompressions,
+            ),
+            ProfileField::count("pack_frame_cache_hits", counters.pack_frame_cache_hits),
+            ProfileField::count("pack_blob_bodies_hashed", counters.pack_blob_bodies_hashed),
+            ProfileField::count(
+                "pack_state_frames_decoded",
+                counters.pack_state_frames_decoded,
+            ),
         ],
     );
 }

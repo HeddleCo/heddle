@@ -2569,6 +2569,7 @@ dependencies = [
  "heddle-format",
  "heddle-fs-prims",
  "heddle-object-model",
+ "heddle-perf-contract",
  "memmap2",
  "rmp-serde",
  "tempfile",

@@ -10,7 +10,9 @@ mod state;
 mod state_decode;
 mod tree;
 
-pub use blob::{decode_blob_frame, encode_blob_frame, is_blob_frame};
+pub use blob::{
+    decode_blob_frame, encode_blob_frame, extract_blob, extract_blob_with_scan, is_blob_frame,
+};
 pub use extract::extract_state;
 pub use state::{encode_state_frame, is_state_frame};
 pub use state_decode::decode_state_frame;

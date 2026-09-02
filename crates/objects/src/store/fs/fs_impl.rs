@@ -1060,11 +1060,10 @@ impl FsStore {
         }
 
         if let Ok(manager) = self.pack_manager().read()
-            && let Some((obj_type, data)) = manager.get_object(&PackObjectId::StateId(*id))?
-            && obj_type == ObjectType::State
+            && let Some(state) = manager.get_state(id)?
         {
             trace!("Found state in packfile");
-            let state = validate_loaded_state(id, rmp_serde::from_slice(&data)?)?;
+            let state = validate_loaded_state(id, state)?;
             heddle_perf_contract::record_object_decode();
             if let Ok(mut cache) = self.recent_states.write() {
                 cache.insert(*id, state.clone());

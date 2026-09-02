@@ -49,6 +49,46 @@ pub fn encode_blob_frame(blobs: &[&[u8]]) -> Result<Vec<u8>> {
 
 /// Decode and whole-frame-verify every indexed blob slice.
 pub fn decode_blob_frame(bytes: &[u8]) -> Result<Vec<DecodedBlob<'_>>> {
+    let (mut input, lengths) = blob_frame_parts(bytes)?;
+    let mut blobs = Vec::with_capacity(lengths.len());
+    for len in lengths {
+        let body = input.take(len)?;
+        blobs.push((ContentHash::compute_typed("blob", body), body));
+    }
+    input.finish()?;
+    Ok(blobs)
+}
+
+/// Return one verified blob body without allocating or hashing later bodies.
+///
+/// HCB2 stores every body length before the concatenated bodies. After the
+/// whole-frame checksum and length table are validated, this walks bodies in
+/// frame order and stops at the first typed hash matching `expected`.
+pub fn extract_blob(bytes: &[u8], expected: ContentHash) -> Result<DecodedBlob<'_>> {
+    extract_blob_with_scan(bytes, expected).map(|(blob, _)| blob)
+}
+
+/// Point-read variant that also reports how many bodies were hashed.
+///
+/// This is exposed for the executable storage performance contract; callers
+/// serving objects should normally use [`extract_blob`].
+#[doc(hidden)]
+pub fn extract_blob_with_scan(
+    bytes: &[u8],
+    expected: ContentHash,
+) -> Result<(DecodedBlob<'_>, usize)> {
+    let (mut input, lengths) = blob_frame_parts(bytes)?;
+    for (ordinal, len) in lengths.into_iter().enumerate() {
+        let body = input.take(len)?;
+        let hash = ContentHash::compute_typed("blob", body);
+        if hash == expected {
+            return Ok(((hash, body), ordinal + 1));
+        }
+    }
+    Err(super::CompactError::Missing)
+}
+
+fn blob_frame_parts(bytes: &[u8]) -> Result<(Reader<'_>, Vec<usize>)> {
     let mut input = Reader::verified(bytes, BLOB_MAGIC)?;
     let count = input.get_count("blob frame", MIN_BLOB_ITEM_BYTES)?;
     let mut lengths = Vec::with_capacity(count);
@@ -78,13 +118,7 @@ pub fn decode_blob_frame(bytes: &[u8]) -> Result<Vec<DecodedBlob<'_>>> {
             input.remaining()
         )));
     }
-    let mut blobs = Vec::with_capacity(count);
-    for len in lengths {
-        let body = input.take(len)?;
-        blobs.push((ContentHash::compute_typed("blob", body), body));
-    }
-    input.finish()?;
-    Ok(blobs)
+    Ok((input, lengths))
 }
 
 fn checked_length(value: u64) -> Result<usize> {
