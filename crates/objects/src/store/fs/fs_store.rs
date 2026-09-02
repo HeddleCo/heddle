@@ -11,6 +11,7 @@ use std::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
     },
+    time::SystemTime,
 };
 
 use heddle_format::compression::CompressionConfig;
@@ -46,6 +47,12 @@ pub(super) const RECENT_BLOB_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// caps the resident blob-cache footprint while still holding a deep
 /// hot working set of small objects (the common case).
 pub(super) const RECENT_BLOB_CACHE_MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
+
+fn pack_dir_modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
 
 thread_local! {
     static SNAPSHOT_WRITE_BATCH_DEPTHS: std::cell::RefCell<HashMap<PathBuf, usize>> =
@@ -259,6 +266,13 @@ pub struct FsStore {
     pub(super) snapshot_delta_search: bool,
     pack_manager: RwLock<SnapshotPackManager>,
     npk1_manager: RwLock<Npk1Manager>,
+    /// Last pack-directory generation reflected by both in-memory managers.
+    /// Immutable pack publication changes the directory entry set, so one
+    /// metadata probe replaces the two full directory scans formerly paid by
+    /// every read miss.
+    pack_dir_modified: RwLock<Option<SystemTime>>,
+    #[cfg(test)]
+    pack_dir_generation_probes: AtomicUsize,
     pub(super) recent_blobs: RwLock<RecentObjectCache<ContentHash, Blob>>,
     pub(super) recent_trees: RwLock<RecentObjectCache<ContentHash, Tree>>,
     pub(super) recent_states: RwLock<RecentObjectCache<StateId, State>>,
@@ -296,6 +310,11 @@ impl Clone for FsStore {
         cloned.snapshot_delta_search = self.snapshot_delta_search;
         cloned.loose_object_write_mode = self.loose_object_write_mode;
         cloned.external_source = self.external_source.clone();
+        cloned.pack_dir_modified = RwLock::new(pack_dir_modified(&packs_dir(&self.root)));
+        #[cfg(test)]
+        cloned
+            .pack_dir_generation_probes
+            .store(0, Ordering::Relaxed);
         cloned
     }
 }
@@ -308,12 +327,16 @@ impl FsStore {
         let root = root.as_ref().to_path_buf();
         let pack_manager = SnapshotPackManager::new(packs_dir(&root));
         let npk1_manager = Npk1Manager::new(packs_dir(&root));
+        let pack_dir_modified = pack_dir_modified(&packs_dir(&root));
         Self {
             root,
             compression: CompressionConfig::default(),
             snapshot_delta_search: false,
             pack_manager: RwLock::new(pack_manager),
             npk1_manager: RwLock::new(npk1_manager),
+            pack_dir_modified: RwLock::new(pack_dir_modified),
+            #[cfg(test)]
+            pack_dir_generation_probes: AtomicUsize::new(0),
             recent_blobs: RwLock::new(RecentObjectCache::with_byte_budget(
                 RECENT_BLOB_CACHE_CAPACITY,
                 RECENT_BLOB_CACHE_MAX_TOTAL_BYTES,
@@ -339,12 +362,16 @@ impl FsStore {
         let root = root.as_ref().to_path_buf();
         let pack_manager = SnapshotPackManager::new(packs_dir(&root));
         let npk1_manager = Npk1Manager::new(packs_dir(&root));
+        let pack_dir_modified = pack_dir_modified(&packs_dir(&root));
         Self {
             root,
             compression,
             snapshot_delta_search: false,
             pack_manager: RwLock::new(pack_manager),
             npk1_manager: RwLock::new(npk1_manager),
+            pack_dir_modified: RwLock::new(pack_dir_modified),
+            #[cfg(test)]
+            pack_dir_generation_probes: AtomicUsize::new(0),
             recent_blobs: RwLock::new(RecentObjectCache::with_byte_budget(
                 RECENT_BLOB_CACHE_CAPACITY,
                 RECENT_BLOB_CACHE_MAX_TOTAL_BYTES,
@@ -375,6 +402,7 @@ impl FsStore {
         crate::fs_atomic::create_dir_all_durable(&states_dir(&self.root))?;
         crate::fs_atomic::create_dir_all_durable(&actions_dir(&self.root))?;
         crate::fs_atomic::create_dir_all_durable(&packs_dir(&self.root))?;
+        self.remember_pack_dir_modified()?;
         Ok(())
     }
 
@@ -460,7 +488,9 @@ impl FsStore {
         let mut npk1 = self.npk1_manager.write().map_err(|_| {
             crate::store::HeddleError::Config("Failed to acquire NPK1 manager lock".to_string())
         })?;
-        npk1.reload()
+        npk1.reload()?;
+        drop(npk1);
+        self.remember_pack_dir_modified()
     }
 
     /// Reload pack files only if the immutable pack set changed on disk.
@@ -477,40 +507,67 @@ impl FsStore {
     /// the write lock; only the first thread that observes a stale
     /// view escalates and does the reload.
     pub(super) fn reload_packs_if_stale(&self) -> Result<bool> {
-        // Fast path: read-lock and bail out if the disk snapshot still matches.
-        let generic_stale = {
-            let manager = self.pack_manager.read().map_err(|_| {
-                crate::store::HeddleError::Config("Failed to acquire pack manager lock".to_string())
-            })?;
-            manager.needs_reload()?
-        };
-        let npk1_stale = {
-            let manager = self.npk1_manager.read().map_err(|_| {
-                crate::store::HeddleError::Config("Failed to acquire NPK1 manager lock".to_string())
-            })?;
-            manager.needs_reload()?
-        };
-        if !generic_stale && !npk1_stale {
+        let packs = packs_dir(&self.root);
+        let disk_modified = self.current_pack_dir_modified(&packs);
+        let observed = self.pack_dir_modified.read().map_err(|_| {
+            crate::store::HeddleError::Config(
+                "Failed to acquire pack directory generation lock".to_string(),
+            )
+        })?;
+        if *observed == disk_modified {
             return Ok(false);
         }
-        // Slow path: take the write lock and re-check (another
-        // thread may have already reloaded between our drop and
-        // re-acquire).
+        drop(observed);
+
+        // Serialize the generation transition, then recheck in case another
+        // reader refreshed both managers while this thread was waiting.
+        let mut observed = self.pack_dir_modified.write().map_err(|_| {
+            crate::store::HeddleError::Config(
+                "Failed to acquire pack directory generation lock".to_string(),
+            )
+        })?;
+        let disk_modified = self.current_pack_dir_modified(&packs);
+        if *observed == disk_modified {
+            return Ok(false);
+        }
         let mut manager = self.pack_manager.write().map_err(|_| {
             crate::store::HeddleError::Config("Failed to acquire pack manager lock".to_string())
         })?;
-        let generic_reloaded = manager.reload_if_stale()?;
+        manager.reload()?;
         drop(manager);
         let mut npk1 = self.npk1_manager.write().map_err(|_| {
             crate::store::HeddleError::Config("Failed to acquire NPK1 manager lock".to_string())
         })?;
-        let npk1_reloaded = if npk1.needs_reload()? {
-            npk1.reload()?;
-            true
-        } else {
-            false
-        };
-        Ok(generic_reloaded || npk1_reloaded)
+        npk1.reload()?;
+        *observed = self.current_pack_dir_modified(&packs);
+        Ok(true)
+    }
+
+    pub(super) fn remember_pack_dir_modified(&self) -> Result<()> {
+        let mut observed = self.pack_dir_modified.write().map_err(|_| {
+            crate::store::HeddleError::Config(
+                "Failed to acquire pack directory generation lock".to_string(),
+            )
+        })?;
+        *observed = self.current_pack_dir_modified(&packs_dir(&self.root));
+        Ok(())
+    }
+
+    fn current_pack_dir_modified(&self, packs: &Path) -> Option<SystemTime> {
+        #[cfg(test)]
+        self.pack_dir_generation_probes
+            .fetch_add(1, Ordering::Relaxed);
+        pack_dir_modified(packs)
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset_pack_dir_generation_probes(&self) {
+        self.pack_dir_generation_probes.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(super) fn pack_dir_generation_probes(&self) -> usize {
+        self.pack_dir_generation_probes.load(Ordering::Relaxed)
     }
 
     /// Get the pack manager for pack operations.

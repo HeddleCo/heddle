@@ -325,6 +325,7 @@ impl FsStore {
                 packs.join(format!("{installed_pack_name}.idx")),
             )?;
         }
+        self.remember_pack_dir_modified()?;
         for (hash, kind) in staged_encodings {
             self.remember_tree_encoding(hash, kind)?;
         }
