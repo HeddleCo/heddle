@@ -363,7 +363,7 @@ fn run_list(
 async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) -> Result<()> {
     use hosted_client::client::discussion_live::{
         DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventOutcome,
-        load_scoped_cursor, paired_thread_scope, save_scoped_cursor,
+        load_scoped_cursor, paired_thread_scope, save_scoped_cursor, wait_reconnect_backoff,
     };
     use hosted_client::client::{HostedAuthMode, HostedClient};
 
@@ -425,6 +425,7 @@ async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) ->
     }
 
     let mut seen = 0usize;
+    let mut reconnects = 0u32;
     'session: loop {
         let mut consumer = DiscussionEventConsumer::new(repo, &mut client, repo_path.clone())
             .with_authority(authority.clone());
@@ -442,6 +443,7 @@ async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) ->
                 discussion_id: None,
                 applied: false,
                 after_event_id: subscription.last_event_id(),
+                skip_reason: None,
             },
         )?;
 
@@ -451,6 +453,7 @@ async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) ->
             }
             match consumer.consume_next(&mut subscription).await {
                 Ok((event, outcome)) => {
+                    reconnects = 0;
                     seen += 1;
                     let status = match &outcome {
                         DiscussionEventOutcome::Applied { .. } => "applied",
@@ -468,6 +471,7 @@ async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) ->
                             discussion_id: outcome.discussion_id().map(ToString::to_string),
                             applied: outcome.applied(),
                             after_event_id: subscription.last_event_id(),
+                            skip_reason: outcome.skip_reason().map(ToString::to_string),
                         },
                     )?;
                     if args.max_events.is_some_and(|max| seen >= max) {
@@ -475,10 +479,17 @@ async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) ->
                     }
                 }
                 Err(error) if error.resume_after_event_id().is_some() => {
+                    let Some(delay) = wait_reconnect_backoff(reconnects) else {
+                        return Err(anyhow!(
+                            "discuss wait reconnect ceiling reached after {reconnects} attempts"
+                        ));
+                    };
+                    reconnects += 1;
                     // Stream died (staging drops iroh endpoints). Persist
                     // already happened per event; reopen and subscribe after
                     // the watermark.
                     drop(consumer);
+                    tokio::time::sleep(delay).await;
                     client.close().await;
                     client = HostedClient::open_session_with_insecure(
                         &authority,
@@ -521,7 +532,7 @@ fn emit_wait_line(cli: &Cli, line: DiscussWaitLineOutput) -> Result<()> {
             line.discussion_id.as_deref().unwrap_or("-"),
             line.event_id
         ),
-        "skipped" => println!("skipped {} ({})", line.event_type, line.event_id),
+        "skipped" => println!("{}", format_wait_skip(&line)),
         "ignored" => {}
         other => println!("{other} {} ({})", line.event_type, line.event_id),
     }
@@ -855,6 +866,13 @@ fn anchor_path(value: &CollaborationAnchor) -> Option<&str> {
     }
 }
 
+fn format_wait_skip(line: &DiscussWaitLineOutput) -> String {
+    match line.skip_reason.as_deref().filter(|reason| !reason.is_empty()) {
+        Some(reason) => format!("skipped {} ({}) — {reason}", line.event_type, line.event_id),
+        None => format!("skipped {} ({})", line.event_type, line.event_id),
+    }
+}
+
 fn anchor_label(value: &AnchorOutput) -> String {
     match value {
         AnchorOutput::Repository => "repository".to_string(),
@@ -900,4 +918,28 @@ mod tests {
             "discuss show stays read-only"
         );
     }
+
+    #[test]
+    fn skipped_wait_line_carries_the_reason() {
+        let line = DiscussWaitLineOutput {
+            output_kind: "discuss_wait",
+            status: "skipped",
+            event_id: 44,
+            event_type: "discussion.opened".to_string(),
+            discussion_id: None,
+            applied: false,
+            after_event_id: 44,
+            skip_reason: Some("discussion disc-hidden is not visible to this caller".to_string()),
+        };
+        let json = serde_json::to_value(&line).unwrap();
+        assert_eq!(
+            json["skip_reason"],
+            "discussion disc-hidden is not visible to this caller"
+        );
+        assert!(
+            format_wait_skip(&line).contains("not visible"),
+            "human skip lines must include the reason"
+        );
+    }
 }
+

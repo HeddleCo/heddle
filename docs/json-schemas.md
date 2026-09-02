@@ -3490,6 +3490,10 @@ the `discuss_show` discriminator:
 {"output_kind":"discuss_wait","status":"applied","event_id":12,"event_type":"turn.appended","discussion_id":"disc-018f47ea-4a54-7c89-b012-3456789abcde","applied":true,"after_event_id":12}
 ```
 
+```json
+{"output_kind":"discuss_wait","status":"skipped","event_id":44,"event_type":"discussion.opened","discussion_id":null,"applied":false,"after_event_id":44,"skip_reason":"discussion disc-hidden is not visible to this caller"}
+```
+
 `heddle maintenance fsck --output json` emits:
 
 ```json

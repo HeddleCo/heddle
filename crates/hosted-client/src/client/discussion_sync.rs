@@ -590,7 +590,8 @@ pub async fn pull_discussions(
 }
 
 /// Wait `--thread` bootstrap: same ListByState RPC, then keep only discussions
-/// whose `thread_ref` matches the paired thread name or stable id.
+/// whose `thread_ref` matches the paired name or whose wire `thread_id`
+/// matches the stable id.
 ///
 /// `ListDiscussionsByStateRequest` has no thread fields (heddle-api 0.23.0).
 /// Do not call `ListByThreadRef` — that would be a second list RPC.
@@ -721,11 +722,17 @@ fn discussion_matches_wait_thread(
     thread: &str,
     thread_id: &str,
 ) -> bool {
-    let Some(thread_ref) = discussion.thread_ref.as_deref() else {
-        return false;
-    };
-    (!thread.is_empty() && thread_ref == thread)
-        || (!thread_id.is_empty() && thread_ref == thread_id)
+    let name_hit = !thread.is_empty()
+        && discussion
+            .thread_ref
+            .as_deref()
+            .is_some_and(|thread_ref| thread_ref == thread);
+    let id_hit = !thread_id.is_empty()
+        && discussion
+            .thread_id
+            .as_deref()
+            .is_some_and(|id| id == thread_id);
+    name_hit || id_hit
 }
 
 /// Import one already-fetched hosted discussion into the local op-log.
@@ -767,6 +774,7 @@ fn hosted_discussion_from_bootstrap(discussion: Discussion) -> HostedDiscussion 
         opened_against_state: Some(discussion.opened_against_state),
         visibility: discussion.visibility.as_str().to_string(),
         thread_ref: discussion.thread_ref,
+        thread_id: None,
         turns: discussion
             .turns
             .into_iter()
@@ -1697,6 +1705,7 @@ mod tests {
             opened_against_state: None,
             visibility: "internal".to_string(),
             thread_ref: None,
+            thread_id: None,
             kind: 0,
             turns: vec![HostedDiscussionTurn {
                 author_name: "Ada".to_string(),
@@ -1720,16 +1729,22 @@ mod tests {
         assert!(!discussion_matches_wait_thread(
             &discussion, "bar", "thr-bar"
         ));
-        discussion.thread_ref = Some("thr-foo".to_string());
+        discussion.thread_ref = Some("old-name".to_string());
+        discussion.thread_id = Some("thr-foo".to_string());
         assert!(
             discussion_matches_wait_thread(&discussion, "foo", "thr-foo"),
-            "weft may stamp the stable id in thread_ref"
+            "a renamed thread still matches on the stable wire thread_id"
         );
-        discussion.thread_ref = None;
+        discussion.thread_id = None;
         assert!(
             !discussion_matches_wait_thread(&discussion, "foo", "thr-foo"),
-            "untagged discussions are not this thread"
+            "weft stamps the UUID in thread_id, not thread_ref"
         );
+        discussion.thread_ref = None;
+        discussion.thread_id = Some("thr-foo".to_string());
+        assert!(discussion_matches_wait_thread(
+            &discussion, "foo", "thr-foo"
+        ));
     }
 
     #[test]

@@ -110,6 +110,9 @@ pub struct DiscussWaitLineOutput {
     pub discussion_id: Option<String>,
     pub applied: bool,
     pub after_event_id: i64,
+    /// Present on `status = "skipped"` so a person (and JSONL) can see why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
 }
 
 // ---- review ----------------------------------------------------------------

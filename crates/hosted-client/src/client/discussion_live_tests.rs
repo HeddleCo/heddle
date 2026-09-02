@@ -11,7 +11,7 @@ use tempfile::TempDir;
 use super::{
     DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventCursor, DiscussionEventOutcome,
     audience_cursor_scope, bootstrap_discussions, bootstrap_discussions_scoped,
-    consume_discussion_event,
+    consume_discussion_event, wait_reconnect_backoff,
     consume_discussion_event_scoped, is_discussion_event, load_cursor, load_scoped_cursor,
     paired_thread_scope, parse_event_payload, save_cursor, save_scoped_cursor, subscribe_request,
 };
@@ -632,6 +632,12 @@ async fn get_discussion_permission_denied_is_skipped_and_advances_the_watermark(
     .await
     .unwrap();
     assert!(matches!(outcome, DiscussionEventOutcome::Skipped { .. }));
+    assert!(
+        outcome
+            .skip_reason()
+            .is_some_and(|reason| reason.contains("not visible")),
+        "skipped wait lines need a reason: {outcome:?}"
+    );
     assert_eq!(
         load_event_cursor(&repo, &client, "acme/widgets").after_event_id,
         44
@@ -1539,20 +1545,18 @@ async fn dismissed_empty_reason_fetches_or_skips_and_does_not_fail_loop() {
     let (mut client, server, fixture) =
         crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
 
-    let outcome = consume_discussion_event(
+    let error = consume_discussion_event(
         &repo,
         &mut client,
         "acme/widgets",
         &resolved_event(82, "disc-empty-dismiss"),
     )
     .await
-    .expect("empty dismiss reason must not fail-loop");
+    .expect_err("empty dismiss reason is a local materialization failure");
     assert!(
-        matches!(
-            outcome,
-            DiscussionEventOutcome::Skipped { .. } | DiscussionEventOutcome::Applied { .. }
-        ),
-        "expected fetch+skip or apply, got {outcome:?}"
+        error.to_string().contains("disc-empty-dismiss")
+            || error.to_string().contains("dismiss"),
+        "expected an apply failure, got {error:#}"
     );
     assert_eq!(
         fixture
@@ -1564,8 +1568,8 @@ async fn dismissed_empty_reason_fetches_or_skips_and_does_not_fail_loop() {
     );
     assert_eq!(
         load_event_cursor(&repo, &client, "acme/widgets").after_event_id,
-        82,
-        "empty dismiss reason must advance the watermark"
+        0,
+        "apply Err must not acknowledge the event"
     );
 
     client.close().await;
@@ -1858,4 +1862,216 @@ async fn thread_scoped_pull_fold_bootstrap_stays_repo_wide() {
 
     client.close().await;
     server.await.unwrap();
+}
+
+fn seed_repo_without_head() -> (TempDir, Repository) {
+    let temp = TempDir::new().unwrap();
+    let repo = Repository::init(temp.path()).unwrap();
+    assert!(
+        repo.head().unwrap().is_none(),
+        "this fixture must have no HEAD"
+    );
+    (temp, repo)
+}
+
+#[tokio::test]
+async fn local_materialization_error_does_not_advance_the_watermark() {
+    let (_temp, repo) = seed_repo_without_head();
+    let mut fixture = CollaborationFixture::default();
+    fixture.discussions.insert(
+        "disc-headless".to_string(),
+        proto_discussion("disc-headless", &[("turn-open", "keep this invariant", 1)]),
+    );
+    let (mut client, server, _fixture) =
+        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
+
+    let error = consume_discussion_event(
+        &repo,
+        &mut client,
+        "acme/widgets",
+        &doorbell(90, "discussion.opened", "disc-headless", "turn-open", 1),
+    )
+    .await
+    .expect_err("no HEAD is a local apply failure, not a skip");
+    assert!(
+        error.to_string().contains("HEAD") || error.to_string().contains("disc-headless"),
+        "expected a materialization error, got {error:#}"
+    );
+    assert_eq!(
+        load_event_cursor(&repo, &client, "acme/widgets").after_event_id,
+        0,
+        "apply Err must leave the cursor before the event"
+    );
+
+    client.close().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn bootstrap_without_head_does_not_mark_the_cursor_bootstrapped() {
+    let (_temp, repo) = seed_repo_without_head();
+    let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+    bootstrap_discussions(&repo, &mut client, "acme/widgets", None)
+        .await
+        .expect_err("bootstrap must defer until HEAD exists");
+    let cursor = load_cursor(repo.heddle_dir(), "acme/widgets").unwrap();
+    assert!(
+        !cursor.bootstrapped,
+        "a no-HEAD bootstrap must not park the live tail past unseen events"
+    );
+    assert_eq!(cursor.after_event_id, 0);
+
+    client.close().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn alice_skipping_a_restricted_event_does_not_advance_bob() {
+    let (_temp, repo) = seed_repo();
+    let mut fixture = CollaborationFixture::default();
+    fixture
+        .hidden
+        .insert("disc-secret".to_string(), CallFailureCode::PermissionDenied);
+    let (mut client, server, _fixture) =
+        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
+
+    let alice = DiscussionCursorScope {
+        repo_path: "acme/widgets".into(),
+        principal: "alice".into(),
+        ..DiscussionCursorScope::default()
+    };
+    let bob = DiscussionCursorScope {
+        repo_path: "acme/widgets".into(),
+        principal: "bob".into(),
+        ..DiscussionCursorScope::default()
+    };
+    let outcome = consume_discussion_event_scoped(
+        &repo,
+        &mut client,
+        "acme/widgets",
+        &alice,
+        &doorbell(91, "discussion.opened", "disc-secret", "turn-1", 1),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, DiscussionEventOutcome::Skipped { .. }));
+    assert_eq!(
+        load_scoped_cursor(repo.heddle_dir(), &alice)
+            .unwrap()
+            .after_event_id,
+        91
+    );
+    assert_eq!(
+        load_scoped_cursor(repo.heddle_dir(), &bob)
+            .unwrap()
+            .after_event_id,
+        0,
+        "Alice skipping a restricted event must not advance Bob's slot"
+    );
+    assert_eq!(
+        audience_cursor_scope(&client, "acme/widgets").principal,
+        "test",
+        "wait/consumer helpers must stamp the authenticated username"
+    );
+
+    client.close().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn thread_scoped_bootstrap_matches_stable_thread_id_after_rename() {
+    let mut renamed = proto_discussion_on_thread(
+        "disc-renamed",
+        "old-name",
+        &[("turn-open", "still this thread", 1)],
+    );
+    renamed.thread_id = "thr-stable".to_string();
+    let other = proto_discussion_on_thread("disc-other", "bar", &[("turn-bar", "from bar", 1)]);
+    let (_temp, repo) = seed_repo();
+    let fixture = CollaborationFixture {
+        list: vec![renamed, other],
+        ..CollaborationFixture::default()
+    };
+    let (mut client, server, _fixture) =
+        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
+
+    let scoped = DiscussionCursorScope {
+        repo_path: "acme/widgets".into(),
+        thread: "foo".into(),
+        thread_id: "thr-stable".into(),
+        ..DiscussionCursorScope::default()
+    };
+    bootstrap_discussions_scoped(&repo, &mut client, "acme/widgets", &scoped, None)
+        .await
+        .unwrap();
+
+    let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+    let discussions = store.materialize().unwrap().discussions;
+    assert_eq!(
+        discussions.len(),
+        1,
+        "stable thread_id must keep the renamed discussion and drop the other thread"
+    );
+    assert_eq!(
+        discussions.into_values().next().unwrap().turns[0].1.body,
+        "still this thread"
+    );
+
+    client.close().await;
+    server.await.unwrap();
+}
+
+#[test]
+fn concurrent_cursor_saves_do_not_clobber_other_slots() {
+    let temp = TempDir::new().unwrap();
+    let heddle_dir = temp.path().to_path_buf();
+    let threads: Vec<_> = (0..8)
+        .map(|i| {
+            let heddle_dir = heddle_dir.clone();
+            std::thread::spawn(move || {
+                let scope = DiscussionCursorScope {
+                    repo_path: "acme/widgets".into(),
+                    principal: format!("agent-{i}"),
+                    ..DiscussionCursorScope::default()
+                };
+                let cursor = DiscussionEventCursor {
+                    after_event_id: i64::from(i) + 1,
+                    repo_id: format!("repo-{i}"),
+                    bootstrapped: true,
+                };
+                save_scoped_cursor(&heddle_dir, &scope, &cursor).unwrap();
+            })
+        })
+        .collect();
+    for handle in threads {
+        handle.join().expect("cursor writer thread");
+    }
+    for i in 0..8 {
+        let scope = DiscussionCursorScope {
+            repo_path: "acme/widgets".into(),
+            principal: format!("agent-{i}"),
+            ..DiscussionCursorScope::default()
+        };
+        let cursor = load_scoped_cursor(&heddle_dir, &scope).unwrap();
+        assert_eq!(
+            cursor.after_event_id,
+            i64::from(i) + 1,
+            "slot agent-{i} must survive concurrent RMW"
+        );
+    }
+}
+
+#[test]
+fn wait_reconnect_backoff_is_bounded() {
+    let first = wait_reconnect_backoff(0).expect("first reconnect waits");
+    let second = wait_reconnect_backoff(1).expect("second reconnect waits longer");
+    assert!(second > first);
+    assert!(
+        wait_reconnect_backoff(8).is_none(),
+        "the ceiling must stop the outer reconnect loop"
+    );
+    assert_eq!(
+        wait_reconnect_backoff(7),
+        Some(std::time::Duration::from_millis(6_400))
+    );
 }

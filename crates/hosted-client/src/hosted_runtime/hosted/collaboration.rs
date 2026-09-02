@@ -76,6 +76,9 @@ pub struct HostedDiscussion {
     pub opened_against_state: Option<StateId>,
     pub visibility: String,
     pub thread_ref: Option<String>,
+    /// Wire `Discussion.thread_id`. Weft stamps the stable UUID here and the
+    /// renameable name in `thread_ref`.
+    pub thread_id: Option<String>,
     pub turns: Vec<HostedDiscussionTurn>,
     pub resolution: HostedResolution,
     /// Wire `Discussion.kind`. Unspecified is treated as code-anchored when
@@ -94,6 +97,7 @@ fn decode_discussion(proto: ProtoDiscussion) -> HostedDiscussion {
             .and_then(|state| StateId::try_from_slice(&state.value).ok()),
         visibility: proto.visibility,
         thread_ref: (!proto.thread_ref.is_empty()).then_some(proto.thread_ref),
+        thread_id: (!proto.thread_id.is_empty()).then_some(proto.thread_id),
         kind: proto.kind,
         turns: proto
             .turns
@@ -516,6 +520,7 @@ mod tests {
         assert_eq!(decoded.opened_against_state, Some(state));
         assert_eq!(decoded.visibility, "team");
         assert_eq!(decoded.thread_ref, None);
+        assert_eq!(decoded.thread_id, None);
         assert_eq!(decoded.turns.len(), 1);
         assert_eq!(decoded.turns[0].author_name, "alice");
         assert_eq!(decoded.turns[0].body, "lgtm");
@@ -530,5 +535,15 @@ mod tests {
         assert!(empty.file.is_empty());
         assert!(empty.opened_against_state.is_none());
         assert!(empty.turns.is_empty());
+        assert!(empty.thread_id.is_none());
+
+        let stamped = decode_discussion(ProtoDiscussion {
+            id: "stamped".into(),
+            thread_ref: "old-name".into(),
+            thread_id: "thr-stable".into(),
+            ..Default::default()
+        });
+        assert_eq!(stamped.thread_ref.as_deref(), Some("old-name"));
+        assert_eq!(stamped.thread_id.as_deref(), Some("thr-stable"));
     }
 }

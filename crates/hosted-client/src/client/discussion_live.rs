@@ -8,8 +8,8 @@
 //! 1. Bootstrap a fresh clone via [`super::discussion_sync::pull_discussions`]
 //!    (pull-bootstrap discussions when present, otherwise `ListByState` — the
 //!    same non-fatal path #1642 falls back to). A `--thread` wait filters
-//!    that ListByState snapshot by `thread_ref` before apply; clone/pull
-//!    pull-fold stays repo-wide.
+//!    that ListByState snapshot by `thread_ref` / wire `thread_id` before
+//!    apply; clone/pull pull-fold stays repo-wide.
 //! 2. Subscribe from the persisted client watermark (`after_event_id`).
 //! 3. Treat live events as doorbells. `GetDiscussion` is the snapshot for
 //!    `discussion.opened` / `discussion.resolved` and for any append whose
@@ -110,6 +110,13 @@ impl DiscussionEventOutcome {
 
     pub fn applied(&self) -> bool {
         matches!(self, Self::Applied { .. })
+    }
+
+    pub fn skip_reason(&self) -> Option<&str> {
+        match self {
+            Self::Skipped { reason } => Some(reason.as_str()),
+            _ => None,
+        }
     }
 }
 
@@ -254,11 +261,15 @@ pub fn load_scoped_cursor(
 }
 
 /// Persist the watermark for `scope`. Always writes the scoped slot.
+///
+/// Takes the cursor lock for the load/insert/save so two `discuss wait`
+/// processes cannot clobber each other's slots.
 pub fn save_scoped_cursor(
     heddle_dir: &Path,
     scope: &DiscussionCursorScope,
     cursor: &DiscussionEventCursor,
 ) -> Result<()> {
+    let _guard = lock_cursor_write(heddle_dir)?;
     let mut cursors = load_cursors(heddle_dir)?;
     cursors.repos.insert(scope.slot(), cursor.clone());
     save_cursors(heddle_dir, &cursors)
@@ -476,12 +487,10 @@ async fn apply_discussion_event(
     ) {
         Ok(true) => Ok(DiscussionEventOutcome::Applied { discussion_id }),
         Ok(false) => Ok(DiscussionEventOutcome::Unchanged { discussion_id }),
-        Err(error) => Ok(DiscussionEventOutcome::Skipped {
-            reason: format!(
-                "could not materialize hosted discussion {discussion_id} after {}: {error}",
-                event.event_type
-            ),
-        }),
+        Err(error) => Err(error).context(format!(
+            "could not materialize hosted discussion {discussion_id} after {}",
+            event.event_type
+        )),
     }
 }
 
@@ -580,6 +589,7 @@ fn append_from_payload(payload: &EventPayload, already_mirrored: bool) -> Option
         opened_against_state: None,
         visibility: String::new(),
         thread_ref: None,
+        thread_id: None,
         turns: vec![HostedDiscussionTurn {
             author_name,
             author_email: payload.author_email.clone().unwrap_or_default(),
@@ -801,6 +811,17 @@ impl DiscussionEventSubscription {
     pub fn resume_request(&self) -> SubscribeRepoEventsRequest {
         self.inner.resume_request()
     }
+}
+
+/// Bounded reconnect delay for `discuss wait`. `None` means the retry
+/// ceiling was hit and the session should stop rather than spin.
+pub fn wait_reconnect_backoff(attempt: u32) -> Option<std::time::Duration> {
+    const CEILING: u32 = 8;
+    if attempt >= CEILING {
+        return None;
+    }
+    let exp = attempt.min(5);
+    Some(std::time::Duration::from_millis(200 * (1u64 << exp)))
 }
 
 /// Failure to bootstrap, subscribe, or apply a live discussion event.
