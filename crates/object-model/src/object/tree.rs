@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Tree types: entries, structure, and supporting enums.
 
-use std::{fmt, path::Path, sync::Arc};
+use std::{
+    fmt,
+    path::Path,
+    sync::{Arc, OnceLock},
+};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
@@ -19,6 +23,42 @@ const ENTRY_KIND_GITLINK: u8 = 3;
 const ENTRY_KIND_SPOOLLINK: u8 = 4;
 const GIT_OBJECT_FORMAT_SHA1: u8 = 1;
 const GIT_OBJECT_FORMAT_SHA256: u8 = 2;
+pub(crate) const TREE_HASH_SCRATCH_LEN: usize = 4 * 1024;
+
+struct TreeHashWriter<'a> {
+    hasher: &'a mut blake3::Hasher,
+    scratch: &'a mut [u8; TREE_HASH_SCRATCH_LEN],
+    len: usize,
+}
+
+impl TreeHashWriter<'_> {
+    fn push(&mut self, byte: u8) {
+        if self.len == self.scratch.len() {
+            self.flush();
+        }
+        self.scratch[self.len] = byte;
+        self.len += 1;
+    }
+
+    fn extend(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            if self.len == self.scratch.len() {
+                self.flush();
+            }
+            let count = bytes.len().min(self.scratch.len() - self.len);
+            self.scratch[self.len..self.len + count].copy_from_slice(&bytes[..count]);
+            self.len += count;
+            bytes = &bytes[count..];
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.len > 0 {
+            self.hasher.update(&self.scratch[..self.len]);
+            self.len = 0;
+        }
+    }
+}
 
 // ── TreeError ───────────────────────────────────────────────────────
 
@@ -217,23 +257,23 @@ impl TreeEntryTarget {
         }
     }
 
-    fn update_hasher(&self, hasher: &mut blake3::Hasher) {
-        hasher.update(&[self.mode().to_byte()]);
-        hasher.update(&[self.entry_type().to_byte()]);
+    fn append_hash_bytes(&self, bytes: &mut TreeHashWriter<'_>) {
+        bytes.push(self.mode().to_byte());
+        bytes.push(self.entry_type().to_byte());
         match self {
             TreeEntryTarget::Blob { hash, .. }
             | TreeEntryTarget::Tree { hash }
-            | TreeEntryTarget::Symlink { hash } => hasher.update(hash.as_bytes()),
+            | TreeEntryTarget::Symlink { hash } => bytes.extend(hash.as_bytes()),
             TreeEntryTarget::Gitlink { target } => {
-                hasher.update(&[git_format_to_tag(target.format())]);
-                hasher.update(target.as_bytes())
+                bytes.push(git_format_to_tag(target.format()));
+                bytes.extend(target.as_bytes());
             }
             TreeEntryTarget::Spoollink { spool_id, state_id } => {
-                hasher.update(&(spool_id.as_str().len() as u32).to_le_bytes());
-                hasher.update(spool_id.as_str().as_bytes());
-                hasher.update(state_id.as_bytes())
+                bytes.extend(&(spool_id.as_str().len() as u32).to_le_bytes());
+                bytes.extend(spool_id.as_str().as_bytes());
+                bytes.extend(state_id.as_bytes());
             }
-        };
+        }
     }
 }
 
@@ -459,27 +499,47 @@ impl TreeEntry {
         self.name.len() + self.target.encoded_payload_len()
     }
 
-    pub(crate) fn update_hasher(&self, hasher: &mut blake3::Hasher) {
-        self.target.update_hasher(hasher);
-        hasher.update(self.name.as_bytes());
-        hasher.update(&[0]);
+    pub(crate) fn update_hasher(
+        &self,
+        hasher: &mut blake3::Hasher,
+        scratch: &mut [u8; TREE_HASH_SCRATCH_LEN],
+    ) {
+        let mut writer = TreeHashWriter {
+            hasher,
+            scratch,
+            len: 0,
+        };
+        self.target.append_hash_bytes(&mut writer);
+        writer.extend(self.name.as_bytes());
+        writer.push(0);
+        writer.flush();
     }
 }
 
 // ── Tree ────────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Tree {
     // Trees are immutable on every read path and only change while a caller is
     // constructing a replacement tree. Sharing the entry vector makes those
     // read-path clones O(1); insert/remove detach with copy-on-write.
     entries: Arc<Vec<TreeEntry>>,
+    hash: OnceLock<ContentHash>,
 }
+
+impl PartialEq for Tree {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+
+impl Eq for Tree {}
 
 impl Tree {
     pub fn new() -> Self {
         Self {
             entries: Arc::new(Vec::new()),
+            hash: OnceLock::new(),
         }
     }
 
@@ -487,6 +547,7 @@ impl Tree {
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         Self {
             entries: Arc::new(entries),
+            hash: OnceLock::new(),
         }
     }
 
@@ -498,6 +559,7 @@ impl Tree {
     pub fn try_from_decoded_entries(entries: Vec<TreeEntry>) -> Result<Self, TreeError> {
         let tree = Self {
             entries: Arc::new(entries),
+            hash: OnceLock::new(),
         };
         tree.validate()?;
         Ok(tree)
@@ -539,11 +601,14 @@ impl Tree {
             .position(|e| e.name > entry.name)
             .unwrap_or(entries.len());
         entries.insert(pos, entry);
+        self.hash = OnceLock::new();
     }
 
     pub fn remove(&mut self, name: &str) -> Option<TreeEntry> {
         let pos = self.entries.iter().position(|e| e.name == name)?;
-        Some(Arc::make_mut(&mut self.entries).remove(pos))
+        let removed = Arc::make_mut(&mut self.entries).remove(pos);
+        self.hash = OnceLock::new();
+        Some(removed)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -555,11 +620,14 @@ impl Tree {
     }
 
     pub fn hash(&self) -> ContentHash {
-        let total_len: usize = self.entries.iter().map(TreeEntry::encoded_len).sum();
-        ContentHash::compute_typed_with_len("tree", total_len as u64, |hasher| {
-            for entry in self.entries.iter() {
-                entry.update_hasher(hasher);
-            }
+        *self.hash.get_or_init(|| {
+            let total_len: usize = self.entries.iter().map(TreeEntry::encoded_len).sum();
+            ContentHash::compute_typed_with_len("tree", total_len as u64, |hasher| {
+                let mut scratch = [0; TREE_HASH_SCRATCH_LEN];
+                for entry in self.entries.iter() {
+                    entry.update_hasher(hasher, &mut scratch);
+                }
+            })
         })
     }
 
@@ -898,6 +966,32 @@ mod spoollink_tests {
 mod cow_tests {
     use super::*;
 
+    fn legacy_hash(tree: &Tree) -> ContentHash {
+        let total_len: usize = tree.entries.iter().map(TreeEntry::encoded_len).sum();
+        ContentHash::compute_typed_with_len("tree", total_len as u64, |hasher| {
+            for entry in tree.entries.iter() {
+                hasher.update(&[entry.mode().to_byte()]);
+                hasher.update(&[entry.entry_type().to_byte()]);
+                match entry.target() {
+                    TreeEntryTarget::Blob { hash, .. }
+                    | TreeEntryTarget::Tree { hash }
+                    | TreeEntryTarget::Symlink { hash } => hasher.update(hash.as_bytes()),
+                    TreeEntryTarget::Gitlink { target } => {
+                        hasher.update(&[git_format_to_tag(target.format())]);
+                        hasher.update(target.as_bytes())
+                    }
+                    TreeEntryTarget::Spoollink { spool_id, state_id } => {
+                        hasher.update(&(spool_id.as_str().len() as u32).to_le_bytes());
+                        hasher.update(spool_id.as_str().as_bytes());
+                        hasher.update(state_id.as_bytes())
+                    }
+                };
+                hasher.update(entry.name.as_bytes());
+                hasher.update(&[0]);
+            }
+        })
+    }
+
     fn fixture() -> Tree {
         Tree::from_entries(vec![
             TreeEntry::file("a", ContentHash::compute(b"a"), false).unwrap(),
@@ -930,6 +1024,29 @@ mod cow_tests {
         assert_eq!(original.hash(), original_hash);
         assert_eq!(rmp_serde::to_vec_named(&original).unwrap(), original_bytes);
         assert_ne!(clone.hash(), original_hash);
+    }
+
+    #[test]
+    fn cached_batched_hash_matches_legacy_hash_domain() {
+        let gitlink = GitObjectId::from_raw(GitObjectFormat::Sha1, &[7; 20]).unwrap();
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("a-file", ContentHash::compute(b"file"), false).unwrap(),
+            TreeEntry::file("b-executable", ContentHash::compute(b"executable"), true).unwrap(),
+            TreeEntry::directory("c-directory", ContentHash::compute(b"directory")).unwrap(),
+            TreeEntry::symlink("d-symlink", ContentHash::compute(b"symlink")).unwrap(),
+            TreeEntry::gitlink("e-gitlink", gitlink).unwrap(),
+            TreeEntry::spoollink(
+                "f-spoollink",
+                SpoolId::parse("acme/child").unwrap(),
+                StateId::from_bytes([9; 32]),
+            )
+            .unwrap(),
+            TreeEntry::file("g".repeat(5_000), ContentHash::compute(b"long-name"), false).unwrap(),
+        ]);
+
+        let expected = legacy_hash(&tree);
+        assert_eq!(tree.hash(), expected);
+        assert_eq!(tree.hash(), expected, "cached lookup must remain identical");
     }
 
     #[test]
