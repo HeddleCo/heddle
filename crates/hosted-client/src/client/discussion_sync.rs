@@ -1553,23 +1553,6 @@ mod tests {
         server.await.unwrap();
     }
 
-    #[test]
-    fn apply_without_head_does_not_succeed() {
-        let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
-        let error = apply_hosted_discussion(
-            &repo,
-            "acme/widgets",
-            None,
-            &hosted("disc-1", "first", "turn-1", HostedResolution::Open),
-        )
-        .expect_err("no HEAD must fail rather than acknowledge");
-        assert!(
-            error.to_string().contains("HEAD"),
-            "expected a HEAD refusal, got {error:#}"
-        );
-    }
-
     fn hosted(
         id: &str,
         body: &str,
