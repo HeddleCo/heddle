@@ -6,8 +6,12 @@ use proptest::prelude::*;
 use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::{
-    CHECKSUM_CHUNK_BYTES, CHECKSUM_LEN, MAX_CHAIN_DEPTH, Npk1Pack, TRAILER_HEADER_LEN, VERSION,
-    codec::{decoded_record_blocks, reset_decoded_record_blocks},
+    CHECKSUM_CHUNK_BYTES, CHECKSUM_LEN, MAX_CHAIN_DEPTH, NAME_RESTART, Npk1Pack,
+    TRAILER_HEADER_LEN, VERSION,
+    codec::{
+        decoded_name_rows, decoded_record_blocks, reset_decoded_name_rows,
+        reset_decoded_record_blocks,
+    },
 };
 use crate::{
     object::{Attribution, ContentHash, Principal, SpoolId, State, StateId, Tree, TreeEntry},
@@ -179,6 +183,58 @@ fn direct_lookup_decodes_only_the_selected_record_block() {
         Some(wanted)
     );
     assert_eq!(decoded_record_blocks(), 1);
+}
+
+#[test]
+fn direct_name_lookup_seeks_restart_blocks() {
+    let (_temp, store) = store();
+    let tree = related_tree(9, NAME_RESTART * 3);
+    store.put_tree(&tree).expect("put restart-spanning tree");
+    repack(&store);
+    let pack = Npk1Pack::open_direct(&only_npk1_path(&store)).expect("open pack directly");
+
+    for index in [0, 127, 128, 255, 256, 383] {
+        let wanted = tree.entries()[index].clone();
+        reset_decoded_name_rows();
+        assert_eq!(
+            pack.lookup(&tree.hash(), wanted.name())
+                .expect("lookup restart-spanning name"),
+            Some(wanted)
+        );
+        assert!(
+            decoded_name_rows() <= NAME_RESTART,
+            "name lookup decoded more than one restart block"
+        );
+    }
+
+    reset_decoded_name_rows();
+    reset_decoded_record_blocks();
+    assert_eq!(
+        pack.lookup(&tree.hash(), "entry-0127a.txt")
+            .expect("lookup absent dictionary name"),
+        None
+    );
+    assert!(decoded_name_rows() <= NAME_RESTART);
+    assert_eq!(
+        decoded_record_blocks(),
+        0,
+        "an absent dictionary name must not touch a record block"
+    );
+}
+
+#[test]
+fn direct_open_does_not_touch_every_dictionary_chunk() {
+    let (_temp, store) = store();
+    let tree = related_tree(11, 10_000);
+    store.put_tree(&tree).expect("put large-name-count tree");
+    repack(&store);
+
+    let pack = Npk1Pack::open_direct(&only_npk1_path(&store)).expect("open pack directly");
+    let (verified, total) = pack.verified_chunk_count().expect("checksum cache size");
+    assert!(
+        total > verified,
+        "fixture must contain untouched data chunks"
+    );
 }
 
 #[test]
