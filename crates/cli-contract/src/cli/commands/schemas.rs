@@ -30,7 +30,8 @@ use super::{
     init_output::InitOutput,
     wire::{
         AdoptOutput, BlameOutput, CloneOutput, CommitOutput, DiscussionListOutput,
-        DiscussionShowOutput, DiscussionWriteOutput, ExpandOutput, ExportGitOutput,
+        DiscussWaitLineOutput, DiscussionShowOutput, DiscussionWriteOutput, ExpandOutput,
+        ExportGitOutput,
         ImportGitOutput, IntegrationStatusOutput, LandOutput, LogOutput, MarkerBulkDeleteOutput,
         MarkerListOutput, MarkerOpOutput, MultiLandOutput, OperatorCommandOutput, PullOutput,
         PushOutput, ReadyOutput, ReflogOutput, RemoteMutationOutput, RepackOutput, RevertOutput,
@@ -152,6 +153,7 @@ schema_registry! {
     (&["discuss open", "discuss append", "discuss resolve", "discuss reopen"], DiscussionWriteOutput),
     (&["discuss show"], DiscussionShowOutput),
     (&["discuss list"], DiscussionListOutput),
+    (&["discuss wait"], DiscussWaitLineOutput),
     (&["query --attribution"], BlameOutput),
     (&["bridge git export"], ExportGitOutput),
     (&["bridge git import"], ImportGitOutput),
@@ -1434,6 +1436,7 @@ mod tests {
             "discuss reopen",
             "discuss list",
             "discuss show",
+            "discuss wait",
             "query",
             "query --attribution",
         ] {

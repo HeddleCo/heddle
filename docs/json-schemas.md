@@ -3478,6 +3478,18 @@ the `discuss_show` discriminator:
 {"output_kind":"discuss_list","discussions":[]}
 ```
 
+## `heddle discuss wait --output json`
+
+`discuss wait` emits JSONL: one object after subscribe, then one object per hosted event.
+
+```json
+{"output_kind":"discuss_wait","status":"listening","event_id":0,"event_type":"","discussion_id":null,"applied":false,"after_event_id":0}
+```
+
+```json
+{"output_kind":"discuss_wait","status":"applied","event_id":12,"event_type":"turn.appended","discussion_id":"disc-018f47ea-4a54-7c89-b012-3456789abcde","applied":true,"after_event_id":12}
+```
+
 `heddle maintenance fsck --output json` emits:
 
 ```json

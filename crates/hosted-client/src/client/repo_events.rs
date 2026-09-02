@@ -134,8 +134,11 @@ impl RepoEventClient {
         self.client.close().await;
     }
 
-    #[cfg(test)]
-    fn from_hosted_client(client: HostedClient) -> Self {
+    /// Wrap an already-connected hosted client.
+    ///
+    /// Live discussion delivery shares this connection with `ListByState` /
+    /// `GetDiscussion` so bootstrap and the event tail use one session.
+    pub fn from_hosted_client(client: HostedClient) -> Self {
         Self { client }
     }
 }

@@ -93,6 +93,7 @@ const SWEPT: &[&str] = &[
     "discuss reopen",
     "discuss list",
     "discuss show",
+    "discuss wait",
     "context set",
     "context get",
     "context list",

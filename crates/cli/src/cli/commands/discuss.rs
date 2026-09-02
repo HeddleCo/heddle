@@ -7,8 +7,8 @@ use anyhow::{Context, Result, anyhow};
 // The discussion wire payloads live in cli-contract so the schema registry
 // registers the real serialization types.
 pub(crate) use heddle_cli_contract::cli::commands::wire::collab::{
-    AnchorOutput, DiscussionListOutput, DiscussionOutput, DiscussionShowOutput,
-    DiscussionWriteOutput, ResolutionOutput, TurnOutput,
+    AnchorOutput, DiscussWaitLineOutput, DiscussionListOutput, DiscussionOutput,
+    DiscussionShowOutput, DiscussionWriteOutput, ResolutionOutput, TurnOutput,
 };
 use objects::object::{
     AnnotationKind, CollabOpId, CollaborationAnchor, CollaborationAnchorStatus,
@@ -38,7 +38,8 @@ use crate::{
     cli::{
         cli_args::{
             Cli, DiscussAppendArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs,
-            DiscussReopenArgs, DiscussResolveArgs, DiscussShowArgs, ResolveModeArg,
+            DiscussReopenArgs, DiscussResolveArgs, DiscussShowArgs, DiscussWaitArgs,
+            ResolveModeArg,
         },
         should_output_json,
     },
@@ -79,6 +80,12 @@ pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
         DiscussCommands::Reopen(args) => run_reopen(cli, &repo, &store, args),
         DiscussCommands::List(args) => run_list(cli, &repo, &store, args),
         DiscussCommands::Show(args) => run_show(cli, &store, args),
+        #[cfg(feature = "client")]
+        DiscussCommands::Wait(args) => run_wait(cli, &repo, args).await,
+        #[cfg(not(feature = "client"))]
+        DiscussCommands::Wait(_) => Err(anyhow!(
+            "discuss wait requires the hosted client feature"
+        )),
     }
 }
 
@@ -324,6 +331,136 @@ fn run_list(
                 discussion.title
             );
         }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "client")]
+async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) -> Result<()> {
+    use hosted_client::client::discussion_live::{
+        DiscussionEventConsumer, DiscussionEventOutcome, load_cursor, save_cursor,
+    };
+    use hosted_client::client::{HostedAuthMode, HostedClient};
+
+    use super::remote::resolve_default_remote_name;
+    use crate::remote::{RemoteTarget, resolve_remote_with_key};
+
+    let remote_name = resolve_default_remote_name(repo, args.remote.as_deref())?;
+    let (target, server_key) = resolve_remote_with_key(repo, Some(&remote_name))?;
+    let (authority, repo_path) = match target {
+        RemoteTarget::Network {
+            authority,
+            repo_path,
+        } => (
+            authority,
+            repo_path.context("hosted remote must include a repository path")?,
+        ),
+        RemoteTarget::Local(_) => {
+            return Err(anyhow!(RecoveryAdvice::safety_refusal(
+                "hosted_remote_required",
+                format!("discuss wait requires a hosted remote; remote '{remote_name}' is local"),
+                "Configure a hosted remote, then retry `heddle discuss wait`.",
+                format!("remote '{remote_name}' is local, but live discussion delivery is hosted"),
+                "a local remote has no event cursor",
+                "no hosted request was sent and local repository state was left unchanged",
+                "heddle remote list",
+                vec!["heddle remote list".to_string()],
+            )));
+        }
+    };
+
+    let user_config = UserConfig::load_default()?;
+    let mut client = HostedClient::open_session(
+        &authority,
+        &user_config,
+        server_key,
+        HostedAuthMode::CredentialFallback,
+    )
+    .await?;
+
+    if let Some(after) = args.after {
+        let mut cursor = load_cursor(repo.heddle_dir(), &repo_path)?;
+        cursor.after_event_id = after;
+        save_cursor(repo.heddle_dir(), &repo_path, &cursor)?;
+    }
+
+    let mut consumer = DiscussionEventConsumer::new(repo, &mut client, repo_path.clone());
+    if let Some(thread) = args.thread.as_deref() {
+        consumer = consumer.with_thread(thread, "");
+    }
+    let mut subscription = consumer.start(None).await?;
+    emit_wait_line(
+        cli,
+        DiscussWaitLineOutput {
+            output_kind: "discuss_wait",
+            status: "listening",
+            event_id: subscription.last_event_id(),
+            event_type: String::new(),
+            discussion_id: None,
+            applied: false,
+            after_event_id: subscription.last_event_id(),
+        },
+    )?;
+
+    let mut seen = 0usize;
+    loop {
+        if args.max_events.is_some_and(|max| seen >= max) {
+            break;
+        }
+        let (event, outcome) = consumer.consume_next(&mut subscription).await?;
+        seen += 1;
+        let status = match &outcome {
+            DiscussionEventOutcome::Applied { .. } => "applied",
+            DiscussionEventOutcome::Unchanged { .. } => "unchanged",
+            DiscussionEventOutcome::Skipped { .. } => "skipped",
+            DiscussionEventOutcome::Ignored => "ignored",
+        };
+        emit_wait_line(
+            cli,
+            DiscussWaitLineOutput {
+                output_kind: "discuss_wait",
+                status,
+                event_id: event.event_id,
+                event_type: event.event_type,
+                discussion_id: outcome.discussion_id().map(ToString::to_string),
+                applied: outcome.applied(),
+                after_event_id: subscription.last_event_id(),
+            },
+        )?;
+        if args.max_events.is_some_and(|max| seen >= max) {
+            break;
+        }
+    }
+    client.close().await;
+    Ok(())
+}
+
+#[cfg(feature = "client")]
+fn emit_wait_line(cli: &Cli, line: DiscussWaitLineOutput) -> Result<()> {
+    if should_output_json(cli, None) {
+        println!("{}", serde_json::to_string(&line)?);
+        return Ok(());
+    }
+    match line.status {
+        "listening" => println!(
+            "waiting for discussion events after {}",
+            line.after_event_id
+        ),
+        "applied" => println!(
+            "applied {} {} ({})",
+            line.event_type,
+            line.discussion_id.as_deref().unwrap_or("-"),
+            line.event_id
+        ),
+        "unchanged" => println!(
+            "already had {} {} ({})",
+            line.event_type,
+            line.discussion_id.as_deref().unwrap_or("-"),
+            line.event_id
+        ),
+        "skipped" => println!("skipped {} ({})", line.event_type, line.event_id),
+        "ignored" => {}
+        other => println!("{other} {} ({})", line.event_type, line.event_id),
     }
     Ok(())
 }

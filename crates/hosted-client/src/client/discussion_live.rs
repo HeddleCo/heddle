@@ -1,0 +1,574 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Live discussion delivery over [`RepoEventClient`].
+//!
+//! Pack attachments are a snapshot, not a stream. Live turns belong on the
+//! #1585 event-cursor channel. weft already emits `discussion.opened` /
+//! `turn.appended` / `discussion.resolved`; this module is the consumer:
+//!
+//! 1. Bootstrap a fresh clone via [`super::discussion_sync::pull_discussions`]
+//!    (pull-bootstrap discussions when present, otherwise `ListByState` — the
+//!    same non-fatal path #1642 falls back to).
+//! 2. Subscribe from the persisted client watermark (`after_event_id`).
+//! 3. Apply each event into the local collab op-log, preserving server turn
+//!    identity (`turn_id` / `turn_seq`) so the linear blob cannot erase it.
+//! 4. Persist the watermark after each event so a reconnect resumes.
+//!
+//! Fail-closed on visibility: the server already filters emission by audience.
+//! This consumer uses the caller's credentials, treats a refused subscription
+//! as fatal, and does not invent a discussion from an event that lacks a
+//! server id. `discussions_from_pack` is not read or written here.
+
+#![cfg(feature = "client")]
+
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context, Result, anyhow};
+use objects::{
+    fs_atomic::write_file_atomic,
+    object::{Discussion, StateId},
+};
+use repo::Repository;
+use serde::{Deserialize, Serialize};
+
+use super::{
+    discussion_sync::{apply_hosted_discussion, pull_discussions},
+    repo_events::{RepoEvent, RepoEventClient, RepoEventError, RepoEventSubscription, SubscribeRepoEventsRequest},
+};
+use crate::{
+    client::HostedClient,
+    hosted_runtime::hosted::{HostedDiscussion, HostedDiscussionTurn, HostedResolution},
+};
+
+/// Event types this consumer subscribes to. Unknown types are ignored.
+pub const DISCUSSION_EVENT_TYPES: &[&str] = &[
+    "discussion.opened",
+    "turn.appended",
+    "discussion.resolved",
+];
+
+const CURSOR_FILE: &str = "event-cursor.json";
+
+/// Per-repo durable resume cursor for discussion events.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiscussionEventCursor {
+    /// Last successfully consumed `RepoEvent.event_id`. Placed in
+    /// `after_event_id` on the next subscribe.
+    #[serde(default)]
+    pub after_event_id: i64,
+    /// Hosted repo id last seen on the wire. Empty until the first event.
+    #[serde(default)]
+    pub repo_id: String,
+    /// True after a ListByState / bootstrap snapshot has been applied.
+    #[serde(default)]
+    pub bootstrapped: bool,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct CursorFile {
+    #[serde(default)]
+    repos: std::collections::BTreeMap<String, DiscussionEventCursor>,
+}
+
+/// What happened when one event was consumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscussionEventOutcome {
+    /// Not a discussion event; watermark still advances.
+    Ignored,
+    /// Authorized event that could not be materialized (missing id, or
+    /// GetDiscussion hid it). Watermark advances so we do not retry forever.
+    Skipped { reason: String },
+    /// Local op-log changed.
+    Applied { discussion_id: String },
+    /// Event was already represented locally.
+    Unchanged { discussion_id: String },
+}
+
+impl DiscussionEventOutcome {
+    pub fn discussion_id(&self) -> Option<&str> {
+        match self {
+            Self::Applied { discussion_id } | Self::Unchanged { discussion_id } => {
+                Some(discussion_id.as_str())
+            }
+            Self::Ignored | Self::Skipped { .. } => None,
+        }
+    }
+
+    pub fn applied(&self) -> bool {
+        matches!(self, Self::Applied { .. })
+    }
+}
+
+fn cursor_path(heddle_dir: &Path) -> PathBuf {
+    heddle_dir.join("collaboration").join(CURSOR_FILE)
+}
+
+fn load_cursors(heddle_dir: &Path) -> Result<CursorFile> {
+    match fs::read(cursor_path(heddle_dir)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).context("decode discussion event cursor"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(CursorFile::default()),
+        Err(error) => Err(error).context("read discussion event cursor"),
+    }
+}
+
+fn save_cursors(heddle_dir: &Path, cursors: &CursorFile) -> Result<()> {
+    let path = cursor_path(heddle_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).context("create collaboration dir")?;
+    }
+    let bytes = serde_json::to_vec_pretty(cursors).context("encode discussion event cursor")?;
+    write_file_atomic(&path, &bytes).context("write discussion event cursor")?;
+    Ok(())
+}
+
+/// Load the persisted watermark for `repo_path`.
+pub fn load_cursor(heddle_dir: &Path, repo_path: &str) -> Result<DiscussionEventCursor> {
+    Ok(load_cursors(heddle_dir)?
+        .repos
+        .get(repo_path)
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// Persist the watermark for `repo_path`.
+pub fn save_cursor(
+    heddle_dir: &Path,
+    repo_path: &str,
+    cursor: &DiscussionEventCursor,
+) -> Result<()> {
+    let mut cursors = load_cursors(heddle_dir)?;
+    cursors
+        .repos
+        .insert(repo_path.to_string(), cursor.clone());
+    save_cursors(heddle_dir, &cursors)
+}
+
+/// True when this event is a discussion doorbell or payload.
+pub fn is_discussion_event(event: &RepoEvent) -> bool {
+    DISCUSSION_EVENT_TYPES.contains(&event.event_type.as_str())
+        || event.kind
+            == api::heddle::api::v1alpha1::RepoEventKind::DiscussionTurn as i32
+}
+
+/// Subscribe request for the discussion live tail.
+pub fn subscribe_request(
+    repo_id: &str,
+    after_event_id: i64,
+    thread: &str,
+    thread_id: &str,
+) -> SubscribeRepoEventsRequest {
+    SubscribeRepoEventsRequest {
+        repo_id: repo_id.to_string(),
+        thread: thread.to_string(),
+        after_event_id,
+        event_types: DISCUSSION_EVENT_TYPES
+            .iter()
+            .map(|event_type| (*event_type).to_string())
+            .collect(),
+        thread_id: thread_id.to_string(),
+    }
+}
+
+/// Snapshot bootstrap for a fresh clone, then mark the cursor bootstrapped.
+///
+/// Does not start the live tail. `bootstrap` is the pull-fold discussions
+/// when the clone/pull already decoded them; `None` falls back to ListByState.
+pub async fn bootstrap_discussions(
+    repo: &Repository,
+    client: &mut HostedClient,
+    repo_path: &str,
+    bootstrap: Option<&[Discussion]>,
+) -> Result<DiscussionEventCursor> {
+    pull_discussions(repo, client, repo_path, bootstrap)
+        .await
+        .context("bootstrap hosted discussions")?;
+    let mut cursor = load_cursor(repo.heddle_dir(), repo_path)?;
+    cursor.bootstrapped = true;
+    if cursor.repo_id.is_empty() {
+        cursor.repo_id = repo_path.to_string();
+    }
+    save_cursor(repo.heddle_dir(), repo_path, &cursor)?;
+    Ok(cursor)
+}
+
+/// Apply one already-received repo event into the local op-log and advance
+/// the watermark. Fetches via `GetDiscussion` when the payload is a doorbell.
+pub async fn consume_discussion_event(
+    repo: &Repository,
+    client: &mut HostedClient,
+    repo_path: &str,
+    event: &RepoEvent,
+) -> Result<DiscussionEventOutcome> {
+    let mut cursor = load_cursor(repo.heddle_dir(), repo_path)?;
+    let outcome = apply_discussion_event(repo, client, repo_path, event).await?;
+    cursor.after_event_id = cursor.after_event_id.max(event.event_id);
+    if !event.repo_id.is_empty() {
+        cursor.repo_id = event.repo_id.clone();
+    } else if cursor.repo_id.is_empty() {
+        cursor.repo_id = repo_path.to_string();
+    }
+    save_cursor(repo.heddle_dir(), repo_path, &cursor)?;
+    Ok(outcome)
+}
+
+async fn apply_discussion_event(
+    repo: &Repository,
+    client: &mut HostedClient,
+    repo_path: &str,
+    event: &RepoEvent,
+) -> Result<DiscussionEventOutcome> {
+    if !is_discussion_event(event) {
+        return Ok(DiscussionEventOutcome::Ignored);
+    }
+    let payload = parse_event_payload(event);
+    let Some(discussion_id) = payload.discussion_id.clone() else {
+        return Ok(DiscussionEventOutcome::Skipped {
+            reason: "discussion event is missing a server discussion id".to_string(),
+        });
+    };
+
+    let hosted = match discussion_from_payload(event.event_type.as_str(), &payload) {
+        Some(discussion) => discussion,
+        None => match client.get_discussion(repo_path, &discussion_id).await {
+            Ok(discussion) => discussion,
+            Err(error) if is_hidden_discussion(&error) => {
+                return Ok(DiscussionEventOutcome::Skipped {
+                    reason: format!("discussion {discussion_id} is not visible to this caller"),
+                });
+            }
+            Err(error) => {
+                return Err(anyhow!(error).context(format!(
+                    "fetch hosted discussion {discussion_id} after {}",
+                    event.event_type
+                )));
+            }
+        },
+    };
+
+    let changed = apply_hosted_discussion(
+        repo,
+        repo_path,
+        client.authenticated_username().as_deref(),
+        &hosted,
+    )?;
+    Ok(if changed {
+        DiscussionEventOutcome::Applied { discussion_id }
+    } else {
+        DiscussionEventOutcome::Unchanged { discussion_id }
+    })
+}
+
+fn is_hidden_discussion(error: &wire::ProtocolError) -> bool {
+    let text = error.to_string();
+    text.contains("PermissionDenied")
+        || text.contains("NotFound")
+        || text.contains("permission denied")
+        || text.contains("not found")
+}
+
+#[derive(Debug, Default)]
+struct EventPayload {
+    discussion_id: Option<String>,
+    turn_id: Option<String>,
+    turn_seq: u64,
+    body: Option<String>,
+    author_name: Option<String>,
+    author_email: Option<String>,
+    posted_at_secs: i64,
+    file: Option<String>,
+    symbol: Option<String>,
+    visibility: Option<String>,
+    thread_ref: Option<String>,
+    opened_against_state: Option<StateId>,
+    resolution: HostedResolution,
+}
+
+fn parse_event_payload(event: &RepoEvent) -> EventPayload {
+    let value = if event.payload_json.trim().is_empty() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str(&event.payload_json).unwrap_or(serde_json::Value::Null)
+    };
+    let nested = value.get("discussion");
+    let discussion_id = string_field(&value, &["discussion_id", "id"])
+        .or_else(|| nested.and_then(|nested| string_field(nested, &["id", "discussion_id"])));
+    let turn = value.get("turn").cloned().unwrap_or(serde_json::Value::Null);
+    EventPayload {
+        discussion_id,
+        turn_id: string_field(&value, &["turn_id"])
+            .or_else(|| string_field(&turn, &["turn_id", "id"])),
+        turn_seq: u64_field(&value, "turn_seq")
+            .or_else(|| u64_field(&turn, "turn_seq"))
+            .unwrap_or(0),
+        body: string_field(&value, &["body"]).or_else(|| string_field(&turn, &["body"])),
+        author_name: string_field(&value, &["author_name"])
+            .or_else(|| string_field(&turn, &["author_name"])),
+        author_email: string_field(&value, &["author_email"])
+            .or_else(|| string_field(&turn, &["author_email"])),
+        posted_at_secs: i64_field(&value, &["posted_at", "posted_at_secs"])
+            .or_else(|| i64_field(&turn, &["posted_at", "posted_at_secs"]))
+            .unwrap_or(0),
+        file: string_field(&value, &["file", "path"])
+            .or_else(|| nested.and_then(|nested| string_field(nested, &["file", "path"]))),
+        symbol: string_field(&value, &["symbol"])
+            .or_else(|| nested.and_then(|nested| string_field(nested, &["symbol"]))),
+        visibility: string_field(&value, &["visibility"]),
+        thread_ref: string_field(&value, &["thread_ref"])
+            .or_else(|| (!event.thread.is_empty()).then(|| event.thread.clone())),
+        opened_against_state: value
+            .get("opened_against_state")
+            .and_then(parse_state_id)
+            .or_else(|| event.new_state.as_ref().and_then(proto_state_id)),
+        resolution: parse_resolution(&value),
+    }
+}
+
+fn discussion_from_payload(event_type: &str, payload: &EventPayload) -> Option<HostedDiscussion> {
+    let discussion_id = payload.discussion_id.clone()?;
+    // Doorbell events (id only) and incomplete appends must fetch. A fat
+    // `turn.appended` without turn identity would look like ordinal 0 and
+    // either drop the new turn or collide with the bootstrap snapshot.
+    let body = payload.body.clone()?;
+    if body.trim().is_empty() {
+        return None;
+    }
+    if event_type == "turn.appended"
+        && payload.turn_id.is_none()
+        && payload.turn_seq == 0
+    {
+        return None;
+    }
+    Some(HostedDiscussion {
+        id: discussion_id,
+        file: payload.file.clone().unwrap_or_default(),
+        symbol: payload.symbol.clone().unwrap_or_default(),
+        opened_against_state: payload.opened_against_state,
+        visibility: payload
+            .visibility
+            .clone()
+            .unwrap_or_else(|| "internal".to_string()),
+        thread_ref: payload.thread_ref.clone(),
+        turns: vec![HostedDiscussionTurn {
+            author_name: payload.author_name.clone().unwrap_or_default(),
+            author_email: payload.author_email.clone().unwrap_or_default(),
+            body,
+            posted_at_secs: payload.posted_at_secs,
+            turn_id: payload.turn_id.clone().unwrap_or_default(),
+            turn_seq: payload.turn_seq,
+        }],
+        resolution: payload.resolution.clone(),
+    })
+}
+
+fn parse_resolution(value: &serde_json::Value) -> HostedResolution {
+    let Some(resolution) = value.get("resolution") else {
+        if value.get("dismissed_reason").is_some() {
+            return HostedResolution::Dismissed {
+                reason: string_field(value, &["dismissed_reason"]).unwrap_or_default(),
+            };
+        }
+        return HostedResolution::Open;
+    };
+    match string_field(resolution, &["kind", "type"])
+        .unwrap_or_default()
+        .as_str()
+    {
+        "dismissed" | "dismiss" => HostedResolution::Dismissed {
+            reason: string_field(resolution, &["reason"]).unwrap_or_default(),
+        },
+        "by_edit" | "by-edit" | "addressed_by_state" => HostedResolution::ByEdit {
+            state_id: resolution.get("state_id").and_then(parse_state_id),
+        },
+        "into_annotation" | "annotation" => HostedResolution::IntoAnnotation {
+            annotation_id: string_field(resolution, &["annotation_id", "id"]).unwrap_or_default(),
+        },
+        _ => HostedResolution::Open,
+    }
+}
+
+fn string_field(value: &serde_json::Value, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        value
+            .get(*name)
+            .and_then(|field| field.as_str())
+            .map(str::trim)
+            .filter(|field| !field.is_empty())
+            .map(ToString::to_string)
+    })
+}
+
+fn u64_field(value: &serde_json::Value, name: &str) -> Option<u64> {
+    value.get(name).and_then(|field| {
+        field
+            .as_u64()
+            .or_else(|| field.as_i64().and_then(|n| u64::try_from(n).ok()))
+            .or_else(|| field.as_str()?.parse().ok())
+    })
+}
+
+fn i64_field(value: &serde_json::Value, names: &[&str]) -> Option<i64> {
+    names.iter().find_map(|name| {
+        value.get(*name).and_then(|field| {
+            field
+                .as_i64()
+                .or_else(|| field.as_u64().and_then(|n| i64::try_from(n).ok()))
+                .or_else(|| field.as_str()?.parse().ok())
+        })
+    })
+}
+
+fn parse_state_id(value: &serde_json::Value) -> Option<StateId> {
+    if let Some(hex) = value.as_str() {
+        let bytes = hex::decode(hex).ok()?;
+        return StateId::try_from_slice(&bytes).ok();
+    }
+    if let Some(bytes) = value.get("value").and_then(|field| field.as_array()) {
+        let bytes: Option<Vec<u8>> = bytes
+            .iter()
+            .map(|n| n.as_u64().and_then(|n| u8::try_from(n).ok()))
+            .collect();
+        return StateId::try_from_slice(&bytes?).ok();
+    }
+    None
+}
+
+fn proto_state_id(state: &api::heddle::api::v1alpha1::StateId) -> Option<StateId> {
+    StateId::try_from_slice(&state.value).ok()
+}
+
+/// One live-tail session: bootstrap if needed, subscribe, apply, persist.
+pub struct DiscussionEventConsumer<'a> {
+    repo: &'a Repository,
+    client: &'a mut HostedClient,
+    events: RepoEventClient,
+    repo_path: String,
+    thread: String,
+    thread_id: String,
+}
+
+impl<'a> DiscussionEventConsumer<'a> {
+    pub fn new(
+        repo: &'a Repository,
+        client: &'a mut HostedClient,
+        repo_path: impl Into<String>,
+    ) -> Self {
+        let events = RepoEventClient::from_hosted_client(client.clone());
+        Self {
+            repo,
+            client,
+            events,
+            repo_path: repo_path.into(),
+            thread: String::new(),
+            thread_id: String::new(),
+        }
+    }
+
+    pub fn with_thread(mut self, thread: impl Into<String>, thread_id: impl Into<String>) -> Self {
+        self.thread = thread.into();
+        self.thread_id = thread_id.into();
+        self
+    }
+
+    /// Snapshot bootstrap (if this clone has no cursor yet) then open the
+    /// replay-then-live subscription.
+    pub async fn start(
+        &mut self,
+        bootstrap: Option<&[Discussion]>,
+    ) -> Result<DiscussionEventSubscription, DiscussionLiveError> {
+        let mut cursor = load_cursor(self.repo.heddle_dir(), &self.repo_path)
+            .map_err(DiscussionLiveError::cursor)?;
+        if !cursor.bootstrapped {
+            cursor = bootstrap_discussions(self.repo, self.client, &self.repo_path, bootstrap)
+                .await
+                .map_err(DiscussionLiveError::bootstrap)?;
+        }
+        let repo_id = if cursor.repo_id.is_empty() {
+            self.repo_path.clone()
+        } else {
+            cursor.repo_id.clone()
+        };
+        let subscription = self
+            .events
+            .subscribe(subscribe_request(
+                &repo_id,
+                cursor.after_event_id,
+                &self.thread,
+                &self.thread_id,
+            ))
+            .await
+            .map_err(DiscussionLiveError::Subscribe)?;
+        Ok(DiscussionEventSubscription {
+            inner: subscription,
+        })
+    }
+
+    pub async fn consume_next(
+        &mut self,
+        subscription: &mut DiscussionEventSubscription,
+    ) -> Result<(RepoEvent, DiscussionEventOutcome), DiscussionLiveError> {
+        let event = subscription
+            .inner
+            .next()
+            .await
+            .map_err(DiscussionLiveError::Subscribe)?;
+        let outcome = consume_discussion_event(self.repo, self.client, &self.repo_path, &event)
+            .await
+            .map_err(DiscussionLiveError::apply)?;
+        Ok((event, outcome))
+    }
+}
+
+/// Wrapper so callers do not have to name [`RepoEventSubscription`].
+pub struct DiscussionEventSubscription {
+    inner: RepoEventSubscription,
+}
+
+impl DiscussionEventSubscription {
+    pub fn last_event_id(&self) -> i64 {
+        self.inner.last_event_id()
+    }
+
+    pub fn resume_request(&self) -> SubscribeRepoEventsRequest {
+        self.inner.resume_request()
+    }
+}
+
+/// Failure to bootstrap, subscribe, or apply a live discussion event.
+#[derive(Debug, thiserror::Error)]
+pub enum DiscussionLiveError {
+    #[error("failed to persist the discussion event cursor: {0}")]
+    Cursor(String),
+    #[error("failed to bootstrap hosted discussions: {0}")]
+    Bootstrap(String),
+    #[error(transparent)]
+    Subscribe(#[from] RepoEventError),
+    #[error("failed to apply a discussion event: {0}")]
+    Apply(String),
+}
+
+impl DiscussionLiveError {
+    fn cursor(error: anyhow::Error) -> Self {
+        Self::Cursor(error.to_string())
+    }
+
+    fn bootstrap(error: anyhow::Error) -> Self {
+        Self::Bootstrap(error.to_string())
+    }
+
+    fn apply(error: anyhow::Error) -> Self {
+        Self::Apply(error.to_string())
+    }
+
+    pub fn resume_after_event_id(&self) -> Option<i64> {
+        match self {
+            Self::Subscribe(error) => error.resume_after_event_id(),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "discussion_live_tests.rs"]
+mod tests;

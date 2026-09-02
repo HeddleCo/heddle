@@ -44,10 +44,11 @@ pub use bridge::{
     LossyImportEntryOutput, RepackOutput, SyncGitOutput,
 };
 pub use collab::{
-    AnchorOutput, DiscussionListOutput, DiscussionOutput, DiscussionShowOutput, DiscussionView,
-    DiscussionWriteOutput, HealthEntry, NextStateView, RequiredNullableNextState, ResolutionOutput,
-    ReviewHealthOutput, ReviewNextOutput, ReviewShowOutput, ReviewSignOutput, SignalView,
-    SignatureView, TurnOutput, WatchActorInfo, WatchLineOutput,
+    AnchorOutput, DiscussWaitLineOutput, DiscussionListOutput, DiscussionOutput,
+    DiscussionShowOutput, DiscussionView, DiscussionWriteOutput, HealthEntry, NextStateView,
+    RequiredNullableNextState, ResolutionOutput, ReviewHealthOutput, ReviewNextOutput,
+    ReviewShowOutput, ReviewSignOutput, SignalView, SignatureView, TurnOutput, WatchActorInfo,
+    WatchLineOutput,
 };
 pub use core_loop::{
     CommitOutput, SnapshotAgentOutput, SnapshotOutput, SnapshotPrincipalOutput, UndoRedoOutput,

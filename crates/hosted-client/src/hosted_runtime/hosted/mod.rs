@@ -47,7 +47,7 @@ pub use bootstrap::{
     fetch_signed_endpoint_descriptor,
 };
 pub use call::{BidirectionalRequestStream, BidirectionalStream, ServerStream, ServerStreamItem};
-pub use collaboration::{HostedDiscussion, HostedDiscussionTurn};
+pub use collaboration::{HostedDiscussion, HostedDiscussionTurn, HostedResolution};
 use config::ClientConfig;
 use connection::HostedConnection;
 pub use context::CallContextFactory;

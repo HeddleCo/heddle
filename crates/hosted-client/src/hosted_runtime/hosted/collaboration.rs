@@ -18,9 +18,10 @@
 
 use api::heddle::api::v1alpha1::{
     AppendTurnRequest, ContextAnnotationKind, Discussion as ProtoDiscussion, DiscussionKind,
-    DiscussionSeverity, DiscussionStatusFilter, ListDiscussionsByStateRequest,
-    OpenDiscussionRequest, PathSymbolRef, ResolveDiscussionRequest, StateId as ProtoStateId,
-    list_discussions_response, resolve_discussion_request,
+    DiscussionSeverity, DiscussionStatusFilter, GetDiscussionRequest,
+    ListDiscussionsByStateRequest, OpenDiscussionRequest, PathSymbolRef, ResolveDiscussionRequest,
+    StateId as ProtoStateId, discussion_resolution, list_discussions_response,
+    resolve_discussion_request,
 };
 use objects::object::{AnnotationKind, ChangeId, StateId};
 use wire::ProtocolError;
@@ -28,12 +29,35 @@ use wire::ProtocolError;
 use super::{HostedClient, helpers::hosted_to_protocol_error};
 
 /// One turn of a hosted discussion, decoded from the wire.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct HostedDiscussionTurn {
     pub author_name: String,
     pub author_email: String,
     pub body: String,
     pub posted_at_secs: i64,
+    /// Server-minted turn identity. Empty when the producer has not minted one
+    /// (ListByState snapshots on older weft); live events should carry it.
+    pub turn_id: String,
+    /// Per-discussion monotonic sequence. Zero means "not minted" — callers
+    /// then fall back to list order. Proto documents minted sequences as
+    /// 1-based (`turn_seq` is zero only before mint).
+    pub turn_seq: u64,
+}
+
+/// Hosted resolution decoded from the collaboration wire oneof.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum HostedResolution {
+    #[default]
+    Open,
+    IntoAnnotation {
+        annotation_id: String,
+    },
+    ByEdit {
+        state_id: Option<StateId>,
+    },
+    Dismissed {
+        reason: String,
+    },
 }
 
 /// A hosted discussion decoded from the `CollaborationService` wire types into
@@ -49,6 +73,7 @@ pub struct HostedDiscussion {
     pub visibility: String,
     pub thread_ref: Option<String>,
     pub turns: Vec<HostedDiscussionTurn>,
+    pub resolution: HostedResolution,
 }
 
 fn decode_discussion(proto: ProtoDiscussion) -> HostedDiscussion {
@@ -70,8 +95,32 @@ fn decode_discussion(proto: ProtoDiscussion) -> HostedDiscussion {
                 author_email: turn.author_email,
                 body: turn.body,
                 posted_at_secs: turn.posted_at.map(|ts| ts.seconds).unwrap_or(0),
+                turn_id: turn.turn_id,
+                turn_seq: turn.turn_seq,
             })
             .collect(),
+        resolution: decode_resolution(proto.resolution),
+    }
+}
+
+fn decode_resolution(
+    resolution: Option<api::heddle::api::v1alpha1::DiscussionResolution>,
+) -> HostedResolution {
+    match resolution.and_then(|resolution| resolution.state) {
+        Some(discussion_resolution::State::IntoAnnotation(annotation)) => {
+            HostedResolution::IntoAnnotation {
+                annotation_id: annotation.annotation_id,
+            }
+        }
+        Some(discussion_resolution::State::ByEdit(edit)) => HostedResolution::ByEdit {
+            state_id: edit
+                .state_id
+                .and_then(|state| StateId::try_from_slice(&state.value).ok()),
+        },
+        Some(discussion_resolution::State::Dismissed(dismissed)) => HostedResolution::Dismissed {
+            reason: dismissed.reason,
+        },
+        Some(discussion_resolution::State::Open(_)) | None => HostedResolution::Open,
     }
 }
 
@@ -176,6 +225,26 @@ impl HostedClient {
         let response = self
             .routes()
             .append_turn(&request)
+            .await
+            .map_err(hosted_to_protocol_error)?;
+        Ok(decode_discussion(response))
+    }
+
+    /// Fetch one hosted discussion by server id. `state_id` empty means HEAD.
+    /// Used by the live event consumer as the doorbell payload fetch.
+    pub async fn get_discussion(
+        &mut self,
+        repo_path: &str,
+        discussion_id: &str,
+    ) -> Result<HostedDiscussion, ProtocolError> {
+        let request = GetDiscussionRequest {
+            repo_path: super::helpers::repository_ref(repo_path),
+            discussion_id: discussion_id.to_string(),
+            state_id: None,
+        };
+        let response = self
+            .routes()
+            .get_discussion(&request)
             .await
             .map_err(hosted_to_protocol_error)?;
         Ok(decode_discussion(response))
@@ -422,6 +491,7 @@ mod tests {
         assert_eq!(decoded.turns[0].author_name, "alice");
         assert_eq!(decoded.turns[0].body, "lgtm");
         assert_eq!(decoded.turns[0].posted_at_secs, 42);
+        assert!(matches!(decoded.resolution, HostedResolution::Open));
 
         // Missing optional fields collapse cleanly.
         let empty = decode_discussion(ProtoDiscussion {

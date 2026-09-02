@@ -362,6 +362,13 @@ impl HostedRoutes<'_> {
         ResolveDiscussionRequest,
         Discussion
     );
+    unary_method!(
+        get_discussion,
+        "CollaborationService",
+        "GetDiscussion",
+        GetDiscussionRequest,
+        Discussion
+    );
     server_stream_method!(
         list_discussions_by_state,
         "CollaborationService",

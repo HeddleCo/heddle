@@ -99,6 +99,19 @@ pub struct DiscussionListOutput {
     pub discussions: Vec<DiscussionOutput>,
 }
 
+/// One `heddle discuss wait` JSONL line.
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "DiscussWaitLineSchema")]
+pub struct DiscussWaitLineOutput {
+    pub output_kind: &'static str,
+    pub status: &'static str,
+    pub event_id: i64,
+    pub event_type: String,
+    pub discussion_id: Option<String>,
+    pub applied: bool,
+    pub after_event_id: i64,
+}
+
 // ---- review ----------------------------------------------------------------
 
 #[derive(Serialize, JsonSchema)]
