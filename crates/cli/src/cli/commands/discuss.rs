@@ -373,7 +373,7 @@ async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) ->
     let mut client = HostedClient::open_session(
         &authority,
         &user_config,
-        server_key,
+        server_key.clone(),
         HostedAuthMode::CredentialFallback,
     )
     .await?;
@@ -384,51 +384,72 @@ async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) ->
         save_cursor(repo.heddle_dir(), &repo_path, &cursor)?;
     }
 
-    let mut consumer = DiscussionEventConsumer::new(repo, &mut client, repo_path.clone());
-    if let Some(thread) = args.thread.as_deref() {
-        consumer = consumer.with_thread(thread, "");
-    }
-    let mut subscription = consumer.start(None).await?;
-    emit_wait_line(
-        cli,
-        DiscussWaitLineOutput {
-            output_kind: "discuss_wait",
-            status: "listening",
-            event_id: subscription.last_event_id(),
-            event_type: String::new(),
-            discussion_id: None,
-            applied: false,
-            after_event_id: subscription.last_event_id(),
-        },
-    )?;
-
     let mut seen = 0usize;
-    loop {
-        if args.max_events.is_some_and(|max| seen >= max) {
-            break;
+    'session: loop {
+        let mut consumer = DiscussionEventConsumer::new(repo, &mut client, repo_path.clone());
+        if let Some(thread) = args.thread.as_deref() {
+            consumer = consumer.with_thread(thread, "");
         }
-        let (event, outcome) = consumer.consume_next(&mut subscription).await?;
-        seen += 1;
-        let status = match &outcome {
-            DiscussionEventOutcome::Applied { .. } => "applied",
-            DiscussionEventOutcome::Unchanged { .. } => "unchanged",
-            DiscussionEventOutcome::Skipped { .. } => "skipped",
-            DiscussionEventOutcome::Ignored => "ignored",
-        };
+        let mut subscription = consumer.start(None).await?;
         emit_wait_line(
             cli,
             DiscussWaitLineOutput {
                 output_kind: "discuss_wait",
-                status,
-                event_id: event.event_id,
-                event_type: event.event_type,
-                discussion_id: outcome.discussion_id().map(ToString::to_string),
-                applied: outcome.applied(),
+                status: "listening",
+                event_id: subscription.last_event_id(),
+                event_type: String::new(),
+                discussion_id: None,
+                applied: false,
                 after_event_id: subscription.last_event_id(),
             },
         )?;
-        if args.max_events.is_some_and(|max| seen >= max) {
-            break;
+
+        loop {
+            if args.max_events.is_some_and(|max| seen >= max) {
+                break 'session;
+            }
+            match consumer.consume_next(&mut subscription).await {
+                Ok((event, outcome)) => {
+                    seen += 1;
+                    let status = match &outcome {
+                        DiscussionEventOutcome::Applied { .. } => "applied",
+                        DiscussionEventOutcome::Unchanged { .. } => "unchanged",
+                        DiscussionEventOutcome::Skipped { .. } => "skipped",
+                        DiscussionEventOutcome::Ignored => "ignored",
+                    };
+                    emit_wait_line(
+                        cli,
+                        DiscussWaitLineOutput {
+                            output_kind: "discuss_wait",
+                            status,
+                            event_id: event.event_id,
+                            event_type: event.event_type,
+                            discussion_id: outcome.discussion_id().map(ToString::to_string),
+                            applied: outcome.applied(),
+                            after_event_id: subscription.last_event_id(),
+                        },
+                    )?;
+                    if args.max_events.is_some_and(|max| seen >= max) {
+                        break 'session;
+                    }
+                }
+                Err(error) if error.resume_after_event_id().is_some() => {
+                    // Stream died (staging drops iroh endpoints). Persist
+                    // already happened per event; reopen and subscribe after
+                    // the watermark.
+                    drop(consumer);
+                    client.close().await;
+                    client = HostedClient::open_session(
+                        &authority,
+                        &user_config,
+                        server_key.clone(),
+                        HostedAuthMode::CredentialFallback,
+                    )
+                    .await?;
+                    continue 'session;
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
     }
     client.close().await;

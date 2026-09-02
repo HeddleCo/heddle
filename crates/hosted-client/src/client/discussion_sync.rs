@@ -175,6 +175,22 @@ fn save_mirror(heddle_dir: &Path, mirror: &HostedMirror) -> Result<()> {
     Ok(())
 }
 
+/// True when `server_id` is already in the hosted mirror for `repo_path`.
+/// Fat `turn.appended` / `discussion.resolved` payloads may apply only after
+/// this is true; otherwise the consumer must `GetDiscussion`.
+pub fn discussion_is_mirrored(
+    heddle_dir: &Path,
+    repo_path: &str,
+    server_id: &str,
+) -> Result<bool> {
+    let mirror = load_mirror(heddle_dir)?;
+    Ok(mirror.repos.get(repo_path).is_some_and(|repo| {
+        repo.discussions
+            .iter()
+            .any(|entry| entry.server_id == server_id)
+    }))
+}
+
 fn open_op_id(repo_path: &str, local_id: &str) -> String {
     uuid::Uuid::new_v5(
         &OP_NAMESPACE,
