@@ -982,7 +982,7 @@ mod tests {
         );
         assert!(
             store
-                .materialize_discussion(&discussion.id)
+                .materialize_discussion(&discussion.discussion_id)
                 .unwrap()
                 .is_some(),
             "discuss show must be able to load the migrated discussion by id"
