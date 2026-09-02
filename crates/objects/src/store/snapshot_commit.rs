@@ -20,7 +20,7 @@ use crate::{
 
 pub const SNAPSHOT_COMMIT_ARTIFACT_SCHEMA: u32 = 1;
 
-type SnapshotCommitMarkersByPack = HashMap<String, Vec<(ContentHash, Vec<u8>)>>;
+pub(crate) type SnapshotCommitMarkersByPack = HashMap<String, Vec<(ContentHash, Vec<u8>)>>;
 
 pub(crate) fn snapshot_commit_marker_path(pack_path: &Path, artifact_id: &ContentHash) -> PathBuf {
     let stem = pack_path
@@ -262,7 +262,9 @@ impl SnapshotPackManager {
     }
 }
 
-fn snapshot_commit_markers_by_pack(packs_dir: &Path) -> Result<SnapshotCommitMarkersByPack> {
+pub(crate) fn snapshot_commit_markers_by_pack(
+    packs_dir: &Path,
+) -> Result<SnapshotCommitMarkersByPack> {
     let mut markers = SnapshotCommitMarkersByPack::new();
     for entry in fs::read_dir(packs_dir)? {
         let entry = entry?;

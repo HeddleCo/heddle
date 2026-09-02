@@ -368,6 +368,25 @@ fn second_fs_store_sees_packs_installed_after_its_construction() {
 }
 
 #[test]
+fn repeated_read_misses_probe_only_the_pack_directory_generation() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = FsStore::new(temp_dir.path().join(".heddle"));
+    store.init().unwrap();
+    store.reset_pack_dir_generation_probes();
+    let missing = ContentHash::compute(b"generation-probe-miss");
+
+    for _ in 0..100 {
+        assert!(!store.has_blob(&missing).unwrap());
+    }
+
+    assert_eq!(
+        store.pack_dir_generation_probes(),
+        100,
+        "each miss should pay one metadata probe, not two full pack-directory scans"
+    );
+}
+
+#[test]
 fn list_states_sees_packs_installed_after_store_construction() {
     let temp_dir = TempDir::new().unwrap();
     let heddle_dir = temp_dir.path().join(".heddle");

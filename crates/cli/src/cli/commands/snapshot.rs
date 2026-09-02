@@ -158,6 +158,7 @@ pub fn cmd_snapshot(
     let captured_thread_targets_integration = capture_report.captured_thread_targets_integration;
     let (output, snapshot_profile) = snapshot_output_from_capture_report(capture_report);
     let repo = ctx.require_repo()?;
+    super::automatic_repack::note_committed_capture(repo);
 
     let as_json = should_output_json(cli, Some(repo.config()));
     let git_overlay = repo.capability() == repo::RepositoryCapability::GitOverlay;
@@ -602,6 +603,9 @@ pub(crate) fn create_snapshot_profiled(
     let execute_save_start = Instant::now();
     let report = execute_save(repo, plan)?;
     let execute_save_ms = execute_save_start.elapsed().as_millis();
+    if report.created_new_state {
+        super::automatic_repack::note_committed_capture(repo);
+    }
     let (output, mut profile) = snapshot_output_from_save_report(repo, user_config, report)?;
     profile.preflight_ms = preflight_ms;
     profile.attribution_ms = attribution_ms;
@@ -655,6 +659,9 @@ pub(crate) fn create_snapshot_from_tree_profiled(
         )),
     };
     let report = execute_save(repo, plan)?;
+    if report.created_new_state {
+        super::automatic_repack::note_committed_capture(repo);
+    }
     snapshot_output_from_save_report(repo, user_config, report)
 }
 

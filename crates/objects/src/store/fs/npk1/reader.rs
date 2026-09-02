@@ -913,10 +913,6 @@ impl Npk1Manager {
         Ok(())
     }
 
-    pub(crate) fn needs_reload(&self) -> Result<bool> {
-        Ok(discover(&self.packs_dir)? != self.fingerprints)
-    }
-
     pub(crate) fn file_paths(&self) -> Vec<&Path> {
         self.fingerprints
             .iter()

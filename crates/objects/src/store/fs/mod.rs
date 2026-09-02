@@ -20,4 +20,4 @@ pub use pack_install_journal::{
     pack_install_metrics_reset, pack_install_metrics_snapshot, recover_pack_install_intents,
     recover_pack_install_intents_with_ttl,
 };
-pub use repack::FsRepackOperation;
+pub use repack::{AutomaticRepackLock, FsRepackOperation, SnapshotPackFold};

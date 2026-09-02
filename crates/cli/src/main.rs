@@ -26,20 +26,21 @@ use cli::{
         UndoArgs,
         cli_args::LandArgs,
         commands::{
-            LogCommandOptions, SnapshotAgentOverrides, build_command_catalog, cmd_abort, cmd_adopt,
-            cmd_agent, cmd_capture_split, cmd_clone, cmd_commit, cmd_complete, cmd_completions,
-            cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
-            cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
-            cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
-            cmd_daemon_status, cmd_daemon_stop, cmd_diff, cmd_discuss, cmd_doctor, cmd_doctor_docs,
-            cmd_doctor_schemas, cmd_hook, cmd_init, cmd_integration, cmd_land, cmd_log,
-            cmd_maintenance, cmd_netd_serve, cmd_netd_status, cmd_netd_stop, cmd_pull, cmd_push,
-            cmd_query, cmd_ready, cmd_redo, cmd_remote,
+            LogCommandOptions, SnapshotAgentOverrides, automatic_repack_worker_root,
+            build_command_catalog, cmd_abort, cmd_adopt, cmd_agent, cmd_capture_split, cmd_clone,
+            cmd_commit, cmd_complete, cmd_completions, cmd_context_audit, cmd_context_check,
+            cmd_context_edit, cmd_context_get, cmd_context_history, cmd_context_list,
+            cmd_context_rm, cmd_context_set, cmd_context_suggest, cmd_context_supersede,
+            cmd_continue, cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop, cmd_diff,
+            cmd_discuss, cmd_doctor, cmd_doctor_docs, cmd_doctor_schemas, cmd_hook, cmd_init,
+            cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_netd_serve, cmd_netd_status,
+            cmd_netd_stop, cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_redo, cmd_remote,
             cmd_resolve, cmd_revert, cmd_review, cmd_shell, cmd_show, cmd_snapshot, cmd_start,
             cmd_status, cmd_sync_smart, cmd_thread, cmd_undo, cmd_undo_recover, cmd_verify,
             cmd_watch, command_runtime_contract_for_command, print_error_with_hint,
             print_or_suggest_parse_error, print_parse_error_json_envelope,
-            recover_incomplete_land_if_present,
+            recover_incomplete_land_if_present, run_automatic_repack_worker,
+            spawn_pending_automatic_repack_workers,
         },
         render::write_json_stdout,
     },
@@ -62,6 +63,9 @@ use tracing::debug;
 // multi-thread flavor pays for thread-pool creation + teardown.
 fn main() -> Result<()> {
     install_broken_pipe_panic_hook();
+    if let Some(root) = automatic_repack_worker_root() {
+        return run_automatic_repack_worker(root);
+    }
     if let Some(code) = cli::identity_stamp::maybe_run_fast_path() {
         std::process::exit(code);
     }
@@ -844,6 +848,12 @@ async fn async_main() -> Result<()> {
             ],
         );
     }
+
+    // A capture's durable save and all measured command work are complete.
+    // The detached worker owns any synchronous cheap fold and waits for the
+    // scheduler thread, so the foreground process neither kills the repack at
+    // exit nor puts storage maintenance inside CaptureOne's measured body.
+    spawn_pending_automatic_repack_workers();
 
     shutdown_command_telemetry(command_trace, command_span_guard, telemetry, exit_status);
     match result {
