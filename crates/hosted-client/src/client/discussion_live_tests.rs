@@ -11,8 +11,8 @@ use tempfile::TempDir;
 use super::{
     DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventCursor, DiscussionEventOutcome,
     bootstrap_discussions, consume_discussion_event, consume_discussion_event_scoped,
-    is_discussion_event, load_cursor, load_scoped_cursor, parse_event_payload, save_cursor,
-    save_scoped_cursor, subscribe_request,
+    is_discussion_event, load_cursor, load_scoped_cursor, paired_thread_scope, parse_event_payload,
+    save_cursor, save_scoped_cursor, subscribe_request,
 };
 use crate::hosted_runtime::hosted::HostedResolution;
 use crate::hosted_runtime::hosted::test_server::CollaborationFixture;
@@ -172,6 +172,20 @@ fn subscribe_request_filters_to_discussion_event_types() {
     );
     assert_eq!(request.thread, "main");
     assert_eq!(request.thread_id, "thread-main");
+}
+
+#[test]
+fn paired_thread_scope_requires_both_name_and_stable_id() {
+    assert_eq!(
+        paired_thread_scope("", "").unwrap(),
+        (String::new(), String::new())
+    );
+    assert_eq!(
+        paired_thread_scope("foo", "thr-1").unwrap(),
+        ("foo".to_string(), "thr-1".to_string())
+    );
+    assert!(paired_thread_scope("foo", "").is_err());
+    assert!(paired_thread_scope("", "thr-1").is_err());
 }
 
 #[test]
@@ -1147,6 +1161,63 @@ async fn fat_append_with_turn_id_and_zero_seq_fetches_and_keeps_the_new_turn() {
     assert_eq!(discussion.turns.len(), 2);
     assert_eq!(discussion.turns[0].1.body, "first turn");
     assert_eq!(discussion.turns[1].1.body, "second turn");
+
+    client.close().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn thread_scoped_subscribe_request_carries_thread_id() {
+    let (_temp, repo) = seed_repo();
+    let fixture = CollaborationFixture::default();
+    let (mut client, server, fixture) =
+        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
+
+    let mut consumer = DiscussionEventConsumer::new(&repo, &mut client, "acme/widgets")
+        .with_thread("feature/run", "thr-stable");
+    let _subscription = consumer.start(None).await.unwrap();
+    assert_eq!(
+        fixture
+            .subscribe_thread
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_slice(),
+        [("feature/run".to_string(), "thr-stable".to_string())]
+    );
+
+    client.close().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn get_discussion_unauthenticated_does_not_advance_the_watermark() {
+    let (_temp, repo) = seed_repo();
+    let mut fixture = CollaborationFixture::default();
+    fixture
+        .hidden
+        .insert("disc-auth".to_string(), CallFailureCode::Unauthenticated);
+    let (mut client, server, _fixture) =
+        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
+
+    let error = consume_discussion_event(
+        &repo,
+        &mut client,
+        "acme/widgets",
+        &doorbell(55, "discussion.opened", "disc-auth", "turn-1", 1),
+    )
+    .await
+    .expect_err("unauthenticated doorbell fetch must be fatal");
+    assert!(
+        error.to_string().contains("disc-auth") || error.to_string().contains("Unauthenticated"),
+        "expected a fetch failure, got {error:#}"
+    );
+    assert_eq!(
+        load_cursor(repo.heddle_dir(), "acme/widgets")
+            .unwrap()
+            .after_event_id,
+        0,
+        "unauthenticated must not advance the watermark"
+    );
 
     client.close().await;
     server.await.unwrap();

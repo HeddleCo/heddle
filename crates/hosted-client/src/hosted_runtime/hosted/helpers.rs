@@ -296,9 +296,14 @@ pub(super) fn hosted_to_protocol_error(error: HostedError) -> ProtocolError {
             }
 
             match code {
-                CallFailureCode::Unauthenticated | CallFailureCode::PermissionDenied => {
-                    ProtocolError::AuthorizationFailed(message)
-                }
+                CallFailureCode::PermissionDenied => ProtocolError::AuthorizationFailed(message),
+                // Keep the CallFailureCode so doorbell fetch can treat
+                // expired/missing creds as fatal instead of a visibility skip.
+                CallFailureCode::Unauthenticated => ProtocolError::RemoteFailure {
+                    code: remote_failure_code(code),
+                    message,
+                    details: Vec::new(),
+                },
                 CallFailureCode::NotFound => ProtocolError::ObjectNotFound(message),
                 CallFailureCode::AlreadyExists => ProtocolError::AlreadyExists(message),
                 CallFailureCode::InvalidArgument | CallFailureCode::FailedPrecondition => {
@@ -543,7 +548,13 @@ mod tests {
             message: "invalid proof".to_string(),
             error: None,
         });
-        assert!(matches!(error, ProtocolError::AuthorizationFailed(_)));
+        assert!(matches!(
+            error,
+            ProtocolError::RemoteFailure {
+                code: wire::RemoteFailureCode::Unauthenticated,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -770,7 +781,10 @@ mod tests {
                 message: "nope".into(),
                 error: None,
             }),
-            ProtocolError::AuthorizationFailed(_)
+            ProtocolError::RemoteFailure {
+                code: wire::RemoteFailureCode::Unauthenticated,
+                ..
+            }
         ));
         assert!(matches!(
             hosted_to_protocol_error(HostedError::Call {

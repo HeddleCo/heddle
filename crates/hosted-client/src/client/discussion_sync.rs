@@ -544,7 +544,7 @@ async fn push_into_annotation_resolution(
     {
         return Ok(false);
     }
-    client
+    let hosted = client
         .resolve_discussion_into_annotation(
             repo_path,
             server_id,
@@ -561,6 +561,9 @@ async fn push_into_annotation_resolution(
         .and_then(|repo_mirror| repo_mirror.discussions.get_mut(index))
         .ok_or_else(|| anyhow!("hosted discussion mirror entry disappeared during resolution"))?;
     entry.resolved_into_annotation_operation_id = Some(operation_id);
+    if let Some(key) = hosted_resolution_key(&hosted.resolution) {
+        entry.pulled_resolution_key = Some(key);
+    }
     Ok(true)
 }
 
@@ -971,11 +974,36 @@ fn pull_resolution(
         .materialize_discussion(&local_id)
         .context("materialize mirrored discussion")?
         .ok_or_else(|| anyhow!("mirrored discussion {local_id} missing locally"))?;
-    let parents = if existing.resolution.is_some() || !existing.conflict_operations.is_empty() {
+    let pushed_echo = is_pushed_annotation_echo(
+        &mirror.repos[repo_path].discussions[index],
+        &existing,
+        &discussion.resolution,
+    );
+    let parents = if pushed_echo {
+        // Finalize the server's annotation id as a descendant of the local
+        // IntoAnnotation we already pushed — not a sibling that conflicts.
+        existing.heads.iter().copied().collect()
+    } else if existing.resolution.is_some() || !existing.conflict_operations.is_empty() {
         resolution_sibling_parents(store, &existing)?
     } else {
         existing.heads.iter().copied().collect()
     };
+    if pushed_echo
+        && matches!(
+            existing.resolution,
+            Some(CollaborationResolution::Annotation { ref annotation_id })
+                if Some(annotation_id.as_str())
+                    == hosted_annotation_id(&discussion.resolution)
+        )
+    {
+        mirror
+            .repos
+            .get_mut(repo_path)
+            .and_then(|repo_mirror| repo_mirror.discussions.get_mut(index))
+            .ok_or_else(|| anyhow!("hosted discussion mirror entry disappeared during resolution"))?
+            .pulled_resolution_key = Some(hosted_key);
+        return Ok(false);
+    }
     write_local_operation(
         store,
         local_id,
@@ -991,6 +1019,31 @@ fn pull_resolution(
         .ok_or_else(|| anyhow!("hosted discussion mirror entry disappeared during resolution"))?
         .pulled_resolution_key = Some(hosted_key);
     Ok(true)
+}
+
+fn is_pushed_annotation_echo(
+    entry: &MirrorEntry,
+    existing: &MaterializedDiscussion,
+    hosted: &HostedResolution,
+) -> bool {
+    entry.resolved_into_annotation_operation_id.is_some()
+        && hosted_annotation_id(hosted).is_some()
+        && matches!(
+            existing.resolution,
+            Some(
+                CollaborationResolution::IntoAnnotation { .. }
+                    | CollaborationResolution::Annotation { .. }
+            )
+        )
+}
+
+fn hosted_annotation_id(resolution: &HostedResolution) -> Option<&str> {
+    match resolution {
+        HostedResolution::IntoAnnotation { annotation_id } if !annotation_id.is_empty() => {
+            Some(annotation_id.as_str())
+        }
+        _ => None,
+    }
 }
 
 fn hosted_resolution_key(resolution: &HostedResolution) -> Option<String> {
@@ -1669,6 +1722,93 @@ mod tests {
             )
             .unwrap(),
             "the same hosted resolution must not be imported twice"
+        );
+    }
+
+    #[test]
+    fn pushed_into_annotation_echo_does_not_conflict() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
+        repo.snapshot_with_attribution(
+            Some("seed".to_string()),
+            None,
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        )
+        .unwrap();
+
+        assert!(
+            apply_hosted_discussion(
+                &repo,
+                "acme/widgets",
+                None,
+                &hosted("disc-1", "first", "turn-1", HostedResolution::Open),
+            )
+            .unwrap()
+        );
+
+        let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+        let existing = store
+            .materialize()
+            .unwrap()
+            .discussions
+            .into_values()
+            .next()
+            .unwrap();
+        write_local_operation(
+            &store,
+            existing.discussion_id,
+            existing.heads.iter().copied().collect(),
+            Attribution::human(Principal::new("Local", "local@example.com")),
+            1_700_000_100_000,
+            CollaborationOperationBodyV1::Resolve {
+                resolution: CollaborationResolution::IntoAnnotation {
+                    annotation_kind: AnnotationKind::Invariant,
+                    content: "the cache key includes visibility".to_string(),
+                    tags: vec!["cache".to_string()],
+                },
+            },
+        )
+        .unwrap();
+
+        let path = mirror_path(repo.heddle_dir());
+        let mut mirror: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        mirror["repos"]["acme/widgets"]["discussions"][0]
+            ["resolved_into_annotation_operation_id"] = serde_json::json!("pushed-op");
+        std::fs::write(&path, serde_json::to_vec_pretty(&mirror).unwrap()).unwrap();
+
+        apply_hosted_discussion(
+            &repo,
+            "acme/widgets",
+            None,
+            &hosted(
+                "disc-1",
+                "first",
+                "turn-1",
+                HostedResolution::IntoAnnotation {
+                    annotation_id: "ann-1".to_string(),
+                },
+            ),
+        )
+        .unwrap();
+
+        let echoed = store
+            .materialize()
+            .unwrap()
+            .discussions
+            .into_values()
+            .next()
+            .unwrap();
+        assert!(
+            echoed.conflict_operations.is_empty(),
+            "a pushed IntoAnnotation echo must not surface as competing collab state"
+        );
+        assert_eq!(
+            echoed.resolution,
+            Some(CollaborationResolution::Annotation {
+                annotation_id: "ann-1".to_string(),
+            })
         );
     }
 

@@ -339,7 +339,7 @@ fn run_list(
 async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) -> Result<()> {
     use hosted_client::client::discussion_live::{
         DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventOutcome,
-        load_scoped_cursor, save_scoped_cursor,
+        load_scoped_cursor, paired_thread_scope, save_scoped_cursor,
     };
     use hosted_client::client::{HostedAuthMode, HostedClient};
 
@@ -381,11 +381,17 @@ async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) ->
     )
     .await?;
 
+    let (thread_name, thread_id) = if let Some(thread) = args.thread.as_deref() {
+        let record = super::thread_cmd::load_thread(repo, thread)?;
+        paired_thread_scope(&record.thread, &record.id)?
+    } else {
+        (String::new(), String::new())
+    };
     let cursor_scope = DiscussionCursorScope {
         authority: authority.clone(),
         repo_path: repo_path.clone(),
-        thread: args.thread.clone().unwrap_or_default(),
-        thread_id: String::new(),
+        thread: thread_name.clone(),
+        thread_id: thread_id.clone(),
     };
     if let Some(after) = args.after {
         let mut cursor = load_scoped_cursor(repo.heddle_dir(), &cursor_scope)?;
@@ -397,8 +403,8 @@ async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) ->
     'session: loop {
         let mut consumer = DiscussionEventConsumer::new(repo, &mut client, repo_path.clone())
             .with_authority(authority.clone());
-        if let Some(thread) = args.thread.as_deref() {
-            consumer = consumer.with_thread(thread, "");
+        if !thread_name.is_empty() {
+            consumer = consumer.with_thread(&thread_name, &thread_id);
         }
         let mut subscription = consumer.start(None).await?;
         emit_wait_line(

@@ -68,6 +68,7 @@ pub(crate) struct CollaborationFixture {
     pub get_request_state_ids: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
     pub list_requests: Arc<Mutex<usize>>,
     pub subscribe_after: Arc<Mutex<Vec<i64>>>,
+    pub subscribe_thread: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 pub(crate) async fn start() -> (HostedClient, JoinHandle<()>) {
@@ -776,16 +777,26 @@ async fn serve_subscribe_repo_events(
     fixture: CollaborationFixture,
 ) {
     read_request_body(recv, request).await;
-    let after_event_id = decode_request_frame(request)
+    let subscribe = decode_request_frame(request)
         .ok()
-        .and_then(|frame| SubscribeRepoEventsRequest::decode(frame.body).ok())
+        .and_then(|frame| SubscribeRepoEventsRequest::decode(frame.body).ok());
+    let after_event_id = subscribe
+        .as_ref()
         .map(|body| body.after_event_id)
         .unwrap_or(0);
+    let thread_scope = subscribe
+        .map(|body| (body.thread, body.thread_id))
+        .unwrap_or_default();
     fixture
         .subscribe_after
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .push(after_event_id);
+    fixture
+        .subscribe_thread
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(thread_scope);
     let mut matching = fixture
         .events
         .into_iter()

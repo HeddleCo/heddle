@@ -234,6 +234,22 @@ pub fn is_discussion_event(event: &RepoEvent) -> bool {
 }
 
 /// Subscribe request for the discussion live tail.
+/// Pair a thread name with its stable record id for a scoped subscribe.
+///
+/// heddle-api 0.23.0 `SubscribeRepoEventsRequest` requires both when the
+/// subscription is thread-scoped. An empty pair is the unfiltered wait.
+pub fn paired_thread_scope(thread: &str, thread_id: &str) -> Result<(String, String)> {
+    if thread.is_empty() && thread_id.is_empty() {
+        return Ok((String::new(), String::new()));
+    }
+    if thread.is_empty() || thread_id.is_empty() {
+        return Err(anyhow!(
+            "thread-scoped discuss wait requires both the thread name and its stable id"
+        ));
+    }
+    Ok((thread.to_string(), thread_id.to_string()))
+}
+
 pub fn subscribe_request(
     repo_id: &str,
     after_event_id: i64,
@@ -395,15 +411,16 @@ async fn apply_discussion_event(
 }
 
 fn is_hidden_discussion(error: &wire::ProtocolError) -> bool {
+    // Skip only a real visibility denial or a missing object. Unauthenticated
+    // / expired credentials are fatal: skipping would advance the watermark
+    // and permanently miss the discussion after re-auth.
     match error {
         wire::ProtocolError::AuthorizationFailed(_) | wire::ProtocolError::ObjectNotFound(_) => {
             true
         }
         wire::ProtocolError::RemoteFailure { code, .. } => matches!(
             code,
-            wire::RemoteFailureCode::PermissionDenied
-                | wire::RemoteFailureCode::NotFound
-                | wire::RemoteFailureCode::Unauthenticated
+            wire::RemoteFailureCode::PermissionDenied | wire::RemoteFailureCode::NotFound
         ),
         _ => false,
     }
