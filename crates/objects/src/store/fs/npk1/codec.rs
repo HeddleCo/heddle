@@ -21,6 +21,7 @@ use crate::{
 #[cfg(test)]
 thread_local! {
     static DECODED_RECORD_BLOCKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static DECODED_NAME_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[derive(Debug)]
@@ -63,27 +64,6 @@ impl Dictionary {
             .into_iter()
             .map(|(target, _)| target)
             .collect::<Vec<_>>();
-        let target_ids = targets
-            .iter()
-            .enumerate()
-            .map(|(index, target)| (*target, index as u32))
-            .collect();
-        Ok(Self {
-            names,
-            name_ids,
-            targets,
-            target_ids,
-        })
-    }
-
-    pub(super) fn decode(name_bytes: &[u8], target_bytes: &[u8]) -> Result<Self> {
-        let names = decode_names(name_bytes)?;
-        let targets = decode_targets(target_bytes)?;
-        let name_ids = names
-            .iter()
-            .enumerate()
-            .map(|(index, name)| (name.clone(), index as u32))
-            .collect();
         let target_ids = targets
             .iter()
             .enumerate()
@@ -156,107 +136,311 @@ impl Dictionary {
     }
 }
 
-fn decode_names(bytes: &[u8]) -> Result<Vec<String>> {
-    if checked_slice(bytes, 0, 4, "name dictionary magic")? != NAME_MAGIC {
-        return Err(invalid("invalid name dictionary magic"));
-    }
-    let count = read_u32(bytes, 4, "name count")? as usize;
-    if count > bytes.len() / 2 {
-        return Err(invalid("name count exceeds dictionary bytes"));
-    }
-    let restart = read_u16(bytes, 8, "name restart interval")? as usize;
-    if restart != NAME_RESTART {
-        return Err(invalid("unsupported name restart interval"));
-    }
-    if read_u16(bytes, 10, "name dictionary reserved field")? != 0 {
-        return Err(invalid("non-zero name dictionary reserved field"));
-    }
-    let block_count = read_u32(bytes, 12, "name restart count")? as usize;
-    if block_count != count.div_ceil(NAME_RESTART) {
-        return Err(invalid("name restart count mismatch"));
-    }
-    let offsets_len = block_count
-        .checked_mul(4)
-        .ok_or_else(|| invalid("name restart table overflow"))?;
-    let payload_start = 16usize
-        .checked_add(offsets_len)
-        .ok_or_else(|| invalid("name dictionary header overflow"))?;
-    let payload = bytes
-        .get(payload_start..)
-        .ok_or_else(|| invalid("truncated name dictionary payload"))?;
-    let mut restart_offsets = Vec::with_capacity(block_count);
-    for index in 0..block_count {
-        restart_offsets.push(read_u32(bytes, 16 + index * 4, "name restart offset")? as usize);
-    }
-    if restart_offsets.first().copied().unwrap_or_default() != 0
-        || restart_offsets.windows(2).any(|pair| pair[0] >= pair[1])
-        || restart_offsets
-            .last()
-            .is_some_and(|offset| *offset >= payload.len())
-    {
-        return Err(invalid("invalid name restart offsets"));
+#[derive(Clone, Copy, Debug)]
+pub(super) struct NameDictionary {
+    count: usize,
+    block_count: usize,
+    payload_start: usize,
+    len: usize,
+}
+
+impl NameDictionary {
+    pub(super) fn decode(bytes: &[u8]) -> Result<Self> {
+        if checked_slice(bytes, 0, 4, "name dictionary magic")? != NAME_MAGIC {
+            return Err(invalid("invalid name dictionary magic"));
+        }
+        let count = read_u32(bytes, 4, "name count")? as usize;
+        if count > bytes.len() / 2 {
+            return Err(invalid("name count exceeds dictionary bytes"));
+        }
+        let restart = read_u16(bytes, 8, "name restart interval")? as usize;
+        if restart != NAME_RESTART {
+            return Err(invalid("unsupported name restart interval"));
+        }
+        if read_u16(bytes, 10, "name dictionary reserved field")? != 0 {
+            return Err(invalid("non-zero name dictionary reserved field"));
+        }
+        let block_count = read_u32(bytes, 12, "name restart count")? as usize;
+        if block_count != count.div_ceil(NAME_RESTART) {
+            return Err(invalid("name restart count mismatch"));
+        }
+        let offsets_len = block_count
+            .checked_mul(4)
+            .ok_or_else(|| invalid("name restart table overflow"))?;
+        let payload_start = 16usize
+            .checked_add(offsets_len)
+            .ok_or_else(|| invalid("name dictionary header overflow"))?;
+        if payload_start > bytes.len() || (count == 0) != (payload_start == bytes.len()) {
+            return Err(invalid("truncated name dictionary payload"));
+        }
+        Ok(Self {
+            count,
+            block_count,
+            payload_start,
+            len: bytes.len(),
+        })
     }
 
-    let mut names = Vec::with_capacity(count);
-    for block_index in 0..block_count {
-        let block_start = restart_offsets[block_index];
-        let block_end = restart_offsets
-            .get(block_index + 1)
-            .copied()
-            .unwrap_or(payload.len());
-        let block = payload
-            .get(block_start..block_end)
-            .ok_or_else(|| invalid("name restart block out of bounds"))?;
-        let rows = NAME_RESTART.min(count - names.len());
+    pub(super) fn lookup(
+        &self,
+        bytes: &[u8],
+        wanted: &str,
+        mut verify: impl FnMut(usize, usize) -> Result<()>,
+    ) -> Result<Option<u32>> {
+        self.check_bytes(bytes)?;
+        let mut low = 0usize;
+        let mut high = self.block_count;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let (start, end) = self.block_bounds(bytes, middle, &mut verify)?;
+            verify(start, end - start)?;
+            let first = first_name(checked_slice(
+                bytes,
+                start,
+                end - start,
+                "name restart block",
+            )?)?;
+            if first <= wanted {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        let Some(block_index) = low.checked_sub(1) else {
+            return Ok(None);
+        };
+        let (start, end) = self.block_bounds(bytes, block_index, &mut verify)?;
+        verify(start, end - start)?;
+        let block = checked_slice(bytes, start, end - start, "name restart block")?;
+        let rows = NAME_RESTART.min(self.count - block_index * NAME_RESTART);
         let mut offset = 0usize;
         let mut previous = String::new();
-        for ordinal in 0..rows {
-            let prefix = take_varint(block, &mut offset)?;
-            let suffix_len = take_varint(block, &mut offset)?;
-            if ordinal == 0 && prefix != 0 {
-                return Err(invalid("name restart row has a prefix"));
+        for row in 0..rows {
+            decode_name_row(block, &mut offset, row, &mut previous)?;
+            match previous.as_str().cmp(wanted) {
+                std::cmp::Ordering::Less => {}
+                std::cmp::Ordering::Equal => {
+                    let ordinal = block_index
+                        .checked_mul(NAME_RESTART)
+                        .and_then(|value| value.checked_add(row))
+                        .ok_or_else(|| invalid("name dictionary ordinal overflow"))?;
+                    return u32::try_from(ordinal)
+                        .map(Some)
+                        .map_err(|_| invalid("name dictionary ordinal overflow"));
+                }
+                std::cmp::Ordering::Greater => return Ok(None),
             }
-            if prefix > previous.len() || !previous.is_char_boundary(prefix) {
-                return Err(invalid("name prefix is not a valid string boundary"));
-            }
-            let suffix = checked_slice(block, offset, suffix_len, "name suffix")?;
-            offset += suffix_len;
-            let suffix = std::str::from_utf8(suffix)
-                .map_err(|error| invalid(format!("name suffix is not UTF-8: {error}")))?;
-            let mut name = previous[..prefix].to_string();
-            name.push_str(suffix);
-            if names.last().is_some_and(|prior| prior >= &name) {
-                return Err(invalid("name dictionary is not strictly sorted"));
-            }
-            previous = name.clone();
-            names.push(name);
         }
         if offset != block.len() {
             return Err(invalid("name restart block has trailing bytes"));
         }
+        Ok(None)
     }
-    if names.len() != count {
-        return Err(invalid("name dictionary count mismatch"));
+
+    pub(super) fn decode_block(
+        &self,
+        bytes: &[u8],
+        ordinal: u32,
+        mut verify: impl FnMut(usize, usize) -> Result<()>,
+    ) -> Result<(usize, Vec<String>)> {
+        self.check_bytes(bytes)?;
+        let ordinal = ordinal as usize;
+        if ordinal >= self.count {
+            return Err(invalid("row name ordinal out of bounds"));
+        }
+        let block_index = ordinal / NAME_RESTART;
+        let (start, end) = self.block_bounds(bytes, block_index, &mut verify)?;
+        verify(start, end - start)?;
+        let block = checked_slice(bytes, start, end - start, "name restart block")?;
+        let rows = NAME_RESTART.min(self.count - block_index * NAME_RESTART);
+        let mut names = Vec::with_capacity(rows);
+        let mut offset = 0usize;
+        let mut previous = String::new();
+        for row in 0..rows {
+            decode_name_row(block, &mut offset, row, &mut previous)?;
+            names.push(previous.clone());
+        }
+        if offset != block.len() {
+            return Err(invalid("name restart block has trailing bytes"));
+        }
+        Ok((block_index, names))
     }
-    Ok(names)
+
+    pub(super) fn validate(
+        &self,
+        bytes: &[u8],
+        mut verify: impl FnMut(usize, usize) -> Result<()>,
+    ) -> Result<()> {
+        self.check_bytes(bytes)?;
+        let mut previous_global = String::new();
+        let mut decoded = 0usize;
+        for block_index in 0..self.block_count {
+            let (start, end) = self.block_bounds(bytes, block_index, &mut verify)?;
+            verify(start, end - start)?;
+            let block = checked_slice(bytes, start, end - start, "name restart block")?;
+            let rows = NAME_RESTART.min(self.count - decoded);
+            let mut offset = 0usize;
+            let mut previous = String::new();
+            for row in 0..rows {
+                decode_name_row(block, &mut offset, row, &mut previous)?;
+                if decoded > 0 && previous_global >= previous {
+                    return Err(invalid("name dictionary is not strictly sorted"));
+                }
+                previous_global.clone_from(&previous);
+                decoded += 1;
+            }
+            if offset != block.len() {
+                return Err(invalid("name restart block has trailing bytes"));
+            }
+        }
+        if decoded != self.count {
+            return Err(invalid("name dictionary count mismatch"));
+        }
+        Ok(())
+    }
+
+    fn check_bytes(&self, bytes: &[u8]) -> Result<()> {
+        if bytes.len() != self.len {
+            return Err(invalid("name dictionary view length changed"));
+        }
+        Ok(())
+    }
+
+    fn block_bounds(
+        &self,
+        bytes: &[u8],
+        block_index: usize,
+        verify: &mut impl FnMut(usize, usize) -> Result<()>,
+    ) -> Result<(usize, usize)> {
+        if block_index >= self.block_count {
+            return Err(invalid("name restart block ordinal out of bounds"));
+        }
+        let row = 16usize
+            .checked_add(
+                block_index
+                    .checked_mul(4)
+                    .ok_or_else(|| invalid("name restart table overflow"))?,
+            )
+            .ok_or_else(|| invalid("name restart table overflow"))?;
+        let table_len = if block_index + 1 < self.block_count {
+            8
+        } else {
+            4
+        };
+        verify(row, table_len)?;
+        let start = self
+            .payload_start
+            .checked_add(read_u32(bytes, row, "name restart offset")? as usize)
+            .ok_or_else(|| invalid("name restart offset overflow"))?;
+        let end = if block_index + 1 < self.block_count {
+            self.payload_start
+                .checked_add(read_u32(bytes, row + 4, "name restart offset")? as usize)
+                .ok_or_else(|| invalid("name restart offset overflow"))?
+        } else {
+            self.len
+        };
+        if (block_index == 0 && start != self.payload_start) || start >= end || end > self.len {
+            return Err(invalid("invalid name restart offsets"));
+        }
+        Ok((start, end))
+    }
 }
 
-fn decode_targets(bytes: &[u8]) -> Result<Vec<[u8; 32]>> {
-    if checked_slice(bytes, 0, 4, "target dictionary magic")? != TARGET_MAGIC {
-        return Err(invalid("invalid target dictionary magic"));
+fn first_name(block: &[u8]) -> Result<&str> {
+    let mut offset = 0usize;
+    if take_varint(block, &mut offset)? != 0 {
+        return Err(invalid("name restart row has a prefix"));
     }
-    let count = read_u32(bytes, 4, "target count")? as usize;
-    let expected = 8usize
-        .checked_add(
-            count
-                .checked_mul(32)
-                .ok_or_else(|| invalid("target dictionary size overflow"))?,
-        )
-        .ok_or_else(|| invalid("target dictionary size overflow"))?;
-    if bytes.len() != expected {
-        return Err(invalid("target dictionary length mismatch"));
+    let suffix_len = take_varint(block, &mut offset)?;
+    let suffix = checked_slice(block, offset, suffix_len, "name suffix")?;
+    std::str::from_utf8(suffix)
+        .map_err(|error| invalid(format!("name suffix is not UTF-8: {error}")))
+}
+
+fn decode_name_row(
+    block: &[u8],
+    offset: &mut usize,
+    row: usize,
+    previous: &mut String,
+) -> Result<()> {
+    #[cfg(test)]
+    DECODED_NAME_ROWS.with(|count| count.set(count.get().saturating_add(1)));
+    let prefix = take_varint(block, offset)?;
+    let suffix_len = take_varint(block, offset)?;
+    if row == 0 && prefix != 0 {
+        return Err(invalid("name restart row has a prefix"));
     }
-    Ok(bytes[8..].as_chunks::<32>().0.to_vec())
+    if prefix > previous.len() || !previous.is_char_boundary(prefix) {
+        return Err(invalid("name prefix is not a valid string boundary"));
+    }
+    let suffix = checked_slice(block, *offset, suffix_len, "name suffix")?;
+    *offset += suffix_len;
+    let suffix = std::str::from_utf8(suffix)
+        .map_err(|error| invalid(format!("name suffix is not UTF-8: {error}")))?;
+    previous.truncate(prefix);
+    previous.push_str(suffix);
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TargetDictionary {
+    count: usize,
+    len: usize,
+}
+
+impl TargetDictionary {
+    pub(super) fn decode(bytes: &[u8]) -> Result<Self> {
+        if checked_slice(bytes, 0, 4, "target dictionary magic")? != TARGET_MAGIC {
+            return Err(invalid("invalid target dictionary magic"));
+        }
+        let count = read_u32(bytes, 4, "target count")? as usize;
+        let expected = 8usize
+            .checked_add(
+                count
+                    .checked_mul(32)
+                    .ok_or_else(|| invalid("target dictionary size overflow"))?,
+            )
+            .ok_or_else(|| invalid("target dictionary size overflow"))?;
+        if bytes.len() != expected {
+            return Err(invalid("target dictionary length mismatch"));
+        }
+        Ok(Self {
+            count,
+            len: bytes.len(),
+        })
+    }
+
+    pub(super) fn target(
+        &self,
+        bytes: &[u8],
+        ordinal: usize,
+        mut verify: impl FnMut(usize, usize) -> Result<()>,
+    ) -> Result<[u8; 32]> {
+        if bytes.len() != self.len || ordinal >= self.count {
+            return Err(invalid("target dictionary ordinal out of bounds"));
+        }
+        let offset = 8usize
+            .checked_add(
+                ordinal
+                    .checked_mul(32)
+                    .ok_or_else(|| invalid("target dictionary offset overflow"))?,
+            )
+            .ok_or_else(|| invalid("target dictionary offset overflow"))?;
+        verify(offset, 32)?;
+        checked_slice(bytes, offset, 32, "target dictionary row")?
+            .try_into()
+            .map_err(|_| invalid("invalid target dictionary row"))
+    }
+
+    pub(super) fn count(&self) -> usize {
+        self.count
+    }
+}
+
+pub(super) trait DecodeDictionary {
+    fn name(&self, ordinal: u32) -> Result<String>;
+    fn target(&self, ordinal: usize) -> Result<[u8; 32]>;
+    fn target_count(&self) -> usize;
 }
 
 fn content_target(entry: &TreeEntry) -> Option<[u8; 32]> {
@@ -307,7 +491,7 @@ fn decode_entry(
     bytes: &[u8],
     offset: &mut usize,
     name: &str,
-    dictionary: &Dictionary,
+    dictionary: &impl DecodeDictionary,
 ) -> Result<TreeEntry> {
     let tag = *bytes
         .get(*offset)
@@ -325,11 +509,7 @@ fn decode_entry(
                 *offset += 32;
                 ContentHash::from_bytes(raw)
             } else {
-                let raw = dictionary
-                    .targets
-                    .get(encoded_target - 1)
-                    .ok_or_else(|| invalid("target dictionary ordinal out of bounds"))?;
-                ContentHash::from_bytes(*raw)
+                ContentHash::from_bytes(dictionary.target(encoded_target - 1)?)
             };
             match kind {
                 EntryType::Blob => TreeEntry::file(name, target, mode == FileMode::Executable)?,
@@ -380,6 +560,49 @@ fn decode_entry(
         return Err(invalid("entry mode and kind disagree"));
     }
     Ok(entry)
+}
+
+fn skip_entry(bytes: &[u8], offset: &mut usize, dictionary: &impl DecodeDictionary) -> Result<()> {
+    let tag = *bytes
+        .get(*offset)
+        .ok_or_else(|| invalid("truncated entry tag"))?;
+    *offset += 1;
+    let _mode = FileMode::from_byte(tag >> 3).ok_or_else(|| invalid("invalid entry mode"))?;
+    let kind = EntryType::from_byte(tag & 0x07).ok_or_else(|| invalid("invalid entry kind"))?;
+    match kind {
+        EntryType::Blob | EntryType::Tree | EntryType::Symlink => {
+            let encoded_target = take_varint(bytes, offset)?;
+            if encoded_target == 0 {
+                let _ = checked_slice(bytes, *offset, 32, "inline target")?;
+                *offset += 32;
+            } else if encoded_target > dictionary.target_count() {
+                return Err(invalid("target dictionary ordinal out of bounds"));
+            }
+        }
+        EntryType::Gitlink => {
+            let target_len = match *bytes
+                .get(*offset)
+                .ok_or_else(|| invalid("truncated gitlink format"))?
+            {
+                1 => 20,
+                2 => 32,
+                _ => return Err(invalid("invalid gitlink format")),
+            };
+            *offset += 1;
+            let _ = checked_slice(bytes, *offset, target_len, "gitlink target")?;
+            *offset += target_len;
+        }
+        EntryType::Spoollink => {
+            let spool_len = take_varint(bytes, offset)?;
+            let spool = checked_slice(bytes, *offset, spool_len, "spool id")?;
+            let _ = std::str::from_utf8(spool)
+                .map_err(|error| invalid(format!("spool id is not UTF-8: {error}")))?;
+            *offset += spool_len;
+            let _ = checked_slice(bytes, *offset, 32, "spool state")?;
+            *offset += 32;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -678,7 +901,7 @@ pub(super) fn record_base_distance(bytes: &[u8]) -> Result<Option<usize>> {
 fn decode_rows(
     bytes: &[u8],
     header: &RecordHeader,
-    dictionary: &Dictionary,
+    dictionary: &impl DecodeDictionary,
     decoder: &RecordDecoder,
 ) -> Result<Vec<TreeDeltaOp>> {
     let mut ops = Vec::new();
@@ -702,25 +925,22 @@ fn decode_rows(
                 return Err(invalid("record rows are not strictly sorted"));
             }
             previous_global = Some(name_id);
-            let name = dictionary
-                .names
-                .get(name_id as usize)
-                .ok_or_else(|| invalid("row name ordinal out of bounds"))?;
+            let name = dictionary.name(name_id)?;
             if header.tag == b'D' {
                 let opcode = *raw
                     .get(offset)
                     .ok_or_else(|| invalid("truncated delta opcode"))?;
                 offset += 1;
                 ops.push(match opcode {
-                    0 => TreeDeltaOp::Remove(name.clone()),
-                    1 => TreeDeltaOp::Upsert(decode_entry(&raw, &mut offset, name, dictionary)?),
+                    0 => TreeDeltaOp::Remove(name),
+                    1 => TreeDeltaOp::Upsert(decode_entry(&raw, &mut offset, &name, dictionary)?),
                     _ => return Err(invalid("invalid delta opcode")),
                 });
             } else {
                 ops.push(TreeDeltaOp::Upsert(decode_entry(
                     &raw,
                     &mut offset,
-                    name,
+                    &name,
                     dictionary,
                 )?));
             }
@@ -732,7 +952,7 @@ fn decode_rows(
 
 pub(super) fn decode_anchor(
     bytes: &[u8],
-    dictionary: &Dictionary,
+    dictionary: &impl DecodeDictionary,
     decoder: &RecordDecoder,
 ) -> Result<Tree> {
     let header = parse_record_header(bytes)?;
@@ -757,7 +977,7 @@ pub(super) fn decode_anchor(
 pub(super) fn decode_delta(
     bytes: &[u8],
     base: &Tree,
-    dictionary: &Dictionary,
+    dictionary: &impl DecodeDictionary,
     decoder: &RecordDecoder,
 ) -> Result<Tree> {
     let header = parse_record_header(bytes)?;
@@ -786,8 +1006,9 @@ pub(super) enum LookupState {
 
 pub(super) fn lookup_record(
     bytes: &[u8],
-    dictionary: &Dictionary,
+    dictionary: &impl DecodeDictionary,
     wanted_name: u32,
+    wanted: &str,
     decoder: &RecordDecoder,
 ) -> Result<(LookupState, Option<TreeEntry>)> {
     let header = parse_record_header(bytes)?;
@@ -812,10 +1033,9 @@ pub(super) fn lookup_record(
                 .checked_add(encoded_name)
                 .ok_or_else(|| invalid("lookup name ordinal overflow"))?
         };
-        let name = dictionary
-            .names
-            .get(name_id as usize)
-            .ok_or_else(|| invalid("lookup name ordinal out of bounds"))?;
+        if name_id > wanted_name {
+            break;
+        }
         if header.tag == b'D' {
             let opcode = *raw
                 .get(offset)
@@ -828,21 +1048,20 @@ pub(super) fn lookup_record(
                     }
                 }
                 1 => {
-                    let entry = decode_entry(&raw, &mut offset, name, dictionary)?;
                     if name_id == wanted_name {
+                        let entry = decode_entry(&raw, &mut offset, wanted, dictionary)?;
                         return Ok((LookupState::Found, Some(entry)));
                     }
+                    skip_entry(&raw, &mut offset, dictionary)?;
                 }
                 _ => return Err(invalid("invalid lookup opcode")),
             }
         } else {
-            let entry = decode_entry(&raw, &mut offset, name, dictionary)?;
             if name_id == wanted_name {
+                let entry = decode_entry(&raw, &mut offset, wanted, dictionary)?;
                 return Ok((LookupState::Found, Some(entry)));
             }
-        }
-        if name_id > wanted_name {
-            break;
+            skip_entry(&raw, &mut offset, dictionary)?;
         }
         ordinal += 1;
     }
@@ -857,6 +1076,16 @@ pub(super) fn reset_decoded_record_blocks() {
 #[cfg(test)]
 pub(super) fn decoded_record_blocks() -> usize {
     DECODED_RECORD_BLOCKS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(super) fn reset_decoded_name_rows() {
+    DECODED_NAME_ROWS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn decoded_name_rows() -> usize {
+    DECODED_NAME_ROWS.with(std::cell::Cell::get)
 }
 
 pub(super) fn note_tree_dictionary_rows(

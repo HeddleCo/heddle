@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
+    cell::RefCell,
     collections::HashSet,
     fs,
     fs::File,
@@ -16,8 +17,8 @@ use super::{
     MAX_CHAIN_DEPTH, RECORD_BLOCK_ENTRIES, TRAILER_HEADER_LEN, TRAILER_MAGIC, VERSION,
     checked_slice,
     codec::{
-        Dictionary, LookupState, RecordDecoder, decode_anchor, decode_delta, lookup_record,
-        parse_record_header, record_base_distance,
+        DecodeDictionary, LookupState, NameDictionary, RecordDecoder, TargetDictionary,
+        decode_anchor, decode_delta, lookup_record, parse_record_header, record_base_distance,
     },
     invalid, read_u16, read_u32, read_u64, usize_from_u64,
 };
@@ -26,18 +27,20 @@ use crate::{
     store::{HeddleError, Result},
 };
 
-type DecodedIndex = (Vec<([u8; 32], u32)>, Vec<u64>);
-
 pub(crate) struct Npk1Pack {
     mmap: Mmap,
-    dictionary: Dictionary,
+    names: NameDictionary,
+    targets: TargetDictionary,
+    name_offset: usize,
+    target_offset: usize,
+    record_dictionary_offset: usize,
     record_decoder: RecordDecoder,
     records_offset: usize,
-    record_offsets: Vec<u64>,
-    object_index: Vec<([u8; 32], u32)>,
+    index_offset: usize,
+    index: PackIndex,
     trailer_offset: usize,
-    chunk_hashes: Vec<[u8; CHECKSUM_LEN]>,
-    verified_chunks: Mutex<Vec<bool>>,
+    checksum: ChecksumManifest,
+    verified_chunks: Mutex<HashSet<usize>>,
 }
 
 impl Npk1Pack {
@@ -45,7 +48,7 @@ impl Npk1Pack {
         Self::open_with_validation(path, true)
     }
 
-    fn open_direct(path: &Path) -> Result<Self> {
+    pub(super) fn open_direct(path: &Path) -> Result<Self> {
         Self::open_with_validation(path, false)
     }
 
@@ -117,12 +120,12 @@ impl Npk1Pack {
         {
             return Err(invalid("invalid pack section offsets"));
         }
-        let chunk_hashes = decode_checksum_trailer(&bytes[trailer_offset..], trailer_offset)?;
-        let mut verified_chunks = vec![false; chunk_hashes.len()];
+        let checksum = decode_checksum_trailer(&bytes[trailer_offset..], trailer_offset)?;
+        let mut verified_chunks = HashSet::new();
         verify_range_impl(
             bytes,
             trailer_offset,
-            &chunk_hashes,
+            checksum,
             &mut verified_chunks,
             0,
             HEADER_LEN,
@@ -130,76 +133,98 @@ impl Npk1Pack {
         verify_range_impl(
             bytes,
             trailer_offset,
-            &chunk_hashes,
+            checksum,
             &mut verified_chunks,
             name_offset,
-            records_offset - name_offset,
+            16,
         )?;
         verify_range_impl(
             bytes,
             trailer_offset,
-            &chunk_hashes,
+            checksum,
+            &mut verified_chunks,
+            target_offset,
+            8,
+        )?;
+        verify_range_impl(
+            bytes,
+            trailer_offset,
+            checksum,
+            &mut verified_chunks,
+            record_dictionary_offset,
+            records_offset - record_dictionary_offset,
+        )?;
+        let names = NameDictionary::decode(&bytes[name_offset..target_offset])?;
+        let targets = TargetDictionary::decode(&bytes[target_offset..record_dictionary_offset])?;
+        let record_decoder = RecordDecoder::new(&bytes[record_dictionary_offset..records_offset]);
+        let index_header_len = (16 + 256 * 4).min(trailer_offset - index_offset);
+        verify_range_impl(
+            bytes,
+            trailer_offset,
+            checksum,
             &mut verified_chunks,
             index_offset,
-            trailer_offset - index_offset,
+            index_header_len,
         )?;
-        let dictionary = Dictionary::decode(
-            &bytes[name_offset..target_offset],
-            &bytes[target_offset..record_dictionary_offset],
-        )?;
-        let record_decoder = RecordDecoder::new(&bytes[record_dictionary_offset..records_offset]);
-        let (object_index, record_offsets) = decode_index(
-            &bytes[index_offset..trailer_offset],
-            object_count,
-            index_offset - records_offset,
-        )?;
+        let index = PackIndex::decode(&bytes[index_offset..trailer_offset], object_count)?;
         let pack = Self {
             mmap,
-            dictionary,
+            names,
+            targets,
+            name_offset,
+            target_offset,
+            record_dictionary_offset,
             record_decoder,
             records_offset,
-            record_offsets,
-            object_index,
+            index_offset,
+            index,
             trailer_offset,
-            chunk_hashes,
+            checksum,
             verified_chunks: Mutex::new(verified_chunks),
         };
         if verify_all {
             pack.verify_range(0, trailer_offset)?;
+            pack.validate_dictionaries()?;
+            pack.index
+                .validate(pack.index_bytes()?, index_offset - records_offset)?;
             pack.validate_record_graph()?;
         }
         Ok(pack)
     }
 
-    pub(super) fn contains(&self, expected: &ContentHash) -> bool {
-        self.object_index
-            .binary_search_by_key(expected.as_bytes(), |(hash, _)| *hash)
-            .is_ok()
+    pub(super) fn contains(&self, expected: &ContentHash) -> Result<bool> {
+        Ok(self.find_object(expected)?.is_some())
     }
 
     pub(crate) fn ids(&self) -> impl Iterator<Item = ContentHash> + '_ {
-        self.object_index
-            .iter()
-            .map(|(hash, _)| ContentHash::from_bytes(*hash))
+        (0..self.index.object_count()).map(|index| {
+            let row = self.index.entries_start + index * 36;
+            let absolute = self.index_offset + row;
+            let hash = std::array::from_fn(|byte| self.mmap[absolute + byte]);
+            ContentHash::from_bytes(hash)
+        })
     }
 
     fn object_ordinal(&self, expected: &ContentHash) -> Result<usize> {
-        let index = self
-            .object_index
-            .binary_search_by_key(expected.as_bytes(), |(hash, _)| *hash)
-            .map_err(|_| HeddleError::NotFound(format!("NPK1 tree {expected}")))?;
-        Ok(self.object_index[index].1 as usize)
+        self.find_object(expected)?
+            .ok_or_else(|| HeddleError::NotFound(format!("NPK1 tree {expected}")))
     }
 
     fn record_bounds(&self, ordinal: usize) -> Result<(usize, usize)> {
-        let start = *self
-            .record_offsets
-            .get(ordinal)
-            .ok_or_else(|| invalid("record ordinal out of bounds"))?;
-        let end = *self
-            .record_offsets
-            .get(ordinal + 1)
-            .ok_or_else(|| invalid("record end ordinal out of bounds"))?;
+        if ordinal >= self.index.object_count() {
+            return Err(invalid("record ordinal out of bounds"));
+        }
+        let index_bytes = self.index_bytes()?;
+        let start = self
+            .index
+            .record_offset(index_bytes, ordinal, |offset, len| {
+                self.verify_index_range(offset, len)
+            })?;
+        let end = self
+            .index
+            .record_offset(index_bytes, ordinal + 1, |offset, len| {
+                self.verify_index_range(offset, len)
+            })?;
         let start = usize_from_u64(start, "record offset")?;
         let len = usize_from_u64(
             end.checked_sub(start as u64)
@@ -232,16 +257,88 @@ impl Npk1Pack {
         verify_range_impl(
             &self.mmap,
             self.trailer_offset,
-            &self.chunk_hashes,
+            self.checksum,
             &mut verified,
             offset,
             len,
         )
     }
 
+    fn verify_index_range(&self, offset: usize, len: usize) -> Result<()> {
+        let absolute = self
+            .index_offset
+            .checked_add(offset)
+            .ok_or_else(|| invalid("absolute index offset overflow"))?;
+        self.verify_range(absolute, len)
+    }
+
+    fn index_bytes(&self) -> Result<&[u8]> {
+        checked_slice(
+            &self.mmap,
+            self.index_offset,
+            self.trailer_offset - self.index_offset,
+            "index",
+        )
+    }
+
+    fn verify_ids(&self) -> Result<()> {
+        let len = self
+            .index
+            .object_count()
+            .checked_mul(36)
+            .ok_or_else(|| invalid("index entries overflow"))?;
+        self.verify_index_range(self.index.entries_start, len)
+    }
+
+    fn find_object(&self, expected: &ContentHash) -> Result<Option<usize>> {
+        let bytes = self.index_bytes()?;
+        self.index.find(bytes, expected.as_bytes(), |offset, len| {
+            self.verify_index_range(offset, len)
+        })
+    }
+
+    fn mapped_dictionary(&self) -> MappedDictionary<'_> {
+        MappedDictionary {
+            pack: self,
+            names: RefCell::new(None),
+        }
+    }
+
+    fn name_ordinal(&self, wanted: &str) -> Result<Option<u32>> {
+        let bytes = checked_slice(
+            &self.mmap,
+            self.name_offset,
+            self.target_offset - self.name_offset,
+            "name dictionary",
+        )?;
+        self.names.lookup(bytes, wanted, |offset, len| {
+            let absolute = self
+                .name_offset
+                .checked_add(offset)
+                .ok_or_else(|| invalid("absolute name dictionary offset overflow"))?;
+            self.verify_range(absolute, len)
+        })
+    }
+
+    fn validate_dictionaries(&self) -> Result<()> {
+        let bytes = checked_slice(
+            &self.mmap,
+            self.name_offset,
+            self.target_offset - self.name_offset,
+            "name dictionary",
+        )?;
+        self.names.validate(bytes, |offset, len| {
+            let absolute = self
+                .name_offset
+                .checked_add(offset)
+                .ok_or_else(|| invalid("absolute name dictionary offset overflow"))?;
+            self.verify_range(absolute, len)
+        })
+    }
+
     fn validate_record_graph(&self) -> Result<()> {
-        let mut depths = Vec::with_capacity(self.object_index.len());
-        for ordinal in 0..self.object_index.len() {
+        let mut depths = Vec::with_capacity(self.index.object_count());
+        for ordinal in 0..self.index.object_count() {
             let record = self.record_unverified(ordinal)?;
             let _ = parse_record_header(record)?;
             let depth = match record_base_distance(record)? {
@@ -280,12 +377,13 @@ impl Npk1Pack {
         let anchor = chain
             .pop()
             .ok_or_else(|| invalid("empty resolution chain"))?;
-        let mut tree = decode_anchor(self.record(anchor)?, &self.dictionary, &self.record_decoder)?;
+        let dictionary = self.mapped_dictionary();
+        let mut tree = decode_anchor(self.record(anchor)?, &dictionary, &self.record_decoder)?;
         while let Some(delta) = chain.pop() {
             tree = decode_delta(
                 self.record(delta)?,
                 &tree,
-                &self.dictionary,
+                &dictionary,
                 &self.record_decoder,
             )?;
         }
@@ -300,9 +398,10 @@ impl Npk1Pack {
     }
 
     pub(super) fn lookup(&self, expected: &ContentHash, name: &str) -> Result<Option<TreeEntry>> {
-        let Some(wanted_name) = self.dictionary.name_ids.get(name).copied() else {
+        let Some(wanted_name) = self.name_ordinal(name)? else {
             return Ok(None);
         };
+        let dictionary = self.mapped_dictionary();
         let mut ordinal = self.object_ordinal(expected)?;
         let mut deltas = 0usize;
         loop {
@@ -332,7 +431,7 @@ impl Npk1Pack {
                 )?;
             }
             let (state, entry) =
-                lookup_record(record, &self.dictionary, wanted_name, &self.record_decoder)?;
+                lookup_record(record, &dictionary, wanted_name, name, &self.record_decoder)?;
             match state {
                 LookupState::Found => return Ok(entry),
                 LookupState::Removed => return Ok(None),
@@ -362,9 +461,90 @@ impl Npk1Pack {
         }
         Ok(depth)
     }
+
+    #[cfg(test)]
+    pub(super) fn verified_chunk_count(&self) -> Result<(usize, usize)> {
+        let verified = self
+            .verified_chunks
+            .lock()
+            .map_err(|_| invalid("checksum cache lock is poisoned"))?;
+        Ok((verified.len(), self.checksum.chunk_count))
+    }
 }
 
-fn decode_checksum_trailer(bytes: &[u8], data_len: usize) -> Result<Vec<[u8; CHECKSUM_LEN]>> {
+struct MappedDictionary<'a> {
+    pack: &'a Npk1Pack,
+    names: RefCell<Option<(usize, Vec<String>)>>,
+}
+
+impl DecodeDictionary for MappedDictionary<'_> {
+    fn name(&self, ordinal: u32) -> Result<String> {
+        let block_index = ordinal as usize / super::NAME_RESTART;
+        if let Some((_, names)) = self
+            .names
+            .borrow()
+            .as_ref()
+            .filter(|(cached, _)| *cached == block_index)
+        {
+            return names
+                .get(ordinal as usize % super::NAME_RESTART)
+                .cloned()
+                .ok_or_else(|| invalid("row name ordinal out of bounds"));
+        }
+        let bytes = checked_slice(
+            &self.pack.mmap,
+            self.pack.name_offset,
+            self.pack.target_offset - self.pack.name_offset,
+            "name dictionary",
+        )?;
+        let decoded = self
+            .pack
+            .names
+            .decode_block(bytes, ordinal, |offset, len| {
+                let absolute = self
+                    .pack
+                    .name_offset
+                    .checked_add(offset)
+                    .ok_or_else(|| invalid("absolute name dictionary offset overflow"))?;
+                self.pack.verify_range(absolute, len)
+            })?;
+        let name = decoded
+            .1
+            .get(ordinal as usize % super::NAME_RESTART)
+            .cloned()
+            .ok_or_else(|| invalid("row name ordinal out of bounds"))?;
+        self.names.replace(Some(decoded));
+        Ok(name)
+    }
+
+    fn target(&self, ordinal: usize) -> Result<[u8; 32]> {
+        let bytes = checked_slice(
+            &self.pack.mmap,
+            self.pack.target_offset,
+            self.pack.record_dictionary_offset - self.pack.target_offset,
+            "target dictionary",
+        )?;
+        self.pack.targets.target(bytes, ordinal, |offset, len| {
+            let absolute = self
+                .pack
+                .target_offset
+                .checked_add(offset)
+                .ok_or_else(|| invalid("absolute target dictionary offset overflow"))?;
+            self.pack.verify_range(absolute, len)
+        })
+    }
+
+    fn target_count(&self) -> usize {
+        self.pack.targets.count()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ChecksumManifest {
+    chunk_count: usize,
+}
+
+fn decode_checksum_trailer(bytes: &[u8], data_len: usize) -> Result<ChecksumManifest> {
     if checked_slice(bytes, 0, 4, "checksum manifest magic")? != TRAILER_MAGIC {
         return Err(invalid("invalid checksum manifest magic"));
     }
@@ -400,33 +580,17 @@ fn decode_checksum_trailer(bytes: &[u8], data_len: usize) -> Result<Vec<[u8; CHE
     {
         return Err(invalid("checksum manifest checksum mismatch"));
     }
-    let mut hashes = Vec::with_capacity(chunk_count);
-    for index in 0..chunk_count {
-        hashes.push(
-            checked_slice(
-                bytes,
-                TRAILER_HEADER_LEN + index * CHECKSUM_LEN,
-                CHECKSUM_LEN,
-                "checksum chunk hash",
-            )?
-            .try_into()
-            .map_err(|_| invalid("invalid checksum chunk hash"))?,
-        );
-    }
-    Ok(hashes)
+    Ok(ChecksumManifest { chunk_count })
 }
 
 fn verify_range_impl(
     bytes: &[u8],
     data_len: usize,
-    hashes: &[[u8; CHECKSUM_LEN]],
-    verified: &mut [bool],
+    manifest: ChecksumManifest,
+    verified: &mut HashSet<usize>,
     offset: usize,
     len: usize,
 ) -> Result<()> {
-    if hashes.len() != verified.len() {
-        return Err(invalid("checksum cache length mismatch"));
-    }
     let end = offset
         .checked_add(len)
         .ok_or_else(|| invalid("checksum range overflow"))?;
@@ -439,143 +603,264 @@ fn verify_range_impl(
     let first = offset / CHECKSUM_CHUNK_BYTES;
     let last = (end - 1) / CHECKSUM_CHUNK_BYTES;
     for index in first..=last {
-        if *verified
-            .get(index)
-            .ok_or_else(|| invalid("checksum chunk ordinal out of bounds"))?
-        {
+        if verified.contains(&index) {
             continue;
+        }
+        if index >= manifest.chunk_count {
+            return Err(invalid("checksum chunk ordinal out of bounds"));
         }
         let start = index
             .checked_mul(CHECKSUM_CHUNK_BYTES)
             .ok_or_else(|| invalid("checksum chunk offset overflow"))?;
         let chunk_end = start.saturating_add(CHECKSUM_CHUNK_BYTES).min(data_len);
         let chunk = checked_slice(bytes, start, chunk_end - start, "checksum chunk")?;
-        let expected = hashes
-            .get(index)
-            .ok_or_else(|| invalid("checksum hash ordinal out of bounds"))?;
+        let hash_offset = data_len
+            .checked_add(TRAILER_HEADER_LEN)
+            .and_then(|offset| {
+                index
+                    .checked_mul(CHECKSUM_LEN)
+                    .and_then(|row| offset.checked_add(row))
+            })
+            .ok_or_else(|| invalid("checksum hash offset overflow"))?;
+        let expected = checked_slice(bytes, hash_offset, CHECKSUM_LEN, "checksum chunk hash")?;
         if blake3::hash(chunk).as_bytes() != expected {
             return Err(invalid(format!("checksum mismatch in chunk {index}")));
         }
-        verified[index] = true;
+        verified.insert(index);
     }
     Ok(())
 }
 
-fn decode_index(bytes: &[u8], expected_objects: usize, records_len: usize) -> Result<DecodedIndex> {
-    if checked_slice(bytes, 0, 4, "index magic")? != INDEX_MAGIC {
-        return Err(invalid("invalid index magic"));
-    }
-    let object_count = read_u32(bytes, 4, "index object count")? as usize;
-    if object_count != expected_objects {
-        return Err(invalid("index object count disagrees with pack header"));
-    }
-    let escape_count = read_u32(bytes, 8, "large-offset count")? as usize;
-    if read_u32(bytes, 12, "index reserved field")? != 0 {
-        return Err(invalid("non-zero index reserved field"));
-    }
-    let entries_start = 16usize + 256 * 4;
-    let entries_len = object_count
-        .checked_mul(36)
-        .ok_or_else(|| invalid("index entries overflow"))?;
-    let offsets_start = entries_start
-        .checked_add(entries_len)
-        .ok_or_else(|| invalid("index offset table position overflow"))?;
-    let offsets_len = object_count
-        .checked_add(1)
-        .and_then(|count| count.checked_mul(4))
-        .ok_or_else(|| invalid("record offset table overflow"))?;
-    let escapes_start = offsets_start
-        .checked_add(offsets_len)
-        .ok_or_else(|| invalid("large-offset table position overflow"))?;
-    let escapes_len = escape_count
-        .checked_mul(8)
-        .ok_or_else(|| invalid("large-offset table overflow"))?;
-    let checksum_offset = escapes_start
-        .checked_add(escapes_len)
-        .ok_or_else(|| invalid("index checksum position overflow"))?;
-    if checksum_offset
-        .checked_add(CHECKSUM_LEN)
-        .is_none_or(|expected| expected != bytes.len())
-    {
-        return Err(invalid("index length mismatch"));
-    }
-    if blake3::hash(&bytes[..checksum_offset]).as_bytes()
-        != checked_slice(bytes, checksum_offset, CHECKSUM_LEN, "index checksum")?
-    {
-        return Err(invalid("index checksum mismatch"));
-    }
+#[derive(Clone, Copy)]
+struct PackIndex {
+    object_count: usize,
+    escape_count: usize,
+    entries_start: usize,
+    offsets_start: usize,
+    escapes_start: usize,
+    checksum_offset: usize,
+    len: usize,
+}
 
-    let mut fanout = [0u32; 256];
-    let mut previous_fanout = 0u32;
-    for (index, count) in fanout.iter_mut().enumerate() {
-        *count = read_u32(bytes, 16 + index * 4, "fanout row")?;
-        if *count < previous_fanout {
-            return Err(invalid("index fanout is not monotonic"));
+impl PackIndex {
+    fn decode(bytes: &[u8], expected_objects: usize) -> Result<Self> {
+        if checked_slice(bytes, 0, 4, "index magic")? != INDEX_MAGIC {
+            return Err(invalid("invalid index magic"));
         }
-        previous_fanout = *count;
-    }
-    if fanout[255] as usize != object_count {
-        return Err(invalid("index fanout total mismatch"));
-    }
-    let mut object_index = Vec::with_capacity(object_count);
-    let mut seen_ordinals = HashSet::with_capacity(object_count);
-    for index in 0..object_count {
-        let offset = entries_start + index * 36;
-        let hash: [u8; 32] = checked_slice(bytes, offset, 32, "index hash")?
-            .try_into()
-            .map_err(|_| invalid("invalid index hash"))?;
-        if object_index
-            .last()
-            .is_some_and(|(previous, _)| previous >= &hash)
+        let object_count = read_u32(bytes, 4, "index object count")? as usize;
+        if object_count != expected_objects {
+            return Err(invalid("index object count disagrees with pack header"));
+        }
+        let escape_count = read_u32(bytes, 8, "large-offset count")? as usize;
+        if read_u32(bytes, 12, "index reserved field")? != 0 {
+            return Err(invalid("non-zero index reserved field"));
+        }
+        let entries_start = 16usize + 256 * 4;
+        let entries_len = object_count
+            .checked_mul(36)
+            .ok_or_else(|| invalid("index entries overflow"))?;
+        let offsets_start = entries_start
+            .checked_add(entries_len)
+            .ok_or_else(|| invalid("index offset table position overflow"))?;
+        let offsets_len = object_count
+            .checked_add(1)
+            .and_then(|count| count.checked_mul(4))
+            .ok_or_else(|| invalid("record offset table overflow"))?;
+        let escapes_start = offsets_start
+            .checked_add(offsets_len)
+            .ok_or_else(|| invalid("large-offset table position overflow"))?;
+        let escapes_len = escape_count
+            .checked_mul(8)
+            .ok_or_else(|| invalid("large-offset table overflow"))?;
+        let checksum_offset = escapes_start
+            .checked_add(escapes_len)
+            .ok_or_else(|| invalid("index checksum position overflow"))?;
+        if checksum_offset
+            .checked_add(CHECKSUM_LEN)
+            .is_none_or(|expected| expected != bytes.len())
         {
-            return Err(invalid("index hashes are not strictly sorted"));
+            return Err(invalid("index length mismatch"));
         }
-        let ordinal = read_u32(bytes, offset + 32, "record ordinal")?;
-        if ordinal as usize >= object_count || !seen_ordinals.insert(ordinal) {
-            return Err(invalid("record ordinal is duplicate or out of bounds"));
+
+        let mut previous_fanout = 0u32;
+        for index in 0..256 {
+            let count = read_u32(bytes, 16 + index * 4, "fanout row")?;
+            if count < previous_fanout {
+                return Err(invalid("index fanout is not monotonic"));
+            }
+            previous_fanout = count;
         }
-        object_index.push((hash, ordinal));
-    }
-    let mut recomputed_fanout = [0u32; 256];
-    for (hash, _) in &object_index {
-        recomputed_fanout[hash[0] as usize] += 1;
-    }
-    let mut cumulative = 0u32;
-    for count in &mut recomputed_fanout {
-        cumulative += *count;
-        *count = cumulative;
-    }
-    if recomputed_fanout != fanout {
-        return Err(invalid("index fanout does not match its hashes"));
+        if previous_fanout as usize != object_count {
+            return Err(invalid("index fanout total mismatch"));
+        }
+        Ok(Self {
+            object_count,
+            escape_count,
+            entries_start,
+            offsets_start,
+            escapes_start,
+            checksum_offset,
+            len: bytes.len(),
+        })
     }
 
-    let escapes = (0..escape_count)
-        .map(|index| read_u64(bytes, escapes_start + index * 8, "large record offset"))
-        .collect::<Result<Vec<_>>>()?;
-    let mut record_offsets = Vec::with_capacity(object_count + 1);
-    for index in 0..=object_count {
-        let encoded = read_u32(bytes, offsets_start + index * 4, "record offset")?;
-        let offset = if encoded & LARGE_OFFSET_FLAG == 0 {
-            encoded as u64
+    fn object_count(self) -> usize {
+        self.object_count
+    }
+
+    fn find(
+        self,
+        bytes: &[u8],
+        wanted: &[u8; 32],
+        mut verify: impl FnMut(usize, usize) -> Result<()>,
+    ) -> Result<Option<usize>> {
+        self.check_bytes(bytes)?;
+        let bucket = wanted[0] as usize;
+        let fanout_row = 16 + bucket * 4;
+        verify(fanout_row, 4)?;
+        let mut high = read_u32(bytes, fanout_row, "fanout row")? as usize;
+        let mut low = if bucket == 0 {
+            0
         } else {
-            let escape = (encoded & !LARGE_OFFSET_FLAG) as usize;
-            *escapes
-                .get(escape)
-                .ok_or_else(|| invalid("large record offset ordinal out of bounds"))?
+            verify(fanout_row - 4, 4)?;
+            read_u32(bytes, fanout_row - 4, "fanout row")? as usize
         };
-        if record_offsets
-            .last()
-            .is_some_and(|previous| *previous >= offset)
-            && index > 0
-        {
-            return Err(invalid("record offsets are not strictly increasing"));
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let offset = self.entry_offset(middle)?;
+            verify(offset, 36)?;
+            let hash = self.hash(bytes, middle)?;
+            match hash.cmp(wanted) {
+                std::cmp::Ordering::Less => low = middle + 1,
+                std::cmp::Ordering::Greater => high = middle,
+                std::cmp::Ordering::Equal => {
+                    let ordinal = read_u32(bytes, offset + 32, "record ordinal")? as usize;
+                    if ordinal >= self.object_count {
+                        return Err(invalid("record ordinal out of bounds"));
+                    }
+                    return Ok(Some(ordinal));
+                }
+            }
         }
-        record_offsets.push(offset);
+        Ok(None)
     }
-    if record_offsets.first() != Some(&0) || record_offsets.last() != Some(&(records_len as u64)) {
-        return Err(invalid("record offsets do not span the record section"));
+
+    fn hash(self, bytes: &[u8], index: usize) -> Result<[u8; 32]> {
+        self.check_bytes(bytes)?;
+        let offset = self.entry_offset(index)?;
+        checked_slice(bytes, offset, 32, "index hash")?
+            .try_into()
+            .map_err(|_| invalid("invalid index hash"))
     }
-    Ok((object_index, record_offsets))
+
+    fn record_offset_range(self, ordinal: usize) -> Result<(usize, usize)> {
+        if ordinal > self.object_count {
+            return Err(invalid("record offset ordinal out of bounds"));
+        }
+        let offset = self
+            .offsets_start
+            .checked_add(
+                ordinal
+                    .checked_mul(4)
+                    .ok_or_else(|| invalid("record offset table overflow"))?,
+            )
+            .ok_or_else(|| invalid("record offset table overflow"))?;
+        Ok((offset, 4))
+    }
+
+    fn record_offset(
+        self,
+        bytes: &[u8],
+        ordinal: usize,
+        mut verify: impl FnMut(usize, usize) -> Result<()>,
+    ) -> Result<u64> {
+        self.check_bytes(bytes)?;
+        let (row, len) = self.record_offset_range(ordinal)?;
+        verify(row, len)?;
+        let encoded = read_u32(bytes, row, "record offset")?;
+        if encoded & LARGE_OFFSET_FLAG == 0 {
+            return Ok(encoded as u64);
+        }
+        let escape = (encoded & !LARGE_OFFSET_FLAG) as usize;
+        if escape >= self.escape_count {
+            return Err(invalid("large record offset ordinal out of bounds"));
+        }
+        let offset = self
+            .escapes_start
+            .checked_add(
+                escape
+                    .checked_mul(8)
+                    .ok_or_else(|| invalid("large-offset table overflow"))?,
+            )
+            .ok_or_else(|| invalid("large-offset table overflow"))?;
+        verify(offset, 8)?;
+        read_u64(bytes, offset, "large record offset")
+    }
+
+    fn validate(self, bytes: &[u8], records_len: usize) -> Result<()> {
+        self.check_bytes(bytes)?;
+        if blake3::hash(&bytes[..self.checksum_offset]).as_bytes()
+            != checked_slice(bytes, self.checksum_offset, CHECKSUM_LEN, "index checksum")?
+        {
+            return Err(invalid("index checksum mismatch"));
+        }
+        let mut seen_ordinals = HashSet::with_capacity(self.object_count);
+        let mut previous_hash = None;
+        let mut bucket_start = 0usize;
+        for bucket in 0..256usize {
+            let bucket_end = read_u32(bytes, 16 + bucket * 4, "fanout row")? as usize;
+            for index in bucket_start..bucket_end {
+                let hash = self.hash(bytes, index)?;
+                if hash[0] as usize != bucket
+                    || previous_hash.is_some_and(|previous| previous >= hash)
+                {
+                    return Err(invalid("index hashes or fanout are not strictly sorted"));
+                }
+                previous_hash = Some(hash);
+                let ordinal = read_u32(bytes, self.entry_offset(index)? + 32, "record ordinal")?;
+                if ordinal as usize >= self.object_count || !seen_ordinals.insert(ordinal) {
+                    return Err(invalid("record ordinal is duplicate or out of bounds"));
+                }
+            }
+            bucket_start = bucket_end;
+        }
+
+        let mut previous_offset = None;
+        for ordinal in 0..=self.object_count {
+            let offset = self.record_offset(bytes, ordinal, |_, _| Ok(()))?;
+            if ordinal == 0 && offset != 0 {
+                return Err(invalid("record offsets do not start at zero"));
+            }
+            if previous_offset.is_some_and(|previous| previous >= offset) && ordinal > 0 {
+                return Err(invalid("record offsets are not strictly increasing"));
+            }
+            previous_offset = Some(offset);
+        }
+        if previous_offset != Some(records_len as u64) {
+            return Err(invalid("record offsets do not span the record section"));
+        }
+        Ok(())
+    }
+
+    fn entry_offset(self, index: usize) -> Result<usize> {
+        if index >= self.object_count {
+            return Err(invalid("index entry ordinal out of bounds"));
+        }
+        self.entries_start
+            .checked_add(
+                index
+                    .checked_mul(36)
+                    .ok_or_else(|| invalid("index entry offset overflow"))?,
+            )
+            .ok_or_else(|| invalid("index entry offset overflow"))
+    }
+
+    fn check_bytes(self, bytes: &[u8]) -> Result<()> {
+        if bytes.len() != self.len {
+            return Err(invalid("index view length changed"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -641,7 +926,7 @@ impl Npk1Manager {
 
     pub(crate) fn has_tree(&self, hash: &ContentHash) -> Result<bool> {
         for cached in self.packs.iter().rev() {
-            if cached.open()?.contains(hash) {
+            if cached.open()?.contains(hash)? {
                 return Ok(true);
             }
         }
@@ -651,7 +936,7 @@ impl Npk1Manager {
     pub(crate) fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
         for cached in self.packs.iter().rev() {
             let pack = cached.open()?;
-            if pack.contains(hash) {
+            if pack.contains(hash)? {
                 return pack.resolve(hash).map(Some);
             }
         }
@@ -661,7 +946,7 @@ impl Npk1Manager {
     pub(crate) fn get_entry(&self, hash: &ContentHash, name: &str) -> Result<Option<TreeEntry>> {
         for cached in self.packs.iter().rev() {
             let pack = cached.open()?;
-            if pack.contains(hash) {
+            if pack.contains(hash)? {
                 return pack.lookup(hash, name);
             }
         }
@@ -671,7 +956,9 @@ impl Npk1Manager {
     pub(crate) fn list_ids(&self) -> Result<Vec<ContentHash>> {
         let mut ids = HashSet::new();
         for cached in &self.packs {
-            ids.extend(cached.open()?.ids());
+            let pack = cached.open()?;
+            pack.verify_ids()?;
+            ids.extend(pack.ids());
         }
         let mut ids = ids.into_iter().collect::<Vec<_>>();
         ids.sort();
