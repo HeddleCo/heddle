@@ -326,6 +326,9 @@ fn bootstrap_owner_root_wire_carries_agent_claim_binding_on_tag_5() {
 }
 
 #[test]
+// This deliberately exercises the legacy single-key device_public_key path.
+// Migrating CLI owner-root flows to the two-key model is a separate effort.
+#[allow(deprecated)]
 fn register_public_key_claim_sends_claim_deferred_human_on_tag_16() {
     let _home = IsolatedHome::new();
     finish_invite_create_from_response(
@@ -416,6 +419,9 @@ fn register_public_key_claim_refuses_a_replacement_seq0() {
 }
 
 #[test]
+// This deliberately exercises the legacy single-key device_public_key path.
+// Migrating CLI owner-root flows to the two-key model is a separate effort.
+#[allow(deprecated)]
 fn claim_prepares_register_public_key_claim_deferred_human_for_send() {
     let _home = IsolatedHome::new();
     finish_invite_create_from_response(
