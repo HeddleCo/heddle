@@ -274,7 +274,7 @@ fn discussions_from_pull_pack(
         Err(DiscussionError::UnsupportedVersion(version)) => Ok(PackedDiscussions::Unconsumable(
             format!("unsupported blob version {version}"),
         )),
-        Err(DiscussionError::Encoding(error)) if msgpack_named_map(blob.content()) => {
+        Err(DiscussionError::Encoding(error)) if named_map_version_skew(blob.content()) => {
             Ok(PackedDiscussions::Unconsumable(format!(
                 "blob encoding is not this client's DiscussionsBlob v1: {error}"
             )))
@@ -283,11 +283,23 @@ fn discussions_from_pull_pack(
     }
 }
 
-/// weft's v2 discussion root is a named-map MessagePack object. This client's
-/// v1 blob is a positional array. A leading map is version skew; a leading
-/// array (or anything else) that fails decode is corruption.
-fn msgpack_named_map(bytes: &[u8]) -> bool {
-    matches!(bytes.first(), Some(0x80..=0x8f | 0xde | 0xdf))
+/// weft's v2 root is a named map with a version that is not this client's
+/// positional `DiscussionsBlob` v1. Peek enough of that map to identify skew
+/// (`format_version` / `version` ≠ 1). An empty or keyless map is corruption.
+fn named_map_version_skew(bytes: &[u8]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Peek {
+        #[serde(default)]
+        format_version: Option<u8>,
+        #[serde(default)]
+        version: Option<u8>,
+    }
+    let Ok(peek) = rmp_serde::from_slice::<Peek>(bytes) else {
+        return false;
+    };
+    peek.format_version
+        .or(peek.version)
+        .is_some_and(|version| version != DiscussionsBlob::FORMAT_VERSION)
 }
 
 pub(crate) fn context_from_pull_pack(
@@ -3693,6 +3705,43 @@ mod pull_bootstrap_tests {
     }
 
     #[test]
+    fn packed_bootstrap_falls_back_on_foreign_named_map_version() {
+        let (_temp, repo, state_id) = seed_snapshot();
+        #[derive(serde::Serialize)]
+        struct ForeignRoot {
+            version: u8,
+            kind: String,
+        }
+        let bytes = rmp_serde::to_vec_named(&ForeignRoot {
+            version: 2,
+            kind: "DiscussionRootFrame".to_string(),
+        })
+        .expect("encode foreign named map");
+        let hash = repo
+            .store()
+            .put_blob(&Blob::from(bytes))
+            .expect("store foreign root");
+        repo.put_state_attachment(&StateAttachment {
+            state_id,
+            body: StateAttachmentBody::Discussions(hash),
+            attribution: Attribution::human(Principal::new("Ada", "ada@example.com")),
+            created_at: Utc::now(),
+            supersedes: None,
+        })
+        .expect("attach foreign root");
+
+        let resolved = packed_metadata()
+            .resolve(&repo, Some(state_id))
+            .expect("positively identified v2 named map must not clone-kill");
+        assert!(resolved.discussions.is_none());
+        let warning = resolved.discussions_pack_fallback.expect("warned fallback");
+        assert!(
+            warning.contains("blob encoding is not this client's DiscussionsBlob v1"),
+            "{warning}"
+        );
+    }
+
+    #[test]
     fn packed_bootstrap_fail_closes_when_discussions_blob_is_corrupt() {
         let (_temp, repo, state_id) = seed_snapshot();
         let mut discussion = sample_discussion(state_id);
@@ -3757,10 +3806,6 @@ mod pull_bootstrap_tests {
             .encode()
             .expect("encode v1");
         let truncated = &valid[..valid.len().saturating_sub(2)];
-        assert!(
-            !msgpack_named_map(truncated),
-            "truncated v1 must stay an array, not a named map"
-        );
         let hash = repo
             .store()
             .put_blob(&Blob::from(truncated.to_vec()))
@@ -3777,6 +3822,28 @@ mod pull_bootstrap_tests {
         packed_metadata()
             .resolve(&repo, Some(state_id))
             .expect_err("truncated v1 positional blob is corruption, not version skew");
+    }
+
+    #[test]
+    fn packed_bootstrap_fail_closes_on_empty_named_map() {
+        let (_temp, repo, state_id) = seed_snapshot();
+        // MessagePack empty fixmap (`0x80`): map-shaped but not a v2 schema.
+        let hash = repo
+            .store()
+            .put_blob(&Blob::from(vec![0x80]))
+            .expect("store empty map");
+        repo.put_state_attachment(&StateAttachment {
+            state_id,
+            body: StateAttachmentBody::Discussions(hash),
+            attribution: Attribution::human(Principal::new("Ada", "ada@example.com")),
+            created_at: Utc::now(),
+            supersedes: None,
+        })
+        .expect("attach empty map");
+
+        packed_metadata()
+            .resolve(&repo, Some(state_id))
+            .expect_err("empty map is corruption, not version skew");
     }
 
     #[test]
