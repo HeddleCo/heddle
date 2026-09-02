@@ -794,6 +794,29 @@ fn fat_append_on_unknown_discussion_is_not_self_contained() {
 }
 
 #[test]
+fn fat_append_with_turn_id_but_zero_seq_is_a_doorbell() {
+    let event = RepoEvent {
+        event_type: "turn.appended".into(),
+        payload_json: serde_json::json!({
+            "discussion_id": "disc-9",
+            "file": "lib.rs",
+            "symbol": "run",
+            "body": "second turn",
+            "author_name": "Ada",
+            "author_email": "ada@example.com",
+            "posted_at": 1_700_000_010,
+            "turn_id": "turn-append",
+            "turn_seq": 0
+        })
+        .to_string(),
+        ..RepoEvent::default()
+    };
+    let payload = parse_event_payload(&event);
+    assert!(super::discussion_from_payload("turn.appended", &payload, true).is_none());
+    assert!(super::discussion_from_payload("turn.appended", &payload, false).is_none());
+}
+
+#[test]
 fn opened_without_file_or_symbol_is_a_doorbell() {
     let event = RepoEvent {
         event_type: "discussion.opened".into(),
@@ -856,7 +879,7 @@ fn filtered_cursor_slot_does_not_share_the_unfiltered_watermark() {
 }
 
 #[test]
-fn unfiltered_authority_cursor_falls_back_to_legacy_repo_path() {
+fn authority_scoped_cursor_does_not_inherit_the_legacy_repo_path_slot() {
     let temp = TempDir::new().unwrap();
     let legacy = DiscussionEventCursor {
         after_event_id: 7,
@@ -864,30 +887,19 @@ fn unfiltered_authority_cursor_falls_back_to_legacy_repo_path() {
         bootstrapped: true,
     };
     save_cursor(temp.path(), "acme/widgets", &legacy).unwrap();
-    let scoped = DiscussionCursorScope {
-        authority: "weft.example:443".into(),
+    let other_host = DiscussionCursorScope {
+        authority: "other.example:443".into(),
         repo_path: "acme/widgets".into(),
         ..DiscussionCursorScope::default()
     };
     assert_eq!(
-        load_scoped_cursor(temp.path(), &scoped).unwrap(),
+        load_scoped_cursor(temp.path(), &other_host).unwrap(),
+        DiscussionEventCursor::default(),
+        "a different hosted authority must not inherit the bare repo_path cursor"
+    );
+    assert_eq!(
+        load_cursor(temp.path(), "acme/widgets").unwrap(),
         legacy
-    );
-    let advanced = DiscussionEventCursor {
-        after_event_id: 9,
-        repo_id: "repo-1".into(),
-        bootstrapped: true,
-    };
-    save_scoped_cursor(temp.path(), &scoped, &advanced).unwrap();
-    assert_eq!(
-        load_cursor(temp.path(), "acme/widgets").unwrap().after_event_id,
-        7
-    );
-    assert_eq!(
-        load_scoped_cursor(temp.path(), &scoped)
-            .unwrap()
-            .after_event_id,
-        9
     );
 }
 
@@ -1058,6 +1070,83 @@ async fn incomplete_resolve_without_resolution_doorbell_fetches() {
             .as_slice(),
         ["disc-res"]
     );
+
+    client.close().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn fat_append_with_turn_id_and_zero_seq_fetches_and_keeps_the_new_turn() {
+    let (_temp, repo) = seed_repo();
+    let mut fixture = CollaborationFixture::default();
+    fixture.discussions.insert(
+        "disc-zero".to_string(),
+        proto_discussion(
+            "disc-zero",
+            &[
+                ("turn-open", "first turn", 1),
+                ("turn-append", "second turn", 2),
+            ],
+        ),
+    );
+    let (mut client, server, fixture) =
+        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
+
+    consume_discussion_event(
+        &repo,
+        &mut client,
+        "acme/widgets",
+        &opened_event(1, "disc-zero", "first turn", "turn-open"),
+    )
+    .await
+    .unwrap();
+
+    let fat_zero = RepoEvent {
+        event_id: 2,
+        repo_id: "repo-1".to_string(),
+        event_type: "turn.appended".to_string(),
+        kind: RepoEventKind::DiscussionTurn as i32,
+        payload_json: serde_json::json!({
+            "discussion_id": "disc-zero",
+            "file": "lib.rs",
+            "symbol": "run",
+            "body": "second turn",
+            "author_name": "Ada",
+            "author_email": "ada@example.com",
+            "posted_at": 1_700_000_010,
+            "turn_id": "turn-append",
+            "turn_seq": 0
+        })
+        .to_string(),
+        ..RepoEvent::default()
+    };
+    let outcome = consume_discussion_event(&repo, &mut client, "acme/widgets", &fat_zero)
+        .await
+        .unwrap();
+    assert!(
+        outcome.applied(),
+        "a new turn_id must be kept, not dropped as ordinal 0"
+    );
+    assert_eq!(
+        fixture
+            .get_requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_slice(),
+        ["disc-zero"]
+    );
+
+    let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+    let discussion = store
+        .materialize()
+        .unwrap()
+        .discussions
+        .into_values()
+        .next()
+        .unwrap();
+    assert_eq!(discussion.turns.len(), 2);
+    assert_eq!(discussion.turns[0].1.body, "first turn");
+    assert_eq!(discussion.turns[1].1.body, "second turn");
 
     client.close().await;
     server.await.unwrap();

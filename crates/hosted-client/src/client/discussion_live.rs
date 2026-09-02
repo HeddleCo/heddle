@@ -200,23 +200,19 @@ pub fn save_cursor(
 
 /// Load the watermark for `scope`.
 ///
-/// Unfiltered + authority falls back to the bare `repo_path` slot so files
-/// written before authority scoping still resume. Filtered scopes never fall
-/// back to the unfiltered watermark.
+/// Filtered scopes never fall back to the unfiltered watermark. An
+/// authority-scoped unfiltered wait also does not inherit the bare
+/// `repo_path` slot — that file has no hosted authority, so applying it
+/// would skip events on a different remote that shares owner/name.
 pub fn load_scoped_cursor(
     heddle_dir: &Path,
     scope: &DiscussionCursorScope,
 ) -> Result<DiscussionEventCursor> {
-    let cursors = load_cursors(heddle_dir)?;
-    if let Some(cursor) = cursors.repos.get(&scope.slot()) {
-        return Ok(cursor.clone());
-    }
-    if !scope.is_filtered() && !scope.authority.is_empty() {
-        if let Some(cursor) = cursors.repos.get(&scope.repo_path) {
-            return Ok(cursor.clone());
-        }
-    }
-    Ok(DiscussionEventCursor::default())
+    Ok(load_cursors(heddle_dir)?
+        .repos
+        .get(&scope.slot())
+        .cloned()
+        .unwrap_or_default())
 }
 
 /// Persist the watermark for `scope`. Always writes the scoped slot.
@@ -496,7 +492,10 @@ fn discussion_from_payload(
             if body.trim().is_empty() {
                 return None;
             }
-            if payload.turn_id.is_none() && payload.turn_seq == 0 {
+            // turn_seq 0 is "not minted". A one-turn HostedDiscussion then
+            // lands at list-index/ordinal 0 and pull_one drops it as the
+            // already-linked Open turn. Fetch unless identity is complete.
+            if payload.turn_id.is_none() || payload.turn_seq == 0 {
                 return None;
             }
             Some(hosted_from_payload(discussion_id, payload))

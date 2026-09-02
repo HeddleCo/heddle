@@ -882,9 +882,15 @@ fn pull_one(
             let mut changed = false;
             for (list_index, server_turn) in discussion.turns.iter().enumerate() {
                 let ordinal = server_ordinal(server_turn, list_index);
-                if linked_ordinals.contains(&ordinal)
-                    || server_turn_id(server_turn)
-                        .is_some_and(|turn_id| linked_server_turn_ids.contains(&turn_id))
+                let turn_id = server_turn_id(server_turn);
+                // A minted turn_id is the identity. Ordinal matching is only
+                // for older snapshots that never minted one — otherwise a
+                // fat append with turn_seq=0 would collide with the Open
+                // turn at ordinal 0 and be dropped.
+                if turn_id
+                    .as_ref()
+                    .is_some_and(|id| linked_server_turn_ids.contains(id))
+                    || (turn_id.is_none() && linked_ordinals.contains(&ordinal))
                 {
                     continue;
                 }
