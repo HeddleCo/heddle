@@ -7,6 +7,8 @@
 #[cfg(feature = "client")]
 pub mod context_sync;
 #[cfg(feature = "client")]
+pub mod discussion_live;
+#[cfg(feature = "client")]
 pub mod discussion_sync;
 #[cfg(feature = "client")]
 pub mod human_signature;

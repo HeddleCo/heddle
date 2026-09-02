@@ -71,6 +71,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
+    fs::OpenOptions,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -78,11 +79,12 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use objects::{
     fs_atomic::write_file_atomic,
+    lock::RepoLock,
     object::{
         Attribution, CollabOpId, CollaborationAnchor, CollaborationIdempotencyKey,
-        CollaborationOperationBodyV1, CollaborationOperationEnvelope, Discussion,
-        DiscussionRecordId, DiscussionTurnV1, MaterializedDiscussion, Principal, StateId,
-        VisibilityTier,
+        CollaborationOperationBodyV1, CollaborationOperationEnvelope, CollaborationResolution,
+        Discussion, DiscussionRecordId, DiscussionTurnV1, MaterializedDiscussion, Principal,
+        StateId, VisibilityTier,
     },
     store::ObjectStore,
 };
@@ -91,7 +93,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     client::HostedClient,
-    hosted_runtime::hosted::{HostedDiscussion, HostedDiscussionTurn},
+    hosted_runtime::hosted::{HostedDiscussion, HostedDiscussionTurn, HostedResolution},
 };
 
 /// Deterministic namespace for the derived client-operation-ids so a retried
@@ -124,6 +126,12 @@ struct MirrorEntry {
     /// exist on both sides.
     #[serde(default)]
     resolved_into_annotation_operation_id: Option<String>,
+    /// Hosted resolution already imported (`dismissed:{reason}`,
+    /// `by_edit:{hex}`, `annotation:{id}`). Only this exact hosted operation
+    /// is treated as already applied; a distinct local resolution is a
+    /// competing sibling.
+    #[serde(default)]
+    pulled_resolution_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +141,10 @@ struct TurnLink {
     local_turn_id: String,
     /// Position of the turn in the server's linear turn list.
     server_ordinal: usize,
+    /// Server-minted turn identity from the event stream / DiscussionTurn
+    /// wire. Empty on older ListByState snapshots that only had ordinals.
+    #[serde(default)]
+    server_turn_id: Option<String>,
 }
 
 /// One local turn with the identity + attribution the sync bridge reasons over.
@@ -169,6 +181,24 @@ fn save_mirror(heddle_dir: &Path, mirror: &HostedMirror) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(mirror).context("encode hosted discussion mirror map")?;
     write_file_atomic(&path, &bytes).context("write hosted discussion mirror map")?;
     Ok(())
+}
+
+fn mirror_lock(heddle_dir: &Path) -> Result<RepoLock> {
+    let dir = heddle_dir.join("collaboration");
+    fs::create_dir_all(&dir).context("create collaboration dir")?;
+    let lock_path = dir.join("hosted-mirror.lock");
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&lock_path)
+        .context("create hosted-mirror lock")?;
+    Ok(RepoLock::at(lock_path))
+}
+
+fn lock_mirror_write(heddle_dir: &Path) -> Result<objects::lock::WriteLockGuard> {
+    mirror_lock(heddle_dir)?
+        .write()
+        .map_err(|error| anyhow!("lock hosted discussion mirror: {error}"))
 }
 
 fn open_op_id(repo_path: &str, local_id: &str) -> String {
@@ -271,6 +301,7 @@ pub async fn push_discussions(
     }
     let self_attr = repo.get_attribution().ok();
 
+    let _guard = lock_mirror_write(repo.heddle_dir())?;
     let mut mirror = load_mirror(repo.heddle_dir())?;
     let mut synced = 0usize;
 
@@ -372,80 +403,89 @@ async fn push_one(
             heddle_cli_render::cli::style::warn_marker(),
         );
     }
-    let (index, server_id, mut changed) = match entry_index {
-        None => {
-            if candidates.is_empty() {
-                return Ok(false);
-            }
-            let (open_turn_id, open_body) = candidates[0].clone();
-            let hosted = client
-                .open_discussion(
-                    repo_path,
-                    change_id,
-                    path,
-                    symbol,
-                    &open_body,
-                    &visibility,
-                    discussion.thread_ref.as_deref(),
-                    open_op_id(repo_path, local_id),
-                )
-                .await
-                .with_context(|| format!("open hosted discussion for {local_id}"))?;
-            let server_id = hosted.id.clone();
-            let repo_mirror = mirror.repos.entry(repo_path.to_string()).or_default();
-            repo_mirror.discussions.push(MirrorEntry {
-                local_id: local_id.to_string(),
-                server_id: server_id.clone(),
-                links: vec![TurnLink {
-                    local_turn_id: open_turn_id,
-                    server_ordinal: 0,
-                }],
-                resolved_into_annotation_operation_id: None,
-            });
-            let index = repo_mirror.discussions.len() - 1;
-            for (turn_id, body) in &candidates[1..] {
+    let (index, server_id, mut changed) =
+        match entry_index {
+            None => {
+                if candidates.is_empty() {
+                    return Ok(false);
+                }
+                let (open_turn_id, open_body) = candidates[0].clone();
                 let hosted = client
-                    .append_turn(
+                    .open_discussion(
                         repo_path,
-                        &server_id,
-                        body,
-                        append_op_id(repo_path, &server_id, turn_id),
+                        change_id,
+                        path,
+                        symbol,
+                        &open_body,
+                        &visibility,
+                        discussion.thread_ref.as_deref(),
+                        open_op_id(repo_path, local_id),
                     )
                     .await
-                    .with_context(|| format!("append hosted turn for {local_id}"))?;
-                push_link(
-                    mirror,
-                    repo_path,
-                    index,
-                    turn_id.clone(),
-                    hosted.turns.len().saturating_sub(1),
-                );
-            }
-            (index, server_id, true)
-        }
-        Some(index) => {
-            let server_id = mirror.repos[repo_path].discussions[index].server_id.clone();
-            for (turn_id, body) in &candidates {
-                let hosted = client
-                    .append_turn(
+                    .with_context(|| format!("open hosted discussion for {local_id}"))?;
+                let server_id = hosted.id.clone();
+                let repo_mirror = mirror.repos.entry(repo_path.to_string()).or_default();
+                repo_mirror.discussions.push(MirrorEntry {
+                    local_id: local_id.to_string(),
+                    server_id: server_id.clone(),
+                    links: vec![TurnLink {
+                        local_turn_id: open_turn_id,
+                        server_ordinal: 0,
+                        server_turn_id: None,
+                    }],
+                    resolved_into_annotation_operation_id: None,
+                    pulled_resolution_key: None,
+                });
+                let index = repo_mirror.discussions.len() - 1;
+                for (turn_id, body) in &candidates[1..] {
+                    let hosted = client
+                        .append_turn(
+                            repo_path,
+                            &server_id,
+                            body,
+                            append_op_id(repo_path, &server_id, turn_id),
+                        )
+                        .await
+                        .with_context(|| format!("append hosted turn for {local_id}"))?;
+                    push_link(
+                        mirror,
                         repo_path,
-                        &server_id,
-                        body,
-                        append_op_id(repo_path, &server_id, turn_id),
-                    )
-                    .await
-                    .with_context(|| format!("append hosted turn for {local_id}"))?;
-                push_link(
-                    mirror,
-                    repo_path,
-                    index,
-                    turn_id.clone(),
-                    hosted.turns.len().saturating_sub(1),
-                );
+                        index,
+                        turn_id.clone(),
+                        hosted.turns.len().saturating_sub(1),
+                        hosted.turns.last().and_then(|turn| {
+                            (!turn.turn_id.is_empty()).then(|| turn.turn_id.clone())
+                        }),
+                    );
+                }
+                (index, server_id, true)
             }
-            (index, server_id, !candidates.is_empty())
-        }
-    };
+            Some(index) => {
+                let server_id = mirror.repos[repo_path].discussions[index].server_id.clone();
+                for (turn_id, body) in &candidates {
+                    let hosted = client
+                        .append_turn(
+                            repo_path,
+                            &server_id,
+                            body,
+                            append_op_id(repo_path, &server_id, turn_id),
+                        )
+                        .await
+                        .with_context(|| format!("append hosted turn for {local_id}"))?;
+                    push_link(
+                        mirror,
+                        repo_path,
+                        index,
+                        turn_id.clone(),
+                        hosted.turns.len().saturating_sub(1),
+                        hosted.turns.last().and_then(|turn| {
+                            (!turn.turn_id.is_empty()).then(|| turn.turn_id.clone())
+                        }),
+                    );
+                }
+                (index, server_id, !candidates.is_empty())
+            }
+        };
 
     if push_into_annotation_resolution(client, repo_path, mirror, index, &server_id, discussion)
         .await?
@@ -480,7 +520,7 @@ async fn push_into_annotation_resolution(
     {
         return Ok(false);
     }
-    client
+    let hosted = client
         .resolve_discussion_into_annotation(
             repo_path,
             server_id,
@@ -497,6 +537,9 @@ async fn push_into_annotation_resolution(
         .and_then(|repo_mirror| repo_mirror.discussions.get_mut(index))
         .ok_or_else(|| anyhow!("hosted discussion mirror entry disappeared during resolution"))?;
     entry.resolved_into_annotation_operation_id = Some(operation_id);
+    if let Some(key) = hosted_resolution_key(&hosted.resolution) {
+        entry.pulled_resolution_key = Some(key);
+    }
     Ok(true)
 }
 
@@ -507,6 +550,11 @@ async fn push_into_annotation_resolution(
 /// `against` is the pulled/cloned tip. Clone publishes HEAD only after this
 /// call, and `heddle pull feature --local-thread feature` leaves HEAD on the
 /// current checkout — ListByState must not re-read HEAD.
+///
+/// Repo-wide: clone/pull and unfiltered `discuss wait`. Hosted discussions
+/// arrive as server-minted `Discussions` state-attachments; we claim the
+/// one-shot legacy blob→op-log marker so those attachments are not also
+/// converted (duplicates / multi-turn diverge).
 pub async fn pull_discussions(
     repo: &Repository,
     client: &mut HostedClient,
@@ -514,43 +562,52 @@ pub async fn pull_discussions(
     bootstrap: Option<&[Discussion]>,
     against: Option<StateId>,
 ) -> Result<usize> {
-    // Hosted discussions arrive as server-minted `Discussions` state-attachments
-    // on the pulled objects. Those are the transport form of what we
-    // authoritatively re-materialize below via the CollaborationService RPCs —
-    // so claim the one-shot legacy blob->op-log migration marker to keep it from
-    // also converting them (which would duplicate every discussion and diverge
-    // on multi-turn supersede history). Fresh clones have no genuine local
-    // legacy discussions, and existing repos already hold the marker.
-    mark_legacy_discussions_migrated(repo).context("claim legacy discussion migration marker")?;
+    pull_discussions_filtered(repo, client, repo_path, bootstrap, against, None).await
+}
 
-    let Some(head_state) = discussion_sync_state(repo, against)? else {
+/// Wait `--thread` bootstrap: same ListByState RPC, then keep only discussions
+/// whose `thread_ref` matches the paired name or whose wire `thread_id`
+/// matches the stable id.
+///
+/// `ListDiscussionsByStateRequest` has no thread fields (heddle-api 0.23.0).
+/// Do not call `ListByThreadRef` — that would be a second list RPC.
+/// Pull-fold `Some(discussions)` stays repo-wide: clone/pull must not shrink.
+pub async fn pull_discussions_for_thread(
+    repo: &Repository,
+    client: &mut HostedClient,
+    repo_path: &str,
+    bootstrap: Option<&[Discussion]>,
+    thread: &str,
+    thread_id: &str,
+) -> Result<usize> {
+    let filter = (!thread.is_empty() || !thread_id.is_empty()).then_some((thread, thread_id));
+    pull_discussions_filtered(repo, client, repo_path, bootstrap, None, filter).await
+}
+
+async fn pull_discussions_filtered(
+    repo: &Repository,
+    client: &mut HostedClient,
+    repo_path: &str,
+    bootstrap: Option<&[Discussion]>,
+    against: Option<StateId>,
+    thread_filter: Option<(&str, &str)>,
+) -> Result<usize> {
+    // Repo-wide import (clone/pull, unfiltered wait) claims the one-shot
+    // marker so pulled hosted attachments are not also converted. A
+    // `--thread` wait only imports that thread; claiming here would hide
+    // other threads' local legacy discussions from later list/show.
+    if thread_filter.is_none() {
+        mark_legacy_discussions_migrated(repo)
+            .context("claim legacy discussion migration marker")?;
+    }
+
+    let Some((head_state, hosted)) =
+        listed_hosted_discussions(repo, client, repo_path, bootstrap, against, thread_filter)
+            .await?
+    else {
         // weft#638: a repo with no HEAD cannot resolve a state to list against
         // unless the caller passed the pulled/cloned tip.
         return Ok(0);
-    };
-    let Some(state) = repo
-        .store()
-        .get_state(&head_state)
-        .context("load head state")?
-    else {
-        return Ok(0);
-    };
-    let change_id = state.change_id;
-
-    // `None` is ListByState: older servers, or `discussions_from_pack`
-    // advertised a snapshot this client cannot consume (missing attachment /
-    // version skew). `Some` is the packed or inline bootstrap set, including
-    // an explicit empty page.
-    let hosted = match bootstrap {
-        Some(discussions) => discussions
-            .iter()
-            .cloned()
-            .map(hosted_discussion_from_bootstrap)
-            .collect(),
-        None => client
-            .list_discussions_by_state(repo_path, change_id, "all")
-            .await
-            .context("list hosted discussions")?,
     };
     if hosted.is_empty() {
         return Ok(0);
@@ -561,6 +618,7 @@ pub async fn pull_discussions(
 
     let store = CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?;
     let self_attr = repo.get_attribution().ok();
+    let _guard = lock_mirror_write(repo.heddle_dir())?;
     let mut mirror = load_mirror(repo.heddle_dir())?;
     let mut changed = 0usize;
 
@@ -600,6 +658,101 @@ fn discussion_sync_state(repo: &Repository, against: Option<StateId>) -> Result<
     }
 }
 
+async fn listed_hosted_discussions(
+    repo: &Repository,
+    client: &mut HostedClient,
+    repo_path: &str,
+    bootstrap: Option<&[Discussion]>,
+    against: Option<StateId>,
+    thread_filter: Option<(&str, &str)>,
+) -> Result<Option<(StateId, Vec<HostedDiscussion>)>> {
+    let Some(state_id) = discussion_sync_state(repo, against)? else {
+        return Ok(None);
+    };
+    let Some(state) = repo
+        .store()
+        .get_state(&state_id)
+        .context("load discussion sync state")?
+    else {
+        return Ok(None);
+    };
+
+    // Pull-fold attachments are clone/pull's repo-wide snapshot. Never shrink
+    // that set for wait `--thread` — wait's filtered path always passes None.
+    let hosted = match bootstrap {
+        Some(discussions) => discussions
+            .iter()
+            .cloned()
+            .map(hosted_discussion_from_bootstrap)
+            .collect(),
+        None => {
+            let listed = client
+                .list_discussions_by_state(repo_path, state.change_id, "all")
+                .await
+                .context("list hosted discussions")?;
+            match thread_filter {
+                Some((thread, thread_id)) => listed
+                    .into_iter()
+                    .filter(|discussion| {
+                        discussion_matches_wait_thread(discussion, thread, thread_id)
+                    })
+                    .collect(),
+                None => listed,
+            }
+        }
+    };
+    Ok(Some((state_id, hosted)))
+}
+
+fn discussion_matches_wait_thread(
+    discussion: &HostedDiscussion,
+    thread: &str,
+    thread_id: &str,
+) -> bool {
+    let name_hit = !thread.is_empty()
+        && discussion
+            .thread_ref
+            .as_deref()
+            .is_some_and(|thread_ref| thread_ref == thread);
+    let id_hit = !thread_id.is_empty()
+        && discussion
+            .thread_id
+            .as_deref()
+            .is_some_and(|id| id == thread_id);
+    name_hit || id_hit
+}
+
+/// Import one already-fetched hosted discussion into the local op-log.
+/// Persists the mirror. Used by the live event consumer after GetDiscussion
+/// (opened/resolved, or an unmirrored append) and the mirrored-append fast path.
+pub fn apply_hosted_discussion(
+    repo: &Repository,
+    repo_path: &str,
+    hosted_username: Option<&str>,
+    discussion: &HostedDiscussion,
+) -> Result<bool> {
+    let Some(head_state) = repo.head().context("resolve repository head")? else {
+        return Err(anyhow!(
+            "cannot apply a hosted discussion without a repository HEAD"
+        ));
+    };
+    let store = CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?;
+    let self_attr = repo.get_attribution().ok();
+    let _guard = lock_mirror_write(repo.heddle_dir())?;
+    let mut mirror = load_mirror(repo.heddle_dir())?;
+    let result = import_hosted_discussion(
+        &store,
+        repo_path,
+        &mut mirror,
+        head_state,
+        hosted_username,
+        self_attr.as_ref(),
+        discussion,
+    );
+    save_mirror(repo.heddle_dir(), &mirror)?;
+    result
+}
+
 fn hosted_discussion_from_bootstrap(discussion: Discussion) -> HostedDiscussion {
     HostedDiscussion {
         id: discussion.id,
@@ -608,6 +761,7 @@ fn hosted_discussion_from_bootstrap(discussion: Discussion) -> HostedDiscussion 
         opened_against_state: Some(discussion.opened_against_state),
         visibility: discussion.visibility.as_str().to_string(),
         thread_ref: discussion.thread_ref,
+        thread_id: None,
         turns: discussion
             .turns
             .into_iter()
@@ -616,9 +770,50 @@ fn hosted_discussion_from_bootstrap(discussion: Discussion) -> HostedDiscussion 
                 author_email: turn.author.email_lossy().into_owned(),
                 body: turn.body,
                 posted_at_secs: turn.posted_at,
+                turn_id: String::new(),
+                turn_seq: 0,
             })
             .collect(),
+        resolution: match discussion.resolution {
+            objects::object::DiscussionResolution::Open => HostedResolution::Open,
+            objects::object::DiscussionResolution::ResolvedIntoAnnotation { annotation_id } => {
+                HostedResolution::IntoAnnotation { annotation_id }
+            }
+            objects::object::DiscussionResolution::ResolvedByEdit { state_id } => {
+                HostedResolution::ByEdit {
+                    state_id: Some(state_id),
+                }
+            }
+            objects::object::DiscussionResolution::Dismissed { reason } => {
+                HostedResolution::Dismissed { reason }
+            }
+        },
+        kind: 0,
     }
+}
+
+/// Materialize one hosted discussion (snapshot or live fetch) into the local
+/// collab op-log. Idempotent via the hosted mirror: already-linked turns and
+/// resolutions are left alone. Used by pull bootstrap and the event consumer.
+#[allow(clippy::too_many_arguments)]
+fn import_hosted_discussion(
+    store: &CollaborationStore,
+    repo_path: &str,
+    mirror: &mut HostedMirror,
+    head_state: StateId,
+    hosted_username: Option<&str>,
+    self_attr: Option<&Attribution>,
+    discussion: &HostedDiscussion,
+) -> Result<bool> {
+    pull_one(
+        store,
+        repo_path,
+        mirror,
+        head_state,
+        hosted_username,
+        self_attr,
+        discussion,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -631,7 +826,7 @@ fn pull_one(
     self_attr: Option<&Attribution>,
     discussion: &HostedDiscussion,
 ) -> Result<bool> {
-    if discussion.turns.is_empty() {
+    if discussion.turns.is_empty() && matches!(discussion.resolution, HostedResolution::Open) {
         return Ok(false);
     }
     let repo_mirror = mirror.repos.entry(repo_path.to_string()).or_default();
@@ -640,14 +835,13 @@ fn pull_one(
         .iter()
         .position(|entry| entry.server_id == discussion.id);
 
-    match entry_index {
+    let mut changed = match entry_index {
         None => {
+            if discussion.turns.is_empty() {
+                return Ok(false);
+            }
             let local_id = DiscussionRecordId::generate();
-            let anchor = CollaborationAnchor::Symbol {
-                state_id: discussion.opened_against_state.unwrap_or(head_state),
-                path: discussion.file.clone(),
-                symbol: discussion.symbol.clone(),
-            };
+            let anchor = hosted_open_anchor(discussion, head_state);
             let title = derive_title(&discussion.turns[0].body, &discussion.symbol);
             let visibility = parse_visibility_token(&discussion.visibility);
 
@@ -674,14 +868,17 @@ fn pull_one(
                 server_id: discussion.id.clone(),
                 links: vec![TurnLink {
                     local_turn_id: turn_identity(&open_op, 0),
-                    server_ordinal: 0,
+                    server_ordinal: server_ordinal(first, 0),
+                    server_turn_id: server_turn_id(first),
                 }],
                 resolved_into_annotation_operation_id: None,
+                pulled_resolution_key: None,
             });
             let index = repo_mirror.discussions.len() - 1;
 
             let mut heads = vec![open_op];
-            for (ordinal, turn) in discussion.turns.iter().enumerate().skip(1) {
+            for (list_index, turn) in discussion.turns.iter().enumerate().skip(1) {
+                let ordinal = server_ordinal(turn, list_index);
                 let op_id = write_local_operation(
                     store,
                     local_id,
@@ -693,9 +890,16 @@ fn pull_one(
                     },
                 )?;
                 heads = vec![op_id];
-                push_link(mirror, repo_path, index, turn_identity(&op_id, 0), ordinal);
+                push_link(
+                    mirror,
+                    repo_path,
+                    index,
+                    turn_identity(&op_id, 0),
+                    ordinal,
+                    server_turn_id(turn),
+                );
             }
-            Ok(true)
+            true
         }
         Some(index) => {
             let local_id: DiscussionRecordId = repo_mirror.discussions[index]
@@ -706,6 +910,11 @@ fn pull_one(
                 .links
                 .iter()
                 .map(|link| link.server_ordinal)
+                .collect();
+            let linked_server_turn_ids: HashSet<String> = repo_mirror.discussions[index]
+                .links
+                .iter()
+                .filter_map(|link| link.server_turn_id.clone())
                 .collect();
             let linked_turn_ids: HashSet<String> = repo_mirror.discussions[index]
                 .links
@@ -726,13 +935,24 @@ fn pull_one(
                 .collect();
 
             let mut changed = false;
-            for (ordinal, server_turn) in discussion.turns.iter().enumerate() {
-                if linked_ordinals.contains(&ordinal) {
+            for (list_index, server_turn) in discussion.turns.iter().enumerate() {
+                let ordinal = server_ordinal(server_turn, list_index);
+                if linked_ordinals.contains(&ordinal)
+                    || server_turn_id(server_turn)
+                        .is_some_and(|turn_id| linked_server_turn_ids.contains(&turn_id))
+                {
                     continue;
                 }
                 if let Some(pos) = reconcile(&available, server_turn, hosted_username) {
                     let local = available.swap_remove(pos);
-                    push_link(mirror, repo_path, index, local.turn_id, ordinal);
+                    push_link(
+                        mirror,
+                        repo_path,
+                        index,
+                        local.turn_id,
+                        ordinal,
+                        server_turn_id(server_turn),
+                    );
                     changed = true;
                     continue;
                 }
@@ -747,12 +967,225 @@ fn pull_one(
                     },
                 )?;
                 heads = vec![op_id];
-                push_link(mirror, repo_path, index, turn_identity(&op_id, 0), ordinal);
+                push_link(
+                    mirror,
+                    repo_path,
+                    index,
+                    turn_identity(&op_id, 0),
+                    ordinal,
+                    server_turn_id(server_turn),
+                );
                 changed = true;
             }
-            Ok(changed)
+            changed
+        }
+    };
+
+    if pull_resolution(store, repo_path, mirror, discussion)? {
+        changed = true;
+    }
+    Ok(changed)
+}
+
+fn pull_resolution(
+    store: &CollaborationStore,
+    repo_path: &str,
+    mirror: &mut HostedMirror,
+    discussion: &HostedDiscussion,
+) -> Result<bool> {
+    let Some(resolution) = hosted_resolution_to_collab(&discussion.resolution) else {
+        return Ok(false);
+    };
+    let Some(hosted_key) = hosted_resolution_key(&discussion.resolution) else {
+        return Ok(false);
+    };
+    let Some(index) = mirror.repos.get(repo_path).and_then(|repo_mirror| {
+        repo_mirror
+            .discussions
+            .iter()
+            .position(|entry| entry.server_id == discussion.id)
+    }) else {
+        return Ok(false);
+    };
+    if mirror.repos[repo_path].discussions[index]
+        .pulled_resolution_key
+        .as_deref()
+        == Some(hosted_key.as_str())
+    {
+        return Ok(false);
+    }
+    let local_id: DiscussionRecordId = mirror.repos[repo_path].discussions[index]
+        .local_id
+        .parse()
+        .map_err(|e| anyhow!("mirror map has an invalid local discussion id: {e}"))?;
+    let existing = store
+        .materialize_discussion(&local_id)
+        .context("materialize mirrored discussion")?
+        .ok_or_else(|| anyhow!("mirrored discussion {local_id} missing locally"))?;
+    let pushed_echo = is_pushed_annotation_echo(
+        &mirror.repos[repo_path].discussions[index],
+        &existing,
+        &discussion.resolution,
+    );
+    let parents = if pushed_echo {
+        // Finalize the server's annotation id as a descendant of the local
+        // IntoAnnotation we already pushed — not a sibling that conflicts.
+        existing.heads.iter().copied().collect()
+    } else if existing.resolution.is_some() || !existing.conflict_operations.is_empty() {
+        resolution_sibling_parents(store, &existing)?
+    } else {
+        existing.heads.iter().copied().collect()
+    };
+    if pushed_echo
+        && matches!(
+            existing.resolution,
+            Some(CollaborationResolution::Annotation { ref annotation_id })
+                if Some(annotation_id.as_str())
+                    == hosted_annotation_id(&discussion.resolution)
+        )
+    {
+        mirror
+            .repos
+            .get_mut(repo_path)
+            .and_then(|repo_mirror| repo_mirror.discussions.get_mut(index))
+            .ok_or_else(|| anyhow!("hosted discussion mirror entry disappeared during resolution"))?
+            .pulled_resolution_key = Some(hosted_key);
+        return Ok(false);
+    }
+    write_local_operation(
+        store,
+        local_id,
+        parents,
+        hosted_resolution_author(),
+        now_ms(),
+        CollaborationOperationBodyV1::Resolve { resolution },
+    )?;
+    mirror
+        .repos
+        .get_mut(repo_path)
+        .and_then(|repo_mirror| repo_mirror.discussions.get_mut(index))
+        .ok_or_else(|| anyhow!("hosted discussion mirror entry disappeared during resolution"))?
+        .pulled_resolution_key = Some(hosted_key);
+    Ok(true)
+}
+
+fn is_pushed_annotation_echo(
+    entry: &MirrorEntry,
+    existing: &MaterializedDiscussion,
+    hosted: &HostedResolution,
+) -> bool {
+    entry.resolved_into_annotation_operation_id.is_some()
+        && hosted_annotation_id(hosted).is_some()
+        && matches!(
+            existing.resolution,
+            Some(
+                CollaborationResolution::IntoAnnotation { .. }
+                    | CollaborationResolution::Annotation { .. }
+            )
+        )
+}
+
+fn hosted_open_anchor(discussion: &HostedDiscussion, head_state: StateId) -> CollaborationAnchor {
+    use api::heddle::api::v1alpha1::DiscussionKind;
+
+    let kind = DiscussionKind::try_from(discussion.kind).unwrap_or(DiscussionKind::Unspecified);
+    let has_symbol = !discussion.file.is_empty() && !discussion.symbol.is_empty();
+    // Coordination has no PathSymbolRef. An empty-anchor fetch of any kind
+    // must still Open — failing validation here would not advance the
+    // watermark and every restart would die on the same event.
+    if kind == DiscussionKind::Coordination || !has_symbol {
+        return CollaborationAnchor::Repository;
+    }
+    CollaborationAnchor::Symbol {
+        state_id: discussion.opened_against_state.unwrap_or(head_state),
+        path: discussion.file.clone(),
+        symbol: discussion.symbol.clone(),
+    }
+}
+
+fn hosted_annotation_id(resolution: &HostedResolution) -> Option<&str> {
+    match resolution {
+        HostedResolution::IntoAnnotation { annotation_id } if !annotation_id.is_empty() => {
+            Some(annotation_id.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn hosted_resolution_key(resolution: &HostedResolution) -> Option<String> {
+    match resolution {
+        HostedResolution::Open => None,
+        HostedResolution::Dismissed { reason } => Some(format!("dismissed:{reason}")),
+        HostedResolution::ByEdit {
+            state_id: Some(state_id),
+        } => Some(format!("by_edit:{}", hex::encode(state_id.as_bytes()))),
+        HostedResolution::ByEdit { state_id: None } => None,
+        HostedResolution::IntoAnnotation { annotation_id } if !annotation_id.is_empty() => {
+            Some(format!("annotation:{annotation_id}"))
+        }
+        HostedResolution::IntoAnnotation { .. } => None,
+    }
+}
+
+fn resolution_sibling_parents(
+    store: &CollaborationStore,
+    existing: &MaterializedDiscussion,
+) -> Result<Vec<CollabOpId>> {
+    let candidates: Vec<CollabOpId> = if !existing.conflict_operations.is_empty() {
+        existing.conflict_operations.iter().copied().collect()
+    } else {
+        existing.heads.iter().copied().collect()
+    };
+    for id in &candidates {
+        let Some(decoded) = store
+            .read_operation(id)
+            .context("read head for hosted resolution parents")?
+        else {
+            continue;
+        };
+        match decoded.operation.body {
+            CollaborationOperationBodyV1::Resolve { .. }
+            | CollaborationOperationBodyV1::Reopen { .. }
+            | CollaborationOperationBodyV1::ResolveConflict { .. } => {
+                return Ok(decoded.operation.parents);
+            }
+            _ => {}
         }
     }
+    Ok(existing.heads.iter().copied().collect())
+}
+
+fn hosted_resolution_author() -> Attribution {
+    Attribution::human(Principal::new("hosted", ""))
+}
+
+fn hosted_resolution_to_collab(resolution: &HostedResolution) -> Option<CollaborationResolution> {
+    match resolution {
+        HostedResolution::Open => None,
+        HostedResolution::IntoAnnotation { annotation_id } => {
+            Some(CollaborationResolution::Annotation {
+                annotation_id: annotation_id.clone(),
+            })
+        }
+        HostedResolution::ByEdit { state_id } => {
+            state_id.map(|state_id| CollaborationResolution::AddressedByState { state_id })
+        }
+        HostedResolution::Dismissed { reason } => Some(CollaborationResolution::Dismissed {
+            reason: reason.clone(),
+        }),
+    }
+}
+
+fn server_ordinal(turn: &HostedDiscussionTurn, list_index: usize) -> usize {
+    if turn.turn_seq > 0 {
+        (turn.turn_seq as usize).saturating_sub(1)
+    } else {
+        list_index
+    }
+}
+
+fn server_turn_id(turn: &HostedDiscussionTurn) -> Option<String> {
+    (!turn.turn_id.is_empty()).then(|| turn.turn_id.clone())
 }
 
 /// Match an unlinked server turn against an unlinked local turn by AUTHOR, never
@@ -787,6 +1220,7 @@ fn push_link(
     index: usize,
     local_turn_id: String,
     server_ordinal: usize,
+    server_turn_id: Option<String>,
 ) {
     if let Some(entry) = mirror
         .repos
@@ -796,6 +1230,7 @@ fn push_link(
         entry.links.push(TurnLink {
             local_turn_id,
             server_ordinal,
+            server_turn_id,
         });
     }
 }
@@ -813,7 +1248,7 @@ fn write_local_operation(
     body: CollaborationOperationBodyV1,
 ) -> Result<CollabOpId> {
     let key = CollaborationIdempotencyKey::new(uuid::Uuid::new_v4().to_string())
-        .map_err(|e| anyhow!("invalid idempotency key: {e}"))?;
+        .map_err(|error| anyhow!("invalid idempotency key: {error}"))?;
     let operation = CollaborationOperationEnvelope::new(
         discussion_id,
         parents,
@@ -822,7 +1257,7 @@ fn write_local_operation(
         occurred_at_ms,
         body,
     )
-    .map_err(|e| anyhow!("build collaboration operation: {e}"))?;
+    .context("build collaboration operation")?;
     Ok(store
         .write_operation(&operation)
         .context("write collaboration operation")?
@@ -830,7 +1265,7 @@ fn write_local_operation(
 }
 
 fn turn_body(turn: &HostedDiscussionTurn) -> Result<DiscussionTurnV1> {
-    DiscussionTurnV1::new(turn.body.clone()).map_err(|e| anyhow!("invalid discussion turn: {e}"))
+    DiscussionTurnV1::new(turn.body.clone()).context("invalid discussion turn")
 }
 
 fn turn_attribution(turn: &HostedDiscussionTurn) -> Attribution {
@@ -880,7 +1315,7 @@ mod tests {
         CollaborationOperationBodyV1, CollaborationOperationEnvelope, CollaborationResolution,
         ContentHash, Discussion, DiscussionRecordId, DiscussionResolution, DiscussionTurn,
         DiscussionTurnV1, LegacyDiscussionId, LegacyDiscussionResolutionV1, LegacySourceLocator,
-        Principal, StateAttachmentId, StateId, SymbolAnchor, VisibilityTier,
+        Principal, State, StateAttachmentId, StateId, SymbolAnchor, Tree, VisibilityTier,
     };
     use tempfile::TempDir;
 
@@ -914,6 +1349,8 @@ mod tests {
             author_email: author_email.to_string(),
             body: body.to_string(),
             posted_at_secs,
+            turn_id: String::new(),
+            turn_seq: 0,
         }
     }
 
@@ -1039,6 +1476,72 @@ mod tests {
             Some(first)
         );
         assert_eq!(discussion_sync_state(&repo, None).unwrap(), Some(second));
+    }
+
+    #[tokio::test]
+    async fn clone_discussion_sync_uses_against_before_head_is_published() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        let tree = Tree::new();
+        let tree_id = repo.store().put_tree(&tree).unwrap();
+        let state = State::new_snapshot(
+            tree_id,
+            Vec::new(),
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        );
+        repo.store().put_state(&state).unwrap();
+        let against = state.id();
+        assert_eq!(
+            repo.head().unwrap(),
+            None,
+            "clone has not published HEAD yet"
+        );
+
+        let bootstrap = vec![Discussion {
+            id: "server-discussion-before-head".to_string(),
+            anchor: SymbolAnchor::new("lib.rs", "run"),
+            opened_against_state: against,
+            opened_at: 1_700_000_000,
+            thread_ref: None,
+            turns: vec![DiscussionTurn {
+                author: Principal::new("Reviewer", "reviewer@example.com"),
+                body: "keep this invariant".to_string(),
+                posted_at: 1_700_000_001,
+                references: Vec::new(),
+            }],
+            resolution: DiscussionResolution::Open,
+            body_changed_since_open: false,
+            anchor_ambiguous: false,
+            orphaned: false,
+            visibility: VisibilityTier::Internal,
+            resolved_annotation_id: None,
+        }];
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+
+        assert_eq!(
+            pull_discussions(
+                &repo,
+                &mut client,
+                "acme/widgets",
+                Some(&bootstrap),
+                Some(against),
+            )
+            .await
+            .unwrap(),
+            1,
+            "discussion sync must not return Ok(0) just because HEAD is unpublished"
+        );
+        assert_eq!(
+            repo.head().unwrap(),
+            None,
+            "sync must not publish clone HEAD"
+        );
+
+        let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+        assert_eq!(store.materialize().unwrap().discussions.len(), 1);
+
+        client.close().await;
+        server.await.unwrap();
     }
 
     // F3: no local principal ⇒ turns are NOT treated as ours (fail closed).
@@ -1234,5 +1737,296 @@ mod tests {
 
         client.close().await;
         server.await.unwrap();
+    }
+
+    fn hosted(
+        id: &str,
+        body: &str,
+        turn_id: &str,
+        resolution: HostedResolution,
+    ) -> HostedDiscussion {
+        HostedDiscussion {
+            id: id.to_string(),
+            file: "lib.rs".to_string(),
+            symbol: "run".to_string(),
+            opened_against_state: None,
+            visibility: "internal".to_string(),
+            thread_ref: None,
+            thread_id: None,
+            kind: 0,
+            turns: vec![HostedDiscussionTurn {
+                author_name: "Ada".to_string(),
+                author_email: "ada@example.com".to_string(),
+                body: body.to_string(),
+                posted_at_secs: 1_700_000_000,
+                turn_id: turn_id.to_string(),
+                turn_seq: 1,
+            }],
+            resolution,
+        }
+    }
+
+    #[test]
+    fn wait_thread_filter_matches_name_or_stamped_id() {
+        let mut discussion = hosted("disc-1", "first", "turn-1", HostedResolution::Open);
+        discussion.thread_ref = Some("foo".to_string());
+        assert!(discussion_matches_wait_thread(
+            &discussion,
+            "foo",
+            "thr-foo"
+        ));
+        assert!(!discussion_matches_wait_thread(
+            &discussion,
+            "bar",
+            "thr-bar"
+        ));
+        discussion.thread_ref = Some("old-name".to_string());
+        discussion.thread_id = Some("thr-foo".to_string());
+        assert!(
+            discussion_matches_wait_thread(&discussion, "foo", "thr-foo"),
+            "a renamed thread still matches on the stable wire thread_id"
+        );
+        discussion.thread_id = None;
+        assert!(
+            !discussion_matches_wait_thread(&discussion, "foo", "thr-foo"),
+            "weft stamps the UUID in thread_id, not thread_ref"
+        );
+        discussion.thread_ref = None;
+        discussion.thread_id = Some("thr-foo".to_string());
+        assert!(discussion_matches_wait_thread(
+            &discussion,
+            "foo",
+            "thr-foo"
+        ));
+    }
+
+    #[test]
+    fn competing_hosted_resolution_is_recorded_not_unchanged() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
+        repo.snapshot_with_attribution(
+            Some("seed".to_string()),
+            None,
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        )
+        .unwrap();
+
+        assert!(
+            apply_hosted_discussion(
+                &repo,
+                "acme/widgets",
+                None,
+                &hosted("disc-1", "first", "turn-1", HostedResolution::Open),
+            )
+            .unwrap()
+        );
+
+        let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+        let existing = store
+            .materialize()
+            .unwrap()
+            .discussions
+            .into_values()
+            .next()
+            .unwrap();
+        write_local_operation(
+            &store,
+            existing.discussion_id,
+            existing.heads.iter().copied().collect(),
+            Attribution::human(Principal::new("Local", "local@example.com")),
+            1_700_000_100_000,
+            CollaborationOperationBodyV1::Resolve {
+                resolution: CollaborationResolution::Dismissed {
+                    reason: "local-only".to_string(),
+                },
+            },
+        )
+        .unwrap();
+
+        assert!(
+            apply_hosted_discussion(
+                &repo,
+                "acme/widgets",
+                None,
+                &hosted(
+                    "disc-1",
+                    "first",
+                    "turn-1",
+                    HostedResolution::Dismissed {
+                        reason: "hosted-only".to_string(),
+                    },
+                ),
+            )
+            .unwrap(),
+            "a distinct hosted resolution must be recorded"
+        );
+
+        let conflicted = store
+            .materialize()
+            .unwrap()
+            .discussions
+            .into_values()
+            .next()
+            .unwrap();
+        assert!(
+            !conflicted.conflict_operations.is_empty(),
+            "distinct hosted vs local resolutions must surface as competing collab state"
+        );
+        assert_eq!(conflicted.resolution, None);
+
+        assert!(
+            !apply_hosted_discussion(
+                &repo,
+                "acme/widgets",
+                None,
+                &hosted(
+                    "disc-1",
+                    "first",
+                    "turn-1",
+                    HostedResolution::Dismissed {
+                        reason: "hosted-only".to_string(),
+                    },
+                ),
+            )
+            .unwrap(),
+            "the same hosted resolution must not be imported twice"
+        );
+    }
+
+    #[test]
+    fn pushed_into_annotation_echo_does_not_conflict() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
+        repo.snapshot_with_attribution(
+            Some("seed".to_string()),
+            None,
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        )
+        .unwrap();
+
+        assert!(
+            apply_hosted_discussion(
+                &repo,
+                "acme/widgets",
+                None,
+                &hosted("disc-1", "first", "turn-1", HostedResolution::Open),
+            )
+            .unwrap()
+        );
+
+        let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+        let existing = store
+            .materialize()
+            .unwrap()
+            .discussions
+            .into_values()
+            .next()
+            .unwrap();
+        write_local_operation(
+            &store,
+            existing.discussion_id,
+            existing.heads.iter().copied().collect(),
+            Attribution::human(Principal::new("Local", "local@example.com")),
+            1_700_000_100_000,
+            CollaborationOperationBodyV1::Resolve {
+                resolution: CollaborationResolution::IntoAnnotation {
+                    annotation_kind: AnnotationKind::Invariant,
+                    content: "the cache key includes visibility".to_string(),
+                    tags: vec!["cache".to_string()],
+                },
+            },
+        )
+        .unwrap();
+
+        let path = mirror_path(repo.heddle_dir());
+        let mut mirror: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        mirror["repos"]["acme/widgets"]["discussions"][0]["resolved_into_annotation_operation_id"] =
+            serde_json::json!("pushed-op");
+        std::fs::write(&path, serde_json::to_vec_pretty(&mirror).unwrap()).unwrap();
+
+        apply_hosted_discussion(
+            &repo,
+            "acme/widgets",
+            None,
+            &hosted(
+                "disc-1",
+                "first",
+                "turn-1",
+                HostedResolution::IntoAnnotation {
+                    annotation_id: "ann-1".to_string(),
+                },
+            ),
+        )
+        .unwrap();
+
+        let echoed = store
+            .materialize()
+            .unwrap()
+            .discussions
+            .into_values()
+            .next()
+            .unwrap();
+        assert!(
+            echoed.conflict_operations.is_empty(),
+            "a pushed IntoAnnotation echo must not surface as competing collab state"
+        );
+        assert_eq!(
+            echoed.resolution,
+            Some(CollaborationResolution::Annotation {
+                annotation_id: "ann-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn concurrent_apply_does_not_drop_turn_links() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
+        repo.snapshot_with_attribution(
+            Some("seed".to_string()),
+            None,
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        )
+        .unwrap();
+        let path = temp.path().to_path_buf();
+        drop(repo);
+
+        let first = hosted("disc-a", "alpha", "turn-a", HostedResolution::Open);
+        let second = hosted("disc-b", "beta", "turn-b", HostedResolution::Open);
+        std::thread::scope(|scope| {
+            let path_a = path.clone();
+            let disc_a = first.clone();
+            scope.spawn(move || {
+                let repo = Repository::open(&path_a).unwrap();
+                apply_hosted_discussion(&repo, "acme/widgets", None, &disc_a)
+                    .expect("apply first discussion");
+            });
+            let path_b = path.clone();
+            let disc_b = second.clone();
+            scope.spawn(move || {
+                let repo = Repository::open(&path_b).unwrap();
+                apply_hosted_discussion(&repo, "acme/widgets", None, &disc_b)
+                    .expect("apply second discussion");
+            });
+        });
+
+        let repo = Repository::open(&path).unwrap();
+        let mirror = load_mirror(repo.heddle_dir()).unwrap();
+        let discussions = &mirror.repos["acme/widgets"].discussions;
+        assert_eq!(
+            discussions.len(),
+            2,
+            "both discussions must remain in the mirror"
+        );
+        assert!(
+            discussions.iter().all(|entry| !entry.links.is_empty()),
+            "concurrent apply must not drop TurnLinks"
+        );
+        let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+        assert_eq!(store.materialize().unwrap().discussions.len(), 2);
     }
 }

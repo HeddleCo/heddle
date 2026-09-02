@@ -11,16 +11,21 @@
 //! Wire identity note: the canonical `CollaborationService` proto types the
 //! discussion anchor state as a 32-byte `StateId`, but the hosted server still
 //! resolves the inbound `state_id` field through a 16-byte `ChangeId` decode
-//! (`OpenDiscussion`/`ListByState`). We therefore send the **ChangeId** bytes in
-//! that field (matching weft's own canonical integration tests), while the
+//! for `OpenDiscussion`/`ListByState`. We therefore send the **ChangeId** bytes
+//! in those fields (matching weft's own canonical integration tests), while the
 //! server echoes the genuine 32-byte `StateId` back in
 //! `Discussion.opened_against_state`.
+//!
+//! `GetDiscussion.state_id` is the 32-byte `StateId` (empty = HEAD). Pass
+//! `opened_against_state` / the event's `new_state` so a discussion that
+//! exists on a prior state is not NotFound.
 
 use api::heddle::api::v1alpha1::{
     AppendTurnRequest, ContextAnnotationKind, Discussion as ProtoDiscussion, DiscussionKind,
-    DiscussionSeverity, DiscussionStatusFilter, ListDiscussionsByStateRequest,
-    OpenDiscussionRequest, PathSymbolRef, ResolveDiscussionRequest, StateId as ProtoStateId,
-    list_discussions_response, resolve_discussion_request,
+    DiscussionSeverity, DiscussionStatusFilter, GetDiscussionRequest,
+    ListDiscussionsByStateRequest, OpenDiscussionRequest, PathSymbolRef, ResolveDiscussionRequest,
+    StateId as ProtoStateId, discussion_resolution, list_discussions_response,
+    resolve_discussion_request,
 };
 use objects::object::{AnnotationKind, ChangeId, StateId};
 use wire::ProtocolError;
@@ -28,12 +33,35 @@ use wire::ProtocolError;
 use super::{HostedClient, helpers::hosted_to_protocol_error};
 
 /// One turn of a hosted discussion, decoded from the wire.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct HostedDiscussionTurn {
     pub author_name: String,
     pub author_email: String,
     pub body: String,
     pub posted_at_secs: i64,
+    /// Server-minted turn identity. Empty when the producer has not minted one
+    /// (ListByState snapshots on older weft); live events should carry it.
+    pub turn_id: String,
+    /// Per-discussion monotonic sequence. Zero means "not minted" — callers
+    /// then fall back to list order. Proto documents minted sequences as
+    /// 1-based (`turn_seq` is zero only before mint).
+    pub turn_seq: u64,
+}
+
+/// Hosted resolution decoded from the collaboration wire oneof.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum HostedResolution {
+    #[default]
+    Open,
+    IntoAnnotation {
+        annotation_id: String,
+    },
+    ByEdit {
+        state_id: Option<StateId>,
+    },
+    Dismissed {
+        reason: String,
+    },
 }
 
 /// A hosted discussion decoded from the `CollaborationService` wire types into
@@ -48,7 +76,14 @@ pub struct HostedDiscussion {
     pub opened_against_state: Option<StateId>,
     pub visibility: String,
     pub thread_ref: Option<String>,
+    /// Wire `Discussion.thread_id`. Weft stamps the stable UUID here and the
+    /// renameable name in `thread_ref`.
+    pub thread_id: Option<String>,
     pub turns: Vec<HostedDiscussionTurn>,
+    pub resolution: HostedResolution,
+    /// Wire `Discussion.kind`. Unspecified is treated as code-anchored when
+    /// file+symbol are present; Coordination has no `PathSymbolRef`.
+    pub kind: i32,
 }
 
 fn decode_discussion(proto: ProtoDiscussion) -> HostedDiscussion {
@@ -62,6 +97,8 @@ fn decode_discussion(proto: ProtoDiscussion) -> HostedDiscussion {
             .and_then(|state| StateId::try_from_slice(&state.value).ok()),
         visibility: proto.visibility,
         thread_ref: (!proto.thread_ref.is_empty()).then_some(proto.thread_ref),
+        thread_id: (!proto.thread_id.is_empty()).then_some(proto.thread_id),
+        kind: proto.kind,
         turns: proto
             .turns
             .into_iter()
@@ -70,8 +107,32 @@ fn decode_discussion(proto: ProtoDiscussion) -> HostedDiscussion {
                 author_email: turn.author_email,
                 body: turn.body,
                 posted_at_secs: turn.posted_at.map(|ts| ts.seconds).unwrap_or(0),
+                turn_id: turn.turn_id,
+                turn_seq: turn.turn_seq,
             })
             .collect(),
+        resolution: decode_resolution(proto.resolution),
+    }
+}
+
+fn decode_resolution(
+    resolution: Option<api::heddle::api::v1alpha1::DiscussionResolution>,
+) -> HostedResolution {
+    match resolution.and_then(|resolution| resolution.state) {
+        Some(discussion_resolution::State::IntoAnnotation(annotation)) => {
+            HostedResolution::IntoAnnotation {
+                annotation_id: annotation.annotation_id,
+            }
+        }
+        Some(discussion_resolution::State::ByEdit(edit)) => HostedResolution::ByEdit {
+            state_id: edit
+                .state_id
+                .and_then(|state| StateId::try_from_slice(&state.value).ok()),
+        },
+        Some(discussion_resolution::State::Dismissed(dismissed)) => HostedResolution::Dismissed {
+            reason: dismissed.reason,
+        },
+        Some(discussion_resolution::State::Open(_)) | None => HostedResolution::Open,
     }
 }
 
@@ -82,6 +143,18 @@ fn change_id_state_field(change_id: ChangeId) -> Option<ProtoStateId> {
     Some(ProtoStateId {
         value: change_id.as_bytes().to_vec(),
     })
+}
+
+fn get_discussion_request(
+    repo_path: &str,
+    discussion_id: &str,
+    state_id: Option<StateId>,
+) -> GetDiscussionRequest {
+    GetDiscussionRequest {
+        repo_path: super::helpers::repository_ref(repo_path),
+        discussion_id: discussion_id.to_string(),
+        state_id: state_id.and_then(super::helpers::proto_state_id),
+    }
 }
 
 impl HostedClient {
@@ -176,6 +249,24 @@ impl HostedClient {
         let response = self
             .routes()
             .append_turn(&request)
+            .await
+            .map_err(hosted_to_protocol_error)?;
+        Ok(decode_discussion(response))
+    }
+
+    /// Fetch one hosted discussion by server id. `state_id` empty means HEAD;
+    /// set it to recover a discussion on a prior state (32-byte `StateId`,
+    /// not the ChangeId used on OpenDiscussion/ListByState).
+    pub async fn get_discussion(
+        &mut self,
+        repo_path: &str,
+        discussion_id: &str,
+        state_id: Option<StateId>,
+    ) -> Result<HostedDiscussion, ProtocolError> {
+        let request = get_discussion_request(repo_path, discussion_id, state_id);
+        let response = self
+            .routes()
+            .get_discussion(&request)
             .await
             .map_err(hosted_to_protocol_error)?;
         Ok(decode_discussion(response))
@@ -348,6 +439,17 @@ mod tests {
     }
 
     #[test]
+    fn get_discussion_request_uses_32_byte_state_id() {
+        let state = StateId::from_bytes([0xab; 32]);
+        let request = get_discussion_request("acme/widgets", "disc-1", Some(state));
+        assert_eq!(request.discussion_id, "disc-1");
+        let sent = request.state_id.expect("state_id should be set");
+        assert_eq!(sent.value, vec![0xab; 32]);
+        let head = get_discussion_request("acme/widgets", "disc-1", None);
+        assert!(head.state_id.is_none());
+    }
+
+    #[test]
     fn open_discussion_request_sets_thread_ref() {
         let change = ChangeId::from_bytes([0x11; 16]);
         let request = open_discussion_request(
@@ -418,10 +520,12 @@ mod tests {
         assert_eq!(decoded.opened_against_state, Some(state));
         assert_eq!(decoded.visibility, "team");
         assert_eq!(decoded.thread_ref, None);
+        assert_eq!(decoded.thread_id, None);
         assert_eq!(decoded.turns.len(), 1);
         assert_eq!(decoded.turns[0].author_name, "alice");
         assert_eq!(decoded.turns[0].body, "lgtm");
         assert_eq!(decoded.turns[0].posted_at_secs, 42);
+        assert!(matches!(decoded.resolution, HostedResolution::Open));
 
         // Missing optional fields collapse cleanly.
         let empty = decode_discussion(ProtoDiscussion {
@@ -431,5 +535,15 @@ mod tests {
         assert!(empty.file.is_empty());
         assert!(empty.opened_against_state.is_none());
         assert!(empty.turns.is_empty());
+        assert!(empty.thread_id.is_none());
+
+        let stamped = decode_discussion(ProtoDiscussion {
+            id: "stamped".into(),
+            thread_ref: "old-name".into(),
+            thread_id: "thr-stable".into(),
+            ..Default::default()
+        });
+        assert_eq!(stamped.thread_ref.as_deref(), Some("old-name"));
+        assert_eq!(stamped.thread_id.as_deref(), Some("thr-stable"));
     }
 }

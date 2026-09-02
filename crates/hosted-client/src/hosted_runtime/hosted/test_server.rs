@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::Ipv4Addr,
     sync::{Arc, Mutex},
 };
@@ -10,18 +10,21 @@ use api::{
     StreamingShape,
     framing::{
         StreamFrame, decode_request_frame, decode_request_prelude, decode_stream_frame,
-        encode_stream_message, encode_success_response,
+        encode_failure_response, encode_stream_failure, encode_stream_message,
+        encode_success_response,
     },
     heddle::api::v1alpha1::{
-        BlobResponse, CreateSpoolRequest, DeleteSpoolRequest, GetBlobRequest,
-        GetContextHistoryPageEnd, GetContextHistoryResponse, HostedSpool, ListContextPageEnd,
-        ListContextResponse, ListDiscussionsPageEnd, ListDiscussionsResponse, ListRefsPageEnd,
-        ListRefsResponse, ListThreadsPageEnd, ListThreadsResponse, PackChunk, PackStreamKind,
-        PullComplete, PullReady, PullServerFrame, PushClientFrame, PushComplete, PushReady,
-        PushRequest, PushServerFrame, SignedSpoolOwnerGenesis, StateId, TransferCheckpoint,
-        TransportMode, UpdateSpoolRequest, get_context_history_response, list_context_response,
-        list_discussions_response, list_refs_response, list_threads_response, pull_server_frame,
-        push_client_frame, push_server_frame,
+        BlobResponse, CallFailure, CallFailureCode, CreateSpoolRequest, DeleteSpoolRequest,
+        Discussion, GetBlobRequest, GetContextHistoryPageEnd, GetContextHistoryResponse,
+        GetDiscussionRequest, HostedSpool, ListContextPageEnd, ListContextResponse,
+        ListDiscussionsByStateRequest, ListDiscussionsPageEnd, ListDiscussionsResponse,
+        ListRefsPageEnd, ListRefsResponse, ListThreadsPageEnd, ListThreadsResponse, PackChunk,
+        PackStreamKind, PullComplete, PullReady, PullServerFrame, PushClientFrame, PushComplete,
+        PushReady, PushRequest, PushServerFrame, RepoEvent, SignedSpoolOwnerGenesis, StateId,
+        SubscribeRepoEventsRequest, TransferCheckpoint, TransportMode, UpdateSpoolRequest,
+        get_context_history_response, list_context_response, list_discussions_response,
+        list_refs_response, list_threads_response, pull_server_frame, push_client_frame,
+        push_server_frame,
     },
     method_descriptor,
 };
@@ -39,6 +42,10 @@ const GET_BLOB_METHOD: &str = "/heddle.api.v1alpha1.RepositoryService/GetBlob";
 const CREATE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/CreateSpool";
 const DELETE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/DeleteSpool";
 const UPDATE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/UpdateSpool";
+const GET_DISCUSSION_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/GetDiscussion";
+const LIST_BY_STATE_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/ListByState";
+const SUBSCRIBE_REPO_EVENTS_METHOD: &str =
+    "/heddle.api.v1alpha1.RepositoryService/SubscribeRepoEvents";
 
 #[derive(Default)]
 pub(crate) struct SpoolMutationCapture {
@@ -51,8 +58,40 @@ fn owner_genesis_fixture() -> SignedSpoolOwnerGenesis {
     SignedSpoolOwnerGenesis::decode(bytes.as_slice()).expect("published v2 fixture genesis")
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct CollaborationFixture {
+    pub discussions: HashMap<String, Discussion>,
+    pub list: Vec<Discussion>,
+    pub hidden: HashMap<String, CallFailureCode>,
+    pub events: Vec<RepoEvent>,
+    pub one_event_per_subscribe: bool,
+    pub unknown_repo_ids: HashSet<String>,
+    pub get_requests: Arc<Mutex<Vec<String>>>,
+    pub get_request_state_ids: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
+    pub list_requests: Arc<Mutex<usize>>,
+    pub subscribe_after: Arc<Mutex<Vec<i64>>>,
+    pub subscribe_repo_ids: Arc<Mutex<Vec<String>>>,
+    pub subscribe_thread: Arc<Mutex<Vec<(String, String)>>>,
+}
+
 pub(crate) async fn start() -> (HostedClient, JoinHandle<()>) {
-    start_inner(None, BlobFixture::default(), None, None, None).await
+    start_inner(None, BlobFixture::default(), None, None, None, None).await
+}
+
+pub(crate) async fn start_with_collaboration(
+    fixture: CollaborationFixture,
+) -> (HostedClient, JoinHandle<()>, CollaborationFixture) {
+    let fixture_clone = fixture.clone();
+    let (client, server) = start_inner(
+        None,
+        BlobFixture::default(),
+        None,
+        None,
+        None,
+        Some(fixture),
+    )
+    .await;
+    (client, server, fixture_clone)
 }
 
 pub(crate) async fn start_recording_push()
@@ -64,6 +103,7 @@ pub(crate) async fn start_recording_push()
         None,
         None,
         Some(Arc::clone(&captured)),
+        None,
     )
     .await;
     (client, server, captured)
@@ -79,6 +119,7 @@ pub(crate) async fn start_recording_create_spool() -> (
         None,
         BlobFixture::default(),
         Some(Arc::clone(&captured)),
+        None,
         None,
         None,
     )
@@ -98,6 +139,7 @@ pub(crate) async fn start_recording_spool_mutations() -> (
         None,
         Some(Arc::clone(&captured)),
         None,
+        None,
     )
     .await;
     (client, server, captured)
@@ -112,6 +154,7 @@ pub(crate) async fn start_with_remote_state(
             pack: None,
         }),
         BlobFixture::default(),
+        None,
         None,
         None,
         None,
@@ -130,6 +173,7 @@ pub(crate) async fn start_with_pull_pack(
             pack: Some((pack_data, index_data)),
         }),
         BlobFixture::default(),
+        None,
         None,
         None,
         None,
@@ -168,7 +212,7 @@ async fn start_with_get_blob_contents_and_pull(
         contents: blobs.into_iter().collect(),
         requested: Arc::clone(&requested),
     };
-    let (client, server) = start_inner(pull, fixture, None, None, None).await;
+    let (client, server) = start_inner(pull, fixture, None, None, None, None).await;
     (client, server, requested)
 }
 
@@ -190,6 +234,7 @@ async fn start_inner(
     create_spool: Option<Arc<Mutex<Vec<CreateSpoolRequest>>>>,
     spool_mutations: Option<Arc<Mutex<SpoolMutationCapture>>>,
     push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
+    collaboration: Option<CollaborationFixture>,
 ) -> (HostedClient, JoinHandle<()>) {
     let server = Endpoint::builder(presets::Minimal)
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
@@ -216,6 +261,7 @@ async fn start_inner(
                 create_spool.clone(),
                 spool_mutations.clone(),
                 push_requests.clone(),
+                collaboration.clone(),
             ));
         }
         server.close().await;
@@ -237,6 +283,7 @@ async fn start_inner(
     (client, server_task)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_call(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
@@ -245,6 +292,7 @@ async fn serve_call(
     create_spool: Option<Arc<Mutex<Vec<CreateSpoolRequest>>>>,
     spool_mutations: Option<Arc<Mutex<SpoolMutationCapture>>>,
     push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
+    collaboration: Option<CollaborationFixture>,
 ) {
     let mut request = Vec::new();
     let (method, prelude_len) = loop {
@@ -269,6 +317,14 @@ async fn serve_call(
                 serve_delete_spool(&mut send, &mut recv, &mut request, spool_mutations).await;
             } else if method == GET_BLOB_METHOD && !blobs.contents.is_empty() {
                 serve_get_blob(&mut send, &mut recv, &mut request, blobs).await;
+            } else if method == GET_DISCUSSION_METHOD {
+                if let Some(collaboration) = collaboration {
+                    serve_get_discussion(&mut send, &mut recv, &mut request, collaboration).await;
+                } else {
+                    send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
+                        .await
+                        .unwrap();
+                }
             } else {
                 send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
                     .await
@@ -276,10 +332,29 @@ async fn serve_call(
             }
         }
         StreamingShape::ServerStreaming => {
-            let body = terminal_page(&method);
-            send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
-                .await
-                .unwrap();
+            if method == LIST_BY_STATE_METHOD {
+                if let Some(collaboration) = collaboration {
+                    serve_list_by_state(&mut send, &mut recv, &mut request, collaboration).await;
+                } else {
+                    let body = terminal_page(&method);
+                    send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
+                        .await
+                        .unwrap();
+                }
+            } else if method == SUBSCRIBE_REPO_EVENTS_METHOD {
+                if let Some(collaboration) = collaboration {
+                    serve_subscribe_repo_events(&mut send, &mut recv, &mut request, collaboration)
+                        .await;
+                } else {
+                    send.finish().unwrap();
+                    return;
+                }
+            } else {
+                let body = terminal_page(&method);
+                send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
+                    .await
+                    .unwrap();
+            }
         }
         StreamingShape::Bidirectional => {
             if method == "/heddle.api.v1alpha1.RepoSyncService/Push" {
@@ -599,6 +674,174 @@ async fn serve_get_blob(
     ))
     .await
     .unwrap();
+}
+
+async fn read_request_body(recv: &mut iroh::endpoint::RecvStream, request: &mut Vec<u8>) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+}
+
+async fn serve_get_discussion(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    fixture: CollaborationFixture,
+) {
+    read_request_body(recv, request).await;
+    let request = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| GetDiscussionRequest::decode(frame.body).ok());
+    let discussion_id = request
+        .as_ref()
+        .map(|body| body.discussion_id.clone())
+        .unwrap_or_default();
+    let state_id = request.and_then(|body| body.state_id.map(|state| state.value));
+    fixture
+        .get_requests
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(discussion_id.clone());
+    fixture
+        .get_request_state_ids
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(state_id);
+    if let Some(code) = fixture.hidden.get(&discussion_id).copied() {
+        let failure = CallFailure {
+            code: code as i32,
+            message: "discussion is not visible".to_string(),
+            error: None,
+        };
+        send.write_chunk(Bytes::from(encode_failure_response(&failure).unwrap()))
+            .await
+            .unwrap();
+        return;
+    }
+    let Some(discussion) = fixture.discussions.get(&discussion_id) else {
+        let failure = CallFailure {
+            code: CallFailureCode::NotFound as i32,
+            message: format!("discussion {discussion_id} not found"),
+            error: None,
+        };
+        send.write_chunk(Bytes::from(encode_failure_response(&failure).unwrap()))
+            .await
+            .unwrap();
+        return;
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&discussion.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_list_by_state(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    fixture: CollaborationFixture,
+) {
+    read_request_body(recv, request).await;
+    let _ = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| ListDiscussionsByStateRequest::decode(frame.body).ok());
+    *fixture
+        .list_requests
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) += 1;
+    for discussion in &fixture.list {
+        let body = ListDiscussionsResponse {
+            frame: Some(list_discussions_response::Frame::Item(Box::new(
+                discussion.clone(),
+            ))),
+        }
+        .encode_to_vec();
+        send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
+            .await
+            .unwrap();
+    }
+    let end = ListDiscussionsResponse {
+        frame: Some(list_discussions_response::Frame::PageEnd(
+            ListDiscussionsPageEnd {
+                next_page_token: String::new(),
+            },
+        )),
+    }
+    .encode_to_vec();
+    send.write_chunk(Bytes::from(encode_stream_message(&end).unwrap()))
+        .await
+        .unwrap();
+}
+
+async fn serve_subscribe_repo_events(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    fixture: CollaborationFixture,
+) {
+    read_request_body(recv, request).await;
+    let subscribe = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| SubscribeRepoEventsRequest::decode(frame.body).ok());
+    let after_event_id = subscribe
+        .as_ref()
+        .map(|body| body.after_event_id)
+        .unwrap_or(0);
+    let repo_id = subscribe
+        .as_ref()
+        .map(|body| body.repo_id.clone())
+        .unwrap_or_default();
+    let thread_scope = subscribe
+        .map(|body| (body.thread, body.thread_id))
+        .unwrap_or_default();
+    fixture
+        .subscribe_after
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(after_event_id);
+    fixture
+        .subscribe_repo_ids
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(repo_id.clone());
+    fixture
+        .subscribe_thread
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(thread_scope);
+    if fixture.unknown_repo_ids.contains(&repo_id) {
+        let failure = CallFailure {
+            code: CallFailureCode::NotFound as i32,
+            message: format!("repository {repo_id} not found"),
+            error: None,
+        };
+        send.write_chunk(Bytes::from(encode_stream_failure(&failure).unwrap()))
+            .await
+            .unwrap();
+        return;
+    }
+    let mut matching = fixture
+        .events
+        .into_iter()
+        .filter(|event| event.event_id > after_event_id);
+    if fixture.one_event_per_subscribe {
+        if let Some(event) = matching.next() {
+            send.write_chunk(Bytes::from(
+                encode_stream_message(&event.encode_to_vec()).unwrap(),
+            ))
+            .await
+            .unwrap();
+        }
+    } else {
+        for event in matching {
+            send.write_chunk(Bytes::from(
+                encode_stream_message(&event.encode_to_vec()).unwrap(),
+            ))
+            .await
+            .unwrap();
+        }
+    }
 }
 
 fn pack_frame(stream_kind: PackStreamKind, data: Vec<u8>) -> Vec<u8> {

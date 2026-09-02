@@ -7,8 +7,8 @@ use anyhow::{Context, Result, anyhow};
 // The discussion wire payloads live in cli-contract so the schema registry
 // registers the real serialization types.
 pub(crate) use heddle_cli_contract::cli::commands::wire::collab::{
-    AnchorOutput, DiscussionListOutput, DiscussionOutput, DiscussionShowOutput,
-    DiscussionWriteOutput, ResolutionOutput, TurnOutput,
+    AnchorOutput, DiscussWaitLineOutput, DiscussionListOutput, DiscussionOutput,
+    DiscussionShowOutput, DiscussionWriteOutput, ResolutionOutput, TurnOutput,
 };
 use objects::object::{
     AnnotationKind, CollabOpId, CollaborationAnchor, CollaborationAnchorStatus,
@@ -38,7 +38,8 @@ use crate::{
     cli::{
         cli_args::{
             Cli, DiscussAppendArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs,
-            DiscussReopenArgs, DiscussResolveArgs, DiscussShowArgs, ResolveModeArg,
+            DiscussReopenArgs, DiscussResolveArgs, DiscussShowArgs, DiscussWaitArgs,
+            ResolveModeArg,
         },
         should_output_json,
     },
@@ -69,9 +70,26 @@ pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
                 );
             }
         },
+        #[cfg(feature = "client")]
+        DiscussCommands::Wait(args) => {
+            // Like clone/pull: do not run legacy blob→op-log migration first.
+            // Hosted bootstrap claims the marker, then GetDiscussion / ListByState
+            // are authoritative. Migrating pulled Discussions attachments here
+            // would duplicate every hosted discussion. list/show still migrate.
+            let repo = cli.open_repo().context("open Heddle repository")?;
+            return run_wait(cli, &repo, args).await;
+        }
+        #[cfg(not(feature = "client"))]
+        DiscussCommands::Wait(_) => {
+            return Err(anyhow!("discuss wait requires the hosted client feature"));
+        }
         _ => cli.open_repo().context("open Heddle repository")?,
     };
-    let store = open_store(&repo)?;
+    let store = if migrates_legacy_on_entry(command) {
+        open_store(&repo)?
+    } else {
+        CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?
+    };
     match command {
         DiscussCommands::Open(args) => run_open(cli, &repo, &store, args),
         DiscussCommands::Append(args) => run_append(cli, &repo, &store, args),
@@ -79,7 +97,12 @@ pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
         DiscussCommands::Reopen(args) => run_reopen(cli, &repo, &store, args),
         DiscussCommands::List(args) => run_list(cli, &repo, &store, args),
         DiscussCommands::Show(args) => run_show(cli, &store, args),
+        DiscussCommands::Wait(_) => unreachable!("wait returns before opening the store"),
     }
+}
+
+fn migrates_legacy_on_entry(command: &DiscussCommands) -> bool {
+    !matches!(command, DiscussCommands::Wait(_))
 }
 
 impl CompactProjection for DiscussionWriteOutput {
@@ -324,6 +347,186 @@ fn run_list(
                 discussion.title
             );
         }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "client")]
+async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) -> Result<()> {
+    use hosted_client::client::discussion_live::{
+        DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventOutcome, load_scoped_cursor,
+        paired_thread_scope, save_scoped_cursor, wait_reconnect_backoff,
+    };
+    use hosted_client::client::{HostedAuthMode, HostedClient};
+
+    use super::remote::resolve_default_remote_name;
+    use crate::remote::{RemoteTarget, resolve_remote_with_key_and_insecure};
+
+    let remote_name = resolve_default_remote_name(repo, args.remote.as_deref())?;
+    let (target, server_key, insecure) =
+        resolve_remote_with_key_and_insecure(repo, Some(&remote_name))?;
+    let (authority, repo_path) = match target {
+        RemoteTarget::Network {
+            authority,
+            repo_path,
+        } => (
+            authority,
+            repo_path.context("hosted remote must include a repository path")?,
+        ),
+        RemoteTarget::Local(_) => {
+            return Err(anyhow!(RecoveryAdvice::safety_refusal(
+                "hosted_remote_required",
+                format!("discuss wait requires a hosted remote; remote '{remote_name}' is local"),
+                "Configure a hosted remote, then retry `heddle discuss wait`.",
+                format!("remote '{remote_name}' is local, but live discussion delivery is hosted"),
+                "a local remote has no event cursor",
+                "no hosted request was sent and local repository state was left unchanged",
+                "heddle remote list",
+                vec!["heddle remote list".to_string()],
+            )));
+        }
+    };
+
+    let user_config = UserConfig::load_default()?;
+    let mut client = HostedClient::open_session_with_insecure(
+        &authority,
+        &user_config,
+        server_key.clone(),
+        HostedAuthMode::CredentialFallback,
+        insecure,
+    )
+    .await?;
+
+    let (thread_name, thread_id) = if let Some(thread) = args.thread.as_deref() {
+        let record = super::thread_cmd::load_thread(repo, thread)?;
+        paired_thread_scope(&record.thread, &record.id)?
+    } else {
+        (String::new(), String::new())
+    };
+    let cursor_scope = DiscussionCursorScope {
+        authority: authority.clone(),
+        repo_path: repo_path.clone(),
+        thread: thread_name.clone(),
+        thread_id: thread_id.clone(),
+        principal: client.authenticated_username().unwrap_or_default(),
+    };
+    if let Some(after) = args.after {
+        let mut cursor = load_scoped_cursor(repo.heddle_dir(), &cursor_scope)?;
+        cursor.after_event_id = after;
+        save_scoped_cursor(repo.heddle_dir(), &cursor_scope, &cursor)?;
+    }
+
+    let mut seen = 0usize;
+    let mut reconnects = 0u32;
+    'session: loop {
+        let mut consumer = DiscussionEventConsumer::new(repo, &mut client, repo_path.clone())
+            .with_authority(authority.clone());
+        if !thread_name.is_empty() {
+            consumer = consumer.with_thread(&thread_name, &thread_id);
+        }
+        let mut subscription = consumer.start(None).await?;
+        emit_wait_line(
+            cli,
+            DiscussWaitLineOutput {
+                output_kind: "discuss_wait",
+                status: "listening",
+                event_id: subscription.last_event_id(),
+                event_type: String::new(),
+                discussion_id: None,
+                applied: false,
+                after_event_id: subscription.last_event_id(),
+                skip_reason: None,
+            },
+        )?;
+
+        loop {
+            if args.max_events.is_some_and(|max| seen >= max) {
+                break 'session;
+            }
+            match consumer.consume_next(&mut subscription).await {
+                Ok((event, outcome)) => {
+                    reconnects = 0;
+                    seen += 1;
+                    let status = match &outcome {
+                        DiscussionEventOutcome::Applied { .. } => "applied",
+                        DiscussionEventOutcome::Unchanged { .. } => "unchanged",
+                        DiscussionEventOutcome::Skipped { .. } => "skipped",
+                        DiscussionEventOutcome::Ignored => "ignored",
+                    };
+                    emit_wait_line(
+                        cli,
+                        DiscussWaitLineOutput {
+                            output_kind: "discuss_wait",
+                            status,
+                            event_id: event.event_id,
+                            event_type: event.event_type,
+                            discussion_id: outcome.discussion_id().map(ToString::to_string),
+                            applied: outcome.applied(),
+                            after_event_id: subscription.last_event_id(),
+                            skip_reason: outcome.skip_reason().map(ToString::to_string),
+                        },
+                    )?;
+                    if args.max_events.is_some_and(|max| seen >= max) {
+                        break 'session;
+                    }
+                }
+                Err(error) if error.resume_after_event_id().is_some() => {
+                    let Some(delay) = wait_reconnect_backoff(reconnects) else {
+                        return Err(anyhow!(
+                            "discuss wait reconnect ceiling reached after {reconnects} attempts"
+                        ));
+                    };
+                    reconnects += 1;
+                    // Stream died (staging drops iroh endpoints). Persist
+                    // already happened per event; reopen and subscribe after
+                    // the watermark.
+                    drop(consumer);
+                    tokio::time::sleep(delay).await;
+                    client.close().await;
+                    client = HostedClient::open_session_with_insecure(
+                        &authority,
+                        &user_config,
+                        server_key.clone(),
+                        HostedAuthMode::CredentialFallback,
+                        insecure,
+                    )
+                    .await?;
+                    continue 'session;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    client.close().await;
+    Ok(())
+}
+
+#[cfg(feature = "client")]
+fn emit_wait_line(cli: &Cli, line: DiscussWaitLineOutput) -> Result<()> {
+    if should_output_json(cli, None) {
+        println!("{}", serde_json::to_string(&line)?);
+        return Ok(());
+    }
+    match line.status {
+        "listening" => println!(
+            "waiting for discussion events after {}",
+            line.after_event_id
+        ),
+        "applied" => println!(
+            "applied {} {} ({})",
+            line.event_type,
+            line.discussion_id.as_deref().unwrap_or("-"),
+            line.event_id
+        ),
+        "unchanged" => println!(
+            "already had {} {} ({})",
+            line.event_type,
+            line.discussion_id.as_deref().unwrap_or("-"),
+            line.event_id
+        ),
+        "skipped" => println!("{}", format_wait_skip(&line)),
+        "ignored" => {}
+        other => println!("{other} {} ({})", line.event_type, line.event_id),
     }
     Ok(())
 }
@@ -655,6 +858,17 @@ fn anchor_path(value: &CollaborationAnchor) -> Option<&str> {
     }
 }
 
+fn format_wait_skip(line: &DiscussWaitLineOutput) -> String {
+    match line
+        .skip_reason
+        .as_deref()
+        .filter(|reason| !reason.is_empty())
+    {
+        Some(reason) => format!("skipped {} ({}) — {reason}", line.event_type, line.event_id),
+        None => format!("skipped {} ({})", line.event_type, line.event_id),
+    }
+}
+
 fn anchor_label(value: &AnchorOutput) -> String {
     match value {
         AnchorOutput::Repository => "repository".to_string(),
@@ -662,5 +876,139 @@ fn anchor_label(value: &AnchorOutput) -> String {
         AnchorOutput::Change { change_id } => change_id.clone(),
         AnchorOutput::Path { path, .. } => path.clone(),
         AnchorOutput::Symbol { path, symbol, .. } => format!("{path}:{symbol}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::cli_args::{DiscussListArgs, DiscussShowArgs, DiscussWaitArgs};
+
+    #[test]
+    fn wait_is_the_only_discuss_verb_that_skips_legacy_migration() {
+        let wait = DiscussCommands::Wait(DiscussWaitArgs {
+            after: None,
+            remote: None,
+            thread: None,
+            max_events: None,
+        });
+        assert!(
+            !migrates_legacy_on_entry(&wait),
+            "discuss wait must not migrate legacy discussions before hosted bootstrap"
+        );
+        let list = DiscussCommands::List(DiscussListArgs {
+            state: None,
+            file: None,
+            symbol: None,
+            status: "open".to_string(),
+        });
+        assert!(
+            migrates_legacy_on_entry(&list),
+            "discuss list must still convert legacy attachments"
+        );
+        let show = DiscussCommands::Show(DiscussShowArgs {
+            discussion_id: "disc-1".to_string(),
+        });
+        assert!(
+            migrates_legacy_on_entry(&show),
+            "discuss show must still convert legacy attachments"
+        );
+    }
+
+    #[test]
+    fn list_and_show_materialize_legacy_attachments() {
+        use chrono::Utc;
+        use objects::{
+            object::{
+                Attribution, Blob, Discussion, DiscussionResolution, DiscussionTurn,
+                DiscussionsBlob, Principal, StateAttachment, StateAttachmentBody, SymbolAnchor,
+            },
+            store::ObjectStore,
+        };
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = repo::Repository::init_default(temp.path()).unwrap();
+        let state_id = repo.head().unwrap().unwrap();
+        let bytes = DiscussionsBlob::new(vec![Discussion {
+            id: "legacy-1".to_string(),
+            anchor: SymbolAnchor::new("src/lib.rs", "run"),
+            opened_against_state: state_id,
+            opened_at: 1_700_000_000,
+            thread_ref: None,
+            turns: vec![DiscussionTurn {
+                author: Principal::new("Ada", "ada@example.com"),
+                body: "why?".to_string(),
+                posted_at: 1_700_000_000,
+                references: Vec::new(),
+            }],
+            resolution: DiscussionResolution::Open,
+            body_changed_since_open: false,
+            anchor_ambiguous: false,
+            orphaned: false,
+            visibility: VisibilityTier::default(),
+            resolved_annotation_id: None,
+        }])
+        .encode()
+        .unwrap();
+        let blob_hash = repo.store().put_blob(&Blob::new(bytes)).unwrap();
+        repo.put_state_attachment(&StateAttachment {
+            state_id,
+            body: StateAttachmentBody::Discussions(blob_hash),
+            attribution: Attribution::human(Principal::new("Importer", "importer@example.com")),
+            created_at: Utc::now(),
+            supersedes: None,
+        })
+        .unwrap();
+        let marker = repo
+            .heddle_dir()
+            .join("collaboration/migrations/legacy-discussions-v1");
+        assert!(
+            !marker.exists(),
+            "the fixture is an unmigrated clone with legacy attachments"
+        );
+
+        let store = open_store(&repo).expect("list/show open the store through migrate");
+        let materialized = store.materialize().unwrap();
+        assert_eq!(
+            materialized.discussions.len(),
+            1,
+            "list/show must still convert legacy attachments when the marker is unset"
+        );
+        let discussion = materialized.discussions.into_values().next().unwrap();
+        assert_eq!(discussion.turns[0].1.body, "why?");
+        assert!(
+            marker.exists(),
+            "list/show claim the marker after converting the attachment"
+        );
+        assert!(
+            store
+                .materialize_discussion(&discussion.discussion_id)
+                .unwrap()
+                .is_some(),
+            "discuss show must be able to load the migrated discussion by id"
+        );
+    }
+
+    #[test]
+    fn skipped_wait_line_carries_the_reason() {
+        let line = DiscussWaitLineOutput {
+            output_kind: "discuss_wait",
+            status: "skipped",
+            event_id: 44,
+            event_type: "discussion.opened".to_string(),
+            discussion_id: None,
+            applied: false,
+            after_event_id: 44,
+            skip_reason: Some("discussion disc-hidden is not visible to this caller".to_string()),
+        };
+        let json = serde_json::to_value(&line).unwrap();
+        assert_eq!(
+            json["skip_reason"],
+            "discussion disc-hidden is not visible to this caller"
+        );
+        assert!(
+            format_wait_skip(&line).contains("not visible"),
+            "human skip lines must include the reason"
+        );
     }
 }

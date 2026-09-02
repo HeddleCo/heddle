@@ -2003,6 +2003,23 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
+        &["discuss", "wait"],
+        json_discriminators(
+            documented_schemas(
+                CommandContract {
+                    json_kind: "jsonl",
+                    ..NETWORK_METADATA_MUTATION_NO_OP_ID
+                },
+                &["discuss wait"],
+            ),
+            &[json_discriminator(
+                Some("discuss wait"),
+                "output_kind",
+                "discuss_wait",
+            )],
+        ),
+    ),
+    entry(
         &["doctor"],
         front_door(
             json_discriminators(
@@ -4497,6 +4514,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             DiscussCommands::Reopen(_) => vec!["discuss", "reopen"],
             DiscussCommands::List(_) => vec!["discuss", "list"],
             DiscussCommands::Show(_) => vec!["discuss", "show"],
+            DiscussCommands::Wait(_) => vec!["discuss", "wait"],
         },
         Commands::Query(_) => vec!["query"],
         Commands::Review { command } => match command {

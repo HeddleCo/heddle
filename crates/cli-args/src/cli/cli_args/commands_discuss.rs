@@ -17,6 +17,8 @@ pub enum DiscussCommands {
     List(DiscussListArgs),
     /// Show one discussion and its causal heads.
     Show(DiscussShowArgs),
+    /// Replay hosted discussion events after the local watermark, then go live.
+    Wait(DiscussWaitArgs),
 }
 
 #[derive(Clone, Debug, Args)]
@@ -161,4 +163,20 @@ pub struct DiscussListArgs {
 #[derive(Clone, Debug, Args)]
 pub struct DiscussShowArgs {
     pub discussion_id: String,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct DiscussWaitArgs {
+    /// Resume after this hosted event id. Defaults to the persisted watermark.
+    #[arg(long)]
+    pub after: Option<i64>,
+    /// Hosted remote that owns the event cursor. Defaults to the repository default.
+    #[arg(long)]
+    pub remote: Option<String>,
+    /// Restrict the subscription to this thread name.
+    #[arg(long)]
+    pub thread: Option<String>,
+    /// Internal helper for tests: stop after this many events (including ignored ones).
+    #[arg(long, hide = true)]
+    pub max_events: Option<usize>,
 }

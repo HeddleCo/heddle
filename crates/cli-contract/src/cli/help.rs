@@ -889,7 +889,7 @@ Tick budget: at most 3 signals per state by default. Priority:\n\
 invariant_adjacency > self_flagged_uncertainty > pattern_deviation >\n\
 novelty > test_reachability.\n";
 
-const DISCUSS_TOPIC: &str = "`heddle discuss open | append | resolve | reopen | list | show`\n\
+const DISCUSS_TOPIC: &str = "`heddle discuss open | append | resolve | reopen | list | show | wait`\n\
 \n\
 Scope: native Heddle only. Discussions are stored in `.heddle` and travel over\n\
 `heddle push` / `heddle pull` to a Heddle remote. They are deliberately not\n\
@@ -916,7 +916,12 @@ file, and symbol where the discussion began:\n\
 the symbol-anchored discussion to a thread; it does not replace the anchor.\n\
 \n\
 Visibility: `--visibility public|internal|team:NAME|restricted:LABEL|private:LABEL`.\n\
-Empty visibility uses the configured discussion visibility policy.\n";
+Empty visibility uses the configured discussion visibility policy.\n\
+\n\
+`wait` tails hosted discussion events (`discussion.opened` / `turn.appended` /\n\
+`discussion.resolved`) after a ListByState snapshot bootstrap. A turn opened\n\
+on another machine appears here without a full pull. `--after` overrides the\n\
+persisted watermark. Pack attachments are not the live channel.\n";
 
 const GIT_OVERLAY_TOPIC: &str = r#"Git Overlay workflow
 

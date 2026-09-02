@@ -63,7 +63,7 @@ pub use commands_context::ContextCommands;
 pub use commands_context::ContextReasonCommands;
 pub use commands_discuss::{
     DiscussAppendArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs, DiscussReopenArgs,
-    DiscussResolveArgs, DiscussShowArgs, ResolveModeArg,
+    DiscussResolveArgs, DiscussShowArgs, DiscussWaitArgs, ResolveModeArg,
 };
 #[cfg(feature = "git-overlay")]
 pub use commands_git_projection::{BridgeCommands, BridgeGitCommands, GitSource, SyncCommands};

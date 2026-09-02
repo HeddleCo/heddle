@@ -258,6 +258,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(&["discuss", "list"], &["discuss", "list"]),
     sample(&["discuss", "show"], &["discuss", "show", "discussion-1"]),
+    sample(&["discuss", "wait"], &["discuss", "wait"]),
     sample(&["doctor"], &["doctor"]),
     sample(&["doctor", "docs"], &["doctor", "docs"]),
     sample(&["doctor", "schemas"], &["doctor", "schemas"]),
@@ -1642,6 +1643,7 @@ fn json_kind_marks_streaming_command_surfaces() {
     let catalog = build_command_catalog();
     for (display, kind) in [
         ("watch", "jsonl"),
+        ("discuss wait", "jsonl"),
         ("status", "json_or_jsonl"),
         ("thread show", "json_or_jsonl"),
     ] {
@@ -1824,6 +1826,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "discuss reopen",
             "discuss list",
             "discuss show",
+            "discuss wait",
             "doctor",
             "doctor docs",
             "doctor schemas",

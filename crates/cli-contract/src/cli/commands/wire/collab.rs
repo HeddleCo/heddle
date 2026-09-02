@@ -99,6 +99,22 @@ pub struct DiscussionListOutput {
     pub discussions: Vec<DiscussionOutput>,
 }
 
+/// One `heddle discuss wait` JSONL line.
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "DiscussWaitLineSchema")]
+pub struct DiscussWaitLineOutput {
+    pub output_kind: &'static str,
+    pub status: &'static str,
+    pub event_id: i64,
+    pub event_type: String,
+    pub discussion_id: Option<String>,
+    pub applied: bool,
+    pub after_event_id: i64,
+    /// Present on `status = "skipped"` so a person (and JSONL) can see why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+}
+
 // ---- review ----------------------------------------------------------------
 
 #[derive(Serialize, JsonSchema)]
