@@ -6,7 +6,7 @@ use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::{
     ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeEntry, TreeError,
-    tree::git_format_from_tag,
+    tree::{TREE_HASH_SCRATCH_LEN, git_format_from_tag},
     tree_canonical::{
         TREE_BLOCK_ENCODING_VERSION, TREE_BLOCK_INDEX_LEN, TREE_BLOCK_PREAMBLE_LEN,
         TREE_ENCODING_VERSION, TREE_HEADER_LEN, TREE_LEAN_ENCODING_VERSION, TREE_LEAN_MAGIC,
@@ -165,6 +165,7 @@ pub struct TreeEntryReader<S: TreeByteSource> {
     layout: TreeReaderLayout,
     cursor: TreeResumeCursor,
     hasher: Option<blake3::Hasher>,
+    hash_scratch: [u8; TREE_HASH_SCRATCH_LEN],
     lean_hash_entries: Option<Vec<TreeEntry>>,
     decoded_logical_len: u64,
     started_at_zero: bool,
@@ -256,6 +257,7 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
             layout,
             cursor,
             hasher,
+            hash_scratch: [0; TREE_HASH_SCRATCH_LEN],
             lean_hash_entries,
             decoded_logical_len: 0,
             started_at_zero,
@@ -714,7 +716,7 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
             .into());
         }
         if let Some(hasher) = &mut self.hasher {
-            entry.update_hasher(hasher);
+            entry.update_hasher(hasher, &mut self.hash_scratch);
         }
         if let Some(entries) = &mut self.lean_hash_entries {
             entries.push(entry.clone());

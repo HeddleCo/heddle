@@ -9,8 +9,8 @@ use heddle_format::compression::{
 use crate::{
     object::{
         Action, ActionId, ContentHash, State, TREE_DELTA_ANCHOR_INTERVAL, TREE_DELTA_MAX_OPS, Tree,
-        decode_tree_delta, decode_tree_delta_header, encode_tree_delta, is_canonical_tree,
-        is_delta_tree, is_lean_tree, tree_delta,
+        decode_tree_delta, decode_tree_delta_header, encode_tree_delta, encoded_lean_size,
+        is_canonical_tree, is_delta_tree, is_lean_tree, tree_delta,
     },
     store::{HeddleError, Result},
 };
@@ -69,52 +69,27 @@ pub fn encode_tree(tree: &Tree, _config: &CompressionConfig) -> Result<(ContentH
 /// eligible descendants are cumulative HDC1 deltas against the epoch anchor.
 pub fn encode_tree_hot(tree: &Tree, base: Option<TreeDeltaBase<'_>>) -> Result<EncodedTree> {
     let hash = tree.hash();
-    let lean = tree.encode_lean()?;
     let Some(base) = base else {
-        return Ok(EncodedTree {
-            hash,
-            data: lean,
-            kind: TreeEncodingKind::Lean,
-        });
+        return encode_tree_lean(tree, hash);
     };
     if hash == base.anchor_id {
-        return Ok(EncodedTree {
-            hash,
-            data: lean,
-            kind: TreeEncodingKind::Lean,
-        });
+        return encode_tree_lean(tree, hash);
     }
     let Some(depth) = base.parent_depth.checked_add(1) else {
-        return Ok(EncodedTree {
-            hash,
-            data: lean,
-            kind: TreeEncodingKind::Lean,
-        });
+        return encode_tree_lean(tree, hash);
     };
     if depth >= TREE_DELTA_ANCHOR_INTERVAL {
-        return Ok(EncodedTree {
-            hash,
-            data: lean,
-            kind: TreeEncodingKind::Lean,
-        });
+        return encode_tree_lean(tree, hash);
     }
     let ops = tree_delta(base.anchor, tree);
     if ops.len() > TREE_DELTA_MAX_OPS {
-        return Ok(EncodedTree {
-            hash,
-            data: lean,
-            kind: TreeEncodingKind::Lean,
-        });
+        return encode_tree_lean(tree, hash);
     }
     let delta = encode_tree_delta(base.anchor_id, base.anchor, tree, &ops)?;
     let header = decode_tree_delta_header(&delta)?;
     let porch_is_bounded = header.first_base_count <= 1 && header.hundred_base_count <= 100;
-    if !porch_is_bounded || delta.len() >= lean.len() {
-        return Ok(EncodedTree {
-            hash,
-            data: lean,
-            kind: TreeEncodingKind::Lean,
-        });
+    if !porch_is_bounded || delta.len() >= encoded_lean_size(tree) {
+        return encode_tree_lean(tree, hash);
     }
     Ok(EncodedTree {
         hash,
@@ -124,6 +99,14 @@ pub fn encode_tree_hot(tree: &Tree, base: Option<TreeDeltaBase<'_>>) -> Result<E
             depth,
             op_count: ops.len(),
         },
+    })
+}
+
+fn encode_tree_lean(tree: &Tree, hash: ContentHash) -> Result<EncodedTree> {
+    Ok(EncodedTree {
+        hash,
+        data: tree.encode_lean()?,
+        kind: TreeEncodingKind::Lean,
     })
 }
 
@@ -272,6 +255,7 @@ mod tests {
         let anchor = tree_fixture(240, None);
         let current = tree_fixture(240, Some((117, b"changed")));
         let lean = encode_tree_hot(&anchor, None).unwrap();
+        assert_eq!(encoded_lean_size(&anchor), lean.data.len());
         assert_eq!(lean.kind, TreeEncodingKind::Lean);
         assert_eq!(
             decode_tree_with_key(&lean.data, anchor.hash(), None).unwrap(),

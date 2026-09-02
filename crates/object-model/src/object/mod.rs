@@ -161,8 +161,8 @@ pub use tree_canonical::{
     TREE_LEAN_ENCODING_VERSION, TREE_LEAN_MAGIC, TreeDeltaHeader, TreeDeltaOp, TreeHeader,
     apply_tree_delta, decode_header, decode_lean_prefix, decode_tree_delta,
     decode_tree_delta_header, decode_tree_delta_header_prefix, decode_tree_delta_ops,
-    decode_tree_delta_ops_prefix, encode_lean_entry, encode_tree_delta, is_canonical_tree,
-    is_delta_tree, is_lean_tree, is_streamable_tree, tree_delta,
+    decode_tree_delta_ops_prefix, encode_lean_entry, encode_tree_delta, encoded_lean_size,
+    is_canonical_tree, is_delta_tree, is_lean_tree, is_streamable_tree, tree_delta,
 };
 #[cfg(feature = "async-source")]
 pub use tree_diff::diff_trees_visit_async;

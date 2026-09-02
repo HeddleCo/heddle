@@ -9,7 +9,8 @@
 use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::{
-    ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeEntry, TreeError,
+    ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeEntry, TreeEntryTarget,
+    TreeError,
     tree::{git_format_from_tag, git_format_to_tag},
     tree_stream::TreeStreamError,
 };
@@ -201,6 +202,30 @@ impl Tree {
             Ok(raw)
         }
     }
+}
+
+/// Exact byte length of the HLR1 body without constructing it.
+pub fn encoded_lean_size(tree: &Tree) -> usize {
+    let mut size = TREE_LEAN_MAGIC.len() + varint_len(tree.len());
+    let mut previous = "";
+    for entry in tree.entries() {
+        let prefix = shared_prefix(previous, entry.name());
+        let suffix_len = entry.name().len() - prefix;
+        let target_len = match entry.target() {
+            TreeEntryTarget::Blob { hash, .. }
+            | TreeEntryTarget::Tree { hash }
+            | TreeEntryTarget::Symlink { hash } => hash.as_bytes().len(),
+            TreeEntryTarget::Gitlink { target } => 1 + target.as_bytes().len(),
+            TreeEntryTarget::Spoollink { spool_id, state_id } => {
+                varint_len(spool_id.as_str().len())
+                    + spool_id.as_str().len()
+                    + state_id.as_bytes().len()
+            }
+        };
+        size += 1 + varint_len(prefix) + varint_len(suffix_len) + suffix_len + target_len;
+        previous = entry.name();
+    }
+    size
 }
 
 /// Parse the fixed HTR4 header. Does not read entry frames.
@@ -731,6 +756,15 @@ fn put_varint(mut value: usize, out: &mut Vec<u8>) {
     out.push(value as u8);
 }
 
+fn varint_len(mut value: usize) -> usize {
+    let mut len = 1;
+    while value >= 0x80 {
+        value >>= 7;
+        len += 1;
+    }
+    len
+}
+
 pub(crate) fn take_varint(bytes: &[u8], offset: &mut usize) -> Result<usize, TreeStreamError> {
     let mut value = 0usize;
     for shift in (0..usize::BITS).step_by(7) {
@@ -1055,10 +1089,13 @@ pub fn encode_tree_delta(
             ops.len()
         )));
     }
-    if apply_tree_delta(anchor, ops)? != *current {
-        return Err(TreeStreamError::Malformed(
-            "tree delta operations do not reconstruct the result".into(),
-        ));
+    #[cfg(debug_assertions)]
+    {
+        let reconstructed = apply_tree_delta(anchor, ops)?;
+        debug_assert_eq!(
+            reconstructed, *current,
+            "tree delta operations must reconstruct the result"
+        );
     }
     let result_count = u32::try_from(current.len())
         .map_err(|_| TreeStreamError::Malformed("delta result count exceeds u32".into()))?;
