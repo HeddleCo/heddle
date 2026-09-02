@@ -383,7 +383,7 @@ fn run_reason(args: ReasonArgs<'_>) -> Result<()> {
     // we take the default (every mapped commit), filter by `--since`,
     // and cap by `--limit`.
     let mut commits = if args.commits.is_empty() {
-        pipeline_default_commits(&map)
+        pipeline_default_commits(&map)?
     } else {
         args.commits.clone()
     };
@@ -536,22 +536,22 @@ fn run_map(path: &std::path::Path, action: MapAction) -> Result<()> {
     match action {
         MapAction::Stats => {
             println!("records: {}", map.len());
-            println!("commits: {}", map.commit_count());
+            println!("commits: {}", map.commit_count()?);
             println!("path: {}", path.display());
         }
         MapAction::LookupGit { sha } => {
-            if let Some(cid) = map.get_commit(&sha) {
+            if let Some(cid) = map.get_commit(&sha)? {
                 println!("commit {sha} → {}", cid.to_string_full());
-            } else if let Some(h) = map.get_tree(&sha) {
+            } else if let Some(h) = map.get_tree(&sha)? {
                 println!("tree   {sha} → {}", h.to_hex());
-            } else if let Some(h) = map.get_blob(&sha) {
+            } else if let Some(h) = map.get_blob(&sha)? {
                 println!("blob   {sha} → {}", h.to_hex());
             } else {
                 eprintln!("no mapping for git sha {sha}");
                 std::process::exit(1);
             }
         }
-        MapAction::LookupHeddle { heddle } => match map.get_git_for_heddle(&heddle) {
+        MapAction::LookupHeddle { heddle } => match map.get_git_for_heddle(&heddle)? {
             Some(sha) => println!("{heddle} → git {sha}"),
             None => {
                 eprintln!("no git sha mapped to {heddle}");

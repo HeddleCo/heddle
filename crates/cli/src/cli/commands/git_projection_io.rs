@@ -743,7 +743,7 @@ fn run_reason(
     let transcripts = load_transcripts(git_path, &roots);
     println!("loaded {} transcripts", transcripts.len());
 
-    let mut commits = pipeline_default_commits(&map);
+    let mut commits = pipeline_default_commits(&map)?;
     if let Some(n) = limit {
         commits.truncate(n);
     }
