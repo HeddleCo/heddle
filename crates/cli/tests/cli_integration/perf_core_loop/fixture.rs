@@ -141,6 +141,16 @@ impl PerfFixture {
         println!("SETUP additional_threads={count}");
     }
 
+    pub(super) fn repack(&self, binary: &Path) {
+        let start = Instant::now();
+        run_setup(
+            binary,
+            &["--output", "json", "maintenance", "repack"],
+            &self.root,
+        );
+        println!("SETUP repacked_ms={}", start.elapsed().as_millis());
+    }
+
     pub(super) fn prepare_full_scan_sample(&self) {
         let index = self.root.join(".heddle/state/index.bin");
         match fs::remove_file(index) {

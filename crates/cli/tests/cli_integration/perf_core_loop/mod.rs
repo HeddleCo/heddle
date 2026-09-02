@@ -15,7 +15,7 @@ use super::*;
 
 const DEFAULT_SAMPLES: usize = 20;
 
-#[ignore = "release-only instant core-loop contract; run with `TMPDIR=/home/scratch cargo test --release -p heddle-cli --test cli_integration core_loop_release_contract -- --ignored --nocapture`"]
+#[ignore = "release-only instant core-loop contract; run with `TMPDIR=/home/scratch cargo test --release -p heddle-cli --test cli_basics core_loop_release_contract -- --ignored --nocapture`"]
 #[test]
 fn core_loop_release_contract() {
     if std::hint::black_box(cfg!(debug_assertions)) {
@@ -103,6 +103,21 @@ fn core_loop_release_contract() {
                         binary,
                         Some(&mut fixture),
                         CaseKind::LogBounded,
+                        samples,
+                        negative,
+                    ));
+                    fixture.repack(binary);
+                    results.push(measure_case(
+                        binary,
+                        Some(&mut fixture),
+                        CaseKind::DiffOneRepacked,
+                        samples,
+                        negative,
+                    ));
+                    results.push(measure_case(
+                        binary,
+                        Some(&mut fixture),
+                        CaseKind::LogBoundedRepacked,
                         samples,
                         negative,
                     ));

@@ -149,5 +149,9 @@ fn structural_counters(trace: &Value) -> Counters {
             .unwrap_or(true),
         ancestors_visited: count("ancestors_visited"),
         history_objects_decoded: count("history_objects_decoded"),
+        pack_frame_decompressions: count("pack_frame_decompressions"),
+        pack_frame_cache_hits: count("pack_frame_cache_hits"),
+        pack_blob_bodies_hashed: count("pack_blob_bodies_hashed"),
+        pack_state_frames_decoded: count("pack_state_frames_decoded"),
     }
 }

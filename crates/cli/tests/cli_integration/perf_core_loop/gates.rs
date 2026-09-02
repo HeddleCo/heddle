@@ -205,10 +205,14 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
     for kind in [
         CaseKind::DiffOne,
         CaseKind::LogBounded,
+        CaseKind::DiffOneRepacked,
+        CaseKind::LogBoundedRepacked,
         CaseKind::ThreadListBounded,
     ] {
         enforce_absolute_p95(results, kind, BOUNDED_LOCAL_READ_P95_MS, &mut failures);
     }
+
+    enforce_repacked_reads(results, &mut failures);
 
     if !failures.is_empty() {
         eprintln!("PERF GATE RED");
@@ -216,6 +220,46 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
             eprintln!("  - {failure}");
         }
         panic!("{} core-loop performance gate(s) failed", failures.len());
+    }
+}
+
+fn enforce_repacked_reads(results: &[CaseResult], failures: &mut Vec<String>) {
+    let Some(diff) = find(results, CaseKind::DiffOneRepacked, 100_000) else {
+        failures.push("repacked read gate: missing diff_one_repacked @ 100000 paths".to_string());
+        return;
+    };
+    let diff_decompressions = diff.counter(|counters| counters.pack_frame_decompressions);
+    let diff_blob_hashes = diff.counter(|counters| counters.pack_blob_bodies_hashed);
+    let diff_state_decodes = diff.counter(|counters| counters.pack_state_frames_decoded);
+    println!(
+        "REPACKED_READ case=diff_one_repacked frame_decompressions={} blob_bodies_hashed={} state_frames_decoded={}",
+        diff_decompressions, diff_blob_hashes, diff_state_decodes
+    );
+    if diff_decompressions.max > 2.0 || diff_blob_hashes.max > 128.0 || diff_state_decodes.max > 1.0
+    {
+        failures.push(format!(
+            "repacked diff gate: frame decompressions max {:.0} (<=2), blob bodies hashed max {:.0} (<=128), state frames decoded max {:.0} (<=1)",
+            diff_decompressions.max, diff_blob_hashes.max, diff_state_decodes.max
+        ));
+    }
+
+    let Some(log) = find(results, CaseKind::LogBoundedRepacked, 100_000) else {
+        failures
+            .push("repacked read gate: missing log_bounded_repacked @ 100000 paths".to_string());
+        return;
+    };
+    let log_decompressions = log.counter(|counters| counters.pack_frame_decompressions);
+    let log_cache_hits = log.counter(|counters| counters.pack_frame_cache_hits);
+    let log_state_decodes = log.counter(|counters| counters.pack_state_frames_decoded);
+    println!(
+        "REPACKED_READ case=log_bounded_repacked frame_decompressions={} frame_cache_hits={} state_frames_decoded={}",
+        log_decompressions, log_cache_hits, log_state_decodes
+    );
+    if log_decompressions.max > 1.0 || log_state_decodes.max > 1.0 || log_cache_hits.p50 < 19.0 {
+        failures.push(format!(
+            "repacked log gate: frame decompressions max {:.0} (<=1), state frames decoded max {:.0} (<=1), frame cache hits p50 {:.0} (>=19)",
+            log_decompressions.max, log_state_decodes.max, log_cache_hits.p50
+        ));
     }
 }
 
