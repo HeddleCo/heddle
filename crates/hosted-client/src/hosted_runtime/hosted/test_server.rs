@@ -280,6 +280,7 @@ async fn start_inner(
     (client, server_task)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_call(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,

@@ -641,11 +641,13 @@ async fn get_discussion_not_found_is_skipped_and_advances_the_watermark() {
 #[tokio::test]
 async fn bootstrap_none_hits_list_by_state() {
     let (_temp, repo) = seed_repo();
-    let mut fixture = CollaborationFixture::default();
-    fixture.list = vec![proto_discussion(
-        "disc-list",
-        &[("turn-open", "from list", 1)],
-    )];
+    let fixture = CollaborationFixture {
+        list: vec![proto_discussion(
+            "disc-list",
+            &[("turn-open", "from list", 1)],
+        )],
+        ..CollaborationFixture::default()
+    };
     let (mut client, server, fixture) =
         crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
 
@@ -1169,10 +1171,10 @@ async fn fat_append_with_turn_id_and_zero_seq_fetches_and_keeps_the_new_turn() {
 #[tokio::test]
 async fn thread_scoped_subscribe_request_carries_thread_id() {
     let (_temp, repo) = seed_repo();
-    let mut fixture = CollaborationFixture::default();
-    fixture
-        .events
-        .push(opened_event(1, "disc-1", "hello", "turn-1"));
+    let fixture = CollaborationFixture {
+        events: vec![opened_event(1, "disc-1", "hello", "turn-1")],
+        ..CollaborationFixture::default()
+    };
     let (mut client, server, fixture) =
         crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
 
