@@ -14,17 +14,18 @@ use api::{
         encode_success_response,
     },
     heddle::api::v1alpha1::{
-        BlobResponse, CallFailure, CallFailureCode, CreateSpoolRequest, DeleteSpoolRequest,
-        Discussion, GetBlobRequest, GetContextHistoryPageEnd, GetContextHistoryResponse,
-        GetDiscussionRequest, HostedSpool, ListContextPageEnd, ListContextResponse,
-        ListDiscussionsByStateRequest, ListDiscussionsPageEnd, ListDiscussionsResponse,
-        ListRefsPageEnd, ListRefsResponse, ListThreadsPageEnd, ListThreadsResponse, PackChunk,
-        PackStreamKind, PullComplete, PullReady, PullServerFrame, PushClientFrame, PushComplete,
-        PushReady, PushRequest, PushServerFrame, RepoEvent, SignedSpoolOwnerGenesis, StateId,
-        SubscribeRepoEventsRequest, TransferCheckpoint, TransportMode, UpdateSpoolRequest,
-        get_context_history_response, list_context_response, list_discussions_response,
-        list_refs_response, list_threads_response, pull_server_frame, push_client_frame,
-        push_server_frame,
+        AnnotatedFile, BlobResponse, CallFailure, CallFailureCode, ContextRevision,
+        CreateSpoolRequest, DeleteSpoolRequest, Discussion, GetBlobRequest,
+        GetContextHistoryPageEnd, GetContextHistoryRequest, GetContextHistoryResponse,
+        GetDiscussionRequest, HostedSpool, ListContextPageEnd, ListContextRequest,
+        ListContextResponse, ListDiscussionsByStateRequest, ListDiscussionsPageEnd,
+        ListDiscussionsResponse, ListRefsPageEnd, ListRefsResponse, ListThreadsPageEnd,
+        ListThreadsResponse, PackChunk, PackStreamKind, PullComplete, PullReady, PullServerFrame,
+        PushClientFrame, PushComplete, PushReady, PushRequest, PushServerFrame, RepoEvent,
+        SignedSpoolOwnerGenesis, StateContextEntry, StateId, SubscribeRepoEventsRequest,
+        TransferCheckpoint, TransportMode, UpdateSpoolRequest, get_context_history_response,
+        list_context_response, list_discussions_response, list_refs_response,
+        list_threads_response, pull_server_frame, push_client_frame, push_server_frame,
     },
     method_descriptor,
 };
@@ -44,6 +45,8 @@ const DELETE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/DeleteSp
 const UPDATE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/UpdateSpool";
 const GET_DISCUSSION_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/GetDiscussion";
 const LIST_BY_STATE_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/ListByState";
+const LIST_CONTEXT_METHOD: &str = "/heddle.api.v1alpha1.RepositoryService/ListContext";
+const GET_CONTEXT_HISTORY_METHOD: &str = "/heddle.api.v1alpha1.RepositoryService/GetContextHistory";
 const SUBSCRIBE_REPO_EVENTS_METHOD: &str =
     "/heddle.api.v1alpha1.RepositoryService/SubscribeRepoEvents";
 
@@ -74,8 +77,17 @@ pub(crate) struct CollaborationFixture {
     pub subscribe_thread: Arc<Mutex<Vec<(String, String)>>>,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct ContextFixture {
+    pub files: Vec<AnnotatedFile>,
+    pub states: Vec<StateContextEntry>,
+    pub histories: HashMap<String, Vec<ContextRevision>>,
+    pub list_requests: Arc<Mutex<usize>>,
+    pub history_requests: Arc<Mutex<Vec<String>>>,
+}
+
 pub(crate) async fn start() -> (HostedClient, JoinHandle<()>) {
-    start_inner(None, BlobFixture::default(), None, None, None, None).await
+    start_inner(None, BlobFixture::default(), None, None, None, None, None).await
 }
 
 pub(crate) async fn start_with_collaboration(
@@ -88,7 +100,25 @@ pub(crate) async fn start_with_collaboration(
         None,
         None,
         None,
+        None,
         Some(fixture),
+    )
+    .await;
+    (client, server, fixture_clone)
+}
+
+pub(crate) async fn start_with_context(
+    fixture: ContextFixture,
+) -> (HostedClient, JoinHandle<()>, ContextFixture) {
+    let fixture_clone = fixture.clone();
+    let (client, server) = start_inner(
+        None,
+        BlobFixture::default(),
+        None,
+        None,
+        None,
+        Some(fixture),
+        None,
     )
     .await;
     (client, server, fixture_clone)
@@ -103,6 +133,7 @@ pub(crate) async fn start_recording_push()
         None,
         None,
         Some(Arc::clone(&captured)),
+        None,
         None,
     )
     .await;
@@ -119,6 +150,7 @@ pub(crate) async fn start_recording_create_spool() -> (
         None,
         BlobFixture::default(),
         Some(Arc::clone(&captured)),
+        None,
         None,
         None,
         None,
@@ -140,6 +172,7 @@ pub(crate) async fn start_recording_spool_mutations() -> (
         Some(Arc::clone(&captured)),
         None,
         None,
+        None,
     )
     .await;
     (client, server, captured)
@@ -154,6 +187,7 @@ pub(crate) async fn start_with_remote_state(
             pack: None,
         }),
         BlobFixture::default(),
+        None,
         None,
         None,
         None,
@@ -173,6 +207,7 @@ pub(crate) async fn start_with_pull_pack(
             pack: Some((pack_data, index_data)),
         }),
         BlobFixture::default(),
+        None,
         None,
         None,
         None,
@@ -212,7 +247,7 @@ async fn start_with_get_blob_contents_and_pull(
         contents: blobs.into_iter().collect(),
         requested: Arc::clone(&requested),
     };
-    let (client, server) = start_inner(pull, fixture, None, None, None, None).await;
+    let (client, server) = start_inner(pull, fixture, None, None, None, None, None).await;
     (client, server, requested)
 }
 
@@ -234,6 +269,7 @@ async fn start_inner(
     create_spool: Option<Arc<Mutex<Vec<CreateSpoolRequest>>>>,
     spool_mutations: Option<Arc<Mutex<SpoolMutationCapture>>>,
     push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
+    context: Option<ContextFixture>,
     collaboration: Option<CollaborationFixture>,
 ) -> (HostedClient, JoinHandle<()>) {
     let server = Endpoint::builder(presets::Minimal)
@@ -261,6 +297,7 @@ async fn start_inner(
                 create_spool.clone(),
                 spool_mutations.clone(),
                 push_requests.clone(),
+                context.clone(),
                 collaboration.clone(),
             ));
         }
@@ -292,6 +329,7 @@ async fn serve_call(
     create_spool: Option<Arc<Mutex<Vec<CreateSpoolRequest>>>>,
     spool_mutations: Option<Arc<Mutex<SpoolMutationCapture>>>,
     push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
+    context: Option<ContextFixture>,
     collaboration: Option<CollaborationFixture>,
 ) {
     let mut request = Vec::new();
@@ -332,7 +370,25 @@ async fn serve_call(
             }
         }
         StreamingShape::ServerStreaming => {
-            if method == LIST_BY_STATE_METHOD {
+            if method == LIST_CONTEXT_METHOD {
+                if let Some(context) = context {
+                    serve_list_context(&mut send, &mut recv, &mut request, context).await;
+                } else {
+                    let body = terminal_page(&method);
+                    send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
+                        .await
+                        .unwrap();
+                }
+            } else if method == GET_CONTEXT_HISTORY_METHOD {
+                if let Some(context) = context {
+                    serve_get_context_history(&mut send, &mut recv, &mut request, context).await;
+                } else {
+                    let body = terminal_page(&method);
+                    send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
+                        .await
+                        .unwrap();
+                }
+            } else if method == LIST_BY_STATE_METHOD {
                 if let Some(collaboration) = collaboration {
                     serve_list_by_state(&mut send, &mut recv, &mut request, collaboration).await;
                 } else {
@@ -680,6 +736,85 @@ async fn read_request_body(recv: &mut iroh::endpoint::RecvStream, request: &mut 
     while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
         request.extend_from_slice(&chunk);
     }
+}
+
+async fn serve_list_context(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    fixture: ContextFixture,
+) {
+    read_request_body(recv, request).await;
+    let _ = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| ListContextRequest::decode(frame.body).ok());
+    *fixture
+        .list_requests
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) += 1;
+    for file in &fixture.files {
+        let body = ListContextResponse {
+            frame: Some(list_context_response::Frame::Item(file.clone())),
+            states: Vec::new(),
+        }
+        .encode_to_vec();
+        send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
+            .await
+            .unwrap();
+    }
+    let end = ListContextResponse {
+        frame: Some(list_context_response::Frame::PageEnd(ListContextPageEnd {
+            next_page_token: String::new(),
+            ..ListContextPageEnd::default()
+        })),
+        states: fixture.states.clone(),
+    }
+    .encode_to_vec();
+    send.write_chunk(Bytes::from(encode_stream_message(&end).unwrap()))
+        .await
+        .unwrap();
+}
+
+async fn serve_get_context_history(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    fixture: ContextFixture,
+) {
+    read_request_body(recv, request).await;
+    let annotation_id = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| GetContextHistoryRequest::decode(frame.body).ok())
+        .map(|body| body.annotation_id)
+        .unwrap_or_default();
+    fixture
+        .history_requests
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(annotation_id.clone());
+    if let Some(revisions) = fixture.histories.get(&annotation_id) {
+        for revision in revisions {
+            let body = GetContextHistoryResponse {
+                frame: Some(get_context_history_response::Frame::Item(revision.clone())),
+            }
+            .encode_to_vec();
+            send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
+                .await
+                .unwrap();
+        }
+    }
+    let end = GetContextHistoryResponse {
+        frame: Some(get_context_history_response::Frame::PageEnd(
+            GetContextHistoryPageEnd {
+                next_page_token: String::new(),
+                ..GetContextHistoryPageEnd::default()
+            },
+        )),
+    }
+    .encode_to_vec();
+    send.write_chunk(Bytes::from(encode_stream_message(&end).unwrap()))
+        .await
+        .unwrap();
 }
 
 async fn serve_get_discussion(

@@ -108,7 +108,13 @@ pub struct ResolvedPullBootstrapMetadata {
     /// packed attachment was unconsumable. Absent on the inline-bootstrap path
     /// and when the pack decoded.
     pub discussions_pack_fallback: Option<String>,
-    pub context: Vec<(ContextTarget, ContextBlob)>,
+    /// Packed or inline bootstrap context. `None` means the server advertised
+    /// `context_from_pack` and this client cannot consume the attachment, so
+    /// callers fall back to `ListContext`.
+    pub context: Option<Vec<(ContextTarget, ContextBlob)>>,
+    /// Human-facing reason when [`Self::context`] is `None`. Absent on the
+    /// inline-bootstrap path and when the packed attachment decoded.
+    pub context_pack_fallback: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,15 +146,25 @@ impl PullBootstrapMetadata {
         } else {
             (Some(self.discussions.clone()), None)
         };
-        let context = if self.context_from_pack {
-            context_from_pull_pack(repo, state_id)?
+        let (context, context_pack_fallback) = if self.context_from_pack {
+            match context_from_pull_pack(repo, state_id)? {
+                PackedContext::Ready(context) => (Some(context), None),
+                PackedContext::Unconsumable(reason) => {
+                    let warning = format!(
+                        "pull bootstrap advertised packed context but this client cannot consume it ({reason}); falling back to ListContext"
+                    );
+                    eprintln!("{} {warning}", heddle_cli_render::cli::style::warn_marker());
+                    (None, Some(warning))
+                }
+            }
         } else {
-            self.context.clone()
+            (Some(self.context.clone()), None)
         };
         Ok(ResolvedPullBootstrapMetadata {
             discussions,
             discussions_pack_fallback,
             context,
+            context_pack_fallback,
         })
     }
 }
@@ -302,21 +318,33 @@ fn named_map_version_skew(bytes: &[u8]) -> bool {
         .is_some_and(|version| version != DiscussionsBlob::FORMAT_VERSION)
 }
 
-pub(crate) fn context_from_pull_pack(
+enum PackedContext {
+    Ready(Vec<(ContextTarget, ContextBlob)>),
+    /// Server advertised a pack optimization this client cannot consume.
+    /// Clone/pull must ListContext instead of exiting 76.
+    Unconsumable(String),
+}
+
+fn context_from_pull_pack(
     repo: &Repository,
     state_id: StateId,
-) -> Result<Vec<(ContextTarget, ContextBlob)>, ProtocolError> {
+) -> Result<PackedContext, ProtocolError> {
     let Some(attachment) = repo.latest_state_attachment(&state_id, StateAttachmentKind::Context)?
     else {
-        return Err(ProtocolError::InvalidState(
-            "pull bootstrap advertised packed context but the attachment is missing".to_string(),
+        return Ok(PackedContext::Unconsumable(
+            "the attachment is missing".to_string(),
         ));
     };
     let StateAttachmentBody::Context(root) = attachment.body else {
-        return Err(ProtocolError::InvalidState(
-            "packed context attachment has the wrong kind".to_string(),
+        return Ok(PackedContext::Unconsumable(
+            "the attachment has the wrong kind".to_string(),
         ));
     };
+    if repo.store().get_tree(&root)?.is_none() {
+        return Ok(PackedContext::Unconsumable(format!(
+            "the context root {root} is missing"
+        )));
+    }
     let mut entries = repo
         .list_context_entries(&root, None)?
         .into_iter()
@@ -327,7 +355,7 @@ pub(crate) fn context_from_pull_pack(
             .retain(|annotation| annotation.status == AnnotationStatus::Active);
     }
     entries.retain(|(_, blob)| !blob.annotations.is_empty());
-    Ok(entries)
+    Ok(PackedContext::Ready(entries))
 }
 
 struct PullWantPlan {
@@ -2055,11 +2083,10 @@ impl HostedClient {
                 }
                 Some(pull_server_frame::Frame::StateAttachment(_)) => {
                     // Recognized and ignored. Weft streams attachments on this
-                    // frame, not in the native pack. Discussions are a v2
-                    // named-map chain; this client decodes v1 positional
-                    // DiscussionsBlob and must not treat the chain as
-                    // transport. resolve() ListByState-falls-back when
-                    // discussions_from_pack is advertised but unconsumable.
+                    // frame, not in the native pack. This client does not yet
+                    // consume that live transfer. resolve() falls back to the
+                    // hosted list RPC when discussions_from_pack or
+                    // context_from_pack is advertised but unconsumable.
                 }
                 Some(pull_server_frame::Frame::Complete(complete)) => {
                     tx.take();
@@ -3599,7 +3626,8 @@ mod pull_bootstrap_tests {
 
         assert_eq!(resolved.discussions, Some(vec![discussion]));
         assert!(resolved.discussions_pack_fallback.is_none());
-        assert_eq!(resolved.context, vec![(target, context_blob)]);
+        assert_eq!(resolved.context, Some(vec![(target, context_blob)]));
+        assert!(resolved.context_pack_fallback.is_none());
     }
 
     fn seed_snapshot() -> (TempDir, Repository, StateId) {
@@ -3641,6 +3669,61 @@ mod pull_bootstrap_tests {
             context_from_pack: false,
             context: Vec::new(),
         }
+    }
+
+    fn packed_context_metadata() -> PullBootstrapMetadata {
+        PullBootstrapMetadata {
+            discussions_from_pack: false,
+            discussions: Vec::new(),
+            context_from_pack: true,
+            context: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn packed_bootstrap_falls_back_when_context_attachment_is_missing() {
+        let (_temp, repo, state_id) = seed_snapshot();
+        let resolved = packed_context_metadata()
+            .resolve(&repo, Some(state_id))
+            .expect("missing packed context must not clone-kill");
+        assert!(
+            resolved.context.is_none(),
+            "None means ListContext, not an empty inline set"
+        );
+        let warning = resolved.context_pack_fallback.expect("warned fallback");
+        assert!(warning.contains("the attachment is missing"), "{warning}");
+        assert!(warning.contains("falling back to ListContext"), "{warning}");
+    }
+
+    #[test]
+    fn packed_bootstrap_fail_closes_when_context_blob_is_corrupt() {
+        let (_temp, repo, state_id) = seed_snapshot();
+        let corrupt_hash = repo
+            .store()
+            .put_blob(&Blob::from(vec![0x80]))
+            .expect("store corrupt context blob");
+        let mut files = Tree::new();
+        files.insert(TreeEntry::file("lib.rs", corrupt_hash, false).expect("context file entry"));
+        let files_hash = repo.store().put_tree(&files).expect("store files tree");
+        let mut root = Tree::new();
+        root.insert(TreeEntry::directory("__files", files_hash).expect("context files root"));
+        let context_root = repo.store().put_tree(&root).expect("store context root");
+        repo.put_state_attachment(&StateAttachment {
+            state_id,
+            body: StateAttachmentBody::Context(context_root),
+            attribution: Attribution::human(Principal::new("Ada", "ada@example.com")),
+            created_at: Utc::now(),
+            supersedes: None,
+        })
+        .expect("attach corrupt context");
+
+        let error = packed_context_metadata()
+            .resolve(&repo, Some(state_id))
+            .expect_err("present corrupt ContextBlob must fail closed");
+        assert!(
+            error.to_string().contains("invalid context blob"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -3860,6 +3943,8 @@ mod pull_bootstrap_tests {
         .expect("inline bootstrap");
         assert_eq!(resolved.discussions, Some(vec![discussion]));
         assert!(resolved.discussions_pack_fallback.is_none());
+        assert_eq!(resolved.context, Some(Vec::new()));
+        assert!(resolved.context_pack_fallback.is_none());
     }
 }
 
