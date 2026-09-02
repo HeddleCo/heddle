@@ -1169,13 +1169,21 @@ async fn fat_append_with_turn_id_and_zero_seq_fetches_and_keeps_the_new_turn() {
 #[tokio::test]
 async fn thread_scoped_subscribe_request_carries_thread_id() {
     let (_temp, repo) = seed_repo();
-    let fixture = CollaborationFixture::default();
+    let mut fixture = CollaborationFixture::default();
+    fixture
+        .events
+        .push(opened_event(1, "disc-1", "hello", "turn-1"));
     let (mut client, server, fixture) =
         crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
 
     let mut consumer = DiscussionEventConsumer::new(&repo, &mut client, "acme/widgets")
         .with_thread("feature/run", "thr-stable");
-    let _subscription = consumer.start(None).await.unwrap();
+    let mut subscription = consumer.start(None).await.unwrap();
+    // start() can return before the server records the request body.
+    // consume_next waits for the first event, which is written only after
+    // serve_subscribe_repo_events has stored the paired thread fields.
+    let (event, _) = consumer.consume_next(&mut subscription).await.unwrap();
+    assert_eq!(event.event_id, 1);
     assert_eq!(
         fixture
             .subscribe_thread
