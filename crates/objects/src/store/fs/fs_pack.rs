@@ -20,7 +20,7 @@ use crate::{
         FsRepackOperation, HeddleError, ObjectStore, RepackPolicy, RepackResourceLimits,
         RepackSchedule, RepackScheduler, Result, SnapshotCommitArtifact, SnapshotCommitDescriptor,
         TreeWrite, codec,
-        pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId, PackReader},
+        pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
         snapshot_commit::snapshot_commit_marker_path,
     },
 };
@@ -299,6 +299,14 @@ impl FsStore {
 
         let (pack_data, index_data, _stats, retained_objects) =
             builder.build_retaining_objects()?;
+        let object_ids = commit_artifact.as_ref().map(|_| {
+            let mut ids = retained_objects
+                .iter()
+                .map(|(id, _, _)| *id)
+                .collect::<Vec<_>>();
+            ids.sort_unstable();
+            ids
+        });
         let packs = packs_dir(&self.root);
         let installed_pack_name = if commit_artifact.is_some() {
             let (Some(artifact_id), Some(artifact_bytes)) = (artifact_id, artifact_bytes) else {
@@ -350,8 +358,11 @@ impl FsStore {
         }
         let descriptor = if let Some(artifact) = commit_artifact {
             let pack_path = packs.join(format!("{installed_pack_name}.pack"));
-            let index_path = packs.join(format!("{installed_pack_name}.idx"));
-            let object_ids = PackReader::open(&pack_path, &index_path)?.list_ids()?;
+            let object_ids = object_ids.ok_or_else(|| {
+                HeddleError::InvalidObject(
+                    "snapshot commit pack object ids were not retained".to_string(),
+                )
+            })?;
             Some(SnapshotCommitDescriptor {
                 artifact,
                 pack_name: installed_pack_name,
