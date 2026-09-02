@@ -5,14 +5,15 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::{OnceLock, RwLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
     time::SystemTime,
 };
 
 use tracing::{debug, instrument, trace};
 
+use super::decoded_frame_cache::DecodedFrameCache;
 use crate::{
-    object::ContentHash,
+    object::{ContentHash, State, StateId},
     store::{
         Result,
         pack::{ObjectType, PackObjectId, PackReadTier, PackReader},
@@ -25,6 +26,7 @@ use crate::{
 pub struct PackManager {
     packs_dir: PathBuf,
     packs: Vec<CachedPack>,
+    decoded_frames: Arc<Mutex<DecodedFrameCache>>,
     object_locations: RwLock<ObjectLocationIndex>,
     eager_object_locations: bool,
 }
@@ -44,51 +46,71 @@ struct ObjectLocation {
 struct CachedPack {
     pack_path: PathBuf,
     index_path: PathBuf,
+    decoded_frames: Arc<Mutex<DecodedFrameCache>>,
     reader: OnceLock<Option<PackReader<'static>>>,
 }
 
 impl CachedPack {
-    fn discovered(pack_path: PathBuf, index_path: PathBuf) -> Self {
+    fn discovered(
+        pack_path: PathBuf,
+        index_path: PathBuf,
+        decoded_frames: Arc<Mutex<DecodedFrameCache>>,
+    ) -> Self {
         Self {
             pack_path,
             index_path,
+            decoded_frames,
             reader: OnceLock::new(),
         }
     }
 
-    fn validated(pack_path: PathBuf, index_path: PathBuf, reader: PackReader<'static>) -> Self {
+    fn validated(
+        pack_path: PathBuf,
+        index_path: PathBuf,
+        decoded_frames: Arc<Mutex<DecodedFrameCache>>,
+        reader: PackReader<'static>,
+    ) -> Self {
         Self {
             pack_path,
             index_path,
+            decoded_frames,
             reader: OnceLock::from(Some(reader)),
         }
     }
 
     fn reader(&self) -> Option<&PackReader<'static>> {
         self.reader
-            .get_or_init(
-                || match PackReader::open_lazy(&self.pack_path, &self.index_path) {
+            .get_or_init(|| {
+                match PackReader::open_lazy_with_cache(
+                    &self.pack_path,
+                    &self.index_path,
+                    Arc::clone(&self.decoded_frames),
+                ) {
                     Ok(reader) => Some(reader),
                     Err(error) => {
                         debug!(pack = ?self.pack_path, %error, "Failed to open pack");
                         None
                     }
-                },
-            )
+                }
+            })
             .as_ref()
     }
 
     fn verified_reader(&self) -> Option<&PackReader<'static>> {
         self.reader
-            .get_or_init(
-                || match PackReader::open(&self.pack_path, &self.index_path) {
+            .get_or_init(|| {
+                match PackReader::open_with_cache(
+                    &self.pack_path,
+                    &self.index_path,
+                    Arc::clone(&self.decoded_frames),
+                ) {
                     Ok(reader) => Some(reader),
                     Err(error) => {
                         debug!(pack = ?self.pack_path, %error, "Failed to open pack");
                         None
                     }
-                },
-            )
+                }
+            })
             .as_ref()
     }
 }
@@ -99,11 +121,13 @@ impl PackManager {
     }
 
     fn new_with_index_mode(packs_dir: PathBuf, eager_object_locations: bool) -> Self {
-        let packs = Self::load_packs(&packs_dir).unwrap_or_default();
+        let decoded_frames = Arc::new(Mutex::new(DecodedFrameCache::new()));
+        let packs = Self::load_packs(&packs_dir, &decoded_frames).unwrap_or_default();
         let object_locations = Self::initial_object_locations(&packs, eager_object_locations);
         Self {
             packs_dir,
             packs,
+            decoded_frames,
             object_locations: RwLock::new(object_locations),
             eager_object_locations,
         }
@@ -143,15 +167,20 @@ impl PackManager {
         Ok(packs)
     }
 
-    fn load_packs(packs_dir: &Path) -> Result<Vec<CachedPack>> {
+    fn load_packs(
+        packs_dir: &Path,
+        decoded_frames: &Arc<Mutex<DecodedFrameCache>>,
+    ) -> Result<Vec<CachedPack>> {
         Ok(Self::discover_pack_paths(packs_dir)?
             .into_iter()
-            .map(|(pack_path, index_path)| CachedPack::discovered(pack_path, index_path))
+            .map(|(pack_path, index_path)| {
+                CachedPack::discovered(pack_path, index_path, Arc::clone(decoded_frames))
+            })
             .collect())
     }
 
     pub fn reload(&mut self) -> Result<()> {
-        self.packs = Self::load_packs(&self.packs_dir)?;
+        self.packs = Self::load_packs(&self.packs_dir, &self.decoded_frames)?;
         self.reset_object_locations();
         Ok(())
     }
@@ -252,10 +281,16 @@ impl PackManager {
         if self.packs.iter().any(|pack| pack.pack_path == pack_path) {
             return Ok(());
         }
-        let reader = PackReader::open(&pack_path, &index_path)?;
+        let reader =
+            PackReader::open_with_cache(&pack_path, &index_path, Arc::clone(&self.decoded_frames))?;
         let objects = reader.indexed_read_tiers()?;
         let pack_index = self.packs.len();
-        let cached = CachedPack::validated(pack_path, index_path, reader);
+        let cached = CachedPack::validated(
+            pack_path,
+            index_path,
+            Arc::clone(&self.decoded_frames),
+            reader,
+        );
         self.packs.push(cached);
         let mut index = self
             .object_locations
@@ -317,6 +352,19 @@ impl PackManager {
             trace!("Found object in pack");
         }
         Ok(object)
+    }
+
+    /// Return a typed state, preserving compact-frame decoding in the shared
+    /// frame cache instead of round-tripping through MessagePack.
+    pub fn get_state(&self, id: &StateId) -> Result<Option<State>> {
+        let object_id = PackObjectId::StateId(*id);
+        let Some(pack_index) = self.point_object_location(&object_id)? else {
+            return Ok(None);
+        };
+        let Some(reader) = self.packs[pack_index].reader() else {
+            return Ok(None);
+        };
+        reader.get_state(id)
     }
 
     /// Return the physical tier that will serve `id`.

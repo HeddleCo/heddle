@@ -5,6 +5,7 @@
 //! achieving 50-70% space savings for repositories with many similar objects.
 
 mod compact_frame;
+mod decoded_frame_cache;
 mod manager;
 mod pack_builder;
 mod pack_identity;

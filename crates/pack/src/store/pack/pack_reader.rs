@@ -7,7 +7,8 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs::File,
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 use bytes::Bytes;
@@ -15,12 +16,15 @@ use heddle_format::delta::{DeltaDecoder, MAX_DELTA_OUTPUT_SIZE};
 
 use super::{
     ObjectType, PackLogicalId, PackObjectId, PackObjectRecord, PackRepresentationHash,
-    append_container_checksum, decode_tagged_entry_header, decompress_pack_payload, has_zstd_magic,
-    pack_container_spec, pack_identity::LogicalIdBuilder, pack_index::PackIndex, varint,
-    verify_supported_container, verify_supported_container_layout, write_container_header,
+    append_container_checksum, decode_tagged_entry_header,
+    decoded_frame_cache::{DecodedFrame, DecodedFrameCache, DecodedFrameKey, in_memory_pack_path},
+    decompress_pack_payload, has_zstd_magic, pack_container_spec,
+    pack_identity::LogicalIdBuilder,
+    pack_index::PackIndex,
+    varint, verify_supported_container, verify_supported_container_layout, write_container_header,
 };
 use crate::{
-    object::ContentHash,
+    object::{ContentHash, State, StateId},
     store::{Result, StoreError},
 };
 
@@ -105,8 +109,29 @@ pub struct PackReader<'a> {
     index: PackIndex,
     aliased_offsets: HashSet<u64>,
     content_end: usize,
+    pack_path: Arc<PathBuf>,
+    decoded_frames: Arc<Mutex<DecodedFrameCache>>,
     #[cfg(test)]
     compact_frame_reads: AtomicUsize,
+}
+
+enum NonDeltaPayload {
+    Ordinary(Vec<u8>),
+    Compact(Arc<DecodedFrame>),
+}
+
+struct PendingDelta {
+    data: Vec<u8>,
+    output_size: usize,
+}
+
+enum RecordStep {
+    Complete(PackObjectRecord),
+    Delta {
+        base_hash: ContentHash,
+        data: Vec<u8>,
+        output_size: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -121,17 +146,34 @@ impl PackReader<'static> {
     /// to benefit (the same threshold the loose-blob path uses for
     /// its own mmap decision); read-into-heap otherwise.
     pub fn open(pack_path: &Path, index_path: &Path) -> Result<Self> {
-        Self::open_with_verification(pack_path, index_path, true)
+        Self::open_with_cache(
+            pack_path,
+            index_path,
+            Arc::new(Mutex::new(DecodedFrameCache::new())),
+        )
     }
 
-    pub(super) fn open_lazy(pack_path: &Path, index_path: &Path) -> Result<Self> {
-        Self::open_with_verification(pack_path, index_path, false)
+    pub(super) fn open_with_cache(
+        pack_path: &Path,
+        index_path: &Path,
+        decoded_frames: Arc<Mutex<DecodedFrameCache>>,
+    ) -> Result<Self> {
+        Self::open_with_verification(pack_path, index_path, true, decoded_frames)
+    }
+
+    pub(super) fn open_lazy_with_cache(
+        pack_path: &Path,
+        index_path: &Path,
+        decoded_frames: Arc<Mutex<DecodedFrameCache>>,
+    ) -> Result<Self> {
+        Self::open_with_verification(pack_path, index_path, false, decoded_frames)
     }
 
     fn open_with_verification(
         pack_path: &Path,
         index_path: &Path,
         verify_checksum: bool,
+        decoded_frames: Arc<Mutex<DecodedFrameCache>>,
     ) -> Result<Self> {
         let pack_bytes = read_file_bytes_for_pack(pack_path)?;
         let index_data = read_file_bytes_for_pack(index_path)?;
@@ -147,6 +189,8 @@ impl PackReader<'static> {
             index,
             aliased_offsets,
             content_end,
+            pack_path: Arc::new(pack_path.to_path_buf()),
+            decoded_frames,
             #[cfg(test)]
             compact_frame_reads: AtomicUsize::new(0),
         })
@@ -162,6 +206,8 @@ impl PackReader<'static> {
             index,
             aliased_offsets,
             content_end,
+            pack_path: in_memory_pack_path(),
+            decoded_frames: Arc::new(Mutex::new(DecodedFrameCache::new())),
             #[cfg(test)]
             compact_frame_reads: AtomicUsize::new(0),
         })
@@ -178,6 +224,8 @@ impl<'a> PackReader<'a> {
             index,
             aliased_offsets,
             content_end,
+            pack_path: in_memory_pack_path(),
+            decoded_frames: Arc::new(Mutex::new(DecodedFrameCache::new())),
             #[cfg(test)]
             compact_frame_reads: AtomicUsize::new(0),
         })
@@ -449,6 +497,42 @@ impl<'a> PackReader<'a> {
         self.get_object(&PackObjectId::Hash(*hash))
     }
 
+    /// Read a state as its domain type.
+    ///
+    /// Compact state frames keep their decoded state vector in the frame LRU,
+    /// so this path does not serialize one state to MessagePack merely for the
+    /// object store to parse it again.
+    pub fn get_state(&self, id: &StateId) -> Result<Option<State>> {
+        let requested_id = PackObjectId::StateId(*id);
+        let Some(offset) = self.index.find(&requested_id)? else {
+            return Ok(None);
+        };
+        let offset = checked_index_offset(offset)?;
+        let header = decode_tagged_entry_header(self.content_from(offset)?)?;
+        if header.obj_type == ObjectType::State {
+            let data_start = checked_index_add(offset, header.header_len, "entry data start")?;
+            let data_end = checked_data_end(data_start, header.compressed_size, self.content_end)?;
+            let stored = &self.data.as_slice()[data_start..data_end];
+            return match self.read_non_delta_payload(offset, &header, stored)? {
+                NonDeltaPayload::Compact(frame) => state_from_decoded_frame(&frame, *id).map(Some),
+                NonDeltaPayload::Ordinary(data) => {
+                    verify_record_id_matches(&requested_id, &header.id)?;
+                    decode_serialized_state(&data, *id).map(Some)
+                }
+            };
+        }
+
+        let Some((obj_type, data)) = self.get_object(&requested_id)? else {
+            return Ok(None);
+        };
+        if obj_type != ObjectType::State {
+            return Err(StoreError::InvalidObject(format!(
+                "state index entry resolved to {obj_type:?}"
+            )));
+        }
+        decode_serialized_state(&data, *id).map(Some)
+    }
+
     /// Read an object's logical type from pack headers without reading or
     /// decoding its payload.
     ///
@@ -577,45 +661,104 @@ impl<'a> PackReader<'a> {
     fn read_object_type_at_depth(
         &self,
         requested_id: &PackObjectId,
-        offset: usize,
+        mut offset: usize,
         depth: usize,
     ) -> Result<ObjectType> {
-        if depth > MAX_DELTA_CHAIN_DEPTH {
-            return Err(StoreError::InvalidObject(format!(
-                "Delta chain depth {depth} exceeds max {MAX_DELTA_CHAIN_DEPTH}"
-            )));
+        let mut current_id = *requested_id;
+        let mut current_depth = depth;
+        loop {
+            verify_delta_depth(current_depth)?;
+            if offset >= self.content_end {
+                return Err(StoreError::InvalidObject(
+                    "Entry offset out of bounds".to_string(),
+                ));
+            }
+            let header = decode_tagged_entry_header(self.content_from(offset)?)?;
+            if header.id != current_id {
+                return self
+                    .read_record_at_depth(&current_id, offset, current_depth)
+                    .map(|record| record.obj_type);
+            }
+            if header.obj_type != ObjectType::Delta {
+                return Ok(header.obj_type);
+            }
+            let base_hash = Self::require_delta_base_hash(header.delta_base)?;
+            current_id = PackObjectId::Hash(base_hash);
+            let base_offset = self
+                .index
+                .find(&current_id)?
+                .ok_or_else(|| StoreError::NotFound(base_hash.to_string()))?;
+            offset = checked_index_offset(base_offset)?;
+            current_depth = current_depth.checked_add(1).ok_or_else(|| {
+                StoreError::InvalidObject("Delta chain depth overflow".to_string())
+            })?;
         }
-        if offset >= self.content_end {
-            return Err(StoreError::InvalidObject(
-                "Entry offset out of bounds".to_string(),
-            ));
-        }
-
-        let header = decode_tagged_entry_header(self.content_from(offset)?)?;
-        if header.id != *requested_id {
-            return self
-                .read_record_at_depth(requested_id, offset, depth)
-                .map(|record| record.obj_type);
-        }
-        if header.obj_type != ObjectType::Delta {
-            return Ok(header.obj_type);
-        }
-
-        let base_hash = Self::require_delta_base_hash(header.delta_base)?;
-        let base_id = PackObjectId::Hash(base_hash);
-        let base_offset = self
-            .index
-            .find(&base_id)?
-            .ok_or_else(|| StoreError::NotFound(base_hash.to_string()))?;
-        self.read_object_type_at_depth(&base_id, checked_index_offset(base_offset)?, depth + 1)
     }
 
     fn read_record_at_depth(
         &self,
         requested_id: &PackObjectId,
-        offset: usize,
+        mut offset: usize,
         depth: usize,
     ) -> Result<PackObjectRecord> {
+        let mut current_id = *requested_id;
+        let mut pending = Vec::<PendingDelta>::new();
+        loop {
+            let current_depth = depth.checked_add(pending.len()).ok_or_else(|| {
+                StoreError::InvalidObject("Delta chain depth overflow".to_string())
+            })?;
+            verify_delta_depth(current_depth)?;
+            match self.read_record_step(&current_id, offset)? {
+                RecordStep::Complete(record) => {
+                    let mut data = record.data;
+                    while let Some(delta) = pending.pop() {
+                        data = DeltaDecoder::decode(&data, &delta.data, delta.output_size)
+                            .map_err(|error| {
+                                StoreError::InvalidObject(format!("Delta decode failed: {error}"))
+                            })?;
+                        if data.len() != delta.output_size {
+                            return Err(StoreError::InvalidObject(format!(
+                                "Size mismatch: expected {}, got {}",
+                                delta.output_size,
+                                data.len()
+                            )));
+                        }
+                    }
+                    return Ok(PackObjectRecord {
+                        id: *requested_id,
+                        obj_type: record.obj_type,
+                        data,
+                        delta_base: None,
+                        path_hint: None,
+                    });
+                }
+                RecordStep::Delta {
+                    base_hash,
+                    data,
+                    output_size,
+                } => {
+                    if output_size > MAX_PACK_DELTA_OUTPUT_SIZE {
+                        return Err(StoreError::InvalidObject(format!(
+                            "Delta output size {} exceeds max {}",
+                            output_size, MAX_PACK_DELTA_OUTPUT_SIZE
+                        )));
+                    }
+                    pending.push(PendingDelta { data, output_size });
+                    current_id = PackObjectId::Hash(base_hash);
+                    let base_offset = self
+                        .index
+                        .find(&current_id)?
+                        .ok_or_else(|| StoreError::NotFound(base_hash.to_string()))?;
+                    offset = checked_index_offset(base_offset)?;
+                }
+            }
+        }
+    }
+
+    /// Read one physical record. Delta base traversal deliberately lives in
+    /// the iterative caller above; #1670 can extend this step with cross-object
+    /// base lookup without introducing recursive or single-pack resolution.
+    fn read_record_step(&self, requested_id: &PackObjectId, offset: usize) -> Result<RecordStep> {
         if offset >= self.content_end {
             return Err(StoreError::InvalidObject(
                 "Entry offset out of bounds".to_string(),
@@ -652,60 +795,52 @@ impl<'a> PackReader<'a> {
 
         let stored_data = &self.data.as_slice()[data_start..data_end];
 
-        // Raw zstd (no wrapper). For non-delta entries, decompress
-        // if sizes differ. For delta entries, the stored data IS the delta
-        // payload (possibly zstd-compressed); check for zstd magic.
-        let decompressed = if obj_type == ObjectType::Delta {
-            if has_zstd_magic(stored_data) {
+        if obj_type == ObjectType::Delta {
+            verify_record_id_matches(requested_id, &id)?;
+            let data = if has_zstd_magic(stored_data) {
                 decompress_pack_payload(stored_data, 0)?
             } else {
                 stored_data.to_vec()
-            }
-        } else if compressed_size != uncompressed_size {
-            decompress_pack_payload(stored_data, uncompressed_size)?
-        } else {
-            stored_data.to_vec()
-        };
+            };
+            return Ok(RecordStep::Delta {
+                base_hash: Self::require_delta_base_hash(base_id)?,
+                data,
+                output_size: uncompressed_size,
+            });
+        }
 
         let shared_blob =
             obj_type == ObjectType::Blob && self.aliased_offsets.contains(&(offset as u64));
-        if obj_type != ObjectType::Delta && (shared_blob || is_compact_frame(&decompressed)) {
-            #[cfg(test)]
-            self.record_compact_frame_read();
-            if let Some(data) =
-                decode_compact_object(requested_id, obj_type, &decompressed, shared_blob)?
-            {
-                return Ok(PackObjectRecord {
+        match self.read_non_delta_payload_parts(
+            offset,
+            obj_type,
+            uncompressed_size,
+            compressed_size,
+            stored_data,
+            shared_blob,
+        )? {
+            NonDeltaPayload::Compact(frame) => {
+                let data = decode_compact_object(requested_id, obj_type, &frame, shared_blob)?
+                    .ok_or_else(|| compact_index_miss(requested_id))?;
+                Ok(RecordStep::Complete(PackObjectRecord {
                     id: *requested_id,
                     obj_type,
                     data,
                     delta_base: None,
                     path_hint: None,
-                });
+                }))
+            }
+            NonDeltaPayload::Ordinary(data) => {
+                verify_record_id_matches(requested_id, &id)?;
+                Ok(RecordStep::Complete(PackObjectRecord {
+                    id,
+                    obj_type,
+                    data,
+                    delta_base: None,
+                    path_hint: None,
+                }))
             }
         }
-        verify_record_id_matches(requested_id, &id)?;
-        let (resolved_type, final_data) = if obj_type == ObjectType::Delta {
-            self.read_delta_record(base_id, &decompressed, uncompressed_size, depth)?
-        } else {
-            (obj_type, decompressed)
-        };
-
-        if final_data.len() != uncompressed_size {
-            return Err(StoreError::InvalidObject(format!(
-                "Size mismatch: expected {}, got {}",
-                uncompressed_size,
-                final_data.len()
-            )));
-        }
-
-        Ok(PackObjectRecord {
-            id,
-            obj_type: resolved_type,
-            data: final_data,
-            delta_base: None,
-            path_hint: None,
-        })
     }
 
     fn read_compact_objects_at(&self, offset: usize) -> Result<Option<DecodedCompactObjects>> {
@@ -729,61 +864,101 @@ impl<'a> PackReader<'a> {
         let data_start = checked_index_add(offset, header.header_len, "entry data start")?;
         let data_end = checked_data_end(data_start, header.compressed_size, self.content_end)?;
         let stored = &self.data.as_slice()[data_start..data_end];
-        let data = if header.compressed_size != header.uncompressed_size {
-            decompress_pack_payload(stored, header.uncompressed_size)?
-        } else {
-            stored.to_vec()
-        };
-        if data.len() != header.uncompressed_size {
-            return Err(StoreError::InvalidObject(format!(
-                "Size mismatch: expected {}, got {}",
-                header.uncompressed_size,
-                data.len()
-            )));
+        match self.read_non_delta_payload(offset, &header, stored)? {
+            NonDeltaPayload::Compact(frame) => {
+                decode_compact_objects(header.obj_type, &frame, shared_blob)
+            }
+            NonDeltaPayload::Ordinary(_) => Ok(None),
         }
-        #[cfg(test)]
-        if shared_blob || is_compact_frame(&data) {
-            self.record_compact_frame_read();
-        }
-        decode_compact_objects(header.obj_type, &data, shared_blob)
     }
 
-    fn read_delta_record(
+    fn read_non_delta_payload(
         &self,
-        base_id: Option<PackObjectId>,
-        delta: &[u8],
+        offset: usize,
+        header: &super::PackEntryHeader,
+        stored_data: &[u8],
+    ) -> Result<NonDeltaPayload> {
+        let shared_blob =
+            header.obj_type == ObjectType::Blob && self.aliased_offsets.contains(&(offset as u64));
+        self.read_non_delta_payload_parts(
+            offset,
+            header.obj_type,
+            header.uncompressed_size,
+            header.compressed_size,
+            stored_data,
+            shared_blob,
+        )
+    }
+
+    fn read_non_delta_payload_parts(
+        &self,
+        offset: usize,
+        obj_type: ObjectType,
         uncompressed_size: usize,
-        depth: usize,
-    ) -> Result<(ObjectType, Vec<u8>)> {
-        if depth > MAX_DELTA_CHAIN_DEPTH {
+        compressed_size: usize,
+        stored_data: &[u8],
+        shared_blob: bool,
+    ) -> Result<NonDeltaPayload> {
+        let cache_key = DecodedFrameKey::new(Arc::clone(&self.pack_path), offset);
+        if let Some(frame) = self.cached_frame(&cache_key) {
+            heddle_perf_contract::record_pack_frame_cache_hit();
+            return Ok(NonDeltaPayload::Compact(frame));
+        }
+        let decompressed = if compressed_size != uncompressed_size {
+            decompress_pack_payload(stored_data, uncompressed_size)?
+        } else {
+            stored_data.to_vec()
+        };
+        if decompressed.len() != uncompressed_size {
             return Err(StoreError::InvalidObject(format!(
-                "Delta chain depth {} exceeds max {}",
-                depth, MAX_DELTA_CHAIN_DEPTH
+                "Size mismatch: expected {}, got {}",
+                uncompressed_size,
+                decompressed.len()
             )));
         }
-
-        if uncompressed_size > MAX_PACK_DELTA_OUTPUT_SIZE {
-            return Err(StoreError::InvalidObject(format!(
-                "Delta output size {} exceeds max {}",
-                uncompressed_size, MAX_PACK_DELTA_OUTPUT_SIZE
-            )));
+        if !shared_blob && (obj_type == ObjectType::Blob || !is_compact_frame(&decompressed)) {
+            return Ok(NonDeltaPayload::Ordinary(decompressed));
         }
+        if compressed_size != uncompressed_size {
+            heddle_perf_contract::record_pack_frame_decompression();
+        }
+        #[cfg(test)]
+        self.record_compact_frame_read();
+        let states = if obj_type == ObjectType::State
+            && heddle_object_model::compact::is_state_frame(&decompressed)
+        {
+            heddle_perf_contract::record_pack_state_frame_decode();
+            Some(
+                heddle_object_model::compact::decode_state_frame(&decompressed)
+                    .map_err(|error| StoreError::InvalidObject(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let frame = Arc::new(DecodedFrame::new(Bytes::from(decompressed), states));
+        Ok(NonDeltaPayload::Compact(
+            self.insert_cached_frame(cache_key, frame),
+        ))
+    }
 
-        let base_hash = Self::require_delta_base_hash(base_id)?;
-        let base_offset = self
-            .index
-            .find(&PackObjectId::Hash(base_hash))?
-            .ok_or_else(|| StoreError::NotFound(base_hash.to_string()))?;
-        let base_offset = checked_index_offset(base_offset)?;
-        let base_id = PackObjectId::Hash(base_hash);
-        let base_record = self.read_record_at_depth(&base_id, base_offset, depth + 1)?;
-        let base_type = base_record.obj_type;
-        let base_data = base_record.data;
+    fn cached_frame(&self, key: &DecodedFrameKey) -> Option<Arc<DecodedFrame>> {
+        let mut cache = self
+            .decoded_frames
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.get(key)
+    }
 
-        let decoded = DeltaDecoder::decode(&base_data, delta, uncompressed_size)
-            .map_err(|error| StoreError::InvalidObject(format!("Delta decode failed: {error}")))?;
-
-        Ok((base_type, decoded))
+    fn insert_cached_frame(
+        &self,
+        key: DecodedFrameKey,
+        frame: Arc<DecodedFrame>,
+    ) -> Arc<DecodedFrame> {
+        let mut cache = self
+            .decoded_frames
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.insert(key, frame)
     }
 
     fn require_delta_base_hash(base_id: Option<PackObjectId>) -> Result<ContentHash> {
@@ -811,6 +986,15 @@ impl<'a> PackReader<'a> {
 fn checked_index_offset(offset: u64) -> Result<usize> {
     usize::try_from(offset)
         .map_err(|_| StoreError::InvalidObject("Entry offset exceeds platform limits".to_string()))
+}
+
+fn verify_delta_depth(depth: usize) -> Result<()> {
+    if depth > MAX_DELTA_CHAIN_DEPTH {
+        return Err(StoreError::InvalidObject(format!(
+            "Delta chain depth {depth} exceeds max {MAX_DELTA_CHAIN_DEPTH}"
+        )));
+    }
+    Ok(())
 }
 
 fn checked_decoded_size(field: &str, size: u64) -> Result<usize> {
@@ -893,10 +1077,18 @@ fn is_compact_frame(data: &[u8]) -> bool {
 fn decode_compact_object(
     requested_id: &PackObjectId,
     obj_type: ObjectType,
-    data: &[u8],
+    frame: &DecodedFrame,
     require_blob_frame: bool,
 ) -> Result<Option<Vec<u8>>> {
+    let data = frame.bytes.as_ref();
     match (obj_type, requested_id) {
+        (ObjectType::Blob, PackObjectId::Hash(hash)) if require_blob_frame => {
+            let ((_, body), hashed_bodies) =
+                heddle_object_model::compact::extract_blob_with_scan(data, *hash)
+                    .map_err(|error| compact_extract_error(requested_id, error))?;
+            heddle_perf_contract::record_pack_blob_bodies_hashed(hashed_bodies);
+            Ok(Some(body.to_vec()))
+        }
         (ObjectType::Tree, PackObjectId::Hash(hash))
             if heddle_object_model::compact::is_tree_frame(data) =>
         {
@@ -909,14 +1101,13 @@ fn decode_compact_object(
         (ObjectType::State, PackObjectId::StateId(id))
             if heddle_object_model::compact::is_state_frame(data) =>
         {
-            let state = heddle_object_model::compact::extract_state(data, *id)
-                .map_err(|error| compact_extract_error(requested_id, error))?;
+            let state = state_from_decoded_frame(frame, *id)?;
             rmp_serde::to_vec_named(&state)
                 .map(Some)
                 .map_err(|error| StoreError::InvalidObject(error.to_string()))
         }
         _ => {
-            let Some(objects) = decode_compact_objects(obj_type, data, require_blob_frame)? else {
+            let Some(objects) = decode_compact_objects(obj_type, frame, require_blob_frame)? else {
                 return Ok(None);
             };
             objects
@@ -941,9 +1132,10 @@ fn compact_extract_error(
 
 fn decode_compact_objects(
     obj_type: ObjectType,
-    data: &[u8],
+    frame: &DecodedFrame,
     require_blob_frame: bool,
 ) -> Result<Option<DecodedCompactObjects>> {
+    let data = frame.bytes.as_ref();
     match obj_type {
         ObjectType::Blob if require_blob_frame => {
             heddle_object_model::compact::decode_blob_frame(data)
@@ -968,24 +1160,60 @@ fn decode_compact_objects(
                 .collect::<Result<Vec<_>>>()
                 .map(Some)
         }
-        ObjectType::State if heddle_object_model::compact::is_state_frame(data) => {
-            heddle_object_model::compact::decode_state_frame(data)
-                .map_err(|error| StoreError::InvalidObject(error.to_string()))?
-                .into_iter()
-                .map(|state| {
-                    let id = PackObjectId::StateId(state.state_id);
-                    let bytes = rmp_serde::to_vec_named(&state)
-                        .map_err(|error| StoreError::InvalidObject(error.to_string()))?;
-                    Ok((id, ObjectType::State, bytes))
-                })
-                .collect::<Result<Vec<_>>>()
-                .map(Some)
-        }
+        ObjectType::State if heddle_object_model::compact::is_state_frame(data) => frame
+            .states
+            .as_ref()
+            .ok_or_else(|| {
+                StoreError::InvalidObject(
+                    "compact state frame is missing its decoded state vector".into(),
+                )
+            })?
+            .iter()
+            .map(|state| {
+                let id = PackObjectId::StateId(state.state_id);
+                let bytes = rmp_serde::to_vec_named(&state)
+                    .map_err(|error| StoreError::InvalidObject(error.to_string()))?;
+                Ok((id, ObjectType::State, bytes))
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Some),
         _ if is_compact_frame(data) => Err(StoreError::InvalidObject(
             "compact frame magic does not match its pack object type".into(),
         )),
         _ => Ok(None),
     }
+}
+
+fn state_from_decoded_frame(frame: &DecodedFrame, expected: StateId) -> Result<State> {
+    frame
+        .states
+        .as_ref()
+        .ok_or_else(|| {
+            StoreError::InvalidObject(
+                "compact state frame is missing its decoded state vector".into(),
+            )
+        })?
+        .iter()
+        .find(|state| state.accepts_stored_id(&expected))
+        .cloned()
+        .map(|mut state| {
+            state.state_id = expected;
+            state
+        })
+        .ok_or_else(|| compact_index_miss(&PackObjectId::StateId(expected)))
+}
+
+fn decode_serialized_state(data: &[u8], expected: StateId) -> Result<State> {
+    let mut state: State = rmp_serde::from_slice(data)
+        .map_err(|error| StoreError::InvalidObject(error.to_string()))?;
+    if !state.accepts_stored_id(&expected) {
+        return Err(StoreError::InvalidObject(format!(
+            "state id mismatch: requested {expected}, computed {}",
+            state.id()
+        )));
+    }
+    state.state_id = expected;
+    Ok(state)
 }
 
 fn compact_index_miss(id: &PackObjectId) -> StoreError {

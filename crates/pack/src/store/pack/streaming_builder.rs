@@ -1097,6 +1097,39 @@ mod tests {
     }
 
     #[test]
+    fn shared_state_frame_returns_typed_states_from_one_decode() {
+        use crate::object::{Attribution, Principal, State};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (mut builder, _, index_path) = fresh_builder(&tmp);
+        let attribution = Attribution::human(Principal::new("Reader", "reader@example.com"));
+        let first = State::new(deterministic_hash(0x40), Vec::new(), attribution.clone())
+            .with_intent("first");
+        let second = State::new(deterministic_hash(0x41), vec![first.id()], attribution)
+            .with_intent("second");
+        let states = [first, second];
+        let ids = states
+            .iter()
+            .map(|state| PackObjectId::StateId(state.id()))
+            .collect::<Vec<_>>();
+        let frame = heddle_object_model::compact::encode_state_frame(&states).unwrap();
+        builder
+            .add_shared_frame(&ids, ObjectType::State, frame.len(), &frame)
+            .unwrap();
+        let (pack, index, _) = finalize_cursor(builder, &index_path);
+        let reader = PackReader::from_bytes(pack, index).unwrap();
+
+        for state in &states {
+            assert_eq!(reader.get_state(&state.id()).unwrap(), Some(state.clone()));
+        }
+        assert_eq!(
+            reader.compact_frame_read_count(),
+            1,
+            "typed state reads must reuse the decoded state vector"
+        );
+    }
+
+    #[test]
     fn compact_tree_extraction_rejects_an_index_alias_with_the_wrong_typed_hash() {
         use crate::object::{Tree, TreeEntry};
 
@@ -1166,6 +1199,11 @@ mod tests {
                 Some(expected.len() as u64)
             );
         }
+        assert_eq!(
+            reader.compact_frame_read_count(),
+            1,
+            "sequential point reads must decompress a shared frame once"
+        );
     }
 
     #[test]
