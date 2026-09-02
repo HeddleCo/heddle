@@ -65,6 +65,7 @@ pub(crate) struct CollaborationFixture {
     pub events: Vec<RepoEvent>,
     pub one_event_per_subscribe: bool,
     pub get_requests: Arc<Mutex<Vec<String>>>,
+    pub get_request_state_ids: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
     pub list_requests: Arc<Mutex<usize>>,
     pub subscribe_after: Arc<Mutex<Vec<i64>>>,
 }
@@ -683,16 +684,24 @@ async fn serve_get_discussion(
     fixture: CollaborationFixture,
 ) {
     read_request_body(recv, request).await;
-    let discussion_id = decode_request_frame(request)
+    let request = decode_request_frame(request)
         .ok()
-        .and_then(|frame| GetDiscussionRequest::decode(frame.body).ok())
-        .map(|body| body.discussion_id)
+        .and_then(|frame| GetDiscussionRequest::decode(frame.body).ok());
+    let discussion_id = request
+        .as_ref()
+        .map(|body| body.discussion_id.clone())
         .unwrap_or_default();
+    let state_id = request.and_then(|body| body.state_id.map(|state| state.value));
     fixture
         .get_requests
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .push(discussion_id.clone());
+    fixture
+        .get_request_state_ids
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(state_id);
     if let Some(code) = fixture.hidden.get(&discussion_id).copied() {
         let failure = CallFailure {
             code: code as i32,

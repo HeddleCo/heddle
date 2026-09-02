@@ -125,25 +125,108 @@ fn save_cursors(heddle_dir: &Path, cursors: &CursorFile) -> Result<()> {
     Ok(())
 }
 
-/// Load the persisted watermark for `repo_path`.
-pub fn load_cursor(heddle_dir: &Path, repo_path: &str) -> Result<DiscussionEventCursor> {
-    Ok(load_cursors(heddle_dir)?
-        .repos
-        .get(repo_path)
-        .cloned()
-        .unwrap_or_default())
+/// Subscription identity for the durable event cursor.
+///
+/// Unfiltered waits (no thread filter, no authority) keep the legacy
+/// `repo_path` slot so existing files keep working. A filtered wait must
+/// never share that slot: skipping bar-thread events and then advancing a
+/// repo-wide watermark would leave an unfiltered `discuss wait` permanently
+/// past them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscussionCursorScope {
+    /// Hosted authority (`host:port`). Empty for tests that only have a path.
+    pub authority: String,
+    pub repo_path: String,
+    pub thread: String,
+    pub thread_id: String,
 }
 
-/// Persist the watermark for `repo_path`.
+impl DiscussionCursorScope {
+    pub fn unfiltered(repo_path: impl Into<String>) -> Self {
+        Self {
+            repo_path: repo_path.into(),
+            ..Self::default()
+        }
+    }
+
+    pub fn is_filtered(&self) -> bool {
+        !self.thread.is_empty() || !self.thread_id.is_empty()
+    }
+
+    /// Stable map key. Filtered keys never equal the unfiltered `repo_path`.
+    pub fn slot(&self) -> String {
+        cursor_slot(
+            &self.authority,
+            &self.repo_path,
+            &self.thread,
+            &self.thread_id,
+        )
+    }
+}
+
+fn cursor_slot(authority: &str, repo_path: &str, thread: &str, thread_id: &str) -> String {
+    let mut key = String::new();
+    if !authority.is_empty() {
+        key.push_str(authority);
+        key.push('\n');
+    }
+    key.push_str(repo_path);
+    if !thread.is_empty() || !thread_id.is_empty() {
+        key.push_str("\nthread=");
+        key.push_str(thread);
+        key.push_str("\nthread_id=");
+        key.push_str(thread_id);
+    }
+    key
+}
+
+/// Load the persisted watermark for the unfiltered `repo_path` slot.
+pub fn load_cursor(heddle_dir: &Path, repo_path: &str) -> Result<DiscussionEventCursor> {
+    load_scoped_cursor(heddle_dir, &DiscussionCursorScope::unfiltered(repo_path))
+}
+
+/// Persist the watermark for the unfiltered `repo_path` slot.
 pub fn save_cursor(
     heddle_dir: &Path,
     repo_path: &str,
     cursor: &DiscussionEventCursor,
 ) -> Result<()> {
+    save_scoped_cursor(
+        heddle_dir,
+        &DiscussionCursorScope::unfiltered(repo_path),
+        cursor,
+    )
+}
+
+/// Load the watermark for `scope`.
+///
+/// Unfiltered + authority falls back to the bare `repo_path` slot so files
+/// written before authority scoping still resume. Filtered scopes never fall
+/// back to the unfiltered watermark.
+pub fn load_scoped_cursor(
+    heddle_dir: &Path,
+    scope: &DiscussionCursorScope,
+) -> Result<DiscussionEventCursor> {
+    let cursors = load_cursors(heddle_dir)?;
+    if let Some(cursor) = cursors.repos.get(&scope.slot()) {
+        return Ok(cursor.clone());
+    }
+    if !scope.is_filtered() && !scope.authority.is_empty() {
+        if let Some(cursor) = cursors.repos.get(&scope.repo_path) {
+            return Ok(cursor.clone());
+        }
+    }
+    Ok(DiscussionEventCursor::default())
+}
+
+/// Persist the watermark for `scope`. Always writes the scoped slot.
+pub fn save_scoped_cursor(
+    heddle_dir: &Path,
+    scope: &DiscussionCursorScope,
+    cursor: &DiscussionEventCursor,
+) -> Result<()> {
     let mut cursors = load_cursors(heddle_dir)?;
-    cursors
-        .repos
-        .insert(repo_path.to_string(), cursor.clone());
+    cursors.repos.insert(scope.slot(), cursor.clone());
     save_cursors(heddle_dir, &cursors)
 }
 
@@ -183,33 +266,79 @@ pub async fn bootstrap_discussions(
     repo_path: &str,
     bootstrap: Option<&[Discussion]>,
 ) -> Result<DiscussionEventCursor> {
+    bootstrap_discussions_scoped(
+        repo,
+        client,
+        repo_path,
+        &DiscussionCursorScope::unfiltered(repo_path),
+        bootstrap,
+    )
+    .await
+}
+
+/// Snapshot bootstrap, writing the bootstrapped flag on `scope`'s cursor.
+pub async fn bootstrap_discussions_scoped(
+    repo: &Repository,
+    client: &mut HostedClient,
+    repo_path: &str,
+    scope: &DiscussionCursorScope,
+    bootstrap: Option<&[Discussion]>,
+) -> Result<DiscussionEventCursor> {
+    if repo
+        .head()
+        .context("resolve repository head")?
+        .is_none()
+    {
+        return Err(anyhow!(
+            "cannot bootstrap hosted discussions without a repository HEAD"
+        ));
+    }
     pull_discussions(repo, client, repo_path, bootstrap)
         .await
         .context("bootstrap hosted discussions")?;
-    let mut cursor = load_cursor(repo.heddle_dir(), repo_path)?;
+    let mut cursor = load_scoped_cursor(repo.heddle_dir(), scope)?;
     cursor.bootstrapped = true;
     // SubscribeRepoEvents keys on the hosted repo id (`RepoEvent.repo_id`, a
     // weft UUID). owner/name is a RepositoryRef path used by GetDiscussion /
     // ListByState. Do not persist the path into this slot.
-    save_cursor(repo.heddle_dir(), repo_path, &cursor)?;
+    save_scoped_cursor(repo.heddle_dir(), scope, &cursor)?;
     Ok(cursor)
 }
 
 /// Apply one already-received repo event into the local op-log and advance
-/// the watermark. Fetches via `GetDiscussion` when the payload is a doorbell.
+/// the unfiltered watermark. Fetches via `GetDiscussion` when the payload
+/// is a doorbell.
 pub async fn consume_discussion_event(
     repo: &Repository,
     client: &mut HostedClient,
     repo_path: &str,
     event: &RepoEvent,
 ) -> Result<DiscussionEventOutcome> {
-    let mut cursor = load_cursor(repo.heddle_dir(), repo_path)?;
+    consume_discussion_event_scoped(
+        repo,
+        client,
+        repo_path,
+        &DiscussionCursorScope::unfiltered(repo_path),
+        event,
+    )
+    .await
+}
+
+/// Apply one event and advance only `scope`'s watermark.
+pub async fn consume_discussion_event_scoped(
+    repo: &Repository,
+    client: &mut HostedClient,
+    repo_path: &str,
+    scope: &DiscussionCursorScope,
+    event: &RepoEvent,
+) -> Result<DiscussionEventOutcome> {
+    let mut cursor = load_scoped_cursor(repo.heddle_dir(), scope)?;
     let outcome = apply_discussion_event(repo, client, repo_path, event).await?;
     cursor.after_event_id = cursor.after_event_id.max(event.event_id);
     if !event.repo_id.is_empty() {
         cursor.repo_id = event.repo_id.clone();
     }
-    save_cursor(repo.heddle_dir(), repo_path, &cursor)?;
+    save_scoped_cursor(repo.heddle_dir(), scope, &cursor)?;
     Ok(outcome)
 }
 
@@ -237,7 +366,10 @@ async fn apply_discussion_event(
         already_mirrored,
     ) {
         Some(discussion) => discussion,
-        None => match client.get_discussion(repo_path, &discussion_id).await {
+        None => match client
+            .get_discussion(repo_path, &discussion_id, payload.opened_against_state)
+            .await
+        {
             Ok(discussion) => discussion,
             Err(error) if is_hidden_discussion(&error) => {
                 return Ok(DiscussionEventOutcome::Skipped {
@@ -342,20 +474,56 @@ fn discussion_from_payload(
     if event_type != "discussion.opened" && !already_mirrored {
         return None;
     }
-    if event_type == "discussion.opened" && payload.visibility.is_none() {
-        return None;
+    match event_type {
+        "discussion.opened" => {
+            if payload.visibility.is_none() || !payload_has_anchor(payload) {
+                return None;
+            }
+            let body = payload.body.as_deref()?;
+            if body.trim().is_empty() {
+                return None;
+            }
+            Some(hosted_from_payload(discussion_id, payload))
+        }
+        "discussion.resolved" => {
+            if !payload_has_resolution(&payload.resolution) {
+                return None;
+            }
+            Some(hosted_from_payload(discussion_id, payload))
+        }
+        "turn.appended" => {
+            let body = payload.body.as_deref()?;
+            if body.trim().is_empty() {
+                return None;
+            }
+            if payload.turn_id.is_none() && payload.turn_seq == 0 {
+                return None;
+            }
+            Some(hosted_from_payload(discussion_id, payload))
+        }
+        _ => None,
     }
-    if event_type == "discussion.resolved" && already_mirrored {
-        return Some(hosted_from_payload(discussion_id, payload));
+}
+
+fn payload_has_anchor(payload: &EventPayload) -> bool {
+    payload
+        .file
+        .as_deref()
+        .is_some_and(|file| !file.is_empty())
+        && payload
+            .symbol
+            .as_deref()
+            .is_some_and(|symbol| !symbol.is_empty())
+}
+
+fn payload_has_resolution(resolution: &HostedResolution) -> bool {
+    match resolution {
+        HostedResolution::Open => false,
+        HostedResolution::ByEdit { state_id: None } => false,
+        HostedResolution::ByEdit { state_id: Some(_) } => true,
+        HostedResolution::Dismissed { .. } => true,
+        HostedResolution::IntoAnnotation { annotation_id } => !annotation_id.is_empty(),
     }
-    let body = payload.body.as_deref()?;
-    if body.trim().is_empty() {
-        return None;
-    }
-    if event_type == "turn.appended" && payload.turn_id.is_none() && payload.turn_seq == 0 {
-        return None;
-    }
-    Some(hosted_from_payload(discussion_id, payload))
 }
 
 fn hosted_from_payload(discussion_id: String, payload: &EventPayload) -> HostedDiscussion {
@@ -456,6 +624,7 @@ pub struct DiscussionEventConsumer<'a> {
     client: &'a mut HostedClient,
     events: RepoEventClient,
     repo_path: String,
+    authority: String,
     thread: String,
     thread_id: String,
 }
@@ -472,9 +641,15 @@ impl<'a> DiscussionEventConsumer<'a> {
             client,
             events,
             repo_path: repo_path.into(),
+            authority: String::new(),
             thread: String::new(),
             thread_id: String::new(),
         }
+    }
+
+    pub fn with_authority(mut self, authority: impl Into<String>) -> Self {
+        self.authority = authority.into();
+        self
     }
 
     pub fn with_thread(mut self, thread: impl Into<String>, thread_id: impl Into<String>) -> Self {
@@ -483,18 +658,34 @@ impl<'a> DiscussionEventConsumer<'a> {
         self
     }
 
+    fn cursor_scope(&self) -> DiscussionCursorScope {
+        DiscussionCursorScope {
+            authority: self.authority.clone(),
+            repo_path: self.repo_path.clone(),
+            thread: self.thread.clone(),
+            thread_id: self.thread_id.clone(),
+        }
+    }
+
     /// Snapshot bootstrap (if this clone has no cursor yet) then open the
     /// replay-then-live subscription.
     pub async fn start(
         &mut self,
         bootstrap: Option<&[Discussion]>,
     ) -> Result<DiscussionEventSubscription, DiscussionLiveError> {
-        let mut cursor = load_cursor(self.repo.heddle_dir(), &self.repo_path)
+        let scope = self.cursor_scope();
+        let mut cursor = load_scoped_cursor(self.repo.heddle_dir(), &scope)
             .map_err(DiscussionLiveError::cursor)?;
         if !cursor.bootstrapped {
-            cursor = bootstrap_discussions(self.repo, self.client, &self.repo_path, bootstrap)
-                .await
-                .map_err(DiscussionLiveError::bootstrap)?;
+            cursor = bootstrap_discussions_scoped(
+                self.repo,
+                self.client,
+                &self.repo_path,
+                &scope,
+                bootstrap,
+            )
+            .await
+            .map_err(DiscussionLiveError::bootstrap)?;
         }
         self.subscribe_from_cursor(&cursor).await
     }
@@ -503,7 +694,7 @@ impl<'a> DiscussionEventConsumer<'a> {
     pub async fn resume(
         &mut self,
     ) -> Result<DiscussionEventSubscription, DiscussionLiveError> {
-        let cursor = load_cursor(self.repo.heddle_dir(), &self.repo_path)
+        let cursor = load_scoped_cursor(self.repo.heddle_dir(), &self.cursor_scope())
             .map_err(DiscussionLiveError::cursor)?;
         self.subscribe_from_cursor(&cursor).await
     }
@@ -550,9 +741,15 @@ impl<'a> DiscussionEventConsumer<'a> {
             }
             Err(error) => return Err(DiscussionLiveError::Subscribe(error)),
         };
-        let outcome = consume_discussion_event(self.repo, self.client, &self.repo_path, &event)
-            .await
-            .map_err(DiscussionLiveError::apply)?;
+        let outcome = consume_discussion_event_scoped(
+            self.repo,
+            self.client,
+            &self.repo_path,
+            &self.cursor_scope(),
+            &event,
+        )
+        .await
+        .map_err(DiscussionLiveError::apply)?;
         Ok((event, outcome))
     }
 }

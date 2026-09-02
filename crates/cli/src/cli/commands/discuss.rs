@@ -338,15 +338,17 @@ fn run_list(
 #[cfg(feature = "client")]
 async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) -> Result<()> {
     use hosted_client::client::discussion_live::{
-        DiscussionEventConsumer, DiscussionEventOutcome, load_cursor, save_cursor,
+        DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventOutcome,
+        load_scoped_cursor, save_scoped_cursor,
     };
     use hosted_client::client::{HostedAuthMode, HostedClient};
 
     use super::remote::resolve_default_remote_name;
-    use crate::remote::{RemoteTarget, resolve_remote_with_key};
+    use crate::remote::{RemoteTarget, resolve_remote_with_key_and_insecure};
 
     let remote_name = resolve_default_remote_name(repo, args.remote.as_deref())?;
-    let (target, server_key) = resolve_remote_with_key(repo, Some(&remote_name))?;
+    let (target, server_key, insecure) =
+        resolve_remote_with_key_and_insecure(repo, Some(&remote_name))?;
     let (authority, repo_path) = match target {
         RemoteTarget::Network {
             authority,
@@ -370,23 +372,31 @@ async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) ->
     };
 
     let user_config = UserConfig::load_default()?;
-    let mut client = HostedClient::open_session(
+    let mut client = HostedClient::open_session_with_insecure(
         &authority,
         &user_config,
         server_key.clone(),
         HostedAuthMode::CredentialFallback,
+        insecure,
     )
     .await?;
 
+    let cursor_scope = DiscussionCursorScope {
+        authority: authority.clone(),
+        repo_path: repo_path.clone(),
+        thread: args.thread.clone().unwrap_or_default(),
+        thread_id: String::new(),
+    };
     if let Some(after) = args.after {
-        let mut cursor = load_cursor(repo.heddle_dir(), &repo_path)?;
+        let mut cursor = load_scoped_cursor(repo.heddle_dir(), &cursor_scope)?;
         cursor.after_event_id = after;
-        save_cursor(repo.heddle_dir(), &repo_path, &cursor)?;
+        save_scoped_cursor(repo.heddle_dir(), &cursor_scope, &cursor)?;
     }
 
     let mut seen = 0usize;
     'session: loop {
-        let mut consumer = DiscussionEventConsumer::new(repo, &mut client, repo_path.clone());
+        let mut consumer = DiscussionEventConsumer::new(repo, &mut client, repo_path.clone())
+            .with_authority(authority.clone());
         if let Some(thread) = args.thread.as_deref() {
             consumer = consumer.with_thread(thread, "");
         }
@@ -439,11 +449,12 @@ async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) ->
                     // the watermark.
                     drop(consumer);
                     client.close().await;
-                    client = HostedClient::open_session(
+                    client = HostedClient::open_session_with_insecure(
                         &authority,
                         &user_config,
                         server_key.clone(),
                         HostedAuthMode::CredentialFallback,
+                        insecure,
                     )
                     .await?;
                     continue 'session;

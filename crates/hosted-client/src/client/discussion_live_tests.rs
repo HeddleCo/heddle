@@ -9,9 +9,10 @@ use repo::{CollaborationStore, Repository};
 use tempfile::TempDir;
 
 use super::{
-    DiscussionEventConsumer, DiscussionEventCursor, DiscussionEventOutcome, bootstrap_discussions,
-    consume_discussion_event, is_discussion_event, load_cursor, parse_event_payload, save_cursor,
-    subscribe_request,
+    DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventCursor, DiscussionEventOutcome,
+    bootstrap_discussions, consume_discussion_event, consume_discussion_event_scoped,
+    is_discussion_event, load_cursor, load_scoped_cursor, parse_event_payload, save_cursor,
+    save_scoped_cursor, subscribe_request,
 };
 use crate::hosted_runtime::hosted::HostedResolution;
 use crate::hosted_runtime::hosted::test_server::CollaborationFixture;
@@ -790,4 +791,274 @@ fn fat_append_on_unknown_discussion_is_not_self_contained() {
     let payload = parse_event_payload(&event);
     assert!(super::discussion_from_payload("turn.appended", &payload, false).is_none());
     assert!(super::discussion_from_payload("turn.appended", &payload, true).is_some());
+}
+
+#[test]
+fn opened_without_file_or_symbol_is_a_doorbell() {
+    let event = RepoEvent {
+        event_type: "discussion.opened".into(),
+        payload_json: serde_json::json!({
+            "discussion_id": "disc-9",
+            "visibility": "internal",
+            "body": "hello",
+            "turn_id": "turn-1",
+            "turn_seq": 1
+        })
+        .to_string(),
+        ..RepoEvent::default()
+    };
+    let payload = parse_event_payload(&event);
+    assert!(super::discussion_from_payload("discussion.opened", &payload, false).is_none());
+}
+
+#[test]
+fn resolved_without_a_real_resolution_is_a_doorbell() {
+    let event = RepoEvent {
+        event_type: "discussion.resolved".into(),
+        payload_json: serde_json::json!({
+            "discussion_id": "disc-9",
+            "file": "lib.rs",
+            "symbol": "run",
+            "body": "first",
+            "turn_id": "turn-1",
+            "turn_seq": 1
+        })
+        .to_string(),
+        ..RepoEvent::default()
+    };
+    let payload = parse_event_payload(&event);
+    assert!(super::discussion_from_payload("discussion.resolved", &payload, true).is_none());
+    assert!(super::discussion_from_payload("discussion.resolved", &payload, false).is_none());
+}
+
+#[test]
+fn filtered_cursor_slot_does_not_share_the_unfiltered_watermark() {
+    let temp = TempDir::new().unwrap();
+    let filtered = DiscussionCursorScope {
+        repo_path: "acme/widgets".into(),
+        thread: "foo".into(),
+        ..DiscussionCursorScope::default()
+    };
+    let cursor = DiscussionEventCursor {
+        after_event_id: 41,
+        repo_id: "repo-1".into(),
+        bootstrapped: true,
+    };
+    save_scoped_cursor(temp.path(), &filtered, &cursor).unwrap();
+    assert_eq!(
+        load_cursor(temp.path(), "acme/widgets").unwrap(),
+        DiscussionEventCursor::default()
+    );
+    assert_eq!(
+        load_scoped_cursor(temp.path(), &filtered).unwrap(),
+        cursor
+    );
+}
+
+#[test]
+fn unfiltered_authority_cursor_falls_back_to_legacy_repo_path() {
+    let temp = TempDir::new().unwrap();
+    let legacy = DiscussionEventCursor {
+        after_event_id: 7,
+        repo_id: "repo-1".into(),
+        bootstrapped: true,
+    };
+    save_cursor(temp.path(), "acme/widgets", &legacy).unwrap();
+    let scoped = DiscussionCursorScope {
+        authority: "weft.example:443".into(),
+        repo_path: "acme/widgets".into(),
+        ..DiscussionCursorScope::default()
+    };
+    assert_eq!(
+        load_scoped_cursor(temp.path(), &scoped).unwrap(),
+        legacy
+    );
+    let advanced = DiscussionEventCursor {
+        after_event_id: 9,
+        repo_id: "repo-1".into(),
+        bootstrapped: true,
+    };
+    save_scoped_cursor(temp.path(), &scoped, &advanced).unwrap();
+    assert_eq!(
+        load_cursor(temp.path(), "acme/widgets").unwrap().after_event_id,
+        7
+    );
+    assert_eq!(
+        load_scoped_cursor(temp.path(), &scoped)
+            .unwrap()
+            .after_event_id,
+        9
+    );
+}
+
+#[tokio::test]
+async fn filtered_wait_does_not_advance_the_unfiltered_watermark() {
+    let (_temp, repo) = seed_repo();
+    let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+    let filtered = DiscussionCursorScope {
+        repo_path: "acme/widgets".into(),
+        thread: "foo".into(),
+        ..DiscussionCursorScope::default()
+    };
+    let outcome = consume_discussion_event_scoped(
+        &repo,
+        &mut client,
+        "acme/widgets",
+        &filtered,
+        &opened_event(10, "disc-foo", "from foo", "turn-1"),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, DiscussionEventOutcome::Applied { .. }));
+    assert_eq!(
+        load_cursor(repo.heddle_dir(), "acme/widgets")
+            .unwrap()
+            .after_event_id,
+        0
+    );
+    assert_eq!(
+        load_scoped_cursor(repo.heddle_dir(), &filtered)
+            .unwrap()
+            .after_event_id,
+        10
+    );
+
+    client.close().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn get_discussion_is_called_with_the_event_state_id() {
+    let (_temp, repo) = seed_repo();
+    let mut fixture = CollaborationFixture::default();
+    fixture.discussions.insert(
+        "disc-prior".to_string(),
+        proto_discussion("disc-prior", &[("turn-open", "keep this invariant", 1)]),
+    );
+    let (mut client, server, fixture) =
+        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
+
+    let mut event = doorbell(21, "discussion.opened", "disc-prior", "turn-open", 1);
+    event.new_state = Some(ProtoStateId {
+        value: vec![0xab; 32],
+    });
+    let outcome = consume_discussion_event(&repo, &mut client, "acme/widgets", &event)
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        DiscussionEventOutcome::Applied { discussion_id } if discussion_id == "disc-prior"
+    ));
+    assert_eq!(
+        fixture
+            .get_requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_slice(),
+        ["disc-prior"]
+    );
+    assert_eq!(
+        fixture
+            .get_request_state_ids
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_slice(),
+        [Some(vec![0xab; 32])]
+    );
+
+    client.close().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn incomplete_open_without_anchor_doorbell_fetches() {
+    let (_temp, repo) = seed_repo();
+    let mut fixture = CollaborationFixture::default();
+    fixture.discussions.insert(
+        "disc-open".to_string(),
+        proto_discussion("disc-open", &[("turn-open", "keep this invariant", 1)]),
+    );
+    let (mut client, server, fixture) =
+        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
+
+    let event = RepoEvent {
+        event_id: 31,
+        repo_id: "repo-1".to_string(),
+        event_type: "discussion.opened".to_string(),
+        payload_json: serde_json::json!({
+            "discussion_id": "disc-open",
+            "visibility": "internal",
+            "body": "hello without an anchor",
+            "turn_id": "turn-open",
+            "turn_seq": 1
+        })
+        .to_string(),
+        ..RepoEvent::default()
+    };
+    let outcome = consume_discussion_event(&repo, &mut client, "acme/widgets", &event)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, DiscussionEventOutcome::Applied { .. }));
+    assert_eq!(
+        fixture
+            .get_requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_slice(),
+        ["disc-open"]
+    );
+
+    client.close().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn incomplete_resolve_without_resolution_doorbell_fetches() {
+    let (_temp, repo) = seed_repo();
+    let mut fixture = CollaborationFixture::default();
+    fixture.discussions.insert(
+        "disc-res".to_string(),
+        proto_discussion("disc-res", &[("turn-1", "first", 1)]),
+    );
+    let (mut client, server, fixture) =
+        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
+
+    consume_discussion_event(
+        &repo,
+        &mut client,
+        "acme/widgets",
+        &opened_event(1, "disc-res", "first", "turn-1"),
+    )
+    .await
+    .unwrap();
+
+    let event = RepoEvent {
+        event_id: 32,
+        repo_id: "repo-1".to_string(),
+        event_type: "discussion.resolved".to_string(),
+        payload_json: serde_json::json!({
+            "discussion_id": "disc-res",
+            "file": "lib.rs",
+            "symbol": "run",
+            "body": "first",
+            "turn_id": "turn-1",
+            "turn_seq": 1
+        })
+        .to_string(),
+        ..RepoEvent::default()
+    };
+    consume_discussion_event(&repo, &mut client, "acme/widgets", &event)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .get_requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_slice(),
+        ["disc-res"]
+    );
+
+    client.close().await;
+    server.await.unwrap();
 }

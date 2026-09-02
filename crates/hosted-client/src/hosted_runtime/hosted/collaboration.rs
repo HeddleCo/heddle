@@ -11,10 +11,14 @@
 //! Wire identity note: the canonical `CollaborationService` proto types the
 //! discussion anchor state as a 32-byte `StateId`, but the hosted server still
 //! resolves the inbound `state_id` field through a 16-byte `ChangeId` decode
-//! (`OpenDiscussion`/`ListByState`). We therefore send the **ChangeId** bytes in
-//! that field (matching weft's own canonical integration tests), while the
+//! for `OpenDiscussion`/`ListByState`. We therefore send the **ChangeId** bytes
+//! in those fields (matching weft's own canonical integration tests), while the
 //! server echoes the genuine 32-byte `StateId` back in
 //! `Discussion.opened_against_state`.
+//!
+//! `GetDiscussion.state_id` is the 32-byte `StateId` (empty = HEAD). Pass
+//! `opened_against_state` / the event's `new_state` so a discussion that
+//! exists on a prior state is not NotFound.
 
 use api::heddle::api::v1alpha1::{
     AppendTurnRequest, ContextAnnotationKind, Discussion as ProtoDiscussion, DiscussionKind,
@@ -133,6 +137,18 @@ fn change_id_state_field(change_id: ChangeId) -> Option<ProtoStateId> {
     })
 }
 
+fn get_discussion_request(
+    repo_path: &str,
+    discussion_id: &str,
+    state_id: Option<StateId>,
+) -> GetDiscussionRequest {
+    GetDiscussionRequest {
+        repo_path: super::helpers::repository_ref(repo_path),
+        discussion_id: discussion_id.to_string(),
+        state_id: state_id.and_then(super::helpers::proto_state_id),
+    }
+}
+
 impl HostedClient {
     /// The authenticated hosted username (the bearer token's `principal:<subject>`
     /// subject). weft stamps discussion turns with `Principal::new(username, "")`,
@@ -230,18 +246,16 @@ impl HostedClient {
         Ok(decode_discussion(response))
     }
 
-    /// Fetch one hosted discussion by server id. `state_id` empty means HEAD.
-    /// Used by the live event consumer as the doorbell payload fetch.
+    /// Fetch one hosted discussion by server id. `state_id` empty means HEAD;
+    /// set it to recover a discussion on a prior state (32-byte `StateId`,
+    /// not the ChangeId used on OpenDiscussion/ListByState).
     pub async fn get_discussion(
         &mut self,
         repo_path: &str,
         discussion_id: &str,
+        state_id: Option<StateId>,
     ) -> Result<HostedDiscussion, ProtocolError> {
-        let request = GetDiscussionRequest {
-            repo_path: super::helpers::repository_ref(repo_path),
-            discussion_id: discussion_id.to_string(),
-            state_id: None,
-        };
+        let request = get_discussion_request(repo_path, discussion_id, state_id);
         let response = self
             .routes()
             .get_discussion(&request)
@@ -414,6 +428,17 @@ mod tests {
         let change = ChangeId::from_bytes([0x11; 16]);
         let field = change_id_state_field(change).expect("proto state wrapper");
         assert_eq!(field.value, change.as_bytes().to_vec());
+    }
+
+    #[test]
+    fn get_discussion_request_uses_32_byte_state_id() {
+        let state = StateId::from_bytes([0xab; 32]);
+        let request = get_discussion_request("acme/widgets", "disc-1", Some(state));
+        assert_eq!(request.discussion_id, "disc-1");
+        let sent = request.state_id.expect("state_id should be set");
+        assert_eq!(sent.value, vec![0xab; 32]);
+        let head = get_discussion_request("acme/widgets", "disc-1", None);
+        assert!(head.state_id.is_none());
     }
 
     #[test]
