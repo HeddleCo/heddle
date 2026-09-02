@@ -98,7 +98,7 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
         let mut markers = Vec::new();
 
         for head in heads {
-            let Some(cid) = self.map.get_commit(&head.target_sha) else {
+            let Some(cid) = self.map.get_commit(&head.target_sha)? else {
                 warn!(
                     ref_name = %head.full_name,
                     target = %head.target_sha,
@@ -416,6 +416,25 @@ mod tests {
         let stats = pollster::block_on(RefEmitter::new(&mgr, &store, &map).emit(&heads)).unwrap();
         assert_eq!(stats.threads_written, 0);
         assert_eq!(stats.skipped_unmapped, 1);
+        assert_eq!(mgr.get_thread(&ThreadName::new("orphan")).unwrap(), None);
+    }
+
+    #[test]
+    fn sqlite_lookup_error_fails_emit_instead_of_skipping_ref() {
+        let (_tmp, mgr) = fresh_ref_manager();
+        let store = InMemoryStore::new();
+        let map_dir = TempDir::new().unwrap();
+        let map_path = map_dir.path().join("sha_map.sqlite");
+        let map = ShaMap::open(&map_path).unwrap();
+        let conn = rusqlite::Connection::open(&map_path).unwrap();
+        conn.execute("DROP TABLE sha_map", []).unwrap();
+
+        let git_sha = "c".repeat(40);
+        let heads = vec![sample_head("orphan", RefNamespace::Branch, &git_sha)];
+        let error = pollster::block_on(RefEmitter::new(&mgr, &store, &map).emit(&heads))
+            .expect_err("a sha-map query error must fail ref emission");
+
+        assert!(matches!(error, IngestError::ShaMap(_)));
         assert_eq!(mgr.get_thread(&ThreadName::new("orphan")).unwrap(), None);
     }
 

@@ -35,6 +35,7 @@ fn ingest_mapped_change(path: &std::path::Path, git_sha: &str) -> Option<String>
     let map_path = path.join(".heddle").join("ingest").join("sha_map.sqlite");
     let map = ingest::ShaMap::open(map_path).expect("open ingest SHA map");
     map.get_commit(git_sha)
+        .expect("read ingest SHA map")
         .map(|state_id| state_id.to_string_full())
 }
 
@@ -82,9 +83,11 @@ fn capture_persists_unchanged_git_subtree_and_blob_as_native_closure() {
     let map = ingest::ShaMap::open(work.join(".heddle/ingest/sha_map.sqlite")).unwrap();
     let stable_hash = map
         .get_tree(&stable_git_tree)
+        .expect("read unchanged Git subtree mapping")
         .expect("unchanged Git subtree must retain its identity mapping");
     let stable_blob_hash = map
         .get_blob(&stable_git_blob)
+        .expect("read unchanged Git blob mapping")
         .expect("unchanged Git blob must retain its identity mapping");
     let captured_repo = repo::Repository::open(&work).unwrap();
     let captured = captured_repo

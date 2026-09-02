@@ -382,19 +382,18 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
         let overlay_descriptor_dir = staging_dir
             .parent()
             .map(|parent| parent.join("overlay-states"));
-        let descriptor_commits = commits
-            .iter()
-            .filter_map(|commit| {
-                let state = self.map.get_commit(&commit.sha)?;
-                overlay_descriptor_dir
-                    .as_ref()
-                    .is_some_and(|dir| {
-                        dir.join(format!("{}.state", state.to_string_full()))
-                            .is_file()
-                    })
-                    .then(|| (commit.sha.clone(), state))
-            })
-            .collect::<Vec<_>>();
+        let mut descriptor_commits = Vec::new();
+        for commit in &commits {
+            let Some(state) = self.map.get_commit(&commit.sha)? else {
+                continue;
+            };
+            if overlay_descriptor_dir.as_ref().is_some_and(|dir| {
+                dir.join(format!("{}.state", state.to_string_full()))
+                    .is_file()
+            }) {
+                descriptor_commits.push((commit.sha.clone(), state));
+            }
+        }
         let repair_mapped_objects = !descriptor_commits.is_empty();
 
         self.map.begin_append_batch()?;
@@ -477,15 +476,14 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             }
         };
 
-        let descriptor_state_remaps = descriptor_commits
-            .iter()
-            .filter_map(|(git_sha, old_state)| {
-                self.map
-                    .get_commit(git_sha)
-                    .filter(|new_state| new_state != old_state)
-                    .map(|new_state| (*old_state, new_state))
-            })
-            .collect::<Vec<_>>();
+        let mut descriptor_state_remaps = Vec::new();
+        for (git_sha, old_state) in &descriptor_commits {
+            if let Some(new_state) = self.map.get_commit(git_sha)?
+                && new_state != *old_state
+            {
+                descriptor_state_remaps.push((*old_state, new_state));
+            }
+        }
 
         let ref_stats = RefEmitter::new(self.refs, self.store, self.map)
             .with_state_remaps(descriptor_state_remaps)
@@ -757,7 +755,7 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
         git_tree_sha: &str,
         path_prefix: &str,
     ) -> crate::Result<ContentHash> {
-        if let Some(hash) = self.map.get_tree(git_tree_sha)
+        if let Some(hash) = self.map.get_tree(git_tree_sha)?
             && (!self.repair_mapped_objects
                 || !self.materialized_trees.insert(git_tree_sha.to_string()))
         {
@@ -885,7 +883,7 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
     }
 
     fn translate_blob(&mut self, git_blob_sha: &str) -> crate::Result<ContentHash> {
-        if let Some(hash) = self.map.get_blob(git_blob_sha)
+        if let Some(hash) = self.map.get_blob(git_blob_sha)?
             && (!self.repair_mapped_objects
                 || !self.materialized_blobs.insert(git_blob_sha.to_string()))
         {
@@ -912,7 +910,7 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
         for head in heads.iter().filter(|head| {
             head.namespace == RefNamespace::Tag && head.object_sha != head.target_sha
         }) {
-            let peeled_state = self.map.get_commit(&head.target_sha).ok_or_else(|| {
+            let peeled_state = self.map.get_commit(&head.target_sha)?.ok_or_else(|| {
                 IngestError::Other(format!(
                     "annotated tag {} peels to unmapped commit {}",
                     head.full_name, head.target_sha
@@ -955,13 +953,13 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
         git_lossy: bool,
         parent_policy: ParentMapPolicy,
     ) -> crate::Result<objects::object::StateId> {
-        if let Some(cid) = self.map.get_commit(&commit.sha) {
+        if let Some(cid) = self.map.get_commit(&commit.sha)? {
             return Ok(cid);
         }
 
         let mut parents = Vec::with_capacity(commit.parents.len());
         for p in &commit.parents {
-            match self.map.get_commit(p) {
+            match self.map.get_commit(p)? {
                 Some(cid) => parents.push(cid),
                 None => match parent_policy {
                     ParentMapPolicy::RequireMapped => {
@@ -1141,7 +1139,7 @@ pub fn import_single_git_commit_into(
 
     let map_path = repo.heddle_dir().join("ingest").join("sha_map.sqlite");
     let mut map = ShaMap::open(&map_path)?;
-    if let Some(existing) = map.get_commit(git_sha) {
+    if let Some(existing) = map.get_commit(git_sha)? {
         // Already bound — still verify the state object is present.
         if repo.store().get_state(&existing)?.is_some() {
             return Ok(existing);
@@ -1247,7 +1245,7 @@ pub fn bind_single_git_commit_overlay(
     let repo = repo::Repository::open(root)?;
     let map_path = repo.heddle_dir().join("ingest").join("sha_map.sqlite");
     let mut map = ShaMap::open(&map_path)?;
-    if let Some(existing) = map.get_commit(git_sha) {
+    if let Some(existing) = map.get_commit(git_sha)? {
         if repo.store().get_state(&existing)?.is_some() {
             return Ok(existing);
         }
@@ -2056,7 +2054,10 @@ mod tests {
         let tip = git_output(&source, &["rev-parse", "HEAD"], None);
 
         let (_, source_map) = import_git_into(&source, &native).expect("import source graph");
-        let source_id = source_map.get_commit(&tip).expect("mapped source tip");
+        let source_id = source_map
+            .get_commit(&tip)
+            .expect("read source mapping")
+            .expect("mapped source tip");
         let source_repo = repo::Repository::open(&native).expect("open source Heddle repo");
         let source_state = source_repo
             .store()
@@ -2127,7 +2128,7 @@ mod tests {
 
         let (_, repaired_map) =
             import_git_into(&clone, &clone).expect("materialize full noted parent graph");
-        assert_eq!(repaired_map.get_commit(&tip), Some(source_id));
+        assert_eq!(repaired_map.get_commit(&tip).unwrap(), Some(source_id));
         let repaired = repo::Repository::open(&clone).expect("open repaired clone");
         let repaired_state = repaired
             .store()
@@ -2380,7 +2381,7 @@ mod tests {
         let (stats, map) = import_git_into(gitdir.path(), gitdir.path()).unwrap();
 
         assert!(stats.commits_imported >= 2);
-        assert_eq!(stats.states_created, map.commit_shas().len());
+        assert_eq!(stats.states_created, map.commit_shas().unwrap().len());
         let map_path = gitdir
             .path()
             .join(".heddle")
@@ -2388,9 +2389,15 @@ mod tests {
             .join("sha_map.sqlite");
         assert!(map_path.is_file(), "ingest SHA map is missing");
         let reloaded = ShaMap::open(&map_path).unwrap();
-        assert_eq!(reloaded.commit_shas().len(), map.commit_shas().len());
-        for git_oid in map.commit_shas() {
-            assert_eq!(reloaded.get_commit(&git_oid), map.get_commit(&git_oid));
+        assert_eq!(
+            reloaded.commit_shas().unwrap().len(),
+            map.commit_shas().unwrap().len()
+        );
+        for git_oid in map.commit_shas().unwrap() {
+            assert_eq!(
+                reloaded.get_commit(&git_oid).unwrap(),
+                map.get_commit(&git_oid).unwrap()
+            );
         }
 
         let git_projection_mapping_path = gitdir
@@ -2443,9 +2450,9 @@ mod tests {
         .expect("single-tip import");
 
         let map = ShaMap::open(gitdir.path().join(".heddle/ingest/sha_map.sqlite")).unwrap();
-        assert_eq!(map.get_commit(&tip), Some(change_id));
+        assert_eq!(map.get_commit(&tip).unwrap(), Some(change_id));
         // Only the tip — not the parent commit.
-        assert_eq!(map.commit_shas().len(), 1);
+        assert_eq!(map.commit_shas().unwrap().len(), 1);
 
         let repo = repo::Repository::open(gitdir.path()).unwrap();
         let state = repo
@@ -2471,6 +2478,7 @@ mod tests {
             ShaMap::open(gitdir.path().join(".heddle/ingest/sha_map.sqlite"))
                 .unwrap()
                 .commit_shas()
+                .unwrap()
                 .len(),
             1
         );

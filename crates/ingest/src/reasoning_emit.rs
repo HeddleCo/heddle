@@ -114,7 +114,7 @@ impl<'a> ReasoningEmitter<'a> {
         // Resolve the git commit to its Heddle state_id. If the ShaMap
         // doesn't know this SHA, the commit wasn't imported; count the
         // whole batch as unmapped and bail.
-        let Some(state_id) = self.sha_map.get_commit(git_sha) else {
+        let Some(state_id) = self.sha_map.get_commit(git_sha)? else {
             self.stats.skipped_unmapped += clean.len();
             return Ok(None);
         };

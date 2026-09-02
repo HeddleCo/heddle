@@ -282,6 +282,7 @@ impl<'a> ReasoningPipeline<'a> {
                     self.stats.skipped_untranslated_tree += 1;
                     continue;
                 }
+                Err(PipelineFileError::ShaMap(error)) => return Err(error.into()),
                 Err(PipelineFileError::Other(e)) => {
                     warn!(sha, error = %e, "diff_trees failed, skipping");
                     self.stats.skipped_git_errors += 1;
@@ -511,6 +512,7 @@ impl<'a> ReasoningPipeline<'a> {
         let to_hash = self
             .sha_map
             .get_tree(&commit.tree_sha)
+            .map_err(PipelineFileError::ShaMap)?
             .ok_or(PipelineFileError::UntranslatedTree)?;
 
         let from_hash = if let Some(parent) = commit.parents.first() {
@@ -527,6 +529,7 @@ impl<'a> ReasoningPipeline<'a> {
             let from_hash = self
                 .sha_map
                 .get_tree(&parent_commit.tree_sha)
+                .map_err(PipelineFileError::ShaMap)?
                 .ok_or(PipelineFileError::UntranslatedTree)?;
             Some(from_hash)
         } else {
@@ -1047,15 +1050,16 @@ fn walk_tree<S: ObjectSource + ?Sized>(
 /// exploded" (unexpected — log and move on).
 enum PipelineFileError {
     UntranslatedTree,
+    ShaMap(crate::ShaMapError),
     Other(String),
 }
 
 /// Convenience: return every git commit SHA currently in the map.
 /// Useful for the default "process all imported commits" policy.
-pub fn pipeline_default_commits(map: &ShaMap) -> Vec<String> {
-    let mut v = map.commit_shas();
+pub fn pipeline_default_commits(map: &ShaMap) -> crate::Result<Vec<String>> {
+    let mut v = map.commit_shas()?;
     v.sort();
-    v
+    Ok(v)
 }
 
 #[cfg(test)]
@@ -1370,7 +1374,10 @@ mod tests {
         // Verify the annotation surface: the state for head_sha should
         // now have a context blob at __files/src/auth.rs with an
         // Invariant-kind annotation.
-        let state_id = map.get_commit(&head_sha).unwrap();
+        let state_id = map
+            .get_commit(&head_sha)
+            .unwrap()
+            .expect("head commit mapping");
         let attachment = repo
             .latest_state_attachment(&state_id, StateAttachmentKind::Context)
             .unwrap()
@@ -1714,7 +1721,7 @@ mod tests {
         map.insert_commit(&"b".repeat(40), test_state_id()).unwrap();
         map.insert_commit(&"a".repeat(40), test_state_id()).unwrap();
         map.insert_commit(&"c".repeat(40), test_state_id()).unwrap();
-        let got = pipeline_default_commits(&map);
+        let got = pipeline_default_commits(&map).unwrap();
         let want: Vec<String> = vec!["a".repeat(40), "b".repeat(40), "c".repeat(40)];
         assert_eq!(got, want);
     }

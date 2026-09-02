@@ -435,13 +435,16 @@ fn execute_authoritative_git_pull(
         import_progress.begin_ref_write();
         import_progress.finish();
     }
-    let new_state = mapping.get_commit(&new_oid.to_string()).ok_or_else(|| {
-        git_pull_import_advice(
-            remote_name,
-            remote_branch,
-            &"the fetched commit was not mapped",
-        )
-    })?;
+    let new_state = mapping
+        .get_commit(&new_oid.to_string())
+        .map_err(|error| git_pull_import_advice(remote_name, remote_branch, &error))?
+        .ok_or_else(|| {
+            git_pull_import_advice(
+                remote_name,
+                remote_branch,
+                &"the fetched commit was not mapped",
+            )
+        })?;
 
     let changed = old_oid != Some(new_oid);
     let materialized =
