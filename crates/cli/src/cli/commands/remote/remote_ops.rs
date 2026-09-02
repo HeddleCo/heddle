@@ -1223,6 +1223,7 @@ async fn pull_network_connected(
                 bootstrap
                     .as_ref()
                     .and_then(|metadata| metadata.discussions.as_deref()),
+                final_state_id,
             )
             .await
             {

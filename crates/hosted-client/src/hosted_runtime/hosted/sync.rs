@@ -274,11 +274,20 @@ fn discussions_from_pull_pack(
         Err(DiscussionError::UnsupportedVersion(version)) => Ok(PackedDiscussions::Unconsumable(
             format!("unsupported blob version {version}"),
         )),
-        Err(DiscussionError::Encoding(error)) => Ok(PackedDiscussions::Unconsumable(format!(
-            "blob encoding is not this client's DiscussionsBlob v1: {error}"
-        ))),
+        Err(DiscussionError::Encoding(error)) if msgpack_named_map(blob.content()) => {
+            Ok(PackedDiscussions::Unconsumable(format!(
+                "blob encoding is not this client's DiscussionsBlob v1: {error}"
+            )))
+        }
         Err(error) => Err(ProtocolError::InvalidState(error.to_string())),
     }
+}
+
+/// weft's v2 discussion root is a named-map MessagePack object. This client's
+/// v1 blob is a positional array. A leading map is version skew; a leading
+/// array (or anything else) that fails decode is corruption.
+fn msgpack_named_map(bytes: &[u8]) -> bool {
+    matches!(bytes.first(), Some(0x80..=0x8f | 0xde | 0xdf))
 }
 
 pub(crate) fn context_from_pull_pack(
@@ -3739,6 +3748,35 @@ mod pull_bootstrap_tests {
                 .contains("packed discussions attachment references missing blob"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn packed_bootstrap_fail_closes_when_discussions_blob_is_truncated_v1() {
+        let (_temp, repo, state_id) = seed_snapshot();
+        let valid = DiscussionsBlob::new(vec![sample_discussion(state_id)])
+            .encode()
+            .expect("encode v1");
+        let truncated = &valid[..valid.len().saturating_sub(2)];
+        assert!(
+            !msgpack_named_map(truncated),
+            "truncated v1 must stay an array, not a named map"
+        );
+        let hash = repo
+            .store()
+            .put_blob(&Blob::from(truncated.to_vec()))
+            .expect("store truncated v1");
+        repo.put_state_attachment(&StateAttachment {
+            state_id,
+            body: StateAttachmentBody::Discussions(hash),
+            attribution: Attribution::human(Principal::new("Ada", "ada@example.com")),
+            created_at: Utc::now(),
+            supersedes: None,
+        })
+        .expect("attach truncated discussions");
+
+        packed_metadata()
+            .resolve(&repo, Some(state_id))
+            .expect_err("truncated v1 positional blob is corruption, not version skew");
     }
 
     #[test]
