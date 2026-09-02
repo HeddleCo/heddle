@@ -413,15 +413,10 @@ async fn replaying_opened_after_bootstrap_does_not_duplicate_the_first_turn() {
     )
     .await
     .unwrap();
-    assert!(
-        matches!(
-            &replay,
-            DiscussionEventOutcome::Applied { discussion_id }
-            | DiscussionEventOutcome::Unchanged { discussion_id }
-                if discussion_id == "server-boot"
-        ),
-        "replay may attach a minted turn_id to the bootstrap link, got {replay:?}"
-    );
+    assert!(matches!(
+        replay,
+        DiscussionEventOutcome::Unchanged { discussion_id } if discussion_id == "server-boot"
+    ));
 
     let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
     let discussion = store.materialize().unwrap().discussions.into_values().next().unwrap();
