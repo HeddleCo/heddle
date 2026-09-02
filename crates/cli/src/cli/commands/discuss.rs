@@ -855,6 +855,16 @@ fn anchor_path(value: &CollaborationAnchor) -> Option<&str> {
     }
 }
 
+fn anchor_label(value: &AnchorOutput) -> String {
+    match value {
+        AnchorOutput::Repository => "repository".to_string(),
+        AnchorOutput::State { state_id } => state_id.clone(),
+        AnchorOutput::Change { change_id } => change_id.clone(),
+        AnchorOutput::Path { path, .. } => path.clone(),
+        AnchorOutput::Symbol { path, symbol, .. } => format!("{path}:{symbol}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -889,15 +899,5 @@ mod tests {
             !migrates_legacy_on_entry(&show),
             "discuss show stays read-only"
         );
-    }
-}
-
-fn anchor_label(value: &AnchorOutput) -> String {
-    match value {
-        AnchorOutput::Repository => "repository".to_string(),
-        AnchorOutput::State { state_id } => state_id.clone(),
-        AnchorOutput::Change { change_id } => change_id.clone(),
-        AnchorOutput::Path { path, .. } => path.clone(),
-        AnchorOutput::Symbol { path, symbol, .. } => format!("{path}:{symbol}"),
     }
 }
