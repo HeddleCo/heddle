@@ -38,7 +38,7 @@ const DEFAULT_REAL_TREE_LIMIT: usize = 4_000;
 const REAL_FILE_SAMPLE_LIMIT: usize = 64;
 const RADICAL_ANCHOR_INTERVAL: usize = 128;
 const RADICAL_MAX_OPS: usize = 512;
-const RADICAL_HEADER_LEN: usize = 59;
+const RADICAL_HEADER_LEN: usize = 60;
 const RADICAL_MAGIC: &[u8; 4] = b"HDC1";
 const LEAN_MAGIC: &[u8; 4] = b"HLR1";
 
@@ -867,6 +867,7 @@ fn encode_delta(anchor_id: ContentHash, anchor: &Tree, current: &Tree, ops: &[De
     };
     let mut out = Vec::with_capacity(RADICAL_HEADER_LEN + body.len());
     out.extend_from_slice(RADICAL_MAGIC);
+    out.push(2);
     out.push(1);
     out.extend_from_slice(anchor_id.as_bytes());
     out.extend_from_slice(&(current.len() as u32).to_le_bytes());
@@ -891,10 +892,11 @@ fn decode_delta_ops(
         "truncated radical delta header"
     );
     ensure!(bytes.starts_with(RADICAL_MAGIC), "not a radical tree delta");
-    ensure!(bytes[4] == 1, "unsupported radical delta version");
-    let anchor = ContentHash::from_bytes(bytes[5..37].try_into()?);
-    let result_count = read_u32(bytes, 37)? as usize;
-    let op_count = read_u16(bytes, 41)? as usize;
+    ensure!(bytes[4] == 2, "unsupported radical delta version");
+    ensure!(bytes[5] == 1, "unexpected radical delta depth");
+    let anchor = ContentHash::from_bytes(bytes[6..38].try_into()?);
+    let result_count = read_u32(bytes, 38)? as usize;
+    let op_count = read_u16(bytes, 42)? as usize;
     ensure!(wanted <= op_count, "partial delta op count exceeds object");
     let mut offset = RADICAL_HEADER_LEN;
     let mut previous = String::new();
@@ -928,7 +930,7 @@ fn decode_delta_ops(
 }
 
 fn decode_delta(bytes: &[u8], anchor: &Tree, expected: ContentHash) -> Result<Tree> {
-    let op_count = read_u16(bytes, 41)? as usize;
+    let op_count = read_u16(bytes, 42)? as usize;
     let (anchor_id, result_count, ops, consumed) = decode_delta_ops(bytes, op_count)?;
     ensure!(consumed == bytes.len(), "trailing radical delta bytes");
     ensure!(anchor.hash() == anchor_id, "radical delta anchor mismatch");
@@ -2279,7 +2281,7 @@ fn self_check(dictionary: Dictionary<'_>, block_entries: usize) -> Result<()> {
     let delta = encode_delta(tree.hash(), &tree, &changed, &ops);
     let production_ops = objects::object::tree_delta(&tree, &changed);
     let production_delta =
-        objects::object::encode_tree_delta(tree.hash(), &tree, &changed, &production_ops)?;
+        objects::object::encode_tree_delta(tree.hash(), 1, &tree, &changed, &production_ops)?;
     ensure!(
         production_delta == delta,
         "production HDC1 bytes drifted from the spike"

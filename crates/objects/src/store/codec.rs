@@ -15,14 +15,6 @@ use crate::{
     store::{HeddleError, Result},
 };
 
-/// Store metadata needed to keep a future delta in the same bounded epoch.
-/// Losing this hint is safe: the next write falls back to a fresh HLR1 anchor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TreeLineage {
-    pub anchor: ContentHash,
-    pub depth: u8,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TreeEncodingKind {
     Lean,
@@ -41,6 +33,8 @@ pub struct EncodedTree {
 }
 
 /// Materialized anchor information inherited from the immediate parent.
+/// A v1 HDC1 parent has no depth, so callers safely omit this hint and the
+/// next write falls back to a fresh HLR1 anchor.
 pub struct TreeDeltaBase<'a> {
     pub anchor_id: ContentHash,
     pub anchor: &'a Tree,
@@ -85,7 +79,7 @@ pub fn encode_tree_hot(tree: &Tree, base: Option<TreeDeltaBase<'_>>) -> Result<E
     if ops.len() > TREE_DELTA_MAX_OPS {
         return encode_tree_lean(tree, hash);
     }
-    let delta = encode_tree_delta(base.anchor_id, base.anchor, tree, &ops)?;
+    let delta = encode_tree_delta(base.anchor_id, depth, base.anchor, tree, &ops)?;
     let header = decode_tree_delta_header(&delta)?;
     let porch_is_bounded = header.first_base_count <= 1 && header.hundred_base_count <= 100;
     if !porch_is_bounded || delta.len() >= encoded_lean_size(tree) {
@@ -355,7 +349,7 @@ mod tests {
         );
         let ops = tree_delta(&anchor, &current);
         assert_eq!(ops.len(), 600);
-        assert!(encode_tree_delta(anchor.hash(), &anchor, &current, &ops).is_err());
+        assert!(encode_tree_delta(anchor.hash(), 1, &anchor, &current, &ops).is_err());
         let encoded = encode_tree_hot(
             &current,
             Some(TreeDeltaBase {
@@ -377,7 +371,7 @@ mod tests {
         assert!(decode_tree_with_key(&lean, wrong, None).is_err());
 
         let ops = tree_delta(&anchor, &current);
-        let delta = encode_tree_delta(anchor.hash(), &anchor, &current, &ops).unwrap();
+        let delta = encode_tree_delta(anchor.hash(), 1, &anchor, &current, &ops).unwrap();
         assert!(decode_tree_with_key(&delta, wrong, Some(&anchor)).is_err());
 
         let raw = current.encode_canonical().unwrap();
