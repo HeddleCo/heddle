@@ -4,9 +4,12 @@ use api::heddle::api::v1alpha1::{
     CallFailureCode, Discussion as ProtoDiscussion, DiscussionKind, DiscussionTurn as ProtoTurn,
     PathSymbolRef, RepoEvent, RepoEventKind, StateId as ProtoStateId, discussion_resolution,
 };
-use objects::object::{
-    Attribution, Blob, CollaborationAnchor, Discussion, DiscussionResolution, DiscussionTurn,
-    DiscussionsBlob, Principal, StateAttachment, StateAttachmentBody, SymbolAnchor,
+use objects::{
+    object::{
+        Attribution, Blob, CollaborationAnchor, Discussion, DiscussionResolution, DiscussionTurn,
+        DiscussionsBlob, Principal, StateAttachment, StateAttachmentBody, SymbolAnchor,
+    },
+    store::ObjectStore,
 };
 use repo::{CollaborationStore, Repository, migrate_legacy_discussions_once};
 use tempfile::TempDir;
@@ -2182,9 +2185,8 @@ async fn filtered_bootstrap_does_not_claim_the_legacy_migration_marker() {
         report.is_some(),
         "a later list/migrate must still see the other thread's legacy discussion"
     );
-    let bodies: Vec<_> = store
-        .materialize()
-        .unwrap()
+    let after = store.materialize().unwrap();
+    let bodies: Vec<_> = after
         .discussions
         .values()
         .flat_map(|discussion| discussion.turns.iter().map(|turn| turn.1.body.as_str()))

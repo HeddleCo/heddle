@@ -918,9 +918,12 @@ mod tests {
     #[test]
     fn list_and_show_materialize_legacy_attachments() {
         use chrono::Utc;
-        use objects::object::{
-            Attribution, Blob, Discussion, DiscussionResolution, DiscussionTurn, DiscussionsBlob,
-            Principal, StateAttachment, StateAttachmentBody, SymbolAnchor,
+        use objects::{
+            object::{
+                Attribution, Blob, Discussion, DiscussionResolution, DiscussionTurn,
+                DiscussionsBlob, Principal, StateAttachment, StateAttachmentBody, SymbolAnchor,
+            },
+            store::ObjectStore,
         };
 
         let temp = tempfile::TempDir::new().unwrap();
