@@ -726,15 +726,21 @@ async fn first_server_revision_id(
 // Pull
 // =========================================================================
 
-/// Fetch hosted annotations for the head and reconcile them into the local
-/// `Context` attachment, rebuilding revision order to match the server.
+/// Fetch hosted annotations for `against` (or repository HEAD) and reconcile
+/// them into the local `Context` attachment, rebuilding revision order to
+/// match the server.
+///
+/// `against` is the pulled/cloned tip. Clone publishes HEAD only after this
+/// call, and `heddle pull feature --local-thread feature` leaves HEAD on the
+/// current checkout, so the fallback must not re-read HEAD.
 pub async fn pull_context(
     repo: &Repository,
     client: &mut HostedClient,
     repo_path: &str,
     bootstrap: Option<&[(ContextTarget, ContextBlob)]>,
+    against: Option<StateId>,
 ) -> Result<usize> {
-    let Some(head_id) = repo.head().context("resolve repository head")? else {
+    let Some(head_id) = context_sync_state(repo, against)? else {
         return Ok(0);
     };
     let Some(head_state) = repo
@@ -815,6 +821,15 @@ pub async fn pull_context(
         }
     }
     Ok(changed)
+}
+
+/// Prefer the pulled/cloned tip because clone has not published HEAD yet and a
+/// local-thread pull may target a thread other than the current checkout.
+fn context_sync_state(repo: &Repository, against: Option<StateId>) -> Result<Option<StateId>> {
+    match against {
+        Some(state) => Ok(Some(state)),
+        None => repo.head().context("resolve repository head"),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1361,6 +1376,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clone_context_pack_fallback_uses_against_before_head_is_published() {
+        use api::heddle::api::v1alpha1::{AnnotatedFile, ContextAnnotation, ContextRevision};
+
+        use crate::hosted_runtime::hosted::{
+            PullBootstrapMetadata,
+            test_server::{ContextFixture, start_with_context},
+        };
+
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        let tree_id = repo
+            .store()
+            .put_tree(&objects::object::Tree::new())
+            .unwrap();
+        let state = State::new_snapshot(
+            tree_id,
+            Vec::new(),
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        );
+        repo.store().put_state(&state).unwrap();
+        let against = state.id();
+        assert_eq!(
+            repo.head().unwrap(),
+            None,
+            "clone has not published HEAD yet"
+        );
+
+        // The server advertised a Context attachment, but the pull loop does
+        // not consume StateAttachment frames. Resolution must select the RPC
+        // fallback instead of clone-killing or treating it as an empty page.
+        let bootstrap = PullBootstrapMetadata {
+            discussions_from_pack: false,
+            discussions: Vec::new(),
+            context_from_pack: true,
+            context: Vec::new(),
+        }
+        .resolve(&repo, Some(against))
+        .expect("unconsumable packed context must fall back");
+        assert!(bootstrap.context.is_none());
+
+        let annotation_id = "server-context-before-head".to_string();
+        let fixture = ContextFixture {
+            files: vec![AnnotatedFile {
+                path: "lib.rs".to_string(),
+                annotations: vec![ContextAnnotation {
+                    id: annotation_id.clone(),
+                    status: ContextAnnotationStatus::Active as i32,
+                    kind: ContextAnnotationKind::Invariant as i32,
+                    ..ContextAnnotation::default()
+                }],
+            }],
+            histories: std::collections::HashMap::from([(
+                annotation_id.clone(),
+                vec![ContextRevision {
+                    revision_id: "server-context-revision".to_string(),
+                    kind: ContextAnnotationKind::Invariant as i32,
+                    content: "preserve this contract".to_string(),
+                    attribution: "reviewer <>".to_string(),
+                    created_at: Some(prost_types::Timestamp {
+                        seconds: 1_700_000_000,
+                        nanos: 0,
+                    }),
+                    ..ContextRevision::default()
+                }],
+            )]),
+            ..ContextFixture::default()
+        };
+        let (mut client, server, fixture) = start_with_context(fixture).await;
+
+        assert_eq!(
+            pull_context(
+                &repo,
+                &mut client,
+                "acme/widgets",
+                bootstrap.context.as_deref(),
+                Some(against),
+            )
+            .await
+            .unwrap(),
+            1,
+            "fallback must not return Ok(0) just because HEAD is unpublished"
+        );
+        assert_eq!(*fixture.list_requests.lock().unwrap(), 1);
+        assert_eq!(
+            fixture.history_requests.lock().unwrap().as_slice(),
+            [annotation_id]
+        );
+        assert_eq!(
+            repo.head().unwrap(),
+            None,
+            "sync must not publish clone HEAD"
+        );
+
+        let stored_state = repo.store().get_state(&against).unwrap().unwrap();
+        let root = context_root_for_state(&repo, &stored_state)
+            .unwrap()
+            .expect("fallback materialized a Context attachment");
+        let target = ContextTarget::file("lib.rs").unwrap();
+        let blob = repo.get_context_blob(&root, &target).unwrap().unwrap();
+        assert_eq!(blob.annotations.len(), 1);
+        assert_eq!(
+            blob.annotations[0].annotation_id,
+            "server-context-before-head"
+        );
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn bootstrap_pull_materializes_context_once_and_persists_the_mirror() {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
@@ -1389,13 +1514,13 @@ mod tests {
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
 
         assert_eq!(
-            pull_context(&repo, &mut client, "acme/widgets", Some(&bootstrap))
+            pull_context(&repo, &mut client, "acme/widgets", Some(&bootstrap), None,)
                 .await
                 .unwrap(),
             1
         );
         assert_eq!(
-            pull_context(&repo, &mut client, "acme/widgets", Some(&bootstrap))
+            pull_context(&repo, &mut client, "acme/widgets", Some(&bootstrap), None,)
                 .await
                 .unwrap(),
             0

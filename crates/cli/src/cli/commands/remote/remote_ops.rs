@@ -1252,7 +1252,8 @@ async fn pull_network_connected(
                 repo_path,
                 bootstrap
                     .as_ref()
-                    .map(|metadata| metadata.context.as_slice()),
+                    .and_then(|metadata| metadata.context.as_deref()),
+                final_state_id,
             )
             .await
             {

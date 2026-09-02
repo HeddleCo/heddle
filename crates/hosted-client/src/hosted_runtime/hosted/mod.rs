@@ -68,6 +68,8 @@ use iroh::{Endpoint, EndpointAddr};
 pub use methods::HostedRoutes;
 use prost::Message;
 pub use session::{HostedAuthMode, HostedSession};
+#[cfg(test)]
+pub(crate) use sync::PullBootstrapMetadata;
 pub use sync::{HostedRefEntry, decode_pull_bootstrap, decode_pull_refs};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
