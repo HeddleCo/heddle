@@ -1177,8 +1177,19 @@ fn loose_hlr1_open_is_file_backed_bounded_and_hashes() {
     ));
 }
 
+fn hdc1_v1_from_v2(mut data: Vec<u8>) -> Vec<u8> {
+    assert_eq!(data[4], 2);
+    for offset in [48, 56] {
+        let end = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+        data[offset..offset + 4].copy_from_slice(&(end - 1).to_le_bytes());
+    }
+    data[4] = 1;
+    data.remove(5);
+    data
+}
+
 #[test]
-fn loose_hdc1_reconstructs_from_one_materialized_anchor() {
+fn loose_hdc1_v1_and_v2_reconstruct_from_one_materialized_anchor() {
     use crate::object::{
         BytesTreeSource, TREE_DELTA_MAGIC, TreeEntryReader, TreePageLimits, is_delta_tree,
     };
@@ -1205,6 +1216,9 @@ fn loose_hdc1_reconstructs_from_one_materialized_anchor() {
         .encode_tree_write(&TreeWrite::descendant(current.clone(), anchor_id))
         .unwrap();
     assert!(is_delta_tree(&encoded.data));
+    let v2_header = decode_tree_delta_header(&encoded.data).unwrap();
+    assert_eq!(v2_header.depth, Some(1));
+    assert_eq!(v2_header.header_len, 60);
     store
         .put_tree_serialized(&encoded.data, encoded.hash)
         .unwrap();
@@ -1240,7 +1254,45 @@ fn loose_hdc1_reconstructs_from_one_materialized_anchor() {
         .unwrap();
     assert_eq!(rest.entries, current.entries()[100..]);
     reader.finish_and_verify().unwrap();
-    assert_eq!(reopened.get_tree(&encoded.hash).unwrap(), Some(current));
+    assert_eq!(
+        reopened.get_tree(&encoded.hash).unwrap(),
+        Some(current.clone())
+    );
+
+    let v1 = hdc1_v1_from_v2(encoded.data);
+    let v1_header = decode_tree_delta_header(&v1).unwrap();
+    assert_eq!(v1_header.depth, None);
+    assert_eq!(v1_header.header_len, 59);
+    assert_eq!(v2_header.first_end, v1_header.first_end + 1);
+    assert_eq!(v2_header.hundred_end, v1_header.hundred_end + 1);
+    std::fs::write(&path, v1).unwrap();
+
+    let reopened_v1 = FsStore::new(store.root());
+    let mut v1_reader = reopened_v1.open_tree(&encoded.hash, None).unwrap().unwrap();
+    let first = v1_reader
+        .next_page(TreePageLimits::new(100, usize::MAX).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.entries, current.entries()[..100]);
+    let rest = v1_reader
+        .next_page(TreePageLimits::new(usize::MAX, usize::MAX).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(rest.entries, current.entries()[100..]);
+    v1_reader.finish_and_verify().unwrap();
+    assert_eq!(
+        reopened_v1.get_tree(&encoded.hash).unwrap(),
+        Some(current.clone())
+    );
+
+    let mut next_entries = current.entries().to_vec();
+    next_entries[118] =
+        TreeEntry::file("module_0118.rs", ContentHash::compute(b"next"), false).unwrap();
+    let next = Tree::from_entries(next_entries);
+    let next_encoded = reopened_v1
+        .encode_tree_write(&TreeWrite::descendant(next, encoded.hash))
+        .unwrap();
+    assert_eq!(next_encoded.kind, TreeEncodingKind::Lean);
 }
 
 #[test]
@@ -1307,12 +1359,53 @@ fn direct_parent_hint_does_not_create_a_delta_chain() {
             ..
         } if anchor == anchor_id
     ));
-    assert_eq!(
-        decode_tree_delta_header(&second_encoded.data)
-            .unwrap()
-            .anchor,
-        anchor_id
+    let header = decode_tree_delta_header(&second_encoded.data).unwrap();
+    assert_eq!(header.anchor, anchor_id);
+    assert_eq!(header.depth, Some(2));
+    assert!(!store.root().join("objects/tree-lineage").exists());
+}
+
+#[test]
+fn packed_capture_stores_hdc1_depth_without_lineage_sidecar() {
+    let (_temp, store) = create_test_store();
+    let anchor = Tree::from_entries(
+        (0..240)
+            .map(|index| {
+                TreeEntry::file(
+                    format!("module_{index:04}.rs"),
+                    ContentHash::compute(format!("anchor-{index}").as_bytes()),
+                    false,
+                )
+                .unwrap()
+            })
+            .collect(),
     );
+    let anchor_id = store.put_tree(&anchor).unwrap();
+    let mut entries = anchor.entries().to_vec();
+    entries[117] =
+        TreeEntry::file("module_0117.rs", ContentHash::compute(b"changed"), false).unwrap();
+    let descendant = Tree::from_entries(entries);
+    let descendant_id = descendant.hash();
+    let state = State::new(
+        descendant_id,
+        Vec::new(),
+        Attribution::human(Principal::new("Capture", "capture@example.com")),
+    );
+
+    store
+        .put_snapshot_objects_packed_impl(
+            Vec::new(),
+            Vec::new(),
+            &TreeWrite::descendant(descendant, anchor_id),
+            &state,
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+
+    let body = store.get_tree_serialized(&descendant_id).unwrap().unwrap();
+    assert_eq!(decode_tree_delta_header(&body).unwrap().depth, Some(1));
+    assert!(!store.root().join("objects/tree-lineage").exists());
 }
 
 #[test]
