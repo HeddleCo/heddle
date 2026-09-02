@@ -3,7 +3,7 @@
 // (`schema_for_verb` / `crates/cli-contract/src/cli/commands/schemas.rs`).
 // Regenerate with `scripts/gen-ts-types.sh`; a drift test keeps it in sync.
 
-export const HEDDLE_SCHEMA_VERSION = "0.16.0" as const;
+export const HEDDLE_SCHEMA_VERSION = "0.17.0" as const;
 
 export interface AbortSchema {
   action: OperatorAction;
@@ -1068,6 +1068,19 @@ export interface DiscussResolveSchema {
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   output_kind: "discuss_resolve";
   replayed?: boolean | null;
+}
+
+/** One `heddle discuss wait` JSONL line. */
+export interface DiscussWaitLineSchema {
+  after_event_id: number;
+  applied: boolean;
+  discussion_id?: string | null;
+  event_id: number;
+  event_type: string;
+  output_kind: "discuss_wait";
+  /** Present on `status = "skipped"` so a person (and JSONL) can see why. */
+  skip_reason?: string | null;
+  status: string;
 }
 
 export interface DiscussionListSchema {
@@ -3549,6 +3562,7 @@ export interface HeddleVerbOutputs {
   "discuss reopen": DiscussReopenSchema;
   "discuss resolve": DiscussResolveSchema;
   "discuss show": DiscussionShowSchema;
+  "discuss wait": DiscussWaitLineSchema;
   doctor: DoctorSchema;
   "doctor docs": DocsReport;
   "doctor schemas": SchemaReport;
@@ -3716,6 +3730,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "discuss reopen",
   "discuss resolve",
   "discuss show",
+  "discuss wait",
   "doctor",
   "doctor docs",
   "doctor schemas",

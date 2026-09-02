@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "0.16.0",
+  "schemaVersion": "0.17.0",
   "verbs": {
     "abort": {
       "$defs": {
@@ -19294,6 +19294,58 @@
         "discussion"
       ],
       "title": "DiscussionShowSchema",
+      "type": "object"
+    },
+    "discuss wait": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One `heddle discuss wait` JSONL line.",
+      "properties": {
+        "after_event_id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "applied": {
+          "type": "boolean"
+        },
+        "discussion_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event_id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "event_type": {
+          "type": "string"
+        },
+        "output_kind": {
+          "enum": [
+            "discuss_wait"
+          ],
+          "type": "string"
+        },
+        "skip_reason": {
+          "description": "Present on `status = \"skipped\"` so a person (and JSONL) can see why.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "status",
+        "event_id",
+        "event_type",
+        "applied",
+        "after_event_id"
+      ],
+      "title": "DiscussWaitLineSchema",
       "type": "object"
     },
     "doctor": {
