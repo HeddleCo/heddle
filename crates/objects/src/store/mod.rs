@@ -23,10 +23,11 @@ pub mod store_compliance;
 pub mod writer_lease;
 
 pub use fs::{
-    DEFAULT_PACK_INSTALL_INTENT_TTL_SECS, FsRepackOperation, FsStore, PackInstallIntent,
-    PackInstallMetricsSnapshot, PackInstallPhase, PackInstallRecoverReport,
-    install_pack_bytes_journaled, pack_install_metrics_reset, pack_install_metrics_snapshot,
-    recover_pack_install_intents, recover_pack_install_intents_with_ttl,
+    AutomaticRepackLock, DEFAULT_PACK_INSTALL_INTENT_TTL_SECS, FsRepackOperation, FsStore,
+    PackInstallIntent, PackInstallMetricsSnapshot, PackInstallPhase, PackInstallRecoverReport,
+    SnapshotPackFold, install_pack_bytes_journaled, pack_install_metrics_reset,
+    pack_install_metrics_snapshot, recover_pack_install_intents,
+    recover_pack_install_intents_with_ttl,
 };
 pub use heddle_format::compression::{CompressionConfig, CompressionError, compress, decompress};
 pub use liveness::{

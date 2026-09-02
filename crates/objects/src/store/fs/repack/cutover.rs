@@ -25,6 +25,7 @@ use crate::{
 };
 
 const REPACK_LOCK_FILE: &str = ".repack.lock";
+const AUTOMATIC_REPACK_LOCK_FILE: &str = ".automatic-repack.lock";
 
 pub(super) struct CutoverStats {
     pub(super) removed_pack_bytes: u64,
@@ -163,6 +164,32 @@ pub(in crate::store::fs) fn acquire_repack_lock_blocking(packs: &Path) -> Result
     let file = open_lock_file(packs)?;
     file.lock_exclusive()?;
     Ok(file)
+}
+
+pub(super) fn try_acquire_repack_lock(packs: &Path) -> Result<Option<File>> {
+    let file = open_lock_file(packs)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(in crate::store::fs) fn try_acquire_automatic_repack_lock(
+    packs: &Path,
+) -> Result<Option<File>> {
+    let path = packs.join(AUTOMATIC_REPACK_LOCK_FILE);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn open_lock_file(packs: &Path) -> std::io::Result<File> {
