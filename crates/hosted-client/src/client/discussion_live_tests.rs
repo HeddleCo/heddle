@@ -1767,7 +1767,7 @@ async fn thread_scoped_bootstrap_does_not_import_another_thread_ref() {
         .unwrap()
         .discussions
         .into_values()
-        .map(|discussion| discussion.turns[0].1.body)
+        .map(|discussion| discussion.turns[0].1.body.clone())
         .collect();
     bodies.sort();
     assert_eq!(
@@ -1847,7 +1847,7 @@ async fn thread_scoped_pull_fold_bootstrap_stays_repo_wide() {
         .unwrap()
         .discussions
         .into_values()
-        .map(|discussion| discussion.turns[0].1.body)
+        .map(|discussion| discussion.turns[0].1.body.clone())
         .collect();
     bodies.sort();
     assert_eq!(
