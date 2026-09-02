@@ -75,15 +75,13 @@ pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
             // Like clone/pull: do not run legacy blob→op-log migration first.
             // Hosted bootstrap claims the marker, then GetDiscussion / ListByState
             // are authoritative. Migrating pulled Discussions attachments here
-            // would duplicate every hosted discussion.
+            // would duplicate every hosted discussion. list/show still migrate.
             let repo = cli.open_repo().context("open Heddle repository")?;
             return run_wait(cli, &repo, args).await;
         }
         #[cfg(not(feature = "client"))]
         DiscussCommands::Wait(_) => {
-            return Err(anyhow!(
-                "discuss wait requires the hosted client feature"
-            ));
+            return Err(anyhow!("discuss wait requires the hosted client feature"));
         }
         _ => cli.open_repo().context("open Heddle repository")?,
     };
@@ -104,13 +102,7 @@ pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
 }
 
 fn migrates_legacy_on_entry(command: &DiscussCommands) -> bool {
-    matches!(
-        command,
-        DiscussCommands::Open(_)
-            | DiscussCommands::Append(_)
-            | DiscussCommands::Resolve(_)
-            | DiscussCommands::Reopen(_)
-    )
+    !matches!(command, DiscussCommands::Wait(_))
 }
 
 impl CompactProjection for DiscussionWriteOutput {
@@ -362,8 +354,8 @@ fn run_list(
 #[cfg(feature = "client")]
 async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) -> Result<()> {
     use hosted_client::client::discussion_live::{
-        DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventOutcome,
-        load_scoped_cursor, paired_thread_scope, save_scoped_cursor, wait_reconnect_backoff,
+        DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventOutcome, load_scoped_cursor,
+        paired_thread_scope, save_scoped_cursor, wait_reconnect_backoff,
     };
     use hosted_client::client::{HostedAuthMode, HostedClient};
 
@@ -867,7 +859,11 @@ fn anchor_path(value: &CollaborationAnchor) -> Option<&str> {
 }
 
 fn format_wait_skip(line: &DiscussWaitLineOutput) -> String {
-    match line.skip_reason.as_deref().filter(|reason| !reason.is_empty()) {
+    match line
+        .skip_reason
+        .as_deref()
+        .filter(|reason| !reason.is_empty())
+    {
         Some(reason) => format!("skipped {} ({}) — {reason}", line.event_type, line.event_id),
         None => format!("skipped {} ({})", line.event_type, line.event_id),
     }
@@ -889,7 +885,7 @@ mod tests {
     use crate::cli::cli_args::{DiscussListArgs, DiscussShowArgs, DiscussWaitArgs};
 
     #[test]
-    fn wait_does_not_run_legacy_migration_on_entry() {
+    fn wait_is_the_only_discuss_verb_that_skips_legacy_migration() {
         let wait = DiscussCommands::Wait(DiscussWaitArgs {
             after: None,
             remote: None,
@@ -907,15 +903,86 @@ mod tests {
             status: "open".to_string(),
         });
         assert!(
-            !migrates_legacy_on_entry(&list),
-            "discuss list stays read-only"
+            migrates_legacy_on_entry(&list),
+            "discuss list must still convert legacy attachments"
         );
         let show = DiscussCommands::Show(DiscussShowArgs {
             discussion_id: "disc-1".to_string(),
         });
         assert!(
-            !migrates_legacy_on_entry(&show),
-            "discuss show stays read-only"
+            migrates_legacy_on_entry(&show),
+            "discuss show must still convert legacy attachments"
+        );
+    }
+
+    #[test]
+    fn list_and_show_materialize_legacy_attachments() {
+        use chrono::Utc;
+        use objects::object::{
+            Attribution, Blob, Discussion, DiscussionResolution, DiscussionTurn, DiscussionsBlob,
+            Principal, StateAttachment, StateAttachmentBody, SymbolAnchor,
+        };
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = repo::Repository::init_default(temp.path()).unwrap();
+        let state_id = repo.head().unwrap().unwrap();
+        let bytes = DiscussionsBlob::new(vec![Discussion {
+            id: "legacy-1".to_string(),
+            anchor: SymbolAnchor::new("src/lib.rs", "run"),
+            opened_against_state: state_id,
+            opened_at: 1_700_000_000,
+            thread_ref: None,
+            turns: vec![DiscussionTurn {
+                author: Principal::new("Ada", "ada@example.com"),
+                body: "why?".to_string(),
+                posted_at: 1_700_000_000,
+                references: Vec::new(),
+            }],
+            resolution: DiscussionResolution::Open,
+            body_changed_since_open: false,
+            anchor_ambiguous: false,
+            orphaned: false,
+            visibility: VisibilityTier::default(),
+            resolved_annotation_id: None,
+        }])
+        .encode()
+        .unwrap();
+        let blob_hash = repo.store().put_blob(&Blob::new(bytes)).unwrap();
+        repo.put_state_attachment(&StateAttachment {
+            state_id,
+            body: StateAttachmentBody::Discussions(blob_hash),
+            attribution: Attribution::human(Principal::new("Importer", "importer@example.com")),
+            created_at: Utc::now(),
+            supersedes: None,
+        })
+        .unwrap();
+        let marker = repo
+            .heddle_dir()
+            .join("collaboration/migrations/legacy-discussions-v1");
+        assert!(
+            !marker.exists(),
+            "the fixture is an unmigrated clone with legacy attachments"
+        );
+
+        let store = open_store(&repo).expect("list/show open the store through migrate");
+        let materialized = store.materialize().unwrap();
+        assert_eq!(
+            materialized.discussions.len(),
+            1,
+            "list/show must still convert legacy attachments when the marker is unset"
+        );
+        let discussion = materialized.discussions.into_values().next().unwrap();
+        assert_eq!(discussion.turns[0].1.body, "why?");
+        assert!(
+            marker.exists(),
+            "list/show claim the marker after converting the attachment"
+        );
+        assert!(
+            store
+                .materialize_discussion(&discussion.id)
+                .unwrap()
+                .is_some(),
+            "discuss show must be able to load the migrated discussion by id"
         );
     }
 
@@ -942,4 +1009,3 @@ mod tests {
         );
     }
 }
-

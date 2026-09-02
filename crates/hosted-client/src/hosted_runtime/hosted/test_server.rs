@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::Ipv4Addr,
     sync::{Arc, Mutex},
 };
@@ -10,7 +10,8 @@ use api::{
     StreamingShape,
     framing::{
         StreamFrame, decode_request_frame, decode_request_prelude, decode_stream_frame,
-        encode_failure_response, encode_stream_message, encode_success_response,
+        encode_failure_response, encode_stream_failure, encode_stream_message,
+        encode_success_response,
     },
     heddle::api::v1alpha1::{
         BlobResponse, CallFailure, CallFailureCode, CreateSpoolRequest, DeleteSpoolRequest,
@@ -64,10 +65,12 @@ pub(crate) struct CollaborationFixture {
     pub hidden: HashMap<String, CallFailureCode>,
     pub events: Vec<RepoEvent>,
     pub one_event_per_subscribe: bool,
+    pub unknown_repo_ids: HashSet<String>,
     pub get_requests: Arc<Mutex<Vec<String>>>,
     pub get_request_state_ids: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
     pub list_requests: Arc<Mutex<usize>>,
     pub subscribe_after: Arc<Mutex<Vec<i64>>>,
+    pub subscribe_repo_ids: Arc<Mutex<Vec<String>>>,
     pub subscribe_thread: Arc<Mutex<Vec<(String, String)>>>,
 }
 
@@ -785,6 +788,10 @@ async fn serve_subscribe_repo_events(
         .as_ref()
         .map(|body| body.after_event_id)
         .unwrap_or(0);
+    let repo_id = subscribe
+        .as_ref()
+        .map(|body| body.repo_id.clone())
+        .unwrap_or_default();
     let thread_scope = subscribe
         .map(|body| (body.thread, body.thread_id))
         .unwrap_or_default();
@@ -794,10 +801,26 @@ async fn serve_subscribe_repo_events(
         .unwrap_or_else(|poison| poison.into_inner())
         .push(after_event_id);
     fixture
+        .subscribe_repo_ids
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(repo_id.clone());
+    fixture
         .subscribe_thread
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .push(thread_scope);
+    if fixture.unknown_repo_ids.contains(&repo_id) {
+        let failure = CallFailure {
+            code: CallFailureCode::NotFound as i32,
+            message: format!("repository {repo_id} not found"),
+            error: None,
+        };
+        send.write_chunk(Bytes::from(encode_stream_failure(&failure).unwrap()))
+            .await
+            .unwrap();
+        return;
+    }
     let mut matching = fixture
         .events
         .into_iter()

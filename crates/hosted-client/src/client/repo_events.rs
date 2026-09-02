@@ -118,9 +118,15 @@ impl RepoEventClient {
             .routes()
             .subscribe_repo_events(&request)
             .await
-            .map_err(|source| RepoEventError::Disconnected {
-                last_event_id,
-                source,
+            .map_err(|source| {
+                if is_refusal(&source) {
+                    RepoEventError::Refused { source }
+                } else {
+                    RepoEventError::Disconnected {
+                        last_event_id,
+                        source,
+                    }
+                }
             })?;
         Ok(RepoEventSubscription {
             request,

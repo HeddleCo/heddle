@@ -4,19 +4,22 @@ use api::heddle::api::v1alpha1::{
     CallFailureCode, Discussion as ProtoDiscussion, DiscussionKind, DiscussionTurn as ProtoTurn,
     PathSymbolRef, RepoEvent, RepoEventKind, StateId as ProtoStateId, discussion_resolution,
 };
-use objects::object::{Attribution, CollaborationAnchor, Principal};
+use objects::object::{
+    Attribution, Blob, CollaborationAnchor, Discussion, DiscussionResolution, DiscussionTurn,
+    DiscussionsBlob, Principal, StateAttachment, StateAttachmentBody, SymbolAnchor,
+};
 use repo::{CollaborationStore, Repository, migrate_legacy_discussions_once};
 use tempfile::TempDir;
 
 use super::{
     DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventCursor, DiscussionEventOutcome,
     audience_cursor_scope, bootstrap_discussions, bootstrap_discussions_scoped,
-    consume_discussion_event, wait_reconnect_backoff,
-    consume_discussion_event_scoped, is_discussion_event, load_cursor, load_scoped_cursor,
-    paired_thread_scope, parse_event_payload, save_cursor, save_scoped_cursor, subscribe_request,
+    consume_discussion_event, consume_discussion_event_scoped, is_discussion_event, load_cursor,
+    load_scoped_cursor, paired_thread_scope, parse_event_payload, save_cursor, save_scoped_cursor,
+    subscribe_request, wait_reconnect_backoff,
 };
-use crate::hosted_runtime::hosted::test_server::CollaborationFixture;
 use crate::client::HostedClient;
+use crate::hosted_runtime::hosted::test_server::CollaborationFixture;
 
 fn seed_repo() -> (TempDir, Repository) {
     let temp = TempDir::new().unwrap();
@@ -66,7 +69,13 @@ fn opened_event(event_id: i64, discussion_id: &str, body: &str, turn_id: &str) -
     }
 }
 
-fn appended_event(event_id: i64, discussion_id: &str, body: &str, turn_id: &str, seq: u64) -> RepoEvent {
+fn appended_event(
+    event_id: i64,
+    discussion_id: &str,
+    body: &str,
+    turn_id: &str,
+    seq: u64,
+) -> RepoEvent {
     RepoEvent {
         event_id,
         repo_id: "repo-1".to_string(),
@@ -295,11 +304,7 @@ async fn resolved_event_writes_a_local_resolution() {
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
         "disc-res".to_string(),
-        proto_dismissed_discussion(
-            "disc-res",
-            &[("turn-1", "first", 1)],
-            "done",
-        ),
+        proto_dismissed_discussion("disc-res", &[("turn-1", "first", 1)], "done"),
     );
     let (mut client, server, fixture) =
         crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
@@ -322,7 +327,13 @@ async fn resolved_event_writes_a_local_resolution() {
     );
 
     let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-    let discussion = store.materialize().unwrap().discussions.into_values().next().unwrap();
+    let discussion = store
+        .materialize()
+        .unwrap()
+        .discussions
+        .into_values()
+        .next()
+        .unwrap();
     assert!(discussion.resolution.is_some());
 
     client.close().await;
@@ -417,7 +428,13 @@ async fn bootstrap_marks_the_cursor_then_live_events_append() {
     .unwrap();
 
     let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-    let discussion = store.materialize().unwrap().discussions.into_values().next().unwrap();
+    let discussion = store
+        .materialize()
+        .unwrap()
+        .discussions
+        .into_values()
+        .next()
+        .unwrap();
     assert_eq!(discussion.turns.len(), 2);
     assert_eq!(discussion.turns[1].1.body, "live turn");
 
@@ -473,7 +490,13 @@ async fn replaying_opened_after_bootstrap_does_not_duplicate_the_first_turn() {
     ));
 
     let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-    let discussion = store.materialize().unwrap().discussions.into_values().next().unwrap();
+    let discussion = store
+        .materialize()
+        .unwrap()
+        .discussions
+        .into_values()
+        .next()
+        .unwrap();
     assert_eq!(discussion.turns.len(), 1);
     assert_eq!(discussion.turns[0].1.body, "keep this invariant");
 
@@ -992,10 +1015,7 @@ fn filtered_cursor_slot_does_not_share_the_unfiltered_watermark() {
         load_cursor(temp.path(), "acme/widgets").unwrap(),
         DiscussionEventCursor::default()
     );
-    assert_eq!(
-        load_scoped_cursor(temp.path(), &filtered).unwrap(),
-        cursor
-    );
+    assert_eq!(load_scoped_cursor(temp.path(), &filtered).unwrap(), cursor);
 }
 
 #[test]
@@ -1017,10 +1037,7 @@ fn authority_scoped_cursor_does_not_inherit_the_legacy_repo_path_slot() {
         DiscussionEventCursor::default(),
         "a different hosted authority must not inherit the bare repo_path cursor"
     );
-    assert_eq!(
-        load_cursor(temp.path(), "acme/widgets").unwrap(),
-        legacy
-    );
+    assert_eq!(load_cursor(temp.path(), "acme/widgets").unwrap(), legacy);
 }
 
 #[tokio::test]
@@ -1554,8 +1571,7 @@ async fn dismissed_empty_reason_fetches_or_skips_and_does_not_fail_loop() {
     .await
     .expect_err("empty dismiss reason is a local materialization failure");
     assert!(
-        error.to_string().contains("disc-empty-dismiss")
-            || error.to_string().contains("dismiss"),
+        error.to_string().contains("disc-empty-dismiss") || error.to_string().contains("dismiss"),
         "expected an apply failure, got {error:#}"
     );
     assert_eq!(
@@ -2074,4 +2090,171 @@ fn wait_reconnect_backoff_is_bounded() {
         wait_reconnect_backoff(7),
         Some(std::time::Duration::from_millis(6_400))
     );
+}
+
+fn migration_marker(repo: &Repository) -> std::path::PathBuf {
+    repo.heddle_dir()
+        .join("collaboration/migrations/legacy-discussions-v1")
+}
+
+fn plant_legacy_discussion(repo: &Repository, id: &str, body: &str) {
+    let state_id = repo.head().unwrap().unwrap();
+    let bytes = DiscussionsBlob::new(vec![Discussion {
+        id: id.to_string(),
+        anchor: SymbolAnchor::new("lib.rs", "run"),
+        opened_against_state: state_id,
+        opened_at: 1_700_000_000,
+        thread_ref: Some("bar".to_string()),
+        turns: vec![DiscussionTurn {
+            author: Principal::new("Ada", "ada@example.com"),
+            body: body.to_string(),
+            posted_at: 1_700_000_000,
+            references: Vec::new(),
+        }],
+        resolution: DiscussionResolution::Open,
+        body_changed_since_open: false,
+        anchor_ambiguous: false,
+        orphaned: false,
+        visibility: objects::object::VisibilityTier::default(),
+        resolved_annotation_id: None,
+    }])
+    .encode()
+    .unwrap();
+    let blob_hash = repo.store().put_blob(&Blob::new(bytes)).unwrap();
+    repo.put_state_attachment(&StateAttachment {
+        state_id,
+        body: StateAttachmentBody::Discussions(blob_hash),
+        attribution: Attribution::human(Principal::new("Test", "test@example.com")),
+        created_at: chrono::Utc::now(),
+        supersedes: None,
+    })
+    .unwrap();
+}
+
+#[tokio::test]
+async fn filtered_bootstrap_does_not_claim_the_legacy_migration_marker() {
+    let (_temp, repo) = seed_repo();
+    plant_legacy_discussion(&repo, "legacy-bar", "from bar thread");
+    assert!(
+        !migration_marker(&repo).exists(),
+        "the fixture is an unmigrated clone with a legacy attachment"
+    );
+
+    let foo = proto_discussion_on_thread("disc-foo", "foo", &[("turn-foo", "from foo", 1)]);
+    let fixture = CollaborationFixture {
+        list: vec![foo],
+        ..CollaborationFixture::default()
+    };
+    let (mut client, server, _fixture) =
+        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
+
+    let scoped = DiscussionCursorScope {
+        repo_path: "acme/widgets".into(),
+        thread: "foo".into(),
+        thread_id: "thr-foo".into(),
+        ..DiscussionCursorScope::default()
+    };
+    bootstrap_discussions_scoped(&repo, &mut client, "acme/widgets", &scoped, None)
+        .await
+        .unwrap();
+    assert!(
+        !migration_marker(&repo).exists(),
+        "wait --thread must not claim the repo-wide marker for discussions it did not import"
+    );
+
+    let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+    let hosted = store.materialize().unwrap();
+    assert_eq!(hosted.discussions.len(), 1);
+    assert_eq!(
+        hosted
+            .discussions
+            .values()
+            .next()
+            .unwrap()
+            .thread_ref
+            .as_deref(),
+        Some("foo")
+    );
+
+    let report = migrate_legacy_discussions_once(&repo, &store, repo.get_attribution().unwrap())
+        .expect("unfiltered migrate after a filtered wait");
+    assert!(
+        report.is_some(),
+        "a later list/migrate must still see the other thread's legacy discussion"
+    );
+    let bodies: Vec<_> = store
+        .materialize()
+        .unwrap()
+        .discussions
+        .values()
+        .flat_map(|discussion| discussion.turns.iter().map(|turn| turn.1.body.as_str()))
+        .collect();
+    assert!(bodies.contains(&"from foo"));
+    assert!(bodies.contains(&"from bar thread"));
+
+    client.close().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_repo_uuid_not_found_resubscribes_via_path() {
+    let (_temp, repo) = seed_repo();
+    let mut fixture = CollaborationFixture {
+        unknown_repo_ids: ["dead-uuid".to_string()].into(),
+        events: vec![opened_event(1, "disc-live", "hello", "turn-1")],
+        ..CollaborationFixture::default()
+    };
+    fixture.discussions.insert(
+        "disc-live".to_string(),
+        proto_discussion("disc-live", &[("turn-1", "hello", 1)]),
+    );
+    let (mut client, server, fixture) =
+        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
+
+    let scope = audience_cursor_scope(&client, "acme/widgets");
+    save_scoped_cursor(
+        repo.heddle_dir(),
+        &scope,
+        &DiscussionEventCursor {
+            after_event_id: 99,
+            repo_id: "dead-uuid".into(),
+            bootstrapped: true,
+        },
+    )
+    .unwrap();
+
+    let mut consumer = DiscussionEventConsumer::new(&repo, &mut client, "acme/widgets");
+    let mut subscription = consumer.start(None).await.unwrap();
+    let (event, _) = consumer
+        .consume_next(&mut subscription)
+        .await
+        .expect("stale UUID NotFound must recover via repo_path");
+    assert_eq!(event.event_id, 1);
+    assert_eq!(
+        fixture
+            .subscribe_repo_ids
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_slice(),
+        ["dead-uuid", "acme/widgets"],
+        "second subscribe must use the path, not the dead UUID"
+    );
+    assert_eq!(
+        fixture
+            .subscribe_after
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_slice(),
+        [99, 0],
+        "recovery resets the watermark before the path subscribe"
+    );
+
+    let cursor = load_scoped_cursor(repo.heddle_dir(), &scope).unwrap();
+    assert_ne!(
+        cursor.repo_id, "dead-uuid",
+        "the dead UUID must not stay in the slot"
+    );
+
+    client.close().await;
+    server.await.unwrap();
 }

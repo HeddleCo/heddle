@@ -31,6 +31,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use api::heddle::api::v1alpha1::CallFailureCode;
 use objects::{
     fs_atomic::write_file_atomic,
     lock::RepoLock,
@@ -45,7 +46,8 @@ use super::{
         pull_discussions_for_thread,
     },
     repo_events::{
-        RepoEvent, RepoEventClient, RepoEventError, RepoEventSubscription, SubscribeRepoEventsRequest,
+        RepoEvent, RepoEventClient, RepoEventError, RepoEventSubscription,
+        SubscribeRepoEventsRequest,
     },
 };
 use crate::{
@@ -54,11 +56,8 @@ use crate::{
 };
 
 /// Event types this consumer subscribes to. Unknown types are ignored.
-pub const DISCUSSION_EVENT_TYPES: &[&str] = &[
-    "discussion.opened",
-    "turn.appended",
-    "discussion.resolved",
-];
+pub const DISCUSSION_EVENT_TYPES: &[&str] =
+    &["discussion.opened", "turn.appended", "discussion.resolved"];
 
 const CURSOR_FILE: &str = "event-cursor.json";
 
@@ -278,8 +277,7 @@ pub fn save_scoped_cursor(
 /// True when this event is a discussion doorbell or payload.
 pub fn is_discussion_event(event: &RepoEvent) -> bool {
     DISCUSSION_EVENT_TYPES.contains(&event.event_type.as_str())
-        || event.kind
-            == api::heddle::api::v1alpha1::RepoEventKind::DiscussionTurn as i32
+        || event.kind == api::heddle::api::v1alpha1::RepoEventKind::DiscussionTurn as i32
 }
 
 /// Subscribe request for the discussion live tail.
@@ -348,11 +346,7 @@ pub async fn bootstrap_discussions_scoped(
     scope: &DiscussionCursorScope,
     bootstrap: Option<&[Discussion]>,
 ) -> Result<DiscussionEventCursor> {
-    if repo
-        .head()
-        .context("resolve repository head")?
-        .is_none()
-    {
+    if repo.head().context("resolve repository head")?.is_none() {
         return Err(anyhow!(
             "cannot bootstrap hosted discussions without a repository HEAD"
         ));
@@ -450,20 +444,18 @@ async fn apply_discussion_event(
         });
     };
 
-    let already_mirrored =
-        discussion_is_mirrored(repo.heddle_dir(), repo_path, &discussion_id)?;
+    let already_mirrored = discussion_is_mirrored(repo.heddle_dir(), repo_path, &discussion_id)?;
     let hosted = if event.event_type == "turn.appended" {
         if let Some(discussion) = append_from_payload(&payload, already_mirrored) {
             discussion
         } else {
-            match fetch_hosted_discussion(client, repo_path, event, &discussion_id, &payload).await?
+            match fetch_hosted_discussion(client, repo_path, event, &discussion_id, &payload)
+                .await?
             {
                 Some(discussion) => discussion,
                 None => {
                     return Ok(DiscussionEventOutcome::Skipped {
-                        reason: format!(
-                            "discussion {discussion_id} is not visible to this caller"
-                        ),
+                        reason: format!("discussion {discussion_id} is not visible to this caller"),
                     });
                 }
             }
@@ -704,10 +696,7 @@ impl<'a> DiscussionEventConsumer<'a> {
             repo_path: self.repo_path.clone(),
             thread: self.thread.clone(),
             thread_id: self.thread_id.clone(),
-            principal: self
-                .client
-                .authenticated_username()
-                .unwrap_or_default(),
+            principal: self.client.authenticated_username().unwrap_or_default(),
         }
     }
 
@@ -735,9 +724,7 @@ impl<'a> DiscussionEventConsumer<'a> {
     }
 
     /// Subscribe from the persisted watermark without repeating bootstrap.
-    pub async fn resume(
-        &mut self,
-    ) -> Result<DiscussionEventSubscription, DiscussionLiveError> {
+    pub async fn resume(&mut self) -> Result<DiscussionEventSubscription, DiscussionLiveError> {
         let cursor = load_scoped_cursor(self.repo.heddle_dir(), &self.cursor_scope())
             .map_err(DiscussionLiveError::cursor)?;
         self.subscribe_from_cursor(&cursor).await
@@ -747,6 +734,19 @@ impl<'a> DiscussionEventConsumer<'a> {
         &mut self,
         cursor: &DiscussionEventCursor,
     ) -> Result<DiscussionEventSubscription, DiscussionLiveError> {
+        match self.open_subscription(cursor).await {
+            Ok(subscription) => Ok(subscription),
+            Err(error) if !cursor.repo_id.is_empty() && is_repository_not_found(&error) => {
+                self.recover_stale_repo_identity().await
+            }
+            Err(error) => Err(DiscussionLiveError::Subscribe(error)),
+        }
+    }
+
+    async fn open_subscription(
+        &mut self,
+        cursor: &DiscussionEventCursor,
+    ) -> Result<DiscussionEventSubscription, RepoEventError> {
         // weft keys SubscribeRepoEvents on the hosted repo UUID. After the
         // first event we have that id; before it, owner/name is the path
         // weft resolves the same way RepositoryRef.canonical_path does.
@@ -763,11 +763,42 @@ impl<'a> DiscussionEventConsumer<'a> {
                 &self.thread,
                 &self.thread_id,
             ))
-            .await
-            .map_err(DiscussionLiveError::Subscribe)?;
+            .await?;
         Ok(DiscussionEventSubscription {
             inner: subscription,
         })
+    }
+
+    fn can_recover_stale_repo_id(&self, error: &RepoEventError) -> bool {
+        if !is_repository_not_found(error) {
+            return false;
+        }
+        load_scoped_cursor(self.repo.heddle_dir(), &self.cursor_scope())
+            .ok()
+            .is_some_and(|cursor| !cursor.repo_id.is_empty())
+    }
+
+    /// The spool was deleted and recreated at the same owner/path. The
+    /// persisted UUID is dead; `--after 0` does not clear it. Drop the id,
+    /// re-bootstrap this slot, and subscribe once via `repo_path`.
+    async fn recover_stale_repo_identity(
+        &mut self,
+    ) -> Result<DiscussionEventSubscription, DiscussionLiveError> {
+        let scope = self.cursor_scope();
+        let mut cursor = load_scoped_cursor(self.repo.heddle_dir(), &scope)
+            .map_err(DiscussionLiveError::cursor)?;
+        cursor.repo_id.clear();
+        cursor.after_event_id = 0;
+        cursor.bootstrapped = false;
+        save_scoped_cursor(self.repo.heddle_dir(), &scope, &cursor)
+            .map_err(DiscussionLiveError::cursor)?;
+        let cursor =
+            bootstrap_discussions_scoped(self.repo, self.client, &self.repo_path, &scope, None)
+                .await
+                .map_err(DiscussionLiveError::bootstrap)?;
+        self.open_subscription(&cursor)
+            .await
+            .map_err(DiscussionLiveError::Subscribe)
     }
 
     pub async fn consume_next(
@@ -778,6 +809,13 @@ impl<'a> DiscussionEventConsumer<'a> {
             Ok(event) => event,
             Err(error) if error.resume_after_event_id().is_some() => {
                 *subscription = self.resume().await?;
+                match subscription.inner.next().await {
+                    Ok(event) => event,
+                    Err(error) => return Err(DiscussionLiveError::Subscribe(error)),
+                }
+            }
+            Err(error) if self.can_recover_stale_repo_id(&error) => {
+                *subscription = self.recover_stale_repo_identity().await?;
                 match subscription.inner.next().await {
                     Ok(event) => event,
                     Err(error) => return Err(DiscussionLiveError::Subscribe(error)),
@@ -855,6 +893,21 @@ impl DiscussionLiveError {
             Self::Subscribe(error) => error.resume_after_event_id(),
             _ => None,
         }
+    }
+}
+
+fn is_repository_not_found(error: &RepoEventError) -> bool {
+    match error {
+        RepoEventError::Refused { source } | RepoEventError::Disconnected { source, .. } => {
+            matches!(
+                source,
+                crate::hosted_runtime::hosted::HostedError::Call {
+                    code: CallFailureCode::NotFound,
+                    ..
+                }
+            )
+        }
+        _ => false,
     }
 }
 

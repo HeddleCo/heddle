@@ -616,7 +616,14 @@ async fn pull_discussions_filtered(
     against: Option<StateId>,
     thread_filter: Option<(&str, &str)>,
 ) -> Result<usize> {
-    mark_legacy_discussions_migrated(repo).context("claim legacy discussion migration marker")?;
+    // Repo-wide import (clone/pull, unfiltered wait) claims the one-shot
+    // marker so pulled hosted attachments are not also converted. A
+    // `--thread` wait only imports that thread; claiming here would hide
+    // other threads' local legacy discussions from later list/show.
+    if thread_filter.is_none() {
+        mark_legacy_discussions_migrated(repo)
+            .context("claim legacy discussion migration marker")?;
+    }
 
     let Some(head_state) = discussion_sync_state(repo, against)? else {
         // weft#638: a repo with no HEAD cannot resolve a state to list against
