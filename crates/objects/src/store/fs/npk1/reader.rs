@@ -16,8 +16,8 @@ use super::{
     MAX_CHAIN_DEPTH, RECORD_BLOCK_ENTRIES, TRAILER_HEADER_LEN, TRAILER_MAGIC, VERSION,
     checked_slice,
     codec::{
-        Dictionary, LookupState, decode_anchor, decode_delta, lookup_record, parse_record_header,
-        record_base_distance,
+        Dictionary, LookupState, RecordDecoder, decode_anchor, decode_delta, lookup_record,
+        parse_record_header, record_base_distance,
     },
     invalid, read_u16, read_u32, read_u64, usize_from_u64,
 };
@@ -31,6 +31,7 @@ type DecodedIndex = (Vec<([u8; 32], u32)>, Vec<u64>);
 pub(crate) struct Npk1Pack {
     mmap: Mmap,
     dictionary: Dictionary,
+    record_decoder: RecordDecoder,
     records_offset: usize,
     record_offsets: Vec<u64>,
     object_index: Vec<([u8; 32], u32)>,
@@ -67,18 +68,21 @@ impl Npk1Pack {
             return Err(invalid("invalid pack magic"));
         }
         let version = read_u32(bytes, 4, "pack version")?;
-        if version != VERSION {
+        if version > VERSION {
             return Err(HeddleError::StorageFormatTooNew {
                 storage: path.display().to_string(),
                 found: version,
                 supported: VERSION,
             });
         }
+        if version == 0 {
+            return Err(invalid("unsupported pack version"));
+        }
         let object_count = read_u32(bytes, 8, "object count")? as usize;
         if bytes[12] as usize != MAX_CHAIN_DEPTH {
             return Err(invalid("unsupported chain-depth contract"));
         }
-        if bytes[13] != 0 || bytes[56..64].iter().any(|byte| *byte != 0) {
+        if bytes[13] != 0 {
             return Err(invalid("non-zero reserved header field"));
         }
         if read_u16(bytes, 14, "record block size")? as usize != RECORD_BLOCK_ENTRIES {
@@ -91,9 +95,22 @@ impl Npk1Pack {
         let index_offset = usize_from_u64(read_u64(bytes, 40, "index offset")?, "index offset")?;
         let trailer_offset =
             usize_from_u64(read_u64(bytes, 48, "trailer offset")?, "trailer offset")?;
+        let dictionary_field = usize_from_u64(
+            read_u64(bytes, 56, "record dictionary offset")?,
+            "record dictionary offset",
+        )?;
+        let record_dictionary_offset = if version == 1 {
+            if dictionary_field != 0 {
+                return Err(invalid("non-zero reserved header field"));
+            }
+            records_offset
+        } else {
+            dictionary_field
+        };
         if name_offset != HEADER_LEN
             || !(name_offset <= target_offset
-                && target_offset <= records_offset
+                && target_offset <= record_dictionary_offset
+                && record_dictionary_offset <= records_offset
                 && records_offset <= index_offset
                 && index_offset <= trailer_offset)
             || trailer_offset >= len
@@ -128,8 +145,9 @@ impl Npk1Pack {
         )?;
         let dictionary = Dictionary::decode(
             &bytes[name_offset..target_offset],
-            &bytes[target_offset..records_offset],
+            &bytes[target_offset..record_dictionary_offset],
         )?;
+        let record_decoder = RecordDecoder::new(&bytes[record_dictionary_offset..records_offset]);
         let (object_index, record_offsets) = decode_index(
             &bytes[index_offset..trailer_offset],
             object_count,
@@ -138,6 +156,7 @@ impl Npk1Pack {
         let pack = Self {
             mmap,
             dictionary,
+            record_decoder,
             records_offset,
             record_offsets,
             object_index,
@@ -261,9 +280,14 @@ impl Npk1Pack {
         let anchor = chain
             .pop()
             .ok_or_else(|| invalid("empty resolution chain"))?;
-        let mut tree = decode_anchor(self.record(anchor)?, &self.dictionary)?;
+        let mut tree = decode_anchor(self.record(anchor)?, &self.dictionary, &self.record_decoder)?;
         while let Some(delta) = chain.pop() {
-            tree = decode_delta(self.record(delta)?, &tree, &self.dictionary)?;
+            tree = decode_delta(
+                self.record(delta)?,
+                &tree,
+                &self.dictionary,
+                &self.record_decoder,
+            )?;
         }
         let found = tree.hash();
         if found != *expected {
@@ -307,7 +331,8 @@ impl Npk1Pack {
                     block.stored_len,
                 )?;
             }
-            let (state, entry) = lookup_record(record, &self.dictionary, wanted_name)?;
+            let (state, entry) =
+                lookup_record(record, &self.dictionary, wanted_name, &self.record_decoder)?;
             match state {
                 LookupState::Found => return Ok(entry),
                 LookupState::Removed => return Ok(None),

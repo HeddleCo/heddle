@@ -24,18 +24,22 @@ const INDEX_MAGIC: &[u8; 4] = b"NPI1";
 const NAME_MAGIC: &[u8; 4] = b"NDI1";
 const TARGET_MAGIC: &[u8; 4] = b"TDI1";
 const TRAILER_MAGIC: &[u8; 4] = b"NPT1";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER_LEN: usize = 64;
 const CHECKSUM_LEN: usize = 32;
 const CHECKSUM_CHUNK_BYTES: usize = 64 * 1024;
 const TRAILER_HEADER_LEN: usize = 16;
 const NAME_RESTART: usize = 128;
 const RECORD_BLOCK_ENTRIES: usize = 128;
+#[cfg(feature = "zstd")]
+const RECORD_DICTIONARY_MAX_BYTES: usize = 32 * 1024;
+#[cfg(feature = "zstd")]
+const RECORD_DICTIONARY_MIN_BYTES: usize = 16 * 1024;
 const WINDOW_BUCKET_LIMIT: usize = 64;
 const EXACT_CANDIDATES: usize = 16;
 const MAX_CHAIN_DEPTH: usize = 16;
 #[cfg(feature = "zstd")]
-const RECORD_LEVEL: i32 = 3;
+const RECORD_LEVEL: i32 = 10;
 const LARGE_OFFSET_FLAG: u32 = 1 << 31;
 
 fn invalid(message: impl Into<String>) -> HeddleError {

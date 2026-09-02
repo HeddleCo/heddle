@@ -12,7 +12,10 @@ use super::{
     CHECKSUM_CHUNK_BYTES, EXACT_CANDIDATES, HEADER_LEN, INDEX_MAGIC, LARGE_OFFSET_FLAG, MAGIC,
     MAX_CHAIN_DEPTH, RECORD_BLOCK_ENTRIES, TRAILER_HEADER_LEN, TRAILER_MAGIC, VERSION,
     WINDOW_BUCKET_LIMIT,
-    codec::{Dictionary, encode_anchor, encode_delta, note_tree_dictionary_rows},
+    codec::{
+        Dictionary, RawRecord, RecordEncoder, encode_anchor, encode_delta,
+        note_tree_dictionary_rows,
+    },
     invalid,
 };
 use crate::{
@@ -216,12 +219,38 @@ struct Plan {
 struct CandidateRecord {
     base: usize,
     depth: usize,
-    bytes: Vec<u8>,
+    encoded_len: usize,
+    record: RawRecord,
 }
 
 fn load_tree(store: &FsStore, hash: ContentHash) -> Result<Tree> {
     ObjectStore::get_tree(store, &hash)?
         .ok_or_else(|| invalid(format!("tree disappeared while packing: {hash}")))
+}
+
+fn train_record_dictionary(records: &[RawRecord]) -> Result<Vec<u8>> {
+    #[cfg(feature = "zstd")]
+    {
+        let samples = records
+            .iter()
+            .flat_map(RawRecord::samples)
+            .filter(|sample| !sample.is_empty())
+            .collect::<Vec<_>>();
+        let total_bytes = samples
+            .iter()
+            .fold(0usize, |total, sample| total.saturating_add(sample.len()));
+        let dictionary_bytes = (total_bytes / 8).min(super::RECORD_DICTIONARY_MAX_BYTES);
+        if samples.len() < 8 || dictionary_bytes < super::RECORD_DICTIONARY_MIN_BYTES {
+            return Ok(Vec::new());
+        }
+        zstd::dict::from_samples(&samples, dictionary_bytes)
+            .map_err(|error| HeddleError::Compression(error.to_string()))
+    }
+    #[cfg(not(feature = "zstd"))]
+    {
+        let _ = records;
+        Ok(Vec::new())
+    }
 }
 
 pub(crate) fn build_npk1_pack(
@@ -273,25 +302,12 @@ pub(crate) fn build_npk1_pack(
     let name_bytes = dictionary.encode_names()?;
     let target_bytes = dictionary.encode_targets()?;
 
-    let file = OpenOptions::new()
-        .create_new(true)
-        .read(true)
-        .write(true)
-        .open(output)?;
-    let mut writer = BufWriter::new(file);
-    writer.write_all(&[0u8; HEADER_LEN])?;
-    let name_offset = HEADER_LEN as u64;
-    writer.write_all(&name_bytes)?;
-    let target_offset = name_offset.saturating_add(name_bytes.len() as u64);
-    writer.write_all(&target_bytes)?;
-    let records_offset = target_offset.saturating_add(target_bytes.len() as u64);
-
     let mut plans = vec![None::<Plan>; hashes.len()];
     let mut ordinals = vec![usize::MAX; hashes.len()];
     let mut order = Vec::with_capacity(hashes.len());
-    let mut record_offsets = Vec::with_capacity(hashes.len() + 1);
-    let mut record_position = 0u64;
+    let mut records = Vec::with_capacity(hashes.len());
     let mut window = CandidateWindow::default();
+    let mut selector_encoder = RecordEncoder::new(&[])?;
 
     for start in 0..hashes.len() {
         if plans[start].is_some() {
@@ -315,6 +331,7 @@ pub(crate) fn build_npk1_pack(
             ordinals[index] = ordinal;
             let current = load_tree(store, hashes[index])?;
             let anchor = encode_anchor(&current, &dictionary)?;
+            let anchor_len = anchor.encode(&mut selector_encoder)?.len();
             let candidate_indexes =
                 window.candidates(sketches[index], &sketches, parent_indexes[index], &ordinals);
             let mut candidates = Vec::with_capacity(candidate_indexes.len());
@@ -331,25 +348,27 @@ pub(crate) fn build_npk1_pack(
                 }
                 let base_tree = load_tree(store, hashes[base])?;
                 let ops = tree_delta(&base_tree, &current);
-                let bytes = encode_delta(ordinal - base_ordinal, &current, &ops, &dictionary)?;
+                let record = encode_delta(ordinal - base_ordinal, &current, &ops, &dictionary)?;
+                let encoded_len = record.encode(&mut selector_encoder)?.len();
                 context
-                    .checkpoint(bytes.len() as u64)
+                    .checkpoint(encoded_len as u64)
                     .map_err(Npk1BuildError::Cancelled)?;
-                candidates.push(CandidateRecord { base, depth, bytes });
+                candidates.push(CandidateRecord {
+                    base,
+                    depth,
+                    encoded_len,
+                    record,
+                });
             }
             let selected = candidates
                 .into_iter()
-                .filter(|candidate| candidate.bytes.len() < anchor.len())
-                .min_by_key(|candidate| (candidate.bytes.len(), Reverse(ordinals[candidate.base])));
+                .filter(|candidate| candidate.encoded_len < anchor_len)
+                .min_by_key(|candidate| (candidate.encoded_len, Reverse(ordinals[candidate.base])));
             let (record, depth) = match selected {
-                Some(candidate) => (candidate.bytes, candidate.depth),
+                Some(candidate) => (candidate.record, candidate.depth),
                 None => (anchor, 0),
             };
-            record_offsets.push(record_position);
-            writer.write_all(&record)?;
-            record_position = record_position
-                .checked_add(record.len() as u64)
-                .ok_or_else(|| invalid("record section exceeds u64"))?;
+            records.push(record);
             plans[index] = Some(Plan { depth });
             order.push(index);
             window.insert(index, sketches[index]);
@@ -357,6 +376,33 @@ pub(crate) fn build_npk1_pack(
     }
     if order.len() != hashes.len() {
         return Err(invalid("not every input tree received a record").into());
+    }
+
+    let record_dictionary = train_record_dictionary(&records)?;
+    let mut record_encoder = RecordEncoder::new(&record_dictionary)?;
+    let file = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(output)?;
+    let mut writer = BufWriter::new(file);
+    writer.write_all(&[0u8; HEADER_LEN])?;
+    let name_offset = HEADER_LEN as u64;
+    writer.write_all(&name_bytes)?;
+    let target_offset = name_offset.saturating_add(name_bytes.len() as u64);
+    writer.write_all(&target_bytes)?;
+    let record_dictionary_offset = target_offset.saturating_add(target_bytes.len() as u64);
+    writer.write_all(&record_dictionary)?;
+    let records_offset = record_dictionary_offset.saturating_add(record_dictionary.len() as u64);
+    let mut record_offsets = Vec::with_capacity(records.len() + 1);
+    let mut record_position = 0u64;
+    for record in &records {
+        let encoded = record.encode(&mut record_encoder)?;
+        record_offsets.push(record_position);
+        writer.write_all(&encoded)?;
+        record_position = record_position
+            .checked_add(encoded.len() as u64)
+            .ok_or_else(|| invalid("record section exceeds u64"))?;
     }
     record_offsets.push(record_position);
     let index_offset = records_offset
@@ -373,6 +419,7 @@ pub(crate) fn build_npk1_pack(
         hashes.len(),
         name_offset,
         target_offset,
+        record_dictionary_offset,
         records_offset,
         index_offset,
         trailer_offset,
@@ -392,6 +439,7 @@ fn encode_header(
     object_count: usize,
     name_offset: u64,
     target_offset: u64,
+    record_dictionary_offset: u64,
     records_offset: u64,
     index_offset: u64,
     trailer_offset: u64,
@@ -409,6 +457,7 @@ fn encode_header(
     header[32..40].copy_from_slice(&records_offset.to_le_bytes());
     header[40..48].copy_from_slice(&index_offset.to_le_bytes());
     header[48..56].copy_from_slice(&trailer_offset.to_le_bytes());
+    header[56..64].copy_from_slice(&record_dictionary_offset.to_le_bytes());
     Ok(header)
 }
 
