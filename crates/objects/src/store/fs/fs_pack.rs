@@ -210,7 +210,6 @@ impl FsStore {
 
         let tree_hash = tree.tree.hash();
         let mut staged_trees = Vec::with_capacity(trees.len() + 1);
-        let mut staged_encodings = Vec::with_capacity(trees.len() + 1);
         let mut seen_trees = std::collections::HashSet::with_capacity(trees.len() + 1);
         for authored_tree in trees {
             let authored_hash = authored_tree.tree.hash();
@@ -233,7 +232,6 @@ impl FsStore {
                     ));
                 }
                 builder.add(authored_hash, PackObjectType::Tree, encoded.data);
-                staged_encodings.push((authored_hash, encoded.kind));
                 staged_trees.push((authored_hash, authored_tree.tree));
             }
         }
@@ -255,7 +253,6 @@ impl FsStore {
                 ));
             }
             builder.add(tree_hash, PackObjectType::Tree, encoded.data);
-            staged_encodings.push((tree_hash, encoded.kind));
             staged_trees.push((tree_hash, tree.tree.clone()));
         }
 
@@ -326,9 +323,6 @@ impl FsStore {
             )?;
         }
         self.remember_pack_dir_modified()?;
-        for (hash, kind) in staged_encodings {
-            self.remember_tree_encoding(hash, kind)?;
-        }
         self.materialize_packed_attachment_index(&state_id, &attachment_ids, state_was_present)?;
 
         if let Ok(mut cache) = self.recent_blobs.write() {

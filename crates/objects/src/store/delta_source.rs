@@ -32,7 +32,7 @@ impl DeltaTreeSource {
     ) -> Result<Self, TreeStreamError> {
         let delta_len = usize::try_from(delta.len())
             .map_err(|_| TreeStreamError::Malformed("HDC1 body exceeds usize".into()))?;
-        let mut header_bytes = [0u8; TREE_DELTA_HEADER_LEN];
+        let mut header_bytes = vec![0u8; delta_len.min(TREE_DELTA_HEADER_LEN)];
         delta.read_exact_at(0, &mut header_bytes)?;
         let header = decode_tree_delta_header_prefix(&header_bytes, delta_len)?;
         let mut body = Vec::new();

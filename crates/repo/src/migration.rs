@@ -728,7 +728,7 @@ mod tests {
         let current_hash = current.hash();
         let ops = objects::object::tree_delta(&anchor, &current);
         let delta_body =
-            objects::object::encode_tree_delta(anchor_hash, &anchor, &current, &ops).unwrap();
+            objects::object::encode_tree_delta(anchor_hash, 1, &anchor, &current, &ops).unwrap();
         write_loose_tree_bytes(&repo, current_hash, &delta_body);
 
         apply_pending(&repo).unwrap();

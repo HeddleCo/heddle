@@ -27,10 +27,12 @@ pub const TREE_LEAN_MAGIC: &[u8; 4] = b"HLR1";
 pub const TREE_DELTA_MAGIC: &[u8; 4] = b"HDC1";
 /// Cursor version used by the HLR1 streaming reader.
 pub const TREE_LEAN_ENCODING_VERSION: u8 = 6;
-/// Current HDC1 body version.
-pub const TREE_DELTA_ENCODING_VERSION: u8 = 1;
-/// Fixed HDC1 header from the HTR4 radical spike.
-pub const TREE_DELTA_HEADER_LEN: usize = 59;
+/// Current HDC1 body version. Version 2 stores lineage depth in the header.
+pub const TREE_DELTA_ENCODING_VERSION: u8 = 2;
+/// Fixed HDC1 v2 header length.
+pub const TREE_DELTA_HEADER_LEN: usize = 60;
+const TREE_DELTA_V1_ENCODING_VERSION: u8 = 1;
+const TREE_DELTA_V1_HEADER_LEN: usize = 59;
 /// A lineage is refreshed after 127 delta descendants.
 pub const TREE_DELTA_ANCHOR_INTERVAL: u8 = 128;
 /// Cumulative deltas above this operation count become anchors.
@@ -657,6 +659,11 @@ impl TreeDeltaOp {
 /// Parsed HDC1 header, including its bounded first-entry and first-100 porch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TreeDeltaHeader {
+    /// Delta depth within the anchor epoch. Version 1 did not store this hint;
+    /// callers must safely refresh the lineage when it is absent.
+    pub depth: Option<u8>,
+    /// Version-specific header length, and therefore the operation-body offset.
+    pub header_len: usize,
     pub anchor: ContentHash,
     pub result_count: usize,
     pub op_count: usize,
@@ -1071,10 +1078,16 @@ fn delta_prefix_counts(
 /// Encode a one-hop HDC1 body against `anchor`.
 pub fn encode_tree_delta(
     anchor_id: ContentHash,
+    depth: u8,
     anchor: &Tree,
     current: &Tree,
     ops: &[TreeDeltaOp],
 ) -> Result<Vec<u8>, TreeStreamError> {
+    if depth == 0 || depth >= TREE_DELTA_ANCHOR_INTERVAL {
+        return Err(TreeStreamError::Malformed(
+            "tree delta depth must be within its anchor epoch".into(),
+        ));
+    }
     anchor.validate()?;
     current.validate()?;
     if anchor.hash() != anchor_id {
@@ -1144,6 +1157,7 @@ pub fn encode_tree_delta(
     let mut out = Vec::with_capacity(TREE_DELTA_HEADER_LEN + body.len());
     out.extend_from_slice(TREE_DELTA_MAGIC);
     out.push(TREE_DELTA_ENCODING_VERSION);
+    out.push(depth);
     out.extend_from_slice(anchor_id.as_bytes());
     out.extend_from_slice(&result_count.to_le_bytes());
     out.extend_from_slice(&op_count.to_le_bytes());
@@ -1173,7 +1187,7 @@ pub fn decode_tree_delta_header_prefix(
     data: &[u8],
     object_len: usize,
 ) -> Result<TreeDeltaHeader, TreeStreamError> {
-    if data.len() < TREE_DELTA_HEADER_LEN {
+    if data.len() < TREE_DELTA_MAGIC.len() + 1 {
         return Err(TreeStreamError::TruncatedFrame { offset: 0 });
     }
     if !is_delta_tree(data) {
@@ -1181,29 +1195,42 @@ pub fn decode_tree_delta_header_prefix(
             "bytes are not an HDC1 tree delta".into(),
         ));
     }
-    if data[4] != TREE_DELTA_ENCODING_VERSION {
-        return Err(TreeStreamError::UnsupportedVersion { found: data[4] });
+    let (depth, header_len, anchor_offset) = match data[4] {
+        TREE_DELTA_V1_ENCODING_VERSION => (None, TREE_DELTA_V1_HEADER_LEN, 5),
+        TREE_DELTA_ENCODING_VERSION => (data.get(5).copied(), TREE_DELTA_HEADER_LEN, 6),
+        found => return Err(TreeStreamError::UnsupportedVersion { found }),
+    };
+    if data.len() < header_len {
+        return Err(TreeStreamError::TruncatedFrame { offset: 0 });
+    }
+    if depth.is_some_and(|depth| depth == 0 || depth >= TREE_DELTA_ANCHOR_INTERVAL) {
+        return Err(TreeStreamError::Malformed(
+            "invalid HDC1 lineage depth".into(),
+        ));
     }
     let anchor = ContentHash::from_bytes(
-        data[5..37]
+        data[anchor_offset..anchor_offset + 32]
             .try_into()
             .map_err(|_| TreeStreamError::Malformed("delta anchor hash is not 32 bytes".into()))?,
     );
+    let fields_offset = anchor_offset + 32;
     let header = TreeDeltaHeader {
+        depth,
+        header_len,
         anchor,
-        result_count: read_u32_at(data, 37)? as usize,
-        op_count: read_u16_at(data, 41)? as usize,
-        first_op_count: read_u16_at(data, 43)? as usize,
-        first_base_count: read_u16_at(data, 45)? as usize,
-        first_end: read_u32_at(data, 47)? as usize,
-        hundred_op_count: read_u16_at(data, 51)? as usize,
-        hundred_base_count: read_u16_at(data, 53)? as usize,
-        hundred_end: read_u32_at(data, 55)? as usize,
+        result_count: read_u32_at(data, fields_offset)? as usize,
+        op_count: read_u16_at(data, fields_offset + 4)? as usize,
+        first_op_count: read_u16_at(data, fields_offset + 6)? as usize,
+        first_base_count: read_u16_at(data, fields_offset + 8)? as usize,
+        first_end: read_u32_at(data, fields_offset + 10)? as usize,
+        hundred_op_count: read_u16_at(data, fields_offset + 14)? as usize,
+        hundred_base_count: read_u16_at(data, fields_offset + 16)? as usize,
+        hundred_end: read_u32_at(data, fields_offset + 18)? as usize,
     };
     if header.op_count > TREE_DELTA_MAX_OPS
         || header.first_op_count > header.op_count
         || header.hundred_op_count > header.op_count
-        || header.first_end < TREE_DELTA_HEADER_LEN
+        || header.first_end < header.header_len
         || header.hundred_end < header.first_end
         || header.hundred_end > object_len
     {
@@ -1235,7 +1262,7 @@ pub fn decode_tree_delta_ops_prefix(
             "partial delta operation count exceeds object".into(),
         ));
     }
-    let mut offset = TREE_DELTA_HEADER_LEN;
+    let mut offset = header.header_len;
     let mut previous = String::new();
     let mut ops = Vec::with_capacity(wanted);
     for _ in 0..wanted {

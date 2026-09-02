@@ -18,7 +18,7 @@ use super::{
         action_path, actions_dir, annotated_tags_dir, blobs_dir, hash_path, redaction_path,
         redactions_dir, state_attachment_index_lock_path, state_attachment_index_path,
         state_attachment_path, state_attachments_dir, state_path, state_visibility_dir,
-        state_visibility_path, states_dir, tree_lineage_path, trees_dir,
+        state_visibility_path, states_dir, trees_dir,
     },
 };
 use crate::{
@@ -31,7 +31,7 @@ use crate::{
     },
     store::{
         HeddleError, ObjectStore, Result, SidecarStore, SnapshotCommitDescriptor, TreeWrite, codec,
-        codec::{EncodedTree, TreeDeltaBase, TreeEncodingKind, TreeLineage},
+        codec::{EncodedTree, TreeDeltaBase},
         delta_source::DeltaTreeSource,
         pack::{ObjectType, PackManager, PackObjectId},
     },
@@ -700,7 +700,7 @@ impl FsStore {
     ) -> Result<Option<TreeEntryReader<OpenedTreeBody>>> {
         let object_len = usize::try_from(delta.len())
             .map_err(|_| HeddleError::InvalidObject("HDC1 body exceeds usize".to_string()))?;
-        let mut header_bytes = [0u8; TREE_DELTA_HEADER_LEN];
+        let mut header_bytes = vec![0u8; object_len.min(TREE_DELTA_HEADER_LEN)];
         delta.read_exact_at(0, &mut header_bytes)?;
         let header = decode_tree_delta_header_prefix(&header_bytes, object_len)?;
         let anchor = self
@@ -941,24 +941,18 @@ impl FsStore {
         };
         let base = if is_delta_tree(&parent_body) {
             let header = decode_tree_delta_header(&parent_body)?;
-            let Some(lineage) = self.read_tree_lineage(&parent)? else {
+            let Some(parent_depth) = header.depth else {
                 return codec::encode_tree_hot(&write.tree, None);
             };
-            if lineage.anchor != header.anchor || lineage.depth == 0 {
-                return codec::encode_tree_hot(&write.tree, None);
-            }
             let anchor = if let Some((_, anchor, _)) =
-                write
-                    .anchor
-                    .as_ref()
-                    .filter(|(anchor_id, _, parent_depth)| {
-                        *anchor_id == lineage.anchor && *parent_depth == lineage.depth
-                    }) {
+                write.anchor.as_ref().filter(|(anchor_id, _, hint_depth)| {
+                    *anchor_id == header.anchor && *hint_depth == parent_depth
+                }) {
                 anchor.clone()
-            } else if let Some(anchor) = self.recent_tree(&lineage.anchor) {
+            } else if let Some(anchor) = self.recent_tree(&header.anchor) {
                 anchor
             } else {
-                let Some(anchor_body) = self.try_get_tree_serialized_once(&lineage.anchor)? else {
+                let Some(anchor_body) = self.try_get_tree_serialized_once(&header.anchor)? else {
                     return codec::encode_tree_hot(&write.tree, None);
                 };
                 if is_delta_tree(&anchor_body) {
@@ -966,9 +960,9 @@ impl FsStore {
                         "HDC1 lineage points to another delta".to_string(),
                     ));
                 }
-                codec::decode_tree_serialized_with_key(&anchor_body, lineage.anchor, None)?
+                codec::decode_tree_serialized_with_key(&anchor_body, header.anchor, None)?
             };
-            Some((lineage.anchor, anchor, lineage.depth))
+            Some((header.anchor, anchor, parent_depth))
         } else {
             let anchor = match write.anchor.as_ref() {
                 Some((anchor_id, anchor, 0)) if *anchor_id == parent => anchor.clone(),
@@ -987,39 +981,6 @@ impl FsStore {
                 parent_depth,
             }),
         )
-    }
-
-    fn read_tree_lineage(&self, hash: &ContentHash) -> Result<Option<TreeLineage>> {
-        let Some(bytes) = read_file_bytes(&tree_lineage_path(&self.root, hash))? else {
-            return Ok(None);
-        };
-        let data = bytes.as_slice();
-        if data.len() != 33 {
-            return Ok(None);
-        }
-        let anchor = match data[..32].try_into() {
-            Ok(bytes) => ContentHash::from_bytes(bytes),
-            Err(_) => return Ok(None),
-        };
-        let depth = data[32];
-        if depth == 0 || depth >= crate::object::TREE_DELTA_ANCHOR_INTERVAL {
-            return Ok(None);
-        }
-        Ok(Some(TreeLineage { anchor, depth }))
-    }
-
-    pub(super) fn remember_tree_encoding(
-        &self,
-        hash: ContentHash,
-        kind: TreeEncodingKind,
-    ) -> Result<()> {
-        let TreeEncodingKind::Delta { anchor, depth, .. } = kind else {
-            return Ok(());
-        };
-        let mut bytes = Vec::with_capacity(33);
-        bytes.extend_from_slice(anchor.as_bytes());
-        bytes.push(depth);
-        self.write_reconstructible_cache(&tree_lineage_path(&self.root, &hash), &bytes)
     }
 
     fn try_has_tree_once(&self, hash: &ContentHash) -> Result<bool> {

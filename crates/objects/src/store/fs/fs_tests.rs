@@ -639,7 +639,7 @@ fn install_pack_rejects_hdc1_stored_under_its_anchor_id() {
             .collect(),
     );
     let anchor_id = store.put_tree(&anchor).unwrap();
-    let self_delta = crate::object::encode_tree_delta(anchor_id, &anchor, &anchor, &[]).unwrap();
+    let self_delta = crate::object::encode_tree_delta(anchor_id, 1, &anchor, &anchor, &[]).unwrap();
     let mut builder = PackBuilder::new(CompressionConfig::disabled());
     builder.add(anchor_id, PackObjectType::Tree, self_delta);
     let (pack_data, index_data, _) = builder.build().unwrap();
@@ -1279,9 +1279,6 @@ fn direct_parent_hint_does_not_create_a_delta_chain() {
         .unwrap();
     store
         .put_tree_serialized(&first_encoded.data, first_encoded.hash)
-        .unwrap();
-    store
-        .remember_tree_encoding(first_encoded.hash, first_encoded.kind)
         .unwrap();
 
     let mut second_entries = first.entries().to_vec();
