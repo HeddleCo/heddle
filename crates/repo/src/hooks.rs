@@ -29,7 +29,7 @@ fn hook_executable_busy(error: &std::io::Error) -> bool {
     }
 }
 
-fn spawn_payload_hook(command: &mut Command, hook: Hook) -> Result<std::process::Child> {
+fn spawn_hook(command: &mut Command, hook: Hook) -> Result<std::process::Child> {
     let mut attempt = 0;
     loop {
         match command.spawn() {
@@ -201,8 +201,11 @@ impl HookManager {
             cmd.env(key, value);
         }
 
-        let status = cmd
-            .status()
+        // Same ETXTBSY retry as `run_with_payload`: install-then-exec
+        // can race the just-written hook file under parallel tests.
+        let mut child = spawn_hook(&mut cmd, hook)?;
+        let status = child
+            .wait()
             .map_err(|e| anyhow!("Failed to execute hook {}: {}", hook.filename(), e))?;
 
         if !status.success() {
@@ -248,7 +251,7 @@ impl HookManager {
         for (key, value) in &ctx.env {
             cmd.env(key, value);
         }
-        let mut child = spawn_payload_hook(&mut cmd, hook)?;
+        let mut child = spawn_hook(&mut cmd, hook)?;
         let payload_bytes =
             serde_json::to_vec(payload).map_err(|e| anyhow!("encode hook payload: {e}"))?;
         if let Some(mut stdin) = child.stdin.take() {
@@ -413,11 +416,11 @@ mod tests {
     }
 
     #[test]
-    fn payload_hook_spawn_reports_non_busy_errors() {
+    fn hook_spawn_reports_non_busy_errors() {
         let temp = TempDir::new().unwrap();
         let mut command = Command::new(temp.path().join("missing-hook"));
 
-        let error = spawn_payload_hook(&mut command, Hook::PreSnapshot)
+        let error = spawn_hook(&mut command, Hook::PreSnapshot)
             .expect_err("missing hook executable should not spawn");
 
         assert!(
@@ -429,7 +432,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn payload_hook_spawn_retries_text_file_busy() {
+    fn hook_spawn_retries_text_file_busy() {
         use std::{fs::OpenOptions, os::unix::fs::PermissionsExt};
 
         let temp = TempDir::new().unwrap();
@@ -439,7 +442,7 @@ mod tests {
         let _write_guard = OpenOptions::new().write(true).open(&hook_path).unwrap();
         let mut command = Command::new(&hook_path);
 
-        let error = spawn_payload_hook(&mut command, Hook::PreSnapshot)
+        let error = spawn_hook(&mut command, Hook::PreSnapshot)
             .expect_err("an executable open for writing should stay busy");
 
         assert!(error.to_string().contains("Text file busy"));
@@ -493,9 +496,16 @@ printf '{"abort":"","custom":"%s","protocol":"%s","repo":"%s","payload":%s}
         let err = manager
             .run(Hook::PrePush, &HookContext::new(&repo))
             .unwrap_err();
+        let message = err.to_string();
 
-        assert!(err.to_string().contains("Hook pre-push failed"));
-        assert!(err.to_string().contains("Some(7)"));
+        assert!(
+            message.contains("Hook pre-push failed"),
+            "expected nonzero hook failure, got {message}"
+        );
+        assert!(
+            message.contains("Some(7)"),
+            "expected exit code 7, got {message}"
+        );
     }
 
     #[test]
