@@ -8,6 +8,7 @@ mod agent_cmd;
 mod agent_presence;
 mod agent_provenance;
 mod auto_capture;
+mod automatic_repack;
 mod blame;
 mod checkpoint;
 #[cfg(feature = "ci")]
@@ -93,6 +94,10 @@ pub use agent_cmd::{
     agent_api_schema, cmd_agent_capture, cmd_agent_heartbeat, cmd_agent_list, cmd_agent_ready,
     cmd_agent_release, cmd_agent_reserve,
 };
+pub use automatic_repack::{
+    automatic_repack_worker_root, run_automatic_repack_worker,
+    spawn_pending_automatic_repack_workers,
+};
 #[cfg(feature = "ci")]
 pub use ci::cmd_ci;
 #[cfg(feature = "client")]
@@ -119,7 +124,6 @@ pub use context::{
 #[allow(unused_imports)]
 pub(crate) use daemon::client as daemon_client;
 pub use daemon::{cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop};
-pub use netdaemon::{cmd_netd_serve, cmd_netd_status, cmd_netd_stop};
 pub use diff::cmd_diff;
 pub use discuss::run as cmd_discuss;
 pub use doctor::cmd_doctor;
@@ -147,6 +151,7 @@ pub use integration::{
 };
 pub use log::{LogCommandOptions, cmd_log};
 pub use maintenance::cmd_maintenance;
+pub use netdaemon::{cmd_netd_serve, cmd_netd_status, cmd_netd_stop};
 pub use operator_core::operator_emission_output_kinds;
 pub use operator_loop::{cmd_abort, cmd_continue, cmd_sync_smart};
 pub use oplog::cmd_oplog;
