@@ -11,11 +11,8 @@
 //!    that ListByState snapshot by `thread_ref` / wire `thread_id` before
 //!    apply; clone/pull pull-fold stays repo-wide.
 //! 2. Subscribe from the persisted client watermark (`after_event_id`).
-//! 3. Treat live events as doorbells. `GetDiscussion` is the snapshot for
-//!    `discussion.opened` / `discussion.resolved` and for any append whose
-//!    id is not already mirrored. An already-mirrored `turn.appended` with
-//!    minted identity and a non-empty body may apply without a refetch.
-//!    Never reconstruct a `HostedDiscussion` from opened/resolved JSON.
+//! 3. Treat every live event as a doorbell. `GetDiscussion` is the authorized
+//!    snapshot; event JSON never supplies discussion or turn contents.
 //! 4. Persist the watermark after apply, skip, or ignore — not after apply Err.
 //!
 //! Fail-closed on visibility: the server already filters emission by audience.
@@ -35,25 +32,19 @@ use api::heddle::api::v1alpha1::CallFailureCode;
 use objects::{
     fs_atomic::write_file_atomic,
     lock::RepoLock,
-    object::{Discussion, StateId},
+    object::{CollaborationCodecError, Discussion, StateId},
 };
 use repo::Repository;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    discussion_sync::{
-        apply_hosted_discussion, discussion_is_mirrored, pull_discussions,
-        pull_discussions_for_thread,
-    },
+    discussion_sync::{apply_hosted_discussion, pull_discussions, pull_discussions_for_thread},
     repo_events::{
         RepoEvent, RepoEventClient, RepoEventError, RepoEventSubscription,
         SubscribeRepoEventsRequest,
     },
 };
-use crate::{
-    client::HostedClient,
-    hosted_runtime::hosted::{HostedDiscussion, HostedDiscussionTurn, HostedResolution},
-};
+use crate::{client::HostedClient, hosted_runtime::hosted::HostedDiscussion};
 
 /// Event types this consumer subscribes to. Unknown types are ignored.
 pub const DISCUSSION_EVENT_TYPES: &[&str] =
@@ -87,9 +78,9 @@ struct CursorFile {
 pub enum DiscussionEventOutcome {
     /// Not a discussion event; watermark still advances.
     Ignored,
-    /// Authorized event that could not be materialized (missing id,
-    /// GetDiscussion hid it, or apply could not write a valid op). Watermark
-    /// advances so we do not retry forever.
+    /// Authorized event that could not be materialized because it was hidden,
+    /// missing, malformed, or failed local validation. Watermark advances so
+    /// deterministic poison events are not retried forever.
     Skipped { reason: String },
     /// Local op-log changed.
     Applied { discussion_id: String },
@@ -363,7 +354,7 @@ pub async fn bootstrap_discussions_scoped(
         .await
         .context("bootstrap hosted discussions for thread")?;
     } else {
-        pull_discussions(repo, client, repo_path, bootstrap)
+        pull_discussions(repo, client, repo_path, bootstrap, None)
             .await
             .context("bootstrap hosted discussions")?;
     }
@@ -378,8 +369,8 @@ pub async fn bootstrap_discussions_scoped(
 }
 
 /// Apply one already-received repo event into the local op-log and advance
-/// the audience-scoped watermark. Opened/resolved always fetch; an
-/// already-mirrored append may apply from the event.
+/// the audience-scoped watermark. Every discussion event fetches the
+/// authorized snapshot before applying it.
 pub async fn consume_discussion_event(
     repo: &Repository,
     client: &mut HostedClient,
@@ -444,23 +435,7 @@ async fn apply_discussion_event(
         });
     };
 
-    let already_mirrored = discussion_is_mirrored(repo.heddle_dir(), repo_path, &discussion_id)?;
-    let hosted = if event.event_type == "turn.appended" {
-        if let Some(discussion) = append_from_payload(&payload, already_mirrored) {
-            discussion
-        } else {
-            match fetch_hosted_discussion(client, repo_path, event, &discussion_id, &payload)
-                .await?
-            {
-                Some(discussion) => discussion,
-                None => {
-                    return Ok(DiscussionEventOutcome::Skipped {
-                        reason: format!("discussion {discussion_id} is not visible to this caller"),
-                    });
-                }
-            }
-        }
-    } else {
+    let hosted =
         match fetch_hosted_discussion(client, repo_path, event, &discussion_id, &payload).await? {
             Some(discussion) => discussion,
             None => {
@@ -468,8 +443,7 @@ async fn apply_discussion_event(
                     reason: format!("discussion {discussion_id} is not visible to this caller"),
                 });
             }
-        }
-    };
+        };
 
     match apply_hosted_discussion(
         repo,
@@ -479,11 +453,22 @@ async fn apply_discussion_event(
     ) {
         Ok(true) => Ok(DiscussionEventOutcome::Applied { discussion_id }),
         Ok(false) => Ok(DiscussionEventOutcome::Unchanged { discussion_id }),
+        Err(error) if is_invalid_hosted_discussion(&error) => Ok(DiscussionEventOutcome::Skipped {
+            reason: format!(
+                "could not materialize malformed hosted discussion {discussion_id}: {error:#}"
+            ),
+        }),
         Err(error) => Err(error).context(format!(
             "could not materialize hosted discussion {discussion_id} after {}",
             event.event_type
         )),
     }
+}
+
+fn is_invalid_hosted_discussion(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<CollaborationCodecError>().is_some())
 }
 
 /// `Ok(None)` is a visibility/NotFound skip. Other errors stay fatal.
@@ -526,13 +511,6 @@ fn is_hidden_discussion(error: &wire::ProtocolError) -> bool {
 #[derive(Debug, Default)]
 struct EventPayload {
     discussion_id: Option<String>,
-    turn_id: Option<String>,
-    turn_seq: u64,
-    /// Untrimmed. `None` when missing or whitespace-only (emptiness test).
-    body: Option<String>,
-    author_name: Option<String>,
-    author_email: Option<String>,
-    posted_at_secs: i64,
     opened_against_state: Option<StateId>,
 }
 
@@ -546,53 +524,11 @@ fn parse_event_payload(event: &RepoEvent) -> EventPayload {
     };
     EventPayload {
         discussion_id: string_field(&value, "discussion_id"),
-        turn_id: string_field(&value, "turn_id"),
-        turn_seq: u64_field(&value, "turn_seq").unwrap_or(0),
-        body: body_field(&value),
-        author_name: string_field(&value, "author_name"),
-        author_email: string_field(&value, "author_email"),
-        posted_at_secs: i64_field(&value, "posted_at").unwrap_or(0),
         opened_against_state: value
             .get("opened_against_state")
             .and_then(parse_state_id)
             .or_else(|| event.new_state.as_ref().and_then(proto_state_id)),
     }
-}
-
-/// Already-mirrored append with minted identity and a real body.
-/// Never mints Open. Author and posted_at must both be present; otherwise fetch.
-fn append_from_payload(payload: &EventPayload, already_mirrored: bool) -> Option<HostedDiscussion> {
-    if !already_mirrored {
-        return None;
-    }
-    let discussion_id = payload.discussion_id.clone()?;
-    let body = payload.body.clone()?;
-    if payload.turn_id.is_none() || payload.turn_seq == 0 {
-        return None;
-    }
-    let author_name = payload.author_name.clone()?;
-    if payload.posted_at_secs <= 0 {
-        return None;
-    }
-    Some(HostedDiscussion {
-        id: discussion_id,
-        file: String::new(),
-        symbol: String::new(),
-        opened_against_state: None,
-        visibility: String::new(),
-        thread_ref: None,
-        thread_id: None,
-        turns: vec![HostedDiscussionTurn {
-            author_name,
-            author_email: payload.author_email.clone().unwrap_or_default(),
-            body,
-            posted_at_secs: payload.posted_at_secs,
-            turn_id: payload.turn_id.clone().unwrap_or_default(),
-            turn_seq: payload.turn_seq,
-        }],
-        resolution: HostedResolution::Open,
-        kind: 0,
-    })
 }
 
 fn string_field(value: &serde_json::Value, name: &str) -> Option<String> {
@@ -602,33 +538,6 @@ fn string_field(value: &serde_json::Value, name: &str) -> Option<String> {
         .map(str::trim)
         .filter(|field| !field.is_empty())
         .map(ToString::to_string)
-}
-
-fn body_field(value: &serde_json::Value) -> Option<String> {
-    let body = value.get("body")?.as_str()?;
-    if body.trim().is_empty() {
-        None
-    } else {
-        Some(body.to_string())
-    }
-}
-
-fn u64_field(value: &serde_json::Value, name: &str) -> Option<u64> {
-    value.get(name).and_then(|field| {
-        field
-            .as_u64()
-            .or_else(|| field.as_i64().and_then(|n| u64::try_from(n).ok()))
-            .or_else(|| field.as_str()?.parse().ok())
-    })
-}
-
-fn i64_field(value: &serde_json::Value, name: &str) -> Option<i64> {
-    value.get(name).and_then(|field| {
-        field
-            .as_i64()
-            .or_else(|| field.as_u64().and_then(|n| i64::try_from(n).ok()))
-            .or_else(|| field.as_str()?.parse().ok())
-    })
 }
 
 fn parse_state_id(value: &serde_json::Value) -> Option<StateId> {
