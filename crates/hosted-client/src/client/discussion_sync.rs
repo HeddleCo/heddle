@@ -12,7 +12,10 @@
 //!   signed). #549 rejects attachments in the pack, so they cannot ride it.
 //! * **Pull/clone (read path):** after a successful clone/pull, consume the
 //!   pull bootstrap's discussions when present, falling back to `ListByState`
-//!   for older servers, and materialize unseen turns into the local op-log.
+//!   for older servers and when the server advertised `discussions_from_pack`
+//!   but this client cannot consume the attachment (missing / wrong kind /
+//!   version skew). Live discussions are not a pack snapshot. Materialize
+//!   unseen turns into the local op-log.
 //!
 //! ## Turn identity
 //!
@@ -497,14 +500,19 @@ async fn push_into_annotation_resolution(
     Ok(true)
 }
 
-/// Fetch hosted discussions for the repository head and materialize any turns we
-/// do not already hold. Saves the mirror after each discussion and continues
-/// past a per-discussion failure.
+/// Fetch hosted discussions for `against` (or repository HEAD) and materialize
+/// any turns we do not already hold. Saves the mirror after each discussion
+/// and continues past a per-discussion failure.
+///
+/// `against` is the pulled/cloned tip. Clone publishes HEAD only after this
+/// call, and `heddle pull feature --local-thread feature` leaves HEAD on the
+/// current checkout — ListByState must not re-read HEAD.
 pub async fn pull_discussions(
     repo: &Repository,
     client: &mut HostedClient,
     repo_path: &str,
     bootstrap: Option<&[Discussion]>,
+    against: Option<StateId>,
 ) -> Result<usize> {
     // Hosted discussions arrive as server-minted `Discussions` state-attachments
     // on the pulled objects. Those are the transport form of what we
@@ -515,8 +523,9 @@ pub async fn pull_discussions(
     // legacy discussions, and existing repos already hold the marker.
     mark_legacy_discussions_migrated(repo).context("claim legacy discussion migration marker")?;
 
-    let Some(head_state) = repo.head().context("resolve repository head")? else {
-        // weft#638: a repo with no HEAD cannot resolve a state to list against.
+    let Some(head_state) = discussion_sync_state(repo, against)? else {
+        // weft#638: a repo with no HEAD cannot resolve a state to list against
+        // unless the caller passed the pulled/cloned tip.
         return Ok(0);
     };
     let Some(state) = repo
@@ -528,6 +537,10 @@ pub async fn pull_discussions(
     };
     let change_id = state.change_id;
 
+    // `None` is ListByState: older servers, or `discussions_from_pack`
+    // advertised a snapshot this client cannot consume (missing attachment /
+    // version skew). `Some` is the packed or inline bootstrap set, including
+    // an explicit empty page.
     let hosted = match bootstrap {
         Some(discussions) => discussions
             .iter()
@@ -576,6 +589,15 @@ pub async fn pull_discussions(
     }
 
     Ok(changed)
+}
+
+/// Prefer the pulled/cloned tip. HEAD is wrong on clone (not published yet)
+/// and on `pull --local-thread` into a thread that is not checked out.
+fn discussion_sync_state(repo: &Repository, against: Option<StateId>) -> Result<Option<StateId>> {
+    match against {
+        Some(state) => Ok(Some(state)),
+        None => repo.head().context("resolve repository head"),
+    }
 }
 
 fn hosted_discussion_from_bootstrap(discussion: Discussion) -> HostedDiscussion {
@@ -1000,6 +1022,25 @@ mod tests {
         assert!(turns.iter().all(|t| t.is_self));
     }
 
+    #[test]
+    fn discussion_sync_state_prefers_the_pulled_tip_over_head() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
+        let first = repo.snapshot(Some("first".to_string()), None).unwrap().id();
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() { 1 }\n").unwrap();
+        let second = repo
+            .snapshot(Some("second".to_string()), None)
+            .unwrap()
+            .id();
+        assert_eq!(repo.head().unwrap(), Some(second));
+        assert_eq!(
+            discussion_sync_state(&repo, Some(first)).unwrap(),
+            Some(first)
+        );
+        assert_eq!(discussion_sync_state(&repo, None).unwrap(), Some(second));
+    }
+
     // F3: no local principal ⇒ turns are NOT treated as ours (fail closed).
     #[test]
     fn collect_local_turns_fails_closed_without_self_principal() {
@@ -1072,15 +1113,27 @@ mod tests {
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
 
         assert_eq!(
-            pull_discussions(&repo, &mut client, "acme/widgets", Some(&bootstrap))
-                .await
-                .unwrap(),
+            pull_discussions(
+                &repo,
+                &mut client,
+                "acme/widgets",
+                Some(&bootstrap),
+                Some(state)
+            )
+            .await
+            .unwrap(),
             1
         );
         assert_eq!(
-            pull_discussions(&repo, &mut client, "acme/widgets", Some(&bootstrap))
-                .await
-                .unwrap(),
+            pull_discussions(
+                &repo,
+                &mut client,
+                "acme/widgets",
+                Some(&bootstrap),
+                Some(state)
+            )
+            .await
+            .unwrap(),
             0
         );
         assert!(mirror_path(repo.heddle_dir()).is_file());

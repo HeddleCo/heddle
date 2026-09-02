@@ -49,7 +49,9 @@ mod tests {
             assert!(packable.packable_for_push(), "{packable:?} push");
             assert!(packable.packable_for_pull(), "{packable:?} pull");
         }
-        // The attachment record: excluded from the push pack, kept on pull.
+        // The attachment record: excluded from the push pack. The pull
+        // predicate stays true so planners still list it; weft delivers the
+        // record on Frame::StateAttachment, not in the native pack.
         assert!(!ObjectType::StateAttachment.packable_for_push());
         assert!(ObjectType::StateAttachment.packable_for_pull());
     }

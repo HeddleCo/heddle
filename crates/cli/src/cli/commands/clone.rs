@@ -1766,7 +1766,8 @@ async fn clone_network_connected(
             &local_repo,
             client,
             repo_path,
-            Some(bootstrap.discussions.as_slice()),
+            bootstrap.discussions.as_deref(),
+            Some(final_state),
         )
         .await
         {
@@ -2007,7 +2008,8 @@ async fn recover_interrupted_clone_connected(
         &repo,
         client,
         &intent.repository,
-        Some(bootstrap.discussions.as_slice()),
+        bootstrap.discussions.as_deref(),
+        Some(final_state),
     )
     .await
     {
