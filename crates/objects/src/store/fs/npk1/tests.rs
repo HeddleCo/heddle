@@ -5,7 +5,10 @@ use std::{num::NonZeroUsize, sync::Arc};
 use proptest::prelude::*;
 use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
-use super::{CHECKSUM_CHUNK_BYTES, CHECKSUM_LEN, MAX_CHAIN_DEPTH, Npk1Pack, TRAILER_HEADER_LEN};
+use super::{
+    CHECKSUM_CHUNK_BYTES, CHECKSUM_LEN, MAX_CHAIN_DEPTH, Npk1Pack, TRAILER_HEADER_LEN, VERSION,
+    codec::{decoded_record_blocks, reset_decoded_record_blocks},
+};
 use crate::{
     object::{Attribution, ContentHash, Principal, SpoolId, State, StateId, Tree, TreeEntry},
     store::{
@@ -131,6 +134,51 @@ fn pack_roundtrip_direct_lookup_and_loose_coexistence() {
             .expect("read old packed tree"),
         Some(trees[3].clone())
     );
+}
+
+#[test]
+fn version_one_pack_without_a_record_dictionary_still_roundtrips() {
+    let (_temp, store) = store();
+    let tree = related_tree(3, 16);
+    store.put_tree(&tree).expect("put v1 fixture tree");
+    repack(&store);
+    let path = only_npk1_path(&store);
+    let mut bytes = std::fs::read(&path).expect("read v2 fixture pack");
+    let records_offset =
+        u64::from_le_bytes(bytes[32..40].try_into().expect("records offset")) as usize;
+    let dictionary_offset =
+        u64::from_le_bytes(bytes[56..64].try_into().expect("record dictionary offset")) as usize;
+    assert_eq!(
+        dictionary_offset, records_offset,
+        "fixture has no dictionary"
+    );
+    bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+    bytes[56..64].fill(0);
+    let trailer_offset =
+        u64::from_le_bytes(bytes[48..56].try_into().expect("trailer offset")) as usize;
+    refresh_checksum_manifest(&mut bytes, trailer_offset);
+    std::fs::write(&path, bytes).expect("write checksummed v1 fixture");
+
+    let pack = Npk1Pack::open(&path).expect("open v1 pack");
+    assert_eq!(pack.resolve(&tree.hash()).expect("resolve v1 tree"), tree);
+}
+
+#[test]
+fn direct_lookup_decodes_only_the_selected_record_block() {
+    let (_temp, store) = store();
+    let tree = related_tree(7, 300);
+    store.put_tree(&tree).expect("put multi-block tree");
+    repack(&store);
+    let pack = Npk1Pack::open(&only_npk1_path(&store)).expect("open multi-block pack");
+    let wanted = tree.entries()[200].clone();
+
+    reset_decoded_record_blocks();
+    assert_eq!(
+        pack.lookup(&tree.hash(), wanted.name())
+            .expect("direct block lookup"),
+        Some(wanted)
+    );
+    assert_eq!(decoded_record_blocks(), 1);
 }
 
 #[test]
@@ -386,10 +434,23 @@ fn direct_lookup_verifies_only_the_touched_record_chunks() {
 
     let path = only_npk1_path(&store);
     let mut bytes = std::fs::read(&path).expect("read NPK1");
+    assert_eq!(
+        u32::from_le_bytes(bytes[4..8].try_into().expect("pack version")),
+        VERSION
+    );
     let object_count = u32::from_le_bytes(bytes[8..12].try_into().expect("object count")) as usize;
     let records_offset =
         u64::from_le_bytes(bytes[32..40].try_into().expect("records offset")) as usize;
     let index_offset = u64::from_le_bytes(bytes[40..48].try_into().expect("index offset")) as usize;
+    let dictionary_offset =
+        u64::from_le_bytes(bytes[56..64].try_into().expect("record dictionary offset")) as usize;
+    #[cfg(feature = "zstd")]
+    assert!(
+        dictionary_offset < records_offset,
+        "large v2 fixture must carry a trained record dictionary"
+    );
+    #[cfg(not(feature = "zstd"))]
+    assert_eq!(dictionary_offset, records_offset);
     let entries_start = index_offset + 16 + 256 * 4;
     let offsets_start = entries_start + object_count * 36;
     let indexed_hash = |ordinal: u32| {
