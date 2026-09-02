@@ -10,7 +10,8 @@ use tempfile::TempDir;
 
 use super::{
     DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventCursor, DiscussionEventOutcome,
-    audience_cursor_scope, bootstrap_discussions, consume_discussion_event,
+    audience_cursor_scope, bootstrap_discussions, bootstrap_discussions_scoped,
+    consume_discussion_event,
     consume_discussion_event_scoped, is_discussion_event, load_cursor, load_scoped_cursor,
     paired_thread_scope, parse_event_payload, save_cursor, save_scoped_cursor, subscribe_request,
 };
@@ -1698,6 +1699,161 @@ async fn bootstrap_claims_legacy_migration_marker_before_local_import() {
     assert!(
         report.is_none(),
         "pull_discussions must claim the legacy marker so Wait cannot convert server-minted attachments first"
+    );
+
+    client.close().await;
+    server.await.unwrap();
+}
+
+fn proto_discussion_on_thread(
+    id: &str,
+    thread_ref: &str,
+    turns: &[(&str, &str, u64)],
+) -> ProtoDiscussion {
+    let mut discussion = proto_discussion(id, turns);
+    discussion.thread_ref = thread_ref.to_string();
+    discussion
+}
+
+#[tokio::test]
+async fn thread_scoped_bootstrap_does_not_import_another_thread_ref() {
+    let foo = proto_discussion_on_thread("disc-foo", "foo", &[("turn-foo", "from foo", 1)]);
+    let bar = proto_discussion_on_thread("disc-bar", "bar", &[("turn-bar", "from bar", 1)]);
+
+    let (_temp_scoped, repo_scoped) = seed_repo();
+    let fixture = CollaborationFixture {
+        list: vec![foo.clone(), bar.clone()],
+        ..CollaborationFixture::default()
+    };
+    let (mut client, server, fixture) =
+        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
+
+    let scoped = DiscussionCursorScope {
+        repo_path: "acme/widgets".into(),
+        thread: "foo".into(),
+        thread_id: "thr-foo".into(),
+        ..DiscussionCursorScope::default()
+    };
+    bootstrap_discussions_scoped(&repo_scoped, &mut client, "acme/widgets", &scoped, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        *fixture
+            .list_requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()),
+        1,
+        "thread-scoped wait must reuse ListByState, not a second list RPC"
+    );
+
+    let scoped_store = CollaborationStore::open(repo_scoped.heddle_dir()).unwrap();
+    let scoped_discussions = scoped_store.materialize().unwrap().discussions;
+    assert_eq!(
+        scoped_discussions.len(),
+        1,
+        "wait --thread foo must not materialize bar-thread discussions"
+    );
+    let only = scoped_discussions.into_values().next().unwrap();
+    assert_eq!(only.thread_ref.as_deref(), Some("foo"));
+    assert_eq!(only.turns[0].1.body, "from foo");
+
+    let (_temp_all, repo_all) = seed_repo();
+    bootstrap_discussions(&repo_all, &mut client, "acme/widgets", None)
+        .await
+        .unwrap();
+    let all_store = CollaborationStore::open(repo_all.heddle_dir()).unwrap();
+    let mut bodies: Vec<_> = all_store
+        .materialize()
+        .unwrap()
+        .discussions
+        .into_values()
+        .map(|discussion| discussion.turns[0].1.body)
+        .collect();
+    bodies.sort();
+    assert_eq!(
+        bodies,
+        ["from bar".to_string(), "from foo".to_string()],
+        "unfiltered wait still imports every thread at HEAD"
+    );
+
+    client.close().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn thread_scoped_pull_fold_bootstrap_stays_repo_wide() {
+    let (_temp, repo) = seed_repo();
+    let head = repo.head().unwrap().unwrap();
+    let bootstrap = vec![
+        objects::object::Discussion {
+            id: "disc-foo".to_string(),
+            anchor: objects::object::SymbolAnchor::new("lib.rs", "run"),
+            opened_against_state: head,
+            opened_at: 1_700_000_000,
+            thread_ref: Some("foo".to_string()),
+            turns: vec![objects::object::DiscussionTurn {
+                author: Principal::new("Ada", "ada@example.com"),
+                body: "from foo".to_string(),
+                posted_at: 1_700_000_000,
+                references: Vec::new(),
+            }],
+            resolution: objects::object::DiscussionResolution::Open,
+            body_changed_since_open: false,
+            anchor_ambiguous: false,
+            orphaned: false,
+            visibility: objects::object::VisibilityTier::Internal,
+            resolved_annotation_id: None,
+        },
+        objects::object::Discussion {
+            id: "disc-bar".to_string(),
+            anchor: objects::object::SymbolAnchor::new("lib.rs", "run"),
+            opened_against_state: head,
+            opened_at: 1_700_000_000,
+            thread_ref: Some("bar".to_string()),
+            turns: vec![objects::object::DiscussionTurn {
+                author: Principal::new("Ada", "ada@example.com"),
+                body: "from bar".to_string(),
+                posted_at: 1_700_000_000,
+                references: Vec::new(),
+            }],
+            resolution: objects::object::DiscussionResolution::Open,
+            body_changed_since_open: false,
+            anchor_ambiguous: false,
+            orphaned: false,
+            visibility: objects::object::VisibilityTier::Internal,
+            resolved_annotation_id: None,
+        },
+    ];
+    let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+    let scoped = DiscussionCursorScope {
+        repo_path: "acme/widgets".into(),
+        thread: "foo".into(),
+        thread_id: "thr-foo".into(),
+        ..DiscussionCursorScope::default()
+    };
+    bootstrap_discussions_scoped(
+        &repo,
+        &mut client,
+        "acme/widgets",
+        &scoped,
+        Some(&bootstrap),
+    )
+    .await
+    .unwrap();
+
+    let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+    let mut bodies: Vec<_> = store
+        .materialize()
+        .unwrap()
+        .discussions
+        .into_values()
+        .map(|discussion| discussion.turns[0].1.body)
+        .collect();
+    bodies.sort();
+    assert_eq!(
+        bodies,
+        ["from bar".to_string(), "from foo".to_string()],
+        "clone/pull fold stays repo-wide even when the wait cursor is thread-scoped"
     );
 
     client.close().await;

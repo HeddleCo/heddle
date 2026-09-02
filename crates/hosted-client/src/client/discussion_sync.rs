@@ -81,7 +81,7 @@ use objects::{
     fs_atomic::write_file_atomic,
     lock::RepoLock,
     object::{
-        Attribution, CollabOpId, CollaborationAnchor, CollaborationIdempotencyKey,
+        Attribution, ChangeId, CollabOpId, CollaborationAnchor, CollaborationIdempotencyKey,
         CollaborationOperationBodyV1, CollaborationOperationEnvelope, CollaborationResolution,
         Discussion, DiscussionRecordId, DiscussionTurnV1, MaterializedDiscussion, Principal,
         StateId, VisibilityTier,
@@ -574,6 +574,11 @@ async fn push_into_annotation_resolution(
 /// `against` is the pulled/cloned tip. Clone publishes HEAD only after this
 /// call, and `heddle pull feature --local-thread feature` leaves HEAD on the
 /// current checkout — ListByState must not re-read HEAD.
+///
+/// Repo-wide: clone/pull and unfiltered `discuss wait`. Hosted discussions
+/// arrive as server-minted `Discussions` state-attachments; we claim the
+/// one-shot legacy blob→op-log marker so those attachments are not also
+/// converted (duplicates / multi-turn diverge).
 pub async fn pull_discussions(
     repo: &Repository,
     client: &mut HostedClient,
@@ -581,13 +586,35 @@ pub async fn pull_discussions(
     bootstrap: Option<&[Discussion]>,
     against: Option<StateId>,
 ) -> Result<usize> {
-    // Hosted discussions arrive as server-minted `Discussions` state-attachments
-    // on the pulled objects. Those are the transport form of what we
-    // authoritatively re-materialize below via the CollaborationService RPCs —
-    // so claim the one-shot legacy blob->op-log migration marker to keep it from
-    // also converting them (which would duplicate every discussion and diverge
-    // on multi-turn supersede history). Fresh clones have no genuine local
-    // legacy discussions, and existing repos already hold the marker.
+    pull_discussions_filtered(repo, client, repo_path, bootstrap, against, None).await
+}
+
+/// Wait `--thread` bootstrap: same ListByState RPC, then keep only discussions
+/// whose `thread_ref` matches the paired thread name or stable id.
+///
+/// `ListDiscussionsByStateRequest` has no thread fields (heddle-api 0.23.0).
+/// Do not call `ListByThreadRef` — that would be a second list RPC.
+/// Pull-fold `Some(discussions)` stays repo-wide: clone/pull must not shrink.
+pub async fn pull_discussions_for_thread(
+    repo: &Repository,
+    client: &mut HostedClient,
+    repo_path: &str,
+    bootstrap: Option<&[Discussion]>,
+    thread: &str,
+    thread_id: &str,
+) -> Result<usize> {
+    let filter = (!thread.is_empty() || !thread_id.is_empty()).then_some((thread, thread_id));
+    pull_discussions_filtered(repo, client, repo_path, bootstrap, None, filter).await
+}
+
+async fn pull_discussions_filtered(
+    repo: &Repository,
+    client: &mut HostedClient,
+    repo_path: &str,
+    bootstrap: Option<&[Discussion]>,
+    against: Option<StateId>,
+    thread_filter: Option<(&str, &str)>,
+) -> Result<usize> {
     mark_legacy_discussions_migrated(repo).context("claim legacy discussion migration marker")?;
 
     let Some(head_state) = discussion_sync_state(repo, against)? else {
@@ -604,21 +631,8 @@ pub async fn pull_discussions(
     };
     let change_id = state.change_id;
 
-    // `None` is ListByState: older servers, or `discussions_from_pack`
-    // advertised a snapshot this client cannot consume (missing attachment /
-    // version skew). `Some` is the packed or inline bootstrap set, including
-    // an explicit empty page.
-    let hosted = match bootstrap {
-        Some(discussions) => discussions
-            .iter()
-            .cloned()
-            .map(hosted_discussion_from_bootstrap)
-            .collect(),
-        None => client
-            .list_discussions_by_state(repo_path, change_id, "all")
-            .await
-            .context("list hosted discussions")?,
-    };
+    let hosted =
+        listed_hosted_discussions(client, repo_path, change_id, bootstrap, thread_filter).await?;
     if hosted.is_empty() {
         return Ok(0);
     }
@@ -666,6 +680,52 @@ fn discussion_sync_state(repo: &Repository, against: Option<StateId>) -> Result<
         Some(state) => Ok(Some(state)),
         None => repo.head().context("resolve repository head"),
     }
+}
+
+async fn listed_hosted_discussions(
+    client: &mut HostedClient,
+    repo_path: &str,
+    change_id: ChangeId,
+    bootstrap: Option<&[Discussion]>,
+    thread_filter: Option<(&str, &str)>,
+) -> Result<Vec<HostedDiscussion>> {
+    // Pull-fold attachments are clone/pull's repo-wide snapshot. Never shrink
+    // that set for wait `--thread` — wait's filtered path always passes None.
+    let hosted = match bootstrap {
+        Some(discussions) => discussions
+            .iter()
+            .cloned()
+            .map(hosted_discussion_from_bootstrap)
+            .collect(),
+        None => {
+            let listed = client
+                .list_discussions_by_state(repo_path, change_id, "all")
+                .await
+                .context("list hosted discussions")?;
+            match thread_filter {
+                Some((thread, thread_id)) => listed
+                    .into_iter()
+                    .filter(|discussion| {
+                        discussion_matches_wait_thread(discussion, thread, thread_id)
+                    })
+                    .collect(),
+                None => listed,
+            }
+        }
+    };
+    Ok(hosted)
+}
+
+fn discussion_matches_wait_thread(
+    discussion: &HostedDiscussion,
+    thread: &str,
+    thread_id: &str,
+) -> bool {
+    let Some(thread_ref) = discussion.thread_ref.as_deref() else {
+        return false;
+    };
+    (!thread.is_empty() && thread_ref == thread)
+        || (!thread_id.is_empty() && thread_ref == thread_id)
 }
 
 /// Import one already-fetched hosted discussion into the local op-log.
@@ -1648,6 +1708,28 @@ mod tests {
             }],
             resolution,
         }
+    }
+
+    #[test]
+    fn wait_thread_filter_matches_name_or_stamped_id() {
+        let mut discussion = hosted("disc-1", "first", "turn-1", HostedResolution::Open);
+        discussion.thread_ref = Some("foo".to_string());
+        assert!(discussion_matches_wait_thread(
+            &discussion, "foo", "thr-foo"
+        ));
+        assert!(!discussion_matches_wait_thread(
+            &discussion, "bar", "thr-bar"
+        ));
+        discussion.thread_ref = Some("thr-foo".to_string());
+        assert!(
+            discussion_matches_wait_thread(&discussion, "foo", "thr-foo"),
+            "weft may stamp the stable id in thread_ref"
+        );
+        discussion.thread_ref = None;
+        assert!(
+            !discussion_matches_wait_thread(&discussion, "foo", "thr-foo"),
+            "untagged discussions are not this thread"
+        );
     }
 
     #[test]

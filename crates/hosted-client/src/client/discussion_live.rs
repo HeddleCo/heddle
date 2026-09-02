@@ -7,7 +7,9 @@
 //!
 //! 1. Bootstrap a fresh clone via [`super::discussion_sync::pull_discussions`]
 //!    (pull-bootstrap discussions when present, otherwise `ListByState` — the
-//!    same non-fatal path #1642 falls back to).
+//!    same non-fatal path #1642 falls back to). A `--thread` wait filters
+//!    that ListByState snapshot by `thread_ref` before apply; clone/pull
+//!    pull-fold stays repo-wide.
 //! 2. Subscribe from the persisted client watermark (`after_event_id`).
 //! 3. Treat live events as doorbells. `GetDiscussion` is the snapshot for
 //!    `discussion.opened` / `discussion.resolved` and for any append whose
@@ -38,7 +40,10 @@ use repo::Repository;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    discussion_sync::{apply_hosted_discussion, discussion_is_mirrored, pull_discussions},
+    discussion_sync::{
+        apply_hosted_discussion, discussion_is_mirrored, pull_discussions,
+        pull_discussions_for_thread,
+    },
     repo_events::{
         RepoEvent, RepoEventClient, RepoEventError, RepoEventSubscription, SubscribeRepoEventsRequest,
     },
@@ -322,6 +327,9 @@ pub async fn bootstrap_discussions(
 }
 
 /// Snapshot bootstrap, writing the bootstrapped flag on `scope`'s cursor.
+///
+/// A filtered scope (wait `--thread`) ListByState-filters by `thread_ref`
+/// before apply. Pull-fold `Some(discussions)` stays repo-wide.
 pub async fn bootstrap_discussions_scoped(
     repo: &Repository,
     client: &mut HostedClient,
@@ -338,9 +346,22 @@ pub async fn bootstrap_discussions_scoped(
             "cannot bootstrap hosted discussions without a repository HEAD"
         ));
     }
-    pull_discussions(repo, client, repo_path, bootstrap)
+    if scope.is_filtered() {
+        pull_discussions_for_thread(
+            repo,
+            client,
+            repo_path,
+            bootstrap,
+            &scope.thread,
+            &scope.thread_id,
+        )
         .await
-        .context("bootstrap hosted discussions")?;
+        .context("bootstrap hosted discussions for thread")?;
+    } else {
+        pull_discussions(repo, client, repo_path, bootstrap)
+            .await
+            .context("bootstrap hosted discussions")?;
+    }
     let _guard = lock_cursor_write(repo.heddle_dir())?;
     let mut cursor = load_scoped_cursor(repo.heddle_dir(), scope)?;
     cursor.bootstrapped = true;
