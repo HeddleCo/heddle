@@ -392,6 +392,7 @@ async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) ->
         repo_path: repo_path.clone(),
         thread: thread_name.clone(),
         thread_id: thread_id.clone(),
+        principal: client.authenticated_username().unwrap_or_default(),
     };
     if let Some(after) = args.after {
         let mut cursor = load_scoped_cursor(repo.heddle_dir(), &cursor_scope)?;

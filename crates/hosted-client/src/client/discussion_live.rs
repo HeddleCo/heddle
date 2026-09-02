@@ -127,11 +127,13 @@ fn save_cursors(heddle_dir: &Path, cursors: &CursorFile) -> Result<()> {
 
 /// Subscription identity for the durable event cursor.
 ///
-/// Unfiltered waits (no thread filter, no authority) keep the legacy
-/// `repo_path` slot so existing files keep working. A filtered wait must
-/// never share that slot: skipping bar-thread events and then advancing a
-/// repo-wide watermark would leave an unfiltered `discuss wait` permanently
-/// past them.
+/// Unfiltered waits (no thread filter, no authority, no principal) keep the
+/// legacy `repo_path` slot so existing files keep working. A filtered wait
+/// must never share that slot: skipping bar-thread events and then advancing
+/// a repo-wide watermark would leave an unfiltered `discuss wait` permanently
+/// past them. Authenticated principals also get their own slot — the server
+/// filters events by audience, so Alice skipping a restricted event must not
+/// advance Bob's cursor past it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiscussionCursorScope {
     /// Hosted authority (`host:port`). Empty for tests that only have a path.
@@ -139,6 +141,9 @@ pub struct DiscussionCursorScope {
     pub repo_path: String,
     pub thread: String,
     pub thread_id: String,
+    /// Authenticated hosted subject (`principal:<name>` without the prefix).
+    /// Empty for unsigned/anonymous clients and the legacy unfiltered helper.
+    pub principal: String,
 }
 
 impl DiscussionCursorScope {
@@ -160,11 +165,18 @@ impl DiscussionCursorScope {
             &self.repo_path,
             &self.thread,
             &self.thread_id,
+            &self.principal,
         )
     }
 }
 
-fn cursor_slot(authority: &str, repo_path: &str, thread: &str, thread_id: &str) -> String {
+fn cursor_slot(
+    authority: &str,
+    repo_path: &str,
+    thread: &str,
+    thread_id: &str,
+    principal: &str,
+) -> String {
     let mut key = String::new();
     if !authority.is_empty() {
         key.push_str(authority);
@@ -176,6 +188,10 @@ fn cursor_slot(authority: &str, repo_path: &str, thread: &str, thread_id: &str) 
         key.push_str(thread);
         key.push_str("\nthread_id=");
         key.push_str(thread_id);
+    }
+    if !principal.is_empty() {
+        key.push_str("\nprincipal=");
+        key.push_str(principal);
     }
     key
 }
@@ -522,10 +538,14 @@ fn discussion_from_payload(
 }
 
 fn payload_has_anchor(payload: &EventPayload) -> bool {
-    payload
-        .file
-        .as_deref()
-        .is_some_and(|file| !file.is_empty())
+    // file+symbol names a code-anchored discussion; the event state is the
+    // other half. Missing opened_against_state / event.new_state must fetch
+    // — pull_one must not substitute the receiving clone's HEAD.
+    payload.opened_against_state.is_some()
+        && payload
+            .file
+            .as_deref()
+            .is_some_and(|file| !file.is_empty())
         && payload
             .symbol
             .as_deref()
@@ -567,6 +587,7 @@ fn hosted_from_payload(discussion_id: String, payload: &EventPayload) -> HostedD
         thread_ref: payload.thread_ref.clone(),
         turns,
         resolution: payload.resolution.clone(),
+        kind: 0,
     }
 }
 
@@ -680,6 +701,10 @@ impl<'a> DiscussionEventConsumer<'a> {
             repo_path: self.repo_path.clone(),
             thread: self.thread.clone(),
             thread_id: self.thread_id.clone(),
+            principal: self
+                .client
+                .authenticated_username()
+                .unwrap_or_default(),
         }
     }
 

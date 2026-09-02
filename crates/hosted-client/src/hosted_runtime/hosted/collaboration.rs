@@ -78,6 +78,9 @@ pub struct HostedDiscussion {
     pub thread_ref: Option<String>,
     pub turns: Vec<HostedDiscussionTurn>,
     pub resolution: HostedResolution,
+    /// Wire `Discussion.kind`. Unspecified is treated as code-anchored when
+    /// file+symbol are present; Coordination has no `PathSymbolRef`.
+    pub kind: i32,
 }
 
 fn decode_discussion(proto: ProtoDiscussion) -> HostedDiscussion {
@@ -91,6 +94,7 @@ fn decode_discussion(proto: ProtoDiscussion) -> HostedDiscussion {
             .and_then(|state| StateId::try_from_slice(&state.value).ok()),
         visibility: proto.visibility,
         thread_ref: (!proto.thread_ref.is_empty()).then_some(proto.thread_ref),
+        kind: proto.kind,
         turns: proto
             .turns
             .into_iter()

@@ -733,6 +733,7 @@ fn hosted_discussion_from_bootstrap(discussion: Discussion) -> HostedDiscussion 
                 HostedResolution::Dismissed { reason }
             }
         },
+        kind: 0,
     }
 }
 
@@ -785,11 +786,7 @@ fn pull_one(
                 return Ok(false);
             }
             let local_id = DiscussionRecordId::generate();
-            let anchor = CollaborationAnchor::Symbol {
-                state_id: discussion.opened_against_state.unwrap_or(head_state),
-                path: discussion.file.clone(),
-                symbol: discussion.symbol.clone(),
-            };
+            let anchor = hosted_open_anchor(discussion, head_state);
             let title = derive_title(&discussion.turns[0].body, &discussion.symbol);
             let visibility = parse_visibility_token(&discussion.visibility);
 
@@ -1035,6 +1032,27 @@ fn is_pushed_annotation_echo(
                     | CollaborationResolution::Annotation { .. }
             )
         )
+}
+
+fn hosted_open_anchor(
+    discussion: &HostedDiscussion,
+    head_state: StateId,
+) -> CollaborationAnchor {
+    use api::heddle::api::v1alpha1::DiscussionKind;
+
+    let kind = DiscussionKind::try_from(discussion.kind).unwrap_or(DiscussionKind::Unspecified);
+    let has_symbol = !discussion.file.is_empty() && !discussion.symbol.is_empty();
+    // Coordination has no PathSymbolRef. An empty-anchor fetch of any kind
+    // must still Open — failing validation here would not advance the
+    // watermark and every restart would die on the same event.
+    if kind == DiscussionKind::Coordination || !has_symbol {
+        return CollaborationAnchor::Repository;
+    }
+    CollaborationAnchor::Symbol {
+        state_id: discussion.opened_against_state.unwrap_or(head_state),
+        path: discussion.file.clone(),
+        symbol: discussion.symbol.clone(),
+    }
 }
 
 fn hosted_annotation_id(resolution: &HostedResolution) -> Option<&str> {
@@ -1619,6 +1637,7 @@ mod tests {
             opened_against_state: None,
             visibility: "internal".to_string(),
             thread_ref: None,
+            kind: 0,
             turns: vec![HostedDiscussionTurn {
                 author_name: "Ada".to_string(),
                 author_email: "ada@example.com".to_string(),
