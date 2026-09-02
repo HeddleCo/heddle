@@ -6,7 +6,7 @@ use std::{
     fs::OpenOptions,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -25,13 +25,18 @@ const CAPTURE_QUIET_PERIOD: Duration = Duration::from_millis(500);
 const MAX_CAPTURE_QUIET_WAIT: Duration = Duration::from_secs(30);
 static CAPTURED_REPOSITORIES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
+fn captured_repositories() -> MutexGuard<'static, Vec<PathBuf>> {
+    match CAPTURED_REPOSITORIES.lock() {
+        Ok(roots) => roots,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 pub(crate) fn note_committed_capture(repo: &Repository) {
     if repo.capability() != RepositoryCapability::NativeHeddle {
         return;
     }
-    let mut roots = CAPTURED_REPOSITORIES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut roots = captured_repositories();
     if !roots.iter().any(|root| root == repo.heddle_dir()) {
         roots.push(repo.heddle_dir().to_path_buf());
     }
@@ -49,9 +54,7 @@ pub fn automatic_repack_worker_root() -> Option<PathBuf> {
 
 pub fn spawn_pending_automatic_repack_workers() {
     let roots = {
-        let mut pending = CAPTURED_REPOSITORIES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut pending = captured_repositories();
         std::mem::take(&mut *pending)
     };
     let executable = match std::env::current_exe() {
