@@ -7,7 +7,8 @@ use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::{
     CompactError, decode_blob_frame, decode_state_frame, decode_tree_frame, encode_blob_frame,
-    encode_state_frame, encode_tree_frame, extract_state, extract_tree, is_state_frame,
+    encode_state_frame, encode_tree_frame, extract_blob, extract_state, extract_tree,
+    is_state_frame,
     state::{STATE_MAGIC, STATE_MAGIC_V1, encode_state_frame_hcs1},
 };
 use crate::object::{
@@ -400,6 +401,26 @@ fn blob_frame_round_trips_offsets_lengths_and_typed_hashes() {
         assert_eq!(*actual, expected);
         assert_eq!(*hash, ContentHash::compute_typed("blob", expected));
     }
+}
+
+#[test]
+fn blob_frame_extracts_one_borrowed_body() {
+    let bodies = [
+        b"newest blob".as_slice(),
+        b"middle blob with a different length".as_slice(),
+        b"oldest".as_slice(),
+    ];
+    let encoded = encode_blob_frame(&bodies).unwrap();
+    for expected in bodies {
+        let expected_hash = ContentHash::compute_typed("blob", expected);
+        let (actual_hash, actual) = extract_blob(&encoded, expected_hash).unwrap();
+        assert_eq!(actual_hash, expected_hash);
+        assert_eq!(actual, expected);
+    }
+    assert!(matches!(
+        extract_blob(&encoded, ContentHash::from_bytes([0xff; 32])).unwrap_err(),
+        CompactError::Missing
+    ));
 }
 
 #[test]
