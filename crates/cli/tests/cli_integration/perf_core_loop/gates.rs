@@ -9,6 +9,7 @@ use super::measurement::{CaseKind, CaseResult, NegativeControl};
 const WARM_CLEAN_STATUS_100K_P95_MS: f64 = 50.0;
 const ONE_PATH_STATUS_100K_P95_MS: f64 = 75.0;
 const ONE_PATH_CAPTURE_100K_P95_MS: f64 = 100.0;
+const ONE_PATH_CAPTURE_100K_MAX_OBJECT_DECODES: f64 = 1_010.0;
 const BOUNDED_LOCAL_READ_P95_MS: f64 = 100.0;
 
 #[derive(Deserialize)]
@@ -174,10 +175,17 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
     if let Some(capture_100k) = find(results, CaseKind::CaptureOne, 100_000) {
         let dirs = capture_100k.counter(|counters| counters.directories_scanned);
         let hashes = capture_100k.counter(|counters| counters.files_hashed);
+        let decodes = capture_100k.counter(|counters| counters.object_decodes);
         if dirs.p95 > 20.0 || hashes.max > 1.0 {
             failures.push(format!(
                 "warm structural gate: one-path capture @ 100k dirs p95 {:.0} (<=20), files hashed max {:.0} (<=1)",
                 dirs.p95, hashes.max
+            ));
+        }
+        if decodes.max > ONE_PATH_CAPTURE_100K_MAX_OBJECT_DECODES {
+            failures.push(format!(
+                "warm structural gate: one-path capture @ 100k object decodes max {:.0} (<= {:.0})",
+                decodes.max, ONE_PATH_CAPTURE_100K_MAX_OBJECT_DECODES
             ));
         }
     }
