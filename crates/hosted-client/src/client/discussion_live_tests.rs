@@ -1198,6 +1198,26 @@ async fn incomplete_resolve_without_resolution_doorbell_fetches() {
 #[tokio::test]
 async fn fat_append_with_turn_id_and_zero_seq_fetches_and_keeps_the_new_turn() {
     let (_temp, repo) = seed_repo();
+    let head = repo.head().unwrap().unwrap();
+    let bootstrap = vec![objects::object::Discussion {
+        id: "disc-zero".to_string(),
+        anchor: objects::object::SymbolAnchor::new("lib.rs", "run"),
+        opened_against_state: head,
+        opened_at: 1_700_000_000,
+        thread_ref: None,
+        turns: vec![objects::object::DiscussionTurn {
+            author: Principal::new("Ada", "ada@example.com"),
+            body: "first turn".to_string(),
+            posted_at: 1_700_000_000,
+            references: Vec::new(),
+        }],
+        resolution: objects::object::DiscussionResolution::Open,
+        body_changed_since_open: false,
+        anchor_ambiguous: false,
+        orphaned: false,
+        visibility: objects::object::VisibilityTier::Internal,
+        resolved_annotation_id: None,
+    }];
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
         "disc-zero".to_string(),
@@ -1211,15 +1231,9 @@ async fn fat_append_with_turn_id_and_zero_seq_fetches_and_keeps_the_new_turn() {
     );
     let (mut client, server, fixture) =
         crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
-
-    consume_discussion_event(
-        &repo,
-        &mut client,
-        "acme/widgets",
-        &opened_event(1, "disc-zero", "first turn", "turn-open"),
-    )
-    .await
-    .unwrap();
+    bootstrap_discussions(&repo, &mut client, "acme/widgets", Some(&bootstrap))
+        .await
+        .unwrap();
 
     let fat_zero = RepoEvent {
         event_id: 2,
@@ -1253,8 +1267,8 @@ async fn fat_append_with_turn_id_and_zero_seq_fetches_and_keeps_the_new_turn() {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .as_slice(),
-        ["disc-zero", "disc-zero"],
-        "opened doorbells; zero-seq append cannot use the fast path"
+        ["disc-zero"],
+        "already-mirrored zero-seq append cannot use the fast path"
     );
 
     let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
