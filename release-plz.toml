@@ -12,8 +12,13 @@ publish_allow_dirty = false
 
 # Publishable OSS crates — all release = true.
 [[package]]
+# Parked — not published to crates.io until the treadle stack is
+# actually built. Nothing in the heddle graph depends on it; its
+# first-publish 403'd (crates.io token can update existing heddle-*
+# crates but can't create a new crate) and blocked the whole 0.19
+# release. Stays a hosted/buildable workspace member.
 name = "treadle-schema"
-release = true
+release = false
 
 [[package]]
 name = "heddle-format"

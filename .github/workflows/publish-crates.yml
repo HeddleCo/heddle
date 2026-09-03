@@ -74,8 +74,13 @@ env:
   # No auto-discovery (cargo metadata --workspace --no-deps): implicit
   # `publish = true` in Cargo.toml is invisible at PR review time, and
   # accidentally flipping it would silently expand the public surface.
+  #
+  # treadle-schema is intentionally NOT listed here: it's hosted in
+  # the workspace (release-plz.toml release = false, Cargo.toml
+  # publish = false) but parked, not published. Its first-publish
+  # 403'd on crates.io (new-crate permission) and blocked the 0.19
+  # release for the 29 crates below, none of which depend on it.
   PUBLISHABLE_CRATES: |
-    treadle-schema
     heddle-format
     heddle-object-model
     heddle-fs-prims

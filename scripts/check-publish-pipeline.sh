@@ -439,7 +439,14 @@ for cm, toml in crates:
 # release-plz requires every [[package]] table to carry a package name. TOML
 # itself accepts an empty table, so parse and validate the typed shape here
 # rather than letting the next release run discover it.
+#
+# release_names covers every listed package (parked crates included) so
+# name/uniqueness/workspace-membership validation still applies to them.
+# publishable_release_names is the subset actually expected to reach
+# crates.io — it excludes `release = false` entries (parked: hosted in the
+# workspace, not published) — and is what PUBLISHABLE_CRATES must match.
 release_names = []
+publishable_release_names = []
 try:
     with open("release-plz.toml", "rb") as f:
         release_plz_toml = tomllib.load(f)
@@ -462,6 +469,8 @@ else:
                 errors.append(
                     f"release-plz.toml lists {name}, but no workspace package has that name"
                 )
+            if not (isinstance(package, dict) and package.get("release") is False):
+                publishable_release_names.append(name)
         if len(release_names) != len(set(release_names)):
             errors.append("release-plz.toml contains a duplicate package name")
         if release_names and not any(
@@ -493,12 +502,16 @@ if not publish_list:
     errors.append("could not parse PUBLISHABLE_CRATES from workflow")
 elif len(publish_positions) != len(publish_list):
     errors.append("PUBLISHABLE_CRATES contains a duplicate crate name")
-elif release_names != publish_list:
+elif publishable_release_names != publish_list:
     errors.append(
-        "release-plz.toml package order must exactly match PUBLISHABLE_CRATES"
+        "release-plz.toml's release = true package order must exactly match "
+        "PUBLISHABLE_CRATES (release = false parked crates are excluded from "
+        "both)"
     )
 else:
-    oks.append("release-plz.toml package order matches PUBLISHABLE_CRATES")
+    oks.append(
+        "release-plz.toml's release = true package order matches PUBLISHABLE_CRATES"
+    )
     dependency_pairs = 0
     order_pairs = 0
     # Versioned dev-dependencies are errors as well: they do not block
