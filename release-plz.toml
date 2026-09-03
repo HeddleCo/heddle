@@ -12,6 +12,10 @@ publish_allow_dirty = false
 
 # Publishable OSS crates — all release = true.
 [[package]]
+name = "treadle-schema"
+release = true
+
+[[package]]
 name = "heddle-format"
 release = true
 

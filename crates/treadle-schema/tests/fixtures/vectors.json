@@ -1,0 +1,83 @@
+{
+  "$comment": [
+    "Golden signing vectors for treadle-schema. These pin the canonical bytes",
+    "and the ed25519 signature preimage so a re-implementation in ANY language can",
+    "reproduce them exactly. The Rust test `tests/vectors.rs` recomputes every",
+    "field below from the named fixture and asserts equality.",
+    "",
+    "How to reproduce in another language:",
+    "  1. Build the body exactly as described by `canonical_bytes_utf8` (the bytes",
+    "     are serde_json over the struct in declaration order; every map is sorted;",
+    "     every absent Option / empty `secret_grants` is OMITTED, never null/[]).",
+    "  2. body_digest = 'b3:' + lowercase_hex(BLAKE3_256(canonical_bytes)).",
+    "  3. signing_preimage =",
+    "       domain_tag                    (the 21 bytes in signing_payload_version_tag_hex)",
+    "       || body_digest (ASCII)        (the 'b3:'+hex string)",
+    "       || 0x00",
+    "       || signer_kind (ASCII)        ('service_account' | 'delegated' | 'device')",
+    "       || 0x00",
+    "       || signed_at (ASCII)          (RFC3339)",
+    "       || 0x00",
+    "     where domain_tag = the 20 ASCII bytes 'heddle-ci-verdict-v2' + one NUL (0x00).",
+    "  4. signature = ed25519_sign(private_key, signing_preimage), lowercase hex.",
+    "  5. verify recomputes (2)+(3) and checks (4) against `public_key`.",
+    "",
+    "The test private key is a FIXED seed (NEVER use it for anything real):",
+    "  ed25519 seed = 0x01 repeated 32 times.",
+    "All `*_hex` fields are lowercase, no '0x' prefix, no separators."
+  ],
+  "schema_version": 2,
+  "signing_payload_version_tag_ascii": "heddle-ci-verdict-v2",
+  "signing_payload_version_tag_hex": "686564646c652d63692d766572646963742d763200",
+  "test_key": {
+    "kind": "ed25519",
+    "public_key_hex": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "seed_hex": "0101010101010101010101010101010101010101010101010101010101010101"
+  },
+  "vectors": [
+    {
+      "body_digest": "b3:993b1a126b4521684ed957390f10d3445f7b3e8d5c644ccbca1f6cff88544be5",
+      "canonical_bytes_utf8": "{\"schema_version\":2,\"repo\":\"heddle/core/heddle\",\"state\":{\"content_hash\":\"b3:9af2c0de\",\"change_id\":\"hd-7m3k\"},\"basis\":{\"kind\":{\"merged_with\":{\"target_state\":\"b3:1c0dba5e\",\"behind_count\":3}},\"evaluated_tree_digest\":\"b3:deadbeef\"},\"check\":{\"name\":\"check.test\",\"class\":\"required\",\"definition_digest\":\"b3:c0ffee\",\"command\":[\"cargo\",\"test\",\"--workspace\"],\"toolchain\":\"rustc 1.96.0\",\"params\":{\"features\":\"default\"},\"services\":[]},\"outcome\":{\"conclusion\":\"success\"},\"execution\":{\"pick_id\":\"pk_01J\",\"attempt\":1,\"runner\":\"svc:runner-pool-a\",\"started_at\":\"2026-06-11T18:02:11Z\",\"finished_at\":\"2026-06-11T18:05:54Z\",\"duration_ms\":223000,\"ran_suites\":[\"workspace\"],\"skipped_suites\":[]},\"repro\":{\"command\":[\"cargo\",\"test\",\"--locked\",\"--workspace\"],\"env\":{},\"services\":[]}}",
+      "fixture": "passing_body",
+      "name": "minimal",
+      "note": "Most Options unset — exercises the omit-when-absent rule (no logical_change_id, image_digest, failure, log, check_set_digest, no attestation block).",
+      "signature": "310017f0393a78691371c5f2cee025799772410f3938d0e75a17f7b9cb0f8bb9b6f09ecc1f7e5f7565344819149922836491a787a4cda509dfc98c0786d46001",
+      "signed_at": "2026-06-11T18:05:54Z",
+      "signer_kind": "delegated",
+      "signing_preimage_hex": "686564646c652d63692d766572646963742d76320062333a393933623161313236623435323136383465643935373339306631306433343435663762336538643563363434636362636131663663666638383534346265350064656c65676174656400323032362d30362d31315431383a30353a35345a00"
+    },
+    {
+      "body_digest": "b3:4e2642d513e145cf10b510a5c7fdb3d0ff6c77bcbb3cd8a78675ed5bb496c6cd",
+      "canonical_bytes_utf8": "{\"schema_version\":2,\"repo\":\"heddle/core/weft\",\"state\":{\"content_hash\":\"b3:5e11a7c0\",\"change_id\":\"hd-9q2x\",\"logical_change_id\":\"lc-weft-postgres\"},\"basis\":{\"kind\":{\"merged_with\":{\"target_state\":\"hd-main-0001\",\"behind_count\":7,\"merge_algorithm_version\":\"recursive-v2\",\"conflict_policy\":\"refuse-on-conflict\"}},\"evaluated_tree_digest\":\"b3:7eaf00d5\"},\"check\":{\"name\":\"check.postgres\",\"class\":\"required\",\"definition_digest\":\"b3:def111\",\"command\":[\"cargo\",\"test\",\"--features\",\"postgres\",\"--\",\"--ignored\"],\"image_digest\":\"sha256:abc123\",\"toolchain\":\"rustc 1.96.0\",\"params\":{\"features\":\"postgres\",\"toolchain\":\"stable\"},\"services\":[\"postgres\"],\"node_id\":\"node-postgres-suite\"},\"outcome\":{\"conclusion\":\"failure\",\"failure\":{\"class\":\"test\",\"subclass\":\"ignored_suite\",\"failing_step\":\"check.postgres\",\"excerpt\":\"test schema::migrations::applies ... FAILED\",\"excerpt_encoding\":\"utf8\"}},\"execution\":{\"pick_id\":\"pk_02K\",\"attempt\":2,\"runner\":\"svc:runner-pool-b\",\"started_at\":\"2026-06-11T19:00:00Z\",\"finished_at\":\"2026-06-11T19:04:30Z\",\"duration_ms\":270000,\"ran_suites\":[\"postgres\",\"migrations\"],\"skipped_suites\":[\"unit\"],\"runner_pool\":\"pool-b\",\"trust_tier\":\"t1_container\",\"isolation_tier\":\"t1_container\",\"materialization_proof\":\"b3:merged7eaf00d5\",\"secret_grants\":[\"DATABASE_URL\"]},\"log\":{\"manifest_digest\":\"b3:109111\",\"size_bytes\":48122},\"repro\":{\"command\":[\"cargo\",\"test\",\"--locked\",\"--features\",\"postgres\",\"--\",\"--ignored\"],\"env\":{\"CARGO_TERM_COLOR\":\"never\",\"RUST_BACKTRACE\":\"1\"},\"image\":\"sha256:abc123\",\"services\":[\"postgres\"]},\"check_set_digest\":\"b3:cs0001\"}",
+      "fixture": "maximal_body",
+      "name": "maximal",
+      "note": "Every Option set, including the D18 attestation block, log, check_set_digest, node_id, and both merge fields — the omit rule has nothing to omit.",
+      "signature": "46dc853b1e83a6d2d44a0f46166aee92a11f20b340de36c577457503eeaaed58d151906080c4af2fb24c216bd459785002d0202c14c2883b6a07c561cf370d0b",
+      "signed_at": "2026-06-11T19:04:30Z",
+      "signer_kind": "delegated",
+      "signing_preimage_hex": "686564646c652d63692d766572646963742d76320062333a346532363432643531336531343563663130623531306135633766646233643066663663373762636262336364386137383637356564356262343936633663640064656c65676174656400323032362d30362d31315431393a30343a33305a00"
+    },
+    {
+      "body_digest": "b3:0140b830337cc5a1b99fcd3c4d1d888e1b7bf59fc288b989920af23706e68c97",
+      "canonical_bytes_utf8": "{\"schema_version\":2,\"repo\":\"heddle/core/heddle\",\"state\":{\"content_hash\":\"b3:9af2c0de\",\"change_id\":\"hd-7m3k\"},\"basis\":{\"kind\":{\"merged_with\":{\"target_state\":\"hd-main-0042\",\"behind_count\":2,\"merge_algorithm_version\":\"recursive-v2\"}},\"evaluated_tree_digest\":\"b3:merged0042\"},\"check\":{\"name\":\"check.test\",\"class\":\"required\",\"definition_digest\":\"b3:c0ffee\",\"command\":[\"cargo\",\"test\",\"--workspace\"],\"toolchain\":\"rustc 1.96.0\",\"params\":{\"features\":\"default\"},\"services\":[]},\"outcome\":{\"conclusion\":\"success\"},\"execution\":{\"pick_id\":\"pk_01J\",\"attempt\":1,\"runner\":\"svc:runner-pool-a\",\"started_at\":\"2026-06-11T18:02:11Z\",\"finished_at\":\"2026-06-11T18:05:54Z\",\"duration_ms\":223000,\"ran_suites\":[\"workspace\"],\"skipped_suites\":[]},\"repro\":{\"command\":[\"cargo\",\"test\",\"--locked\",\"--workspace\"],\"env\":{},\"services\":[]}}",
+      "fixture": "merge_basis_body",
+      "name": "merge_basis",
+      "note": "Merge-basis (speculative merged tree, not branch-as-pushed) signed with a DEVICE key — the device path the gate treats as advisory-only. merge_algorithm_version set, conflict_policy omitted.",
+      "signature": "197e1d2d57c5916b271b63eec9b2dafe7b3984f2b6165711c5923e5a3fb9afe4cac518f39bcff63fe7200a3ef1a7ab703cdac29545c4e8efea3e423e970bce0b",
+      "signed_at": "2026-06-11T18:05:54Z",
+      "signer_kind": "device",
+      "signing_preimage_hex": "686564646c652d63692d766572646963742d76320062333a303134306238333033333763633561316239396663643363346431643838386531623762663539666332383862393839393230616632333730366536386339370064657669636500323032362d30362d31315431383a30353a35345a00"
+    },
+    {
+      "body_digest": "b3:8cb86ec3994b6845fdb488670d2f4aca436c6f5bf1630327d4c21f1659c9e71f",
+      "canonical_bytes_utf8": "{\"schema_version\":2,\"repo\":\"heddle/core/heddle\",\"state\":{\"content_hash\":\"b3:9af2c0de\",\"change_id\":\"hd-7m3k\"},\"basis\":{\"kind\":\"branch\",\"evaluated_tree_digest\":\"b3:branchasis\"},\"check\":{\"name\":\"check.test\",\"class\":\"required\",\"definition_digest\":\"b3:c0ffee\",\"command\":[\"cargo\",\"test\",\"--workspace\"],\"toolchain\":\"rustc 1.96.0\",\"params\":{\"features\":\"default\"},\"services\":[]},\"outcome\":{\"conclusion\":\"success\"},\"execution\":{\"pick_id\":\"pk_01J\",\"attempt\":1,\"runner\":\"svc:runner-pool-a\",\"started_at\":\"2026-06-11T18:02:11Z\",\"finished_at\":\"2026-06-11T18:05:54Z\",\"duration_ms\":223000,\"ran_suites\":[\"workspace\"],\"skipped_suites\":[]},\"repro\":{\"command\":[\"cargo\",\"test\",\"--locked\",\"--workspace\"],\"env\":{},\"services\":[]}}",
+      "fixture": "branch_basis_body",
+      "name": "branch_basis",
+      "note": "The ONLY branch-basis vector and the legacy service_account compatibility vector. BasisKind::Branch is the branch tree as-pushed, not a speculative merge. Pins the canonical bytes of serde's EXTERNALLY-TAGGED unit variant — the bare string \"kind\":\"branch\" — NOT {\"branch\":null}. Guards the schema-vs-serde mismatch that every MergedWith vector misses.",
+      "signature": "dc0d4b2df3f3b3e269d9f84af3439bfcfdbca3e3dc3dac2c64ded89d083149c2485547ca2812186d178077263831459ab5820422dc2e880d7ed156a8390a120a",
+      "signed_at": "2026-06-11T18:05:54Z",
+      "signer_kind": "service_account",
+      "signing_preimage_hex": "686564646c652d63692d766572646963742d76320062333a3863623836656333393934623638343566646234383836373064326634616361343336633666356266313633303332376434633231663136353963396537316600736572766963655f6163636f756e7400323032362d30362d31315431383a30353a35345a00"
+    }
+  ]
+}

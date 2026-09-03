@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://heddle.co/schemas/ci/v2/ci_verdict_body.schema.json",
+  "title": "CiVerdictBody",
+  "description": "The canonical, signed body of a heddle CI verdict (treadle-schema v2). Hand-maintained to mirror crates/schema/src/body.rs; a test (schema_export.rs) asserts the invariants below. IMPORTANT: additionalProperties is intentionally TRUE everywhere — the Rust type does NOT set deny_unknown_fields, so newer producers may append fields older consumers ignore. The omit-when-absent Option rule means optional members are simply absent when unset (never null). The pre-freeze DESIGN-§3.2/D18 attestation members are present but NOT required and NOT yet gate-validated.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "repo",
+    "state",
+    "basis",
+    "check",
+    "outcome",
+    "execution",
+    "repro"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "minimum": 0, "const": 2 },
+    "repo": { "type": "string" },
+    "state": { "$ref": "#/$defs/StateRef" },
+    "basis": { "$ref": "#/$defs/Basis" },
+    "check": { "$ref": "#/$defs/CheckDescriptor" },
+    "outcome": { "$ref": "#/$defs/Outcome" },
+    "execution": { "$ref": "#/$defs/Execution" },
+    "log": { "$ref": "#/$defs/LogRef" },
+    "repro": { "$ref": "#/$defs/Repro" },
+    "check_set_digest": {
+      "type": "string",
+      "description": "PRE-FREEZE (DESIGN §3.2/D18), not yet gate-validated. Canonical CheckSet digest."
+    }
+  },
+  "$defs": {
+    "StateRef": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["content_hash", "change_id"],
+      "properties": {
+        "content_hash": { "type": "string" },
+        "change_id": { "type": "string" },
+        "logical_change_id": { "type": "string" }
+      }
+    },
+    "Basis": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["kind", "evaluated_tree_digest"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/BasisKind" },
+        "evaluated_tree_digest": { "type": "string" }
+      }
+    },
+    "BasisKind": {
+      "description": "Externally-tagged enum (serde default). The unit variant Branch serializes as the bare string \"branch\"; the struct variant MergedWith serializes as {\"merged_with\": {...}}.",
+      "oneOf": [
+        { "const": "branch" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["merged_with"],
+          "properties": {
+            "merged_with": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["target_state", "behind_count"],
+              "properties": {
+                "target_state": { "type": "string" },
+                "behind_count": { "type": "integer", "minimum": 0 },
+                "merge_algorithm_version": {
+                  "type": "string",
+                  "description": "PRE-FREEZE (DESIGN §3.2), not yet gate-validated."
+                },
+                "conflict_policy": {
+                  "type": "string",
+                  "description": "PRE-FREEZE (DESIGN §3.2), not yet gate-validated."
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "CheckClass": { "type": "string", "enum": ["required", "advisory", "informational"] },
+    "CheckDescriptor": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "class", "definition_digest", "command", "params", "services"],
+      "properties": {
+        "name": { "type": "string" },
+        "class": { "$ref": "#/$defs/CheckClass" },
+        "definition_digest": { "type": "string" },
+        "command": { "type": "array", "items": { "type": "string" } },
+        "image_digest": { "type": "string" },
+        "toolchain": { "type": "string" },
+        "params": { "type": "object", "additionalProperties": { "type": "string" } },
+        "services": { "type": "array", "items": { "type": "string" } },
+        "node_id": {
+          "type": "string",
+          "description": "PRE-FREEZE (DESIGN §3.2/D18), not yet gate-validated."
+        }
+      }
+    },
+    "Conclusion": {
+      "type": "string",
+      "enum": ["success", "failure", "cancelled", "skipped", "timed_out", "infra_error"]
+    },
+    "FailureClass": {
+      "type": "string",
+      "enum": ["build", "test", "lint", "bench", "infra", "timeout", "merge_conflict"]
+    },
+    "FailureDetail": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["class", "excerpt", "excerpt_encoding"],
+      "properties": {
+        "class": { "$ref": "#/$defs/FailureClass" },
+        "subclass": { "type": "string" },
+        "failing_step": { "type": "string" },
+        "excerpt": {
+          "type": "string",
+          "description": "UNTRUSTED CONTENT (attacker-controlled test output). Fence before feeding to any agent."
+        },
+        "excerpt_encoding": { "type": "string" }
+      }
+    },
+    "Outcome": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["conclusion"],
+      "properties": {
+        "conclusion": { "$ref": "#/$defs/Conclusion" },
+        "failure": { "$ref": "#/$defs/FailureDetail" }
+      }
+    },
+    "Execution": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["attempt", "started_at", "finished_at", "duration_ms", "ran_suites", "skipped_suites"],
+      "properties": {
+        "pick_id": { "type": "string" },
+        "attempt": { "type": "integer", "minimum": 0 },
+        "runner": { "type": "string" },
+        "started_at": { "type": "string" },
+        "finished_at": { "type": "string" },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "ran_suites": { "type": "array", "items": { "type": "string" } },
+        "skipped_suites": { "type": "array", "items": { "type": "string" } },
+        "runner_pool": { "type": "string", "description": "PRE-FREEZE (DESIGN §3.2/D18)." },
+        "trust_tier": { "type": "string", "description": "PRE-FREEZE (DESIGN §3.2/D18)." },
+        "isolation_tier": { "type": "string", "description": "PRE-FREEZE (DESIGN §3.2/D18)." },
+        "materialization_proof": { "type": "string", "description": "PRE-FREEZE (DESIGN §3.2/D18)." },
+        "secret_grants": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "PRE-FREEZE (DESIGN §3.2/D18). Names only; values never on the wire."
+        }
+      }
+    },
+    "LogRef": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["manifest_digest", "size_bytes"],
+      "properties": {
+        "manifest_digest": { "type": "string" },
+        "size_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "Repro": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["command", "env", "services"],
+      "properties": {
+        "command": { "type": "array", "items": { "type": "string" } },
+        "env": { "type": "object", "additionalProperties": { "type": "string" } },
+        "image": { "type": "string" },
+        "services": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
