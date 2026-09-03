@@ -266,6 +266,29 @@ fn derived_contributor_cannot_mint_or_list_signup_invites() {
     }
 }
 
+/// weft#2041: the owner-root pin presents the FULL unrestricted client-minted
+/// root as its bearer. Prove that token authorizes `BootstrapOwnerRoot` at the
+/// Biscuit layer — the server requires *some* agent bearer for the pin, and the
+/// previous proof-only session carried none (the `invalid bearer capability`
+/// this fixes). The restricted account root authorizes it too (the deny floor
+/// does not cover `BootstrapOwnerRoot`), so choosing the full root is a
+/// least-dependency call, not a caveat workaround.
+#[test]
+fn agent_roots_authorize_the_owner_root_pin() {
+    let signer = Ed25519Signer::generate().expect("seed");
+    let seed = signer.to_seed();
+    let root = mint_agent_root(&seed).expect("agent root");
+    authorize_restricted_root(&root.token, &seed, "BootstrapOwnerRoot")
+        .expect("the full unrestricted root must authorize the owner-root pin");
+
+    let restricted =
+        restrict_agent_account_root(&root.token, &signer, root.expires_at).expect("restrict");
+    authorize_restricted_root(&restricted, &seed, "BootstrapOwnerRoot").expect(
+        "the account-root deny floor does not cover BootstrapOwnerRoot (heddle#1600 keeps it \
+         so derive-agent children inherit it)",
+    );
+}
+
 fn authorize_restricted_root(
     token: &str,
     seed: &[u8; 32],
