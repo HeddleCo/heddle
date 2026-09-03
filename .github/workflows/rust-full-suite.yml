@@ -261,20 +261,41 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 60
+    env:
+      # Match the fast lane: LLVM lld for the link-heavy test builds. This job
+      # is Linux/ARM native and no heddle Rust job builds a wasm32 target, so
+      # the native-linker flag is safe. Kept byte-identical to the fast lane's
+      # fast-check job so the shared rust-cache slot stays coherent (rust-cache
+      # folds RUST* env vars into its key).
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
 
     steps:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          # Pin to match rust-toolchain.toml and the fast lane so a floating
+          # stable bump does not cold-invalidate the shared rust-cache.
+          toolchain: "1.98.0"
           components: clippy
+
+      - name: Ensure LLVM linker
+        run: |
+          if ! command -v ld.lld; then
+            sudo apt-get update
+            sudo apt-get install -y lld
+          fi
 
       - uses: mozilla-actions/sccache-action@v0.0.9
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: rust-tests-${{ runner.os }}
+          # Shared with the fast lane's fast-check job; see it for the key
+          # rationale. Both lanes are Linux/ARM so they land on one slot.
+          shared-key: rust-ws-${{ runner.os }}-${{ runner.arch }}
+          prefix-key: v1-rust-incr
           cache-on-failure: true
+          cache-all-crates: true
 
       - name: Rust source reachability and dead-code blankets
         if: needs.changes.outputs.skip_cargo != 'true'
