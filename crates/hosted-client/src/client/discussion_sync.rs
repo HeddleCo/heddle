@@ -77,7 +77,6 @@ use std::{
     fs,
     fs::OpenOptions,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -231,13 +230,6 @@ fn resolve_into_annotation_op_id(
     let identity = serde_json::to_vec(&(repo_path, server_id, kind.as_str(), content, tags))
         .context("encode resolve-into-annotation operation identity")?;
     Ok(uuid::Uuid::new_v5(&OP_NAMESPACE, &identity).to_string())
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 /// Enumerate a materialized discussion's turns with their per-op index (turn
@@ -1106,7 +1098,7 @@ fn pull_resolution(
         local_id,
         parents,
         hosted_resolution_author(),
-        now_ms(),
+        resolution_ms(discussion),
         CollaborationOperationBodyV1::Resolve { resolution },
         resolve_op_key(&discussion.id, &hosted_key)?,
     )?;
@@ -1371,8 +1363,30 @@ fn turn_ms(turn: &HostedDiscussionTurn) -> i64 {
     if turn.posted_at_secs > 0 {
         turn.posted_at_secs.saturating_mul(1000)
     } else {
-        now_ms()
+        // heddle#1695: a materialized turn's `occurred_at_ms` is hashed into its
+        // `CollabOpId`, so it MUST be identical on every clone. When the server
+        // sends no `posted_at`, fall back to a deterministic 0 — never wall-clock
+        // `now_ms()`, which would remint the op per clone.
+        0
     }
+}
+
+/// Deterministic `occurred_at_ms` for a resolve op materialized from a hosted
+/// discussion. The wire carries no dedicated resolution timestamp, and this
+/// value is hashed into the resolve op's `CollabOpId`, so it MUST be identical
+/// on every clone (heddle#1695). Derive it from the discussion's latest
+/// server-stamped turn `posted_at` — the most recent server activity, identical
+/// across clones — falling back to a deterministic 0, never wall-clock
+/// `now_ms()`, which would remint the resolve op per clone.
+fn resolution_ms(discussion: &HostedDiscussion) -> i64 {
+    discussion
+        .turns
+        .iter()
+        .map(|turn| turn.posted_at_secs)
+        .filter(|secs| *secs > 0)
+        .max()
+        .map(|secs| secs.saturating_mul(1000))
+        .unwrap_or(0)
 }
 
 fn derive_title(body: &str, symbol: &str) -> String {
@@ -2329,6 +2343,141 @@ mod tests {
         assert_eq!(
             op_id_sets[0], op_id_sets[1],
             "two clones of one source must materialize the same CollabOpId set"
+        );
+    }
+
+    // heddle#1695 control: the clone/materialization path is deterministic
+    // across clones for a REALISTIC hosted open turn — nonzero server posted_at,
+    // server-echoed anchor state, server-stamped author. Two clones agree. (The
+    // invariant #1677 established; the two tests below cover the posted_at=0 and
+    // resolve-op cases that previously escaped it via wall-clock now_ms().)
+    #[tokio::test]
+    async fn two_clones_agree_on_open_op_for_realistic_hosted_turn() {
+        let wire_id = DiscussionRecordId::generate().to_string();
+        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
+        let mut op_id_sets = Vec::new();
+        for _ in 0..2 {
+            let (_temp, repo, head_state) = seed_repo_with_state();
+            // opened_against_state pinned to the server-echoed value (same for
+            // every clone); posted_at nonzero (weft stamps now_secs()).
+            let discussion = bootstrap_discussion(&wire_id, anchor_state);
+            let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+            pull_discussions(
+                &repo,
+                &mut client,
+                "acme/widgets",
+                Some(&[discussion]),
+                Some(head_state),
+            )
+            .await
+            .unwrap();
+            client.close().await;
+            server.await.unwrap();
+
+            let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+            let mut ids: Vec<String> = store
+                .operation_ids()
+                .unwrap()
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect();
+            ids.sort();
+            op_id_sets.push(ids);
+        }
+        assert_eq!(
+            op_id_sets[0], op_id_sets[1],
+            "two clones must agree on the open-op CollabOpId for a realistic hosted turn"
+        );
+    }
+
+    // heddle#1695: a materialized turn whose server `posted_at` is 0 must still
+    // earn the SAME open-op `CollabOpId` on every clone. `occurred_at_ms` is
+    // hashed into the op id, and `turn_ms` previously fell back to wall-clock
+    // `now_ms()` for a 0 `posted_at`, reminting the op per clone. Now it is a
+    // deterministic 0. RED before the fix (disjoint co- ids), GREEN after.
+    #[tokio::test]
+    async fn two_clones_agree_on_open_op_when_posted_at_is_zero() {
+        let wire_id = DiscussionRecordId::generate().to_string();
+        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
+        let mut op_id_sets = Vec::new();
+        for _ in 0..2 {
+            let (_temp, repo, head_state) = seed_repo_with_state();
+            let mut discussion = bootstrap_discussion(&wire_id, anchor_state);
+            discussion.turns[0].posted_at = 0; // server omitted the turn timestamp
+            let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+            pull_discussions(
+                &repo,
+                &mut client,
+                "acme/widgets",
+                Some(&[discussion]),
+                Some(head_state),
+            )
+            .await
+            .unwrap();
+            client.close().await;
+            server.await.unwrap();
+
+            let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+            let mut ids: Vec<String> = store
+                .operation_ids()
+                .unwrap()
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect();
+            ids.sort();
+            op_id_sets.push(ids);
+        }
+        assert_eq!(
+            op_id_sets[0], op_id_sets[1],
+            "two clones must agree on the open-op CollabOpId even when posted_at is 0"
+        );
+    }
+
+    // heddle#1695: a resolution pulled onto two clones must earn the SAME
+    // resolve-op `CollabOpId`. The resolve op's `occurred_at_ms` is hashed into
+    // its id and previously came from wall-clock `now_ms()`, reminting the op per
+    // clone. It is now derived deterministically from the discussion's latest
+    // server turn `posted_at` (`resolution_ms`). RED before the fix, GREEN after.
+    #[tokio::test]
+    async fn two_clones_agree_on_resolve_op() {
+        let wire_id = DiscussionRecordId::generate().to_string();
+        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
+        let mut op_id_sets = Vec::new();
+        for _ in 0..2 {
+            let (_temp, repo, head_state) = seed_repo_with_state();
+            let mut discussion = bootstrap_discussion(&wire_id, anchor_state);
+            // Server-side dismissal — carries a resolution the clone materializes
+            // as a Resolve op alongside the open op.
+            discussion.resolution = DiscussionResolution::Dismissed {
+                reason: "handled offline".to_string(),
+            };
+            let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+            pull_discussions(
+                &repo,
+                &mut client,
+                "acme/widgets",
+                Some(&[discussion]),
+                Some(head_state),
+            )
+            .await
+            .unwrap();
+            client.close().await;
+            server.await.unwrap();
+
+            let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+            let mut ids: Vec<String> = store
+                .operation_ids()
+                .unwrap()
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect();
+            ids.sort();
+            assert_eq!(ids.len(), 2, "one Open + one Resolve materialized");
+            op_id_sets.push(ids);
+        }
+        assert_eq!(
+            op_id_sets[0], op_id_sets[1],
+            "two clones must agree on the resolve-op CollabOpId"
         );
     }
 
