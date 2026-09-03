@@ -3,7 +3,7 @@
 // (`schema_for_verb` / `crates/cli-contract/src/cli/commands/schemas.rs`).
 // Regenerate with `scripts/gen-ts-types.sh`; a drift test keeps it in sync.
 
-export const HEDDLE_SCHEMA_VERSION = "0.18.0" as const;
+export const HEDDLE_SCHEMA_VERSION = "0.19.0" as const;
 
 export interface AbortSchema {
   action: OperatorAction;
