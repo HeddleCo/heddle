@@ -311,6 +311,8 @@ impl CallContextFactory {
             client_operation_id,
             trace: self.trace.clone().or_else(active_trace_context),
             bearer_grant_envelope: self.bearer_grant_envelope.clone(),
+            // empty = legacy scan fallback (weft#1960 leg C cutover)
+            bearer_authority_key_selector: Vec::new(),
         })
     }
 

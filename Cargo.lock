@@ -185,7 +185,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -196,7 +196,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1578,7 +1578,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2119,7 +2119,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "heddle-agent-relay"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2141,9 +2141,9 @@ dependencies = [
 
 [[package]]
 name = "heddle-api"
-version = "0.25.0"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62e8486926f5cafd3292428704df00061da5ee729ab4a24c29410baf284b0340"
+checksum = "47ffb4e958804c0f94a7d2f5b2b107df045ea290c14e6c36d2ed2bfa21afc8ef"
 dependencies = [
  "blake3",
  "bytes",
@@ -2159,7 +2159,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-ci-config"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "heddle-api",
  "hex",
@@ -2172,7 +2172,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-ci-engine"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "blake3",
  "heddle-ci-config",
@@ -2188,7 +2188,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2262,7 +2262,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli-args"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2274,7 +2274,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli-contract"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2295,7 +2295,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli-render"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -2317,7 +2317,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-config"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2338,7 +2338,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-crypto"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2357,7 +2357,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-devtools"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2371,11 +2371,11 @@ dependencies = [
 
 [[package]]
 name = "heddle-docsgen"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "heddle-format"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "blake3",
  "thiserror 2.0.18",
@@ -2384,7 +2384,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-fs-prims"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "fs2",
  "heddle-object-model",
@@ -2395,7 +2395,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-git-projection"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "heddle-ingest",
  "heddle-objects",
@@ -2415,7 +2415,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-hosted-client"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-ingest"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2496,7 +2496,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-merge"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "heddle-format",
@@ -2508,7 +2508,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-mount"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2540,7 +2540,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-object-model"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "base32",
@@ -2564,7 +2564,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-objects"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "base32",
@@ -2600,7 +2600,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-oplog"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -2617,7 +2617,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-pack"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -2633,11 +2633,11 @@ dependencies = [
 
 [[package]]
 name = "heddle-perf-contract"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "heddle-refs"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "chrono",
  "fs2",
@@ -2656,7 +2656,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-repo"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "base32",
@@ -2696,7 +2696,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-semantic"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -2718,7 +2718,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-semantic-recovery"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "blake3",
  "fastembed",
@@ -2732,7 +2732,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-state-review"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "heddle-objects",
  "heddle-repo",
@@ -2744,7 +2744,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-verbs"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2774,7 +2774,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-wire"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -2788,9 +2788,9 @@ dependencies = [
 
 [[package]]
 name = "heddleco-capability-verifier"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "501f7b6f413dac4236c7d6b30242c798fa11bd06b0dcfa33728feb98c084324d"
+checksum = "9dec352ce11fba30e5c360943878d983e2b06329d834e2f33776f95a09ccd280"
 dependencies = [
  "biscuit-auth",
  "ed25519-dalek 3.0.0",
@@ -3473,7 +3473,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4294,7 +4294,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5231,7 +5231,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac6c3320f9abac597dcbc668774ef006702672474aad53c6d596b62e487b40b1"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "once_cell",
@@ -5264,7 +5264,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -5833,7 +5833,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5925,7 +5925,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6800,7 +6800,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7059,10 +7059,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7557,7 +7557,7 @@ dependencies = [
 
 [[package]]
 name = "treadle-schema"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "blake3",
  "ed25519-dalek 3.0.0",
@@ -8082,7 +8082,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
