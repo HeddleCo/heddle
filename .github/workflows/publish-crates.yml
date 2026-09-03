@@ -341,6 +341,60 @@ jobs:
             exit 1
           fi
 
+          # Poll the crates.io sparse index until a just-published
+          # version is visible, then return — replacing the old fixed
+          # inter-crate sleep. crates.io propagates the sparse index in
+          # seconds, so the next crate (which may depend on this one)
+          # can usually publish almost immediately instead of waiting a
+          # blanket 60s/600s.
+          #
+          # Best-effort by design: on timeout it logs a warning and
+          # returns 0 rather than failing. The next crate's
+          # `cargo publish` already retries with exponential backoff if
+          # a dependency is not yet visible (see the transient-failure
+          # branch below), so a propagation race is caught there. This
+          # poll is a latency optimization, not a correctness gate. The
+          # new-crate 1-per-10-minute quota is still enforced by the
+          # 429-retry branch, never here.
+          #
+          # Sparse-index path convention (https://index.crates.io/):
+          #   1-char name        -> 1/<name>
+          #   2-char name        -> 2/<name>
+          #   3-char name        -> 3/<c1>/<name>
+          #   4+ char name       -> <c1c2>/<c3c4>/<name>   e.g. he/dd/heddle-repo
+          # The response is JSON-lines; each line is a version record
+          # with a "vers" field. We look for a line whose vers == target.
+          wait_for_index() {
+            local crate="$1" version="$2"
+            local len=${#crate} path
+            case "$len" in
+              1) path="1/${crate}" ;;
+              2) path="2/${crate}" ;;
+              3) path="3/${crate:0:1}/${crate}" ;;
+              *) path="${crate:0:2}/${crate:2:2}/${crate}" ;;
+            esac
+            local url="https://index.crates.io/${path}"
+            local deadline
+            deadline=$(( $(date +%s) + 120 ))
+            echo "=== waiting for ${crate}@${version} to appear in the sparse index (${url}) ==="
+            while true; do
+              local body
+              if body=$(curl -sS --max-time 15 \
+                          -H 'User-Agent: heddle-publish-workflow (https://github.com/HeddleCo/heddle)' \
+                          "$url" 2>/dev/null); then
+                if printf '%s\n' "$body" | jq -e --arg v "$version" 'select(.vers == $v)' >/dev/null 2>&1; then
+                  echo "=== index: ${crate}@${version} visible ==="
+                  return 0
+                fi
+              fi
+              if (( $(date +%s) >= deadline )); then
+                echo "::warning::${crate}@${version} not visible in the sparse index after 120s — proceeding anyway (next publish retries with backoff if the dep is missing)"
+                return 0
+              fi
+              sleep 3
+            done
+          }
+
           # Pretty-print the publish plan up front so the workflow log
           # has a clean record before any side effects.
           echo "Publish plan:"
@@ -355,7 +409,6 @@ jobs:
             [[ -z "$line" ]] && continue
             crate=$(echo "$line" | cut -f1)
             version=$(echo "$line" | cut -f2)
-            first_publish=$(echo "$line" | cut -f3)
             publish_idx=$((publish_idx+1))
 
             attempt=0
@@ -425,17 +478,16 @@ jobs:
               exit 1
             done
 
-            # Space publishes to match crates.io quotas and give the
-            # sparse index a moment to see the crate the next publish
-            # may depend on. Skip the pause after the last crate.
+            # Before publishing the next crate (which may depend on the
+            # one we just shipped), poll the sparse index until this
+            # version is visible instead of sleeping a fixed 60s/600s.
+            # This typically returns in a few seconds. It is best-effort:
+            # on timeout it proceeds, since the next `cargo publish` has
+            # retry-with-backoff. The genuine new-crate 1-per-10-min
+            # quota is still guarded by the 429-retry branch above, not
+            # here. Skip the wait after the last crate.
             if (( publish_idx < publish_count )); then
-              if [[ "$first_publish" == "true" ]]; then
-                sleep_for=600
-              else
-                sleep_for=60
-              fi
-              echo "=== waiting ${sleep_for}s before next publish ==="
-              sleep "$sleep_for"
+              wait_for_index "$crate" "$version"
             fi
           done
 
