@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
+# Parked — not published to crates.io (see release-plz.toml). Belt-and-
+# suspenders: cargo refuses to publish this crate even if a publish
+# list drifts.
+publish = false
 
 [dependencies]
 blake3.workspace = true
