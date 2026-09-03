@@ -43,6 +43,15 @@ jobs:
     name: fast-check
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 30
+    env:
+      # GNU ld dominates the tail of the workspace-wide, all-targets links
+      # this lane performs; LLVM lld is substantially faster. No heddle Rust
+      # job builds a wasm32 target, so this native-linker flag is safe
+      # workspace-wide here. Set at job scope so build, clippy, and the unit
+      # test link all use it. Kept identical to the full lane's Quality job so
+      # the two continue to share one rust-cache slot (rust-cache folds RUST*
+      # env into its key).
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
 
     steps:
       - name: Satisfy fast-check on the merge queue
@@ -55,7 +64,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: github.event_name == 'pull_request'
         with:
+          # Pin so a silent stable bump does not invalidate rust-cache. Matches
+          # rust-toolchain.toml, which already forces this channel at build
+          # time; pinning the installed default keeps rust-cache's rustc probe
+          # aligned with it so the cache stays warm across stable releases.
+          toolchain: "1.98.0"
           components: clippy
+
+      - name: Ensure LLVM linker
+        if: github.event_name == 'pull_request'
+        run: |
+          if ! command -v ld.lld; then
+            sudo apt-get update
+            sudo apt-get install -y lld
+          fi
 
       - uses: mozilla-actions/sccache-action@v0.0.9
         if: github.event_name == 'pull_request'
@@ -63,9 +85,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: github.event_name == 'pull_request'
         with:
-          # Shared with the full lane's default-feature Quality job.
-          shared-key: rust-tests-${{ runner.os }}
+          # Shared with the full lane's default-feature Quality job so both
+          # lanes reuse each other's dependency artifacts. Arch-qualified so an
+          # x86 and an arm runner never collide on one slot; prefix bumps the
+          # whole namespace when needed; cache-all-crates keeps registry deps
+          # warm across lanes.
+          shared-key: rust-ws-${{ runner.os }}-${{ runner.arch }}
+          prefix-key: v1-rust-incr
           cache-on-failure: true
+          cache-all-crates: true
 
       - name: Rust source reachability and dead-code blankets
         if: github.event_name == 'pull_request'
