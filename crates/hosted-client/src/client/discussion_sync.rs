@@ -33,11 +33,15 @@
 //! rest would be silently dropped on exactly the migrated repos.
 //!
 //! Push sends only turns that are self-authored AND unlinked; pull materializes
-//! only server ordinals not yet linked. Client operation ids are derived from
-//! the stable turn id, so a retry replays instead of conflicting.
+//! only server ordinals not yet linked. A materialized turn op's idempotency
+//! key is derived deterministically from `(hosted discussion id, server turn
+//! ordinal)` (see `turn_op_key`) — never a random per-write nonce — so the same
+//! server turn earns the same `CollabOpId` on every clone and a retry replays
+//! instead of conflicting or duplicating.
 //! Resolve-into-annotation operations use the same durable mirror: their
-//! request identity is derived from the complete resolution payload and is
-//! recorded only after `ResolveDiscussion` succeeds.
+//! request identity is derived from `(hosted discussion id, server resolution
+//! key)` (see `resolve_op_key`) and is recorded only after `ResolveDiscussion`
+//! succeeds.
 //!
 //! ## Reconciliation is author-aware, never body-alone
 //!
@@ -900,6 +904,7 @@ fn pull_one(
                     turn: turn_body(first)?,
                     thread_ref: discussion.thread_ref.clone(),
                 },
+                turn_op_key(&discussion.id, server_ordinal(first, 0))?,
             )?;
             // Record the mapping immediately so a mid-materialization failure
             // resumes into the `Some` arm instead of orphaning the written ops.
@@ -929,6 +934,7 @@ fn pull_one(
                     CollaborationOperationBodyV1::AppendTurn {
                         turn: turn_body(turn)?,
                     },
+                    turn_op_key(&discussion.id, ordinal)?,
                 )?;
                 heads = vec![op_id];
                 push_link(
@@ -1007,6 +1013,7 @@ fn pull_one(
                     CollaborationOperationBodyV1::AppendTurn {
                         turn: turn_body(server_turn)?,
                     },
+                    turn_op_key(&discussion.id, ordinal)?,
                 )?;
                 heads = vec![op_id];
                 push_link(
@@ -1101,6 +1108,7 @@ fn pull_resolution(
         hosted_resolution_author(),
         now_ms(),
         CollaborationOperationBodyV1::Resolve { resolution },
+        resolve_op_key(&discussion.id, &hosted_key)?,
     )?;
     mirror
         .repos
@@ -1281,6 +1289,49 @@ fn principals_match(a: &Principal, b: &Principal) -> bool {
     a.name == b.name && a.email == b.email
 }
 
+// --- deterministic idempotency keys for materialized hosted ops ---
+//
+// A `CollabOpId` is content-addressed OVER its idempotency key, so the key must
+// be identical across clones for the same turn to earn the same op id (and for
+// a retry to dedupe instead of duplicating). We derive it via UUIDv5 over the
+// module `OP_NAMESPACE` (shared with the push-side op-id helpers; the `turn:` /
+// `resolve:` descriptor prefixes keep the two spaces disjoint), purely from
+// hosted, server-assigned inputs — the hosted discussion id and either the
+// server turn ordinal or the server resolution key — never from local state.
+
+/// Idempotency key for a turn op (open / append) materialized from a hosted
+/// discussion. Derived from `(hosted discussion id, server turn ordinal)`, both
+/// of which are identical on every clone, so the same server turn yields the
+/// same `CollabOpId` everywhere.
+fn turn_op_key(
+    hosted_discussion_id: &str,
+    server_ordinal: usize,
+) -> Result<CollaborationIdempotencyKey> {
+    let raw = uuid::Uuid::new_v5(
+        &OP_NAMESPACE,
+        format!("turn:{hosted_discussion_id}:{server_ordinal}").as_bytes(),
+    )
+    .to_string();
+    CollaborationIdempotencyKey::new(raw)
+        .map_err(|error| anyhow!("invalid idempotency key: {error}"))
+}
+
+/// Idempotency key for a resolve op materialized from a hosted discussion.
+/// Derived from `(hosted discussion id, server resolution key)`, both hosted
+/// values, so a resolution pulled on two clones earns the same `CollabOpId`.
+fn resolve_op_key(
+    hosted_discussion_id: &str,
+    hosted_resolution_key: &str,
+) -> Result<CollaborationIdempotencyKey> {
+    let raw = uuid::Uuid::new_v5(
+        &OP_NAMESPACE,
+        format!("resolve:{hosted_discussion_id}:{hosted_resolution_key}").as_bytes(),
+    )
+    .to_string();
+    CollaborationIdempotencyKey::new(raw)
+        .map_err(|error| anyhow!("invalid idempotency key: {error}"))
+}
+
 fn write_local_operation(
     store: &CollaborationStore,
     discussion_id: DiscussionRecordId,
@@ -1288,9 +1339,8 @@ fn write_local_operation(
     author: Attribution,
     occurred_at_ms: i64,
     body: CollaborationOperationBodyV1,
+    key: CollaborationIdempotencyKey,
 ) -> Result<CollabOpId> {
-    let key = CollaborationIdempotencyKey::new(uuid::Uuid::new_v4().to_string())
-        .map_err(|error| anyhow!("invalid idempotency key: {error}"))?;
     let operation = CollaborationOperationEnvelope::new(
         discussion_id,
         parents,
@@ -1362,6 +1412,13 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// A stable per-turn idempotency key for tests that drive
+    /// `write_local_operation` directly (production callers derive theirs from
+    /// hosted ids via `turn_op_key`/`resolve_op_key`).
+    fn test_key(seed: &str) -> CollaborationIdempotencyKey {
+        CollaborationIdempotencyKey::new(format!("test-op:{seed}")).expect("valid test key")
+    }
 
     fn local(
         body: &str,
@@ -1720,6 +1777,7 @@ mod tests {
                 turn: DiscussionTurnV1::new("first turn").unwrap(),
                 thread_ref: Some("refs/heads/feature/run".to_string()),
             },
+            test_key("open-run-contract"),
         )
         .unwrap();
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
@@ -1739,6 +1797,7 @@ mod tests {
             CollaborationOperationBodyV1::AppendTurn {
                 turn: DiscussionTurnV1::new("second turn").unwrap(),
             },
+            test_key("append-second-turn"),
         )
         .unwrap();
         assert_eq!(
@@ -1761,6 +1820,7 @@ mod tests {
                     tags: vec!["cache".to_string()],
                 },
             },
+            test_key("resolve-into-annotation"),
         )
         .unwrap();
         assert_eq!(
@@ -1883,6 +1943,7 @@ mod tests {
                     reason: "local-only".to_string(),
                 },
             },
+            test_key("resolve-dismissed-local"),
         )
         .unwrap();
 
@@ -1979,6 +2040,7 @@ mod tests {
                     tags: vec!["cache".to_string()],
                 },
             },
+            test_key("resolve-into-annotation-local"),
         )
         .unwrap();
 
@@ -2186,6 +2248,7 @@ mod tests {
                 turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
                 thread_ref: None,
             },
+            test_key("open-keep-invariant"),
         )
         .unwrap();
         let ops_before = store.operation_ids().unwrap().len();
@@ -2208,6 +2271,118 @@ mod tests {
             store.operation_ids().unwrap().len(),
             ops_before,
             "resume must not write a duplicate Open root for the reconciled turn"
+        );
+    }
+
+    // Falsifier for heddle#1677: two clones must materialize the SAME
+    // `CollabOpId`s for the same server turns. The idempotency key is now
+    // derived from `(hosted discussion id, server turn ordinal)` — both
+    // identical on every clone — instead of a random `Uuid::new_v4()` per
+    // write. On the pre-change random key this assertion fails, the two clones
+    // producing disjoint `co-…` id sets.
+    #[tokio::test]
+    async fn two_clones_agree_on_turn_op_ids() {
+        // One server-side discussion, addressed by the originator's id and
+        // pinned to a single server `opened_against_state` — identical for every
+        // clone (the server sends the same value everywhere), so the Open op's
+        // anchor does not depend on any clone's local HEAD.
+        let wire_id = DiscussionRecordId::generate().to_string();
+        let (_temp0, _repo0, pinned_state) = seed_repo_with_state();
+        let mut discussion = bootstrap_discussion(&wire_id, pinned_state);
+        discussion.turns.push(DiscussionTurn {
+            author: Principal::new("Reviewer", "reviewer@example.com"),
+            body: "and here is a follow-up".to_string(),
+            posted_at: 1_700_000_002,
+            references: Vec::new(),
+        });
+
+        let mut op_id_sets = Vec::new();
+        for _ in 0..2 {
+            let (_temp, repo, head_state) = seed_repo_with_state();
+            let bootstrap = vec![discussion.clone()];
+            let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+            // `against` is this clone's own resolvable tip; the shared anchor
+            // rides on the discussion's pinned `opened_against_state`.
+            pull_discussions(
+                &repo,
+                &mut client,
+                "acme/widgets",
+                Some(&bootstrap),
+                Some(head_state),
+            )
+            .await
+            .unwrap();
+            client.close().await;
+            server.await.unwrap();
+
+            let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+            let mut ids: Vec<String> = store
+                .operation_ids()
+                .unwrap()
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect();
+            ids.sort();
+            assert_eq!(ids.len(), 2, "one Open + one AppendTurn materialized");
+            op_id_sets.push(ids);
+        }
+        assert_eq!(
+            op_id_sets[0], op_id_sets[1],
+            "two clones of one source must materialize the same CollabOpId set"
+        );
+    }
+
+    // A retried materialization re-derives the SAME idempotency key from the
+    // stable `(hosted discussion id, server turn ordinal)` tuple, so the op
+    // dedupes at the store instead of duplicating. On the pre-change random key
+    // the retry would mint a fresh `CollabOpId` and double the op count.
+    #[test]
+    fn rederived_turn_op_key_dedupes_on_retry() {
+        let (_temp, repo, state) = seed_repo_with_state();
+        let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+        let discussion_id = DiscussionRecordId::generate();
+        let author = Attribution::human(Principal::new("Reviewer", "reviewer@example.com"));
+        let body = || CollaborationOperationBodyV1::Open {
+            title: "run contract".to_string(),
+            anchor: CollaborationAnchor::Symbol {
+                state_id: state,
+                path: "lib.rs".to_string(),
+                symbol: "run".to_string(),
+            },
+            visibility: VisibilityTier::Internal,
+            turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
+            thread_ref: None,
+        };
+
+        let first = write_local_operation(
+            &store,
+            discussion_id,
+            Vec::new(),
+            author.clone(),
+            1_700_000_001_000,
+            body(),
+            turn_op_key("disc-xyz", 0).unwrap(),
+        )
+        .unwrap();
+        let after_first = store.operation_ids().unwrap().len();
+
+        // Retry: same stable inputs → `turn_op_key` returns the same key.
+        let second = write_local_operation(
+            &store,
+            discussion_id,
+            Vec::new(),
+            author,
+            1_700_000_001_000,
+            body(),
+            turn_op_key("disc-xyz", 0).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(first, second, "a retry must earn the same CollabOpId");
+        assert_eq!(
+            store.operation_ids().unwrap().len(),
+            after_first,
+            "a retry must dedupe, not append a duplicate op"
         );
     }
 }

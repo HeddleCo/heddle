@@ -451,10 +451,12 @@ async fn push_one(
         // crash-retry replays with the same client_operation_id (P2-5).
         let op_id = {
             let entry = get_or_create_entry(mirror, repo_path, &annotation.annotation_id);
-            if entry.pending_create_op.is_none() {
-                entry.pending_create_op = Some(uuid::Uuid::new_v4().to_string());
-            }
-            entry.pending_create_op.clone().expect("just set")
+            entry
+                .pending_create_op
+                .get_or_insert_with(|| {
+                    create_op_id(repo_path, &annotation.annotation_id, &first.revision_id)
+                })
+                .clone()
         };
         save_mirror(heddle_dir, mirror)?;
 
@@ -1117,6 +1119,17 @@ fn revise_op_id(repo_path: &str, server_id: &str, revision_id: &str) -> String {
     uuid::Uuid::new_v5(
         &OP_NAMESPACE,
         format!("revise:{repo_path}:{server_id}:{revision_id}").as_bytes(),
+    )
+    .to_string()
+}
+
+/// Deterministic client-operation-id for the initial `create_on_server` call,
+/// derived from `(annotation id, first revision id)` so a crash-retry of the
+/// same create replays with the same id and dedupes instead of duplicating.
+fn create_op_id(repo_path: &str, annotation_id: &str, revision_id: &str) -> String {
+    uuid::Uuid::new_v5(
+        &OP_NAMESPACE,
+        format!("create:{repo_path}:{annotation_id}:{revision_id}").as_bytes(),
     )
     .to_string()
 }
