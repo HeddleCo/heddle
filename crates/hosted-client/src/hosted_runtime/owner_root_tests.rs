@@ -419,6 +419,27 @@ fn register_public_key_claim_refuses_a_replacement_seq0() {
 }
 
 #[test]
+#[allow(deprecated)]
+fn register_public_key_claim_refuses_retired_device_public_key() {
+    let error = encode_register_public_key_claim(
+        &RegisterPublicKeyRequest {
+            device_public_key: vec![0x11; 32],
+            device_proof_public_key: vec![0x22; 32],
+            client_operation_id: "op-retired".into(),
+            ..Default::default()
+        },
+        &Default::default(),
+    )
+    .expect_err("retired device_public_key must not be encoded");
+    assert!(
+        error
+            .to_string()
+            .contains("must not send device_public_key"),
+        "{error}"
+    );
+}
+
+#[test]
 // This deliberately exercises the legacy single-key device_public_key path.
 // Migrating CLI owner-root flows to the two-key model is a separate effort.
 #[allow(deprecated)]
