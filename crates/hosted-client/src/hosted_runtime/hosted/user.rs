@@ -177,34 +177,6 @@ impl HostedClient {
         Ok(response.spools)
     }
 
-    pub(crate) async fn ensure_claimable_owner_root(&mut self) -> anyhow::Result<()> {
-        let Some(mut state) = crate::hosted_runtime::identity_state::load()? else {
-            return Ok(());
-        };
-        if state.is_claimed() {
-            return Ok(());
-        }
-        if let Some(server) = self.server_key.as_deref()
-            && !crate::hosted_runtime::hosted::server_keys_match(&state.server, server)
-        {
-            return Ok(());
-        }
-        let (signed, signer_pem) = {
-            let Some(signer) = self.context.proof_signer() else {
-                return Ok(());
-            };
-            let signed = crate::hosted_runtime::owner_root::mint_and_record_claimable_root(
-                &mut state,
-                signer,
-                chrono::Utc::now().timestamp(),
-            )?;
-            (signed, signer.to_pem()?)
-        };
-        crate::hosted_runtime::owner_root::persist_claimable_root(&state)?;
-        let signer = crypto::Ed25519Signer::from_pem(&signer_pem)?;
-        crate::hosted_runtime::owner_root::upload_claimable_root(self, &signer, signed).await
-    }
-
     pub async fn bootstrap_owner_root(
         &mut self,
         request: BootstrapOwnerRootRequest,

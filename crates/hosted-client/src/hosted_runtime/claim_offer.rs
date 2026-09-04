@@ -86,9 +86,12 @@ pub(crate) async fn cmd_claim(args: ClaimArgs) -> Result<()> {
         .connect_outbound(&server)
         .await
         .with_context(|| format!("connecting to {server} for the claim ceremony"))?;
-    // Upload the claimable seq-0 root before the Iroh ceremony so claim
-    // works even if this account never created a project spool.
-    if let Err(error) = client.ensure_claimable_owner_root().await {
+    // Install the claimable seq-0 root before the Iroh ceremony so claim works
+    // even if this account never created a project spool. weft#2041 (Option C):
+    // the stored credential cannot install an owner root, so pin over a full
+    // root re-minted in memory from the node seed rather than this connection's
+    // restricted bearer.
+    if let Err(error) = super::auth_login_agent::ensure_owner_root_pinned(&server).await {
         client.close().await;
         return Err(error);
     }

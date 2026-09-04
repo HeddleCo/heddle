@@ -305,13 +305,56 @@ async fn pin_claimable_owner_root(
     subject: &str,
     root: SignedOwnerRoot,
 ) -> Result<()> {
+    let session = owner_root_pin_session(server, full_root_token, proof_key_pem, subject)?;
+    let client = session.connect(server).await?;
+    finish_owner_root_pin(client, proof_key_pem, root).await
+}
+
+/// Ensure the account's claimable owner root is installed, minting a FULL,
+/// unrestricted root in memory from the persisted node seed to bear the pin.
+///
+/// This is the claim-ceremony pre-pin (weft#2041, Option C): the on-disk
+/// credential is the restricted account root, which the deny floor bars from
+/// `BootstrapOwnerRoot`, so the pin cannot ride the stored credential. The node
+/// identity is the account's root of trust; re-minting the full root from its
+/// seed is the same authority `auth login` used, and it is never persisted.
+/// Uses an ephemeral outbound endpoint so it does not bind the device node id
+/// the claim router serves on (heddle#1620). A no-op once the account is claimed
+/// or has no recorded root for this server.
+pub(crate) async fn ensure_owner_root_pinned(server: &str) -> Result<()> {
+    let minted = mint_restricted_agent_root()?;
+    let Some(root) = claimable_root_for_stored_account(server, &minted.private_key_pem)? else {
+        return Ok(());
+    };
+    let session = owner_root_pin_session(
+        server,
+        &minted.full_root_token,
+        &minted.private_key_pem,
+        &minted.subject,
+    )?;
+    let client = session.connect_outbound(server).await?;
+    finish_owner_root_pin(client, &minted.private_key_pem, root).await
+}
+
+fn owner_root_pin_session(
+    server: &str,
+    full_root_token: &str,
+    proof_key_pem: &str,
+    subject: &str,
+) -> Result<HostedSession> {
     let user_config = UserConfig::load_default()?;
-    let session = HostedSession::build(
+    HostedSession::build(
         &user_config,
         Some(server.to_string()),
         owner_root_pin_auth_mode(full_root_token, proof_key_pem, subject),
-    )?;
-    let mut client = session.connect(server).await?;
+    )
+}
+
+async fn finish_owner_root_pin(
+    mut client: super::HostedClient,
+    proof_key_pem: &str,
+    root: SignedOwnerRoot,
+) -> Result<()> {
     let signer = Ed25519Signer::from_pem(proof_key_pem)
         .context("loading the agent proof key for BootstrapOwnerRoot")?;
     let result = super::owner_root::upload_claimable_root(&mut client, &signer, root).await;
