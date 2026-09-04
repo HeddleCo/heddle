@@ -29,8 +29,8 @@ use super::{
         attenuate_for_agent, effective_pop_public_key_hex,
     },
     hosted::{
-        HostedAuthMode, HostedClient, HostedError, HostedSession, ResolvedHostedCredential,
-        operation_id::ClientOperationId, resolve_hosted_credential,
+        CallContextFactory, HostedAuthMode, HostedClient, HostedError, HostedSession,
+        ResolvedHostedCredential, operation_id::ClientOperationId, resolve_hosted_credential,
     },
 };
 
@@ -835,8 +835,10 @@ pub(crate) async fn cmd_auth_login_browser(server: &str, open_browser: bool) -> 
         .to_pem()
         .map_err(|e| anyhow::anyhow!("failed to export private key: {e}"))?;
 
-    // 2. Connect to the auth service.
-    let mut auth_client = connect_auth_client(server).await?;
+    // 2. Connect as the enrolling device key. weft#2047 requires a Tier-1
+    // request PoP by this key on CreateDeviceAuthorization; an unsigned
+    // session is rejected with no fallback.
+    let mut auth_client = connect_enrolling_device_client(server, &signer).await?;
 
     // 3. Create device authorization.
     let hostname = std::env::var("HOSTNAME")
@@ -845,12 +847,10 @@ pub(crate) async fn cmd_auth_login_browser(server: &str, open_browser: bool) -> 
 
     let response: Result<DeviceAuthorizationResponse> = auth_client
         .routes()
-        .create_device_authorization(&CreateDeviceAuthorizationRequest {
-            device_name: hostname,
-            device_public_key: public_key_bytes.clone(),
-            scope: "repo:*".to_string(),
-            client_operation_id: String::new(),
-        })
+        .create_device_authorization(&create_device_authorization_request(
+            hostname,
+            &public_key_bytes,
+        ))
         .await
         .map_err(|error| anyhow::anyhow!("create_device_authorization failed: {error}"));
     let response = match response {
@@ -1333,14 +1333,42 @@ pub(crate) fn resolve_server(explicit: Option<&str>) -> Result<String> {
     Ok("api.heddle.sh".to_string())
 }
 
-/// Connect the unauthenticated login flow through the same signed descriptor
-/// bootstrap used by every other native hosted session.
-async fn connect_auth_client(server: &str) -> Result<HostedClient> {
+/// Connect the device-authorization login flow as the enrolling device key.
+///
+/// CreateDeviceAuthorization is possession-first (weft#2047): the request
+/// proof identity is `principal:device-key:<lowercase-hex>`. The proto field
+/// on this RPC remains `device_public_key` (heddle-api 0.26 has no
+/// `device_proof_public_key` on CreateDeviceAuthorizationRequest).
+fn enrolling_device_auth_mode(signer: &Ed25519Signer) -> Result<HostedAuthMode> {
+    Ok(HostedAuthMode::ProofOnly {
+        proof_key_pem: signer
+            .to_pem()
+            .map_err(|error| anyhow::anyhow!("failed to export private key: {error}"))?,
+        signing_identity: CallContextFactory::device_key_principal(signer.public_key()),
+    })
+}
+
+fn create_device_authorization_request(
+    device_name: impl Into<String>,
+    public_key: &[u8],
+) -> CreateDeviceAuthorizationRequest {
+    CreateDeviceAuthorizationRequest {
+        device_name: device_name.into(),
+        device_public_key: public_key.to_vec(),
+        scope: "repo:*".to_string(),
+        client_operation_id: String::new(),
+    }
+}
+
+async fn connect_enrolling_device_client(
+    server: &str,
+    signer: &Ed25519Signer,
+) -> Result<HostedClient> {
     let user_config = UserConfig::load_default()?;
     HostedSession::build(
         &user_config,
         Some(server.to_string()),
-        HostedAuthMode::Unauthenticated,
+        enrolling_device_auth_mode(signer)?,
     )?
     .connect(server)
     .await
@@ -2683,5 +2711,47 @@ mod tests {
                 "default server must be preserved so a no-arg retry re-targets the same server",
             );
         });
+    }
+
+    #[test]
+    fn device_authorization_session_signs_as_the_enrolling_device_key() {
+        use api::signing;
+        use prost::Message;
+
+        let signer = Ed25519Signer::generate().expect("device key");
+        match enrolling_device_auth_mode(&signer).expect("auth mode") {
+            HostedAuthMode::ProofOnly {
+                signing_identity, ..
+            } => {
+                assert_eq!(
+                    signing_identity,
+                    CallContextFactory::device_key_principal(signer.public_key())
+                );
+            }
+            _ => panic!("CreateDeviceAuthorization must use ProofOnly"),
+        }
+        let request = create_device_authorization_request("laptop", signer.public_key());
+        assert_eq!(request.device_public_key, signer.public_key());
+        assert_eq!(request.device_name, "laptop");
+        let encoded = request.encode_to_vec();
+        let signed = CallContextFactory::default()
+            .with_enrolling_device_key_pem(&signer.to_pem().expect("pem"))
+            .expect("factory")
+            .unary(
+                "/heddle.api.v1alpha1.IdentityService/CreateDeviceAuthorization",
+                &encoded,
+                "",
+            )
+            .expect("sign");
+        let proof = signed.context.request_proof.expect("request proof");
+        let canonical = signing::unary_bytes(
+            &proof.signing_identity,
+            "/heddle.api.v1alpha1.IdentityService/CreateDeviceAuthorization",
+            proof.timestamp_millis,
+            &proof.nonce,
+            &encoded,
+        );
+        Ed25519Signer::verify_with_public_key(&canonical, signer.public_key(), &proof.signature)
+            .expect("weft-verifiable enrollment PoP");
     }
 }

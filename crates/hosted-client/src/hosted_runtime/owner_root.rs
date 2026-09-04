@@ -91,6 +91,7 @@ pub(crate) fn encode_bootstrap_owner_root(
     encoded
 }
 
+#[allow(deprecated)]
 pub(crate) fn encode_register_public_key_claim(
     request: &RegisterPublicKeyRequest,
     transition: &SignedOwnerKeyTransition,
@@ -102,6 +103,19 @@ pub(crate) fn encode_register_public_key_claim(
         bail!(
             "RegisterPublicKey claim must not send owner_root, owner_root_proof_of_possession, or owner_key_binding; those replace sequence-0"
         );
+    }
+    if !request.device_public_key.is_empty() {
+        bail!(
+            "RegisterPublicKey must not send device_public_key; send only device_proof_public_key"
+        );
+    }
+    if !request.biscuit_authority_public_key.is_empty() {
+        bail!(
+            "RegisterPublicKey must not send biscuit_authority_public_key; send only device_proof_public_key"
+        );
+    }
+    if request.device_proof_public_key.len() != 32 {
+        bail!("RegisterPublicKey device_proof_public_key must be 32 bytes");
     }
     let kind = transition
         .transition
@@ -207,11 +221,34 @@ pub(crate) async fn send_pending_register_public_key_claim(
         identity_state::store_while_locked(&state)?;
         encoded
     };
+    let signer = client
+        .claim_proof_signer()
+        .context("RegisterPublicKey requires this device's proof key")?;
+    require_enrolling_device_proof_key(&encoded, signer)?;
+    let enrollment = client
+        .enrolling_device_context()
+        .context("signing RegisterPublicKey as the enrolling device key")?;
     Ok(Some(
         client
-            .call_unary_encoded(REGISTER_PUBLIC_KEY, &encoded)
+            .call_unary_encoded_with(&enrollment, REGISTER_PUBLIC_KEY, &encoded)
             .await?,
     ))
+}
+
+#[allow(deprecated)]
+pub(crate) fn require_enrolling_device_proof_key(
+    encoded: &[u8],
+    signer: &Ed25519Signer,
+) -> Result<()> {
+    let request = RegisterPublicKeyRequest::decode(encoded)
+        .context("decode pending RegisterPublicKey claim")?;
+    if !request.device_public_key.is_empty() || !request.biscuit_authority_public_key.is_empty() {
+        bail!("RegisterPublicKey must send only device_proof_public_key");
+    }
+    if request.device_proof_public_key != signer.public_key() {
+        bail!("RegisterPublicKey device_proof_public_key must be this device's proof key");
+    }
+    Ok(())
 }
 
 fn already_installed(message: &str) -> bool {
