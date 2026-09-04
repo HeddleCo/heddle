@@ -187,10 +187,21 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
     ),
 ];
 
-/// Destructive non-auth methods that remain mandatory denials for every
-/// derived token, even when the caller constructs [`AgentAttenuation`]
-/// directly without an allowlist.
-const NON_AUTH_AGENT_OPERATION_DENY_FLOOR: &[&str] = &["DeleteSpool"];
+/// Non-auth methods that remain mandatory denials for every attenuated token
+/// (the restricted account root and every derived child), even when the caller
+/// constructs [`AgentAttenuation`] directly without an allowlist.
+///
+/// `BootstrapOwnerRoot` is here so no on-disk credential can install an owner
+/// root at the Biscuit layer (weft#2041, Option C): the owner-root pin is
+/// performed only by the FULL, unrestricted client-minted root, which is minted
+/// in memory from the node identity seed and never persisted as a `.hcred`. The
+/// full root does not pass through attenuation, so it is unaffected by this
+/// floor. This deliberately supersedes the earlier heddle#1600 grant that put
+/// `BootstrapOwnerRoot` in the derive-agent child ceiling: because children
+/// attenuate from the restricted account root, they could never widen past this
+/// floor anyway, and no in-tree flow installs an owner root from a derived
+/// child. Owner-root reads (`GetCurrentOwnerKeyring`) stay in the ceiling.
+const NON_AUTH_AGENT_OPERATION_DENY_FLOOR: &[&str] = &["DeleteSpool", "BootstrapOwnerRoot"];
 
 fn mandatory_agent_denied_operations() -> impl Iterator<Item = &'static str> {
     NON_AUTH_AGENT_OPERATION_DENY_FLOOR.iter().copied().chain(
@@ -234,8 +245,11 @@ pub const SAFE_AGENT_OPERATIONS: &[&str] = &[
     // admits both for unclaimed agent-rooted accounts (weft#1852/#1853).
     "GetCurrentUserSpool",
     "CreateSpool",
-    // Install the claimable deferred-human owner root (heddle#1600).
-    "BootstrapOwnerRoot",
+    // Read the installed owner keyring (heddle#1600). Owner-root *install*
+    // (BootstrapOwnerRoot) is intentionally NOT in the agent ceiling: it is
+    // performed only by the full unrestricted root minted in memory at
+    // login/claim (weft#2041), never by the restricted account credential or a
+    // derived child (see NON_AUTH_AGENT_OPERATION_DENY_FLOOR).
     "GetCurrentOwnerKeyring",
     // Repository reads.
     "GetRefs",
@@ -312,8 +326,6 @@ const TEMPLATE_CONTRIBUTOR_WRITES: &[&str] = &[
     "ResolveDiscussion",
     // Provision the caller's own child spool (host-only auto-provision push).
     "CreateSpool",
-    // Install the claimable deferred-human owner root (heddle#1600).
-    "BootstrapOwnerRoot",
 ];
 
 /// The push/pull/ref-move set a CI lander needs to run `ready`/`land`.
@@ -460,6 +472,11 @@ impl AgentAttenuation {
 /// [`SAFE_AGENT_OPERATIONS`] is the derive-agent child ceiling only — do not
 /// apply it here. The leaf PoP stays the registered Iroh key (self-delegation)
 /// so `auth login` can remint from that seed after expiry.
+///
+/// The deny floor now includes `BootstrapOwnerRoot` (weft#2041, Option C), so
+/// this persisted credential genuinely cannot install an owner root. The pin is
+/// performed only by the full unrestricted root, minted in memory from the same
+/// node seed at login/claim and never stored.
 pub(crate) fn restrict_agent_account_root(
     root_token: &str,
     signer: &Ed25519Signer,

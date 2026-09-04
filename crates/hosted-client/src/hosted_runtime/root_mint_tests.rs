@@ -189,6 +189,7 @@ fn restricted_agent_capability_keeps_the_deny_floor() {
     for denied in [
         "CreateServiceAccount",
         "DeleteSpool",
+        "BootstrapOwnerRoot",
         "RevokeSession",
         "CreateAgentAccount",
         "ClaimHandle",
@@ -266,6 +267,31 @@ fn derived_contributor_cannot_mint_or_list_signup_invites() {
     }
 }
 
+/// weft#2041 (Option C): owner-root install is performed only by the FULL,
+/// unrestricted client-minted root; the restricted account credential persisted
+/// to disk must be barred from it at the Biscuit layer. Prove both halves: the
+/// full root authorizes `BootstrapOwnerRoot`, and the restricted credential is
+/// REJECTED for it by the deny floor.
+#[test]
+fn only_the_full_root_authorizes_the_owner_root_pin() {
+    let signer = Ed25519Signer::generate().expect("seed");
+    let seed = signer.to_seed();
+    let root = mint_agent_root(&seed).expect("agent root");
+    authorize_restricted_root(&root.token, &seed, "BootstrapOwnerRoot")
+        .expect("the full unrestricted root must authorize the owner-root pin");
+
+    let restricted =
+        restrict_agent_account_root(&root.token, &signer, root.expires_at).expect("restrict");
+    assert!(
+        authorize_restricted_root(&restricted, &seed, "BootstrapOwnerRoot").is_err(),
+        "the restricted on-disk credential must NOT be able to install an owner root"
+    );
+    // The credential still authorizes its everyday account op, so the deny is
+    // scoped to owner-root install, not a blanket lockout.
+    authorize_restricted_root(&restricted, &seed, "CreateSignupInvite")
+        .expect("the account root must still authorize everyday ops");
+}
+
 fn authorize_restricted_root(
     token: &str,
     seed: &[u8; 32],
@@ -300,12 +326,37 @@ fn safe_ceiling_allows_host_only_spool_provisioning() {
     for op in [
         "GetCurrentUserSpool",
         "CreateSpool",
-        "BootstrapOwnerRoot",
         "GetCurrentOwnerKeyring",
     ] {
         assert!(
             SAFE_AGENT_OPERATIONS.contains(&op),
-            "agent ceiling missing {op}: host-only auto-provision / claimable owner-root cannot fire it"
+            "agent ceiling missing {op}: host-only auto-provision / owner-keyring read cannot fire it"
         );
     }
+}
+
+/// weft#2041 (Option C): owner-root *install* is deliberately absent from the
+/// agent ceiling. Neither the restricted account root nor any derived child may
+/// carry it; only the full unrestricted root pins. Reads of the owner keyring
+/// stay available.
+#[test]
+fn safe_ceiling_excludes_owner_root_install() {
+    assert!(
+        !SAFE_AGENT_OPERATIONS.contains(&"BootstrapOwnerRoot"),
+        "BootstrapOwnerRoot must not be in the derive-agent child ceiling",
+    );
+    for template in AgentTemplate::ALL {
+        assert!(
+            !template
+                .operations()
+                .iter()
+                .any(|op| op == "BootstrapOwnerRoot"),
+            "template {:?} must not grant owner-root install",
+            template.as_str(),
+        );
+    }
+    assert!(
+        SAFE_AGENT_OPERATIONS.contains(&"GetCurrentOwnerKeyring"),
+        "owner-keyring reads must remain available to agents",
+    );
 }

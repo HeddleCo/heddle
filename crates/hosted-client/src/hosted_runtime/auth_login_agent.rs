@@ -22,30 +22,29 @@ use super::{
 
 pub(crate) async fn remint(server: &str) -> Result<()> {
     let stored = mint_restricted_agent_root()?;
+    let subject = stored.subject.clone();
     let claimable_root = claimable_root_for_stored_account(server, &stored.private_key_pem)?;
     if let Some(root) = claimable_root {
-        let user_config = UserConfig::load_default()?;
-        let session = HostedSession::build(
-            &user_config,
-            Some(server.to_string()),
-            HostedAuthMode::ProofOnly {
-                proof_key_pem: stored.private_key_pem.clone(),
-                signing_identity: format!("principal:{}", stored.subject),
-            },
-        )?;
-        let mut client = session.connect(server).await?;
-        let upload = upload_reminted_owner_root(&mut client, &stored.private_key_pem, root).await;
-        client.close().await;
-        upload?;
+        // weft#2041: pin over the FULL unrestricted root, not the proof-only
+        // (bearer-less) session that weft rejects, and not the restricted token
+        // stored below.
+        pin_claimable_owner_root(
+            server,
+            &stored.full_root_token,
+            &stored.private_key_pem,
+            &subject,
+            root,
+        )
+        .await?;
     }
     store_agent_root(
         server,
         stored.token,
-        stored.subject.clone(),
+        subject.clone(),
         stored.private_key_pem,
         stored.expires_at,
     )?;
-    print_success(&stored.subject);
+    print_success(&subject);
     Ok(())
 }
 
@@ -77,6 +76,7 @@ fn claimable_root_for_stored_account(
     Ok(Some(root))
 }
 
+#[cfg(test)]
 async fn upload_reminted_owner_root(
     client: &mut super::HostedClient,
     private_key_pem: &str,
@@ -142,17 +142,18 @@ pub(crate) async fn create_with_invite(
             return Err(error);
         }
     };
-    let signer = Ed25519Signer::from_pem(&minted.private_key_pem)
-        .context("loading the agent proof key for BootstrapOwnerRoot")?;
+    // The proof-only connection consumed the invite. `BootstrapOwnerRoot`
+    // requires an agent BEARER (weft#2041), so close this bearer-less session
+    // and re-open one presenting the full unrestricted root token.
+    client.close().await;
+    let full_root_token = minted.full_root_token.clone();
+    let proof_key_pem = minted.private_key_pem.clone();
+    let subject = minted.subject.clone();
     let output = finish_invite_create(server, minted, response)?;
     if let Some(state) = identity_state::load()?
         && let Some(root) = super::owner_root::load_recorded_root(&state)?
     {
-        let upload = super::owner_root::upload_claimable_root(&mut client, &signer, root).await;
-        client.close().await;
-        upload?;
-    } else {
-        client.close().await;
+        pin_claimable_owner_root(server, &full_root_token, &proof_key_pem, &subject, root).await?;
     }
     emit_created(ctx, &output)?;
     Ok(())
@@ -238,7 +239,16 @@ pub(crate) fn finish_invite_create_from_response(
 }
 
 struct RestrictedAgentRoot {
+    /// The restricted account-root capability persisted to the on-disk
+    /// credential. This is what everyday hosted calls (and `derive-agent`)
+    /// use as the parent bearer.
     token: String,
+    /// The FULL, unrestricted client-minted root token, held only in memory
+    /// during the login flow. `BootstrapOwnerRoot` is presented this bearer
+    /// (weft#2041): the server requires an agent capability for the owner-root
+    /// pin, and pinning over the full root means the pin never depends on the
+    /// stored credential's narrowed authority.
+    full_root_token: String,
     subject: String,
     public_key: [u8; 32],
     private_key_pem: String,
@@ -270,10 +280,133 @@ fn mint_restricted_agent_root() -> Result<RestrictedAgentRoot> {
     }
     Ok(RestrictedAgentRoot {
         token: restricted,
+        full_root_token: root.token,
         subject: metadata.subject,
         public_key: root.public_key,
         private_key_pem: root.private_key_pem,
         expires_at: root.expires_at,
+    })
+}
+
+/// Early-pin the recorded claimable owner root, presenting the FULL,
+/// unrestricted client-minted root token as the request bearer (weft#2041).
+///
+/// `BootstrapOwnerRoot` requires an agent bearer capability and is deliberately
+/// OFF the independent-root method floor so it accepts a client-minted agent
+/// root. The invite/remint flow previously issued this call over a proof-only
+/// session that carried no bearer, so weft rejected it with
+/// `invalid bearer capability`. We open a dedicated session that presents the
+/// unrestricted root held in memory during login, rather than the restricted
+/// credential that is persisted to disk.
+async fn pin_claimable_owner_root(
+    server: &str,
+    full_root_token: &str,
+    proof_key_pem: &str,
+    subject: &str,
+    root: SignedOwnerRoot,
+) -> Result<()> {
+    let session = owner_root_pin_session(server, full_root_token, proof_key_pem, subject)?;
+    let client = session.connect(server).await?;
+    finish_owner_root_pin(client, proof_key_pem, root).await
+}
+
+/// Ensure the account's claimable owner root is installed, minting a FULL,
+/// unrestricted root in memory from the persisted node seed to bear the pin.
+///
+/// This is the claim-ceremony pre-pin (weft#2041, Option C): the on-disk
+/// credential is the restricted account root, which the deny floor bars from
+/// `BootstrapOwnerRoot`, so the pin cannot ride the stored credential. The node
+/// identity is the account's root of trust; re-minting the full root from its
+/// seed is the same authority `auth login` used, and it is never persisted.
+/// Uses an ephemeral outbound endpoint so it does not bind the device node id
+/// the claim router serves on (heddle#1620). A no-op once the account is claimed
+/// or has no recorded root for this server.
+pub(crate) async fn ensure_owner_root_pinned(server: &str) -> Result<()> {
+    let minted = mint_restricted_agent_root()?;
+    let Some(root) = claimable_root_for_stored_account(server, &minted.private_key_pem)? else {
+        return Ok(());
+    };
+    let session = owner_root_pin_session(
+        server,
+        &minted.full_root_token,
+        &minted.private_key_pem,
+        &minted.subject,
+    )?;
+    let client = session.connect_outbound(server).await?;
+    finish_owner_root_pin(client, &minted.private_key_pem, root).await
+}
+
+fn owner_root_pin_session(
+    server: &str,
+    full_root_token: &str,
+    proof_key_pem: &str,
+    subject: &str,
+) -> Result<HostedSession> {
+    let user_config = UserConfig::load_default()?;
+    HostedSession::build(
+        &user_config,
+        Some(server.to_string()),
+        owner_root_pin_auth_mode(full_root_token, proof_key_pem, subject),
+    )
+}
+
+async fn finish_owner_root_pin(
+    mut client: super::HostedClient,
+    proof_key_pem: &str,
+    root: SignedOwnerRoot,
+) -> Result<()> {
+    let signer = Ed25519Signer::from_pem(proof_key_pem)
+        .context("loading the agent proof key for BootstrapOwnerRoot")?;
+    let result = super::owner_root::upload_claimable_root(&mut client, &signer, root).await;
+    client.close().await;
+    result
+}
+
+/// Build the auth mode for the owner-root pin: present the full unrestricted
+/// root token as the bearer, proven by the agent's own device key. Extracted so
+/// the token selection is unit-testable without a live endpoint.
+fn owner_root_pin_auth_mode(
+    full_root_token: &str,
+    proof_key_pem: &str,
+    subject: &str,
+) -> HostedAuthMode {
+    HostedAuthMode::PresentedRoot {
+        token: full_root_token.to_string(),
+        proof_key_pem: proof_key_pem.to_string(),
+        subject: subject.to_string(),
+    }
+}
+
+/// The tokens involved in an owner-root pin, surfaced for tests: the restricted
+/// credential persisted to disk vs. the unrestricted bearer the pin presents.
+#[cfg(test)]
+pub(crate) struct OwnerRootPinProbe {
+    pub stored_token: String,
+    pub presented_bearer: String,
+    pub full_root_token: String,
+    pub subject: String,
+}
+
+/// Mint an agent root exactly as the invite/remint flow does, then resolve the
+/// bearer the owner-root pin would present. Lets tests assert weft#2041's
+/// invariant (pin over the full unrestricted root, store the restricted one)
+/// without a live endpoint.
+#[cfg(test)]
+pub(crate) fn owner_root_pin_probe() -> Result<OwnerRootPinProbe> {
+    let minted = mint_restricted_agent_root()?;
+    let presented_bearer = match owner_root_pin_auth_mode(
+        &minted.full_root_token,
+        &minted.private_key_pem,
+        &minted.subject,
+    ) {
+        HostedAuthMode::PresentedRoot { token, .. } => token,
+        _ => bail!("owner-root pin must present a root bearer"),
+    };
+    Ok(OwnerRootPinProbe {
+        stored_token: minted.token,
+        presented_bearer,
+        full_root_token: minted.full_root_token,
+        subject: minted.subject,
     })
 }
 

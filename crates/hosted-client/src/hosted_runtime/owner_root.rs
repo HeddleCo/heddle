@@ -63,10 +63,6 @@ pub(crate) fn mint_and_record_claimable_root(
     Ok(signed)
 }
 
-pub(crate) fn persist_claimable_root(state: &ClaimState) -> Result<()> {
-    identity_state::store(state)
-}
-
 pub(crate) fn load_recorded_root(state: &ClaimState) -> Result<Option<SignedOwnerRoot>> {
     let Some(hex) = state.signed_owner_root_hex.as_deref() else {
         return Ok(None);

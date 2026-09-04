@@ -12,10 +12,12 @@ use super::{
     auth::headless_token_metadata,
     auth_login::{LoginInputs, LoginPath, login, login_path, store_agent_root},
     auth_login_agent::{
-        finish_invite_create_from_response, remint_with_client_for_test,
+        finish_invite_create_from_response, owner_root_pin_probe, remint_with_client_for_test,
         test_support::start_recording_client,
     },
-    device_flow::restrict_agent_account_root,
+    device_flow::{
+        authenticated_subject, effective_pop_public_key_hex, restrict_agent_account_root,
+    },
     identity_state::{self, ClaimState},
     root_mint::mint_agent_root,
 };
@@ -362,5 +364,54 @@ async fn remint_uses_claim_state_and_uploads_owner_root_at_enrollment() {
         *calls.lock().unwrap_or_else(|poison| poison.into_inner()),
         ["/heddle.api.v1alpha1.OwnerAuthorizationService/BootstrapOwnerRoot"],
         "remint must install the owner root during enrollment"
+    );
+}
+
+/// weft#2041: `auth login --invite` / remint exited 74
+/// (`invalid bearer capability`) because the `BootstrapOwnerRoot` pin ran over a
+/// proof-only session that carried no bearer. Owner chose Option B: pin over the
+/// FULL, unrestricted client-minted root held in memory during login, while the
+/// on-disk credential stays the restricted account root. This locks the token
+/// selection: the pin presents the full root, never the restricted credential.
+#[test]
+fn owner_root_pin_presents_full_unrestricted_root_not_the_stored_credential() {
+    let _home = IsolatedHome::new();
+    let probe = owner_root_pin_probe().expect("mint agent root and resolve the pin bearer");
+
+    assert_eq!(
+        probe.presented_bearer, probe.full_root_token,
+        "the owner-root pin must present the full unrestricted root token"
+    );
+    assert_ne!(
+        probe.presented_bearer, probe.stored_token,
+        "the pin must never present the restricted credential persisted to disk"
+    );
+
+    // Both tokens speak for the same principal and are proven by the same leaf
+    // proof-of-possession key, so the full root is an accepted bearer for the
+    // account the restricted credential also authenticates.
+    assert_eq!(
+        authenticated_subject(&probe.full_root_token).expect("full-root subject"),
+        authenticated_subject(&probe.stored_token).expect("stored-token subject"),
+    );
+    assert_eq!(
+        probe.subject,
+        authenticated_subject(&probe.full_root_token).expect("full-root subject"),
+        "PresentedRoot subject must match the bearer's authenticated principal",
+    );
+    assert_eq!(
+        effective_pop_public_key_hex(&probe.full_root_token).expect("full-root leaf key"),
+        effective_pop_public_key_hex(&probe.stored_token).expect("stored-token leaf key"),
+    );
+
+    // The persisted credential is a strict attenuation of the full root: it adds
+    // the account-root deny-floor block on top of the same authority block.
+    let full = biscuit_auth::UnverifiedBiscuit::from_base64(probe.full_root_token.as_bytes())
+        .expect("parse full root");
+    let stored = biscuit_auth::UnverifiedBiscuit::from_base64(probe.stored_token.as_bytes())
+        .expect("parse stored credential");
+    assert!(
+        stored.block_count() > full.block_count(),
+        "stored credential must add the account-root attenuation block over the full root",
     );
 }
