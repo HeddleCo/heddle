@@ -51,7 +51,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: [self-hosted, linux, x64, heddleco]
     timeout-minutes: 5
 
     steps:
@@ -79,7 +79,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci')
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: [self-hosted, linux, x64, heddleco]
     timeout-minutes: 10
     outputs:
       rust: ${{ steps.decide.outputs.rust }}
@@ -259,7 +259,7 @@ jobs:
     name: Quality
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: [self-hosted, linux, x64, heddleco]
     timeout-minutes: 60
     env:
       # Match the fast lane: LLVM lld for the link-heavy test builds. This job
@@ -362,7 +362,7 @@ jobs:
     name: Feature contracts
     needs: changes
     if: needs.changes.outputs.cli_checks == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: [self-hosted, linux, x64, heddleco]
     timeout-minutes: 30
 
     steps:
@@ -428,7 +428,7 @@ jobs:
       always() &&
       (github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci'))
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: [self-hosted, linux, x64, heddleco]
     timeout-minutes: 5
     steps:
       - name: Require every extracted quality gate
@@ -491,7 +491,7 @@ jobs:
     name: CLI fault-injection tests
     needs: changes
     if: needs.changes.outputs.fault_tests == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: [self-hosted, linux, x64, heddleco]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -540,7 +540,7 @@ jobs:
     name: FUSE mount smoke (Linux)
     needs: changes
     if: needs.changes.outputs.mount == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: [self-hosted, linux, x64, heddleco]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -707,7 +707,7 @@ jobs:
     name: Coverage
     needs: changes
     if: needs.changes.outputs.coverage == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: [self-hosted, linux, x64, heddleco]
     timeout-minutes: 60
 
     steps:
@@ -848,7 +848,7 @@ jobs:
       github.event_name != 'schedule' &&
       (github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'full-ci'))
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: [self-hosted, linux, x64, heddleco]
     timeout-minutes: 5
     steps:
       - name: Require every full-suite gate

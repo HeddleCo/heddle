@@ -25,7 +25,7 @@ env:
 jobs:
   coverage:
     name: Coverage
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: [self-hosted, linux, x64, heddleco]
     timeout-minutes: 60
     env:
       HAVE_CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN != '' }}
