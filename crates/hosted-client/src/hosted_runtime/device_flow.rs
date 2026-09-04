@@ -60,6 +60,10 @@ const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
     ),
     ("RotateCredential", AgentAuthOperationDisposition::Denied),
     ("RevokeCredential", AgentAuthOperationDisposition::Denied),
+    // Passkey-enrolled device-root revoke (weft#2047 C5). Modeled on
+    // RevokeCredential: derived agents must not drop a parent principal's
+    // registered device root.
+    ("RevokeDevice", AgentAuthOperationDisposition::Denied),
     (
         "CreateServiceAccount",
         AgentAuthOperationDisposition::Denied,
