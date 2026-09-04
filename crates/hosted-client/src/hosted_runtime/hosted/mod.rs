@@ -177,6 +177,10 @@ impl HostedClient {
         self.context.proof_signer()
     }
 
+    pub(crate) fn enrolling_device_context(&self) -> Result<CallContextFactory> {
+        self.context.as_enrolling_device_key()
+    }
+
     pub async fn connect(descriptor: &VerifiedEndpointDescriptor) -> Result<Self> {
         let config = ClientConfig::default();
         Ok(Self {
@@ -349,13 +353,26 @@ impl HostedClient {
     where
         Response: Message + Default,
     {
+        self.call_unary_encoded_with(&self.context, method, encoded)
+            .await
+    }
+
+    pub(crate) async fn call_unary_encoded_with<Response>(
+        &self,
+        context: &CallContextFactory,
+        method: &str,
+        encoded: &[u8],
+    ) -> Result<Response>
+    where
+        Response: Message + Default,
+    {
         let descriptor = api::method_descriptor(method)
             .ok_or_else(|| HostedError::Framing(format!("unknown hosted method {method}")))?;
         let client_operation_id = descriptor.client_operation_id(encoded)?.unwrap_or_default();
         if descriptor.client_operation_id_required && client_operation_id.is_empty() {
             return Err(HostedError::MissingClientOperationId);
         }
-        let signed = self.context.unary(method, encoded, client_operation_id)?;
+        let signed = context.unary(method, encoded, client_operation_id)?;
         match call::unary_encoded(&self.connection, method, &signed.context, encoded).await {
             Ok(response) => Ok(response),
             Err(HostedError::Call {

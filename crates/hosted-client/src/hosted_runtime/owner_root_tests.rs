@@ -73,7 +73,7 @@ use super::{
     owner_root::{
         BootstrapOwnerRootExtension, BrowserClaimDeferredHuman, RegisterPublicKeyClaimExtension,
         build_claim_deferred_human, encode_bootstrap_owner_root, encode_register_public_key_claim,
-        load_recorded_root, prepare_register_public_key_claim,
+        load_recorded_root, prepare_register_public_key_claim, require_enrolling_device_proof_key,
     },
 };
 
@@ -326,8 +326,6 @@ fn bootstrap_owner_root_wire_carries_agent_claim_binding_on_tag_5() {
 }
 
 #[test]
-// This deliberately exercises the legacy single-key device_public_key path.
-// Migrating CLI owner-root flows to the two-key model is a separate effort.
 #[allow(deprecated)]
 fn register_public_key_claim_sends_claim_deferred_human_on_tag_16() {
     let _home = IsolatedHome::new();
@@ -377,7 +375,7 @@ fn register_public_key_claim_sends_claim_deferred_human_on_tag_16() {
     );
     let request = RegisterPublicKeyRequest {
         challenge_id: "challenge-1".into(),
-        device_public_key: human.public_key().to_vec(),
+        device_proof_public_key: agent.public_key().to_vec(),
         client_operation_id: "op-claim-1".into(),
         ..Default::default()
     };
@@ -386,7 +384,9 @@ fn register_public_key_claim_sends_claim_deferred_human_on_tag_16() {
     assert!(official.owner_root.is_none());
     assert!(official.owner_root_proof_of_possession.is_none());
     assert!(official.owner_key_binding.is_none());
-    assert_eq!(official.device_public_key, human.public_key());
+    assert!(official.device_public_key.is_empty());
+    assert!(official.biscuit_authority_public_key.is_empty());
+    assert_eq!(official.device_proof_public_key, agent.public_key());
     let extension = RegisterPublicKeyClaimExtension::decode(encoded.as_slice()).expect("tag 16");
     let sent = extension
         .claim_deferred_human
@@ -440,8 +440,44 @@ fn register_public_key_claim_refuses_retired_device_public_key() {
 }
 
 #[test]
-// This deliberately exercises the legacy single-key device_public_key path.
-// Migrating CLI owner-root flows to the two-key model is a separate effort.
+fn register_public_key_claim_refuses_retired_biscuit_authority_public_key() {
+    let error = encode_register_public_key_claim(
+        &RegisterPublicKeyRequest {
+            biscuit_authority_public_key: vec![0x11; 32],
+            device_proof_public_key: vec![0x22; 32],
+            client_operation_id: "op-authority".into(),
+            ..Default::default()
+        },
+        &Default::default(),
+    )
+    .expect_err("retired biscuit_authority_public_key must not be encoded");
+    assert!(
+        error
+            .to_string()
+            .contains("must not send biscuit_authority_public_key"),
+        "{error}"
+    );
+}
+
+#[test]
+fn register_public_key_claim_requires_device_proof_public_key() {
+    let error = encode_register_public_key_claim(
+        &RegisterPublicKeyRequest {
+            client_operation_id: "op-empty".into(),
+            ..Default::default()
+        },
+        &Default::default(),
+    )
+    .expect_err("empty device_proof_public_key must not be encoded");
+    assert!(
+        error
+            .to_string()
+            .contains("device_proof_public_key must be 32 bytes"),
+        "{error}"
+    );
+}
+
+#[test]
 #[allow(deprecated)]
 fn claim_prepares_register_public_key_claim_deferred_human_for_send() {
     let _home = IsolatedHome::new();
@@ -493,7 +529,7 @@ fn claim_prepares_register_public_key_claim_deferred_human_for_send() {
         &mut state,
         RegisterPublicKeyRequest {
             challenge_id: "challenge-prepare".into(),
-            device_public_key: human.public_key().to_vec(),
+            device_proof_public_key: agent.public_key().to_vec(),
             client_operation_id: "op-prepare".into(),
             ..Default::default()
         },
@@ -507,6 +543,8 @@ fn claim_prepares_register_public_key_claim_deferred_human_for_send() {
     let official = RegisterPublicKeyRequest::decode(encoded.as_slice()).expect("official");
     assert!(official.owner_root.is_none());
     assert!(official.owner_key_binding.is_none());
+    assert!(official.device_public_key.is_empty());
+    assert_eq!(official.device_proof_public_key, agent.public_key());
     let extension = RegisterPublicKeyClaimExtension::decode(encoded.as_slice()).expect("tag 16");
     assert_eq!(
         extension
@@ -516,5 +554,37 @@ fn claim_prepares_register_public_key_claim_deferred_human_for_send() {
             .expect("body")
             .kind(),
         OwnerKeyTransitionKind::ClaimDeferredHuman
+    );
+}
+
+#[test]
+#[allow(deprecated)]
+fn pending_register_public_key_must_match_this_device_proof_key() {
+    let signer = Ed25519Signer::generate().expect("device");
+    let encoded = encode_register_public_key_claim(
+        &RegisterPublicKeyRequest {
+            device_proof_public_key: signer.public_key().to_vec(),
+            client_operation_id: "op-match".into(),
+            ..Default::default()
+        },
+        &{
+            let mut transition = SignedOwnerKeyTransition::default();
+            transition.transition = Some(api::heddle::api::v1alpha1::OwnerKeyTransition {
+                kind: OwnerKeyTransitionKind::ClaimDeferredHuman as i32,
+                ..Default::default()
+            });
+            transition
+        },
+    )
+    .expect("one-key request");
+    require_enrolling_device_proof_key(&encoded, &signer).expect("matching device key");
+    let other = Ed25519Signer::generate().expect("other device");
+    let error = require_enrolling_device_proof_key(&encoded, &other)
+        .expect_err("a different device key must not prove this enrollment");
+    assert!(
+        error
+            .to_string()
+            .contains("must be this device's proof key"),
+        "{error}"
     );
 }

@@ -140,6 +140,32 @@ impl CallContextFactory {
         Ok(self)
     }
 
+    /// Pre-account identity weft verifies for possession-first device enrollment.
+    ///
+    /// `hex::encode` is lowercase; weft compares this string exactly against
+    /// `principal:device-key:<lowercase-hex-of-device_proof_public_key>`.
+    pub fn device_key_principal(public_key: &[u8]) -> String {
+        format!("principal:device-key:{}", hex::encode(public_key))
+    }
+
+    /// Sign as the enrolling device key (weft#2047). Keeps any bearer; only
+    /// the request-proof identity becomes `principal:device-key:<hex>`.
+    pub fn as_enrolling_device_key(&self) -> Result<Self> {
+        let signer = self
+            .signer
+            .as_ref()
+            .ok_or(HostedError::SigningIdentityRequired)?;
+        let mut cloned = self.clone();
+        cloned.signing_identity = Some(Self::device_key_principal(signer.public_key()));
+        Ok(cloned)
+    }
+
+    pub fn with_enrolling_device_key_pem(self, pem: &str) -> Result<Self> {
+        let signer = Ed25519Signer::from_pem(pem)?;
+        let identity = Self::device_key_principal(signer.public_key());
+        self.with_signing_key_pem(pem, identity)
+    }
+
     pub fn from_client_config(config: &ClientConfig) -> Result<Self> {
         let signer = config
             .auth_proof_key_pem
@@ -619,6 +645,67 @@ mod tests {
             .mint_spool_owner_genesis()
             .expect_err("CreateSpool must not invent a throwaway owner key");
         assert!(matches!(error, HostedError::SigningIdentityRequired));
+    }
+
+    #[test]
+    fn enrolling_device_key_identity_is_lowercase_hex_principal() {
+        let signer = Ed25519Signer::generate().unwrap();
+        let identity = CallContextFactory::device_key_principal(signer.public_key());
+        assert_eq!(
+            identity,
+            format!("principal:device-key:{}", hex::encode(signer.public_key()))
+        );
+        assert_eq!(identity, identity.to_ascii_lowercase());
+        let factory = CallContextFactory::default()
+            .with_enrolling_device_key_pem(&signer.to_pem().unwrap())
+            .unwrap();
+        assert_eq!(factory.signing_identity(), Some(identity.as_str()));
+        let request = b"device-enrollment";
+        let signed = factory
+            .unary(
+                "/heddle.api.v1alpha1.IdentityService/CreateDeviceAuthorization",
+                request,
+                "",
+            )
+            .unwrap();
+        let proof = signed.context.request_proof.unwrap();
+        assert_eq!(proof.algorithm, "ed25519");
+        assert_eq!(proof.signing_identity, identity);
+        let canonical = signing::unary_bytes(
+            &proof.signing_identity,
+            "/heddle.api.v1alpha1.IdentityService/CreateDeviceAuthorization",
+            proof.timestamp_millis,
+            &proof.nonce,
+            request,
+        );
+        Ed25519Signer::verify_with_public_key(&canonical, signer.public_key(), &proof.signature)
+            .unwrap();
+    }
+
+    #[test]
+    fn as_enrolling_device_key_keeps_the_bearer_and_rewrites_request_identity() {
+        let signer = Ed25519Signer::generate().unwrap();
+        let factory = CallContextFactory::default()
+            .with_bearer_capability(b"agent-root".to_vec())
+            .with_signing_key_pem(&signer.to_pem().unwrap(), "principal:agent-key:abc")
+            .unwrap();
+        let enrollment = factory.as_enrolling_device_key().unwrap();
+        let expected = CallContextFactory::device_key_principal(signer.public_key());
+        assert_eq!(enrollment.bearer_capability(), b"agent-root");
+        assert_eq!(enrollment.signing_identity(), Some(expected.as_str()));
+        let signed = enrollment
+            .unary(
+                "/heddle.api.v1alpha1.IdentityService/RegisterPublicKey",
+                b"claim",
+                "op-1",
+            )
+            .unwrap();
+        let proof = signed.context.request_proof.unwrap();
+        assert_eq!(
+            proof.signing_identity,
+            CallContextFactory::device_key_principal(signer.public_key())
+        );
+        assert_eq!(signed.context.bearer_capability, b"agent-root");
     }
 
     #[test]

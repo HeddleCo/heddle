@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Sign `CreateDeviceAuthorization` and `RegisterPublicKey` with the enrolling
+  device key (`principal:device-key:<hex>`) and send only
+  `device_proof_public_key` on RegisterPublicKey (weft#2047 one-key cutover).
 - Hash Push/Pull `StreamOpeningProof.stream_id` to 64-byte blake3 hex so weft admits the opening (the long transfer identity stays on the checkpoint).
 
 ## [0.15.3](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.15.2...heddle-hosted-client-v0.15.3) - 2026-08-28
