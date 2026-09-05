@@ -8,7 +8,7 @@ use std::{
     path::Path,
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use objects::{
     object::{ActionId, ContentHash, StateAttachment, StateId},
     store::{ObjectStore, SidecarStore},
@@ -354,8 +354,10 @@ impl LocalSync {
     }
 
     /// If the source repository has state-visibility records for `state`,
-    /// ferry the sidecar bytes through the same repository boundary used by
-    /// the network path.
+    /// copy them through the local-trust boundary. Hosted `accept_wire`
+    /// requires `[metadata] trusted_keys`; a fresh clone does not have
+    /// them, and dropping a `Private` sidecar makes the advertised head
+    /// unresolvable.
     fn propagate_state_visibility_for_state(
         &self,
         target: &Repository,
@@ -364,7 +366,7 @@ impl LocalSync {
         let Some(bytes) = self.source.get_state_visibility_bytes_for_state(state)? else {
             return Ok(());
         };
-        target.accept_wire_state_visibility(*state, &bytes)?;
+        target.accept_local_state_visibility(*state, &bytes)?;
         Ok(())
     }
 
@@ -384,7 +386,8 @@ impl LocalSync {
 #[cfg(test)]
 mod tests {
     use objects::object::{
-        Attribution, Blob, Principal, StateAttachment, StateAttachmentBody, Tree, TreeEntry,
+        Attribution, Blob, Principal, StateAttachment, StateAttachmentBody, StateVisibility, Tree,
+        TreeEntry, VisibilityTier,
     };
     use repo::StateAttachmentKind;
     use tempfile::TempDir;
@@ -447,9 +450,12 @@ mod tests {
             .expect("put context blob");
         let context_root = source
             .store()
-            .put_tree(&Tree::from_entries(vec![
-                TreeEntry::file("context.msgpack", context_blob, false).unwrap(),
-            ]))
+            .put_tree(&Tree::from_entries(vec![TreeEntry::file(
+                "context.msgpack",
+                context_blob,
+                false,
+            )
+            .unwrap()]))
             .expect("put context tree");
         let first = StateAttachment {
             state_id,
@@ -480,6 +486,46 @@ mod tests {
                 .latest_state_attachment(&state_id, StateAttachmentKind::Context)
                 .unwrap(),
             Some(second)
+        );
+    }
+
+    #[test]
+    fn fetch_copies_private_visibility_sidecar() {
+        let source_dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let source = Repository::init_default(source_dir.path()).unwrap();
+        let target = Repository::init_default(target_dir.path()).unwrap();
+        let state_id = capture(&source, "secret\n", "embargo");
+        source
+            .put_state_visibility(StateVisibility {
+                state: state_id,
+                tier: VisibilityTier::Private {
+                    scope_label: "ax-only".into(),
+                },
+                embargo_until: None,
+                declarer: Principal::new("Alice", "alice@example.test"),
+                declared_at: chrono::Utc::now(),
+                signature: None,
+                supersedes: None,
+            })
+            .expect("put private visibility");
+
+        LocalSync::open(source_dir.path())
+            .unwrap()
+            .fetch_state(&target, &state_id)
+            .expect("owner local fetch of a private-tier state");
+
+        assert!(target.store().get_state(&state_id).unwrap().is_some());
+        assert_eq!(
+            target.effective_visibility_tier(&state_id).unwrap(),
+            VisibilityTier::Private {
+                scope_label: "ax-only".into(),
+            }
+        );
+        assert_eq!(
+            target.embargo_membership_label().unwrap().as_deref(),
+            Some("ax-only"),
+            "local fetch of Private{{ax-only}} must stamp Restricted(ax-only) membership"
         );
     }
 }

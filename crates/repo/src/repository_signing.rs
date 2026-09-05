@@ -129,12 +129,18 @@ impl Repository {
         })
     }
 
-    /// Verify hosted metadata against this repository's trusted client keys.
+    /// Verify hosted metadata against this repository's trusted client keys
+    /// or the TOFU-pinned owner genesis from `PullReady`.
     ///
     /// A signature only proves the payload was signed by the key *embedded in
     /// the record*. Acceptance requires that key to appear in
-    /// `[metadata] trusted_keys`, and cryptographic verification uses that
-    /// configured key — not attacker-supplied key bytes.
+    /// `[metadata] trusted_keys` **or** to be the owner key already pinned
+    /// from verified `PullReady` genesis. Cryptographic verification uses
+    /// that trusted/pinned key — not attacker-supplied key bytes.
+    ///
+    /// Clone destinations start with an empty trust list. Without the pin
+    /// fallback, an owner-signed `Private` visibility sidecar is rejected
+    /// and the advertised head cannot be resolved (`state not found`).
     pub(crate) fn verify_client_metadata_signature(
         &self,
         payload: &[u8],
@@ -145,29 +151,57 @@ impl Repository {
                 "hosted metadata is unsigned; a trusted client signature is required".to_string(),
             )
         })?;
-        let trusted = super::repo_config::TrustedKey::find(
-            &self.config().metadata.trusted_keys,
-            &signature.algorithm,
-            &signature.public_key,
-        )
-        .ok_or_else(|| {
-            HeddleError::InvalidObject(format!(
+        let (algorithm, public_key_hex) = if let Some(trusted) =
+            super::repo_config::TrustedKey::find(
+                &self.config().metadata.trusted_keys,
+                &signature.algorithm,
+                &signature.public_key,
+            ) {
+            (trusted.algorithm.as_str(), trusted.public_key.as_str())
+        } else if let Some((algorithm, public_key_hex)) = self.pinned_owner_metadata_key()
+            && algorithm.eq_ignore_ascii_case(&signature.algorithm)
+            && public_key_hex.eq_ignore_ascii_case(&signature.public_key)
+        {
+            return self.verify_metadata_signature_bytes(
+                payload,
+                &algorithm,
+                &public_key_hex,
+                &signature.signature,
+            );
+        } else {
+            return Err(HeddleError::InvalidObject(format!(
                 "hosted metadata signer is not trusted ({}:{})",
                 signature.algorithm, signature.public_key
-            ))
-        })?;
-        let public_key = hex::decode(&trusted.public_key).map_err(|error| {
+            )));
+        };
+        self.verify_metadata_signature_bytes(
+            payload,
+            algorithm,
+            public_key_hex,
+            &signature.signature,
+        )
+    }
+
+    fn verify_metadata_signature_bytes(
+        &self,
+        payload: &[u8],
+        algorithm: &str,
+        public_key_hex: &str,
+        signature_hex: &str,
+    ) -> Result<()> {
+        let public_key = hex::decode(public_key_hex).map_err(|error| {
             HeddleError::InvalidObject(format!("invalid metadata public key: {error}"))
         })?;
-        let signature_bytes = hex::decode(&signature.signature).map_err(|error| {
+        let signature_bytes = hex::decode(signature_hex).map_err(|error| {
             HeddleError::InvalidObject(format!("invalid metadata signature: {error}"))
         })?;
-        verify_payload_signature(payload, &trusted.algorithm, &public_key, &signature_bytes)
-            .map_err(|error| {
+        verify_payload_signature(payload, algorithm, &public_key, &signature_bytes).map_err(
+            |error| {
                 HeddleError::InvalidObject(format!(
                     "hosted metadata signature failed verification: {error}"
                 ))
-            })
+            },
+        )
     }
 
     /// Produce a detached signature when a signing identity is available.
