@@ -93,6 +93,9 @@ type PullRefsPayloadWithThreadId = (
     Option<Vec<u8>>,
     Vec<(String, Vec<u8>, bool, String, String)>,
 );
+/// One folded ref after V1/V2 decode: `thread_id` is `None` when omitted or empty.
+type FoldedRefRecord = (String, Vec<u8>, bool, String, Option<String>);
+type DecodedPullRefs = (String, Option<Vec<u8>>, Vec<FoldedRefRecord>);
 type PullRepositoryInitializer<'a> =
     Box<dyn FnOnce(&PullReady) -> Result<Repository, ProtocolError> + 'a>;
 
@@ -257,16 +260,7 @@ pub fn decode_pull_refs(checkpoint: &[u8]) -> Result<Option<PullBootstrapRefs>, 
     Ok(Some(PullBootstrapRefs { head_thread, refs }))
 }
 
-fn decode_folded_ref_records(
-    payload: &[u8],
-) -> Result<
-    (
-        String,
-        Option<Vec<u8>>,
-        Vec<(String, Vec<u8>, bool, String, Option<String>)>,
-    ),
-    ProtocolError,
-> {
+fn decode_folded_ref_records(payload: &[u8]) -> Result<DecodedPullRefs, ProtocolError> {
     if let Ok((head_thread, head_state, refs)) =
         rmp_serde::from_slice::<PullRefsPayloadWithThreadId>(payload)
     {
