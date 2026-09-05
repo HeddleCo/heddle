@@ -3521,13 +3521,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            matches!(
-                replay,
-                DiscussionEventOutcome::Unchanged { discussion_id }
-                    if discussion_id == wire_id.to_string()
-            ),
-            "doorbell after adopt must not remint, got {replay:?}"
+        assert_eq!(
+            replay,
+            DiscussionEventOutcome::Unchanged {
+                discussion_id: wire_id.to_string(),
+            },
+            "doorbell after adopt must not remint"
         );
 
         let discussion = originator_store
