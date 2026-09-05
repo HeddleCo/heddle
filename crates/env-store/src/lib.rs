@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Local confidential-runtime profile store (ADR 0051 / heddle#999).
+//! Local confidential-env store store (ADR 0051 / heddle#999).
 //!
 //! Typed roots, immutable versions, recipient wrapping, and signed lifecycle
 //! records live in the store. The [`PolicyBroker`] authorizes scoped,
@@ -22,21 +22,21 @@ mod types;
 pub use broker::{
     DecryptGrant, DecryptPurpose, DecryptRequest, PolicyBroker, ProviderHandle, RunSecrets,
 };
-pub use error::{BrokerDenialReason, Result, RuntimeProfileError};
+pub use error::{BrokerDenialReason, Result, EnvStoreError};
 pub use ids::{
-    AuditRecordId, CiphertextId, LifecycleRecordId, RecipientId, RuntimeProfileId,
-    RuntimeProfileStateId,
+    AuditRecordId, CiphertextId, LifecycleRecordId, RecipientId, EnvProfileId,
+    EnvProfileVersionId,
 };
 #[cfg(unix)]
 pub use ipc::{
     BrokerRequest, BrokerResponse, BrokerSlotValue, bind_broker_socket, broker_socket_path,
     handle_connection, request_run_unwrap, serve_once,
 };
-pub use store::{RuntimeProfileStore, SlotWrite, confidential_runtime_source_history_laws};
+pub use store::{EnvStore, SlotWrite, confidential_runtime_source_history_laws};
 pub use types::{
     AuditEventKind, AuditRecord, FacetKindWire, LifecycleRecord, LifecycleStatus, ProfileMetadata,
-    ProviderCapability, RESERVED_MATERIALIZATION_PATHS, RUNTIME_PROFILE_SCHEMA_VERSION,
-    RecipientDescriptor, RuntimeProfileRef, RuntimeProfileState, SignatureBlock, SlotMetadata,
+    ProviderCapability, RESERVED_MATERIALIZATION_PATHS, ENV_STORE_SCHEMA_VERSION,
+    RecipientDescriptor, EnvProfileRef, EnvProfileVersion, SignatureBlock, SlotMetadata,
     SlotRecord, WrappedDekRecord, is_reserved_materialization_path,
     reserved_materialization_on_disk,
 };
@@ -57,9 +57,9 @@ mod tests {
         Attribution::human(Principal::new("Ada", "ada@example.com"))
     }
 
-    fn open_store() -> (TempDir, RuntimeProfileStore) {
+    fn open_store() -> (TempDir, EnvStore) {
         let temp = TempDir::new().expect("tempdir");
-        let store = RuntimeProfileStore::open(temp.path()).expect("open store");
+        let store = EnvStore::open(temp.path()).expect("open store");
         (temp, store)
     }
 
@@ -70,7 +70,7 @@ mod tests {
         TempDir,
         PolicyBroker,
         Ed25519Signer,
-        RuntimeProfileId,
+        EnvProfileId,
         SoftwareRecipientSecret,
     ) {
         let (temp, store) = open_store();
@@ -310,7 +310,7 @@ mod tests {
         );
         assert!(FacetKind::ConfidentialRuntime.require_land().is_err());
 
-        let runtime_id = RuntimeProfileStateId::from_bytes([7; 32]);
+        let runtime_id = EnvProfileVersionId::from_bytes([7; 32]);
         let source_id = StateId::from_bytes([7; 32]);
         assert_eq!(runtime_id.as_bytes(), source_id.as_bytes());
         let _need_explicit_conversion = StateId::from_bytes(*runtime_id.as_bytes());
@@ -335,7 +335,7 @@ mod tests {
                 &signer,
             )
             .expect("create");
-        assert!(store.root().ends_with("runtime-profiles"));
+        assert!(store.root().ends_with("env"));
         assert!(!store.root().join("refs").exists());
         assert!(RESERVED_MATERIALIZATION_PATHS.contains(&".env"));
         assert!(is_reserved_materialization_path(".env"));
@@ -558,7 +558,7 @@ mod tests {
         let err = store
             .decrypt_slot(profile.profile_id, "TOKEN", recipient.recipient_id, &secret)
             .expect_err("a revoked version must not decrypt despite an edited field");
-        assert!(matches!(err, RuntimeProfileError::DecryptForbidden(_)), "{err:?}");
+        assert!(matches!(err, EnvStoreError::DecryptForbidden(_)), "{err:?}");
     }
 
     #[test]
@@ -703,7 +703,7 @@ mod tests {
             .expect("first signer pins the identity");
         let foreign = signer();
         match store.create_software_recipient(&foreign, 1) {
-            Err(RuntimeProfileError::Invalid(_)) => {}
+            Err(EnvStoreError::Invalid(_)) => {}
             Ok(_) => panic!("a foreign signer must be rejected against the pinned identity"),
             Err(other) => panic!("unexpected error: {other:?}"),
         }

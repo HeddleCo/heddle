@@ -27,18 +27,18 @@ use crate::codec::{
     encode_named, encode_recipient, encode_ref, encode_state, lifecycle_signing_payload,
     recipient_endorsement_payload,
 };
-use crate::error::{Result, RuntimeProfileError};
+use crate::error::{Result, EnvStoreError};
 use crate::ids::{
-    AuditRecordId, LifecycleRecordId, RecipientId, RuntimeProfileId, RuntimeProfileStateId,
+    AuditRecordId, LifecycleRecordId, RecipientId, EnvProfileId, EnvProfileVersionId,
 };
 use crate::types::{
     AuditEventKind, AuditRecord, FacetKindWire, LifecycleRecord, LifecycleStatus, ProfileMetadata,
-    ProviderCapability, RUNTIME_PROFILE_SCHEMA_VERSION, RecipientDescriptor, RuntimeProfileRef,
-    RuntimeProfileState, SignatureBlock, SlotMetadata, SlotRecord, WrappedDekRecord, slot_aad,
+    ProviderCapability, ENV_STORE_SCHEMA_VERSION, RecipientDescriptor, EnvProfileRef,
+    EnvProfileVersion, SignatureBlock, SlotMetadata, SlotRecord, WrappedDekRecord, slot_aad,
     validate_profile_name, validate_slot_name, wrap_aad,
 };
 
-const STORE_DIR: &str = "runtime-profiles";
+const STORE_DIR: &str = "env";
 const PROFILES_DIR: &str = "profiles";
 const VERSIONS_DIR: &str = "versions";
 const LIFECYCLE_DIR: &str = "lifecycle";
@@ -49,7 +49,7 @@ const AUDIT_DIR: &str = "audit";
 const IDENTITY_FILE: &str = "identity.msgpack";
 const WRAP_ALG: &str = "x25519-hkdf-sha256-aes-256-gcm-v1";
 
-pub struct RuntimeProfileStore {
+pub struct EnvStore {
     root: PathBuf,
 }
 
@@ -76,8 +76,8 @@ struct PinnedIdentity {
     public_key: Vec<u8>,
 }
 
-impl RuntimeProfileStore {
-    /// Open (or create) the store under `{heddle_dir}/runtime-profiles`.
+impl EnvStore {
+    /// Open (or create) the store under `{heddle_dir}/env`.
     pub fn open(heddle_dir: impl AsRef<Path>) -> Result<Self> {
         let root = heddle_dir.as_ref().join(STORE_DIR);
         create_private_dir_all(&root)?;
@@ -112,7 +112,7 @@ impl RuntimeProfileStore {
                 if pinned.algorithm != signer.algorithm()
                     || pinned.public_key != signer.public_key()
                 {
-                    return Err(RuntimeProfileError::Invalid(
+                    return Err(EnvStoreError::Invalid(
                         "signer does not match the store's pinned identity".to_string(),
                     ));
                 }
@@ -120,11 +120,11 @@ impl RuntimeProfileStore {
             }
             None => {
                 let identity = PinnedIdentity {
-                    schema_version: RUNTIME_PROFILE_SCHEMA_VERSION,
+                    schema_version: ENV_STORE_SCHEMA_VERSION,
                     algorithm: signer.algorithm().to_string(),
                     public_key: signer.public_key().to_vec(),
                 };
-                let bytes = encode_named(&identity, "runtime-profile-identity")?;
+                let bytes = encode_named(&identity, "heddle-env-identity")?;
                 write_file_atomic(&self.identity_path(), &bytes)?;
                 Ok(())
             }
@@ -135,12 +135,12 @@ impl RuntimeProfileStore {
         match fs::read(self.identity_path()) {
             Ok(bytes) => {
                 let identity: PinnedIdentity = rmp_serde::from_slice(&bytes).map_err(|err| {
-                    RuntimeProfileError::Decoding(format!("decode store identity: {err}"))
+                    EnvStoreError::Decoding(format!("decode store identity: {err}"))
                 })?;
                 Ok(Some(identity))
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(RuntimeProfileError::Io(err)),
+            Err(err) => Err(EnvStoreError::Io(err)),
         }
     }
 
@@ -148,7 +148,7 @@ impl RuntimeProfileStore {
     /// records but no pinned identity is malformed and must not be trusted.
     fn require_identity(&self) -> Result<PinnedIdentity> {
         self.load_pinned_identity()?.ok_or_else(|| {
-            RuntimeProfileError::Invalid("store has no pinned signing identity".to_string())
+            EnvStoreError::Invalid("store has no pinned signing identity".to_string())
         })
     }
 
@@ -162,12 +162,12 @@ impl RuntimeProfileStore {
         block: &SignatureBlock,
     ) -> Result<()> {
         if block.algorithm != identity.algorithm || block.public_key != identity.public_key {
-            return Err(RuntimeProfileError::Invalid(
+            return Err(EnvStoreError::Invalid(
                 "signed record is not from the store's pinned identity".to_string(),
             ));
         }
         verify_payload_signature(payload, &block.algorithm, &block.public_key, &block.signature)
-            .map_err(RuntimeProfileError::Signature)
+            .map_err(EnvStoreError::Signature)
     }
 
     /// The authoritative lifecycle status of a version, derived from its signed
@@ -176,8 +176,8 @@ impl RuntimeProfileStore {
     /// Every record is verified against the pinned identity; the latest wins.
     pub(crate) fn effective_lifecycle(
         &self,
-        profile_id: RuntimeProfileId,
-        state_id: RuntimeProfileStateId,
+        profile_id: EnvProfileId,
+        state_id: EnvProfileVersionId,
     ) -> Result<LifecycleStatus> {
         let identity = self.require_identity()?;
         let mut current: Option<LifecycleStatus> = None;
@@ -201,7 +201,7 @@ impl RuntimeProfileStore {
             }
         }
         current.ok_or_else(|| {
-            RuntimeProfileError::Invalid(
+            EnvStoreError::Invalid(
                 "version has no signed lifecycle record; refusing to trust it".to_string(),
             )
         })
@@ -217,7 +217,7 @@ impl RuntimeProfileStore {
         self.pin_or_check_identity(signer)?;
         let secret = SoftwareRecipientSecret::generate()?;
         let mut descriptor = RecipientDescriptor {
-            schema_version: RUNTIME_PROFILE_SCHEMA_VERSION,
+            schema_version: ENV_STORE_SCHEMA_VERSION,
             recipient_id: RecipientId::from_bytes([0; 32]),
             capability: ProviderCapability::SoftwareExportable,
             wrap_alg: WRAP_ALG.to_string(),
@@ -243,9 +243,9 @@ impl RuntimeProfileStore {
     pub fn load_recipient(&self, id: RecipientId) -> Result<RecipientDescriptor> {
         let bytes = fs::read(self.recipient_path(id)).map_err(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
-                RuntimeProfileError::RecipientNotFound(id.to_hex())
+                EnvStoreError::RecipientNotFound(id.to_hex())
             } else {
-                RuntimeProfileError::Io(err)
+                EnvStoreError::Io(err)
             }
         })?;
         let descriptor = decode_recipient(&bytes)?;
@@ -261,12 +261,12 @@ impl RuntimeProfileStore {
         let mut id_bytes = recipient_endorsement_payload(&descriptor)?;
         id_bytes.extend_from_slice(&descriptor.endorsement.signature);
         if descriptor.recipient_id != RecipientId::for_bytes(&id_bytes) {
-            return Err(RuntimeProfileError::Invalid(
+            return Err(EnvStoreError::Invalid(
                 "recipient id does not match its endorsed bytes".to_string(),
             ));
         }
         if descriptor.recipient_id != id {
-            return Err(RuntimeProfileError::Invalid(
+            return Err(EnvStoreError::Invalid(
                 "recipient descriptor id does not match its path".to_string(),
             ));
         }
@@ -278,13 +278,13 @@ impl RuntimeProfileStore {
         crypto::reject_group_or_world_readable_key(&self.key_path(id))?;
         let bytes = fs::read(self.key_path(id)).map_err(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
-                RuntimeProfileError::RecipientNotFound(id.to_hex())
+                EnvStoreError::RecipientNotFound(id.to_hex())
             } else {
-                RuntimeProfileError::Io(err)
+                EnvStoreError::Io(err)
             }
         })?;
         let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-            RuntimeProfileError::Invalid("software recipient secret must be 32 bytes".to_string())
+            EnvStoreError::Invalid("software recipient secret must be 32 bytes".to_string())
         })?;
         Ok(SoftwareRecipientSecret::from_bytes(seed))
     }
@@ -296,7 +296,7 @@ impl RuntimeProfileStore {
         recipient_id: RecipientId,
         attribution: Attribution,
         signer: &impl Signer,
-    ) -> Result<RuntimeProfileRef> {
+    ) -> Result<EnvProfileRef> {
         self.create_profile_with_recipients(name, slots, &[recipient_id], attribution, signer)
     }
 
@@ -309,11 +309,11 @@ impl RuntimeProfileStore {
         recipient_ids: &[RecipientId],
         attribution: Attribution,
         signer: &impl Signer,
-    ) -> Result<RuntimeProfileRef> {
-        validate_profile_name(name).map_err(RuntimeProfileError::Invalid)?;
+    ) -> Result<EnvProfileRef> {
+        validate_profile_name(name).map_err(EnvStoreError::Invalid)?;
         if recipient_ids.is_empty() {
-            return Err(RuntimeProfileError::Invalid(
-                "a runtime profile requires at least one recipient".to_string(),
+            return Err(EnvStoreError::Invalid(
+                "a env store requires at least one recipient".to_string(),
             ));
         }
         let recipients = recipient_ids
@@ -321,7 +321,7 @@ impl RuntimeProfileStore {
             .map(|id| self.load_recipient(*id))
             .collect::<Result<Vec<_>>>()?;
         let now = now_ms()?;
-        let profile_id = RuntimeProfileId::generate();
+        let profile_id = EnvProfileId::generate();
         let (state, _) = self.write_version(
             profile_id,
             None,
@@ -352,8 +352,8 @@ impl RuntimeProfileStore {
         let mut active = state;
         active.lifecycle = LifecycleStatus::Active;
         write_file_atomic(&self.version_path(active.state_id), &encode_state(&active)?)?;
-        let profile = RuntimeProfileRef {
-            schema_version: RUNTIME_PROFILE_SCHEMA_VERSION,
+        let profile = EnvProfileRef {
+            schema_version: ENV_STORE_SCHEMA_VERSION,
             profile_id,
             name: name.to_string(),
             facet: FacetKindWire::ConfidentialRuntime,
@@ -368,15 +368,15 @@ impl RuntimeProfileStore {
 
     pub fn update_slots(
         &self,
-        profile_id: RuntimeProfileId,
+        profile_id: EnvProfileId,
         slots: Vec<SlotWrite>,
         attribution: Attribution,
         signer: &impl Signer,
-    ) -> Result<RuntimeProfileRef> {
+    ) -> Result<EnvProfileRef> {
         let mut profile = self.load_profile(profile_id)?;
         let previous = self.load_state(profile.head)?;
         if previous.lifecycle != LifecycleStatus::Active {
-            return Err(RuntimeProfileError::IllegalLifecycle {
+            return Err(EnvStoreError::IllegalLifecycle {
                 from: previous.lifecycle.to_string(),
                 to: LifecycleStatus::Superseded.to_string(),
             });
@@ -443,27 +443,27 @@ impl RuntimeProfileStore {
         Ok(profile)
     }
 
-    pub fn find_profile_by_name(&self, name: &str) -> Result<RuntimeProfileRef> {
+    pub fn find_profile_by_name(&self, name: &str) -> Result<EnvProfileRef> {
         for meta in self.list_profiles()? {
             if meta.name == name {
                 return self.load_profile(meta.profile_id);
             }
         }
-        Err(RuntimeProfileError::ProfileNotFound(name.to_string()))
+        Err(EnvStoreError::ProfileNotFound(name.to_string()))
     }
 
-    pub fn load_profile(&self, profile_id: RuntimeProfileId) -> Result<RuntimeProfileRef> {
+    pub fn load_profile(&self, profile_id: EnvProfileId) -> Result<EnvProfileRef> {
         let bytes = fs::read(self.profile_path(profile_id)).map_err(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
-                RuntimeProfileError::ProfileNotFound(profile_id.to_string())
+                EnvStoreError::ProfileNotFound(profile_id.to_string())
             } else {
-                RuntimeProfileError::Io(err)
+                EnvStoreError::Io(err)
             }
         })?;
         decode_ref(&bytes)
     }
 
-    pub fn load_state(&self, state_id: RuntimeProfileStateId) -> Result<RuntimeProfileState> {
+    pub fn load_state(&self, state_id: EnvProfileVersionId) -> Result<EnvProfileVersion> {
         let bytes = fs::read(self.version_path(state_id))?;
         decode_state(&bytes)
     }
@@ -492,7 +492,7 @@ impl RuntimeProfileStore {
     }
 
     /// List slot metadata for the current head. Does not decrypt.
-    pub fn list_slots(&self, profile_id: RuntimeProfileId) -> Result<Vec<SlotMetadata>> {
+    pub fn list_slots(&self, profile_id: EnvProfileId) -> Result<Vec<SlotMetadata>> {
         let profile = self.load_profile(profile_id)?;
         let state = self.load_state(profile.head)?;
         Ok(state
@@ -539,9 +539,9 @@ impl RuntimeProfileStore {
     #[allow(clippy::too_many_arguments)]
     pub fn record_audit(
         &self,
-        profile_id: Option<RuntimeProfileId>,
+        profile_id: Option<EnvProfileId>,
         profile_name: &str,
-        state_id: Option<RuntimeProfileStateId>,
+        state_id: Option<EnvProfileVersionId>,
         slots: &[String],
         purpose: &str,
         caller: &str,
@@ -553,7 +553,7 @@ impl RuntimeProfileStore {
         self.pin_or_check_identity(signer)?;
         let now = now_ms()?;
         let mut record = AuditRecord {
-            schema_version: RUNTIME_PROFILE_SCHEMA_VERSION,
+            schema_version: ENV_STORE_SCHEMA_VERSION,
             record_id: AuditRecordId::from_bytes([0; 32]),
             profile_id,
             profile_name: profile_name.to_string(),
@@ -594,7 +594,7 @@ impl RuntimeProfileStore {
         Ok(out)
     }
 
-    pub fn list_lifecycle(&self, profile_id: RuntimeProfileId) -> Result<Vec<LifecycleRecord>> {
+    pub fn list_lifecycle(&self, profile_id: EnvProfileId) -> Result<Vec<LifecycleRecord>> {
         let identity = self.require_identity()?;
         let mut out = Vec::new();
         for entry in fs::read_dir(self.root.join(LIFECYCLE_DIR))? {
@@ -620,7 +620,7 @@ impl RuntimeProfileStore {
     /// [`SoftwareRecipientSecret`] are the weaker-custody fallback.
     pub fn decrypt_slot(
         &self,
-        profile_id: RuntimeProfileId,
+        profile_id: EnvProfileId,
         slot_name: &str,
         recipient_id: RecipientId,
         recipient: &SoftwareRecipientSecret,
@@ -631,7 +631,7 @@ impl RuntimeProfileStore {
 
     pub fn decrypt_slot_in_state(
         &self,
-        state_id: RuntimeProfileStateId,
+        state_id: EnvProfileVersionId,
         slot_name: &str,
         recipient_id: RecipientId,
         recipient: &SoftwareRecipientSecret,
@@ -641,13 +641,13 @@ impl RuntimeProfileStore {
         // baked into the version file.
         let lifecycle = self.effective_lifecycle(state.profile_id, state_id)?;
         if !lifecycle.decrypt_allowed() {
-            return Err(RuntimeProfileError::DecryptForbidden(lifecycle.to_string()));
+            return Err(EnvStoreError::DecryptForbidden(lifecycle.to_string()));
         }
         let slot = state
             .slots
             .iter()
             .find(|slot| slot.name == slot_name)
-            .ok_or_else(|| RuntimeProfileError::SlotNotFound(slot_name.to_string()))?;
+            .ok_or_else(|| EnvStoreError::SlotNotFound(slot_name.to_string()))?;
         // Select the wrap for THIS recipient — never blindly the first wrap,
         // or a multi-recipient profile only ever decrypts via recipient[0].
         let wrap = slot
@@ -655,7 +655,7 @@ impl RuntimeProfileStore {
             .iter()
             .find(|wrap| wrap.recipient_id == recipient_id)
             .ok_or_else(|| {
-                RuntimeProfileError::Invalid(format!(
+                EnvStoreError::Invalid(format!(
                     "slot {slot_name} has no wrap for the presented recipient"
                 ))
             })?;
@@ -671,7 +671,7 @@ impl RuntimeProfileStore {
         )?;
         let stored = decode_ciphertext(&fs::read(self.ciphertext_path(slot.ciphertext_id))?)?;
         if stored.ciphertext_id != slot.ciphertext_id {
-            return Err(RuntimeProfileError::Invalid(
+            return Err(EnvStoreError::Invalid(
                 "stored ciphertext id does not match the slot record".to_string(),
             ));
         }
@@ -695,10 +695,10 @@ impl RuntimeProfileStore {
     /// stop decrypting too — not just the current head.
     pub fn revoke(
         &self,
-        profile_id: RuntimeProfileId,
+        profile_id: EnvProfileId,
         attribution: Attribution,
         signer: &impl Signer,
-    ) -> Result<RuntimeProfileRef> {
+    ) -> Result<EnvProfileRef> {
         let mut profile = self.load_profile(profile_id)?;
         let now = now_ms()?;
         let mut revoked_any = false;
@@ -723,7 +723,7 @@ impl RuntimeProfileStore {
         }
         if !revoked_any {
             let head = self.effective_lifecycle(profile_id, profile.head)?;
-            return Err(RuntimeProfileError::IllegalLifecycle {
+            return Err(EnvStoreError::IllegalLifecycle {
                 from: head.to_string(),
                 to: LifecycleStatus::Revoked.to_string(),
             });
@@ -737,8 +737,8 @@ impl RuntimeProfileStore {
     /// All version ids belonging to `profile_id`, from the versions directory.
     fn version_ids_for_profile(
         &self,
-        profile_id: RuntimeProfileId,
-    ) -> Result<Vec<RuntimeProfileStateId>> {
+        profile_id: EnvProfileId,
+    ) -> Result<Vec<EnvProfileVersionId>> {
         let mut out = Vec::new();
         for entry in fs::read_dir(self.root.join(VERSIONS_DIR))? {
             let entry = entry?;
@@ -755,10 +755,10 @@ impl RuntimeProfileStore {
 
     pub fn mark_purge_eligible(
         &self,
-        profile_id: RuntimeProfileId,
+        profile_id: EnvProfileId,
         attribution: Attribution,
         signer: &impl Signer,
-    ) -> Result<RuntimeProfileRef> {
+    ) -> Result<EnvProfileRef> {
         self.advance_head_lifecycle(
             profile_id,
             LifecycleStatus::PurgeEligible,
@@ -770,14 +770,14 @@ impl RuntimeProfileStore {
     /// Delete ciphertext bytes for the current head and mark it purged.
     pub fn purge(
         &self,
-        profile_id: RuntimeProfileId,
+        profile_id: EnvProfileId,
         attribution: Attribution,
         signer: &impl Signer,
-    ) -> Result<RuntimeProfileRef> {
+    ) -> Result<EnvProfileRef> {
         let profile = self.load_profile(profile_id)?;
         let state = self.load_state(profile.head)?;
         if state.lifecycle != LifecycleStatus::PurgeEligible {
-            return Err(RuntimeProfileError::IllegalLifecycle {
+            return Err(EnvStoreError::IllegalLifecycle {
                 from: state.lifecycle.to_string(),
                 to: LifecycleStatus::Purged.to_string(),
             });
@@ -793,15 +793,15 @@ impl RuntimeProfileStore {
 
     fn advance_head_lifecycle(
         &self,
-        profile_id: RuntimeProfileId,
+        profile_id: EnvProfileId,
         to: LifecycleStatus,
         attribution: Attribution,
         signer: &impl Signer,
-    ) -> Result<RuntimeProfileRef> {
+    ) -> Result<EnvProfileRef> {
         let mut profile = self.load_profile(profile_id)?;
         let mut state = self.load_state(profile.head)?;
         if !state.lifecycle.can_transition_to(to) {
-            return Err(RuntimeProfileError::IllegalLifecycle {
+            return Err(EnvStoreError::IllegalLifecycle {
                 from: state.lifecycle.to_string(),
                 to: to.to_string(),
             });
@@ -828,22 +828,22 @@ impl RuntimeProfileStore {
     #[allow(clippy::too_many_arguments)]
     fn write_version(
         &self,
-        profile_id: RuntimeProfileId,
-        parent: Option<RuntimeProfileStateId>,
+        profile_id: EnvProfileId,
+        parent: Option<EnvProfileVersionId>,
         version: u64,
         slots: Vec<SlotWrite>,
         recipients: &[RecipientDescriptor],
         attribution: Attribution,
         created_at_ms: i64,
-    ) -> Result<(RuntimeProfileState, Vec<u8>)> {
+    ) -> Result<(EnvProfileVersion, Vec<u8>)> {
         if recipients.is_empty() {
-            return Err(RuntimeProfileError::Invalid(
-                "a runtime profile requires at least one recipient".to_string(),
+            return Err(EnvStoreError::Invalid(
+                "a env store requires at least one recipient".to_string(),
             ));
         }
         let mut slot_records = Vec::with_capacity(slots.len());
         for slot in slots {
-            validate_slot_name(&slot.name).map_err(RuntimeProfileError::Invalid)?;
+            validate_slot_name(&slot.name).map_err(EnvStoreError::Invalid)?;
             let dek = Dek::generate()?;
             let sealed = encrypt_padded(&dek, &slot.value, &slot_aad(profile_id, &slot.name))?;
             let (_stored, ciphertext_id, cipher_bytes) = StoredCiphertext::from_aead(&sealed)?;
@@ -872,9 +872,9 @@ impl RuntimeProfileStore {
             });
         }
         slot_records.sort_by(|a, b| a.name.cmp(&b.name));
-        let mut state = RuntimeProfileState {
-            schema_version: RUNTIME_PROFILE_SCHEMA_VERSION,
-            state_id: RuntimeProfileStateId::from_bytes([0; 32]),
+        let mut state = EnvProfileVersion {
+            schema_version: ENV_STORE_SCHEMA_VERSION,
+            state_id: EnvProfileVersionId::from_bytes([0; 32]),
             profile_id,
             parent,
             version,
@@ -893,8 +893,8 @@ impl RuntimeProfileStore {
     #[allow(clippy::too_many_arguments)]
     fn record_lifecycle(
         &self,
-        profile_id: RuntimeProfileId,
-        state_id: RuntimeProfileStateId,
+        profile_id: EnvProfileId,
+        state_id: EnvProfileVersionId,
         from: Option<LifecycleStatus>,
         to: LifecycleStatus,
         occurred_at_ms: i64,
@@ -904,14 +904,14 @@ impl RuntimeProfileStore {
         if let Some(from) = from
             && !from.can_transition_to(to)
         {
-            return Err(RuntimeProfileError::IllegalLifecycle {
+            return Err(EnvStoreError::IllegalLifecycle {
                 from: from.to_string(),
                 to: to.to_string(),
             });
         }
         self.pin_or_check_identity(signer)?;
         let mut record = LifecycleRecord {
-            schema_version: RUNTIME_PROFILE_SCHEMA_VERSION,
+            schema_version: ENV_STORE_SCHEMA_VERSION,
             record_id: LifecycleRecordId::from_bytes([0; 32]),
             profile_id,
             state_id,
@@ -932,11 +932,11 @@ impl RuntimeProfileStore {
         Ok(record.record_id)
     }
 
-    fn profile_path(&self, id: RuntimeProfileId) -> PathBuf {
+    fn profile_path(&self, id: EnvProfileId) -> PathBuf {
         self.root.join(PROFILES_DIR).join(format!("{id}.msgpack"))
     }
 
-    fn version_path(&self, id: RuntimeProfileStateId) -> PathBuf {
+    fn version_path(&self, id: EnvProfileVersionId) -> PathBuf {
         self.root
             .join(VERSIONS_DIR)
             .join(format!("{}.msgpack", id.to_hex()))
@@ -972,7 +972,7 @@ impl RuntimeProfileStore {
 }
 
 /// Compile-time proof that this facet cannot be selected by Source History
-/// verbs. `RuntimeProfileStateId` is a distinct type from `StateId`.
+/// verbs. `EnvProfileVersionId` is a distinct type from `StateId`.
 pub const fn confidential_runtime_source_history_laws()
 -> Option<heddle_object_model::object::SourceHistoryLaws> {
     FacetKind::ConfidentialRuntime.source_history_laws()
@@ -985,7 +985,7 @@ const _: () = assert!(!FacetKind::ConfidentialRuntime.may_land());
 
 fn vec_to_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N]> {
     bytes.try_into().map_err(|_| {
-        RuntimeProfileError::Invalid(format!("expected {N} bytes, found {}", bytes.len()))
+        EnvStoreError::Invalid(format!("expected {N} bytes, found {}", bytes.len()))
     })
 }
 
@@ -994,7 +994,7 @@ pub(crate) fn now_ms() -> Result<i64> {
 
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|err| RuntimeProfileError::Invalid(format!("system clock before epoch: {err}")))?;
+        .map_err(|err| EnvStoreError::Invalid(format!("system clock before epoch: {err}")))?;
     i64::try_from(duration.as_millis())
-        .map_err(|_| RuntimeProfileError::Invalid("timestamp overflow".to_string()))
+        .map_err(|_| EnvStoreError::Invalid("timestamp overflow".to_string()))
 }

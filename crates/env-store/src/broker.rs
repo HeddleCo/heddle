@@ -20,9 +20,9 @@ use heddle_object_model::object::Attribution;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
-use crate::error::{BrokerDenialReason, Result, RuntimeProfileError};
-use crate::ids::{RecipientId, RuntimeProfileId, RuntimeProfileStateId};
-use crate::store::{RuntimeProfileStore, now_ms};
+use crate::error::{BrokerDenialReason, Result, EnvStoreError};
+use crate::ids::{RecipientId, EnvProfileId, EnvProfileVersionId};
+use crate::store::{EnvStore, now_ms};
 use crate::types::AuditEventKind;
 
 /// Ceiling on a grant's time-to-live. A caller cannot request an unbounded
@@ -59,9 +59,9 @@ pub struct DecryptRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecryptGrant {
     id: Uuid,
-    profile_id: RuntimeProfileId,
+    profile_id: EnvProfileId,
     profile_name: String,
-    state_id: RuntimeProfileStateId,
+    state_id: EnvProfileVersionId,
     slots: Vec<String>,
     expires_at_ms: i64,
 }
@@ -122,7 +122,7 @@ impl RunSecrets {
         let mut out = Vec::with_capacity(self.values.len());
         for (name, bytes) in self.values.drain(..) {
             let value = String::from_utf8(bytes).map_err(|_| {
-                RuntimeProfileError::Invalid(format!("slot {name} is not valid UTF-8"))
+                EnvStoreError::Invalid(format!("slot {name} is not valid UTF-8"))
             })?;
             out.push((name, value));
         }
@@ -140,23 +140,23 @@ impl Drop for RunSecrets {
 }
 
 struct PendingGrant {
-    profile_id: RuntimeProfileId,
+    profile_id: EnvProfileId,
     profile_name: String,
-    state_id: RuntimeProfileStateId,
+    state_id: EnvProfileVersionId,
     slots: Vec<String>,
     caller: String,
     expires_at_ms: i64,
 }
 
 pub struct PolicyBroker {
-    store: RuntimeProfileStore,
+    store: EnvStore,
     handles: HashMap<RecipientId, ProviderHandle>,
     pending: Mutex<HashMap<Uuid, PendingGrant>>,
     attribution: Attribution,
 }
 
 impl PolicyBroker {
-    pub fn new(store: RuntimeProfileStore, attribution: Attribution) -> Self {
+    pub fn new(store: EnvStore, attribution: Attribution) -> Self {
         Self {
             store,
             handles: HashMap::new(),
@@ -165,7 +165,7 @@ impl PolicyBroker {
         }
     }
 
-    pub fn store(&self) -> &RuntimeProfileStore {
+    pub fn store(&self) -> &EnvStore {
         &self.store
     }
 
@@ -242,15 +242,15 @@ impl PolicyBroker {
 
     fn authorize_inner(&self, request: &DecryptRequest, now: i64) -> Result<DecryptGrant> {
         if request.purpose != DecryptPurpose::Run {
-            return Err(RuntimeProfileError::BrokerDenied(
+            return Err(EnvStoreError::BrokerDenied(
                 BrokerDenialReason::PurposeNotAllowed,
             ));
         }
         if request.expires_at_ms <= now {
-            return Err(RuntimeProfileError::BrokerDenied(BrokerDenialReason::Expired));
+            return Err(EnvStoreError::BrokerDenied(BrokerDenialReason::Expired));
         }
         if request.expires_at_ms.saturating_sub(now) > MAX_GRANT_TTL_MS {
-            return Err(RuntimeProfileError::BrokerDenied(
+            return Err(EnvStoreError::BrokerDenied(
                 BrokerDenialReason::TtlTooLong,
             ));
         }
@@ -260,7 +260,7 @@ impl PolicyBroker {
             .store
             .effective_lifecycle(profile.profile_id, profile.head)?;
         if !lifecycle.decrypt_allowed() {
-            return Err(RuntimeProfileError::DecryptForbidden(lifecycle.to_string()));
+            return Err(EnvStoreError::DecryptForbidden(lifecycle.to_string()));
         }
         let state = self.store.load_state(profile.head)?;
         // Empty `slots` explicitly means "every slot on the head version"; the
@@ -271,7 +271,7 @@ impl PolicyBroker {
         } else {
             for name in &request.slots {
                 if !state.slots.iter().any(|slot| slot.name == *name) {
-                    return Err(RuntimeProfileError::SlotNotFound(name.clone()));
+                    return Err(EnvStoreError::SlotNotFound(name.clone()));
                 }
             }
             request.slots.clone()
@@ -281,20 +281,20 @@ impl PolicyBroker {
                 .slots
                 .iter()
                 .find(|slot| slot.name == *name)
-                .ok_or_else(|| RuntimeProfileError::SlotNotFound(name.clone()))?;
+                .ok_or_else(|| EnvStoreError::SlotNotFound(name.clone()))?;
             let has_handle = slot
                 .dek_wraps
                 .iter()
                 .any(|wrap| self.handles.contains_key(&wrap.recipient_id));
             if !has_handle {
-                return Err(RuntimeProfileError::BrokerDenied(
+                return Err(EnvStoreError::BrokerDenied(
                     BrokerDenialReason::NoProviderHandle(name.clone()),
                 ));
             }
         }
         let id = Uuid::now_v7();
         let mut pending = self.pending.lock().map_err(|_| {
-            RuntimeProfileError::Invalid("broker grant lock was poisoned".to_string())
+            EnvStoreError::Invalid("broker grant lock was poisoned".to_string())
         })?;
         pending.insert(
             id,
@@ -325,12 +325,12 @@ impl PolicyBroker {
         // in the pending map.
         let pending = {
             let mut map = self.pending.lock().map_err(|_| {
-                RuntimeProfileError::Invalid("broker grant lock was poisoned".to_string())
+                EnvStoreError::Invalid("broker grant lock was poisoned".to_string())
             })?;
             map.remove(&grant.id)
         };
         let Some(pending) = pending else {
-            return Err(RuntimeProfileError::InvalidGrant(grant.id.to_string()));
+            return Err(EnvStoreError::InvalidGrant(grant.id.to_string()));
         };
         if now >= pending.expires_at_ms {
             self.store.record_audit(
@@ -345,7 +345,7 @@ impl PolicyBroker {
                 self.attribution.clone(),
                 signer,
             )?;
-            return Err(RuntimeProfileError::BrokerDenied(BrokerDenialReason::Expired));
+            return Err(EnvStoreError::BrokerDenied(BrokerDenialReason::Expired));
         }
         let mut values = Vec::with_capacity(pending.slots.len());
         for slot_name in &pending.slots {
@@ -372,7 +372,7 @@ impl PolicyBroker {
 
     fn secret_for_slot(
         &self,
-        state_id: RuntimeProfileStateId,
+        state_id: EnvProfileVersionId,
         slot_name: &str,
     ) -> Result<(RecipientId, &SoftwareRecipientSecret)> {
         let state = self.store.load_state(state_id)?;
@@ -380,13 +380,13 @@ impl PolicyBroker {
             .slots
             .iter()
             .find(|slot| slot.name == slot_name)
-            .ok_or_else(|| RuntimeProfileError::SlotNotFound(slot_name.to_string()))?;
+            .ok_or_else(|| EnvStoreError::SlotNotFound(slot_name.to_string()))?;
         for wrap in &slot.dek_wraps {
             if let Some(handle) = self.handles.get(&wrap.recipient_id) {
                 return Ok((wrap.recipient_id, &handle.secret));
             }
         }
-        Err(RuntimeProfileError::BrokerDenied(
+        Err(EnvStoreError::BrokerDenied(
             BrokerDenialReason::NoProviderHandle(slot_name.to_string()),
         ))
     }

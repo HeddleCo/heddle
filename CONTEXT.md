@@ -173,7 +173,7 @@ The typed history-graph domain a durable fact belongs to. Source History is the 
 _Avoid_: env/* thread, name-prefix convention
 
 **Runtime Profile**:
-A confidential-runtime facet: a typed `RuntimeProfileRef` pointing at immutable `RuntimeProfileState` versions of named encrypted slots. It is not a Source History state or tree, cannot be checked out, landed, or selected by Git Projection, and must not be stored as an `env/*` source thread. Ciphertext bytes may reuse a byte store only if ownership, reachability, authorization, sync, purge, and projection stay facet-aware.
+A confidential-runtime facet: a typed `EnvProfileRef` pointing at immutable `EnvProfileVersion` versions of named encrypted slots. It is not a Source History state or tree, cannot be checked out, landed, or selected by Git Projection, and must not be stored as an `env/*` source thread. Ciphertext bytes may reuse a byte store only if ownership, reachability, authorization, sync, purge, and projection stay facet-aware.
 _Avoid_: env thread, encrypted source state, VisibilityTier::Private as encryption
 
 **Runtime Profile Recipient**:

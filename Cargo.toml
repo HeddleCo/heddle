@@ -28,7 +28,7 @@ members = [
     "crates/wire",
     "crates/refs",
     "crates/repo",
-    "crates/runtime-profile",
+    "crates/env-store",
     "crates/semantic",
     "crates/semantic-recovery",
     "crates/state-review",
@@ -188,7 +188,7 @@ objects = { path = "crates/objects", package = "heddle-objects", version = "0.20
 oplog = { path = "crates/oplog", package = "heddle-oplog", version = "0.20.2", default-features = false }
 refs = { path = "crates/refs", package = "heddle-refs", version = "0.20.2" }
 repo = { path = "crates/repo", package = "heddle-repo", version = "0.20.2", default-features = false }
-heddle-runtime-profile = { path = "crates/runtime-profile", version = "0.20.2" }
+heddle-env-store = { path = "crates/env-store", version = "0.20.2" }
 semantic = { path = "crates/semantic", package = "heddle-semantic", version = "0.20.2" }
 semantic-recovery = { path = "crates/semantic-recovery", package = "heddle-semantic-recovery", version = "0.20.2" }
 state_review = { path = "crates/state-review", package = "heddle-state-review", version = "0.20.2" }

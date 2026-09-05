@@ -13,7 +13,7 @@ use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::Zeroizing;
 
 /// Domain for HKDF used when wrapping a DEK to an X25519 recipient.
-pub const WRAP_HKDF_INFO: &[u8] = b"heddle-runtime-wrap-v1";
+pub const WRAP_HKDF_INFO: &[u8] = b"heddle-env-wrap-v1";
 
 /// Version tag stored with ciphertext so algorithms can rotate.
 pub const AEAD_AES256_GCM_V1: &str = "aes-256-gcm-v1";

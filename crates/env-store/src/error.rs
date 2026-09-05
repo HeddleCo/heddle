@@ -44,16 +44,16 @@ impl BrokerDenialReason {
     }
 }
 
-/// Failures from the local runtime-profile store.
+/// Failures from the local env-store store.
 #[derive(Debug, thiserror::Error)]
-pub enum RuntimeProfileError {
-    #[error("runtime-profile encoding failed: {0}")]
+pub enum EnvStoreError {
+    #[error("env-store encoding failed: {0}")]
     Encoding(String),
-    #[error("runtime-profile decoding failed: {0}")]
+    #[error("env-store decoding failed: {0}")]
     Decoding(String),
-    #[error("unsupported runtime-profile schema version {0}")]
+    #[error("unsupported env-store schema version {0}")]
     UnsupportedVersion(u16),
-    #[error("invalid runtime profile: {0}")]
+    #[error("invalid env store: {0}")]
     Invalid(String),
     #[error("profile {0} was not found")]
     ProfileNotFound(String),
@@ -63,7 +63,7 @@ pub enum RuntimeProfileError {
     RecipientNotFound(String),
     #[error("lifecycle {from} cannot move to {to}")]
     IllegalLifecycle { from: String, to: String },
-    #[error("refusing to decrypt a {0} runtime-profile version")]
+    #[error("refusing to decrypt a {0} env-store version")]
     DecryptForbidden(String),
     #[error("broker refused the request: {0}")]
     BrokerDenied(BrokerDenialReason),
@@ -81,4 +81,4 @@ pub enum RuntimeProfileError {
     Io(#[from] io::Error),
 }
 
-pub type Result<T> = std::result::Result<T, RuntimeProfileError>;
+pub type Result<T> = std::result::Result<T, EnvStoreError>;

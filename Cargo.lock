@@ -2212,6 +2212,7 @@ dependencies = [
  "heddle-cli-render",
  "heddle-config",
  "heddle-crypto",
+ "heddle-env-store",
  "heddle-format",
  "heddle-git-projection",
  "heddle-hosted-client",
@@ -2223,7 +2224,6 @@ dependencies = [
  "heddle-perf-contract",
  "heddle-refs",
  "heddle-repo",
- "heddle-runtime-profile",
  "heddle-semantic",
  "heddle-verbs",
  "heddle-wire",
@@ -2380,6 +2380,23 @@ dependencies = [
 [[package]]
 name = "heddle-docsgen"
 version = "0.20.2"
+
+[[package]]
+name = "heddle-env-store"
+version = "0.20.2"
+dependencies = [
+ "chrono",
+ "heddle-crypto",
+ "heddle-fs-prims",
+ "heddle-object-model",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
+ "zeroize",
+]
 
 [[package]]
 name = "heddle-format"
@@ -2703,23 +2720,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "heddle-runtime-profile"
-version = "0.20.2"
-dependencies = [
- "chrono",
- "heddle-crypto",
- "heddle-fs-prims",
- "heddle-object-model",
- "rmp-serde",
- "serde",
- "serde_bytes",
- "tempfile",
- "thiserror 2.0.18",
- "uuid",
- "zeroize",
-]
-
-[[package]]
 name = "heddle-semantic"
 version = "0.20.2"
 dependencies = [
@@ -2775,13 +2775,13 @@ dependencies = [
  "chrono",
  "fs2",
  "heddle-crypto",
+ "heddle-env-store",
  "heddle-git-projection",
  "heddle-merge",
  "heddle-objects",
  "heddle-oplog",
  "heddle-refs",
  "heddle-repo",
- "heddle-runtime-profile",
  "heddle-semantic",
  "heddle-state-review",
  "hex",

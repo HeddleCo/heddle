@@ -1,9 +1,9 @@
 [package]
-name = "heddle-runtime-profile"
+name = "heddle-env-store"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "Local confidential-runtime profile store (ADR 0051 / heddle#999)."
+description = "Local confidential-runtime env-store (encrypted secrets for `heddle env run`, ADR 0051 / heddle#999)."
 license.workspace = true
 repository.workspace = true
 keywords.workspace = true
@@ -11,7 +11,7 @@ categories.workspace = true
 
 [lib]
 path = "src/lib.rs"
-name = "runtime_profile"
+name = "env_store"
 
 [dependencies]
 chrono.workspace = true

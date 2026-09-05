@@ -13,7 +13,7 @@ use crypto::Signer;
 use serde::{Deserialize, Serialize};
 
 use crate::broker::{DecryptPurpose, DecryptRequest, PolicyBroker};
-use crate::error::{BrokerDenialReason, Result, RuntimeProfileError};
+use crate::error::{BrokerDenialReason, Result, EnvStoreError};
 
 const FRAME_LIMIT: u32 = 1024 * 1024;
 
@@ -92,17 +92,17 @@ pub fn request_run_unwrap(
 
 /// Reconstruct a typed error from a wire denial so the client classifies by
 /// code, not by matching message text.
-fn broker_denied_from_wire(code: &str, message: String) -> RuntimeProfileError {
+fn broker_denied_from_wire(code: &str, message: String) -> EnvStoreError {
     match code {
-        "expired" => RuntimeProfileError::BrokerDenied(BrokerDenialReason::Expired),
+        "expired" => EnvStoreError::BrokerDenied(BrokerDenialReason::Expired),
         "purpose_not_allowed" => {
-            RuntimeProfileError::BrokerDenied(BrokerDenialReason::PurposeNotAllowed)
+            EnvStoreError::BrokerDenied(BrokerDenialReason::PurposeNotAllowed)
         }
-        "ttl_too_long" => RuntimeProfileError::BrokerDenied(BrokerDenialReason::TtlTooLong),
+        "ttl_too_long" => EnvStoreError::BrokerDenied(BrokerDenialReason::TtlTooLong),
         "no_provider_handle" => {
-            RuntimeProfileError::BrokerDenied(BrokerDenialReason::NoProviderHandle(message))
+            EnvStoreError::BrokerDenied(BrokerDenialReason::NoProviderHandle(message))
         }
-        _ => RuntimeProfileError::Invalid(message),
+        _ => EnvStoreError::Invalid(message),
     }
 }
 
@@ -140,11 +140,11 @@ fn dispatch(broker: &PolicyBroker, signer: &impl Signer, request: BrokerRequest)
     }
 }
 
-fn deny(err: RuntimeProfileError) -> BrokerResponse {
+fn deny(err: EnvStoreError) -> BrokerResponse {
     let code = match &err {
-        RuntimeProfileError::BrokerDenied(reason) => reason.code(),
-        RuntimeProfileError::InvalidGrant(_) => "unauthorized",
-        RuntimeProfileError::ProfileNotFound(_) | RuntimeProfileError::SlotNotFound(_) => {
+        EnvStoreError::BrokerDenied(reason) => reason.code(),
+        EnvStoreError::InvalidGrant(_) => "unauthorized",
+        EnvStoreError::ProfileNotFound(_) | EnvStoreError::SlotNotFound(_) => {
             "not_found"
         }
         _ => "denied",
@@ -157,28 +157,28 @@ fn deny(err: RuntimeProfileError) -> BrokerResponse {
 
 fn encode_request(value: &BrokerRequest) -> Result<Vec<u8>> {
     rmp_serde::to_vec_named(value)
-        .map_err(|err| RuntimeProfileError::Encoding(format!("encode broker request: {err}")))
+        .map_err(|err| EnvStoreError::Encoding(format!("encode broker request: {err}")))
 }
 
 fn encode_response(value: &BrokerResponse) -> Result<Vec<u8>> {
     rmp_serde::to_vec_named(value)
-        .map_err(|err| RuntimeProfileError::Encoding(format!("encode broker response: {err}")))
+        .map_err(|err| EnvStoreError::Encoding(format!("encode broker response: {err}")))
 }
 
 fn decode_response(bytes: &[u8]) -> Result<BrokerResponse> {
     rmp_serde::from_slice(bytes)
-        .map_err(|err| RuntimeProfileError::Decoding(format!("decode broker response: {err}")))
+        .map_err(|err| EnvStoreError::Decoding(format!("decode broker response: {err}")))
 }
 
 fn read_request(stream: &mut UnixStream) -> Result<BrokerRequest> {
     let bytes = read_frame(stream)?;
     rmp_serde::from_slice(&bytes)
-        .map_err(|err| RuntimeProfileError::Decoding(format!("decode broker request: {err}")))
+        .map_err(|err| EnvStoreError::Decoding(format!("decode broker request: {err}")))
 }
 
 fn write_frame(stream: &mut UnixStream, bytes: &[u8]) -> Result<()> {
     let len = u32::try_from(bytes.len())
-        .map_err(|_| RuntimeProfileError::Invalid("broker frame too large".to_string()))?;
+        .map_err(|_| EnvStoreError::Invalid("broker frame too large".to_string()))?;
     stream.write_all(&len.to_le_bytes())?;
     stream.write_all(bytes)?;
     stream.flush()?;
@@ -190,7 +190,7 @@ fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>> {
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_le_bytes(len_buf);
     if len > FRAME_LIMIT {
-        return Err(RuntimeProfileError::Invalid(
+        return Err(EnvStoreError::Invalid(
             "broker frame exceeds limit".to_string(),
         ));
     }
