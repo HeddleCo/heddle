@@ -77,7 +77,7 @@ An opaque stable UUIDv7 identifier for a discussion. Human-readable meaning belo
 _Avoid_: discussion slug, content-addressed discussion id
 
 **Collaboration Operation ID**:
-An opaque stable content-addressed identifier for a collaboration operation. It is distinct from a source history ChangeId even if it uses familiar Heddle short-prefix UX.
+An opaque stable content-addressed identifier for a collaboration operation. It is distinct from a source history ChangeId even if it uses familiar Heddle short-prefix UX. After a hosted push or pull, a published turn's id is the envelope a clone materializes from the hosted snapshot (author, timestamp, and `turn_op_key`); the originator's pre-push local-only id is retired so every machine agrees.
 _Avoid_: change id for collaboration
 
 **Collaboration Idempotency Key**:

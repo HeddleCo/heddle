@@ -26,6 +26,8 @@ Weft applies the same rule when validating hosted collaboration operations. A we
 
 Independent actors submitting the same visible content with the same anchor and causal parents still create distinct collaboration operations unless they share the same idempotency key and actor/capability scope. Heddle does not deduplicate collaboration by semantic content because repeated agreement, duplicate human comments, and parallel agent conclusions can be meaningful records.
 
+Hosted publish restamps author and timestamp, so the originator's local-only envelope cannot hash to the hosted `CollabOpId`. After a successful push or a later pull, Heddle retires that local-only operation and writes the hosted-canonical envelope a clone would materialize (heddle#1695). This creates a new operation id with a recorded mirror mapping; it does not rewrite bytes under the old id.
+
 Collaboration idempotency keys are operational metadata. Normal human-facing discussion output shows the resulting operation ID, actor, timestamp, turn kind, and content; idempotency keys appear only in verbose/debug JSON and `fsck`/`doctor` diagnostics.
 
 **Status:** proposed
