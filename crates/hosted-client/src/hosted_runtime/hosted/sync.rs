@@ -85,6 +85,7 @@ type PullBootstrapPayload = (
     bool,
     Vec<(ContextTarget, ContextBlob)>,
 );
+#[cfg(test)]
 type PullRefsPayload = (
     String,
     Option<Vec<u8>>,
@@ -285,8 +286,9 @@ pub fn decode_pull_refs(checkpoint: &[u8]) -> Result<Option<PullBootstrapRefs>, 
         })?;
     let payload = hex::decode(payload)
         .map_err(|error| ProtocolError::InvalidState(format!("decode pull refs: {error}")))?;
-    let (head_thread, head_state, refs): DecodedPullRefsPayload = rmp_serde::from_slice(&payload)
-        .map_err(|error| ProtocolError::InvalidState(format!("decode pull refs: {error}")))?;
+    let (head_thread, head_state, refs): DecodedPullRefsPayload =
+        rmp_serde::from_slice(&payload)
+            .map_err(|error| ProtocolError::InvalidState(format!("decode pull refs: {error}")))?;
     let head_state = head_state
         .map(|value| decode_bootstrap_state_id(value, "head state"))
         .transpose()?;
