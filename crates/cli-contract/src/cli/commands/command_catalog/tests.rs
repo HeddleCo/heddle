@@ -511,6 +511,15 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(&["verify"], &["verify"]),
     sample(
+        &["env", "create"],
+        &["env", "create", "--name", "local", "--from-env", "TOKEN"],
+    ),
+    sample(&["env", "list"], &["env", "list"]),
+    sample(
+        &["env", "run"],
+        &["env", "run", "--profile", "local", "--", "true"],
+    ),
+    sample(
         &["visibility", "set"],
         &["visibility", "set", "HEAD", "--tier", "internal"],
     ),
@@ -1900,6 +1909,8 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "agent timeline reset",
             "agent timeline recover",
             "verify",
+            "env create",
+            "env list",
             "visibility set",
             "visibility promote",
             "visibility show",

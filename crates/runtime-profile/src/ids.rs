@@ -149,3 +149,31 @@ impl fmt::Display for CiphertextId {
         f.write_str(&self.to_hex())
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AuditRecordId([u8; 32]);
+
+impl AuditRecordId {
+    pub fn for_bytes(bytes: &[u8]) -> Self {
+        let hash = ContentHash::compute_typed("runtime-profile-audit", bytes);
+        Self(*hash.as_bytes())
+    }
+
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn to_hex(&self) -> String {
+        ContentHash::from_bytes(self.0).to_hex()
+    }
+}
+
+impl fmt::Display for AuditRecordId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_hex())
+    }
+}

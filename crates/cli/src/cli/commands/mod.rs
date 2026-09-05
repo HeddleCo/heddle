@@ -23,6 +23,7 @@ mod daemon;
 mod diff;
 mod discuss;
 mod doctor;
+mod env_cmd;
 pub(crate) mod dry_run;
 mod error_envelope;
 mod expand;
@@ -123,6 +124,7 @@ pub use netdaemon::{cmd_netd_serve, cmd_netd_status, cmd_netd_stop};
 pub use diff::cmd_diff;
 pub use discuss::run as cmd_discuss;
 pub use doctor::cmd_doctor;
+pub use env_cmd::cmd_env;
 pub use doctor_docs::cmd_doctor_docs;
 pub use doctor_schemas::{cmd_doctor_schemas, documented_samples_with_bound_verbs};
 pub use error_envelope::{

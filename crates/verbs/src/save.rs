@@ -563,6 +563,17 @@ pub fn capture(
         ));
     }
 
+    if let Some(path) = runtime_profile::reserved_materialization_on_disk(repo.root()) {
+        return Err(capture_refusal(
+            "reserved_materialization_path",
+            format!("Refusing to capture reserved path `{path}`"),
+            "Inject secrets with `heddle env run --profile <name> -- <cmd>` instead of writing `.env` files.",
+            format!("`{path}` is a reserved confidential-runtime materialization path"),
+            "capture would ingest reserved plaintext into Source History",
+            "repository state, refs, metadata, and worktree files were left unchanged",
+            vec!["heddle env run --profile <name> -- <cmd>".to_string()],
+        ));
+    }
     preflight_unimported_git_history(repo, "capture")?;
     let complete_thread_resolution = merge_resolution_is_complete(repo)?;
     let worktree_status_started = Instant::now();

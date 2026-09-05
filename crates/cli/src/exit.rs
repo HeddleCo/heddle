@@ -133,7 +133,11 @@ impl HeddleExitCode {
             // failed envelope — semantic rejection of well-formed input.
             | "operator_blocked"
             // Hosted merge eligibility gate refused the pair.
-            | "merge_eligibility_blocked" => Some(Self::DataErr),
+            | "merge_eligibility_blocked"
+            | "reserved_materialization_path"
+            | "runtime_profile_not_found"
+            | "runtime_profile_slot_not_found" => Some(Self::DataErr),
+            "runtime_profile_denied" | "runtime_profile_expired" => Some(Self::NoPerm),
             // Capture aborted on ENOSPC; working tree is intact. Classifies
             // as IO rather than a distinct raw-28 OS code so agents stay on
             // the documented sysexits taxonomy.
@@ -527,6 +531,11 @@ mod tests {
             ("json_compact_unsupported", HeddleExitCode::DataErr),
             ("operator_blocked", HeddleExitCode::DataErr),
             ("merge_eligibility_blocked", HeddleExitCode::DataErr),
+            ("reserved_materialization_path", HeddleExitCode::DataErr),
+            ("runtime_profile_not_found", HeddleExitCode::DataErr),
+            ("runtime_profile_slot_not_found", HeddleExitCode::DataErr),
+            ("runtime_profile_denied", HeddleExitCode::NoPerm),
+            ("runtime_profile_expired", HeddleExitCode::NoPerm),
             ("capture_out_of_space", HeddleExitCode::IoErr),
         ] {
             assert_eq!(

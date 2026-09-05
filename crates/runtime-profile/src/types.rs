@@ -9,6 +9,7 @@ pub const RUNTIME_PROFILE_SCHEMA_VERSION: u16 = 1;
 pub const LIFECYCLE_SIGNING_DOMAIN: &[u8] = b"hd-runtime-lifecycle-v1";
 pub const RECIPIENT_ENDORSE_DOMAIN: &[u8] = b"hd-runtime-recipient-v1";
 pub const SLOT_AAD_DOMAIN: &[u8] = b"heddle-runtime-slot-v1";
+pub const AUDIT_SIGNING_DOMAIN: &[u8] = b"hd-runtime-audit-v1";
 
 /// Paths source capture must refuse to ingest as ordinary files once a
 /// materialization path exists. `.heddleignore` is defense in depth only.
@@ -193,6 +194,41 @@ pub struct SlotMetadata {
     pub recipient_ids: Vec<RecipientId>,
 }
 
+/// Signed decrypt/run audit event. Slot names only — never values.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditRecord {
+    pub schema_version: u16,
+    pub record_id: crate::ids::AuditRecordId,
+    pub profile_id: Option<RuntimeProfileId>,
+    pub profile_name: String,
+    pub state_id: Option<RuntimeProfileStateId>,
+    pub slots: Vec<String>,
+    pub purpose: String,
+    pub event: AuditEventKind,
+    pub reason: Option<String>,
+    pub occurred_at_ms: i64,
+    pub attribution: Attribution,
+    pub signature: SignatureBlock,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditEventKind {
+    Denied,
+    Granted,
+    Run,
+}
+
+impl AuditEventKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Denied => "denied",
+            Self::Granted => "granted",
+            Self::Run => "run",
+        }
+    }
+}
+
 /// Profile listing row. No slot values.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileMetadata {
@@ -223,6 +259,23 @@ pub fn validate_profile_name(name: &str) -> Result<(), String> {
         return Err("profile name must be [A-Za-z0-9._-]".to_string());
     }
     Ok(())
+}
+
+/// True when `path` is a reserved materialization name (ADR 0051).
+/// Source capture must refuse these; `.heddleignore` is not the boundary.
+pub fn is_reserved_materialization_path(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    RESERVED_MATERIALIZATION_PATHS.contains(&name)
+}
+
+/// First reserved materialization path present on disk under `worktree`.
+pub fn reserved_materialization_on_disk(worktree: &std::path::Path) -> Option<&'static str> {
+    for path in RESERVED_MATERIALIZATION_PATHS {
+        if worktree.join(path).exists() {
+            return Some(*path);
+        }
+    }
+    None
 }
 
 pub fn validate_slot_name(name: &str) -> Result<(), String> {

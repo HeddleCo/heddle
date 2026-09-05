@@ -22,6 +22,7 @@ heddle-git-projection.workspace = true
 oplog.workspace = true
 refs.workspace = true
 repo = { workspace = true, features = ["default"] }
+heddle-runtime-profile.workspace = true
 rmp-serde.workspace = true
 schemars.workspace = true
 serde.workspace = true

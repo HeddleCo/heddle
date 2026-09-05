@@ -789,6 +789,8 @@ async fn async_main() -> Result<()> {
             cli::cli::commands::cmd_visibility(&cli, command.clone())
         }
 
+        Commands::Env { command } => cli::cli::commands::cmd_env(&cli, command.clone()),
+
         Commands::Maintenance { command } => cmd_maintenance(&cli, command.clone()),
 
         Commands::Clone(CloneArgs {

@@ -1294,7 +1294,7 @@ mod tests {
                 "`whoami` is part of the locked everyday surface"
             );
         }
-        for verb in ["thread", "git-projection"] {
+        for verb in ["thread", "git-projection", "env"] {
             assert!(
                 !everyday.contains(verb),
                 "`{verb}` is not an everyday first-screen verb"

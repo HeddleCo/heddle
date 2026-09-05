@@ -3580,6 +3580,22 @@ covered by a `.heddleignore` / `.gitignore` glob:
 {"output_kind": "redact_apply", "redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hc-sqr398dvx9ay", "path": "secrets.env", "reason": "credential", "redactor": "A. Engineer <a@example.com>", "redacted_at": "2026-01-01T00:00:00Z", "all_states": false, "states_redacted": 1, "signed": false, "ignore_hint": {"ignore_file": ".heddleignore", "already_exists": false, "suggested_pattern": "secrets.env", "message": "hint: create .heddleignore with `secrets.env` so the next `heddle capture` doesn't re-import the leaked bytes"}}
 ```
 
+`heddle env create --output json` emits profile metadata only. Slot
+values never appear:
+
+```json
+{"output_kind": "env_create", "profile": "local", "slots": ["DATABASE_URL"]}
+```
+
+`heddle env list --output json` emits names, slot names, and lifecycle.
+Values never appear:
+
+```json
+{"output_kind": "env_list", "profiles": [{"name": "local", "slots": ["DATABASE_URL"], "lifecycle": "active"}]}
+```
+
+`heddle env run` does not support `--output json`. The child owns stdout.
+
 `heddle visibility set --output json` emits (each carries `output_kind`
 set to the snake-cased subcommand). `label` is present only for the
 `team-scoped` / `restricted` tiers; `supersedes` is omitted on a first
