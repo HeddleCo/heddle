@@ -1350,7 +1350,12 @@ pub(crate) fn drop_thread_silent(
     force: bool,
 ) -> Result<DropOutcome> {
     let manager = thread_manager(repo);
-    let loaded = manager.load(thread_id)?;
+    let loaded = match manager.load(thread_id)? {
+        Some(thread) => Some(thread),
+        // Persisted default `main` has a UUID record id; `heddle thread drop
+        // main` names the thread, not the record.
+        None => manager.find_by_thread(thread_id)?,
+    };
     let is_current_lane = repo.current_lane()?.as_deref() == Some(thread_id);
     let disposition = match &loaded {
         None => plan_thread_drop(&ThreadDropOptions {

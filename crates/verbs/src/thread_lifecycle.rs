@@ -67,8 +67,7 @@ pub fn thread_mode_requires_unmount(mode: &ThreadMode) -> bool {
 pub struct ThreadDropOptions {
     /// Whether a managed thread record was loaded for the requested id/name.
     pub thread_found: bool,
-    /// True when the request names the attached current lane (only consulted
-    /// when the record is missing).
+    /// True when the request names the attached current lane.
     pub is_current_lane: bool,
     /// `heddle thread drop --delete-thread` (or cleanup-equivalent).
     pub delete_thread: bool,
@@ -118,16 +117,22 @@ pub enum ThreadDropDisposition {
 /// Pure preflight for `heddle thread drop` / `drop_thread_silent`.
 ///
 /// Rules (matching CLI):
-/// 1. Missing + current lane + no delete flag → refuse
-/// 2. Missing + delete flag → proceed to delete command
-/// 3. Missing otherwise → not found
-/// 4. Found → drop plan (unmount if virtualized, remove checkout if present,
-///    abandon record, strip agents, optionally delete ref)
+/// 1. Current lane + no delete flag → refuse
+/// 2. Current lane + delete flag → proceed to delete command (typed
+///    `branch_delete_current` advice; do not tear down the checkout)
+/// 3. Missing + delete flag → proceed to delete command
+/// 4. Missing otherwise → not found
+/// 5. Found → drop plan (unmount if virtualized, remove a dedicated
+///    checkout if present, abandon record, strip agents, optionally
+///    delete ref). Never remove the shared repo root.
 pub fn plan_thread_drop(options: &ThreadDropOptions) -> ThreadDropDisposition {
-    if !options.thread_found {
-        if !options.delete_thread && options.is_current_lane {
-            return ThreadDropDisposition::RefuseCurrentCheckout;
+    if options.is_current_lane {
+        if options.delete_thread {
+            return ThreadDropDisposition::ProceedDeleteMissing;
         }
+        return ThreadDropDisposition::RefuseCurrentCheckout;
+    }
+    if !options.thread_found {
         if options.delete_thread {
             return ThreadDropDisposition::ProceedDeleteMissing;
         }
@@ -142,7 +147,8 @@ pub fn plan_thread_drop(options: &ThreadDropOptions) -> ThreadDropDisposition {
             options.execution_path_has_heddle,
         ),
         unmount_virtualized: thread_mode_requires_unmount(&options.mode),
-        remove_execution_path: options.execution_path_exists,
+        remove_execution_path: options.execution_path_exists
+            && !options.execution_path_is_repo_root,
         remove_manifest: true,
         mark_abandoned: true,
         strip_actor_presence: true,
@@ -418,6 +424,42 @@ mod tests {
             plan_thread_drop(&opts),
             ThreadDropDisposition::RefuseCurrentCheckout
         );
+    }
+
+    #[test]
+    fn plan_thread_drop_refuses_found_current_lane() {
+        let mut opts = drop_opts(true);
+        opts.is_current_lane = true;
+        assert_eq!(
+            plan_thread_drop(&opts),
+            ThreadDropDisposition::RefuseCurrentCheckout
+        );
+    }
+
+    #[test]
+    fn plan_thread_drop_delete_found_current_lane_uses_branch_delete() {
+        let mut opts = drop_opts(true);
+        opts.is_current_lane = true;
+        opts.delete_thread = true;
+        assert_eq!(
+            plan_thread_drop(&opts),
+            ThreadDropDisposition::ProceedDeleteMissing
+        );
+    }
+
+    #[test]
+    fn plan_thread_drop_does_not_remove_shared_repo_root() {
+        let mut opts = drop_opts(true);
+        opts.execution_path_is_repo_root = true;
+        opts.delete_thread = true;
+        match plan_thread_drop(&opts) {
+            ThreadDropDisposition::Drop(plan) => {
+                assert!(!plan.remove_execution_path);
+                assert!(plan.delete_thread_ref);
+                assert!(plan.mark_abandoned);
+            }
+            other => panic!("expected Drop, got {other:?}"),
+        }
     }
 
     #[test]
