@@ -11,6 +11,7 @@ mod commands_ci;
 mod commands_client;
 mod commands_context;
 mod commands_discuss;
+mod commands_env;
 #[cfg(feature = "git-overlay")]
 mod commands_git_projection;
 mod commands_hook;
@@ -61,6 +62,7 @@ pub use commands_client::{
 pub use commands_context::ContextCommands;
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 pub use commands_context::ContextReasonCommands;
+pub use commands_env::{EnvCommands, EnvCreateArgs, EnvListArgs, EnvRunArgs};
 pub use commands_discuss::{
     DiscussAppendArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs, DiscussReopenArgs,
     DiscussResolveArgs, DiscussShowArgs, DiscussWaitArgs, ResolveModeArg,

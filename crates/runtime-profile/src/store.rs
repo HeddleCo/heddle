@@ -2,9 +2,9 @@
 //! Local confidential-runtime store.
 //!
 //! Decrypt APIs that accept a [`SoftwareRecipientSecret`] are the provider
-//! unwrap boundary. A future policy broker will call them after authorizing a
-//! request and will return values, never key material. Holding the software
-//! secret in-process is the explicit weaker-custody fallback — not agent
+//! unwrap boundary. The policy broker calls them after authorizing a request
+//! and returns values, never key material. Holding the software secret in
+//! the broker process is the explicit weaker-custody fallback — not agent
 //! isolation.
 
 use std::fs;
@@ -20,17 +20,20 @@ use heddle_fs_prims::fs_atomic::{
 use heddle_object_model::object::{Attribution, FacetKind};
 
 use crate::codec::{
-    StoredCiphertext, assign_lifecycle_id, assign_state_id, decode_ciphertext, decode_lifecycle,
-    decode_recipient, decode_ref, decode_state, encode_recipient, encode_ref, encode_state,
-    lifecycle_signing_payload, recipient_endorsement_payload,
+    StoredCiphertext, assign_audit_id, assign_lifecycle_id, assign_state_id, audit_signing_payload,
+    decode_audit, decode_ciphertext, decode_lifecycle, decode_recipient, decode_ref, decode_state,
+    encode_recipient, encode_ref, encode_state, lifecycle_signing_payload,
+    recipient_endorsement_payload,
 };
 use crate::error::{Result, RuntimeProfileError};
-use crate::ids::{LifecycleRecordId, RecipientId, RuntimeProfileId, RuntimeProfileStateId};
+use crate::ids::{
+    AuditRecordId, LifecycleRecordId, RecipientId, RuntimeProfileId, RuntimeProfileStateId,
+};
 use crate::types::{
-    FacetKindWire, LifecycleRecord, LifecycleStatus, ProfileMetadata, ProviderCapability,
-    RUNTIME_PROFILE_SCHEMA_VERSION, RecipientDescriptor, RuntimeProfileRef, RuntimeProfileState,
-    SignatureBlock, SlotMetadata, SlotRecord, WrappedDekRecord, slot_aad, validate_profile_name,
-    validate_slot_name,
+    AuditEventKind, AuditRecord, FacetKindWire, LifecycleRecord, LifecycleStatus, ProfileMetadata,
+    ProviderCapability, RUNTIME_PROFILE_SCHEMA_VERSION, RecipientDescriptor, RuntimeProfileRef,
+    RuntimeProfileState, SignatureBlock, SlotMetadata, SlotRecord, WrappedDekRecord, slot_aad,
+    validate_profile_name, validate_slot_name,
 };
 
 const STORE_DIR: &str = "runtime-profiles";
@@ -40,6 +43,7 @@ const LIFECYCLE_DIR: &str = "lifecycle";
 const CIPHERTEXT_DIR: &str = "ciphertext";
 const RECIPIENTS_DIR: &str = "recipients";
 const KEYS_DIR: &str = "keys";
+const AUDIT_DIR: &str = "audit";
 const WRAP_ALG: &str = "x25519-hkdf-sha256-aes-256-gcm-v1";
 
 pub struct RuntimeProfileStore {
@@ -63,6 +67,7 @@ impl RuntimeProfileStore {
             CIPHERTEXT_DIR,
             RECIPIENTS_DIR,
             KEYS_DIR,
+            AUDIT_DIR,
         ] {
             create_private_dir_all(&root.join(child))?;
         }
@@ -261,6 +266,15 @@ impl RuntimeProfileStore {
         Ok(profile)
     }
 
+    pub fn find_profile_by_name(&self, name: &str) -> Result<RuntimeProfileRef> {
+        for meta in self.list_profiles()? {
+            if meta.name == name {
+                return self.load_profile(meta.profile_id);
+            }
+        }
+        Err(RuntimeProfileError::ProfileNotFound(name.to_string()))
+    }
+
     pub fn load_profile(&self, profile_id: RuntimeProfileId) -> Result<RuntimeProfileRef> {
         let bytes = fs::read(self.profile_path(profile_id)).map_err(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
@@ -319,6 +333,82 @@ impl RuntimeProfileStore {
                     .collect(),
             })
             .collect())
+    }
+
+    pub fn list_recipients(&self) -> Result<Vec<RecipientDescriptor>> {
+        let mut out = Vec::new();
+        for entry in fs::read_dir(self.root.join(RECIPIENTS_DIR))? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            out.push(decode_recipient(&fs::read(entry.path())?)?);
+        }
+        Ok(out)
+    }
+
+    /// First software recipient, or create one. Used by CLI setup.
+    pub fn default_or_create_software_recipient(
+        &self,
+        signer: &impl Signer,
+    ) -> Result<RecipientDescriptor> {
+        if let Some(existing) = self.list_recipients()?.into_iter().next() {
+            return Ok(existing);
+        }
+        let (descriptor, _) = self.create_software_recipient(signer, 1)?;
+        Ok(descriptor)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_audit(
+        &self,
+        profile_id: Option<RuntimeProfileId>,
+        profile_name: &str,
+        state_id: Option<RuntimeProfileStateId>,
+        slots: &[String],
+        purpose: &str,
+        event: AuditEventKind,
+        reason: Option<String>,
+        attribution: Attribution,
+        signer: &impl Signer,
+    ) -> Result<AuditRecordId> {
+        let now = now_ms()?;
+        let mut record = AuditRecord {
+            schema_version: RUNTIME_PROFILE_SCHEMA_VERSION,
+            record_id: AuditRecordId::from_bytes([0; 32]),
+            profile_id,
+            profile_name: profile_name.to_string(),
+            state_id,
+            slots: slots.to_vec(),
+            purpose: purpose.to_string(),
+            event,
+            reason,
+            occurred_at_ms: now,
+            attribution,
+            signature: SignatureBlock {
+                algorithm: signer.algorithm().to_string(),
+                public_key: signer.public_key().to_vec(),
+                signature: Vec::new(),
+            },
+        };
+        let payload = audit_signing_payload(&record)?;
+        record.signature.signature = signer.sign(&payload)?;
+        let bytes = assign_audit_id(&mut record)?;
+        write_file_atomic(&self.audit_path(record.record_id), &bytes)?;
+        Ok(record.record_id)
+    }
+
+    pub fn list_audit(&self) -> Result<Vec<AuditRecord>> {
+        let mut out = Vec::new();
+        for entry in fs::read_dir(self.root.join(AUDIT_DIR))? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            out.push(decode_audit(&fs::read(entry.path())?)?);
+        }
+        out.sort_by_key(|record| record.occurred_at_ms);
+        Ok(out)
     }
 
     pub fn list_lifecycle(&self, profile_id: RuntimeProfileId) -> Result<Vec<LifecycleRecord>> {
@@ -604,6 +694,12 @@ impl RuntimeProfileStore {
     fn key_path(&self, id: RecipientId) -> PathBuf {
         self.root.join(KEYS_DIR).join(id.to_hex())
     }
+
+    fn audit_path(&self, id: AuditRecordId) -> PathBuf {
+        self.root
+            .join(AUDIT_DIR)
+            .join(format!("{}.msgpack", id.to_hex()))
+    }
 }
 
 /// Compile-time proof that this facet cannot be selected by Source History
@@ -624,7 +720,7 @@ fn vec_to_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N]> {
     })
 }
 
-fn now_ms() -> Result<i64> {
+pub(crate) fn now_ms() -> Result<i64> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let duration = SystemTime::now()

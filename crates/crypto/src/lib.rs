@@ -46,6 +46,24 @@ pub trait Signer: Send + Sync {
     fn verify(&self, data: &[u8], signature: &[u8]) -> Result<(), SignerError>;
 }
 
+impl Signer for Box<dyn Signer> {
+    fn algorithm(&self) -> &'static str {
+        (**self).algorithm()
+    }
+
+    fn public_key(&self) -> &[u8] {
+        (**self).public_key()
+    }
+
+    fn sign(&self, data: &[u8]) -> Result<Vec<u8>, SignerError> {
+        (**self).sign(data)
+    }
+
+    fn verify(&self, data: &[u8], signature: &[u8]) -> Result<(), SignerError> {
+        (**self).verify(data, signature)
+    }
+}
+
 const STATE_SIGNATURE_DOMAIN: &[u8; 16] = b"hd-state-sig-v1\x00";
 
 fn state_signature_payload(content_hash: &ContentHash) -> [u8; 48] {

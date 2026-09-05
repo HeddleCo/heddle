@@ -8,7 +8,7 @@ use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
-    AgentCommands, CompletionSubject, ContextCommands, DiscussCommands, HookCommands,
+    AgentCommands, CompletionSubject, ContextCommands, DiscussCommands, EnvCommands, HookCommands,
     IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
     ShellCommands, ThreadCommands, VisibilityCommands,
     commands_args::{
@@ -292,6 +292,23 @@ Examples:
     Visibility {
         #[command(subcommand)]
         command: VisibilityCommands,
+    },
+
+    /// Run a child with a confidential runtime profile.
+    ///
+    /// `heddle env run --profile <name> -- <cmd>` asks the local policy
+    /// broker to unwrap named slots and injects them into the child
+    /// environment only. Values never land in the worktree, the store, or
+    /// command JSON. Same-UID callers are cooperative; OS isolation is later.
+    #[command(after_help = "\
+Examples:
+  heddle env list
+  heddle env create --name local --from-env DATABASE_URL
+  heddle env run --profile local -- printenv DATABASE_URL
+")]
+    Env {
+        #[command(subcommand)]
+        command: EnvCommands,
     },
 
     /// Revert changes from a state.

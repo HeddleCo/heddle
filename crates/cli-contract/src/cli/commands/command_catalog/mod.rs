@@ -22,7 +22,7 @@ use crate::cli::{
     AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands, HookCommands,
     INIT_VERB, IntegrationCommands, MaintenanceCommands, NetdCommands, OplogCommands, PurgeCommands,
     RedactCommands, RemoteCommands, ShellCommands, ThreadCommands, ThreadMarkerCommands,
-    TimelineCommands, VisibilityCommands,
+    TimelineCommands, VisibilityCommands, EnvCommands,
     cli_args::{
         AgentFanoutCommands, AgentProvenanceCommands, AgentTaskCommands, DiscussCommands,
         PresenceCommands, ReviewCommands,
@@ -2962,6 +2962,32 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ],
         ),
     ),
+    entry(&["env"], GROUP),
+    entry(
+        &["env", "create"],
+        json_discriminators(
+            opaque_schemas(METADATA_MUTATION_NO_OP_ID, &["env create"]),
+            &[json_discriminator(
+                Some("env create"),
+                "output_kind",
+                "env_create",
+            )],
+        ),
+    ),
+    entry(
+        &["env", "list"],
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["env list"]),
+            &[json_discriminator(Some("env list"), "output_kind", "env_list")],
+        ),
+    ),
+    entry(
+        &["env", "run"],
+        CommandContract {
+            writes_metadata: true,
+            ..EXTERNAL_COMMAND_MUTATION
+        },
+    ),
     entry(&["visibility"], GROUP),
     entry(
         &["visibility", "set"],
@@ -4531,6 +4557,11 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 PurgeCommands::Apply(_) => vec!["redact", "purge", "apply"],
                 PurgeCommands::List(_) => vec!["redact", "purge", "list"],
             },
+        },
+        Commands::Env { command } => match command {
+            EnvCommands::Create(_) => vec!["env", "create"],
+            EnvCommands::List(_) => vec!["env", "list"],
+            EnvCommands::Run(_) => vec!["env", "run"],
         },
         Commands::Visibility { command } => match command {
             VisibilityCommands::Set(_) => vec!["visibility", "set"],

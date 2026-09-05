@@ -3211,7 +3211,7 @@ as one; no `help advanced`).
       "visibility set",
       "visibility promote"
     ],
-    "accepted_opaque_schema_verbs_total": 39,
+    "accepted_opaque_schema_verbs_total": 44,
     "advanced_scope": "advanced_internal_admin",
     "advanced_scope_accepted_opaque_schema_examples": [
       "help",
@@ -3223,26 +3223,26 @@ as one; no `help advanced`).
       "visibility set",
       "visibility promote"
     ],
-    "advanced_scope_json_commands_total": 101,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 39,
-    "advanced_scope_mutating_commands_total": 57,
-    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 21,
-    "catalog_commands_total": 186,
-    "catalog_mutating_commands_total": 90,
-    "json_commands_total": 149,
-    "json_commands_with_accepted_opaque_schema": 39,
-    "json_commands_with_schema": 110,
+    "advanced_scope_json_commands_total": 107,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 44,
+    "advanced_scope_mutating_commands_total": 61,
+    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 24,
+    "catalog_commands_total": 195,
+    "catalog_mutating_commands_total": 95,
+    "json_commands_total": 155,
+    "json_commands_with_accepted_opaque_schema": 44,
+    "json_commands_with_schema": 111,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 87,
+    "json_mutating_commands_total": 91,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 87,
-    "mutating_commands_with_accepted_opaque_schema": 21,
-    "mutating_commands_with_schema": 66,
+    "mutating_commands_total": 91,
+    "mutating_commands_with_accepted_opaque_schema": 24,
+    "mutating_commands_with_schema": 67,
     "mutating_commands_without_schema": 0,
-    "opaque_schema_verbs_total": 39,
+    "opaque_schema_verbs_total": 44,
     "status": "available",
-    "summary": "188 command(s), 149 JSON command(s), 90 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+    "summary": "197 command(s), 155 JSON command(s), 95 mutating command(s), 91 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
@@ -3280,7 +3280,7 @@ as one; no `help advanced`).
     "try"
   ],
   "status": "available",
-  "summary": "188 command(s), 149 JSON command(s), 90 mutating command(s), 87 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 39 accepted opaque schema(s) outside clean verification",
+  "summary": "197 command(s), 155 JSON command(s), 95 mutating command(s), 91 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -3579,6 +3579,22 @@ covered by a `.heddleignore` / `.gitignore` glob:
 ```json
 {"output_kind": "redact_apply", "redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hc-sqr398dvx9ay", "path": "secrets.env", "reason": "credential", "redactor": "A. Engineer <a@example.com>", "redacted_at": "2026-01-01T00:00:00Z", "all_states": false, "states_redacted": 1, "signed": false, "ignore_hint": {"ignore_file": ".heddleignore", "already_exists": false, "suggested_pattern": "secrets.env", "message": "hint: create .heddleignore with `secrets.env` so the next `heddle capture` doesn't re-import the leaked bytes"}}
 ```
+
+`heddle env create --output json` emits profile metadata only. Slot
+values never appear:
+
+```json
+{"output_kind": "env_create", "profile": "local", "slots": ["DATABASE_URL"]}
+```
+
+`heddle env list --output json` emits names, slot names, and lifecycle.
+Values never appear:
+
+```json
+{"output_kind": "env_list", "profiles": [{"name": "local", "slots": ["DATABASE_URL"], "lifecycle": "active"}]}
+```
+
+`heddle env run` does not support `--output json`. The child owns stdout.
 
 `heddle visibility set --output json` emits (each carries `output_kind`
 set to the snake-cased subcommand). `label` is present only for the

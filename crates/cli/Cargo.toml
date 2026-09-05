@@ -59,6 +59,7 @@ oplog.workspace = true
 wire.workspace = true
 refs.workspace = true
 repo.workspace = true
+heddle-runtime-profile.workspace = true
 semantic = { workspace = true, optional = true }
 notify.workspace = true
 opentelemetry = { workspace = true, optional = true }

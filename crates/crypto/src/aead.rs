@@ -53,8 +53,9 @@ impl Dek {
 
 /// Exportable X25519 recipient secret. Explicit weaker-custody fallback.
 ///
-/// `StaticSecret` zeroizes on drop. Holding this in-process is weaker custody;
-/// the policy broker (later) must hold a provider handle instead.
+/// `StaticSecret` zeroizes on drop. Holding this in-process is weaker custody.
+/// The policy broker holds a provider handle over this secret and returns
+/// slot values, never the key bytes.
 #[derive(Clone)]
 pub struct SoftwareRecipientSecret(StaticSecret);
 

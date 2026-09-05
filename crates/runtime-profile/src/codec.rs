@@ -4,10 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, RuntimeProfileError};
 use crate::ids::{
-    CiphertextId, LifecycleRecordId, RecipientId, RuntimeProfileId, RuntimeProfileStateId,
+    AuditRecordId, CiphertextId, LifecycleRecordId, RecipientId, RuntimeProfileId,
+    RuntimeProfileStateId,
 };
 use crate::types::{
-    FacetKindWire, LifecycleRecord, LifecycleStatus, ProviderCapability,
+    AuditRecord, FacetKindWire, LifecycleRecord, LifecycleStatus, ProviderCapability,
     RUNTIME_PROFILE_SCHEMA_VERSION, RecipientDescriptor, RuntimeProfileRef, RuntimeProfileState,
     SlotRecord,
 };
@@ -233,6 +234,55 @@ pub fn encode_recipient(value: &RecipientDescriptor) -> Result<Vec<u8>> {
 
 pub fn encode_lifecycle(value: &LifecycleRecord) -> Result<Vec<u8>> {
     encode_named(value, "runtime-profile-lifecycle")
+}
+
+pub fn audit_signing_payload(record: &AuditRecord) -> Result<Vec<u8>> {
+    #[derive(Serialize)]
+    struct Body<'a> {
+        schema_version: u16,
+        profile_id: Option<RuntimeProfileId>,
+        profile_name: &'a str,
+        state_id: Option<RuntimeProfileStateId>,
+        slots: &'a [String],
+        purpose: &'a str,
+        event: crate::types::AuditEventKind,
+        reason: &'a Option<String>,
+        occurred_at_ms: i64,
+        attribution: heddle_object_model::object::Attribution,
+    }
+    let mut payload = crate::types::AUDIT_SIGNING_DOMAIN.to_vec();
+    payload.extend_from_slice(&encode_named(
+        &Body {
+            schema_version: record.schema_version,
+            profile_id: record.profile_id,
+            profile_name: &record.profile_name,
+            state_id: record.state_id,
+            slots: &record.slots,
+            purpose: &record.purpose,
+            event: record.event,
+            reason: &record.reason,
+            occurred_at_ms: record.occurred_at_ms,
+            attribution: record.attribution.clone(),
+        },
+        "audit-signing",
+    )?);
+    Ok(payload)
+}
+
+pub fn decode_audit(bytes: &[u8]) -> Result<AuditRecord> {
+    require_v1(bytes, "runtime-profile-audit")?;
+    rmp_serde::from_slice(bytes)
+        .map_err(|err| RuntimeProfileError::Decoding(format!("decode runtime-profile-audit: {err}")))
+}
+
+pub fn encode_audit(value: &AuditRecord) -> Result<Vec<u8>> {
+    encode_named(value, "runtime-profile-audit")
+}
+
+pub fn assign_audit_id(record: &mut AuditRecord) -> Result<Vec<u8>> {
+    let payload = audit_signing_payload(record)?;
+    record.record_id = AuditRecordId::for_bytes(&payload);
+    encode_audit(record)
 }
 
 pub fn assign_lifecycle_id(record: &mut LifecycleRecord) -> Result<Vec<u8>> {

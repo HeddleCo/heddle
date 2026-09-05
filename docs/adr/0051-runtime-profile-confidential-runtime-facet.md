@@ -101,17 +101,14 @@ Provider capabilities (v1 names the set; only software is implemented):
 | `tpm` / `secure-enclave` / `os-provider` | Hardware or OS key store; broker holds a handle | later |
 | `pkcs11` / `remote-hsm` / `kms` | External custody | later |
 
-The policy **broker** (later, separately approved IPC) authorizes scoped,
-time-boxed decrypt requests and returns **values, never key material**. The
-broker holds provider handles, not exportable private keys. Hardware protects
-custody; the broker enforces authorization, revocation, and audit. Strong
-agent isolation needs distinct OS/container identities. Same-UID callers are
-cooperative, not an adversarial boundary.
-
-Until the broker exists, the library decrypt path that accepts a software
-recipient secret is the weaker-custody fallback only. It is not the
-agent-facing security boundary. This slice does **not** add `heddle env` or
-`heddle runtime-profile` CLI that would pretend otherwise.
+The local policy broker (phase 3) authorizes scoped, time-boxed `run`
+requests and returns **values, never key material**. It holds provider
+handles, not exportable private keys. `heddle env run` injects those
+values into a child process only. The library decrypt path that accepts
+a software recipient secret remains the weaker-custody fallback.
+Hardware TPM / OS isolation and Biscuit attenuation are later slices.
+Same-UID callers without OS isolation are cooperative, not an
+adversarial boundary.
 
 ## Lifecycle
 
@@ -144,8 +141,9 @@ CLI still mints client roots. Weft's existing server-side `SecretStore`
 
 ## Projection and capture guards
 
-These guards are part of the accepted model even though `env run` and the
-broker are later slices.
+These guards are part of the accepted model. Phase 3 ships `env run` and
+the local broker; reserved-path capture refusal is the cheap hook.
+Fingerprint matching against broker-known secrets is a follow-up.
 
 1. **Git Projection selects typed Source History roots only.** It never walks
    runtime profile roots, ciphertext, recipient descriptors, or policy data.
@@ -156,12 +154,13 @@ broker are later slices.
    require `SourceHistoryLaws` at the materialize and merge chokepoints. A
    runtime profile cannot be started into a worktree or landed onto HEAD.
 
-3. **`env run` (later)** injects plaintext into a child process only. It must
+3. **`env run`** injects plaintext into a child process only. It must
    not write the source worktree, the object store, command output, or logs.
 
-4. **Source capture (later, before any materialization path)** must reject
-   broker-known secret fingerprints and reserved materialization paths.
-   `.heddleignore` is defense in depth, not a security boundary.
+4. **Source capture** rejects reserved materialization paths
+   (`.env`, `.env.local`, `.env.rc`). Broker-known secret fingerprints
+   are a follow-up. `.heddleignore` is defense in depth, not a security
+   boundary.
 
 5. Intentional declassification (for example an `.env.example` schema) must
    be explicit and audited.

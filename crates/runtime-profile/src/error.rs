@@ -26,6 +26,12 @@ pub enum RuntimeProfileError {
     IllegalLifecycle { from: String, to: String },
     #[error("refusing to decrypt a {0} runtime-profile version")]
     DecryptForbidden(String),
+    #[error("broker refused the request: {0}")]
+    BrokerDenied(String),
+    #[error("decrypt grant {0} is not valid")]
+    InvalidGrant(String),
+    #[error("reserved materialization path {0} cannot be captured")]
+    ReservedMaterialization(String),
     #[error("{0} is not a source-history root")]
     FacetExcluded(FacetKind),
     #[error("aead error: {0}")]
