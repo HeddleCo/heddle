@@ -307,7 +307,10 @@ mod tests {
         let wrapped = wrap_dek(&dek, &alice.public_key()).expect("wrap");
         let opened = unwrap_dek(&wrapped, &alice).expect("alice unwraps");
         assert_eq!(opened.as_bytes(), dek.as_bytes());
-        unwrap_dek(&wrapped, &bob).expect_err("bob cannot unwrap");
+        assert!(
+            unwrap_dek(&wrapped, &bob).is_err(),
+            "bob cannot unwrap alice's wrap"
+        );
     }
 
     #[test]
