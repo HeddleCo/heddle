@@ -1,7 +1,0 @@
-// Owner-authz v2 is deliberately a one-action rule pack.
-//
-// PURGE is action value 1 in heddle-api 0.15. Ordinary redact, visibility,
-// attachment, and metadata writes are transport spool-write decisions and
-// can never be derived from an owner capability. The exact selector flag is
-// false because purge is direct-only and bound to one spool target.
-owner_purge($spool, $path) <- owner_grant($spool, $path, false, 1);

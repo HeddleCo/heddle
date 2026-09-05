@@ -2142,6 +2142,24 @@ dependencies = [
 
 [[package]]
 name = "heddle-api"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02ca39fe24cc86e74825d513f5ccf29fbb5df80f1c347f1697147b0ad3975c4c"
+dependencies = [
+ "blake3",
+ "bytes",
+ "hex",
+ "prost 0.14.1",
+ "prost-build",
+ "prost-reflect",
+ "prost-types 0.14.1",
+ "protoc-bin-vendored",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "heddle-api"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b206b8d4eead491a1f803db16c3ba8571acc346386d509673347f4cf962360f"
@@ -2162,7 +2180,7 @@ dependencies = [
 name = "heddle-ci-config"
 version = "0.20.3"
 dependencies = [
- "heddle-api",
+ "heddle-api 0.28.0",
  "hex",
  "prost 0.14.1",
  "regex",
@@ -2203,7 +2221,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "heddle-agent-relay",
- "heddle-api",
+ "heddle-api 0.28.0",
  "heddle-ci-config",
  "heddle-ci-engine",
  "heddle-cli-args",
@@ -2268,7 +2286,7 @@ version = "0.20.3"
 dependencies = [
  "anyhow",
  "clap",
- "heddle-api",
+ "heddle-api 0.28.0",
  "heddle-config",
  "heddle-objects",
  "heddle-repo",
@@ -2432,7 +2450,7 @@ dependencies = [
  "chrono",
  "futures",
  "getrandom 0.4.3",
- "heddle-api",
+ "heddle-api 0.28.0",
  "heddle-cli-args",
  "heddle-cli-contract",
  "heddle-cli-render",
@@ -2668,7 +2686,7 @@ dependencies = [
  "base32",
  "blake3",
  "chrono",
- "heddle-api",
+ "heddle-api 0.28.0",
  "heddle-crypto",
  "heddle-objects",
  "heddle-oplog",
@@ -2812,11 +2830,13 @@ dependencies = [
 [[package]]
 name = "heddleco-capability-verifier"
 version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a342c0bf87836d4430c6eb51aed9a847df8e50af30d91217b643f014db3c970f"
 dependencies = [
  "biscuit-auth",
  "ed25519-dalek 3.0.0",
  "getrandom 0.2.17",
- "heddle-api",
+ "heddle-api 0.27.0",
  "hex",
  "prost 0.14.1",
  "serde",
