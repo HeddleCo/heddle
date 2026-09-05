@@ -1285,6 +1285,8 @@ fn runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
         // Stopping a daemon that is not running still exits 0 with the
         // full `daemon_stop` payload, so a bare init fixture suffices.
         "daemon_stop" => (init_fixture(), sv(&["daemon", "stop"])),
+        "netd_status" => (init_fixture(), sv(&["netd", "status"])),
+        "netd_stop" => (init_fixture(), sv(&["netd", "stop"])),
         "oplog_recover" => {
             // Seed three captures, truncate the packed base, and explicitly
             // recover once. Normal repository open now refuses structural
