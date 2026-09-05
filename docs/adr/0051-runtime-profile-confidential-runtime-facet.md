@@ -179,6 +179,19 @@ broker are later slices.
   facet-aware sync exists. Ciphertext must not become an ordinary blob that
   Git Projection or source GC can discover by walking states.
 
+## Phase 1 local-store caveats
+
+These are accepted limits of the library MVP, not the long-term model:
+
+- `purge()` deletes ciphertext files for the **current head version only**.
+  Superseded versions keep their ciphertext until a later retention pass.
+- `update_slots` is a full slot-set replace, not a merge of named keys.
+- The store has no multi-writer file lock. Concurrent local writers are
+  undefined until the broker owns mutation.
+- Version files are content-addressed and unsigned. Authenticity is on the
+  signed lifecycle records and the recipient endorsement, not on each
+  `RuntimeProfileState` blob.
+
 ## Considered options
 
 **`env/*` source thread of encrypted blobs.** Reuses State/Tree/oplog for

@@ -7,11 +7,9 @@
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-use hmac::{Hmac, KeyInit as HmacKeyInit, Mac};
+use hkdf::Hkdf;
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
-
-type HmacSha256 = Hmac<Sha256>;
 
 /// Domain for HKDF used when wrapping a DEK to an X25519 recipient.
 pub const WRAP_HKDF_INFO: &[u8] = b"heddle-runtime-wrap-v1";
@@ -130,18 +128,9 @@ fn fill_random(dest: &mut [u8]) -> Result<(), AeadError> {
 
 /// HKDF-SHA256 extract+expand for a single 32-byte OKM (RFC 5869).
 fn hkdf_sha256(salt: &[u8], ikm: &[u8], info: &[u8]) -> Result<[u8; DEK_LEN], AeadError> {
-    let mut extract = <HmacSha256 as HmacKeyInit>::new_from_slice(salt).map_err(|_| AeadError::Hkdf)?;
-    extract.update(ikm);
-    let prk = extract.finalize().into_bytes();
-    let mut expand = <HmacSha256 as HmacKeyInit>::new_from_slice(&prk).map_err(|_| AeadError::Hkdf)?;
-    expand.update(info);
-    expand.update(&[1u8]);
-    let t = expand.finalize().into_bytes();
+    let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
     let mut okm = [0u8; DEK_LEN];
-    if t.len() < DEK_LEN {
-        return Err(AeadError::Hkdf);
-    }
-    okm.copy_from_slice(&t[..DEK_LEN]);
+    hk.expand(info, &mut okm).map_err(|_| AeadError::Hkdf)?;
     Ok(okm)
 }
 
