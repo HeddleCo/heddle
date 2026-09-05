@@ -2592,6 +2592,7 @@ async fn persist_hosted_clone_thread_identity(
     Ok(())
 }
 
+#[cfg(feature = "client")]
 fn hosted_clone_thread_revision_address<'a>(
     remote_refs: &'a [HostedRefEntry],
     thread: &str,
