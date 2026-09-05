@@ -242,3 +242,43 @@ fn discuss_anchor_still_follows_a_file_rename() {
     assert_eq!(persisted.status, CollaborationAnchorStatus::Moved);
     assert_eq!(persisted.operation_count, 2);
 }
+
+#[test]
+fn discuss_anchor_still_follows_a_mkdir_rename() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(
+        temp.path().join("lib.py"),
+        "def greet(name):\n    return f\"hello {name}\"\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
+    let opened = json(
+        &heddle(
+            &[
+                "--output", "json", "discuss", "open", "lib.py", "greet", "review q",
+            ],
+            Some(temp.path()),
+        )
+        .unwrap(),
+    );
+    let id = opened["discussion"]["id"].as_str().unwrap();
+
+    std::fs::create_dir(temp.path().join("pkg")).unwrap();
+    std::fs::rename(
+        temp.path().join("lib.py"),
+        temp.path().join("pkg/greeter.py"),
+    )
+    .unwrap();
+    heddle(
+        &["capture", "-m", "move lib.py into pkg"],
+        Some(temp.path()),
+    )
+    .unwrap();
+
+    let persisted = assert_views_and_get(temp.path(), id, "pkg/greeter.py", "greet", "moved");
+    assert_eq!(persisted.path, "pkg/greeter.py");
+    assert_eq!(persisted.symbol, "greet");
+    assert_eq!(persisted.status, CollaborationAnchorStatus::Moved);
+    assert_eq!(persisted.operation_count, 2);
+}
