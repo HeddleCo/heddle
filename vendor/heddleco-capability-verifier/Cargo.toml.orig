@@ -1,0 +1,52 @@
+[package]
+name = "heddleco-capability-verifier"
+version = "0.16.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["HeddleCo"]
+description = "Pure owner-anchored capability verification shared by Heddle and Weft"
+repository = "https://github.com/HeddleCo/capability-verifier"
+license = "MIT OR Apache-2.0"
+keywords = ["authorization", "capability", "ed25519", "security", "wasm"]
+categories = ["authentication", "cryptography", "wasm"]
+readme = "README.md"
+include = [
+  "/src/**",
+  "/tests/**",
+  "/conformance/**",
+  "/Cargo.toml",
+  "/README.md",
+  "/LICENSE-APACHE",
+  "/LICENSE-MIT",
+]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+biscuit-auth = { version = "6.0", default-features = false, features = ["datalog-macro", "wasm"] }
+ed25519-dalek = { version = "3.0", default-features = false, features = ["alloc", "fast"] }
+heddle-api = "0.28"
+hex = "0.4"
+prost = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# biscuit-auth links its token builder even for verification-only consumers.
+# Enabling its transitive entropy backend makes that pure code linkable in a
+# browser Worker; this crate never calls a randomness API.
+getrandom = { version = "0.2", features = ["js"] }
+wasm-bindgen = "=0.2.127"
+
+[dev-dependencies]
+wasm-bindgen-test = "=0.3.77"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

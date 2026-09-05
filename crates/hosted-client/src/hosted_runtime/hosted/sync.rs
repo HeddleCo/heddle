@@ -197,7 +197,7 @@ pub fn decode_pull_bootstrap(
 
 /// The hex-msgpack `heddle-pull-refs-v1:` checkpoint fold is a removed
 /// side channel. Clone/pull bootstrap refs are heddle-api `RefEntry`
-/// (ListRefs today; `PullReady.refs` once heddle-api 0.28.0 ships).
+/// on `PullReady.refs`, with ListRefs as the empty-refs fallback.
 pub fn reject_legacy_pull_refs_fold(checkpoint: &[u8]) -> Result<(), ProtocolError> {
     let Ok(text) = std::str::from_utf8(checkpoint) else {
         return Ok(());
@@ -228,6 +228,41 @@ pub fn hosted_ref_from_api(entry: &ProtoRefEntry) -> Result<HostedRefEntry, Prot
         entry.revision_address.clone(),
         thread_id,
     ))
+}
+
+/// Prefer `PullReady.refs` when the server advertised them. `None` means
+/// an older peer left the field empty — callers ListRefs. The removed
+/// hex-msgpack fold still fails closed.
+pub fn pull_refs_from_ready(ready: &PullReady) -> Result<Option<PullBootstrapRefs>, ProtocolError> {
+    let checkpoint = ready
+        .transfer
+        .as_ref()
+        .map(|transfer| transfer.checkpoint.as_slice())
+        .unwrap_or_default();
+    reject_legacy_pull_refs_fold(checkpoint)?;
+    if ready.refs.is_empty() {
+        return Ok(None);
+    }
+    if ready.refs.len() > api::MAX_PAGE_SIZE as usize {
+        return Err(ProtocolError::InvalidState(format!(
+            "PullReady refs exceed MAX_PAGE_SIZE ({})",
+            api::MAX_PAGE_SIZE
+        )));
+    }
+    let refs = ready
+        .refs
+        .iter()
+        .map(hosted_ref_from_api)
+        .collect::<Result<Vec<_>, _>>()?;
+    let head_thread = {
+        let trimmed = ready.head_thread.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    };
+    Ok(Some(PullBootstrapRefs { head_thread, refs }))
 }
 
 enum PackedDiscussions {
@@ -649,9 +684,8 @@ impl HostedClient {
         Ok(self.advertised_pull_refs(repo_path).await?.refs)
     }
 
-    /// ListRefs-shaped bootstrap refs: the same heddle-api `RefEntry` as
-    /// `PullReady.refs` will carry once that field ships. Captures
-    /// `ListRefsPageEnd.head_thread` for clone HEAD selection.
+    /// ListRefs fallback when `PullReady.refs` is empty. Same `RefEntry`
+    /// type. Captures `ListRefsPageEnd.head_thread` for clone HEAD.
     async fn advertised_pull_refs(
         &mut self,
         repo_path: &str,
@@ -1793,13 +1827,10 @@ impl HostedClient {
         let owned_repo = match initial_repo {
             Some(_) => None,
             None => {
-                let checkpoint = ready
-                    .transfer
-                    .as_ref()
-                    .map(|transfer| transfer.checkpoint.as_slice())
-                    .unwrap_or_default();
-                reject_legacy_pull_refs_fold(checkpoint)?;
-                let advertised = self.advertised_pull_refs(repo_path).await?;
+                let advertised = match pull_refs_from_ready(&ready)? {
+                    Some(refs) => refs,
+                    None => self.advertised_pull_refs(repo_path).await?,
+                };
                 Some(initializer.ok_or_else(|| {
                     ProtocolError::InvalidState(
                         "pull is missing its repository initializer".to_string(),
@@ -3303,7 +3334,9 @@ fn apply_marker_entry(
 
 #[cfg(test)]
 mod pull_bootstrap_tests {
-    use api::heddle::api::v1alpha1::{RefEntry as ProtoRefEntry, StateId as ProtoStateId};
+    use api::heddle::api::v1alpha1::{
+        PullReady, RefEntry as ProtoRefEntry, StateId as ProtoStateId, TransferCheckpoint,
+    };
     use chrono::Utc;
     use objects::{
         object::{
@@ -3462,6 +3495,77 @@ mod pull_bootstrap_tests {
         );
         reject_legacy_pull_refs_fold(b"heddle-markers-v1\nrelease\tabc\n")
             .expect("other checkpoint lines are not the removed fold");
+    }
+
+    fn pull_ready_with_refs(
+        refs: Vec<ProtoRefEntry>,
+        head_thread: &str,
+        checkpoint: &[u8],
+    ) -> PullReady {
+        PullReady {
+            refs,
+            head_thread: head_thread.to_string(),
+            transfer: Some(TransferCheckpoint {
+                checkpoint: checkpoint.to_vec(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pull_ready_refs_are_preferred() {
+        let main = StateId::from_bytes([7; 32]);
+        let hosted_id = "019f0000-aaaa-7bbb-8ccc-ddddeeeeffff";
+        let ready = pull_ready_with_refs(
+            vec![proto_ref(
+                "main",
+                main,
+                true,
+                "git:0123456789abcdef",
+                hosted_id,
+            )],
+            "main",
+            b"",
+        );
+        let decoded = pull_refs_from_ready(&ready)
+            .expect("PullReady.refs must map")
+            .expect("non-empty refs are preferred over ListRefs");
+        assert_eq!(decoded.head_thread.as_deref(), Some("main"));
+        assert_eq!(decoded.refs.len(), 1);
+        assert_eq!(decoded.refs[0].name, "main");
+        assert_eq!(decoded.refs[0].thread_id.as_deref(), Some(hosted_id));
+    }
+
+    #[test]
+    fn pull_ready_empty_refs_defer_to_list_refs() {
+        let ready = pull_ready_with_refs(Vec::new(), "", b"");
+        assert!(
+            pull_refs_from_ready(&ready)
+                .expect("empty refs are not an error")
+                .is_none(),
+            "empty PullReady.refs must leave room for ListRefs"
+        );
+    }
+
+    #[test]
+    fn pull_ready_rejects_fold_even_when_refs_present() {
+        let main = StateId::from_bytes([7; 32]);
+        let checkpoint = format!(
+            "{PULL_REFS_LINE_PREFIX}deadbeef\t{}\n",
+            StateId::from_bytes([0; 32]).to_string_full(),
+        );
+        let ready = pull_ready_with_refs(
+            vec![proto_ref("main", main, true, "", "id")],
+            "main",
+            checkpoint.as_bytes(),
+        );
+        let error = pull_refs_from_ready(&ready)
+            .expect_err("fold must fail closed even when PullReady.refs is set");
+        assert!(
+            error.to_string().contains("removed pull-refs side channel"),
+            "got {error}"
+        );
     }
 
     #[test]
