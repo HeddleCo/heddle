@@ -4,6 +4,11 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types.
+pub use heddle_cli_contract::cli::commands::wire::thread::{
+    ThreadAbsorbOutput, ThreadResolveOutput,
+};
 use objects::object::ThreadName;
 use repo::{GitImportGuidance, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
 use serde::Serialize;
@@ -34,12 +39,6 @@ use crate::{
         worktree_status_options,
     },
     config::UserConfig,
-};
-
-// The wire payloads live in cli-contract so the schema registry registers
-// the real serialization types.
-pub use heddle_cli_contract::cli::commands::wire::thread::{
-    ThreadAbsorbOutput, ThreadResolveOutput,
 };
 
 impl super::compact::CompactProjection for ThreadResolveOutput {
@@ -210,9 +209,10 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
         match refresh_thread(&repo, &thread_id, cli) {
             Ok(_) => {
                 let manager = super::thread_cmd::thread_manager(&repo);
-                let mut refreshed_thread = manager.load(&thread_id)?.ok_or_else(|| {
-                    anyhow!(thread_not_found_advice(&thread_id, "resolve thread"))
-                })?;
+                let mut refreshed_thread =
+                    manager.load_id_or_name(&thread_id)?.ok_or_else(|| {
+                        anyhow!(thread_not_found_advice(&thread_id, "resolve thread"))
+                    })?;
                 let before_update =
                     capture_thread_update_before(&repo, &manager, &refreshed_thread)?;
                 let resolved_state = repo

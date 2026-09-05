@@ -2,6 +2,12 @@
 use std::{cell::RefCell, collections::HashSet, fs, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+// The sync/land wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::{
+    LandBlockerCheck, LandBlockerCode, LandBlockerDetail, LandBlockerStateContext, LandOutput,
+    MultiLandOutput, MultiLandPeerResult, SiblingRestackFailure, SyncOutput,
+};
 use objects::{
     lock::{RepositoryLockExt, WriteLockGuard},
     object::{State, StateId, ThreadName},
@@ -68,13 +74,6 @@ use crate::{
         output_is_compact, should_output_json, style, worktree_status_options,
     },
     config::UserConfig,
-};
-
-// The sync/land wire payloads live in cli-contract so the schema registry
-// registers the real serialization types.
-pub(crate) use heddle_cli_contract::cli::commands::wire::{
-    LandBlockerCheck, LandBlockerCode, LandBlockerDetail, LandBlockerStateContext, LandOutput,
-    MultiLandOutput, MultiLandPeerResult, SiblingRestackFailure, SyncOutput,
 };
 
 /// Internal accumulator for sibling restack outcomes; never serialized
@@ -1443,7 +1442,7 @@ fn update_integration_policy(
     reason: impl Into<String>,
 ) -> Result<()> {
     let manager = thread_manager(repo);
-    let mut thread = manager.load(thread_id)?.ok_or_else(|| {
+    let mut thread = manager.load_id_or_name(thread_id)?.ok_or_else(|| {
         anyhow!(thread_not_found_advice(
             thread_id,
             "update integration policy"
@@ -1473,7 +1472,7 @@ fn update_integration_policy(
 
 fn clear_manual_resolution_state(repo: &Repository, thread_id: &str) -> Result<()> {
     let manager = thread_manager(repo);
-    let mut thread = manager.load(thread_id)?.ok_or_else(|| {
+    let mut thread = manager.load_id_or_name(thread_id)?.ok_or_else(|| {
         anyhow!(thread_not_found_advice(
             thread_id,
             "clear manual resolution"
@@ -1775,7 +1774,7 @@ fn adopt_manual_resolution(
     transaction_id: Option<&str>,
 ) -> Result<String> {
     let manager = thread_manager(repo);
-    let mut thread = manager.load(thread_id)?.ok_or_else(|| {
+    let mut thread = manager.load_id_or_name(thread_id)?.ok_or_else(|| {
         anyhow!(thread_not_found_advice(
             thread_id,
             "adopt manual resolution"

@@ -190,7 +190,7 @@ fn collect_thread_captures(
         .get_thread(&ThreadName::new(thread))?
         .ok_or_else(|| anyhow!(thread_not_found_advice(thread, "list thread captures")))?;
     let base = ThreadManager::new(repo.heddle_dir())
-        .load(thread)?
+        .load_id_or_name(thread)?
         .map(|thread| thread.base_state);
     let mut out = Vec::new();
     let mut cursor = Some(current);
@@ -831,7 +831,7 @@ pub(crate) fn start_transaction_id(
 /// instant → distinct key → it actually starts.
 pub(crate) fn resolve_start_epoch(repo: &Repository, name: &str) -> Result<DateTime<Utc>> {
     let prior_active = ThreadManager::new(repo.heddle_dir())
-        .load(name)?
+        .load_id_or_name(name)?
         .filter(|thread| thread.state == ThreadState::Active);
     Ok(prior_active.map_or_else(Utc::now, |thread| thread.created_at))
 }
@@ -1197,7 +1197,7 @@ fn finalize_committed_start(
     actor_identity: &StartActorIdentity,
 ) -> Result<ThreadOpOutput> {
     let committed = ThreadManager::new(repo.heddle_dir())
-        .load(&args.name)?
+        .load_id_or_name(&args.name)?
         .ok_or_else(|| {
             anyhow!(
                 "thread '{}' has a committed start transaction but no durable record to \

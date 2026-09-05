@@ -225,7 +225,7 @@ fn thread_matches_execution_root(thread: &Thread, canonical: &Path) -> bool {
 }
 
 pub(crate) fn load_thread(repo: &Repository, thread_id: &str) -> Result<Thread> {
-    match thread_manager(repo).load(thread_id)? {
+    match thread_manager(repo).load_id_or_name(thread_id)? {
         Some(thread) => Ok(thread),
         None if repo
             .refs()
@@ -485,7 +485,7 @@ fn cmd_thread_refresh(cli: &Cli, repo: &Repository, thread_id: &str) -> Result<(
 pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> Result<Thread> {
     let manager = thread_manager(repo);
     let mut thread = manager
-        .load(thread_id)?
+        .load_id_or_name(thread_id)?
         .ok_or_else(|| anyhow!(thread_not_found_advice(thread_id, "refresh thread")))?;
     // Missing-target is a pure gate and must refuse before freshness I/O so
     // the error path matches historical CLI behavior (no side-channel ref
@@ -1206,7 +1206,7 @@ fn cmd_thread_promote(
 ) -> Result<()> {
     let manager = thread_manager(repo);
     let mut thread = manager
-        .load(thread_id)?
+        .load_id_or_name(thread_id)?
         .ok_or_else(|| anyhow!(thread_not_found_advice(thread_id, "promote thread")))?;
     let state_id = repo
         .refs()
@@ -1350,12 +1350,7 @@ pub(crate) fn drop_thread_silent(
     force: bool,
 ) -> Result<DropOutcome> {
     let manager = thread_manager(repo);
-    let loaded = match manager.load(thread_id)? {
-        Some(thread) => Some(thread),
-        // Persisted default `main` has a UUID record id; `heddle thread drop
-        // main` names the thread, not the record.
-        None => manager.find_by_thread(thread_id)?,
-    };
+    let loaded = manager.load_id_or_name(thread_id)?;
     let is_current_lane = repo.current_lane()?.as_deref() == Some(thread_id);
     let disposition = match &loaded {
         None => plan_thread_drop(&ThreadDropOptions {
