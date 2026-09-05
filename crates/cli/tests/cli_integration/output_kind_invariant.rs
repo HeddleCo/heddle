@@ -64,6 +64,9 @@ const SWEPT: &[&str] = &[
     // heddle#1057 — whoami emits `output_kind: "whoami"` (matches its verb path,
     // no override needed).
     "whoami",
+    // heddle#1709 — runtime-profile verbs already emit `output_kind`.
+    "env create",
+    "env list",
     // heddle#272 — output_kind sweep on the named-by-persona verbs.
     "agent presence list",
     "agent presence show",
@@ -1283,6 +1286,24 @@ fn runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
             (t, sv(&["maintenance", "oplog", "recover"]))
         }
         "timeline_log" => (init_fixture(), sv(&["log", "--timeline"])),
+        "env_create" => {
+            // `--from-env` is required; the child inherits this process env.
+            unsafe {
+                std::env::set_var("DATABASE_URL", "postgres://example.invalid/app");
+            }
+            (
+                init_fixture(),
+                sv(&[
+                    "env",
+                    "create",
+                    "--name",
+                    "local",
+                    "--from-env",
+                    "DATABASE_URL",
+                ]),
+            )
+        }
+        "env_list" => (init_fixture(), sv(&["env", "list"])),
         _ => return None,
     };
     Some(RuntimeDocCase::at_root(case.0, case.1))
