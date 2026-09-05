@@ -467,6 +467,8 @@ async fn push_one(
                         }),
                     );
                 }
+                // OpenDiscussion / AppendTurn echo the full discussion (≥2 turns
+                // after append). Adopt uses this last snapshot.
                 (index, server_id, true, Some(hosted))
             }
             Some(index) => {
@@ -492,6 +494,9 @@ async fn push_one(
                             (!turn.turn_id.is_empty()).then(|| turn.turn_id.clone())
                         }),
                     );
+                    // Weft AppendTurn/OpenDiscussion echoes the full discussion
+                    // (≥2 turns after append). Adopt uses this snapshot so a
+                    // last-turn-only echo cannot under-adopt.
                     hosted = Some(echoed);
                 }
                 (index, server_id, !candidates.is_empty(), hosted)
@@ -504,7 +509,7 @@ async fn push_one(
             .repos
             .get_mut(repo_path)
             .and_then(|repo_mirror| repo_mirror.discussions.get_mut(index))
-            && adopt_hosted_canonical_turns(store, head_state, local_id, hosted, entry)?
+            && adopt_from_push_echo(store, head_state, local_id, hosted, entry)?
         {
             changed = true;
         }
@@ -1396,6 +1401,30 @@ fn parse_linked_op_id(local_turn_id: &str) -> Result<CollabOpId> {
         .unwrap_or(local_turn_id);
     op.parse()
         .map_err(|error| anyhow!("mirror turn link has an invalid CollabOpId {op:?}: {error}"))
+}
+
+/// The adopt `push_one` runs after keeping the last OpenDiscussion/AppendTurn
+/// echo. Weft echoes the **full** discussion (≥2 turns after append). Empty
+/// `turns` is a test-server / older-weft no-op. A short echo is refused so a
+/// last-turn-only snapshot cannot retire local turns it cannot replace.
+fn adopt_from_push_echo(
+    store: &CollaborationStore,
+    head_state: StateId,
+    local_id: &str,
+    hosted: &HostedDiscussion,
+    entry: &mut MirrorEntry,
+) -> Result<bool> {
+    if hosted.turns.is_empty() {
+        return Ok(false);
+    }
+    if hosted.turns.len() < entry.links.len() {
+        return Err(anyhow!(
+            "hosted echo for {local_id} has {} turn(s) but this discussion has {} linked op(s); refusing adopt so a partial echo cannot drop local turns",
+            hosted.turns.len(),
+            entry.links.len(),
+        ));
+    }
+    adopt_hosted_canonical_turns(store, head_state, local_id, hosted, entry)
 }
 
 /// Replace local-only published turn ops with the envelopes a clone would
@@ -2859,6 +2888,10 @@ mod tests {
             references: Vec::new(),
         });
         let hosted = hosted_discussion_from_bootstrap(hosted_snapshot.clone());
+        assert!(
+            hosted.turns.len() >= 2,
+            "AppendTurn/OpenDiscussion echo is the full discussion, not the last turn only"
+        );
 
         let (_originator_temp, originator_repo, originator_state) = seed_repo_with_state();
         let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
@@ -2961,6 +2994,225 @@ mod tests {
             originator_ids, clone_ids,
             "after adopt, originator open+append CollabOpIds must equal the hosted clone"
         );
+    }
+
+    // The adopt `push_one` runs after `hosted = Some(echoed)`: a multi-turn
+    // AppendTurn echo is the full discussion, so both local ops adopt.
+    #[tokio::test]
+    async fn push_echo_adopt_uses_full_discussion() {
+        let wire_id = DiscussionRecordId::generate();
+        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
+        let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
+        hosted_snapshot.turns[0].author = Principal::new("preview-user", "");
+        hosted_snapshot.turns[0].posted_at = 1_700_000_042;
+        hosted_snapshot.turns.push(DiscussionTurn {
+            author: Principal::new("preview-user", ""),
+            body: "and a follow-up".to_string(),
+            posted_at: 1_700_000_043,
+            references: Vec::new(),
+        });
+        let echo = hosted_discussion_from_bootstrap(hosted_snapshot.clone());
+        assert!(
+            echo.turns.len() >= 2,
+            "the AppendTurn echo push_one keeps must include every turn, not only the last"
+        );
+
+        let (_originator_temp, originator_repo, originator_state) = seed_repo_with_state();
+        let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
+        let originator_open = write_local_operation(
+            &originator_store,
+            wire_id,
+            Vec::new(),
+            Attribution::human(Principal::new("Local Author", "local@example.com")),
+            1_111_111_111_111,
+            CollaborationOperationBodyV1::Open {
+                title: "local title".to_string(),
+                anchor: CollaborationAnchor::Symbol {
+                    state_id: originator_state,
+                    path: "lib.rs".to_string(),
+                    symbol: "run".to_string(),
+                },
+                visibility: VisibilityTier::Internal,
+                turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
+                thread_ref: None,
+            },
+            test_key("originator-local-open"),
+        )
+        .unwrap();
+        let originator_append = write_local_operation(
+            &originator_store,
+            wire_id,
+            vec![originator_open],
+            Attribution::human(Principal::new("Local Author", "local@example.com")),
+            1_111_111_111_222,
+            CollaborationOperationBodyV1::AppendTurn {
+                turn: DiscussionTurnV1::new("and a follow-up").unwrap(),
+            },
+            test_key("originator-local-append"),
+        )
+        .unwrap();
+
+        let (_clone_temp, clone_repo, clone_head) = seed_repo_with_state();
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        pull_discussions(
+            &clone_repo,
+            &mut client,
+            "acme/widgets",
+            Some(&[hosted_snapshot]),
+            Some(clone_head),
+        )
+        .await
+        .unwrap();
+        client.close().await;
+        server.await.unwrap();
+        let clone_ids: Vec<String> = {
+            let store = CollaborationStore::open(clone_repo.heddle_dir()).unwrap();
+            let mut ids: Vec<String> = store
+                .operation_ids()
+                .unwrap()
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect();
+            ids.sort();
+            ids
+        };
+
+        let mut entry = MirrorEntry {
+            local_id: wire_id.to_string(),
+            server_id: wire_id.to_string(),
+            links: vec![
+                TurnLink {
+                    local_turn_id: turn_identity(&originator_open, 0),
+                    server_ordinal: 0,
+                    server_turn_id: None,
+                },
+                TurnLink {
+                    local_turn_id: turn_identity(&originator_append, 0),
+                    server_ordinal: 1,
+                    server_turn_id: None,
+                },
+            ],
+            resolved_into_annotation_operation_id: None,
+            pulled_resolution_key: None,
+        };
+        assert!(
+            echo.turns.len() >= entry.links.len(),
+            "full echo must cover every linked local turn"
+        );
+        assert!(
+            adopt_from_push_echo(
+                &originator_store,
+                originator_state,
+                &wire_id.to_string(),
+                &echo,
+                &mut entry,
+            )
+            .unwrap(),
+            "push_one's adopt must consume the full multi-turn echo"
+        );
+
+        let mut originator_ids: Vec<String> = originator_store
+            .operation_ids()
+            .unwrap()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        originator_ids.sort();
+        assert_eq!(
+            originator_ids, clone_ids,
+            "push_one adopt from a full echo must match the hosted clone"
+        );
+        assert_eq!(
+            originator_store.operation_ids().unwrap().len(),
+            2,
+            "full-echo adopt must keep both published turns"
+        );
+    }
+
+    // A last-turn-only echo must not retire the unpublished prefix.
+    #[test]
+    fn partial_push_echo_does_not_under_adopt() {
+        let wire_id = DiscussionRecordId::generate();
+        let (_originator_temp, originator_repo, originator_state) = seed_repo_with_state();
+        let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
+        let originator_open = write_local_operation(
+            &originator_store,
+            wire_id,
+            Vec::new(),
+            Attribution::human(Principal::new("Local Author", "local@example.com")),
+            1_111_111_111_111,
+            CollaborationOperationBodyV1::Open {
+                title: "local title".to_string(),
+                anchor: CollaborationAnchor::Symbol {
+                    state_id: originator_state,
+                    path: "lib.rs".to_string(),
+                    symbol: "run".to_string(),
+                },
+                visibility: VisibilityTier::Internal,
+                turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
+                thread_ref: None,
+            },
+            test_key("originator-local-open"),
+        )
+        .unwrap();
+        let originator_append = write_local_operation(
+            &originator_store,
+            wire_id,
+            vec![originator_open],
+            Attribution::human(Principal::new("Local Author", "local@example.com")),
+            1_111_111_111_222,
+            CollaborationOperationBodyV1::AppendTurn {
+                turn: DiscussionTurnV1::new("and a follow-up").unwrap(),
+            },
+            test_key("originator-local-append"),
+        )
+        .unwrap();
+
+        let mut partial = hosted_discussion_from_bootstrap(bootstrap_discussion(
+            &wire_id.to_string(),
+            originator_state,
+        ));
+        partial.turns.truncate(1);
+        assert_eq!(partial.turns.len(), 1);
+
+        let mut entry = MirrorEntry {
+            local_id: wire_id.to_string(),
+            server_id: wire_id.to_string(),
+            links: vec![
+                TurnLink {
+                    local_turn_id: turn_identity(&originator_open, 0),
+                    server_ordinal: 0,
+                    server_turn_id: None,
+                },
+                TurnLink {
+                    local_turn_id: turn_identity(&originator_append, 0),
+                    server_ordinal: 1,
+                    server_turn_id: None,
+                },
+            ],
+            resolved_into_annotation_operation_id: None,
+            pulled_resolution_key: None,
+        };
+        let before = originator_store.operation_ids().unwrap();
+        let error = adopt_from_push_echo(
+            &originator_store,
+            originator_state,
+            &wire_id.to_string(),
+            &partial,
+            &mut entry,
+        )
+        .expect_err("a one-turn echo must not adopt over two linked local turns");
+        assert!(
+            error.to_string().contains("partial echo"),
+            "refuse must name the partial-echo hazard, got: {error}"
+        );
+        let after = originator_store.operation_ids().unwrap();
+        assert_eq!(
+            after, before,
+            "partial echo must leave both local ops in place"
+        );
+        assert!(after.contains(&originator_open));
+        assert!(after.contains(&originator_append));
     }
 
     // The remint site on the hosted-clone/pull path: originator already

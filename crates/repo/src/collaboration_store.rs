@@ -186,6 +186,10 @@ impl CollaborationStore {
     /// turn ops with the hosted-canonical envelopes a clone would materialize
     /// (heddle#1695). New ids are new envelopes; this does not rewrite bytes
     /// under an existing `CollabOpId`.
+    ///
+    /// Retire-then-write crash recovery is the existing pending-commit rebuild
+    /// (`stage_pending_commit_unlocked` → `pending-commit.msgpack` →
+    /// `rebuild_index_unlocked` on next `open`).
     pub fn replace_operations(
         &self,
         retire: &[CollabOpId],
@@ -262,7 +266,13 @@ impl CollaborationStore {
             let existed = path.exists();
             self.stage_pending_commit_unlocked(id)?;
             if !existed {
-                fs::create_dir_all(path.parent().expect("operation path has shard"))?;
+                let parent = path.parent().ok_or_else(|| {
+                    HeddleError::InvalidObject(format!(
+                        "collaboration operation path has no shard directory: {}",
+                        path.display()
+                    ))
+                })?;
+                fs::create_dir_all(parent)?;
                 write_file_atomic(&path, &bytes)?;
             }
             index.operations.insert(id);
