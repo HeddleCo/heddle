@@ -93,9 +93,8 @@ type PullRefsPayload = (
 );
 type DecodedPullRefsPayload = (String, Option<Vec<u8>>, Vec<FoldedRefRecord>);
 
-/// weft#2055 folds `(name, state_id, is_thread, revision_address, thread_id)`.
-/// heddle#1702 still advertised the legacy 4-tuple. Accept both; empty
-/// `thread_id` stays absent so live ListRefs can still supply it.
+/// One decode path, length-discriminated: legacy 4-tuple or weft#2055 5-tuple.
+/// Empty `thread_id` stays absent so live ListRefs can still supply it.
 struct FoldedRefRecord {
     name: String,
     state_id: Vec<u8>,
@@ -138,13 +137,28 @@ impl<'de> Visitor<'de> for FoldedRefRecordVisitor {
         let revision_address = seq
             .next_element()?
             .ok_or_else(|| de::Error::invalid_length(3, &self))?;
-        let thread_id = match seq.next_element::<Option<String>>()? {
-            None => None,
-            Some(value) => value.filter(|id| !id.is_empty()),
+        // Remaining length, not a hard 5-tuple type: 0 => legacy fold
+        // (`thread_id` absent), 1 => weft#2055 fifth field. A 5-only
+        // decode unblocks current weft and breaks 4-tuple servers.
+        let thread_id = match seq.size_hint() {
+            Some(0) => None,
+            Some(1) => {
+                let id: Option<String> = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(4, &self))?;
+                id.filter(|id| !id.is_empty())
+            }
+            Some(extra) => return Err(de::Error::invalid_length(4 + extra, &self)),
+            None => match seq.next_element::<Option<String>>()? {
+                None => None,
+                Some(id) => {
+                    if seq.next_element::<IgnoredAny>()?.is_some() {
+                        return Err(de::Error::invalid_length(6, &self));
+                    }
+                    id.filter(|id| !id.is_empty())
+                }
+            },
         };
-        if seq.next_element::<IgnoredAny>()?.is_some() {
-            return Err(de::Error::invalid_length(6, &self));
-        }
         Ok(FoldedRefRecord {
             name,
             state_id,
@@ -3577,6 +3591,50 @@ mod pull_bootstrap_tests {
         assert!(
             decoded.refs[3].thread_id.is_none(),
             "synthetic frontiers must not adopt a folded thread_id"
+        );
+    }
+
+    #[derive(serde::Serialize)]
+    #[serde(untagged)]
+    enum FoldedRefWire {
+        Legacy(String, Vec<u8>, bool, String),
+        Current(String, Vec<u8>, bool, String, String),
+    }
+
+    #[test]
+    fn folded_refs_decode_mixed_four_and_five_tuples_in_one_fold() {
+        let main = StateId::from_bytes([7; 32]);
+        let feature = StateId::from_bytes([9; 32]);
+        let hosted_id = "019f0000-aaaa-7bbb-8ccc-ddddeeeeffff";
+        let payload = (
+            "main".to_string(),
+            Some(main.as_bytes().to_vec()),
+            vec![
+                FoldedRefWire::Current(
+                    "main".to_string(),
+                    main.as_bytes().to_vec(),
+                    true,
+                    RevisionAddress::heddle(main).to_string(),
+                    hosted_id.to_string(),
+                ),
+                FoldedRefWire::Legacy(
+                    "feature".to_string(),
+                    feature.as_bytes().to_vec(),
+                    true,
+                    RevisionAddress::heddle(feature).to_string(),
+                ),
+            ],
+        );
+        let decoded = decode_pull_refs(encode_pull_refs_checkpoint(&payload).as_bytes())
+            .expect("one fold may mix 4-tuple and 5-tuple records")
+            .expect("new server advertises refs");
+        assert_eq!(decoded.refs.len(), 2);
+        assert_eq!(decoded.refs[0].name, "main");
+        assert_eq!(decoded.refs[0].thread_id.as_deref(), Some(hosted_id));
+        assert_eq!(decoded.refs[1].name, "feature");
+        assert!(
+            decoded.refs[1].thread_id.is_none(),
+            "legacy 4-tuple in a mixed fold must stay id-less for ListRefs fallback"
         );
     }
 
