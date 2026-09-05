@@ -36,7 +36,7 @@ use objects::{
 use oplog::{OpLogRecorder, OpRecord, VisibilitySidecarSnapshots};
 
 use crate::{
-    namespace_policy::{VisibilityResolutionContext, resolve_default_visibility},
+    namespace_policy::{resolve_default_visibility, VisibilityResolutionContext},
     repository::Repository,
 };
 
@@ -257,6 +257,9 @@ impl Repository {
             fs::create_dir_all(parent).with_context(|| format!("create '{}'", parent.display()))?;
         }
         write_file_atomic(&path, &bytes).with_context(|| format!("write '{}'", path.display()))?;
+        if let Some(latest) = existing.latest()? {
+            self.record_embargo_membership_from_tier(&latest.tier)?;
+        }
         Ok(PutVisibilityOutcome {
             id,
             prior_sidecar,
@@ -511,6 +514,38 @@ impl Repository {
         Ok(())
     }
 
+    /// Copy a state-visibility sidecar from a local source the operator can
+    /// already read. Decode and validate the blob, then persist the original
+    /// bytes — local clone must not require the destination to pre-seed
+    /// `[metadata] trusted_keys` the way hosted `accept_wire_state_visibility`
+    /// does. A `Private` head that lost its sidecar on clone cannot be
+    /// resolved (`state not found`).
+    pub fn accept_local_state_visibility(&self, state: StateId, bytes: &[u8]) -> Result<()> {
+        let incoming = StateVisibilityBlob::decode(bytes).with_context(|| {
+            format!(
+                "decode local state visibility for state {}",
+                state.to_string_full()
+            )
+        })?;
+        for record in &incoming.records {
+            if record.state != state {
+                anyhow::bail!(
+                    "local state visibility claims state {} but was copied under {}",
+                    record.state.to_string_full(),
+                    state.to_string_full()
+                );
+            }
+            record
+                .validate()
+                .with_context(|| "validate local state-visibility record")?;
+        }
+        self.restore_state_visibility_sidecar(&state, Some(bytes.to_vec()))?;
+        if let Some(latest) = incoming.latest()? {
+            self.record_embargo_membership_from_tier(&latest.tier)?;
+        }
+        Ok(())
+    }
+
     /// Load all visibility records targeting `state`. Returns an empty
     /// [`StateVisibilityBlob`] (not an error) when none exist — callers can
     /// treat the result uniformly.
@@ -675,9 +710,9 @@ impl Repository {
         let _own_lock = if lock_held {
             None
         } else {
-            Some(self.locker().write().with_context(
-                || "acquire repo write lock for capture-time default visibility binding",
-            )?)
+            Some(self.locker().write().with_context(|| {
+                "acquire repo write lock for capture-time default visibility binding"
+            })?)
         };
         let mut record = StateVisibility {
             state: *state,
@@ -798,6 +833,52 @@ impl Repository {
     /// `<heddle_dir>/visibility/` — root of the per-state visibility store.
     pub(crate) fn state_visibility_dir(&self) -> PathBuf {
         self.heddle_dir().join("visibility")
+    }
+
+    /// Local embargo membership for this checkout — the `audience_label`
+    /// `audience_tier_for_grant` maps to Restricted.
+    ///
+    /// Stamped when this principal declares or accepts a `Private` /
+    /// `Restricted` sidecar so they carry that one label, not every Private
+    /// scope. Unlabeled Owner stays Internal.
+    pub fn embargo_membership_label(&self) -> Result<Option<String>> {
+        let path = self.embargo_membership_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("read embargo membership '{}'", path.display()))?;
+        let label = raw.trim();
+        if label.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(label.to_string()))
+        }
+    }
+
+    fn embargo_membership_path(&self) -> PathBuf {
+        self.state_visibility_dir().join("audience_label")
+    }
+
+    fn record_embargo_membership_from_tier(&self, tier: &VisibilityTier) -> Result<()> {
+        let label = match tier {
+            VisibilityTier::Private { scope_label } | VisibilityTier::Restricted { scope_label } => {
+                scope_label.trim()
+            }
+            VisibilityTier::Public
+            | VisibilityTier::Internal
+            | VisibilityTier::TeamScoped { .. } => return Ok(()),
+        };
+        if label.is_empty() {
+            return Ok(());
+        }
+        let path = self.embargo_membership_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create '{}'", parent.display()))?;
+        }
+        write_file_atomic(&path, label.as_bytes())
+            .with_context(|| format!("write embargo membership '{}'", path.display()))
     }
 
     /// `<heddle_dir>/visibility/<change-id>.bin` — the visibility sidecar
@@ -1011,6 +1092,122 @@ mod tests {
     }
 
     #[test]
+    fn wire_visibility_accepts_pullready_pinned_owner_key() {
+        // Clone destinations have an empty `[metadata] trusted_keys`. The
+        // owner key TOFU-pinned from PullReady must still admit that owner's
+        // Private sidecar, or clone cannot resolve the advertised head.
+        let owner = Ed25519Signer::generate().expect("owner keygen");
+        let stranger = Ed25519Signer::generate().expect("stranger keygen");
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(dir.path()).unwrap();
+        let genesis = crate::sign_spool_owner_genesis(&owner, *uuid::Uuid::now_v7().as_bytes())
+            .expect("sign genesis");
+        repo.verify_and_pin_owner_genesis(2, Some(&genesis), &["alice".into(), "private".into()])
+            .expect("pin owner genesis");
+
+        let state = StateId::from_bytes([11u8; 32]);
+        let mut record = sample_record(
+            state,
+            VisibilityTier::Private {
+                scope_label: "ax-only".into(),
+            },
+        );
+        sign_visibility(&mut record, &owner);
+        let signed = StateVisibilityBlob::new(vec![record]).encode().unwrap();
+        repo.accept_wire_state_visibility(state, &signed)
+            .expect("pinned owner must be able to land their own Private sidecar");
+        assert!(
+            repo.has_visibility_for_state(&state)
+                .expect("owner visibility persisted")
+        );
+        assert_eq!(
+            repo.embargo_membership_label()
+                .expect("membership")
+                .as_deref(),
+            Some("ax-only"),
+            "accepting Private{ax-only} must stamp Restricted(ax-only), not all-Private Owner"
+        );
+
+        let mut other = sample_record(
+            StateId::from_bytes([12u8; 32]),
+            VisibilityTier::Private {
+                scope_label: "ax-only".into(),
+            },
+        );
+        sign_visibility(&mut other, &stranger);
+        let forged = StateVisibilityBlob::new(vec![other.clone()])
+            .encode()
+            .unwrap();
+        repo.accept_wire_state_visibility(other.state, &forged)
+            .expect_err("a key that is not the pinned owner must still be rejected");
+    }
+
+    #[test]
+    fn local_visibility_copy_keeps_private_sidecar_without_trusted_keys() {
+        let source_dir = TempDir::new().unwrap();
+        let source = Repository::init_default(source_dir.path()).unwrap();
+        let state = StateId::from_bytes([13u8; 32]);
+        source
+            .put_state_visibility(sample_record(
+                state,
+                VisibilityTier::Private {
+                    scope_label: "ax-only".into(),
+                },
+            ))
+            .expect("put private visibility");
+        let bytes = source
+            .get_state_visibility_bytes_for_state(&state)
+            .expect("read source sidecar")
+            .expect("sidecar present");
+
+        let dest_dir = TempDir::new().unwrap();
+        let dest = Repository::init_default(dest_dir.path()).unwrap();
+        dest.accept_local_state_visibility(state, &bytes)
+            .expect("local clone must copy the Private sidecar");
+        assert_eq!(
+            dest.effective_visibility_tier(&state).expect("tier"),
+            VisibilityTier::Private {
+                scope_label: "ax-only".into(),
+            }
+        );
+        assert_eq!(
+            source
+                .embargo_membership_label()
+                .expect("source membership")
+                .as_deref(),
+            Some("ax-only")
+        );
+        assert_eq!(
+            dest.embargo_membership_label()
+                .expect("dest membership")
+                .as_deref(),
+            Some("ax-only")
+        );
+        let private = VisibilityTier::Private {
+            scope_label: "ax-only".into(),
+        };
+        let other = VisibilityTier::Private {
+            scope_label: "other".into(),
+        };
+        let label = dest.embargo_membership_label().expect("label");
+        assert!(crate::grant_can_see_tier(
+            Some(crate::GrantRole::Owner),
+            label.as_deref(),
+            &private
+        ));
+        assert!(!crate::grant_can_see_tier(
+            Some(crate::GrantRole::Owner),
+            None,
+            &private
+        ));
+        assert!(!crate::grant_can_see_tier(
+            Some(crate::GrantRole::Owner),
+            label.as_deref(),
+            &other
+        ));
+    }
+
+    #[test]
     fn put_then_read_back_and_has_visibility_true() {
         let (_dir, repo) = fresh_repo();
         let state = StateId::from_bytes([5u8; 32]);
@@ -1121,12 +1318,11 @@ mod tests {
             "a state with no record must be public-by-absence (has_visibility_for_state == false)"
         );
         // And its sidecar load is an empty blob, never an error.
-        assert!(
-            repo.get_state_visibility_for_state(&no_record)
-                .expect("read record-free state")
-                .records
-                .is_empty()
-        );
+        assert!(repo
+            .get_state_visibility_for_state(&no_record)
+            .expect("read record-free state")
+            .records
+            .is_empty());
     }
 
     #[test]

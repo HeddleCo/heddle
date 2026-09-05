@@ -4,6 +4,10 @@
 //! This is the heddle-side typed contract Weft gates `ListRefs`/`Pull` against.
 //! Unknown or missing roles fail closed to [`AudienceTier::Public`] so an
 //! unauthorized puller can never be treated as the internal trusted set.
+//! Owners stay label-scoped: unlabeled Owner is Internal; Private is visible
+//! only with a matching `audience_label` (`Restricted`).
+
+use objects::object::{VisibilityTier, visible};
 
 use super::visibility::AudienceTier;
 
@@ -71,6 +75,20 @@ pub fn audience_tier_for_grant(
     }
 }
 
+/// Whether this grant may be served a record at `tier`.
+///
+/// Owners stay label-scoped: unlabeled Owner is Internal and cannot see
+/// `Private`. A matching `audience_label` is `Restricted(L)` and is the
+/// only Owner admit for that embargo. Missing/unspecified grants stay
+/// Public (Bob without a grant remains PermissionDenied).
+pub fn grant_can_see_tier(
+    role: Option<GrantRole>,
+    audience_label: Option<&str>,
+    tier: &VisibilityTier,
+) -> bool {
+    visible(tier, &audience_tier_for_grant(role, audience_label))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,6 +135,49 @@ mod tests {
             audience_tier_for_grant(Some(GrantRole::Owner), Some("  ")),
             AudienceTier::Internal
         );
+    }
+
+    #[test]
+    fn owner_sees_private_only_with_matching_embargo_label() {
+        let private = VisibilityTier::Private {
+            scope_label: "ax-only".into(),
+        };
+        let other = VisibilityTier::Private {
+            scope_label: "other".into(),
+        };
+        assert_eq!(
+            audience_tier_for_grant(Some(GrantRole::Owner), None),
+            AudienceTier::Internal
+        );
+        assert!(
+            !grant_can_see_tier(Some(GrantRole::Owner), None, &private),
+            "unlabeled Owner must not see every Private label"
+        );
+        assert!(grant_can_see_tier(
+            Some(GrantRole::Owner),
+            Some("ax-only"),
+            &private
+        ));
+        assert!(!grant_can_see_tier(
+            Some(GrantRole::Owner),
+            Some("other"),
+            &private
+        ));
+        assert!(!grant_can_see_tier(
+            Some(GrantRole::Owner),
+            Some("ax-only"),
+            &other
+        ));
+        assert!(!grant_can_see_tier(Some(GrantRole::Admin), None, &private));
+        assert!(
+            !grant_can_see_tier(None, None, &private),
+            "a missing grant must stay Public and must not see Private"
+        );
+        assert!(!grant_can_see_tier(
+            Some(GrantRole::Unspecified),
+            None,
+            &private
+        ));
     }
 
     #[test]
