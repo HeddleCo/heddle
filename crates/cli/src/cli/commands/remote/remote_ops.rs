@@ -1174,7 +1174,32 @@ async fn pull_network_connected(
                             .await?,
                     )
                 } else {
-                    None
+                    match client
+                        .try_get_thread_metadata(
+                            repo,
+                            repo_path,
+                            options.remote_thread,
+                            final_state_id,
+                        )
+                        .await?
+                    {
+                        Some(metadata) => Some(metadata),
+                        None => {
+                            if let Ok(stable_id) = client
+                                .require_thread_id(repo_path, options.remote_thread)
+                                .await
+                            {
+                                ThreadManager::new(repo.heddle_dir())
+                                    .adopt_stable_identity_for_thread(
+                                        repo,
+                                        track_to_update,
+                                        &stable_id,
+                                        final_state_id,
+                                    )?;
+                            }
+                            None
+                        }
+                    }
                 };
                 let track_tn = ThreadName::new(track_to_update);
                 let pre_target = repo.refs().get_thread(&track_tn)?;
@@ -1317,17 +1342,14 @@ fn save_pulled_thread_metadata(
     pulled_state: &StateId,
     metadata: Option<SyncedThreadMetadata>,
 ) -> Result<()> {
-    let Some(mut metadata) = metadata else {
+    let Some(metadata) = metadata else {
         return Ok(());
     };
-    metadata.id = local_thread.to_string();
-    metadata.thread = local_thread.to_string();
-    metadata.current_state = Some(pulled_state.short());
-    metadata.shared_target_dir = None;
-    metadata
-        .integration_policy_result
-        .clear_untrusted_landing_fields();
-    ThreadManager::new(repo.heddle_dir()).save_record(&metadata)?;
+    ThreadManager::new(repo.heddle_dir()).save_pulled_metadata(
+        local_thread,
+        pulled_state,
+        metadata,
+    )?;
     Ok(())
 }
 
