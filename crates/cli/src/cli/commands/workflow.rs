@@ -297,6 +297,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     recover_incomplete_land_if_present(&repo)?;
     let user_config = UserConfig::load_default().unwrap_or_default();
     let thread = resolve_land_subject_thread(cli, &repo, args.thread.as_deref())?;
+    if thread.target_thread.is_none() {
+        return Err(anyhow!(RecoveryAdvice::missing_target_thread(
+            &thread.thread,
+            "land",
+        )));
+    }
     let thread_repo = if thread.execution_path.as_os_str().is_empty() {
         None
     } else if thread.execution_path.exists() {
@@ -799,7 +805,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     let merge_output = if let Some(transaction_id) = integration_transaction_id.as_deref() {
         merge_thread_into_current_transactional(
             &repo,
-            &merge_thread.id,
+            &merge_thread.thread,
             None,
             false,
             false,
@@ -812,7 +818,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     } else {
         merge_thread_into_current(
             &repo,
-            &merge_thread.id,
+            &merge_thread.thread,
             None,
             false,
             false,
@@ -1207,13 +1213,13 @@ fn collapse_thread_for_land(
         &sources,
         intent,
         None,
-        CollapsePublishedRef::Thread(ThreadName::new(&thread.id)),
+        CollapsePublishedRef::Thread(ThreadName::new(&thread.thread)),
     )?;
     Ok(Some(result.state_id))
 }
 
 fn thread_source_states(repo: &Repository, thread: &Thread) -> Result<Vec<State>> {
-    let Some(tip) = repo.refs().get_thread(&ThreadName::new(&thread.id))? else {
+    let Some(tip) = repo.refs().get_thread(&ThreadName::new(&thread.thread))? else {
         return Ok(Vec::new());
     };
     let base = repo.resolve_state(&thread.base_state)?;
@@ -1327,10 +1333,9 @@ fn resolve_thread(
 
 /// Resolve the thread `sync` refreshes onto its target.
 ///
-/// Omit `--thread` to use the current checkout, including a synthesized
-/// default thread such as `main` (ref from `seed_default_thread`, no
-/// ThreadManager record). An explicit `--thread` always goes through
-/// `load_thread` so unmanaged imported refs keep their typed advice.
+/// Omit `--thread` to use the current checkout. An explicit `--thread`
+/// always goes through `load_thread` so unmanaged imported refs keep
+/// their typed advice.
 fn resolve_sync_thread(repo: &Repository, thread: Option<&str>) -> Result<Thread> {
     match thread {
         Some(name) => load_thread(repo, name),
@@ -2383,7 +2388,7 @@ fn write_prepared_land_marker(
             .map(|state| state.state_id.to_string_full()),
         pre_source_state: repo
             .refs()
-            .get_thread(&ThreadName::new(&thread.id))?
+            .get_thread(&ThreadName::new(&thread.thread))?
             .map(|state| state.to_string_full()),
         pre_thread: Some(thread.clone()),
     };

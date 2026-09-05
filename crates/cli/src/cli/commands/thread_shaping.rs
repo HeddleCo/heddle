@@ -342,8 +342,16 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                 thread.id
             )),
         )?;
-        let preview =
-            merge_thread_into_current(&repo, &thread.id, None, false, true, false, false, false)?;
+        let preview = merge_thread_into_current(
+            &repo,
+            &thread.thread,
+            None,
+            false,
+            true,
+            false,
+            false,
+            false,
+        )?;
         if preview.conflict_count > 0 {
             blockers.push(format!(
                 "Thread '{}' still has merge conflicts: {}",

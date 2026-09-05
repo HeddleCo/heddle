@@ -11,7 +11,12 @@
 //!   is already-landed, not another "automatic integration merge" at exit 0
 //! - Next verbs stay native (`heddle thread list`). No `repair git`.
 
-use std::{fs, path::Path, path::PathBuf, process::Output, str};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Output,
+    str,
+};
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -203,9 +208,8 @@ fn run_land_thread(main: &Path, checkout: &Path) -> Output {
     .expect("land --thread feature/search should spawn")
 }
 
-/// Same comment: exit 74 / `repair git --ref main` is the wrong recovery
-/// when authority is native. Explicit `--thread main` must stay on
-/// `heddle thread list`.
+/// Default `main` is a persisted managed thread with no integration target.
+/// Explicit `--thread main` must fail closed without recommending `repair git`.
 #[test]
 fn land_unmanaged_main_on_native_recommends_thread_list() {
     let (_main, checkout) = setup_feature_search();
@@ -218,7 +222,7 @@ fn land_unmanaged_main_on_native_recommends_thread_list() {
     assert_eq!(
         output.status.code(),
         Some(74),
-        "unmanaged main still fails closed (field-study exit 74), but recovery must change:\n{}",
+        "default main still fails closed (field-study exit 74), but recovery must change:\n{}",
         combined(&output)
     );
     let stderr = stderr(&output);
@@ -230,7 +234,17 @@ fn land_unmanaged_main_on_native_recommends_thread_list() {
             .unwrap_or(stderr.trim()),
     )
     .unwrap_or_else(|err| panic!("JSON envelope: {err}\n{stderr}"));
-    assert_eq!(envelope["kind"], "imported_git_ref_not_managed_thread");
-    assert_eq!(envelope["primary_command"], "heddle thread list");
+    assert_eq!(envelope["kind"], "missing_target_thread");
+    assert_eq!(envelope["primary_command"], "heddle thread show main");
+    let recovery = envelope["recovery_commands"]
+        .as_array()
+        .expect("missing_target recovery_commands");
+    assert!(
+        recovery
+            .iter()
+            .any(|command| command.as_str() == Some("heddle thread list")),
+        "recovery must still include thread list:\n{}",
+        combined(&output)
+    );
     assert_no_repair_git(&output, "land --thread main");
 }
