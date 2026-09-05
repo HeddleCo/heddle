@@ -462,6 +462,8 @@ async fn bootstrap_marks_the_cursor_then_live_events_append() {
     server.await.unwrap();
 }
 
+// Clone/bootstrap materialization then doorbell replay. Originator
+// adopt-then-doorbell is `discussion_sync::tests::doorbell_after_adopt_does_not_duplicate_the_first_turn`.
 #[tokio::test]
 async fn replaying_opened_after_bootstrap_does_not_duplicate_the_first_turn() {
     let (_temp, repo) = seed_repo();

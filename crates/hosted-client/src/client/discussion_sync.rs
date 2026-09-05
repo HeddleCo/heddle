@@ -48,7 +48,11 @@
 //! — and again on pull, when a linked local turn is not hosted-canonical —
 //! the originator **adopts** the same envelope a clone would materialize.
 //! The pre-push local-only op is retired (new bytes, new id; we do not
-//! rewrite bytes under the old id).
+//! rewrite bytes under the old id). Adopt remints only originator-local
+//! keys (v4 / `--op-id`). A turn already written with `turn_op_key` is
+//! left alone: a later GetDiscussion doorbell often lacks
+//! `opened_against_state` and must not rebuild a different Open than
+//! bootstrap/clone already stored (#1677/#1697).
 //! Resolve-into-annotation operations use the same durable mirror: their
 //! request identity is derived from `(hosted discussion id, server resolution
 //! key)` (see `resolve_op_key`) and is recorded only after `ResolveDiscussion`
@@ -1403,6 +1407,46 @@ fn parse_linked_op_id(local_turn_id: &str) -> Result<CollabOpId> {
         .map_err(|error| anyhow!("mirror turn link has an invalid CollabOpId {op:?}: {error}"))
 }
 
+/// True when every linked published turn already carries `turn_op_key` for
+/// its server ordinal — clone/bootstrap/prior-adopt materialization, not an
+/// originator-local v4 / `--op-id` key.
+fn linked_turns_already_use_hosted_keys(
+    store: &CollaborationStore,
+    hosted: &HostedDiscussion,
+    entry: &MirrorEntry,
+) -> Result<bool> {
+    if entry.links.is_empty() {
+        return Ok(false);
+    }
+    for link in &entry.links {
+        let op_id = parse_linked_op_id(&link.local_turn_id)?;
+        let Some(decoded) = store
+            .read_operation(&op_id)
+            .context("read linked op before hosted CollabOpId adoption")?
+        else {
+            return Ok(false);
+        };
+        let hosted_key = turn_op_key(&hosted.id, link.server_ordinal)?;
+        if decoded.operation.idempotency_key != hosted_key {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn fill_missing_server_turn_ids(entry: &mut MirrorEntry, hosted: &HostedDiscussion) {
+    for link in &mut entry.links {
+        if link.server_turn_id.is_some() {
+            continue;
+        }
+        link.server_turn_id = hosted.turns.iter().enumerate().find_map(|(index, turn)| {
+            (server_ordinal(turn, index) == link.server_ordinal)
+                .then(|| server_turn_id(turn))
+                .flatten()
+        });
+    }
+}
+
 /// The adopt `push_one` runs after keeping the last OpenDiscussion/AppendTurn
 /// echo. Weft echoes the **full** discussion (≥2 turns after append). Empty
 /// `turns` is a test-server / older-weft no-op. A short echo is refused so a
@@ -1428,8 +1472,11 @@ fn adopt_from_push_echo(
 }
 
 /// Replace local-only published turn ops with the envelopes a clone would
-/// materialize from `hosted`. No-op when the local linked ops already are
-/// those envelopes, or when unpublished local turns still parent the chain.
+/// materialize from `hosted`. No-op when the local linked ops already use
+/// hosted `turn_op_key`s (clone/bootstrap/prior adopt), or when unpublished
+/// local turns still parent the chain. A later doorbell GetDiscussion is
+/// often a thinner snapshot than the first hosted materialization; reminting
+/// from it would disagree with the live replay path.
 fn adopt_hosted_canonical_turns(
     store: &CollaborationStore,
     head_state: StateId,
@@ -1465,6 +1512,13 @@ fn adopt_hosted_canonical_turns(
         return Ok(false);
     }
 
+    if linked_turns_already_use_hosted_keys(store, hosted, entry)? {
+        // Already the hosted key space. Keep those envelopes — do not rebuild
+        // from this snapshot (GetDiscussion may omit opened_against_state).
+        fill_missing_server_turn_ids(entry, hosted);
+        return Ok(false);
+    }
+
     let mut parents = Vec::new();
     let mut canonical = Vec::with_capacity(hosted.turns.len());
     let mut new_links = Vec::with_capacity(hosted.turns.len());
@@ -1495,9 +1549,10 @@ fn adopt_hosted_canonical_turns(
     let already_canonical = linked_ops.len() == canonical.len()
         && canonical.iter().all(|(id, _)| linked_ops.contains(id));
     if already_canonical {
+        // Link metadata only (e.g. filling server_turn_id). The op-log is
+        // unchanged — doorbell replay must stay Unchanged.
         if entry.links != new_links {
             entry.links = new_links;
-            return Ok(true);
         }
         return Ok(false);
     }
@@ -1609,6 +1664,10 @@ fn parse_visibility_token(token: &str) -> VisibilityTier {
 
 #[cfg(test)]
 mod tests {
+    use api::heddle::api::v1alpha1::{
+        Discussion as ProtoDiscussion, DiscussionTurn as ProtoTurn, PathSymbolRef, RepoEvent,
+        StateId as ProtoStateId,
+    };
     use objects::object::{
         AnnotationKind, Attribution, CollaborationAnchor, CollaborationIdempotencyKey,
         CollaborationOperationBodyV1, CollaborationOperationEnvelope, CollaborationResolution,
@@ -1617,6 +1676,9 @@ mod tests {
         Principal, State, StateAttachmentId, StateId, SymbolAnchor, Tree, VisibilityTier,
     };
     use tempfile::TempDir;
+
+    use crate::client::discussion_live::{DiscussionEventOutcome, consume_discussion_event};
+    use crate::hosted_runtime::hosted::test_server::CollaborationFixture;
 
     use super::*;
 
@@ -3328,5 +3390,167 @@ mod tests {
             vec![originator_open.to_string()],
             "pull must retire the local-only open op, not keep it"
         );
+    }
+
+    // Cross-path for heddle#1695 + #1677/#1697: after the originator adopts
+    // the hosted-canonical Open, a live doorbell GetDiscussion (thinner
+    // snapshot: no opened_against_state, turn_id/turn_seq set) must not remint
+    // or duplicate the first turn. Adopt-in-isolation tests never hit this.
+    #[tokio::test]
+    async fn doorbell_after_adopt_does_not_duplicate_the_first_turn() {
+        let wire_id = DiscussionRecordId::generate();
+        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
+        let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
+        hosted_snapshot.turns[0].author = Principal::new("preview-user", "");
+        hosted_snapshot.turns[0].posted_at = 1_700_000_042;
+        let hosted = hosted_discussion_from_bootstrap(hosted_snapshot.clone());
+
+        let (_originator_temp, originator_repo, originator_state) = seed_repo_with_state();
+        let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
+        let originator_open = write_local_operation(
+            &originator_store,
+            wire_id,
+            Vec::new(),
+            Attribution::human(Principal::new("Local Author", "local@example.com")),
+            1_111_111_111_111,
+            CollaborationOperationBodyV1::Open {
+                title: "local title".to_string(),
+                anchor: CollaborationAnchor::Symbol {
+                    state_id: originator_state,
+                    path: "lib.rs".to_string(),
+                    symbol: "run".to_string(),
+                },
+                visibility: VisibilityTier::Internal,
+                turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
+                thread_ref: None,
+            },
+            test_key("originator-local-open"),
+        )
+        .unwrap();
+        let mut entry = MirrorEntry {
+            local_id: wire_id.to_string(),
+            server_id: wire_id.to_string(),
+            links: vec![TurnLink {
+                local_turn_id: turn_identity(&originator_open, 0),
+                server_ordinal: 0,
+                server_turn_id: None,
+            }],
+            resolved_into_annotation_operation_id: None,
+            pulled_resolution_key: None,
+        };
+        assert!(
+            adopt_hosted_canonical_turns(
+                &originator_store,
+                originator_state,
+                &wire_id.to_string(),
+                &hosted,
+                &mut entry,
+            )
+            .unwrap(),
+            "originator must adopt the hosted-canonical open before the doorbell"
+        );
+        let mut mirror = HostedMirror::default();
+        mirror
+            .repos
+            .entry("acme/widgets".to_string())
+            .or_default()
+            .discussions
+            .push(entry);
+        save_mirror(originator_repo.heddle_dir(), &mirror).unwrap();
+
+        let mut after_adopt: Vec<String> = originator_store
+            .operation_ids()
+            .unwrap()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        after_adopt.sort();
+        assert_eq!(after_adopt.len(), 1, "adopt must leave a single Open");
+        assert_ne!(
+            after_adopt[0],
+            originator_open.to_string(),
+            "adopt must retire the local-only open"
+        );
+
+        let mut fixture = CollaborationFixture::default();
+        fixture.discussions.insert(
+            wire_id.to_string(),
+            ProtoDiscussion {
+                id: wire_id.to_string(),
+                anchor: Some(PathSymbolRef {
+                    file: "lib.rs".to_string(),
+                    symbol: "run".to_string(),
+                }),
+                visibility: "internal".to_string(),
+                turns: vec![ProtoTurn {
+                    author_name: "preview-user".to_string(),
+                    author_email: String::new(),
+                    body: "keep this invariant".to_string(),
+                    turn_id: "turn-open".to_string(),
+                    turn_seq: 1,
+                    posted_at: Some(prost_types::Timestamp {
+                        seconds: 1_700_000_042,
+                        nanos: 0,
+                    }),
+                    ..ProtoTurn::default()
+                }],
+                ..ProtoDiscussion::default()
+            },
+        );
+        let (mut client, server, _fixture) =
+            crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
+        let replay = consume_discussion_event(
+            &originator_repo,
+            &mut client,
+            "acme/widgets",
+            &RepoEvent {
+                event_id: 3,
+                repo_id: "repo-1".to_string(),
+                event_type: "discussion.opened".to_string(),
+                payload_json: serde_json::json!({
+                    "discussion_id": wire_id.to_string(),
+                    "turn_id": "turn-open",
+                    "turn_seq": 1,
+                })
+                .to_string(),
+                new_state: Some(ProtoStateId {
+                    value: vec![0x11; 32],
+                }),
+                ..RepoEvent::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                replay,
+                DiscussionEventOutcome::Unchanged { discussion_id }
+                    if discussion_id == wire_id.to_string()
+            ),
+            "doorbell after adopt must not remint, got {replay:?}"
+        );
+
+        let discussion = originator_store
+            .materialize()
+            .unwrap()
+            .discussions
+            .into_values()
+            .next()
+            .unwrap();
+        assert_eq!(discussion.turns.len(), 1, "doorbell must not duplicate the first turn");
+        let mut after_doorbell: Vec<String> = originator_store
+            .operation_ids()
+            .unwrap()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        after_doorbell.sort();
+        assert_eq!(
+            after_doorbell, after_adopt,
+            "doorbell GetDiscussion must keep the adopted CollabOpId"
+        );
+
+        client.close().await;
+        server.await.unwrap();
     }
 }
