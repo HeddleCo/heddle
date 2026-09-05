@@ -4,7 +4,7 @@ use wire::ProtocolError;
 use super::{HostedClient, helpers::hosted_to_protocol_error};
 
 impl HostedClient {
-    pub(super) async fn require_thread_id(
+    pub async fn require_thread_id(
         &self,
         repo_path: &str,
         thread_name: &str,

@@ -707,10 +707,34 @@ impl HostedClient {
         remote_thread: &str,
         pulled_state: StateId,
     ) -> Result<SyncedThreadMetadata, ProtocolError> {
+        self.try_get_thread_metadata(repo, repo_path, remote_thread, pulled_state)
+            .await?
+            .ok_or_else(|| {
+                ProtocolError::InvalidState(format!(
+                    "hosted thread '{remote_thread}' has no managed metadata; no local thread was created"
+                ))
+            })
+    }
+
+    /// Like [`get_thread_metadata`], but returns `None` when the remote has
+    /// no managed record yet. Clone/pull use this so a missing GetThread
+    /// can fall back to the advertised ListRefs stable id.
+    pub async fn try_get_thread_metadata(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        remote_thread: &str,
+        pulled_state: StateId,
+    ) -> Result<Option<SyncedThreadMetadata>, ProtocolError> {
+        let thread_id = match self.require_thread_id(repo_path, remote_thread).await {
+            Ok(thread_id) => thread_id,
+            Err(ProtocolError::ObjectNotFound(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
         let request = GetThreadRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             name: remote_thread.to_string(),
-            thread_id: self.require_thread_id(repo_path, remote_thread).await?,
+            thread_id,
         };
         let summary = match self.routes().get_thread(&request).await {
             Ok(summary) => summary,
@@ -724,14 +748,12 @@ impl HostedClient {
                             ..
                         }
                 ) {
-                    return Err(ProtocolError::InvalidState(format!(
-                        "hosted thread '{remote_thread}' has no managed metadata; no local thread was created"
-                    )));
+                    return Ok(None);
                 }
                 return Err(error);
             }
         };
-        super::thread_metadata::from_summary(repo, remote_thread, pulled_state, summary)
+        super::thread_metadata::from_summary(repo, remote_thread, pulled_state, summary).map(Some)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4326,6 +4348,81 @@ mod native_exchange_tests {
             .expect("legacy main metadata must be persisted after the first push");
         assert_eq!(persisted.id, first_metadata.name);
         assert_eq!(persisted.thread, "main");
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clone_like_push_reuses_adopted_hosted_thread_stable_id() {
+        let (mut client, server, captured) =
+            crate::hosted_runtime::hosted::test_server::start_recording_push().await;
+        let source = TempDir::new().unwrap();
+        let (repo, state) = repository(&source);
+        let hosted_id = "019f0000-aaaa-7bbb-8ccc-ddddeeeeffff";
+        save_thread_record(&repo, state, hosted_id, "main");
+
+        let _ = client
+            .push_with_expected_head_profiled(
+                &repo,
+                "acme/widgets",
+                state,
+                "main",
+                false,
+                ExpectedRemoteHead::Missing,
+                "publish-thread-id-op".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let clone = TempDir::new().unwrap();
+        let (clone_repo, clone_state) = repository(&clone);
+        let manager = ThreadManager::new(clone_repo.heddle_dir());
+        let minted = manager
+            .find_record_by_thread("main")
+            .unwrap()
+            .expect("clone init mints its own main identity");
+        assert_ne!(minted.id, hosted_id);
+
+        manager
+            .adopt_stable_identity_for_thread(&clone_repo, "main", hosted_id, clone_state)
+            .unwrap();
+
+        let _ = client
+            .push_with_expected_head_profiled(
+                &clone_repo,
+                "acme/widgets",
+                clone_state,
+                "main",
+                false,
+                ExpectedRemoteHead::Missing,
+                "clone-push-thread-id-op".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let requests = captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0]
+                .thread_metadata
+                .as_ref()
+                .expect("publish must send thread metadata")
+                .name,
+            hosted_id
+        );
+        assert_eq!(
+            requests[1]
+                .thread_metadata
+                .as_ref()
+                .expect("clone push must send thread metadata")
+                .name,
+            hosted_id,
+            "push after adopting the hosted id must round-trip it, not mint a new UUIDv7"
+        );
 
         client.close().await;
         server.await.unwrap();

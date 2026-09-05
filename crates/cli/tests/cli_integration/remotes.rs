@@ -1309,7 +1309,11 @@ fn local_clone_persists_source_thread_stable_id() {
     let dest_parent = TempDir::new().unwrap();
     let clone = dest_parent.path().join("clone");
     heddle(
-        &["clone", source.path().to_str().unwrap(), clone.to_str().unwrap()],
+        &[
+            "clone",
+            source.path().to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
         None,
     )
     .unwrap();

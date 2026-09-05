@@ -232,6 +232,49 @@ pub struct ThreadManager {
     lock_path: PathBuf,
 }
 
+fn materialized_thread_for_state(
+    repo: &crate::Repository,
+    thread: &str,
+    stable_id: String,
+    ref_state: StateId,
+) -> Result<Thread> {
+    let state = repo.store().get_state(&ref_state)?.ok_or_else(|| {
+        HeddleError::NotFound(format!(
+            "thread '{thread}' points to missing state {}",
+            ref_state.to_string_full()
+        ))
+    })?;
+    let now = Utc::now();
+    Ok(Thread {
+        id: stable_id,
+        thread: thread.to_string(),
+        target_thread: None,
+        parent_thread: None,
+        mode: ThreadMode::Materialized,
+        state: ThreadState::Active,
+        base_state: ref_state.to_string_full(),
+        base_root: state.tree.to_hex(),
+        current_state: Some(ref_state.to_string_full()),
+        merged_state: None,
+        task: None,
+        execution_path: repo.root().to_path_buf(),
+        materialized_path: None,
+        changed_paths: Vec::new(),
+        impact_categories: Vec::new(),
+        heavy_impact_paths: Vec::new(),
+        promotion_suggested: false,
+        freshness: ThreadFreshness::Current,
+        verification_summary: summarize_verification(state.verification.as_ref()),
+        confidence_summary: summarize_confidence(state.confidence),
+        integration_policy_result: ThreadIntegrationPolicy::default(),
+        created_at: now,
+        updated_at: now,
+        ephemeral: None,
+        auto: false,
+        shared_target_dir: None,
+    })
+}
+
 impl ThreadManager {
     pub fn new(heddle_dir: &Path) -> Self {
         Self {
@@ -450,47 +493,76 @@ impl ThreadManager {
         let Some(ref_state) = repo.refs().get_thread(&ThreadName::from(thread))? else {
             return Ok(None);
         };
-        let state = repo.store().get_state(&ref_state)?.ok_or_else(|| {
-            HeddleError::NotFound(format!(
-                "thread '{thread}' points to missing state {}",
-                ref_state.to_string_full()
-            ))
-        })?;
-        let now = Utc::now();
-        let materialized = Thread {
-            id: uuid::Uuid::now_v7().to_string(),
-            thread: thread.to_string(),
-            target_thread: None,
-            parent_thread: None,
-            mode: ThreadMode::Materialized,
-            state: ThreadState::Active,
-            base_state: ref_state.to_string_full(),
-            base_root: state.tree.to_hex(),
-            current_state: Some(ref_state.to_string_full()),
-            merged_state: None,
-            task: None,
-            execution_path: repo.root().to_path_buf(),
-            materialized_path: None,
-            changed_paths: Vec::new(),
-            impact_categories: Vec::new(),
-            heavy_impact_paths: Vec::new(),
-            promotion_suggested: false,
-            freshness: ThreadFreshness::Current,
-            verification_summary: summarize_verification(state.verification.as_ref()),
-            confidence_summary: summarize_confidence(state.confidence),
-            integration_policy_result: ThreadIntegrationPolicy::default(),
-            created_at: now,
-            updated_at: now,
-            ephemeral: None,
-            auto: false,
-            shared_target_dir: None,
-        };
+        let materialized = materialized_thread_for_state(
+            repo,
+            thread,
+            uuid::Uuid::now_v7().to_string(),
+            ref_state,
+        )?;
         let record = materialized.to_record();
         self.save_record_file(&record)?;
         objects::fault_inject::maybe_fail_at("thread_manager_save_before_workspace")?;
         self.save_workspace_file(&materialized.id, &materialized.workspace_state())?;
 
         SyncedThreadMetadata::from_record(repo, &record, current_state_override).map(Some)
+    }
+
+    /// Persist `stable_id` as the sole local identity for `thread`.
+    ///
+    /// Clone and pull call this with the hosted (or source) stable id so a
+    /// later push cannot mint a different UUIDv7. If a record already uses
+    /// `stable_id`, it is reused and pointed at `current_state`. Any other
+    /// same-name records are replaced via [`converge_records`].
+    pub fn adopt_stable_identity_for_thread(
+        &self,
+        repo: &crate::Repository,
+        thread: &str,
+        stable_id: &str,
+        current_state: StateId,
+    ) -> Result<SyncedThreadMetadata> {
+        if stable_id.is_empty() {
+            return Err(HeddleError::Config(format!(
+                "cannot adopt an empty stable identity for thread '{thread}'"
+            )));
+        }
+        if let Some(mut record) = self.find_record_by_thread(thread)? {
+            if record.id == stable_id {
+                record.current_state = Some(current_state.to_string_full());
+                record.updated_at = Utc::now();
+                self.save_record(&record)?;
+                return SyncedThreadMetadata::from_record(repo, &record, Some(current_state));
+            }
+        }
+
+        let adopted =
+            materialized_thread_for_state(repo, thread, stable_id.to_string(), current_state)?;
+        self.converge_records(thread, std::slice::from_ref(&adopted))?;
+        SyncedThreadMetadata::from_record(repo, &adopted.to_record(), Some(current_state))
+    }
+
+    /// Write pulled/cloned metadata as the sole record for `local_thread`.
+    ///
+    /// `metadata.id` is the stable identity and must be preserved — it is
+    /// not the thread ref name. Landing fields an unauthenticated peer can
+    /// forge are cleared before the record is filed.
+    pub fn save_pulled_metadata(
+        &self,
+        local_thread: &str,
+        pulled_state: &StateId,
+        mut metadata: SyncedThreadMetadata,
+    ) -> Result<()> {
+        if metadata.id.is_empty() {
+            return Err(HeddleError::Config(format!(
+                "pulled thread '{local_thread}' is missing its stable identity"
+            )));
+        }
+        metadata.thread = local_thread.to_string();
+        metadata.current_state = Some(pulled_state.short());
+        metadata.shared_target_dir = None;
+        metadata
+            .integration_policy_result
+            .clear_untrusted_landing_fields();
+        self.converge_records(local_thread, &[Thread::from_record(metadata)])
     }
 
     pub fn delete_record(&self, record_id: &str) -> Result<()> {
@@ -947,6 +1019,114 @@ updated_at = "2024-01-01T00:00:01Z"
         assert!(
             err.to_string().contains("missing field"),
             "strict reader should reject missing current fields, got: {err}",
+        );
+    }
+}
+
+#[cfg(test)]
+mod adopt_identity_tests {
+    use objects::object::ThreadName;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::Repository;
+
+    #[test]
+    fn adopt_stable_identity_replaces_local_id_and_reuses_matching_id() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let main_state = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("init seeds main");
+        let manager = ThreadManager::new(repo.heddle_dir());
+        let minted = manager
+            .find_record_by_thread("main")
+            .unwrap()
+            .expect("init persists main");
+        assert_ne!(minted.id, "hosted-stable-main");
+
+        let adopted = manager
+            .adopt_stable_identity_for_thread(&repo, "main", "hosted-stable-main", main_state)
+            .unwrap();
+        assert_eq!(adopted.id, "hosted-stable-main");
+        assert_eq!(adopted.thread, "main");
+        assert_eq!(
+            manager.find_record_by_thread("main").unwrap().unwrap().id,
+            "hosted-stable-main"
+        );
+        assert!(manager.load_record(&minted.id).unwrap().is_none());
+
+        let reused = manager
+            .adopt_stable_identity_for_thread(&repo, "main", "hosted-stable-main", main_state)
+            .unwrap();
+        assert_eq!(reused.id, "hosted-stable-main");
+        assert_eq!(
+            manager
+                .list_records()
+                .unwrap()
+                .into_iter()
+                .filter(|record| record.thread == "main")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn save_pulled_metadata_keeps_stable_id_and_clears_forged_landing() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let main_state = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("init seeds main");
+        let manager = ThreadManager::new(repo.heddle_dir());
+        let local = manager
+            .find_record_by_thread("main")
+            .unwrap()
+            .expect("init persists main");
+
+        let mut pulled = local.clone();
+        pulled.id = "source-stable-main".to_string();
+        pulled.thread = "main".to_string();
+        pulled.integration_policy_result.manual_resolution_state = Some(main_state.short());
+        pulled.integration_policy_result.conflicts_resolved_manually = true;
+
+        manager
+            .save_pulled_metadata("main", &main_state, pulled)
+            .unwrap();
+
+        let saved = manager.find_record_by_thread("main").unwrap().unwrap();
+        assert_eq!(saved.id, "source-stable-main");
+        assert_eq!(saved.thread, "main");
+        assert_ne!(saved.id, "main");
+        assert!(
+            saved
+                .integration_policy_result
+                .manual_resolution_state
+                .is_none()
+        );
+        assert!(!saved.integration_policy_result.conflicts_resolved_manually);
+        assert!(manager.load_record(&local.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn adopt_stable_identity_rejects_an_empty_id() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let main_state = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("init seeds main");
+        let err = ThreadManager::new(repo.heddle_dir())
+            .adopt_stable_identity_for_thread(&repo, "main", "", main_state)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("empty stable identity"),
+            "empty id must fail closed, got {err}"
         );
     }
 }
