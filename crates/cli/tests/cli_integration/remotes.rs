@@ -1252,7 +1252,7 @@ fn pulling_managed_thread_into_clone_registers_it_for_thread_list_and_land() {
         repo.refs()
             .get_thread(&ThreadName::new("shuttle/runner"))
             .unwrap()
-            .map(|state| state.short())
+            .map(|state| state.to_string_full())
     );
 
     let listed = heddle(&["thread", "list", "--output", "json"], Some(&clone)).unwrap();

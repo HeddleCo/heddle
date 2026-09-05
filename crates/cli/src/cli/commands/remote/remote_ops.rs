@@ -43,6 +43,8 @@ use verbs::{
     plan_pull, pull_should_materialize, show_plain_git_remote, show_remote,
 };
 pub(crate) use verbs::{resolve_default_remote_name, resolved_default_remote_name};
+#[cfg(feature = "client")]
+use wire::ProtocolError;
 
 use super::super::{
     action_line::print_next,
@@ -1185,17 +1187,26 @@ async fn pull_network_connected(
                     {
                         Some(metadata) => Some(metadata),
                         None => {
-                            if let Ok(stable_id) = client
+                            match client
                                 .require_thread_id(repo_path, options.remote_thread)
                                 .await
                             {
-                                ThreadManager::new(repo.heddle_dir())
-                                    .adopt_stable_identity_for_thread(
-                                        repo,
-                                        track_to_update,
-                                        &stable_id,
-                                        final_state_id,
-                                    )?;
+                                Ok(stable_id) => {
+                                    ThreadManager::new(repo.heddle_dir())
+                                        .adopt_stable_identity_for_thread(
+                                            repo,
+                                            track_to_update,
+                                            &stable_id,
+                                            final_state_id,
+                                        )
+                                        .context(
+                                            "failed to persist hosted thread identity after pull",
+                                        )?;
+                                }
+                                Err(ProtocolError::ObjectNotFound(_)) => {
+                                    // Nothing advertised; first push may mint.
+                                }
+                                Err(error) => return Err(error.into()),
                             }
                             None
                         }

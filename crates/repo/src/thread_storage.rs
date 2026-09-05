@@ -557,7 +557,9 @@ impl ThreadManager {
             )));
         }
         metadata.thread = local_thread.to_string();
-        metadata.current_state = Some(pulled_state.short());
+        // Full encoding matches adopt_stable_identity_for_thread; shorts
+        // resolve, but the on-disk record should not depend on that.
+        metadata.current_state = Some(pulled_state.to_string_full());
         metadata.shared_target_dir = None;
         metadata
             .integration_policy_result
@@ -1101,6 +1103,10 @@ mod adopt_identity_tests {
         let saved = manager.find_record_by_thread("main").unwrap().unwrap();
         assert_eq!(saved.id, "source-stable-main");
         assert_eq!(saved.thread, "main");
+        assert_eq!(
+            saved.current_state.as_deref(),
+            Some(main_state.to_string_full().as_str())
+        );
         assert_ne!(saved.id, "main");
         assert!(
             saved
