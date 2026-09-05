@@ -1,0 +1,28 @@
+[package]
+name = "heddle-runtime-profile"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Local confidential-runtime profile store (ADR 0051 / heddle#999)."
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "runtime_profile"
+
+[dependencies]
+chrono.workspace = true
+crypto.workspace = true
+heddle-fs-prims.workspace = true
+heddle-object-model.workspace = true
+rmp-serde.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

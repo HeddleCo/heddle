@@ -13,13 +13,15 @@ use std::{
 use objects::{
     error::HeddleError,
     object::{
-        AudienceTier, ContentHash, FileMode, Principal, StateId, StateIdParseError, ThreadName,
-        Tree,
+        AudienceTier, ContentHash, FacetKind, FileMode, Principal, StateId, StateIdParseError,
+        ThreadName, Tree,
     },
     store::ObjectStore,
 };
 use refs::Head;
-use repo::{GitCheckpointIntent, GitCheckpointIntentPhase, GitRefName, Repository as HeddleRepository};
+use repo::{
+    GitCheckpointIntent, GitCheckpointIntentPhase, GitRefName, Repository as HeddleRepository,
+};
 pub use repo::{
     GitRefContentNamespace as RefNamespace, GitRefKind, ParsedGitRef,
     REMOTE_NAME_FOR_LOCAL_GIT_REPO, is_reserved_git_remote_name,
@@ -71,6 +73,10 @@ pub enum GitProjectionError {
 
     #[error("state not found: {0}")]
     StateNotFound(StateId),
+
+    /// Git Projection selects typed Source History roots only (ADR 0051).
+    #[error("git projection does not visit {0} facets")]
+    NonProjectableFacet(FacetKind),
 
     #[error("git repository not initialized")]
     GitRepoNotInitialized,

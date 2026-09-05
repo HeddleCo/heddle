@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Cryptographic signing for Heddle states and attestations.
+//! Cryptographic signing for Heddle states and attestations, plus the
+//! versioned AEAD envelope used by confidential-runtime profiles (ADR 0051).
 
+mod aead;
 mod ci_verdict;
 mod ed25519;
 mod error;
@@ -14,6 +16,11 @@ mod behavior_tests;
 
 use std::path::Path;
 
+pub use aead::{
+    AEAD_AES256_GCM_V1, AeadCiphertext, AeadError, Dek, PAD_BUCKETS, SoftwareRecipientSecret,
+    WRAP_HKDF_INFO, WrappedDek, decrypt_padded, encrypt_padded, pad_bucket_for, unwrap_dek,
+    wrap_dek,
+};
 pub use ci_verdict::{
     Basis, BasisKind, CI_VERDICT_BODY_SCHEMA_VERSION, CI_VERDICT_DOMAIN, CheckClass,
     CheckDescriptor, CiVerdictBody, Conclusion, Execution, FailureClass, FailureDetail, LogRef,

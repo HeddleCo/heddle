@@ -1,6 +1,10 @@
 # Encrypted, versioned, agent-scoped env/secret store
 
-**Status:** spike · **Tracking:** heddle#999 · **Review:** Fable-reviewed against the real object model (corrects an earlier over-optimistic sketch). Complementary to weft's server-side `SecretStore` (envelope AES-GCM for provider tokens) — different trust anchor, see §8.
+**Status:** superseded by [ADR 0051](../adr/0051-runtime-profile-confidential-runtime-facet.md) and the canonical model on [heddle#999](https://github.com/HeddleCo/heddle/issues/999).
+
+The issue body wins. In particular this spike's `env/*` checkoutable-thread layout, HKDF-from-signing-seed default, and daemon-as-exportable-key-holder are **rejected**. Keep the document as threat-model notes (dedup leakage, purge residue, capture footguns). Do not implement from the sections below without re-reading ADR 0051.
+
+**Tracking:** heddle#999 · **Review:** Fable-reviewed against the real object model (corrects an earlier over-optimistic sketch). Complementary to weft's server-side `SecretStore` (envelope AES-GCM for provider tokens) — different trust anchor, see §8.
 
 Solve the `.env` problem natively: a private, versioned, **agent-scoped** secret store built on heddle's
 existing primitives — content-addressed blobs, threads, states, oplog, redaction/purge, biscuit

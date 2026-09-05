@@ -13,6 +13,7 @@ mod blob;
 pub mod collaboration;
 mod diff;
 mod discussion;
+mod facet_kind;
 mod frontier_ref;
 mod hash;
 mod identifiers;
@@ -63,6 +64,7 @@ pub use discussion::{
     Discussion, DiscussionError, DiscussionId, DiscussionReference, DiscussionReferenceKind,
     DiscussionResolution, DiscussionTurn, DiscussionsBlob, generate_discussion_id,
 };
+pub use facet_kind::{FacetKind, SourceHistoryLaws};
 pub use frontier_ref::{
     GIT_SYNTHETIC_FRONTIER_PREFIX, SYNTHETIC_FRONTIER_PREFIX, SyntheticFrontierName,
     SyntheticFrontierNameError,
