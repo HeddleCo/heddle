@@ -543,16 +543,11 @@ impl SnapshotMutation<'_> {
             }
 
             if let Some(parent_state) = prior_state.as_ref() {
-                let source_blobs = supplied_blobs.as_ref().map(|(blobs, _)| {
-                    blobs
-                        .iter()
-                        .map(|(hash, bytes)| (*hash, bytes.as_slice()))
-                        .collect::<std::collections::HashMap<_, _>>()
-                });
                 match self.repo.compute_and_persist_context_anchor_travel(
                     parent_state,
                     &tree,
-                    source_blobs.as_ref(),
+                    Some(&source_blobs),
+                    Some(&source_trees),
                 ) {
                     Ok(Some(hash)) => inherited_context = Some(hash),
                     Ok(None) => {}
@@ -564,7 +559,8 @@ impl SnapshotMutation<'_> {
                     parent_state,
                     &state,
                     &tree,
-                    source_blobs.as_ref(),
+                    Some(&source_blobs),
+                    Some(&source_trees),
                 ) {
                     Ok(Some(hash)) => discussions = Some(hash),
                     Ok(None) => {}
