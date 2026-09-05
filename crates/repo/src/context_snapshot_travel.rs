@@ -3,15 +3,12 @@
 
 #![cfg(feature = "tree-sitter-symbols")]
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    path::PathBuf,
-};
+use std::collections::{BTreeMap, HashMap};
 
 use objects::{
     object::{
         Annotation, AnnotationAnchorStatus, AnnotationScope, AnnotationStatus, ContentHash,
-        ContextBlob, ContextTarget, EntryType, State, StateAttachmentBody, Tree,
+        ContextBlob, ContextTarget, State, StateAttachmentBody, Tree,
     },
     store::ObjectStore,
 };
@@ -27,6 +24,7 @@ impl Repository {
         parent_state: &State,
         new_tree: &Tree,
         source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
+        source_trees: Option<&HashMap<ContentHash, &Tree>>,
     ) -> Result<Option<ContentHash>> {
         let Some(parent_context_hash) = self
             .latest_state_attachment(&parent_state.id(), crate::StateAttachmentKind::Context)?
@@ -49,8 +47,8 @@ impl Repository {
             .store()
             .get_tree(&parent_state.tree)?
             .ok_or_else(|| missing_context_travel_object("tree", parent_state.tree))?;
-        let old_files = self.collect_context_travel_file_bytes(&parent_tree, None)?;
-        let new_files = self.collect_context_travel_file_bytes(new_tree, source_blobs)?;
+        let old_files = self.collect_tree_file_bytes(&parent_tree, None, None)?;
+        let new_files = self.collect_tree_file_bytes(new_tree, source_blobs, source_trees)?;
         let mut grouped: BTreeMap<String, (ContextTarget, Vec<Annotation>)> = BTreeMap::new();
         let mut changed = false;
 
@@ -112,70 +110,6 @@ impl Repository {
             root = Some(next);
         }
         Ok(root)
-    }
-
-    fn collect_context_travel_file_bytes(
-        &self,
-        tree: &Tree,
-        source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
-    ) -> Result<HashMap<String, Vec<u8>>> {
-        let mut files = HashMap::new();
-        self.collect_context_travel_file_bytes_inner(
-            tree,
-            PathBuf::new(),
-            source_blobs,
-            &mut files,
-        )?;
-        Ok(files)
-    }
-
-    fn collect_context_travel_file_bytes_inner(
-        &self,
-        tree: &Tree,
-        prefix: PathBuf,
-        source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
-        files: &mut HashMap<String, Vec<u8>>,
-    ) -> Result<()> {
-        for entry in tree.entries() {
-            let path = prefix.join(entry.name());
-            match entry.entry_type() {
-                EntryType::Blob => {
-                    let Some(path) = path.to_str() else {
-                        continue;
-                    };
-                    let Some(hash) = entry.blob_hash() else {
-                        continue;
-                    };
-                    let bytes = match source_blobs.and_then(|blobs| blobs.get(&hash).copied()) {
-                        Some(bytes) => bytes.to_vec(),
-                        None => self
-                            .store()
-                            .get_blob(&hash)?
-                            .ok_or_else(|| missing_context_travel_object("blob", hash))?
-                            .content()
-                            .to_vec(),
-                    };
-                    files.insert(path.to_string(), bytes);
-                }
-                EntryType::Tree => {
-                    let Some(hash) = entry.tree_hash() else {
-                        continue;
-                    };
-                    let subtree = self
-                        .store()
-                        .get_tree(&hash)?
-                        .ok_or_else(|| missing_context_travel_object("tree", hash))?;
-                    self.collect_context_travel_file_bytes_inner(
-                        &subtree,
-                        path,
-                        source_blobs,
-                        files,
-                    )?;
-                }
-                EntryType::Symlink | EntryType::Gitlink | EntryType::Spoollink => {}
-            }
-        }
-        Ok(())
     }
 }
 
