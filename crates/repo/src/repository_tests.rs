@@ -23,6 +23,7 @@ use super::{
 use crate::{
     ChangedPathFilters, HeddleError, HistoryQuery, RepoConfig, Repository, RepositoryCapability,
     RepositorySourceAuthority, ThreadFreshness, ThreadManager, WorktreeIndex,
+    refresh_active_thread_metadata,
 };
 
 fn create_test_repo() -> (TempDir, Repository) {
@@ -63,6 +64,73 @@ fn init_default_persists_and_reuses_stable_main_thread_record() {
         second.id, first.id,
         "main's stable id must not be regenerated"
     );
+
+    let hydrated = ThreadManager::new(reopened.heddle_dir())
+        .find_by_thread("main")
+        .unwrap()
+        .expect("reopening must still hydrate the persisted main record");
+    assert!(
+        hydrated.execution_path.as_os_str().is_empty(),
+        "default main is identity-only, not an isolated checkout"
+    );
+    assert!(hydrated.materialized_path.is_none());
+    assert!(
+        ThreadManager::new(reopened.heddle_dir())
+            .find_by_execution_root(reopened.root())
+            .unwrap()
+            .is_none(),
+        "warm status/capture must not treat default main as the execution-root thread"
+    );
+}
+
+#[test]
+fn capture_refresh_does_not_rewrite_identity_only_default_main() {
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let mut main = manager
+        .find_by_thread("main")
+        .unwrap()
+        .expect("init_default persists main");
+    let original_id = main.id.clone();
+    // Legacy #1639 records claimed the repo root as execution_path.
+    // Refresh must still refuse to rewrite them on the warm path.
+    main.execution_path = repo.root().to_path_buf();
+    manager.save(&main).unwrap();
+    assert!(
+        manager
+            .find_by_execution_root(repo.root())
+            .unwrap()
+            .is_some(),
+        "fixture must reproduce the execution-root match that bloated the record"
+    );
+
+    for index in 0..32 {
+        fs::write(
+            temp_dir.path().join(format!("warm-{index:02}.txt")),
+            format!("warm-{index}\n"),
+        )
+        .unwrap();
+    }
+    let state = repo.snapshot(Some("warm".to_string()), None).unwrap();
+    let tree = repo
+        .store()
+        .get_tree(&state.tree)
+        .unwrap()
+        .expect("snapshot tree");
+    let refresh = refresh_active_thread_metadata(&repo, &state, &tree).unwrap();
+    assert!(
+        refresh.changed_paths.is_empty(),
+        "identity-only main must not grow changed_paths on capture"
+    );
+
+    let after = manager
+        .find_by_thread("main")
+        .unwrap()
+        .expect("identity record must survive capture");
+    assert_eq!(after.id, original_id);
+    assert!(after.changed_paths.is_empty());
+    assert!(after.heavy_impact_paths.is_empty());
 }
 
 #[test]

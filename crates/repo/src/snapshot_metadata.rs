@@ -59,6 +59,13 @@ pub fn refresh_active_thread_metadata(
     let Some(mut thread) = manager.find_by_execution_root(repo.root())? else {
         return Ok(ThreadMetadataRefresh::default());
     };
+    // Isolated checkouts only. Identity-only records (default `main`,
+    // in-repo `thread create`) have no materialized_path. Refreshing
+    // those diffs against genesis and persists every changed path on
+    // the warm capture path.
+    if thread.materialized_path.is_none() {
+        return Ok(ThreadMetadataRefresh::default());
+    }
     let base_state = repo
         .resolve_state(&thread.base_state)?
         .and_then(|id| repo.store().get_state(&id).ok().flatten());

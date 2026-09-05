@@ -257,7 +257,13 @@ fn materialized_thread_for_state(
         current_state: Some(ref_state.to_string_full()),
         merged_state: None,
         task: None,
-        execution_path: repo.root().to_path_buf(),
+        // Identity-only. `heddle thread create` leaves execution_path
+        // empty for in-repo threads; `heddle start --path` sets both
+        // execution_path and materialized_path to the isolated checkout.
+        // Claiming `repo.root()` here makes `find_by_execution_root`
+        // treat default `main` as a managed checkout, so every capture
+        // diffs against genesis and rewrites the record on the warm path.
+        execution_path: PathBuf::new(),
         materialized_path: None,
         changed_paths: Vec::new(),
         impact_categories: Vec::new(),
@@ -1109,10 +1115,12 @@ mod adopt_identity_tests {
             Some(main_state.to_string_full().as_str())
         );
         assert_ne!(saved.id, "main");
-        assert!(saved
-            .integration_policy_result
-            .manual_resolution_state
-            .is_none());
+        assert!(
+            saved
+                .integration_policy_result
+                .manual_resolution_state
+                .is_none()
+        );
         assert!(!saved.integration_policy_result.conflicts_resolved_manually);
         assert!(manager.load_record(&local.id).unwrap().is_none());
     }
