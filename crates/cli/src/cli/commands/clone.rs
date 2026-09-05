@@ -1627,7 +1627,7 @@ async fn clone_network_connected(
     // API 0.15 carries a pre-PullReady stream failure as a real terminal
     // failure instead of letting it decode as a server frame. Persist the
     // recovery authority once the hosted connection is established so that a
-    // disconnect before folded refs arrive remains resumable. PullReady later
+    // disconnect before clone refs arrive remains resumable. PullReady later
     // replaces this provisional record with the advertised HEAD before any
     // repository data is initialized.
     let provisional_intent = CloneIntent {
@@ -1647,7 +1647,7 @@ async fn clone_network_connected(
     } else {
         PullMaterialization::Full
     };
-    let mut folded = None;
+    let mut advertised = None;
     let mut selected_track = None;
     let (mut result, local_repo) = client
         .clone_pull_with_depth_and_materialization(
@@ -1655,18 +1655,13 @@ async fn clone_network_connected(
             thread.as_deref(),
             depth,
             materialization,
-            |ready| {
-                let checkpoint = ready
-                    .transfer
-                    .as_ref()
-                    .map(|transfer| transfer.checkpoint.as_slice())
-                    .unwrap_or_default();
-                let refs = hosted_client::hosted_runtime::hosted::decode_pull_refs(checkpoint)?
-                    .ok_or_else(|| {
-                        wire::ProtocolError::InvalidState(
-                            "server does not advertise folded clone refs".to_string(),
-                        )
-                    })?;
+            |ready, refs| {
+                let _ = ready;
+                if refs.refs.is_empty() {
+                    return Err(wire::ProtocolError::InvalidState(
+                        "server does not advertise clone refs".to_string(),
+                    ));
+                }
                 let mut intent = provisional_intent.clone();
                 intent.advertised_head = refs.head_thread.clone();
                 // An advertised-ref semantic refusal (for example an unknown
@@ -1688,13 +1683,13 @@ async fn clone_network_connected(
                 durability = Some(CloneDurabilityBatch::begin(local_path));
                 let repo = initialize_hosted_clone_repository(local_path, &refs.refs, &track_name)?;
                 selected_track = Some(track_name);
-                folded = Some(refs);
+                advertised = Some(refs.clone());
                 Ok(repo)
             },
         )
         .await?;
-    let folded = folded.context("folded clone response is missing its refs")?;
-    let remote_refs = folded.refs;
+    let advertised = advertised.context("clone response is missing its refs")?;
+    let remote_refs = advertised.refs;
     let track_name = selected_track.context("hosted clone did not select a thread")?;
     let git_overlay_clone = hosted_clone_thread_revision_address(&remote_refs, &track_name)
         .is_some_and(|address| address.starts_with("git:"));
@@ -2580,8 +2575,8 @@ async fn persist_hosted_clone_thread_identity(
         )?;
         return Ok(());
     }
-    // Prefer the folded PullReady thread_id when present. Refresh live
-    // ListRefs only when the fold omitted the advertised stable id.
+    // Prefer the advertised pull-path thread_id when present. Refresh live
+    // ListRefs only when that advertisement omitted the stable id.
     let live_refs = if advertised_user_thread_id(remote_refs, track_name).is_none() {
         Some(client.list_refs_with_revision_addresses(repo_path).await?)
     } else {

@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    fmt,
     io::{self, Seek, SeekFrom, Write},
     sync::{
         Arc, Mutex,
@@ -16,8 +15,8 @@ use api::heddle::api::v1alpha1::{
     IntegrationPolicyStatus as ProtoIntegrationPolicyStatus, ListRefsRequest,
     ObjectAvailabilityStatus, ObjectDescriptor, PackChunk, PackStreamKind, PartialFetchStatus,
     ProviderPlanChallenge, PullClientFrame, PullReady, PullRequest, PullServerFrame,
-    PushClientFrame, PushRequest, PushServerFrame, RedactionTransfer, StateAttachmentTransfer,
-    StateVisibilityTransfer, StreamOpeningProof, ThreadConfidenceSummary,
+    PushClientFrame, PushRequest, PushServerFrame, RedactionTransfer, RefEntry as ProtoRefEntry,
+    StateAttachmentTransfer, StateVisibilityTransfer, StreamOpeningProof, ThreadConfidenceSummary,
     ThreadFreshness as ProtoThreadFreshness, ThreadIntegrationPolicy, ThreadMetadata,
     ThreadMode as ProtoThreadMode, ThreadVerificationSummary, TransportMode, UpdateRefRequest,
     WantObjects, git_lane_transfer, list_refs_response, pull_client_frame, pull_server_frame,
@@ -36,10 +35,6 @@ use objects::{
 use repo::{
     GitRefKind as ClassifiedGitRefKind, GitRefName, Repository, RepositoryCapability,
     RevisionAddress, SyncedThreadMetadata, ThreadManager,
-};
-use serde::{
-    Deserialize,
-    de::{self, Deserializer, IgnoredAny, Visitor},
 };
 use sley::{
     ObjectId as GitObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
@@ -85,91 +80,8 @@ type PullBootstrapPayload = (
     bool,
     Vec<(ContextTarget, ContextBlob)>,
 );
-#[cfg(test)]
-type PullRefsPayload = (
-    String,
-    Option<Vec<u8>>,
-    Vec<(String, Vec<u8>, bool, String)>,
-);
-type DecodedPullRefsPayload = (String, Option<Vec<u8>>, Vec<FoldedRefRecord>);
-
-/// One decode path, length-discriminated: legacy 4-tuple or weft#2055 5-tuple.
-/// Empty `thread_id` stays absent so live ListRefs can still supply it.
-struct FoldedRefRecord {
-    name: String,
-    state_id: Vec<u8>,
-    is_thread: bool,
-    revision_address: String,
-    thread_id: Option<String>,
-}
-
-impl<'de> Deserialize<'de> for FoldedRefRecord {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_seq(FoldedRefRecordVisitor)
-    }
-}
-
-struct FoldedRefRecordVisitor;
-
-impl<'de> Visitor<'de> for FoldedRefRecordVisitor {
-    type Value = FoldedRefRecord;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a folded pull ref 4-tuple or 5-tuple")
-    }
-
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-    where
-        A: de::SeqAccess<'de>,
-    {
-        let name = seq
-            .next_element()?
-            .ok_or_else(|| de::Error::invalid_length(0, &self))?;
-        let state_id = seq
-            .next_element()?
-            .ok_or_else(|| de::Error::invalid_length(1, &self))?;
-        let is_thread = seq
-            .next_element()?
-            .ok_or_else(|| de::Error::invalid_length(2, &self))?;
-        let revision_address = seq
-            .next_element()?
-            .ok_or_else(|| de::Error::invalid_length(3, &self))?;
-        // Remaining length, not a hard 5-tuple type: 0 => legacy fold
-        // (`thread_id` absent), 1 => weft#2055 fifth field. A 5-only
-        // decode unblocks current weft and breaks 4-tuple servers.
-        let thread_id = match seq.size_hint() {
-            Some(0) => None,
-            Some(1) => {
-                let id: Option<String> = seq
-                    .next_element()?
-                    .ok_or_else(|| de::Error::invalid_length(4, &self))?;
-                id.filter(|id| !id.is_empty())
-            }
-            Some(extra) => return Err(de::Error::invalid_length(4 + extra, &self)),
-            None => match seq.next_element::<Option<String>>()? {
-                None => None,
-                Some(id) => {
-                    if seq.next_element::<IgnoredAny>()?.is_some() {
-                        return Err(de::Error::invalid_length(6, &self));
-                    }
-                    id.filter(|id| !id.is_empty())
-                }
-            },
-        };
-        Ok(FoldedRefRecord {
-            name,
-            state_id,
-            is_thread,
-            revision_address,
-            thread_id,
-        })
-    }
-}
 type PullRepositoryInitializer<'a> =
-    Box<dyn FnOnce(&PullReady) -> Result<Repository, ProtocolError> + 'a>;
+    Box<dyn FnOnce(&PullReady, &PullBootstrapRefs) -> Result<Repository, ProtocolError> + 'a>;
 
 #[derive(Debug, Clone)]
 pub struct PullBootstrapMetadata {
@@ -283,62 +195,39 @@ pub fn decode_pull_bootstrap(
     }))
 }
 
-pub fn decode_pull_refs(checkpoint: &[u8]) -> Result<Option<PullBootstrapRefs>, ProtocolError> {
-    let checkpoint = std::str::from_utf8(checkpoint)
-        .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-    let Some(payload) = checkpoint
+/// The hex-msgpack `heddle-pull-refs-v1:` checkpoint fold is a removed
+/// side channel. Clone/pull bootstrap refs are heddle-api `RefEntry`
+/// (ListRefs today; `PullReady.refs` once heddle-api 0.28.0 ships).
+pub fn reject_legacy_pull_refs_fold(checkpoint: &[u8]) -> Result<(), ProtocolError> {
+    let Ok(text) = std::str::from_utf8(checkpoint) else {
+        return Ok(());
+    };
+    if text
         .lines()
-        .find_map(|line| line.strip_prefix(PULL_REFS_LINE_PREFIX))
-    else {
-        return Ok(None);
-    };
-    let payload = payload
-        .split_once('\t')
-        .map(|(payload, _)| payload)
-        .ok_or_else(|| {
-            ProtocolError::InvalidState("decode pull refs: missing sentinel state".to_string())
-        })?;
-    let payload = hex::decode(payload)
-        .map_err(|error| ProtocolError::InvalidState(format!("decode pull refs: {error}")))?;
-    let (head_thread, head_state, refs): DecodedPullRefsPayload =
-        rmp_serde::from_slice(&payload)
-            .map_err(|error| ProtocolError::InvalidState(format!("decode pull refs: {error}")))?;
-    let head_state = head_state
-        .map(|value| decode_bootstrap_state_id(value, "head state"))
-        .transpose()?;
-    let refs = refs
-        .into_iter()
-        .map(|record| {
-            let state_id = decode_bootstrap_state_id(record.state_id, "ref state")?;
-            Ok(HostedRefEntry::from_advertised(
-                record.name,
-                state_id,
-                record.is_thread,
-                record.revision_address,
-                record.thread_id,
-            ))
-        })
-        .collect::<Result<Vec<_>, ProtocolError>>()?;
-    let _ = head_state;
-    let head_thread = {
-        let trimmed = head_thread.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    };
-    Ok(Some(PullBootstrapRefs { head_thread, refs }))
+        .any(|line| line.starts_with(PULL_REFS_LINE_PREFIX))
+    {
+        return Err(ProtocolError::InvalidState(
+            "server advertised removed pull-refs side channel; RefEntry on the pull path is the contract"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
-fn decode_bootstrap_state_id(value: Vec<u8>, field: &str) -> Result<StateId, ProtocolError> {
-    let value: [u8; 32] = value.try_into().map_err(|value: Vec<u8>| {
-        ProtocolError::InvalidState(format!(
-            "decode pull refs {field}: expected 32 bytes, got {}",
-            value.len()
-        ))
-    })?;
-    Ok(StateId::from_bytes(value))
+/// Map a heddle-api `RefEntry` (ListRefs item / PullReady.refs) into the
+/// hosted clone record. Empty `thread_id` stays absent so ListRefs can
+/// still supply it; non-user-threads drop a folded id.
+pub fn hosted_ref_from_api(entry: &ProtoRefEntry) -> Result<HostedRefEntry, ProtocolError> {
+    let state_id = super::helpers::parse_proto_state_id(entry.state_id.clone())?
+        .ok_or_else(|| ProtocolError::InvalidState("ref is missing its state ID".to_string()))?;
+    let thread_id = (!entry.thread_id.is_empty()).then(|| entry.thread_id.clone());
+    Ok(HostedRefEntry::from_advertised(
+        entry.name.clone(),
+        state_id,
+        entry.is_thread,
+        entry.revision_address.clone(),
+        thread_id,
+    ))
 }
 
 enum PackedDiscussions {
@@ -627,22 +516,21 @@ pub fn persist_advertised_thread_identity(
     Ok(())
 }
 
-/// Persist from folded PullReady refs when they advertise an id; otherwise
-/// from a live ListRefs advertisement. weft#2055 folds `thread_id` as the
-/// fifth tuple element; older 4-tuple advertisements omit it.
+/// Persist from advertised pull refs when they carry an id; otherwise
+/// from a live ListRefs advertisement. Empty `thread_id` stays absent.
 pub fn persist_advertised_thread_identity_with_live_fallback(
     repo: &Repository,
-    folded_refs: &[HostedRefEntry],
+    advertised_refs: &[HostedRefEntry],
     live_refs: Option<&[HostedRefEntry]>,
     track_name: &str,
     final_state: &StateId,
 ) -> objects::error::Result<()> {
-    if advertised_user_thread_id(folded_refs, track_name).is_some() {
-        return persist_advertised_thread_identity(repo, folded_refs, track_name, final_state);
+    if advertised_user_thread_id(advertised_refs, track_name).is_some() {
+        return persist_advertised_thread_identity(repo, advertised_refs, track_name, final_state);
     }
     persist_advertised_thread_identity(
         repo,
-        live_refs.unwrap_or(folded_refs),
+        live_refs.unwrap_or(advertised_refs),
         track_name,
         final_state,
     )
@@ -758,8 +646,19 @@ impl HostedClient {
         &mut self,
         repo_path: &str,
     ) -> Result<Vec<HostedRefEntry>, ProtocolError> {
+        Ok(self.advertised_pull_refs(repo_path).await?.refs)
+    }
+
+    /// ListRefs-shaped bootstrap refs: the same heddle-api `RefEntry` as
+    /// `PullReady.refs` will carry once that field ships. Captures
+    /// `ListRefsPageEnd.head_thread` for clone HEAD selection.
+    async fn advertised_pull_refs(
+        &mut self,
+        repo_path: &str,
+    ) -> Result<PullBootstrapRefs, ProtocolError> {
         let mut refs = Vec::new();
         let mut page_token = String::new();
+        let mut head_thread = None;
         loop {
             let request = ListRefsRequest {
                 repo_path: super::helpers::repository_ref(repo_path),
@@ -775,33 +674,21 @@ impl HostedClient {
             while let Some(response) = stream.next().await.map_err(hosted_to_protocol_error)? {
                 match response.frame {
                     Some(list_refs_response::Frame::Item(entry)) => {
-                        let kind = RefKind::from_advertised_name(&entry.name, entry.is_thread);
-                        let thread_id = if kind.is_user_thread() {
-                            if entry.thread_id.is_empty() {
-                                return Err(ProtocolError::InvalidState(format!(
-                                    "hosted thread ref '{}' is missing its stable identity",
-                                    entry.name
-                                )));
-                            }
-                            Some(entry.thread_id)
-                        } else {
-                            None
-                        };
-                        refs.push(HostedRefEntry {
-                            name: entry.name,
-                            state_id: super::helpers::parse_proto_state_id(entry.state_id)?
-                                .ok_or_else(|| {
-                                    ProtocolError::InvalidState(
-                                        "ref is missing its state ID".to_string(),
-                                    )
-                                })?,
-                            kind,
-                            revision_address: entry.revision_address,
-                            thread_id,
-                        });
+                        let mapped = hosted_ref_from_api(&entry)?;
+                        if mapped.is_user_thread() && mapped.thread_id.is_none() {
+                            return Err(ProtocolError::InvalidState(format!(
+                                "hosted thread ref '{}' is missing its stable identity",
+                                mapped.name
+                            )));
+                        }
+                        refs.push(mapped);
                     }
                     Some(list_refs_response::Frame::PageEnd(page_end)) => {
-                        next_page_token = Some(page_end.next_page_token);
+                        next_page_token = Some(page_end.next_page_token.clone());
+                        let trimmed = page_end.head_thread.trim();
+                        if !trimmed.is_empty() {
+                            head_thread = Some(trimmed.to_string());
+                        }
                     }
                     None => {
                         return Err(ProtocolError::InvalidState(
@@ -816,7 +703,7 @@ impl HostedClient {
                 )
             })?;
             if next_page_token.is_empty() {
-                return Ok(refs);
+                return Ok(PullBootstrapRefs { head_thread, refs });
             }
             if next_page_token == page_token {
                 return Err(ProtocolError::InvalidState(
@@ -1543,7 +1430,7 @@ impl HostedClient {
         initialize: F,
     ) -> Result<(PullComplete, Repository), ProtocolError>
     where
-        F: FnOnce(&PullReady) -> Result<Repository, ProtocolError>,
+        F: FnOnce(&PullReady, &PullBootstrapRefs) -> Result<Repository, ProtocolError>,
     {
         let remote_thread = format!(
             "{PULL_CLONE_BOOTSTRAP_THREAD_PREFIX}{}",
@@ -1905,11 +1792,20 @@ impl HostedClient {
         };
         let owned_repo = match initial_repo {
             Some(_) => None,
-            None => Some(initializer.ok_or_else(|| {
-                ProtocolError::InvalidState(
-                    "pull is missing its repository initializer".to_string(),
-                )
-            })?(&ready)?),
+            None => {
+                let checkpoint = ready
+                    .transfer
+                    .as_ref()
+                    .map(|transfer| transfer.checkpoint.as_slice())
+                    .unwrap_or_default();
+                reject_legacy_pull_refs_fold(checkpoint)?;
+                let advertised = self.advertised_pull_refs(repo_path).await?;
+                Some(initializer.ok_or_else(|| {
+                    ProtocolError::InvalidState(
+                        "pull is missing its repository initializer".to_string(),
+                    )
+                })?(&ready, &advertised)?)
+            }
         };
         let repo = initial_repo.or(owned_repo.as_ref()).ok_or_else(|| {
             ProtocolError::InvalidState("pull repository initialization failed".to_string())
@@ -3407,6 +3303,7 @@ fn apply_marker_entry(
 
 #[cfg(test)]
 mod pull_bootstrap_tests {
+    use api::heddle::api::v1alpha1::{RefEntry as ProtoRefEntry, StateId as ProtoStateId};
     use chrono::Utc;
     use objects::{
         object::{
@@ -3420,6 +3317,28 @@ mod pull_bootstrap_tests {
     use wire::{AdvertisedRef, RefKind};
 
     use super::*;
+
+    fn proto_state(state: StateId) -> ProtoStateId {
+        ProtoStateId {
+            value: state.as_bytes().to_vec(),
+        }
+    }
+
+    fn proto_ref(
+        name: impl Into<String>,
+        state: StateId,
+        is_thread: bool,
+        revision_address: impl Into<String>,
+        thread_id: impl Into<String>,
+    ) -> ProtoRefEntry {
+        ProtoRefEntry {
+            name: name.into(),
+            state_id: Some(proto_state(state)),
+            is_thread,
+            revision_address: revision_address.into(),
+            thread_id: thread_id.into(),
+        }
+    }
 
     #[test]
     fn bootstrap_decoder_accepts_structured_empty_metadata() {
@@ -3475,57 +3394,8 @@ mod pull_bootstrap_tests {
         assert!(error.to_string().contains("decode pull bootstrap"));
     }
 
-    fn encode_pull_refs_checkpoint(payload: &impl serde::Serialize) -> String {
-        format!(
-            "{PULL_REFS_LINE_PREFIX}{}\t{}\n",
-            hex::encode(rmp_serde::to_vec_named(payload).expect("encode refs fixture")),
-            StateId::from_bytes([0; 32]).to_string_full(),
-        )
-    }
-
     #[test]
-    fn folded_refs_decode_legacy_four_tuple() {
-        let main = StateId::from_bytes([7; 32]);
-        let release = StateId::from_bytes([8; 32]);
-        let payload: PullRefsPayload = (
-            "main".to_string(),
-            Some(main.as_bytes().to_vec()),
-            vec![
-                (
-                    "main".to_string(),
-                    main.as_bytes().to_vec(),
-                    true,
-                    "git:0123456789abcdef".to_string(),
-                ),
-                (
-                    "release".to_string(),
-                    release.as_bytes().to_vec(),
-                    false,
-                    RevisionAddress::heddle(release).to_string(),
-                ),
-            ],
-        );
-        let decoded = decode_pull_refs(encode_pull_refs_checkpoint(&payload).as_bytes())
-            .expect("decode folded refs")
-            .expect("new server advertises refs");
-        assert_eq!(decoded.head_thread.as_deref(), Some("main"));
-        assert_eq!(decoded.refs.len(), 2);
-        assert_eq!(decoded.refs[0].name, "main");
-        assert_eq!(decoded.refs[0].state_id, main);
-        assert_eq!(decoded.refs[0].kind, RefKind::Thread);
-        assert_eq!(decoded.refs[0].revision_address, "git:0123456789abcdef");
-        assert!(
-            decoded.refs[0].thread_id.is_none(),
-            "legacy 4-tuple folded refs omit thread_id"
-        );
-        assert_eq!(decoded.refs[1].name, "release");
-        assert_eq!(decoded.refs[1].state_id, release);
-        assert_eq!(decoded.refs[1].kind, RefKind::Marker);
-        assert!(decoded.refs[1].thread_id.is_none());
-    }
-
-    #[test]
-    fn folded_refs_decode_five_tuple_adopts_thread_id() {
+    fn api_ref_entry_adopts_thread_id() {
         let main = StateId::from_bytes([7; 32]);
         let release = StateId::from_bytes([8; 32]);
         let change = objects::object::ChangeId::from_bytes([9; 16]);
@@ -3533,109 +3403,65 @@ mod pull_bootstrap_tests {
             .unwrap()
             .as_name();
         let hosted_id = "019f0000-aaaa-7bbb-8ccc-ddddeeeeffff";
-        let payload = (
-            "main".to_string(),
-            Some(main.as_bytes().to_vec()),
-            vec![
-                (
-                    "main".to_string(),
-                    main.as_bytes().to_vec(),
-                    true,
-                    "git:0123456789abcdef".to_string(),
-                    hosted_id.to_string(),
-                ),
-                (
-                    "empty".to_string(),
-                    main.as_bytes().to_vec(),
-                    true,
-                    RevisionAddress::heddle(main).to_string(),
-                    String::new(),
-                ),
-                (
-                    "release".to_string(),
-                    release.as_bytes().to_vec(),
-                    false,
-                    RevisionAddress::heddle(release).to_string(),
-                    hosted_id.to_string(),
-                ),
-                (
-                    frontier.clone(),
-                    main.as_bytes().to_vec(),
-                    true,
-                    String::new(),
-                    hosted_id.to_string(),
-                ),
-            ],
-        );
-        let decoded = decode_pull_refs(encode_pull_refs_checkpoint(&payload).as_bytes())
-            .expect("weft 5-tuple folded refs must decode")
-            .expect("new server advertises refs");
-        assert_eq!(decoded.head_thread.as_deref(), Some("main"));
-        assert_eq!(decoded.refs.len(), 4);
-        assert_eq!(decoded.refs[0].name, "main");
-        assert_eq!(decoded.refs[0].kind, RefKind::Thread);
-        assert_eq!(decoded.refs[0].thread_id.as_deref(), Some(hosted_id));
-        assert_eq!(decoded.refs[1].name, "empty");
+        let refs = [
+            proto_ref("main", main, true, "git:0123456789abcdef", hosted_id),
+            proto_ref(
+                "empty",
+                main,
+                true,
+                RevisionAddress::heddle(main).to_string(),
+                "",
+            ),
+            proto_ref(
+                "release",
+                release,
+                false,
+                RevisionAddress::heddle(release).to_string(),
+                hosted_id,
+            ),
+            proto_ref(frontier.clone(), main, true, "", hosted_id),
+        ]
+        .iter()
+        .map(hosted_ref_from_api)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("heddle-api RefEntry is the only clone-ref schema");
+        assert_eq!(refs.len(), 4);
+        assert_eq!(refs[0].name, "main");
+        assert_eq!(refs[0].kind, RefKind::Thread);
+        assert_eq!(refs[0].thread_id.as_deref(), Some(hosted_id));
+        assert_eq!(refs[1].name, "empty");
         assert!(
-            decoded.refs[1].thread_id.is_none(),
-            "empty folded thread_id must stay absent so ListRefs can still supply it"
+            refs[1].thread_id.is_none(),
+            "empty thread_id must stay absent so ListRefs can still supply it"
         );
-        assert_eq!(decoded.refs[2].name, "release");
-        assert_eq!(decoded.refs[2].kind, RefKind::Marker);
+        assert_eq!(refs[2].name, "release");
+        assert_eq!(refs[2].kind, RefKind::Marker);
         assert!(
-            decoded.refs[2].thread_id.is_none(),
-            "markers must not adopt a folded thread_id"
+            refs[2].thread_id.is_none(),
+            "markers must not adopt a thread_id"
         );
-        assert_eq!(decoded.refs[3].name, frontier);
-        assert_eq!(decoded.refs[3].kind, RefKind::SyntheticFrontierRoot);
+        assert_eq!(refs[3].name, frontier);
+        assert_eq!(refs[3].kind, RefKind::SyntheticFrontierRoot);
         assert!(
-            decoded.refs[3].thread_id.is_none(),
-            "synthetic frontiers must not adopt a folded thread_id"
+            refs[3].thread_id.is_none(),
+            "synthetic frontiers must not adopt a thread_id"
         );
-    }
-
-    #[derive(serde::Serialize)]
-    #[serde(untagged)]
-    enum FoldedRefWire {
-        Legacy(String, Vec<u8>, bool, String),
-        Current(String, Vec<u8>, bool, String, String),
     }
 
     #[test]
-    fn folded_refs_decode_mixed_four_and_five_tuples_in_one_fold() {
-        let main = StateId::from_bytes([7; 32]);
-        let feature = StateId::from_bytes([9; 32]);
-        let hosted_id = "019f0000-aaaa-7bbb-8ccc-ddddeeeeffff";
-        let payload = (
-            "main".to_string(),
-            Some(main.as_bytes().to_vec()),
-            vec![
-                FoldedRefWire::Current(
-                    "main".to_string(),
-                    main.as_bytes().to_vec(),
-                    true,
-                    RevisionAddress::heddle(main).to_string(),
-                    hosted_id.to_string(),
-                ),
-                FoldedRefWire::Legacy(
-                    "feature".to_string(),
-                    feature.as_bytes().to_vec(),
-                    true,
-                    RevisionAddress::heddle(feature).to_string(),
-                ),
-            ],
+    fn legacy_pull_refs_fold_is_rejected() {
+        let checkpoint = format!(
+            "{PULL_REFS_LINE_PREFIX}deadbeef\t{}\n",
+            StateId::from_bytes([0; 32]).to_string_full(),
         );
-        let decoded = decode_pull_refs(encode_pull_refs_checkpoint(&payload).as_bytes())
-            .expect("one fold may mix 4-tuple and 5-tuple records")
-            .expect("new server advertises refs");
-        assert_eq!(decoded.refs.len(), 2);
-        assert_eq!(decoded.refs[0].name, "main");
-        assert_eq!(decoded.refs[0].thread_id.as_deref(), Some(hosted_id));
-        assert_eq!(decoded.refs[1].name, "feature");
+        let error = reject_legacy_pull_refs_fold(checkpoint.as_bytes())
+            .expect_err("old hex-msgpack fold must fail closed");
         assert!(
-            decoded.refs[1].thread_id.is_none(),
-            "legacy 4-tuple in a mixed fold must stay id-less for ListRefs fallback"
+            error.to_string().contains("removed pull-refs side channel"),
+            "got {error}"
         );
+        reject_legacy_pull_refs_fold(b"heddle-markers-v1\nrelease\tabc\n")
+            .expect("other checkpoint lines are not the removed fold");
     }
 
     #[test]
@@ -3764,28 +3590,12 @@ mod pull_bootstrap_tests {
             .unwrap()
             .as_name();
         let state = StateId::from_bytes([7; 32]);
-        let payload: PullRefsPayload = (
-            "main".to_string(),
-            Some(state.as_bytes().to_vec()),
-            vec![(
-                frontier.clone(),
-                state.as_bytes().to_vec(),
-                true,
-                String::new(),
-            )],
-        );
-        let checkpoint = format!(
-            "{PULL_REFS_LINE_PREFIX}{}\t{}\n",
-            hex::encode(rmp_serde::to_vec_named(&payload).expect("encode refs fixture")),
-            StateId::from_bytes([0; 32]).to_string_full(),
-        );
-        let decoded = decode_pull_refs(checkpoint.as_bytes())
-            .expect("decode")
-            .expect("refs");
-        assert_eq!(decoded.refs[0].kind, RefKind::SyntheticFrontierRoot);
-        assert!(!decoded.refs[0].is_user_thread());
-        assert!(!decoded.refs[0].is_marker());
-        match decoded.refs[0].to_wire_entry().advertised() {
+        let decoded = hosted_ref_from_api(&proto_ref(frontier.clone(), state, true, "", ""))
+            .expect("synthetic frontier RefEntry");
+        assert_eq!(decoded.kind, RefKind::SyntheticFrontierRoot);
+        assert!(!decoded.is_user_thread());
+        assert!(!decoded.is_marker());
+        match decoded.to_wire_entry().advertised() {
             Ok(AdvertisedRef::SyntheticFrontier(name)) => assert_eq!(name.as_name(), frontier),
             other => panic!("synthetic must stay synthetic, got {other:?}"),
         }
@@ -4700,7 +4510,7 @@ mod native_exchange_tests {
     }
 
     #[test]
-    fn persist_advertised_identity_adopts_folded_five_tuple_thread_id() {
+    fn persist_advertised_identity_adopts_api_thread_id() {
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
         let hosted_id = "019f0000-aaaa-7bbb-8ccc-ddddeeeeffff";
@@ -4710,35 +4520,23 @@ mod native_exchange_tests {
             .expect("init persists main");
         assert_ne!(minted.id, hosted_id);
 
-        let payload = (
+        let advertised = [HostedRefEntry::from_advertised(
             "main".to_string(),
-            Some(state.as_bytes().to_vec()),
-            vec![(
-                "main".to_string(),
-                state.as_bytes().to_vec(),
-                true,
-                format!("heddle:{}", state.to_string_full()),
-                hosted_id.to_string(),
-            )],
-        );
-        let checkpoint = format!(
-            "{PULL_REFS_LINE_PREFIX}{}\t{}\n",
-            hex::encode(rmp_serde::to_vec_named(&payload).expect("encode refs fixture")),
-            StateId::from_bytes([0; 32]).to_string_full(),
-        );
-        let decoded = decode_pull_refs(checkpoint.as_bytes())
-            .expect("decode folded 5-tuple")
-            .expect("new server advertises refs");
-        assert_eq!(decoded.refs[0].thread_id.as_deref(), Some(hosted_id));
+            state,
+            true,
+            format!("heddle:{}", state.to_string_full()),
+            Some(hosted_id.to_string()),
+        )];
+        assert_eq!(advertised[0].thread_id.as_deref(), Some(hosted_id));
 
         persist_advertised_thread_identity_with_live_fallback(
             &repo,
-            &decoded.refs,
+            &advertised,
             None,
             "main",
             &state,
         )
-        .expect("folded 5-tuple thread_id must be adopted without live ListRefs");
+        .expect("advertised RefEntry thread_id must be adopted without a second ListRefs");
 
         let persisted = ThreadManager::new(repo.heddle_dir())
             .find_record_by_thread("main")
@@ -4857,7 +4655,7 @@ mod native_exchange_tests {
                 Some("main"),
                 Some(1),
                 PullMaterialization::Lazy,
-                |_| Repository::init_default(clone.path()).map_err(ProtocolError::from),
+                |_, _| Repository::init_default(clone.path()).map_err(ProtocolError::from),
             )
             .await
             .unwrap();
@@ -4983,7 +4781,7 @@ mod native_exchange_tests {
                 Some("main"),
                 None,
                 PullMaterialization::Full,
-                |_| Repository::init_default(clone.path()).map_err(ProtocolError::from),
+                |_, _| Repository::init_default(clone.path()).map_err(ProtocolError::from),
             )
             .await
             .unwrap();
@@ -7284,10 +7082,26 @@ mod pure_helpers_tests {
     }
 
     #[test]
-    fn decode_bootstrap_state_id_requires_32_bytes() {
-        let ok = decode_bootstrap_state_id(vec![0u8; 32], "field").unwrap();
-        assert_eq!(ok, StateId::from_bytes([0u8; 32]));
-        assert!(decode_bootstrap_state_id(vec![0u8; 8], "field").is_err());
+    fn hosted_ref_from_api_requires_32_byte_state_id() {
+        let entry = api::heddle::api::v1alpha1::RefEntry {
+            name: "main".to_string(),
+            state_id: Some(api::heddle::api::v1alpha1::StateId { value: vec![0; 8] }),
+            is_thread: true,
+            revision_address: String::new(),
+            thread_id: String::new(),
+        };
+        assert!(hosted_ref_from_api(&entry).is_err());
+        let ok = api::heddle::api::v1alpha1::RefEntry {
+            name: "main".to_string(),
+            state_id: Some(api::heddle::api::v1alpha1::StateId { value: vec![0; 32] }),
+            is_thread: true,
+            revision_address: String::new(),
+            thread_id: String::new(),
+        };
+        assert_eq!(
+            hosted_ref_from_api(&ok).expect("32-byte state").state_id,
+            StateId::from_bytes([0; 32])
+        );
     }
 
     #[test]
