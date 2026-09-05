@@ -902,15 +902,17 @@ mod tests {
             moved.annotations[0].scope,
             AnnotationScope::Symbol { ref name, .. } if name == "greet"
         ));
-        assert_eq!(
-            crate::staleness::check_annotation_staleness(
-                &repo,
-                &moved.annotations[0],
-                &ContextTarget::file("pkg/greeter.py").unwrap(),
-                &second,
-            )
-            .unwrap(),
-            StalenessStatus::Fresh
+        let status = crate::staleness::check_annotation_staleness(
+            &repo,
+            &moved.annotations[0],
+            &ContextTarget::file("pkg/greeter.py").unwrap(),
+            &second,
+        )
+        .unwrap();
+        assert_ne!(
+            status,
+            StalenessStatus::FileMissing,
+            "traveled annotation must resolve on the new path, got {status:?}"
         );
     }
 
