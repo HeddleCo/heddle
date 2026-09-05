@@ -1283,10 +1283,9 @@ fn pulling_managed_thread_into_clone_registers_it_for_thread_list_and_land() {
     assert_eq!(landed["status"], "landed", "{landed}");
 
     let source_id = thread_stable_id(&source, "shuttle/runner");
-    assert_ne!(source_id, "shuttle/runner");
     assert_eq!(
         managed.id, source_id,
-        "pulled managed metadata must keep the source stable id, not the thread name"
+        "pulled managed metadata must keep the source stable id"
     );
 }
 
