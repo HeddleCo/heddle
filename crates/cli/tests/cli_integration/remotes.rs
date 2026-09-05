@@ -154,6 +154,15 @@ fn current_thread_state(cwd: &std::path::Path, thread: &str) -> String {
         .to_string()
 }
 
+fn thread_stable_id(cwd: &std::path::Path, thread: &str) -> String {
+    let repo = Repository::open(cwd).expect("open repository");
+    ThreadManager::new(repo.heddle_dir())
+        .find_record_by_thread(thread)
+        .expect("read thread records")
+        .unwrap_or_else(|| panic!("{thread} should have a persisted thread record"))
+        .id
+}
+
 fn log_head_state(cwd: &std::path::Path) -> String {
     let log_json =
         heddle(&["--output", "json", "log", "--limit", "1"], Some(cwd)).expect("log current state");
@@ -1243,7 +1252,7 @@ fn pulling_managed_thread_into_clone_registers_it_for_thread_list_and_land() {
         repo.refs()
             .get_thread(&ThreadName::new("shuttle/runner"))
             .unwrap()
-            .map(|state| state.short())
+            .map(|state| state.to_string_full())
     );
 
     let listed = heddle(&["thread", "list", "--output", "json"], Some(&clone)).unwrap();
@@ -1272,6 +1281,81 @@ fn pulling_managed_thread_into_clone_registers_it_for_thread_list_and_land() {
     let landed: Value = serde_json::from_str(&landed).unwrap();
     assert_eq!(landed["output_kind"], "land", "{landed}");
     assert_eq!(landed["status"], "landed", "{landed}");
+
+    let source_id = thread_stable_id(&source, "shuttle/runner");
+    assert_eq!(
+        managed.id, source_id,
+        "pulled managed metadata must keep the source stable id"
+    );
+}
+
+/// heddle#1701: a clean local clone must persist the source thread's stable
+/// identity. Hosted push (and weft `hosted_thread_records`) key on that id;
+/// minting a new UUIDv7 or filing the record under the ref name (`main`)
+/// is the clone→push exit-76 mismatch.
+#[test]
+fn local_clone_persists_source_thread_stable_id() {
+    let source = TempDir::new().unwrap();
+    heddle(&["init"], Some(source.path())).unwrap();
+    std::fs::write(source.path().join("main.txt"), "v1\n").unwrap();
+    heddle(&["capture", "-m", "source main"], Some(source.path())).unwrap();
+    let source_id = thread_stable_id(source.path(), "main");
+    assert!(
+        uuid::Uuid::parse_str(&source_id).is_ok(),
+        "source main must already carry a stable UUID, got {source_id}"
+    );
+
+    let dest_parent = TempDir::new().unwrap();
+    let clone = dest_parent.path().join("clone");
+    heddle(
+        &[
+            "clone",
+            source.path().to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+        None,
+    )
+    .unwrap();
+
+    let cloned_id = thread_stable_id(&clone, "main");
+    assert_eq!(
+        cloned_id, source_id,
+        "clone must persist the source stable id, not mint a new one or use the ref name"
+    );
+    assert_ne!(cloned_id, "main");
+}
+
+/// heddle#1701: local pull must keep the source stable id. The previous
+/// `save_pulled_thread_metadata` stomped `metadata.id` to the local thread
+/// name (`main`), which cannot round-trip a hosted UUID.
+#[test]
+fn local_pull_preserves_source_thread_stable_id() {
+    let source = TempDir::new().unwrap();
+    heddle(&["init"], Some(source.path())).unwrap();
+    std::fs::write(source.path().join("main.txt"), "v1\n").unwrap();
+    heddle(&["capture", "-m", "source main"], Some(source.path())).unwrap();
+    let source_id = thread_stable_id(source.path(), "main");
+
+    let target = TempDir::new().unwrap();
+    heddle(&["init"], Some(target.path())).unwrap();
+    let target_id_before = thread_stable_id(target.path(), "main");
+    assert_ne!(
+        target_id_before, source_id,
+        "fixture: target init must mint its own main identity"
+    );
+
+    heddle(
+        &["pull", source.path().to_str().unwrap(), "--thread", "main"],
+        Some(target.path()),
+    )
+    .expect("pull main from the local source");
+
+    let pulled_id = thread_stable_id(target.path(), "main");
+    assert_eq!(
+        pulled_id, source_id,
+        "pull must adopt the source stable id, not keep the local init id or stomp to 'main'"
+    );
+    assert_ne!(pulled_id, "main");
 }
 
 #[test]

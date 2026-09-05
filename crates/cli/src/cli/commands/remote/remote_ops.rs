@@ -43,6 +43,8 @@ use verbs::{
     plan_pull, pull_should_materialize, show_plain_git_remote, show_remote,
 };
 pub(crate) use verbs::{resolve_default_remote_name, resolved_default_remote_name};
+#[cfg(feature = "client")]
+use wire::ProtocolError;
 
 use super::super::{
     action_line::print_next,
@@ -1174,7 +1176,41 @@ async fn pull_network_connected(
                             .await?,
                     )
                 } else {
-                    None
+                    match client
+                        .try_get_thread_metadata(
+                            repo,
+                            repo_path,
+                            options.remote_thread,
+                            final_state_id,
+                        )
+                        .await?
+                    {
+                        Some(metadata) => Some(metadata),
+                        None => {
+                            match client
+                                .require_thread_id(repo_path, options.remote_thread)
+                                .await
+                            {
+                                Ok(stable_id) => {
+                                    ThreadManager::new(repo.heddle_dir())
+                                        .adopt_stable_identity_for_thread(
+                                            repo,
+                                            track_to_update,
+                                            &stable_id,
+                                            final_state_id,
+                                        )
+                                        .context(
+                                            "failed to persist hosted thread identity after pull",
+                                        )?;
+                                }
+                                Err(ProtocolError::ObjectNotFound(_)) => {
+                                    // Nothing advertised; first push may mint.
+                                }
+                                Err(error) => return Err(error.into()),
+                            }
+                            None
+                        }
+                    }
                 };
                 let track_tn = ThreadName::new(track_to_update);
                 let pre_target = repo.refs().get_thread(&track_tn)?;
@@ -1317,17 +1353,14 @@ fn save_pulled_thread_metadata(
     pulled_state: &StateId,
     metadata: Option<SyncedThreadMetadata>,
 ) -> Result<()> {
-    let Some(mut metadata) = metadata else {
+    let Some(metadata) = metadata else {
         return Ok(());
     };
-    metadata.id = local_thread.to_string();
-    metadata.thread = local_thread.to_string();
-    metadata.current_state = Some(pulled_state.short());
-    metadata.shared_target_dir = None;
-    metadata
-        .integration_policy_result
-        .clear_untrusted_landing_fields();
-    ThreadManager::new(repo.heddle_dir()).save_record(&metadata)?;
+    ThreadManager::new(repo.heddle_dir()).save_pulled_metadata(
+        local_thread,
+        pulled_state,
+        metadata,
+    )?;
     Ok(())
 }
 

@@ -509,6 +509,61 @@ impl HostedRefEntry {
     }
 }
 
+/// Advertised ListRefs `thread_id` for a user thread, if present and non-empty.
+pub fn advertised_user_thread_id<'a>(
+    remote_refs: &'a [HostedRefEntry],
+    track_name: &str,
+) -> Option<&'a str> {
+    remote_refs
+        .iter()
+        .find(|entry| entry.is_user_thread() && entry.name == track_name)
+        .and_then(|entry| entry.thread_id.as_deref())
+        .filter(|id| !id.is_empty())
+}
+
+/// Persist the ListRefs-advertised stable id as the local thread identity.
+///
+/// Clone uses this when GetThread is missing; tests drive the same helper so
+/// a later push cannot mint a different UUIDv7.
+pub fn persist_advertised_thread_identity(
+    repo: &Repository,
+    remote_refs: &[HostedRefEntry],
+    track_name: &str,
+    final_state: &StateId,
+) -> objects::error::Result<()> {
+    let Some(stable_id) = advertised_user_thread_id(remote_refs, track_name) else {
+        return Ok(());
+    };
+    ThreadManager::new(repo.heddle_dir()).adopt_stable_identity_for_thread(
+        repo,
+        track_name,
+        stable_id,
+        *final_state,
+    )?;
+    Ok(())
+}
+
+/// Persist from folded PullReady refs when they advertise an id; otherwise
+/// from a live ListRefs advertisement. Folded refs currently decode with
+/// `thread_id: None`.
+pub fn persist_advertised_thread_identity_with_live_fallback(
+    repo: &Repository,
+    folded_refs: &[HostedRefEntry],
+    live_refs: Option<&[HostedRefEntry]>,
+    track_name: &str,
+    final_state: &StateId,
+) -> objects::error::Result<()> {
+    if advertised_user_thread_id(folded_refs, track_name).is_some() {
+        return persist_advertised_thread_identity(repo, folded_refs, track_name, final_state);
+    }
+    persist_advertised_thread_identity(
+        repo,
+        live_refs.unwrap_or(folded_refs),
+        track_name,
+        final_state,
+    )
+}
+
 impl PullObjectMix {
     fn record(&mut self, obj_type: ObjectType) {
         match obj_type.bucket() {
@@ -707,10 +762,35 @@ impl HostedClient {
         remote_thread: &str,
         pulled_state: StateId,
     ) -> Result<SyncedThreadMetadata, ProtocolError> {
+        self.try_get_thread_metadata(repo, repo_path, remote_thread, pulled_state)
+            .await?
+            .ok_or_else(|| {
+                ProtocolError::InvalidState(format!(
+                    "hosted thread '{remote_thread}' has no managed metadata; no local thread was created"
+                ))
+            })
+    }
+
+    /// Like [`get_thread_metadata`], but returns `None` when the remote has
+    /// no managed record yet, including GetThread with an empty `thread_id`.
+    /// Clone/pull use this so a missing or empty-id GetThread can fall back
+    /// to the advertised ListRefs stable id.
+    pub async fn try_get_thread_metadata(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        remote_thread: &str,
+        pulled_state: StateId,
+    ) -> Result<Option<SyncedThreadMetadata>, ProtocolError> {
+        let thread_id = match self.require_thread_id(repo_path, remote_thread).await {
+            Ok(thread_id) => thread_id,
+            Err(ProtocolError::ObjectNotFound(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
         let request = GetThreadRequest {
             repo_path: super::helpers::repository_ref(repo_path),
             name: remote_thread.to_string(),
-            thread_id: self.require_thread_id(repo_path, remote_thread).await?,
+            thread_id,
         };
         let summary = match self.routes().get_thread(&request).await {
             Ok(summary) => summary,
@@ -724,14 +804,12 @@ impl HostedClient {
                             ..
                         }
                 ) {
-                    return Err(ProtocolError::InvalidState(format!(
-                        "hosted thread '{remote_thread}' has no managed metadata; no local thread was created"
-                    )));
+                    return Ok(None);
                 }
                 return Err(error);
             }
         };
-        super::thread_metadata::from_summary(repo, remote_thread, pulled_state, summary)
+        super::thread_metadata::try_from_summary(repo, remote_thread, pulled_state, summary)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3350,6 +3428,10 @@ mod pull_bootstrap_tests {
         assert_eq!(decoded.refs[0].state_id, main);
         assert_eq!(decoded.refs[0].kind, RefKind::Thread);
         assert_eq!(decoded.refs[0].revision_address, "git:0123456789abcdef");
+        assert!(
+            decoded.refs[0].thread_id.is_none(),
+            "folded PullReady refs currently decode without thread_id"
+        );
         assert_eq!(decoded.refs[1].name, "release");
         assert_eq!(decoded.refs[1].state_id, release);
         assert_eq!(decoded.refs[1].kind, RefKind::Marker);
@@ -4329,6 +4411,134 @@ mod native_exchange_tests {
 
         client.close().await;
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clone_like_push_reuses_adopted_hosted_thread_stable_id() {
+        let (mut client, server, captured) =
+            crate::hosted_runtime::hosted::test_server::start_recording_push().await;
+        let source = TempDir::new().unwrap();
+        let (repo, state) = repository(&source);
+        let hosted_id = "019f0000-aaaa-7bbb-8ccc-ddddeeeeffff";
+        save_thread_record(&repo, state, hosted_id, "main");
+
+        let _ = client
+            .push_with_expected_head_profiled(
+                &repo,
+                "acme/widgets",
+                state,
+                "main",
+                false,
+                ExpectedRemoteHead::Missing,
+                "publish-thread-id-op".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let clone = TempDir::new().unwrap();
+        let (clone_repo, clone_state) = repository(&clone);
+        let manager = ThreadManager::new(clone_repo.heddle_dir());
+        let minted = manager
+            .find_record_by_thread("main")
+            .unwrap()
+            .expect("clone init mints its own main identity");
+        assert_ne!(minted.id, hosted_id);
+
+        persist_advertised_thread_identity(
+            &clone_repo,
+            &[HostedRefEntry::from_advertised(
+                "main".to_string(),
+                clone_state,
+                true,
+                format!("heddle:{}", clone_state.to_string_full()),
+                Some(hosted_id.to_string()),
+            )],
+            "main",
+            &clone_state,
+        )
+        .expect("clone path must adopt the advertised ListRefs thread_id");
+
+        let _ = client
+            .push_with_expected_head_profiled(
+                &clone_repo,
+                "acme/widgets",
+                clone_state,
+                "main",
+                false,
+                ExpectedRemoteHead::Missing,
+                "clone-push-thread-id-op".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let requests = captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0]
+                .thread_metadata
+                .as_ref()
+                .expect("publish must send thread metadata")
+                .name,
+            hosted_id
+        );
+        assert_eq!(
+            requests[1]
+                .thread_metadata
+                .as_ref()
+                .expect("clone push must send thread metadata")
+                .name,
+            hosted_id,
+            "push after adopting the hosted id must round-trip it, not mint a new UUIDv7"
+        );
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn persist_advertised_identity_uses_live_refs_when_folded_omit_thread_id() {
+        let source = TempDir::new().unwrap();
+        let (repo, state) = repository(&source);
+        let hosted_id = "019f0000-aaaa-7bbb-8ccc-ddddeeeeffff";
+        let minted = ThreadManager::new(repo.heddle_dir())
+            .find_record_by_thread("main")
+            .unwrap()
+            .expect("init persists main");
+        assert_ne!(minted.id, hosted_id);
+
+        let folded = [HostedRefEntry::from_advertised(
+            "main".to_string(),
+            state,
+            true,
+            format!("heddle:{}", state.to_string_full()),
+            None,
+        )];
+        let live = [HostedRefEntry::from_advertised(
+            "main".to_string(),
+            state,
+            true,
+            format!("heddle:{}", state.to_string_full()),
+            Some(hosted_id.to_string()),
+        )];
+
+        persist_advertised_thread_identity_with_live_fallback(
+            &repo,
+            &folded,
+            Some(&live),
+            "main",
+            &state,
+        )
+        .expect("live ListRefs must supply the omitted folded thread_id");
+
+        let persisted = ThreadManager::new(repo.heddle_dir())
+            .find_record_by_thread("main")
+            .unwrap()
+            .expect("clone must persist a main record");
+        assert_eq!(persisted.id, hosted_id);
+        assert_ne!(persisted.id, minted.id);
     }
 
     #[tokio::test]
