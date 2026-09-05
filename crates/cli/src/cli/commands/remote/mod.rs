@@ -1781,6 +1781,7 @@ async fn auto_provision_hosted_repo(
             provisioned_repo.status_verb(),
             style::bold(&display_full_path)
         );
+        let (scheme, host) = user_facing_hosted_authority(options.remote_arg, options.authority);
         if let Some(remote_name) = configured_remote {
             println!(
                 "{}",
@@ -1789,17 +1790,13 @@ async fn auto_provision_hosted_repo(
                     &format!(
                         "{} -> {}",
                         style::bold(&remote_name),
-                        style::dim(&format!(
-                            "heddle://{}/{}",
-                            options.authority, display_full_path
-                        ))
+                        style::dim(&format!("{scheme}://{host}/{display_full_path}"))
                     )
                 )
             );
         } else {
             print_next(&format!(
-                "heddle remote add origin heddle://{}/{}",
-                options.authority, display_full_path
+                "heddle remote add origin {scheme}://{host}/{display_full_path}"
             ));
         }
     }
@@ -1866,15 +1863,90 @@ fn persist_auto_provisioned_remote(
         return Ok(None);
     };
     let mut cfg = RemoteConfig::open(repo).map_err(anyhow::Error::new)?;
+    let existing = cfg.get(&remote_name).ok();
+    let url = auto_provisioned_remote_url(
+        existing.as_ref().map(|remote| remote.url.as_str()),
+        remote_arg,
+        authority,
+        full_path,
+    );
     cfg.add(
         &remote_name,
         Remote {
-            url: format!("heddle://{authority}/{full_path}"),
-            insecure: false,
+            url,
+            insecure: existing
+                .as_ref()
+                .map(|remote| remote.insecure)
+                .unwrap_or(false),
         },
     )
     .map_err(anyhow::Error::new)?;
     Ok(Some(remote_name))
+}
+
+/// Build the user-facing hosted URL written after CreateSpool.
+///
+/// Keep the scheme and hostname the user typed (`https://` / `heddle://`).
+/// A resolved SocketAddr is only persisted when that was the input —
+/// otherwise later TLS/SNI and descriptor trust look up the IP.
+#[cfg(feature = "client")]
+fn auto_provisioned_remote_url(
+    existing_url: Option<&str>,
+    remote_arg: Option<&str>,
+    authority: &str,
+    full_path: &str,
+) -> String {
+    if let Some(existing) = existing_url
+        && let Some(url) = rewrite_hosted_remote_path(existing, full_path)
+    {
+        return url;
+    }
+    let (scheme, host) = user_facing_hosted_authority(remote_arg, authority);
+    format!("{scheme}://{host}/{full_path}")
+}
+
+#[cfg(feature = "client")]
+fn rewrite_hosted_remote_path(url: &str, full_path: &str) -> Option<String> {
+    let (scheme, rest) = split_hosted_remote_scheme(url)?;
+    let host = rest.split('/').next().filter(|host| !host.is_empty())?;
+    Some(format!("{scheme}://{host}/{full_path}"))
+}
+
+#[cfg(feature = "client")]
+fn split_hosted_remote_scheme(url: &str) -> Option<(&'static str, &str)> {
+    url.strip_prefix("https://")
+        .map(|rest| ("https", rest))
+        .or_else(|| url.strip_prefix("heddle://").map(|rest| ("heddle", rest)))
+}
+
+#[cfg(feature = "client")]
+fn user_facing_hosted_authority<'a>(
+    remote_arg: Option<&'a str>,
+    authority: &'a str,
+) -> (&'static str, &'a str) {
+    if let Some(arg) = remote_arg
+        && let Some((scheme, rest)) = split_hosted_remote_scheme(arg)
+    {
+        if let Some(host) = rest.split('/').next().filter(|host| !host.is_empty()) {
+            return (scheme, prefer_hostname_authority(host, authority));
+        }
+        return (scheme, authority);
+    }
+    ("heddle", authority)
+}
+
+#[cfg(feature = "client")]
+fn prefer_hostname_authority<'a>(from_input: &'a str, authority: &'a str) -> &'a str {
+    if is_raw_socket_authority(authority) && !is_raw_socket_authority(from_input) {
+        from_input
+    } else {
+        authority
+    }
+}
+
+#[cfg(feature = "client")]
+fn is_raw_socket_authority(value: &str) -> bool {
+    value.parse::<std::net::SocketAddr>().is_ok() || value.parse::<std::net::IpAddr>().is_ok()
 }
 
 #[cfg(feature = "client")]
@@ -1886,8 +1958,11 @@ fn auto_provision_remote_name(
     match remote_arg {
         Some(arg) if cfg.get(arg).is_ok() => Ok(Some(arg.to_string())),
         Some(arg) => {
+            // Same parser `push` uses: native HTTPS host-only
+            // (`https://host[:port]`) is a CreateSpool target, but the
+            // generic parser rejects the scheme so origin was never saved.
             let is_direct_network_without_path = matches!(
-                RemoteTarget::parse(arg),
+                repo::remote::parse_target_for_repository(repo, arg),
                 Ok(RemoteTarget::Network {
                     repo_path: None,
                     ..
@@ -2052,6 +2127,18 @@ mod tests {
                 .as_deref(),
             Some("origin")
         );
+        assert_eq!(
+            auto_provision_remote_name(&repo, Some("https://127.0.0.1:8421"))
+                .unwrap()
+                .as_deref(),
+            Some("origin")
+        );
+        assert_eq!(
+            auto_provision_remote_name(&repo, Some("https://api-staging.heddle.sh"))
+                .unwrap()
+                .as_deref(),
+            Some("origin")
+        );
 
         let mut cfg = RemoteConfig::open(&repo).unwrap();
         cfg.add(
@@ -2071,6 +2158,12 @@ mod tests {
         );
         assert_eq!(
             auto_provision_remote_name(&repo, Some("127.0.0.1:8421"))
+                .unwrap()
+                .as_deref(),
+            None
+        );
+        assert_eq!(
+            auto_provision_remote_name(&repo, Some("https://127.0.0.1:8421"))
                 .unwrap()
                 .as_deref(),
             None
@@ -2096,6 +2189,112 @@ mod tests {
         };
         assert_eq!(authority, "api-staging.heddle.sh");
         assert!(authority.parse::<std::net::IpAddr>().is_err());
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn auto_provision_persists_https_host_only_as_named_origin() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+
+        let configured = persist_auto_provisioned_remote(
+            &repo,
+            Some("https://api-staging.heddle.sh"),
+            "api-staging.heddle.sh",
+            "org/repo",
+        )
+        .unwrap();
+
+        assert_eq!(configured.as_deref(), Some("origin"));
+        let remote = RemoteConfig::open(&repo).unwrap().get("origin").unwrap();
+        assert_eq!(remote.url, "https://api-staging.heddle.sh/org/repo");
+        let (target, key) = resolve_remote_with_key(&repo, Some("origin")).unwrap();
+        assert!(matches!(
+            target,
+            RemoteTarget::Network {
+                repo_path: Some(ref path),
+                ..
+            } if path == "org/repo"
+        ));
+        assert_eq!(key.as_deref(), Some("api-staging.heddle.sh"));
+        assert_eq!(
+            RemoteConfig::open(&repo).unwrap().default_name(),
+            Some("origin")
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn auto_provision_persists_https_loopback_host_only_as_origin() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+
+        let configured = persist_auto_provisioned_remote(
+            &repo,
+            Some("https://127.0.0.1:8421"),
+            "127.0.0.1:8421",
+            "alice/demo",
+        )
+        .unwrap();
+
+        assert_eq!(configured.as_deref(), Some("origin"));
+        assert_eq!(
+            RemoteConfig::open(&repo)
+                .unwrap()
+                .get("origin")
+                .unwrap()
+                .url,
+            "https://127.0.0.1:8421/alice/demo"
+        );
+        resolve_remote_with_key(&repo, Some("origin")).unwrap();
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn auto_provision_does_not_overwrite_hostname_with_resolved_socket() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+
+        let configured = persist_auto_provisioned_remote(
+            &repo,
+            Some("https://api-staging.heddle.sh"),
+            "203.0.113.10:443",
+            "org/repo",
+        )
+        .unwrap();
+
+        assert_eq!(configured.as_deref(), Some("origin"));
+        let remote = RemoteConfig::open(&repo).unwrap().get("origin").unwrap();
+        assert_eq!(remote.url, "https://api-staging.heddle.sh/org/repo");
+        assert!(
+            !remote.url.contains("203.0.113.10"),
+            "resolved SocketAddr must not replace the typed hostname: {}",
+            remote.url
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn auto_provision_rewrites_existing_https_origin_path_without_losing_scheme() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let mut cfg = RemoteConfig::open(&repo).unwrap();
+        cfg.add(
+            "origin",
+            Remote {
+                url: "https://preview.heddle.sh".to_string(),
+                insecure: false,
+            },
+        )
+        .unwrap();
+
+        let configured =
+            persist_auto_provisioned_remote(&repo, Some("origin"), "203.0.113.10:443", "org/repo")
+                .unwrap();
+
+        assert_eq!(configured.as_deref(), Some("origin"));
+        let remote = RemoteConfig::open(&repo).unwrap().get("origin").unwrap();
+        assert_eq!(remote.url, "https://preview.heddle.sh/org/repo");
     }
 
     #[cfg(feature = "client")]
