@@ -382,11 +382,13 @@ fn native_remote_add_rejects_local_git_remote_before_configuring_default() {
     assert!(remotes.default_name().is_none());
 }
 
-/// Field study 2026-08-19 on native 0.12.0: these exact argv lines are the
-/// done-criteria. `remote add` used to store `heddle://api.heddle.sh/...`,
-/// then `push`/`pull` printed `invalid remote url` and exited 74.
+/// Field study 2026-08-19: `remote add` used to store
+/// `heddle://api.heddle.sh/luke/tiny-notes`, then `push`/`pull` printed
+/// `invalid remote url` and exited 74. #1631 made that URL a valid
+/// native remote (HTTPS 443 default). Add must admit it; later verbs
+/// must fail for transport, not parse.
 #[test]
-fn field_study_heddle_scheme_is_refused_at_add_not_at_push() {
+fn field_study_heddle_scheme_without_port_is_admitted_at_add() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     let repo = Repository::open(temp.path()).expect("open native repo");
@@ -394,38 +396,34 @@ fn field_study_heddle_scheme_is_refused_at_add_not_at_push() {
 
     let add = heddle_output(&["remote", "add", "origin", url], Some(temp.path()))
         .expect("invoke field-study remote add");
-    let add_stderr = String::from_utf8_lossy(&add.stderr);
+    let add_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&add.stdout),
+        String::from_utf8_lossy(&add.stderr)
+    );
     assert_eq!(
         add.status.code(),
-        Some(74),
-        "field-study invalid URL must stay exit 74: stdout={} stderr={add_stderr}",
-        String::from_utf8_lossy(&add.stdout)
+        Some(0),
+        "field-study URL is a valid native remote (default HTTPS 443): {add_text}"
     );
     assert!(
-        add_stderr.contains(&format!("invalid remote url: {url}")),
-        "add must name the field-study URL: {add_stderr}"
+        !add_text.contains("invalid remote url"),
+        "add must not treat the field-study URL as a parse error: {add_text}"
     );
     assert!(
-        !add_stderr.contains("heddle capture"),
-        "remotes refusal Next must not be capture: {add_stderr}"
+        !add_text.contains("heddle capture"),
+        "remotes Next must not be capture: {add_text}"
     );
-    assert!(
-        RemoteConfig::open(&repo)
-            .expect("open remotes")
-            .list()
-            .is_empty(),
-        "field-study URL must not be stored"
+    let remotes = RemoteConfig::open(&repo)
+        .expect("open remotes")
+        .list();
+    assert_eq!(
+        remotes.len(),
+        1,
+        "admitted field-study URL must be stored"
     );
-
-    for command in ["push", "pull"] {
-        let output = heddle_output(&[command], Some(temp.path()))
-            .unwrap_or_else(|err| panic!("invoke heddle {command}: {err}"));
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            !stderr.contains(&format!("invalid remote url: {url}")),
-            "{command} must not see a stored field-study URL: {stderr}"
-        );
-    }
+    assert_eq!(remotes[0].0, "origin");
+    assert_eq!(remotes[0].1.url, url);
 }
 
 /// Field study: `remote add origin https://github.com/…` probed GitHub as a
