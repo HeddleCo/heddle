@@ -71,7 +71,8 @@ pub use session::{HostedAuthMode, HostedSession};
 #[cfg(test)]
 pub(crate) use sync::PullBootstrapMetadata;
 pub use sync::{
-    HostedRefEntry, decode_pull_bootstrap, decode_pull_refs, persist_advertised_thread_identity,
+    HostedRefEntry, advertised_user_thread_id, decode_pull_bootstrap, decode_pull_refs,
+    persist_advertised_thread_identity, persist_advertised_thread_identity_with_live_fallback,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

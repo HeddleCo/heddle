@@ -509,6 +509,18 @@ impl HostedRefEntry {
     }
 }
 
+/// Advertised ListRefs `thread_id` for a user thread, if present and non-empty.
+pub fn advertised_user_thread_id<'a>(
+    remote_refs: &'a [HostedRefEntry],
+    track_name: &str,
+) -> Option<&'a str> {
+    remote_refs
+        .iter()
+        .find(|entry| entry.is_user_thread() && entry.name == track_name)
+        .and_then(|entry| entry.thread_id.as_deref())
+        .filter(|id| !id.is_empty())
+}
+
 /// Persist the ListRefs-advertised stable id as the local thread identity.
 ///
 /// Clone uses this when GetThread is missing; tests drive the same helper so
@@ -519,12 +531,7 @@ pub fn persist_advertised_thread_identity(
     track_name: &str,
     final_state: &StateId,
 ) -> objects::error::Result<()> {
-    let Some(stable_id) = remote_refs
-        .iter()
-        .find(|entry| entry.is_user_thread() && entry.name == track_name)
-        .and_then(|entry| entry.thread_id.as_deref())
-        .filter(|id| !id.is_empty())
-    else {
+    let Some(stable_id) = advertised_user_thread_id(remote_refs, track_name) else {
         return Ok(());
     };
     ThreadManager::new(repo.heddle_dir()).adopt_stable_identity_for_thread(
@@ -534,6 +541,27 @@ pub fn persist_advertised_thread_identity(
         *final_state,
     )?;
     Ok(())
+}
+
+/// Persist from folded PullReady refs when they advertise an id; otherwise
+/// from a live ListRefs advertisement. Folded refs currently decode with
+/// `thread_id: None`.
+pub fn persist_advertised_thread_identity_with_live_fallback(
+    repo: &Repository,
+    folded_refs: &[HostedRefEntry],
+    live_refs: Option<&[HostedRefEntry]>,
+    track_name: &str,
+    final_state: &StateId,
+) -> objects::error::Result<()> {
+    if advertised_user_thread_id(folded_refs, track_name).is_some() {
+        return persist_advertised_thread_identity(repo, folded_refs, track_name, final_state);
+    }
+    persist_advertised_thread_identity(
+        repo,
+        live_refs.unwrap_or(folded_refs),
+        track_name,
+        final_state,
+    )
 }
 
 impl PullObjectMix {
@@ -744,8 +772,9 @@ impl HostedClient {
     }
 
     /// Like [`get_thread_metadata`], but returns `None` when the remote has
-    /// no managed record yet. Clone/pull use this so a missing GetThread
-    /// can fall back to the advertised ListRefs stable id.
+    /// no managed record yet, including GetThread with an empty `thread_id`.
+    /// Clone/pull use this so a missing or empty-id GetThread can fall back
+    /// to the advertised ListRefs stable id.
     pub async fn try_get_thread_metadata(
         &mut self,
         repo: &Repository,
@@ -780,7 +809,7 @@ impl HostedClient {
                 return Err(error);
             }
         };
-        super::thread_metadata::from_summary(repo, remote_thread, pulled_state, summary).map(Some)
+        super::thread_metadata::try_from_summary(repo, remote_thread, pulled_state, summary)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3399,6 +3428,10 @@ mod pull_bootstrap_tests {
         assert_eq!(decoded.refs[0].state_id, main);
         assert_eq!(decoded.refs[0].kind, RefKind::Thread);
         assert_eq!(decoded.refs[0].revision_address, "git:0123456789abcdef");
+        assert!(
+            decoded.refs[0].thread_id.is_none(),
+            "folded PullReady refs currently decode without thread_id"
+        );
         assert_eq!(decoded.refs[1].name, "release");
         assert_eq!(decoded.refs[1].state_id, release);
         assert_eq!(decoded.refs[1].kind, RefKind::Marker);
@@ -4463,6 +4496,49 @@ mod native_exchange_tests {
 
         client.close().await;
         server.await.unwrap();
+    }
+
+    #[test]
+    fn persist_advertised_identity_uses_live_refs_when_folded_omit_thread_id() {
+        let source = TempDir::new().unwrap();
+        let (repo, state) = repository(&source);
+        let hosted_id = "019f0000-aaaa-7bbb-8ccc-ddddeeeeffff";
+        let minted = ThreadManager::new(repo.heddle_dir())
+            .find_record_by_thread("main")
+            .unwrap()
+            .expect("init persists main");
+        assert_ne!(minted.id, hosted_id);
+
+        let folded = [HostedRefEntry::from_advertised(
+            "main".to_string(),
+            state,
+            true,
+            format!("heddle:{}", state.to_string_full()),
+            None,
+        )];
+        let live = [HostedRefEntry::from_advertised(
+            "main".to_string(),
+            state,
+            true,
+            format!("heddle:{}", state.to_string_full()),
+            Some(hosted_id.to_string()),
+        )];
+
+        persist_advertised_thread_identity_with_live_fallback(
+            &repo,
+            &folded,
+            Some(&live),
+            "main",
+            &state,
+        )
+        .expect("live ListRefs must supply the omitted folded thread_id");
+
+        let persisted = ThreadManager::new(repo.heddle_dir())
+            .find_record_by_thread("main")
+            .unwrap()
+            .expect("clone must persist a main record");
+        assert_eq!(persisted.id, hosted_id);
+        assert_ne!(persisted.id, minted.id);
     }
 
     #[tokio::test]
