@@ -48,6 +48,11 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Fixed
 
+- **Hosted clone drops the `heddle-pull-refs-v1` side channel.** Bootstrap
+  refs are heddle-api `RefEntry` from `PullReady.refs` (ListRefs when that
+  field is empty). The old hex-msgpack fold fails closed. Workspace pins
+  heddle-api 0.28.0 and heddleco-capability-verifier 0.17.0.
+
 - **Format-4 agent states keep their signatures and pack ids.** Verification
   and re-signing use the hash for the accepted stored id. Compact HCS2
   repack accepts that pre-cursor id. Claude SessionEnd relays
