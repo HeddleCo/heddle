@@ -38,6 +38,21 @@
 //! ordinal)` (see `turn_op_key`) — never a random per-write nonce — so the same
 //! server turn earns the same `CollabOpId` on every clone and a retry replays
 //! instead of conflicting or duplicating.
+//!
+//! `CollabOpId` still hashes the **full** envelope, including author and
+//! `occurred_at_ms`. Weft restamps both on accept, so an originator's local
+//! `heddle discuss open` (local git author + wall-clock time + CLI `--op-id`
+//! / v4 key) cannot content-address to the hosted envelope. That is why
+//! clones agreed with each other after #1677/#1697 while the originator
+//! still printed a different `co-…` (heddle#1695). After a successful push
+//! — and again on pull, when a linked local turn is not hosted-canonical —
+//! the originator **adopts** the same envelope a clone would materialize.
+//! The pre-push local-only op is retired (new bytes, new id; we do not
+//! rewrite bytes under the old id). Adopt remints only originator-local
+//! keys (v4 / `--op-id`). A turn already written with `turn_op_key` is
+//! left alone: a later GetDiscussion doorbell often lacks
+//! `opened_against_state` and must not rebuild a different Open than
+//! bootstrap/clone already stored (#1677/#1697).
 //! Resolve-into-annotation operations use the same durable mirror: their
 //! request identity is derived from `(hosted discussion id, server resolution
 //! key)` (see `resolve_op_key`) and is recorded only after `ResolveDiscussion`
@@ -137,7 +152,7 @@ struct MirrorEntry {
     pulled_resolution_key: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TurnLink {
     /// Local turn id: `{CollabOpId}#{index-within-op}` — the stable turn
     /// identity (unique even when a `LegacyImported` op carries many turns).
@@ -399,7 +414,7 @@ async fn push_one(
             heddle_cli_render::cli::style::warn_marker(),
         );
     }
-    let (index, server_id, mut changed) =
+    let (index, server_id, mut changed, hosted) =
         match entry_index {
             None => {
                 if candidates.is_empty() {
@@ -407,7 +422,7 @@ async fn push_one(
                 }
                 let (open_turn_id, open_body) = candidates[0].clone();
                 let proposed_id = local_id.to_string();
-                let hosted = client
+                let mut hosted = client
                     .open_discussion(
                         repo_path,
                         change_id,
@@ -436,7 +451,7 @@ async fn push_one(
                 });
                 let index = repo_mirror.discussions.len() - 1;
                 for (turn_id, body) in &candidates[1..] {
-                    let hosted = client
+                    hosted = client
                         .append_turn(
                             repo_path,
                             &server_id,
@@ -456,12 +471,15 @@ async fn push_one(
                         }),
                     );
                 }
-                (index, server_id, true)
+                // OpenDiscussion / AppendTurn echo the full discussion (≥2 turns
+                // after append). Adopt uses this last snapshot.
+                (index, server_id, true, Some(hosted))
             }
             Some(index) => {
                 let server_id = mirror.repos[repo_path].discussions[index].server_id.clone();
+                let mut hosted = None;
                 for (turn_id, body) in &candidates {
-                    let hosted = client
+                    let echoed = client
                         .append_turn(
                             repo_path,
                             &server_id,
@@ -475,15 +493,31 @@ async fn push_one(
                         repo_path,
                         index,
                         turn_id.clone(),
-                        hosted.turns.len().saturating_sub(1),
-                        hosted.turns.last().and_then(|turn| {
+                        echoed.turns.len().saturating_sub(1),
+                        echoed.turns.last().and_then(|turn| {
                             (!turn.turn_id.is_empty()).then(|| turn.turn_id.clone())
                         }),
                     );
+                    // Weft AppendTurn/OpenDiscussion echoes the full discussion
+                    // (≥2 turns after append). Adopt uses this snapshot so a
+                    // last-turn-only echo cannot under-adopt.
+                    hosted = Some(echoed);
                 }
-                (index, server_id, !candidates.is_empty())
+                (index, server_id, !candidates.is_empty(), hosted)
             }
         };
+
+    if let Some(hosted) = hosted.as_ref() {
+        let head_state = hosted_materialization_state(discussion, repo)?;
+        if let Some(entry) = mirror
+            .repos
+            .get_mut(repo_path)
+            .and_then(|repo_mirror| repo_mirror.discussions.get_mut(index))
+            && adopt_from_push_echo(store, head_state, local_id, hosted, entry)?
+        {
+            changed = true;
+        }
+    }
 
     if push_into_annotation_resolution(client, repo_path, mirror, index, &server_id, discussion)
         .await?
@@ -878,10 +912,6 @@ fn pull_one(
             // discussion is addressable by the same id on every clone; fall back
             // to a deterministic derivation for legacy `hc-` ids.
             let local_id = adopt_or_derive_local_id(&discussion.id);
-            let anchor = hosted_open_anchor(discussion, head_state);
-            let title = derive_title(&discussion.turns[0].body, &discussion.symbol);
-            let visibility = parse_visibility_token(&discussion.visibility);
-
             let first = &discussion.turns[0];
             let open_op = write_local_operation(
                 store,
@@ -889,13 +919,7 @@ fn pull_one(
                 Vec::new(),
                 turn_attribution(first),
                 turn_ms(first),
-                CollaborationOperationBodyV1::Open {
-                    title,
-                    anchor,
-                    visibility,
-                    turn: turn_body(first)?,
-                    thread_ref: discussion.thread_ref.clone(),
-                },
+                hosted_turn_body(discussion, first, 0, head_state)?,
                 turn_op_key(&discussion.id, server_ordinal(first, 0))?,
             )?;
             // Record the mapping immediately so a mid-materialization failure
@@ -923,9 +947,7 @@ fn pull_one(
                     heads.clone(),
                     turn_attribution(turn),
                     turn_ms(turn),
-                    CollaborationOperationBodyV1::AppendTurn {
-                        turn: turn_body(turn)?,
-                    },
+                    hosted_turn_body(discussion, turn, list_index, head_state)?,
                     turn_op_key(&discussion.id, ordinal)?,
                 )?;
                 heads = vec![op_id];
@@ -1024,6 +1046,22 @@ fn pull_one(
 
     if pull_resolution(store, repo_path, mirror, discussion)? {
         changed = true;
+    }
+    if let Some(index) = mirror.repos.get(repo_path).and_then(|repo_mirror| {
+        repo_mirror
+            .discussions
+            .iter()
+            .position(|entry| entry.server_id == discussion.id)
+    }) {
+        let local_id = mirror.repos[repo_path].discussions[index].local_id.clone();
+        if let Some(entry) = mirror
+            .repos
+            .get_mut(repo_path)
+            .and_then(|repo_mirror| repo_mirror.discussions.get_mut(index))
+            && adopt_hosted_canonical_turns(store, head_state, &local_id, discussion, entry)?
+        {
+            changed = true;
+        }
     }
     Ok(changed)
 }
@@ -1324,6 +1362,216 @@ fn resolve_op_key(
         .map_err(|error| anyhow!("invalid idempotency key: {error}"))
 }
 
+fn hosted_materialization_state(
+    discussion: &MaterializedDiscussion,
+    repo: &Repository,
+) -> Result<StateId> {
+    match &discussion.anchor {
+        CollaborationAnchor::Symbol { state_id, .. }
+        | CollaborationAnchor::State { state_id }
+        | CollaborationAnchor::Path { state_id, .. } => Ok(*state_id),
+        _ => repo
+            .head()
+            .context("resolve repository head for hosted turn adoption")?
+            .ok_or_else(|| anyhow!("cannot adopt hosted turn ops without an anchor state")),
+    }
+}
+
+fn hosted_turn_body(
+    discussion: &HostedDiscussion,
+    turn: &HostedDiscussionTurn,
+    index: usize,
+    head_state: StateId,
+) -> Result<CollaborationOperationBodyV1> {
+    if index == 0 {
+        Ok(CollaborationOperationBodyV1::Open {
+            title: derive_title(&turn.body, &discussion.symbol),
+            anchor: hosted_open_anchor(discussion, head_state),
+            visibility: parse_visibility_token(&discussion.visibility),
+            turn: turn_body(turn)?,
+            thread_ref: discussion.thread_ref.clone(),
+        })
+    } else {
+        Ok(CollaborationOperationBodyV1::AppendTurn {
+            turn: turn_body(turn)?,
+        })
+    }
+}
+
+fn parse_linked_op_id(local_turn_id: &str) -> Result<CollabOpId> {
+    let op = local_turn_id
+        .split_once('#')
+        .map(|(op, _)| op)
+        .unwrap_or(local_turn_id);
+    op.parse()
+        .map_err(|error| anyhow!("mirror turn link has an invalid CollabOpId {op:?}: {error}"))
+}
+
+/// True when every linked published turn already carries `turn_op_key` for
+/// its server ordinal — clone/bootstrap/prior-adopt materialization, not an
+/// originator-local v4 / `--op-id` key.
+fn linked_turns_already_use_hosted_keys(
+    store: &CollaborationStore,
+    hosted: &HostedDiscussion,
+    entry: &MirrorEntry,
+) -> Result<bool> {
+    if entry.links.is_empty() {
+        return Ok(false);
+    }
+    for link in &entry.links {
+        let op_id = parse_linked_op_id(&link.local_turn_id)?;
+        let Some(decoded) = store
+            .read_operation(&op_id)
+            .context("read linked op before hosted CollabOpId adoption")?
+        else {
+            return Ok(false);
+        };
+        let hosted_key = turn_op_key(&hosted.id, link.server_ordinal)?;
+        if decoded.operation.idempotency_key != hosted_key {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn fill_missing_server_turn_ids(entry: &mut MirrorEntry, hosted: &HostedDiscussion) {
+    for link in &mut entry.links {
+        if link.server_turn_id.is_some() {
+            continue;
+        }
+        link.server_turn_id = hosted.turns.iter().enumerate().find_map(|(index, turn)| {
+            (server_ordinal(turn, index) == link.server_ordinal)
+                .then(|| server_turn_id(turn))
+                .flatten()
+        });
+    }
+}
+
+/// The adopt `push_one` runs after keeping the last OpenDiscussion/AppendTurn
+/// echo. Weft echoes the **full** discussion (≥2 turns after append). Empty
+/// `turns` is a test-server / older-weft no-op. A short echo is refused so a
+/// last-turn-only snapshot cannot retire local turns it cannot replace.
+fn adopt_from_push_echo(
+    store: &CollaborationStore,
+    head_state: StateId,
+    local_id: &str,
+    hosted: &HostedDiscussion,
+    entry: &mut MirrorEntry,
+) -> Result<bool> {
+    if hosted.turns.is_empty() {
+        return Ok(false);
+    }
+    if hosted.turns.len() < entry.links.len() {
+        return Err(anyhow!(
+            "hosted echo for {local_id} has {} turn(s) but this discussion has {} linked op(s); refusing adopt so a partial echo cannot drop local turns",
+            hosted.turns.len(),
+            entry.links.len(),
+        ));
+    }
+    adopt_hosted_canonical_turns(store, head_state, local_id, hosted, entry)
+}
+
+/// Replace local-only published turn ops with the envelopes a clone would
+/// materialize from `hosted`. No-op when the local linked ops already use
+/// hosted `turn_op_key`s (clone/bootstrap/prior adopt), or when unpublished
+/// local turns still parent the chain. A later doorbell GetDiscussion is
+/// often a thinner snapshot than the first hosted materialization; reminting
+/// from it would disagree with the live replay path.
+fn adopt_hosted_canonical_turns(
+    store: &CollaborationStore,
+    head_state: StateId,
+    local_id: &str,
+    hosted: &HostedDiscussion,
+    entry: &mut MirrorEntry,
+) -> Result<bool> {
+    if hosted.turns.is_empty() || hosted.id.is_empty() {
+        return Ok(false);
+    }
+    let local_record: DiscussionRecordId = local_id
+        .parse()
+        .map_err(|error| anyhow!("invalid local discussion id {local_id}: {error}"))?;
+    let Some(existing) = store
+        .materialize_discussion(&local_record)
+        .context("materialize discussion before hosted CollabOpId adoption")?
+    else {
+        return Ok(false);
+    };
+
+    let linked_ops: HashSet<CollabOpId> = entry
+        .links
+        .iter()
+        .map(|link| parse_linked_op_id(&link.local_turn_id))
+        .collect::<Result<HashSet<_>>>()?;
+    if existing
+        .turns
+        .iter()
+        .any(|(op_id, _)| !linked_ops.contains(op_id))
+    {
+        // An unpushed local turn still parents the published prefix. Rewriting
+        // the prefix would orphan that child; wait until it is published.
+        return Ok(false);
+    }
+
+    if linked_turns_already_use_hosted_keys(store, hosted, entry)? {
+        // Already the hosted key space. Keep those envelopes — do not rebuild
+        // from this snapshot (GetDiscussion may omit opened_against_state).
+        fill_missing_server_turn_ids(entry, hosted);
+        return Ok(false);
+    }
+
+    let mut parents = Vec::new();
+    let mut canonical = Vec::with_capacity(hosted.turns.len());
+    let mut new_links = Vec::with_capacity(hosted.turns.len());
+    for (index, turn) in hosted.turns.iter().enumerate() {
+        let ordinal = server_ordinal(turn, index);
+        let envelope = CollaborationOperationEnvelope::new(
+            local_record,
+            parents.clone(),
+            turn_op_key(&hosted.id, ordinal)?,
+            turn_attribution(turn),
+            turn_ms(turn),
+            hosted_turn_body(hosted, turn, index, head_state)?,
+        )
+        .context("build hosted-canonical collaboration operation")?;
+        let bytes = envelope
+            .encode()
+            .map_err(|error| anyhow!("encode hosted-canonical operation: {error}"))?;
+        let id = CollabOpId::for_bytes(&bytes);
+        new_links.push(TurnLink {
+            local_turn_id: turn_identity(&id, 0),
+            server_ordinal: ordinal,
+            server_turn_id: server_turn_id(turn),
+        });
+        canonical.push((id, envelope));
+        parents = vec![id];
+    }
+
+    let already_canonical = linked_ops.len() == canonical.len()
+        && canonical.iter().all(|(id, _)| linked_ops.contains(id));
+    if already_canonical {
+        // Link metadata only (e.g. filling server_turn_id). The op-log is
+        // unchanged — doorbell replay must stay Unchanged.
+        if entry.links != new_links {
+            entry.links = new_links;
+        }
+        return Ok(false);
+    }
+
+    let retire: Vec<CollabOpId> = linked_ops
+        .into_iter()
+        .filter(|id| !canonical.iter().any(|(canonical_id, _)| canonical_id == id))
+        .collect();
+    let write: Vec<CollaborationOperationEnvelope> = canonical
+        .into_iter()
+        .map(|(_, envelope)| envelope)
+        .collect();
+    store
+        .replace_operations(&retire, &write)
+        .context("adopt hosted-canonical collaboration operations")?;
+    entry.links = new_links;
+    Ok(true)
+}
+
 fn write_local_operation(
     store: &CollaborationStore,
     discussion_id: DiscussionRecordId,
@@ -1416,6 +1664,10 @@ fn parse_visibility_token(token: &str) -> VisibilityTier {
 
 #[cfg(test)]
 mod tests {
+    use api::heddle::api::v1alpha1::{
+        Discussion as ProtoDiscussion, DiscussionTurn as ProtoTurn, PathSymbolRef, RepoEvent,
+        StateId as ProtoStateId,
+    };
     use objects::object::{
         AnnotationKind, Attribution, CollaborationAnchor, CollaborationIdempotencyKey,
         CollaborationOperationBodyV1, CollaborationOperationEnvelope, CollaborationResolution,
@@ -1424,6 +1676,9 @@ mod tests {
         Principal, State, StateAttachmentId, StateId, SymbolAnchor, Tree, VisibilityTier,
     };
     use tempfile::TempDir;
+
+    use crate::client::discussion_live::{DiscussionEventOutcome, consume_discussion_event};
+    use crate::hosted_runtime::hosted::test_server::CollaborationFixture;
 
     use super::*;
 
@@ -2210,9 +2465,15 @@ mod tests {
             let bootstrap = vec![bootstrap_discussion(&wire_id, state)];
             let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
             assert_eq!(
-                pull_discussions(&repo, &mut client, "acme/widgets", Some(&bootstrap), Some(state))
-                    .await
-                    .unwrap(),
+                pull_discussions(
+                    &repo,
+                    &mut client,
+                    "acme/widgets",
+                    Some(&bootstrap),
+                    Some(state)
+                )
+                .await
+                .unwrap(),
                 1
             );
             client.close().await;
@@ -2224,8 +2485,13 @@ mod tests {
                 store.materialize_discussion(&originator).unwrap().is_some(),
                 "clone must be addressable by the originator's id {originator}"
             );
-            let ids: Vec<DiscussionRecordId> =
-                store.materialize().unwrap().discussions.keys().copied().collect();
+            let ids: Vec<DiscussionRecordId> = store
+                .materialize()
+                .unwrap()
+                .discussions
+                .keys()
+                .copied()
+                .collect();
             materialized_ids.push(ids);
         }
         assert_eq!(
@@ -2270,16 +2536,26 @@ mod tests {
         // A pulls its own discussion back — same id on the wire, mirror empty.
         let bootstrap = vec![bootstrap_discussion(&local_id.to_string(), state)];
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-        pull_discussions(&repo, &mut client, "acme/widgets", Some(&bootstrap), Some(state))
-            .await
-            .unwrap();
+        pull_discussions(
+            &repo,
+            &mut client,
+            "acme/widgets",
+            Some(&bootstrap),
+            Some(state),
+        )
+        .await
+        .unwrap();
         client.close().await;
         server.await.unwrap();
 
         // No duplicate `Open` root: exactly one discussion, still addressable, and
         // the single seeded turn reconciled rather than duplicated.
         let materialized = store.materialize().unwrap();
-        assert_eq!(materialized.discussions.len(), 1, "must not duplicate the discussion");
+        assert_eq!(
+            materialized.discussions.len(),
+            1,
+            "must not duplicate the discussion"
+        );
         assert!(materialized.discussions.contains_key(&local_id));
         assert_eq!(
             store.operation_ids().unwrap().len(),
@@ -2533,5 +2809,751 @@ mod tests {
             after_first,
             "a retry must dedupe, not append a duplicate op"
         );
+    }
+
+    // heddle#1695: originator-local CollabOpId (random key + local author +
+    // wall-clock time) must become the hosted-canonical id a clone materializes
+    // from the same weft snapshot. Two clones already agreed after #1677/#1697;
+    // this is the hosted-clone path against an originator who opened locally.
+    #[tokio::test]
+    async fn originator_adopts_hosted_open_op_so_clone_agrees() {
+        let wire_id = DiscussionRecordId::generate();
+        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
+        let hosted_snapshot = {
+            let mut discussion = bootstrap_discussion(&wire_id.to_string(), anchor_state);
+            discussion.turns[0].author = Principal::new("preview-user", "");
+            discussion.turns[0].posted_at = 1_700_000_042;
+            discussion
+        };
+        let hosted = hosted_discussion_from_bootstrap(hosted_snapshot.clone());
+
+        let (originator_temp, originator_repo, originator_state) = seed_repo_with_state();
+        let _ = originator_temp;
+        let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
+        let originator_open = write_local_operation(
+            &originator_store,
+            wire_id,
+            Vec::new(),
+            Attribution::human(Principal::new("Local Author", "local@example.com")),
+            1_111_111_111_111,
+            CollaborationOperationBodyV1::Open {
+                title: "a title the clone will not see".to_string(),
+                anchor: CollaborationAnchor::Symbol {
+                    state_id: originator_state,
+                    path: "lib.rs".to_string(),
+                    symbol: "run".to_string(),
+                },
+                visibility: VisibilityTier::Internal,
+                turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
+                thread_ref: None,
+            },
+            test_key("originator-local-open"),
+        )
+        .unwrap();
+
+        let (clone_temp, clone_repo, clone_head) = seed_repo_with_state();
+        let _ = clone_temp;
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        pull_discussions(
+            &clone_repo,
+            &mut client,
+            "acme/widgets",
+            Some(std::slice::from_ref(&hosted_snapshot)),
+            Some(clone_head),
+        )
+        .await
+        .unwrap();
+        client.close().await;
+        server.await.unwrap();
+        let clone_ids: Vec<String> = {
+            let store = CollaborationStore::open(clone_repo.heddle_dir()).unwrap();
+            let mut ids: Vec<String> = store
+                .operation_ids()
+                .unwrap()
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect();
+            ids.sort();
+            ids
+        };
+        assert_ne!(
+            vec![originator_open.to_string()],
+            clone_ids,
+            "pre-adopt originator CollabOpId must differ from the hosted clone (the remint this test exists to close)"
+        );
+
+        let mut entry = MirrorEntry {
+            local_id: wire_id.to_string(),
+            server_id: wire_id.to_string(),
+            links: vec![TurnLink {
+                local_turn_id: turn_identity(&originator_open, 0),
+                server_ordinal: 0,
+                server_turn_id: None,
+            }],
+            resolved_into_annotation_operation_id: None,
+            pulled_resolution_key: None,
+        };
+        assert!(
+            adopt_hosted_canonical_turns(
+                &originator_store,
+                originator_state,
+                &wire_id.to_string(),
+                &hosted,
+                &mut entry,
+            )
+            .unwrap(),
+            "originator must adopt the hosted-canonical open op"
+        );
+        assert!(
+            !adopt_hosted_canonical_turns(
+                &originator_store,
+                originator_state,
+                &wire_id.to_string(),
+                &hosted,
+                &mut entry,
+            )
+            .unwrap(),
+            "a second adopt must be a no-op"
+        );
+
+        let mut originator_ids: Vec<String> = originator_store
+            .operation_ids()
+            .unwrap()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        originator_ids.sort();
+        assert_eq!(
+            originator_ids, clone_ids,
+            "after adopt, originator CollabOpId must equal the hosted clone"
+        );
+        assert_eq!(
+            originator_store.operation_ids().unwrap().len(),
+            1,
+            "adopt must retire the local-only open, not leave two Open roots"
+        );
+    }
+
+    // Same contract for open + append: the whole published chain adopts so
+    // parent pointers stay hosted-canonical.
+    #[tokio::test]
+    async fn originator_adopts_hosted_open_and_append_so_clone_agrees() {
+        let wire_id = DiscussionRecordId::generate();
+        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
+        let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
+        hosted_snapshot.turns[0].author = Principal::new("preview-user", "");
+        hosted_snapshot.turns[0].posted_at = 1_700_000_042;
+        hosted_snapshot.turns.push(DiscussionTurn {
+            author: Principal::new("preview-user", ""),
+            body: "and a follow-up".to_string(),
+            posted_at: 1_700_000_043,
+            references: Vec::new(),
+        });
+        let hosted = hosted_discussion_from_bootstrap(hosted_snapshot.clone());
+        assert!(
+            hosted.turns.len() >= 2,
+            "AppendTurn/OpenDiscussion echo is the full discussion, not the last turn only"
+        );
+
+        let (_originator_temp, originator_repo, originator_state) = seed_repo_with_state();
+        let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
+        let originator_open = write_local_operation(
+            &originator_store,
+            wire_id,
+            Vec::new(),
+            Attribution::human(Principal::new("Local Author", "local@example.com")),
+            1_111_111_111_111,
+            CollaborationOperationBodyV1::Open {
+                title: "local title".to_string(),
+                anchor: CollaborationAnchor::Symbol {
+                    state_id: originator_state,
+                    path: "lib.rs".to_string(),
+                    symbol: "run".to_string(),
+                },
+                visibility: VisibilityTier::Internal,
+                turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
+                thread_ref: None,
+            },
+            test_key("originator-local-open"),
+        )
+        .unwrap();
+        let originator_append = write_local_operation(
+            &originator_store,
+            wire_id,
+            vec![originator_open],
+            Attribution::human(Principal::new("Local Author", "local@example.com")),
+            1_111_111_111_222,
+            CollaborationOperationBodyV1::AppendTurn {
+                turn: DiscussionTurnV1::new("and a follow-up").unwrap(),
+            },
+            test_key("originator-local-append"),
+        )
+        .unwrap();
+
+        let (_clone_temp, clone_repo, clone_head) = seed_repo_with_state();
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        pull_discussions(
+            &clone_repo,
+            &mut client,
+            "acme/widgets",
+            Some(&[hosted_snapshot]),
+            Some(clone_head),
+        )
+        .await
+        .unwrap();
+        client.close().await;
+        server.await.unwrap();
+        let clone_ids: Vec<String> = {
+            let store = CollaborationStore::open(clone_repo.heddle_dir()).unwrap();
+            let mut ids: Vec<String> = store
+                .operation_ids()
+                .unwrap()
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(clone_ids.len(), 2);
+
+        let mut entry = MirrorEntry {
+            local_id: wire_id.to_string(),
+            server_id: wire_id.to_string(),
+            links: vec![
+                TurnLink {
+                    local_turn_id: turn_identity(&originator_open, 0),
+                    server_ordinal: 0,
+                    server_turn_id: None,
+                },
+                TurnLink {
+                    local_turn_id: turn_identity(&originator_append, 0),
+                    server_ordinal: 1,
+                    server_turn_id: None,
+                },
+            ],
+            resolved_into_annotation_operation_id: None,
+            pulled_resolution_key: None,
+        };
+        assert!(
+            adopt_hosted_canonical_turns(
+                &originator_store,
+                originator_state,
+                &wire_id.to_string(),
+                &hosted,
+                &mut entry,
+            )
+            .unwrap()
+        );
+
+        let mut originator_ids: Vec<String> = originator_store
+            .operation_ids()
+            .unwrap()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        originator_ids.sort();
+        assert_eq!(
+            originator_ids, clone_ids,
+            "after adopt, originator open+append CollabOpIds must equal the hosted clone"
+        );
+    }
+
+    // The adopt `push_one` runs after `hosted = Some(echoed)`: a multi-turn
+    // AppendTurn echo is the full discussion, so both local ops adopt.
+    #[tokio::test]
+    async fn push_echo_adopt_uses_full_discussion() {
+        let wire_id = DiscussionRecordId::generate();
+        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
+        let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
+        hosted_snapshot.turns[0].author = Principal::new("preview-user", "");
+        hosted_snapshot.turns[0].posted_at = 1_700_000_042;
+        hosted_snapshot.turns.push(DiscussionTurn {
+            author: Principal::new("preview-user", ""),
+            body: "and a follow-up".to_string(),
+            posted_at: 1_700_000_043,
+            references: Vec::new(),
+        });
+        let echo = hosted_discussion_from_bootstrap(hosted_snapshot.clone());
+        assert!(
+            echo.turns.len() >= 2,
+            "the AppendTurn echo push_one keeps must include every turn, not only the last"
+        );
+
+        let (_originator_temp, originator_repo, originator_state) = seed_repo_with_state();
+        let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
+        let originator_open = write_local_operation(
+            &originator_store,
+            wire_id,
+            Vec::new(),
+            Attribution::human(Principal::new("Local Author", "local@example.com")),
+            1_111_111_111_111,
+            CollaborationOperationBodyV1::Open {
+                title: "local title".to_string(),
+                anchor: CollaborationAnchor::Symbol {
+                    state_id: originator_state,
+                    path: "lib.rs".to_string(),
+                    symbol: "run".to_string(),
+                },
+                visibility: VisibilityTier::Internal,
+                turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
+                thread_ref: None,
+            },
+            test_key("originator-local-open"),
+        )
+        .unwrap();
+        let originator_append = write_local_operation(
+            &originator_store,
+            wire_id,
+            vec![originator_open],
+            Attribution::human(Principal::new("Local Author", "local@example.com")),
+            1_111_111_111_222,
+            CollaborationOperationBodyV1::AppendTurn {
+                turn: DiscussionTurnV1::new("and a follow-up").unwrap(),
+            },
+            test_key("originator-local-append"),
+        )
+        .unwrap();
+
+        let (_clone_temp, clone_repo, clone_head) = seed_repo_with_state();
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        pull_discussions(
+            &clone_repo,
+            &mut client,
+            "acme/widgets",
+            Some(&[hosted_snapshot]),
+            Some(clone_head),
+        )
+        .await
+        .unwrap();
+        client.close().await;
+        server.await.unwrap();
+        let clone_ids: Vec<String> = {
+            let store = CollaborationStore::open(clone_repo.heddle_dir()).unwrap();
+            let mut ids: Vec<String> = store
+                .operation_ids()
+                .unwrap()
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect();
+            ids.sort();
+            ids
+        };
+
+        let mut entry = MirrorEntry {
+            local_id: wire_id.to_string(),
+            server_id: wire_id.to_string(),
+            links: vec![
+                TurnLink {
+                    local_turn_id: turn_identity(&originator_open, 0),
+                    server_ordinal: 0,
+                    server_turn_id: None,
+                },
+                TurnLink {
+                    local_turn_id: turn_identity(&originator_append, 0),
+                    server_ordinal: 1,
+                    server_turn_id: None,
+                },
+            ],
+            resolved_into_annotation_operation_id: None,
+            pulled_resolution_key: None,
+        };
+        assert!(
+            echo.turns.len() >= entry.links.len(),
+            "full echo must cover every linked local turn"
+        );
+        assert!(
+            adopt_from_push_echo(
+                &originator_store,
+                originator_state,
+                &wire_id.to_string(),
+                &echo,
+                &mut entry,
+            )
+            .unwrap(),
+            "push_one's adopt must consume the full multi-turn echo"
+        );
+
+        let mut originator_ids: Vec<String> = originator_store
+            .operation_ids()
+            .unwrap()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        originator_ids.sort();
+        assert_eq!(
+            originator_ids, clone_ids,
+            "push_one adopt from a full echo must match the hosted clone"
+        );
+        assert_eq!(
+            originator_store.operation_ids().unwrap().len(),
+            2,
+            "full-echo adopt must keep both published turns"
+        );
+    }
+
+    // A last-turn-only echo must not retire the unpublished prefix.
+    #[test]
+    fn partial_push_echo_does_not_under_adopt() {
+        let wire_id = DiscussionRecordId::generate();
+        let (_originator_temp, originator_repo, originator_state) = seed_repo_with_state();
+        let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
+        let originator_open = write_local_operation(
+            &originator_store,
+            wire_id,
+            Vec::new(),
+            Attribution::human(Principal::new("Local Author", "local@example.com")),
+            1_111_111_111_111,
+            CollaborationOperationBodyV1::Open {
+                title: "local title".to_string(),
+                anchor: CollaborationAnchor::Symbol {
+                    state_id: originator_state,
+                    path: "lib.rs".to_string(),
+                    symbol: "run".to_string(),
+                },
+                visibility: VisibilityTier::Internal,
+                turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
+                thread_ref: None,
+            },
+            test_key("originator-local-open"),
+        )
+        .unwrap();
+        let originator_append = write_local_operation(
+            &originator_store,
+            wire_id,
+            vec![originator_open],
+            Attribution::human(Principal::new("Local Author", "local@example.com")),
+            1_111_111_111_222,
+            CollaborationOperationBodyV1::AppendTurn {
+                turn: DiscussionTurnV1::new("and a follow-up").unwrap(),
+            },
+            test_key("originator-local-append"),
+        )
+        .unwrap();
+
+        let mut partial = hosted_discussion_from_bootstrap(bootstrap_discussion(
+            &wire_id.to_string(),
+            originator_state,
+        ));
+        partial.turns.truncate(1);
+        assert_eq!(partial.turns.len(), 1);
+
+        let mut entry = MirrorEntry {
+            local_id: wire_id.to_string(),
+            server_id: wire_id.to_string(),
+            links: vec![
+                TurnLink {
+                    local_turn_id: turn_identity(&originator_open, 0),
+                    server_ordinal: 0,
+                    server_turn_id: None,
+                },
+                TurnLink {
+                    local_turn_id: turn_identity(&originator_append, 0),
+                    server_ordinal: 1,
+                    server_turn_id: None,
+                },
+            ],
+            resolved_into_annotation_operation_id: None,
+            pulled_resolution_key: None,
+        };
+        let before = originator_store.operation_ids().unwrap();
+        let error = adopt_from_push_echo(
+            &originator_store,
+            originator_state,
+            &wire_id.to_string(),
+            &partial,
+            &mut entry,
+        )
+        .expect_err("a one-turn echo must not adopt over two linked local turns");
+        assert!(
+            error.to_string().contains("partial echo"),
+            "refuse must name the partial-echo hazard, got: {error}"
+        );
+        let after = originator_store.operation_ids().unwrap();
+        assert_eq!(
+            after, before,
+            "partial echo must leave both local ops in place"
+        );
+        assert!(after.contains(&originator_open));
+        assert!(after.contains(&originator_append));
+    }
+
+    // The remint site on the hosted-clone/pull path: originator already
+    // published (mirror link exists) but still holds the local-only open op.
+    // pull_one must adopt the hosted-canonical envelope so the originator
+    // matches a fresh clone of the same snapshot.
+    #[tokio::test]
+    async fn pull_adopts_originator_local_open_to_match_clone() {
+        let wire_id = DiscussionRecordId::generate();
+        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
+        let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
+        hosted_snapshot.turns[0].author = Principal::new("preview-user", "");
+        hosted_snapshot.turns[0].posted_at = 1_700_000_042;
+
+        let (_originator_temp, originator_repo, originator_state) = seed_repo_with_state();
+        let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
+        let originator_open = write_local_operation(
+            &originator_store,
+            wire_id,
+            Vec::new(),
+            Attribution::human(Principal::new("Local Author", "local@example.com")),
+            1_111_111_111_111,
+            CollaborationOperationBodyV1::Open {
+                title: "local title".to_string(),
+                anchor: CollaborationAnchor::Symbol {
+                    state_id: originator_state,
+                    path: "lib.rs".to_string(),
+                    symbol: "run".to_string(),
+                },
+                visibility: VisibilityTier::Internal,
+                turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
+                thread_ref: None,
+            },
+            test_key("originator-local-open"),
+        )
+        .unwrap();
+        let mut mirror = HostedMirror::default();
+        mirror
+            .repos
+            .entry("acme/widgets".to_string())
+            .or_default()
+            .discussions
+            .push(MirrorEntry {
+                local_id: wire_id.to_string(),
+                server_id: wire_id.to_string(),
+                links: vec![TurnLink {
+                    local_turn_id: turn_identity(&originator_open, 0),
+                    server_ordinal: 0,
+                    server_turn_id: None,
+                }],
+                resolved_into_annotation_operation_id: None,
+                pulled_resolution_key: None,
+            });
+        save_mirror(originator_repo.heddle_dir(), &mirror).unwrap();
+
+        let (_clone_temp, clone_repo, clone_head) = seed_repo_with_state();
+        let (mut clone_client, clone_server) =
+            crate::hosted_runtime::hosted::test_server::start().await;
+        pull_discussions(
+            &clone_repo,
+            &mut clone_client,
+            "acme/widgets",
+            Some(std::slice::from_ref(&hosted_snapshot)),
+            Some(clone_head),
+        )
+        .await
+        .unwrap();
+        clone_client.close().await;
+        clone_server.await.unwrap();
+
+        let (mut originator_client, originator_server) =
+            crate::hosted_runtime::hosted::test_server::start().await;
+        assert_eq!(
+            pull_discussions(
+                &originator_repo,
+                &mut originator_client,
+                "acme/widgets",
+                Some(&[hosted_snapshot]),
+                Some(originator_state),
+            )
+            .await
+            .unwrap(),
+            1,
+            "pull must adopt the hosted-canonical open op"
+        );
+        originator_client.close().await;
+        originator_server.await.unwrap();
+
+        let mut originator_ids: Vec<String> = originator_store
+            .operation_ids()
+            .unwrap()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        originator_ids.sort();
+        let clone_ids: Vec<String> = {
+            let store = CollaborationStore::open(clone_repo.heddle_dir()).unwrap();
+            let mut ids: Vec<String> = store
+                .operation_ids()
+                .unwrap()
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(
+            originator_ids, clone_ids,
+            "hosted pull must leave the originator with the same CollabOpId a clone materializes"
+        );
+        assert_ne!(
+            originator_ids,
+            vec![originator_open.to_string()],
+            "pull must retire the local-only open op, not keep it"
+        );
+    }
+
+    // Cross-path for heddle#1695 + #1677/#1697: after the originator adopts
+    // the hosted-canonical Open, a live doorbell GetDiscussion (thinner
+    // snapshot: no opened_against_state, turn_id/turn_seq set) must not remint
+    // or duplicate the first turn. Adopt-in-isolation tests never hit this.
+    #[tokio::test]
+    async fn doorbell_after_adopt_does_not_duplicate_the_first_turn() {
+        let wire_id = DiscussionRecordId::generate();
+        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
+        let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
+        hosted_snapshot.turns[0].author = Principal::new("preview-user", "");
+        hosted_snapshot.turns[0].posted_at = 1_700_000_042;
+        let hosted = hosted_discussion_from_bootstrap(hosted_snapshot.clone());
+
+        let (_originator_temp, originator_repo, originator_state) = seed_repo_with_state();
+        let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
+        let originator_open = write_local_operation(
+            &originator_store,
+            wire_id,
+            Vec::new(),
+            Attribution::human(Principal::new("Local Author", "local@example.com")),
+            1_111_111_111_111,
+            CollaborationOperationBodyV1::Open {
+                title: "local title".to_string(),
+                anchor: CollaborationAnchor::Symbol {
+                    state_id: originator_state,
+                    path: "lib.rs".to_string(),
+                    symbol: "run".to_string(),
+                },
+                visibility: VisibilityTier::Internal,
+                turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
+                thread_ref: None,
+            },
+            test_key("originator-local-open"),
+        )
+        .unwrap();
+        let mut entry = MirrorEntry {
+            local_id: wire_id.to_string(),
+            server_id: wire_id.to_string(),
+            links: vec![TurnLink {
+                local_turn_id: turn_identity(&originator_open, 0),
+                server_ordinal: 0,
+                server_turn_id: None,
+            }],
+            resolved_into_annotation_operation_id: None,
+            pulled_resolution_key: None,
+        };
+        assert!(
+            adopt_hosted_canonical_turns(
+                &originator_store,
+                originator_state,
+                &wire_id.to_string(),
+                &hosted,
+                &mut entry,
+            )
+            .unwrap(),
+            "originator must adopt the hosted-canonical open before the doorbell"
+        );
+        let mut mirror = HostedMirror::default();
+        mirror
+            .repos
+            .entry("acme/widgets".to_string())
+            .or_default()
+            .discussions
+            .push(entry);
+        save_mirror(originator_repo.heddle_dir(), &mirror).unwrap();
+
+        let mut after_adopt: Vec<String> = originator_store
+            .operation_ids()
+            .unwrap()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        after_adopt.sort();
+        assert_eq!(after_adopt.len(), 1, "adopt must leave a single Open");
+        assert_ne!(
+            after_adopt[0],
+            originator_open.to_string(),
+            "adopt must retire the local-only open"
+        );
+
+        let mut fixture = CollaborationFixture::default();
+        fixture.discussions.insert(
+            wire_id.to_string(),
+            ProtoDiscussion {
+                id: wire_id.to_string(),
+                anchor: Some(PathSymbolRef {
+                    file: "lib.rs".to_string(),
+                    symbol: "run".to_string(),
+                }),
+                visibility: "internal".to_string(),
+                turns: vec![ProtoTurn {
+                    author_name: "preview-user".to_string(),
+                    author_email: String::new(),
+                    body: "keep this invariant".to_string(),
+                    turn_id: "turn-open".to_string(),
+                    turn_seq: 1,
+                    posted_at: Some(prost_types::Timestamp {
+                        seconds: 1_700_000_042,
+                        nanos: 0,
+                    }),
+                    ..ProtoTurn::default()
+                }],
+                ..ProtoDiscussion::default()
+            },
+        );
+        let (mut client, server, _fixture) =
+            crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
+        let replay = consume_discussion_event(
+            &originator_repo,
+            &mut client,
+            "acme/widgets",
+            &RepoEvent {
+                event_id: 3,
+                repo_id: "repo-1".to_string(),
+                event_type: "discussion.opened".to_string(),
+                payload_json: serde_json::json!({
+                    "discussion_id": wire_id.to_string(),
+                    "turn_id": "turn-open",
+                    "turn_seq": 1,
+                })
+                .to_string(),
+                new_state: Some(ProtoStateId {
+                    value: vec![0x11; 32],
+                }),
+                ..RepoEvent::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            replay,
+            DiscussionEventOutcome::Unchanged {
+                discussion_id: wire_id.to_string(),
+            },
+            "doorbell after adopt must not remint"
+        );
+
+        let discussion = originator_store
+            .materialize()
+            .unwrap()
+            .discussions
+            .into_values()
+            .next()
+            .unwrap();
+        assert_eq!(
+            discussion.turns.len(),
+            1,
+            "doorbell must not duplicate the first turn"
+        );
+        let mut after_doorbell: Vec<String> = originator_store
+            .operation_ids()
+            .unwrap()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        after_doorbell.sort();
+        assert_eq!(
+            after_doorbell, after_adopt,
+            "doorbell GetDiscussion must keep the adopted CollabOpId"
+        );
+
+        client.close().await;
+        server.await.unwrap();
     }
 }

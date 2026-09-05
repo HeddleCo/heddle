@@ -180,6 +180,122 @@ impl CollaborationStore {
         })
     }
 
+    /// Retire `retire` and write `write` under one lock.
+    ///
+    /// Hosted discussion sync uses this to replace an originator's local-only
+    /// turn ops with the hosted-canonical envelopes a clone would materialize
+    /// (heddle#1695). New ids are new envelopes; this does not rewrite bytes
+    /// under an existing `CollabOpId`.
+    ///
+    /// Retire-then-write crash recovery is the existing pending-commit rebuild
+    /// (`stage_pending_commit_unlocked` → `pending-commit.msgpack` →
+    /// `rebuild_index_unlocked` on next `open`).
+    pub fn replace_operations(
+        &self,
+        retire: &[CollabOpId],
+        write: &[CollaborationOperationEnvelope],
+    ) -> Result<Vec<CollaborationWriteOutcome>> {
+        if retire.is_empty() && write.is_empty() {
+            return Ok(Vec::new());
+        }
+        let decoded_writes = write
+            .iter()
+            .map(|operation| {
+                let bytes = operation.encode().map_err(codec_error)?;
+                let decoded =
+                    CollaborationOperationEnvelope::decode(&bytes).map_err(codec_error)?;
+                Ok((bytes, decoded))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let _guard = self.lock.write().map_err(lock_error)?;
+        if self.pending_commit_path().exists() {
+            let recovered = self.rebuild_index_unlocked()?;
+            self.write_index_unlocked(&recovered)?;
+            self.clear_pending_commit_unlocked()?;
+        }
+        let mut index = self.read_or_rebuild_index_unlocked()?;
+        let retire_set: BTreeSet<CollabOpId> = retire.iter().copied().collect();
+
+        for (bytes, decoded) in &decoded_writes {
+            let scope = idempotency_scope(&decoded.operation);
+            if let Some(existing) = index.idempotency.get(&scope)
+                && !retire_set.contains(existing)
+                && *existing != decoded.operation_id
+            {
+                return Err(HeddleError::InvalidObject(format!(
+                    "collaboration idempotency key already identifies {existing}"
+                )));
+            }
+            let path = self.operation_path(&decoded.operation_id);
+            match fs::read(&path) {
+                Ok(existing) if existing == *bytes => {}
+                Ok(_) => {
+                    return Err(HeddleError::InvalidObject(format!(
+                        "collaboration operation address collision at {}",
+                        decoded.operation_id
+                    )));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        for id in &retire_set {
+            self.stage_pending_commit_unlocked(*id)?;
+            let path = self.operation_path(id);
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            index.operations.remove(id);
+            for discussion_ops in index.discussions.values_mut() {
+                discussion_ops.remove(id);
+            }
+            index
+                .discussions
+                .retain(|_, discussion_ops| !discussion_ops.is_empty());
+            index.idempotency.retain(|_, existing| existing != id);
+        }
+
+        let mut outcomes = Vec::with_capacity(decoded_writes.len());
+        for (bytes, decoded) in decoded_writes {
+            let id = decoded.operation_id;
+            let scope = idempotency_scope(&decoded.operation);
+            let path = self.operation_path(&id);
+            let existed = path.exists();
+            self.stage_pending_commit_unlocked(id)?;
+            if !existed {
+                let parent = path.parent().ok_or_else(|| {
+                    HeddleError::InvalidObject(format!(
+                        "collaboration operation path has no shard directory: {}",
+                        path.display()
+                    ))
+                })?;
+                fs::create_dir_all(parent)?;
+                write_file_atomic(&path, &bytes)?;
+            }
+            index.operations.insert(id);
+            index
+                .discussions
+                .entry(decoded.operation.discussion_id)
+                .or_default()
+                .insert(id);
+            index.idempotency.insert(scope, id);
+            outcomes.push(CollaborationWriteOutcome {
+                operation_id: id,
+                disposition: if existed {
+                    CollaborationWriteDisposition::ExistingOperation
+                } else {
+                    CollaborationWriteDisposition::Created
+                },
+            });
+        }
+        self.write_index_unlocked(&index)?;
+        self.clear_pending_commit_unlocked()?;
+        Ok(outcomes)
+    }
+
     pub fn read_operation(&self, id: &CollabOpId) -> Result<Option<DecodedCollaborationOperation>> {
         let _guard = self.lock.read().map_err(lock_error)?;
         self.read_operation_unlocked(id)
@@ -537,5 +653,35 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn replace_operations_retires_old_and_indexes_new() {
+        let temp = TempDir::new().unwrap();
+        let store = CollaborationStore::open(temp.path()).unwrap();
+        let first = operation("local-only");
+        let first_id = store.write_operation(&first).unwrap().operation_id;
+        let replacement = operation("hosted-canonical");
+        let outcomes = store
+            .replace_operations(&[first_id], std::slice::from_ref(&replacement))
+            .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            outcomes[0].disposition,
+            CollaborationWriteDisposition::Created
+        );
+        let ids = store.operation_ids().unwrap();
+        assert_eq!(ids, vec![outcomes[0].operation_id]);
+        assert!(store.read_operation(&first_id).unwrap().is_none());
+        assert_eq!(
+            store
+                .read_operation(&outcomes[0].operation_id)
+                .unwrap()
+                .unwrap()
+                .operation
+                .idempotency_key,
+            replacement.idempotency_key
+        );
+        assert!(store.verify_integrity().unwrap().index_current);
     }
 }
