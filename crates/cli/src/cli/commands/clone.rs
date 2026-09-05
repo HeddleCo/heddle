@@ -29,7 +29,9 @@ use heddle_git_projection::git_core::{
 };
 use hosted_client::client::LocalSync;
 #[cfg(feature = "client")]
-use hosted_client::hosted_runtime::hosted::{HostedClient, HostedRefEntry, PullMaterialization};
+use hosted_client::hosted_runtime::hosted::{
+    HostedClient, HostedRefEntry, PullMaterialization, persist_advertised_thread_identity,
+};
 use ingest::ImportOptions;
 #[cfg(feature = "client")]
 use objects::fs_atomic::CloneDurabilityBatch;
@@ -2558,7 +2560,6 @@ fn clone_hosted_thread_not_found_advice(track_name: &str, remote_label: &str) ->
 }
 
 #[cfg(feature = "client")]
-#[cfg(feature = "client")]
 async fn persist_hosted_clone_thread_identity(
     repo: &Repository,
     client: &mut HostedClient,
@@ -2578,30 +2579,7 @@ async fn persist_hosted_clone_thread_identity(
         )?;
         return Ok(());
     }
-    persist_advertised_clone_thread_identity(repo, remote_refs, track_name, final_state)
-}
-
-#[cfg(feature = "client")]
-fn persist_advertised_clone_thread_identity(
-    repo: &Repository,
-    remote_refs: &[HostedRefEntry],
-    track_name: &str,
-    final_state: &objects::object::StateId,
-) -> Result<()> {
-    let Some(stable_id) = remote_refs
-        .iter()
-        .find(|entry| entry.is_user_thread() && entry.name == track_name)
-        .and_then(|entry| entry.thread_id.as_deref())
-        .filter(|id| !id.is_empty())
-    else {
-        return Ok(());
-    };
-    ThreadManager::new(repo.heddle_dir()).adopt_stable_identity_for_thread(
-        repo,
-        track_name,
-        stable_id,
-        *final_state,
-    )?;
+    persist_advertised_thread_identity(repo, remote_refs, track_name, final_state)?;
     Ok(())
 }
 
@@ -3033,7 +3011,7 @@ mod tests {
             Some("hosted-stable-main".to_string()),
         )];
 
-        persist_advertised_clone_thread_identity(&repo, &remote_refs, "main", &state)
+        persist_advertised_thread_identity(&repo, &remote_refs, "main", &state)
             .expect("persist advertised identity");
 
         let persisted = ThreadManager::new(repo.heddle_dir())

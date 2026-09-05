@@ -70,7 +70,9 @@ use prost::Message;
 pub use session::{HostedAuthMode, HostedSession};
 #[cfg(test)]
 pub(crate) use sync::PullBootstrapMetadata;
-pub use sync::{HostedRefEntry, decode_pull_bootstrap, decode_pull_refs};
+pub use sync::{
+    HostedRefEntry, decode_pull_bootstrap, decode_pull_refs, persist_advertised_thread_identity,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RenewableAuthorityCredential {

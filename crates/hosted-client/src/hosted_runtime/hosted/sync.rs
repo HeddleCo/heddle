@@ -509,6 +509,33 @@ impl HostedRefEntry {
     }
 }
 
+/// Persist the ListRefs-advertised stable id as the local thread identity.
+///
+/// Clone uses this when GetThread is missing; tests drive the same helper so
+/// a later push cannot mint a different UUIDv7.
+pub fn persist_advertised_thread_identity(
+    repo: &Repository,
+    remote_refs: &[HostedRefEntry],
+    track_name: &str,
+    final_state: &StateId,
+) -> objects::error::Result<()> {
+    let Some(stable_id) = remote_refs
+        .iter()
+        .find(|entry| entry.is_user_thread() && entry.name == track_name)
+        .and_then(|entry| entry.thread_id.as_deref())
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(());
+    };
+    ThreadManager::new(repo.heddle_dir()).adopt_stable_identity_for_thread(
+        repo,
+        track_name,
+        stable_id,
+        *final_state,
+    )?;
+    Ok(())
+}
+
 impl PullObjectMix {
     fn record(&mut self, obj_type: ObjectType) {
         match obj_type.bucket() {
@@ -4384,9 +4411,19 @@ mod native_exchange_tests {
             .expect("clone init mints its own main identity");
         assert_ne!(minted.id, hosted_id);
 
-        manager
-            .adopt_stable_identity_for_thread(&clone_repo, "main", hosted_id, clone_state)
-            .unwrap();
+        persist_advertised_thread_identity(
+            &clone_repo,
+            &[HostedRefEntry::from_advertised(
+                "main".to_string(),
+                clone_state,
+                true,
+                format!("heddle:{}", clone_state.to_string_full()),
+                Some(hosted_id.to_string()),
+            )],
+            "main",
+            &clone_state,
+        )
+        .expect("clone path must adopt the advertised ListRefs thread_id");
 
         let _ = client
             .push_with_expected_head_profiled(
