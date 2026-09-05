@@ -1125,7 +1125,7 @@ mod tests {
                 .expect("membership")
                 .as_deref(),
             Some("ax-only"),
-            "accepting Private{ax-only} must stamp Restricted(ax-only), not all-Private Owner"
+            "accepting Private{{ax-only}} must stamp Restricted(ax-only), not all-Private Owner"
         );
 
         let mut other = sample_record(
