@@ -93,6 +93,14 @@ name = "heddle-git-projection"
 release = true
 
 [[package]]
+# New crate (ADR 0051 env-store). heddle-verbs/heddle-cli depend on it, so it
+# must publish. First publish needs a manual `cargo publish -p heddle-env-store`
+# with owner crates.io perms — the CI token cannot create a new crate (see the
+# treadle-schema note above); once it exists, this keeps it in the release set.
+name = "heddle-env-store"
+release = true
+
+[[package]]
 name = "heddle-verbs"
 release = true
 

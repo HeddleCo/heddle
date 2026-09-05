@@ -3,13 +3,14 @@
 use heddle_object_model::object::{Attribution, FacetKind};
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{CiphertextId, RecipientId, RuntimeProfileId, RuntimeProfileStateId};
+use crate::ids::{CiphertextId, RecipientId, EnvProfileId, EnvProfileVersionId};
 
-pub const RUNTIME_PROFILE_SCHEMA_VERSION: u16 = 1;
-pub const LIFECYCLE_SIGNING_DOMAIN: &[u8] = b"hd-runtime-lifecycle-v1";
-pub const RECIPIENT_ENDORSE_DOMAIN: &[u8] = b"hd-runtime-recipient-v1";
-pub const SLOT_AAD_DOMAIN: &[u8] = b"heddle-runtime-slot-v1";
-pub const AUDIT_SIGNING_DOMAIN: &[u8] = b"hd-runtime-audit-v1";
+pub const ENV_STORE_SCHEMA_VERSION: u16 = 1;
+pub const LIFECYCLE_SIGNING_DOMAIN: &[u8] = b"heddle-env-lifecycle-v1";
+pub const RECIPIENT_ENDORSE_DOMAIN: &[u8] = b"heddle-env-recipient-v1";
+pub const SLOT_AAD_DOMAIN: &[u8] = b"heddle-env-slot-v1";
+pub const AUDIT_SIGNING_DOMAIN: &[u8] = b"heddle-env-audit-v1";
+pub const WRAP_AAD_DOMAIN: &[u8] = b"heddle-env-wrap-aad-v1";
 
 /// Paths source capture must refuse to ingest as ordinary files once a
 /// materialization path exists. `.heddleignore` is defense in depth only.
@@ -43,10 +44,26 @@ impl LifecycleStatus {
         matches!(self, Self::Staged | Self::Active | Self::Superseded)
     }
 
+    /// Monotonic position in the lifecycle. Transitions only ever move forward
+    /// (`can_transition_to`), so the most-advanced `to` among a version's
+    /// signed records is its current status — robust to same-millisecond
+    /// records that a timestamp tiebreak could order wrong.
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Staged => 0,
+            Self::Active => 1,
+            Self::Superseded => 2,
+            Self::Revoked => 3,
+            Self::PurgeEligible => 4,
+            Self::Purged => 5,
+        }
+    }
+
     pub const fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
             (Self::Staged, Self::Active)
+                | (Self::Staged, Self::Revoked)
                 | (Self::Active, Self::Superseded)
                 | (Self::Active, Self::Revoked)
                 | (Self::Superseded, Self::Revoked)
@@ -132,12 +149,12 @@ pub struct SlotRecord {
 
 /// Mutable typed root. Atomically replaced; versions stay immutable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeProfileRef {
+pub struct EnvProfileRef {
     pub schema_version: u16,
-    pub profile_id: RuntimeProfileId,
+    pub profile_id: EnvProfileId,
     pub name: String,
     pub facet: FacetKindWire,
-    pub head: RuntimeProfileStateId,
+    pub head: EnvProfileVersionId,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub attribution: Attribution,
@@ -157,11 +174,11 @@ impl FacetKindWire {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeProfileState {
+pub struct EnvProfileVersion {
     pub schema_version: u16,
-    pub state_id: RuntimeProfileStateId,
-    pub profile_id: RuntimeProfileId,
-    pub parent: Option<RuntimeProfileStateId>,
+    pub state_id: EnvProfileVersionId,
+    pub profile_id: EnvProfileId,
+    pub parent: Option<EnvProfileVersionId>,
     pub version: u64,
     pub lifecycle: LifecycleStatus,
     pub slots: Vec<SlotRecord>,
@@ -175,8 +192,8 @@ pub struct RuntimeProfileState {
 pub struct LifecycleRecord {
     pub schema_version: u16,
     pub record_id: crate::ids::LifecycleRecordId,
-    pub profile_id: RuntimeProfileId,
-    pub state_id: RuntimeProfileStateId,
+    pub profile_id: EnvProfileId,
+    pub state_id: EnvProfileVersionId,
     pub from: Option<LifecycleStatus>,
     pub to: LifecycleStatus,
     pub occurred_at_ms: i64,
@@ -199,11 +216,13 @@ pub struct SlotMetadata {
 pub struct AuditRecord {
     pub schema_version: u16,
     pub record_id: crate::ids::AuditRecordId,
-    pub profile_id: Option<RuntimeProfileId>,
+    pub profile_id: Option<EnvProfileId>,
     pub profile_name: String,
-    pub state_id: Option<RuntimeProfileStateId>,
+    pub state_id: Option<EnvProfileVersionId>,
     pub slots: Vec<String>,
     pub purpose: String,
+    /// Who requested the decrypt (e.g. the IPC client identity). Signed.
+    pub caller: String,
     pub event: AuditEventKind,
     pub reason: Option<String>,
     pub occurred_at_ms: i64,
@@ -232,18 +251,37 @@ impl AuditEventKind {
 /// Profile listing row. No slot values.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileMetadata {
-    pub profile_id: RuntimeProfileId,
+    pub profile_id: EnvProfileId,
     pub name: String,
     pub facet: FacetKind,
-    pub head: RuntimeProfileStateId,
+    pub head: EnvProfileVersionId,
     pub version: u64,
     pub lifecycle: LifecycleStatus,
     pub slot_names: Vec<String>,
 }
 
-pub fn slot_aad(profile_id: RuntimeProfileId, slot: &str) -> Vec<u8> {
+pub fn slot_aad(profile_id: EnvProfileId, slot: &str) -> Vec<u8> {
     let mut aad = SLOT_AAD_DOMAIN.to_vec();
     aad.extend_from_slice(profile_id.as_bytes());
+    aad.extend_from_slice(slot.as_bytes());
+    aad
+}
+
+/// AAD binding a wrapped DEK to `(recipient, profile, slot, version)` so a wrap
+/// cannot be transplanted to another recipient, profile, slot, or version
+/// (credential-rollback / injection defense). Length-prefixed fields keep the
+/// concatenation unambiguous.
+pub fn wrap_aad(
+    recipient_id: RecipientId,
+    profile_id: EnvProfileId,
+    slot: &str,
+    version: u64,
+) -> Vec<u8> {
+    let mut aad = WRAP_AAD_DOMAIN.to_vec();
+    aad.extend_from_slice(recipient_id.as_bytes());
+    aad.extend_from_slice(profile_id.as_bytes());
+    aad.extend_from_slice(&version.to_be_bytes());
+    aad.extend_from_slice(&(slot.len() as u64).to_be_bytes());
     aad.extend_from_slice(slot.as_bytes());
     aad
 }

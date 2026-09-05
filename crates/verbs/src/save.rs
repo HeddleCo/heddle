@@ -563,7 +563,7 @@ pub fn capture(
         ));
     }
 
-    if let Some(path) = runtime_profile::reserved_materialization_on_disk(repo.root()) {
+    if let Some(path) = env_store::reserved_materialization_on_disk(repo.root()) {
         return Err(capture_refusal(
             "reserved_materialization_path",
             format!("Refusing to capture reserved path `{path}`"),

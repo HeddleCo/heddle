@@ -28,7 +28,7 @@ members = [
     "crates/wire",
     "crates/refs",
     "crates/repo",
-    "crates/runtime-profile",
+    "crates/env-store",
     "crates/semantic",
     "crates/semantic-recovery",
     "crates/state-review",
@@ -37,7 +37,7 @@ default-members = ["crates/cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.20.2"
+version = "0.20.3"
 edition = "2024"
 authors = ["Luke"]
 description = "An AI-native version control system"
@@ -47,7 +47,7 @@ keywords = ["vcs", "version-control", "ai", "git"]
 categories = ["development-tools"]
 
 [workspace.dependencies]
-aes-gcm = "0.10"
+aes-gcm = { version = "0.10", features = ["zeroize"] }
 anyhow = "1"
 api = { package = "heddle-api", version = "0.27.0" }
 async-trait = "0.1"
@@ -154,6 +154,7 @@ wait-timeout = "0.2"
 webpki-roots = "1.0"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 windows-sys = "0.61"
+zeroize = { version = "1", features = ["zeroize_derive"] }
 zstd = "0.13"
 
 # Internal heddle crates. Declared here so a release version bump only edits
@@ -164,35 +165,35 @@ zstd = "0.13"
 # Cargo forbids a member from turning a workspace dependency's defaults off, so
 # the baseline lives here and the few members that want the defaults re-list
 # them explicitly under `features`.
-treadle-schema = { path = "crates/treadle-schema", version = "0.20.2" }
-heddle-cli-args = { path = "crates/cli-args", version = "0.20.2", default-features = false }
-heddle-cli-contract = { path = "crates/cli-contract", version = "0.20.2", default-features = false }
-heddle-cli-render = { path = "crates/cli-render", version = "0.20.2", default-features = false }
-heddle-format = { path = "crates/format", version = "0.20.2" }
-heddle-fs-prims = { path = "crates/fs-prims", version = "0.20.2" }
-heddle-git-projection = { path = "crates/git-projection", version = "0.20.2", default-features = false }
-heddle-object-model = { path = "crates/object-model", version = "0.20.2" }
-heddle-pack = { path = "crates/pack", version = "0.20.2" }
-heddle-perf-contract = { path = "crates/perf-contract", version = "0.20.2" }
-agent-relay = { path = "crates/agent-relay", package = "heddle-agent-relay", version = "0.20.2", default-features = false }
-ci-config = { path = "crates/ci-config", package = "heddle-ci-config", version = "0.20.2" }
-ci-engine = { path = "crates/ci-engine", package = "heddle-ci-engine", version = "0.20.2" }
-config = { path = "crates/config", package = "heddle-config", version = "0.20.2" }
-crypto = { path = "crates/crypto", package = "heddle-crypto", version = "0.20.2" }
-hosted-client = { path = "crates/hosted-client", package = "heddle-hosted-client", version = "0.20.2", default-features = false }
-ingest = { path = "crates/ingest", package = "heddle-ingest", version = "0.20.2", default-features = false }
-merge = { path = "crates/merge", package = "heddle-merge", version = "0.20.2" }
-mount = { path = "crates/mount", package = "heddle-mount", version = "0.20.2" }
-objects = { path = "crates/objects", package = "heddle-objects", version = "0.20.2" }
-oplog = { path = "crates/oplog", package = "heddle-oplog", version = "0.20.2", default-features = false }
-refs = { path = "crates/refs", package = "heddle-refs", version = "0.20.2" }
-repo = { path = "crates/repo", package = "heddle-repo", version = "0.20.2", default-features = false }
-heddle-runtime-profile = { path = "crates/runtime-profile", version = "0.20.2" }
-semantic = { path = "crates/semantic", package = "heddle-semantic", version = "0.20.2" }
-semantic-recovery = { path = "crates/semantic-recovery", package = "heddle-semantic-recovery", version = "0.20.2" }
-state_review = { path = "crates/state-review", package = "heddle-state-review", version = "0.20.2" }
-verbs = { path = "crates/verbs", package = "heddle-verbs", version = "0.20.2", default-features = false }
-wire = { path = "crates/wire", package = "heddle-wire", version = "0.20.2", default-features = false }
+treadle-schema = { path = "crates/treadle-schema", version = "0.20.3" }
+heddle-cli-args = { path = "crates/cli-args", version = "0.20.3", default-features = false }
+heddle-cli-contract = { path = "crates/cli-contract", version = "0.20.3", default-features = false }
+heddle-cli-render = { path = "crates/cli-render", version = "0.20.3", default-features = false }
+heddle-format = { path = "crates/format", version = "0.20.3" }
+heddle-fs-prims = { path = "crates/fs-prims", version = "0.20.3" }
+heddle-git-projection = { path = "crates/git-projection", version = "0.20.3", default-features = false }
+heddle-object-model = { path = "crates/object-model", version = "0.20.3" }
+heddle-pack = { path = "crates/pack", version = "0.20.3" }
+heddle-perf-contract = { path = "crates/perf-contract", version = "0.20.3" }
+agent-relay = { path = "crates/agent-relay", package = "heddle-agent-relay", version = "0.20.3", default-features = false }
+ci-config = { path = "crates/ci-config", package = "heddle-ci-config", version = "0.20.3" }
+ci-engine = { path = "crates/ci-engine", package = "heddle-ci-engine", version = "0.20.3" }
+config = { path = "crates/config", package = "heddle-config", version = "0.20.3" }
+crypto = { path = "crates/crypto", package = "heddle-crypto", version = "0.20.3" }
+hosted-client = { path = "crates/hosted-client", package = "heddle-hosted-client", version = "0.20.3", default-features = false }
+ingest = { path = "crates/ingest", package = "heddle-ingest", version = "0.20.3", default-features = false }
+merge = { path = "crates/merge", package = "heddle-merge", version = "0.20.3" }
+mount = { path = "crates/mount", package = "heddle-mount", version = "0.20.3" }
+objects = { path = "crates/objects", package = "heddle-objects", version = "0.20.3" }
+oplog = { path = "crates/oplog", package = "heddle-oplog", version = "0.20.3", default-features = false }
+refs = { path = "crates/refs", package = "heddle-refs", version = "0.20.3" }
+repo = { path = "crates/repo", package = "heddle-repo", version = "0.20.3", default-features = false }
+heddle-env-store = { path = "crates/env-store", version = "0.20.3" }
+semantic = { path = "crates/semantic", package = "heddle-semantic", version = "0.20.3" }
+semantic-recovery = { path = "crates/semantic-recovery", package = "heddle-semantic-recovery", version = "0.20.3" }
+state_review = { path = "crates/state-review", package = "heddle-state-review", version = "0.20.3" }
+verbs = { path = "crates/verbs", package = "heddle-verbs", version = "0.20.3", default-features = false }
+wire = { path = "crates/wire", package = "heddle-wire", version = "0.20.3", default-features = false }
 
 [profile.dev]
 debug = "line-tables-only"

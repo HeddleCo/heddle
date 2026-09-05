@@ -7,7 +7,7 @@ use std::process::{Command, Output};
 use crypto::Ed25519Signer;
 use objects::object::{Attribution, Principal};
 use repo::Repository;
-use runtime_profile::{RuntimeProfileStore, SlotWrite};
+use env_store::{EnvStore, SlotWrite};
 use tempfile::TempDir;
 
 fn isolated_heddle(cwd: &Path, home: &Path, args: &[&str]) -> Command {
@@ -33,7 +33,7 @@ fn run_heddle(cwd: &Path, home: &Path, args: &[&str]) -> Output {
 
 fn seed_profile(repo: &Path, name: &str, slot: &str, value: &str) {
     let opened = Repository::open(repo).expect("open");
-    let store = RuntimeProfileStore::open(opened.heddle_dir()).expect("store");
+    let store = EnvStore::open(opened.heddle_dir()).expect("store");
     let signer = Ed25519Signer::generate().expect("signer");
     let (recipient, _secret) = store
         .create_software_recipient(&signer, 1)
