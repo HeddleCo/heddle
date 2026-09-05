@@ -172,8 +172,7 @@ impl Repository {
             return Err(HeddleError::InvalidObject(format!(
                 "hosted metadata signer is not trusted ({}:{})",
                 signature.algorithm, signature.public_key
-            ))
-            .into());
+            )));
         };
         self.verify_metadata_signature_bytes(
             payload,
