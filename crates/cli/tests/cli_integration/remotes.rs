@@ -382,40 +382,25 @@ fn native_remote_add_rejects_local_git_remote_before_configuring_default() {
     assert!(remotes.default_name().is_none());
 }
 
-/// Field study 2026-08-19 on native 0.12.0: these exact argv lines are the
-/// done-criteria. `remote add` used to store `heddle://api.heddle.sh/...`,
-/// then `push`/`pull` printed `invalid remote url` and exited 74.
+/// Field study 2026-08-19 on native 0.12.0: `remote add` used to store
+/// `heddle://api.heddle.sh/...`, then `push`/`pull` printed
+/// `invalid remote url` and exited 74. Hosted remotes now use that
+/// scheme, so add must persist the URL and later push/pull must route
+/// as hosted — never the invalid-url rejection.
 #[test]
-fn field_study_heddle_scheme_is_refused_at_add_not_at_push() {
+fn field_study_heddle_scheme_is_accepted_at_add_and_routed_on_push() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     let repo = Repository::open(temp.path()).expect("open native repo");
     let url = "heddle://api.heddle.sh/luke/tiny-notes";
 
-    let add = heddle_output(&["remote", "add", "origin", url], Some(temp.path()))
-        .expect("invoke field-study remote add");
-    let add_stderr = String::from_utf8_lossy(&add.stderr);
-    assert_eq!(
-        add.status.code(),
-        Some(74),
-        "field-study invalid URL must stay exit 74: stdout={} stderr={add_stderr}",
-        String::from_utf8_lossy(&add.stdout)
-    );
-    assert!(
-        add_stderr.contains(&format!("invalid remote url: {url}")),
-        "add must name the field-study URL: {add_stderr}"
-    );
-    assert!(
-        !add_stderr.contains("heddle capture"),
-        "remotes refusal Next must not be capture: {add_stderr}"
-    );
-    assert!(
-        RemoteConfig::open(&repo)
-            .expect("open remotes")
-            .list()
-            .is_empty(),
-        "field-study URL must not be stored"
-    );
+    heddle(&["remote", "add", "origin", url], Some(temp.path()))
+        .expect("hosted heddle:// remote add");
+    let stored = RemoteConfig::open(&repo)
+        .expect("open remotes")
+        .get("origin")
+        .expect("origin stored");
+    assert_eq!(stored.url, url, "hosted heddle:// URL must be persisted");
 
     for command in ["push", "pull"] {
         let output = heddle_output(&[command], Some(temp.path()))
@@ -423,7 +408,7 @@ fn field_study_heddle_scheme_is_refused_at_add_not_at_push() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             !stderr.contains(&format!("invalid remote url: {url}")),
-            "{command} must not see a stored field-study URL: {stderr}"
+            "{command} must route the stored hosted URL, not reject it as invalid: {stderr}"
         );
     }
 }
