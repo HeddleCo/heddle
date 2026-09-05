@@ -525,13 +525,14 @@ impl ThreadManager {
                 "cannot adopt an empty stable identity for thread '{thread}'"
             )));
         }
-        if let Some(mut record) = self.find_record_by_thread(thread)? {
-            if record.id == stable_id {
+        match self.find_record_by_thread(thread)? {
+            Some(mut record) if record.id == stable_id => {
                 record.current_state = Some(current_state.to_string_full());
                 record.updated_at = Utc::now();
                 self.save_record(&record)?;
                 return SyncedThreadMetadata::from_record(repo, &record, Some(current_state));
             }
+            _ => {}
         }
 
         let adopted =
@@ -1108,12 +1109,10 @@ mod adopt_identity_tests {
             Some(main_state.to_string_full().as_str())
         );
         assert_ne!(saved.id, "main");
-        assert!(
-            saved
-                .integration_policy_result
-                .manual_resolution_state
-                .is_none()
-        );
+        assert!(saved
+            .integration_policy_result
+            .manual_resolution_state
+            .is_none());
         assert!(!saved.integration_policy_result.conflicts_resolved_manually);
         assert!(manager.load_record(&local.id).unwrap().is_none());
     }
