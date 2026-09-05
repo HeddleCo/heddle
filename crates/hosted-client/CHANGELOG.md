@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Decode PullReady folded refs as a weft 5-tuple
+  `(name, state_id, is_thread, revision_address, thread_id)` and the legacy
+  4-tuple. Adopt the folded `thread_id` when present; keep live ListRefs
+  only as fallback when the fold omits it.
 - Sign `CreateDeviceAuthorization` and `RegisterPublicKey` with the enrolling
   device key (`principal:device-key:<hex>`) and send only
   `device_proof_public_key` on RegisterPublicKey (weft#2047 one-key cutover).

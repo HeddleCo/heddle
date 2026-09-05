@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    fmt,
     io::{self, Seek, SeekFrom, Write},
     sync::{
         Arc, Mutex,
@@ -35,6 +36,10 @@ use objects::{
 use repo::{
     GitRefKind as ClassifiedGitRefKind, GitRefName, Repository, RepositoryCapability,
     RevisionAddress, SyncedThreadMetadata, ThreadManager,
+};
+use serde::{
+    Deserialize,
+    de::{self, Deserializer, IgnoredAny, Visitor},
 };
 use sley::{
     ObjectId as GitObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
@@ -85,6 +90,69 @@ type PullRefsPayload = (
     Option<Vec<u8>>,
     Vec<(String, Vec<u8>, bool, String)>,
 );
+type DecodedPullRefsPayload = (String, Option<Vec<u8>>, Vec<FoldedRefRecord>);
+
+/// weft#2055 folds `(name, state_id, is_thread, revision_address, thread_id)`.
+/// heddle#1702 still advertised the legacy 4-tuple. Accept both; empty
+/// `thread_id` stays absent so live ListRefs can still supply it.
+struct FoldedRefRecord {
+    name: String,
+    state_id: Vec<u8>,
+    is_thread: bool,
+    revision_address: String,
+    thread_id: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for FoldedRefRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(FoldedRefRecordVisitor)
+    }
+}
+
+struct FoldedRefRecordVisitor;
+
+impl<'de> Visitor<'de> for FoldedRefRecordVisitor {
+    type Value = FoldedRefRecord;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a folded pull ref 4-tuple or 5-tuple")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: de::SeqAccess<'de>,
+    {
+        let name = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+        let state_id = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+        let is_thread = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(2, &self))?;
+        let revision_address = seq
+            .next_element()?
+            .ok_or_else(|| de::Error::invalid_length(3, &self))?;
+        let thread_id = match seq.next_element::<Option<String>>()? {
+            None => None,
+            Some(value) => value.filter(|id| !id.is_empty()),
+        };
+        if seq.next_element::<IgnoredAny>()?.is_some() {
+            return Err(de::Error::invalid_length(6, &self));
+        }
+        Ok(FoldedRefRecord {
+            name,
+            state_id,
+            is_thread,
+            revision_address,
+            thread_id,
+        })
+    }
+}
 type PullRepositoryInitializer<'a> =
     Box<dyn FnOnce(&PullReady) -> Result<Repository, ProtocolError> + 'a>;
 
@@ -217,21 +285,21 @@ pub fn decode_pull_refs(checkpoint: &[u8]) -> Result<Option<PullBootstrapRefs>, 
         })?;
     let payload = hex::decode(payload)
         .map_err(|error| ProtocolError::InvalidState(format!("decode pull refs: {error}")))?;
-    let (head_thread, head_state, refs): PullRefsPayload = rmp_serde::from_slice(&payload)
+    let (head_thread, head_state, refs): DecodedPullRefsPayload = rmp_serde::from_slice(&payload)
         .map_err(|error| ProtocolError::InvalidState(format!("decode pull refs: {error}")))?;
     let head_state = head_state
         .map(|value| decode_bootstrap_state_id(value, "head state"))
         .transpose()?;
     let refs = refs
         .into_iter()
-        .map(|(name, state_id, is_thread, revision_address)| {
-            let state_id = decode_bootstrap_state_id(state_id, "ref state")?;
+        .map(|record| {
+            let state_id = decode_bootstrap_state_id(record.state_id, "ref state")?;
             Ok(HostedRefEntry::from_advertised(
-                name,
+                record.name,
                 state_id,
-                is_thread,
-                revision_address,
-                None,
+                record.is_thread,
+                record.revision_address,
+                record.thread_id,
             ))
         })
         .collect::<Result<Vec<_>, ProtocolError>>()?;
@@ -544,8 +612,8 @@ pub fn persist_advertised_thread_identity(
 }
 
 /// Persist from folded PullReady refs when they advertise an id; otherwise
-/// from a live ListRefs advertisement. Folded refs currently decode with
-/// `thread_id: None`.
+/// from a live ListRefs advertisement. weft#2055 folds `thread_id` as the
+/// fifth tuple element; older 4-tuple advertisements omit it.
 pub fn persist_advertised_thread_identity_with_live_fallback(
     repo: &Repository,
     folded_refs: &[HostedRefEntry],

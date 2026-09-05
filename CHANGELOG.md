@@ -48,6 +48,11 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Fixed
 
+- **Hosted clone accepts weft PullReady 5-tuple refs.** Folded refs decode
+  `(name, state_id, is_thread, revision_address, thread_id)` and still accept
+  the legacy 4-tuple. Clone adopts the folded `thread_id` when present and
+  only ListRefs-falls-back when the fold omits it (weft#2055, heddle#1702).
+
 - **Format-4 agent states keep their signatures and pack ids.** Verification
   and re-signing use the hash for the accepted stored id. Compact HCS2
   repack accepts that pre-cursor id. Claude SessionEnd relays

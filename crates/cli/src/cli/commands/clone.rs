@@ -2580,8 +2580,8 @@ async fn persist_hosted_clone_thread_identity(
         )?;
         return Ok(());
     }
-    // Folded PullReady refs decode with `thread_id: None`. Refresh live
-    // ListRefs when the fold omitted the advertised stable id.
+    // Prefer the folded PullReady thread_id when present. Refresh live
+    // ListRefs only when the fold omitted the advertised stable id.
     let live_refs = if advertised_user_thread_id(remote_refs, track_name).is_none() {
         Some(client.list_refs_with_revision_addresses(repo_path).await?)
     } else {
