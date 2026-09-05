@@ -3536,7 +3536,11 @@ mod tests {
             .into_values()
             .next()
             .unwrap();
-        assert_eq!(discussion.turns.len(), 1, "doorbell must not duplicate the first turn");
+        assert_eq!(
+            discussion.turns.len(),
+            1,
+            "doorbell must not duplicate the first turn"
+        );
         let mut after_doorbell: Vec<String> = originator_store
             .operation_ids()
             .unwrap()
