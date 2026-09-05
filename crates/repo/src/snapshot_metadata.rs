@@ -141,8 +141,12 @@ pub fn summarize_verification(verification: Option<&Verification>) -> ThreadVeri
     }
 }
 
-/// Re-evaluate freshness against the thread's target. Mirrors the
-/// CLI's `refresh_thread_freshness`.
+/// Re-evaluate freshness against the thread's target.
+///
+/// A persisted default `main` has no target by design — it is the
+/// integration tip — so it is Current. A feature thread with
+/// `target_thread: None` (detached-HEAD start) stays Unknown so sync
+/// fails closed on `missing_target_thread`.
 pub fn refresh_thread_freshness(repo: &Repository, thread: &mut Thread) -> Result<(), HeddleError> {
     thread.freshness = if let Some(target_thread) = thread.target_thread.as_deref() {
         if let Some(target_state) = repo.refs().get_thread(&ThreadName::from(target_thread))? {
@@ -154,6 +158,8 @@ pub fn refresh_thread_freshness(repo: &Repository, thread: &mut Thread) -> Resul
         } else {
             ThreadFreshness::Unknown
         }
+    } else if thread.thread == "main" {
+        ThreadFreshness::Current
     } else {
         ThreadFreshness::Unknown
     };

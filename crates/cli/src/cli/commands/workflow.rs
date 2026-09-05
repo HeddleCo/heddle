@@ -129,14 +129,14 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
             operator: OperatorCommandOutput {
                 status: "current".to_string(),
                 action: OperatorAction::Sync,
-                message: format!("Thread '{}' is already current", thread.id),
+                message: format!("Thread '{}' is already current", thread.thread),
                 blockers: vec![],
                 warnings: Vec::new(),
                 next_action: recommended_action.clone(),
                 recommended_action,
             },
             trust,
-            thread: thread.id.clone(),
+            thread: thread.thread.clone(),
             current_state: thread.current_state.clone(),
             chosen_path: "no_op".to_string(),
         }
@@ -171,14 +171,14 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
             operator: OperatorCommandOutput {
                 status: "blocked".to_string(),
                 action: OperatorAction::Sync,
-                message: format!("Thread '{}' needs manual sync", thread.id),
+                message: format!("Thread '{}' needs manual sync", thread.thread),
                 blockers: stale_report.blockers.clone(),
                 warnings: Vec::new(),
                 next_action: non_empty_next_action(&recommended_action),
                 recommended_action: non_empty_next_action(&recommended_action),
             },
             trust,
-            thread: thread.id.clone(),
+            thread: thread.thread.clone(),
             current_state: thread.current_state.clone(),
             chosen_path: "blocked".to_string(),
         }
@@ -211,14 +211,14 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
                     operator: OperatorCommandOutput {
                         status: "refreshed".to_string(),
                         action: OperatorAction::Sync,
-                        message: format!("Refreshed thread '{}'", refreshed.id),
+                        message: format!("Refreshed thread '{}'", refreshed.thread),
                         blockers: vec![],
                         warnings: Vec::new(),
                         next_action: recommended_action.clone(),
                         recommended_action,
                     },
                     trust,
-                    thread: refreshed.id.clone(),
+                    thread: refreshed.thread.clone(),
                     current_state: refreshed.current_state.clone(),
                     chosen_path: "refresh".to_string(),
                 }
@@ -242,14 +242,17 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
                     operator: OperatorCommandOutput {
                         status: "blocked".to_string(),
                         action: OperatorAction::Sync,
-                        message: format!("Thread '{}' has merge conflicts to resolve", thread.id),
+                        message: format!(
+                            "Thread '{}' has merge conflicts to resolve",
+                            thread.thread
+                        ),
                         blockers: stale_report.blockers.clone(),
                         warnings: Vec::new(),
                         next_action: Some(recommended_action.clone()),
                         recommended_action: Some(recommended_action),
                     },
                     trust,
-                    thread: thread.id.clone(),
+                    thread: thread.thread.clone(),
                     current_state: thread.current_state.clone(),
                     chosen_path: "blocked".to_string(),
                 }
