@@ -30,7 +30,8 @@ use heddle_git_projection::git_core::{
 use hosted_client::client::LocalSync;
 #[cfg(feature = "client")]
 use hosted_client::hosted_runtime::hosted::{
-    HostedClient, HostedRefEntry, PullMaterialization, persist_advertised_thread_identity,
+    HostedClient, HostedRefEntry, PullMaterialization, advertised_user_thread_id,
+    persist_advertised_thread_identity_with_live_fallback,
 };
 use ingest::ImportOptions;
 #[cfg(feature = "client")]
@@ -2579,7 +2580,20 @@ async fn persist_hosted_clone_thread_identity(
         )?;
         return Ok(());
     }
-    persist_advertised_thread_identity(repo, remote_refs, track_name, final_state)?;
+    // Folded PullReady refs decode with `thread_id: None`. Refresh live
+    // ListRefs when the fold omitted the advertised stable id.
+    let live_refs = if advertised_user_thread_id(remote_refs, track_name).is_none() {
+        Some(client.list_refs_with_revision_addresses(repo_path).await?)
+    } else {
+        None
+    };
+    persist_advertised_thread_identity_with_live_fallback(
+        repo,
+        remote_refs,
+        live_refs.as_deref(),
+        track_name,
+        final_state,
+    )?;
     Ok(())
 }
 
@@ -3011,8 +3025,62 @@ mod tests {
             Some("hosted-stable-main".to_string()),
         )];
 
-        persist_advertised_thread_identity(&repo, &remote_refs, "main", &state)
-            .expect("persist advertised identity");
+        persist_advertised_thread_identity_with_live_fallback(
+            &repo,
+            &remote_refs,
+            None,
+            "main",
+            &state,
+        )
+        .expect("persist advertised identity");
+
+        let persisted = ThreadManager::new(repo.heddle_dir())
+            .find_record_by_thread("main")
+            .unwrap()
+            .expect("clone must persist a main record");
+        assert_eq!(persisted.id, "hosted-stable-main");
+        assert_ne!(persisted.id, minted.id);
+        assert_ne!(persisted.id, "main");
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_clone_refreshes_list_refs_when_folded_refs_omit_thread_id() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let repo = Repository::init_default(temp.path()).expect("init");
+        std::fs::write(temp.path().join("tracked.txt"), b"cloned\n").unwrap();
+        let state = repo
+            .snapshot(Some("seed".into()), None)
+            .expect("snapshot")
+            .state_id;
+        let minted = ThreadManager::new(repo.heddle_dir())
+            .find_record_by_thread("main")
+            .unwrap()
+            .expect("init persists main");
+        let folded_refs = vec![HostedRefEntry::from_advertised(
+            "main".to_string(),
+            state,
+            true,
+            format!("heddle:{}", state.to_string_full()),
+            None,
+        )];
+        let live_refs = vec![HostedRefEntry::from_advertised(
+            "main".to_string(),
+            state,
+            true,
+            format!("heddle:{}", state.to_string_full()),
+            Some("hosted-stable-main".to_string()),
+        )];
+
+        assert!(advertised_user_thread_id(&folded_refs, "main").is_none());
+        persist_advertised_thread_identity_with_live_fallback(
+            &repo,
+            &folded_refs,
+            Some(&live_refs),
+            "main",
+            &state,
+        )
+        .expect("persist from live ListRefs when the fold omitted thread_id");
 
         let persisted = ThreadManager::new(repo.heddle_dir())
             .find_record_by_thread("main")

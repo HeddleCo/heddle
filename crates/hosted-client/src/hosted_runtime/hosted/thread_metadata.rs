@@ -9,6 +9,23 @@ use objects::{object::StateId, store::ObjectStore};
 use repo::{Repository, SyncedThreadMetadata};
 use wire::ProtocolError;
 
+/// Convert a GetThread summary, treating an empty `thread_id` as absent.
+///
+/// weft `native_thread_summary` historically hardcodes an empty
+/// `thread_id`. Clone/pull then fall back to ListRefs instead of failing
+/// with "metadata is missing its stable identity".
+pub(super) fn try_from_summary(
+    repo: &Repository,
+    remote_thread: &str,
+    pulled_state: StateId,
+    summary: ThreadSummary,
+) -> Result<Option<SyncedThreadMetadata>, ProtocolError> {
+    if summary.thread_id.is_empty() {
+        return Ok(None);
+    }
+    from_summary(repo, remote_thread, pulled_state, summary).map(Some)
+}
+
 pub(super) fn from_summary(
     repo: &Repository,
     remote_thread: &str,
@@ -200,7 +217,7 @@ mod tests {
     use repo::Repository;
     use tempfile::TempDir;
 
-    use super::from_summary;
+    use super::{from_summary, try_from_summary};
 
     #[test]
     fn hosted_thread_summary_rehydrates_managed_metadata_at_pulled_tip() {
@@ -231,5 +248,33 @@ mod tests {
         assert_eq!(metadata.state, repo::ThreadState::Ready);
         assert_eq!(metadata.current_state, Some(tip.state_id.short()));
         assert_eq!(metadata.changed_paths, vec!["runner.txt"]);
+    }
+
+    #[test]
+    fn empty_get_thread_thread_id_is_treated_as_absent() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let tip = repo
+            .refs()
+            .get_thread(&objects::object::ThreadName::new("main"))
+            .unwrap()
+            .expect("init seeds main");
+        let summary = ThreadSummary {
+            name: "main".to_string(),
+            thread_id: String::new(),
+            ..ThreadSummary::default()
+        };
+
+        let missing = try_from_summary(&repo, "main", tip, summary.clone()).unwrap();
+        assert!(
+            missing.is_none(),
+            "empty GetThread thread_id must fall through to ListRefs"
+        );
+
+        let err = from_summary(&repo, "main", tip, summary).unwrap_err();
+        assert!(
+            err.to_string().contains("missing its stable identity"),
+            "callers that require a summary still fail closed, got {err}"
+        );
     }
 }
