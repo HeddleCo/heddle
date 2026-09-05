@@ -35,7 +35,9 @@ use cli::cli::commands::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{assert_undo_requires_hard, git_hermetic, heddle, heddle_output};
+use super::{
+    assert_undo_requires_hard, git_hermetic, heddle, heddle_output, heddle_output_with_env,
+};
 
 /// Verbs whose `output_kind` invariant is enforced — both the catalog
 /// declaration and (where invocable) the runtime emission.
@@ -860,9 +862,13 @@ fn runtime_init_emits_output_kind() {
 /// Top-level key set of the first JSON object emitted by `argv` in
 /// `dir`. Panics with the captured output on failure so doc-vs-runtime
 /// mismatches surface a readable diff.
-fn runtime_top_level_keys(argv: &[&str], dir: &std::path::Path) -> BTreeSet<String> {
-    let output =
-        heddle_output(argv, Some(dir)).unwrap_or_else(|err| panic!("spawn {argv:?}: {err}"));
+fn runtime_top_level_keys(
+    argv: &[&str],
+    dir: &std::path::Path,
+    extra_env: &[(&str, &str)],
+) -> BTreeSet<String> {
+    let output = heddle_output_with_env(argv, Some(dir), extra_env)
+        .unwrap_or_else(|err| panic!("spawn {argv:?}: {err}"));
     assert!(
         output.status.success(),
         "{argv:?} exited non-zero: stdout={} stderr={}",
@@ -945,15 +951,25 @@ struct RuntimeDocCase {
     _fixture: TempDir,
     cwd: std::path::PathBuf,
     argv: Vec<String>,
+    extra_env: Vec<(String, String)>,
 }
 
 impl RuntimeDocCase {
     fn at_root(fixture: TempDir, argv: Vec<String>) -> Self {
+        Self::at_root_with_env(fixture, argv, Vec::new())
+    }
+
+    fn at_root_with_env(
+        fixture: TempDir,
+        argv: Vec<String>,
+        extra_env: Vec<(String, String)>,
+    ) -> Self {
         let cwd = fixture.path().to_path_buf();
         Self {
             _fixture: fixture,
             cwd,
             argv,
+            extra_env,
         }
     }
 }
@@ -990,6 +1006,7 @@ fn transport_runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
                 remote.to_string_lossy().into_owned(),
                 checkout.to_string_lossy().into_owned(),
             ],
+            extra_env: Vec::new(),
             _fixture: fixture,
         });
     }
@@ -1018,6 +1035,7 @@ fn transport_runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
         _fixture: fixture,
         cwd: checkout,
         argv,
+        extra_env: Vec::new(),
     })
 }
 
@@ -1063,6 +1081,7 @@ fn runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
             _fixture: fixture,
             cwd: work,
             argv: sv(&["land", "--threads", "alpha,beta"]),
+            extra_env: Vec::new(),
         });
     }
     let case = match output_kind {
@@ -1288,8 +1307,59 @@ fn runtime_doc_case(output_kind: &str) -> Option<RuntimeDocCase> {
             (t, sv(&["maintenance", "oplog", "recover"]))
         }
         "timeline_log" => (init_fixture(), sv(&["log", "--timeline"])),
+        "env_create" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("a.txt"), "base").unwrap();
+            heddle(&["capture", "-m", "base"], Some(t.path())).expect("capture");
+            (
+                t,
+                sv(&[
+                    "env",
+                    "create",
+                    "--name",
+                    "local",
+                    "--from-env",
+                    "DATABASE_URL",
+                ]),
+            )
+        }
+        "env_list" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("a.txt"), "base").unwrap();
+            heddle(&["capture", "-m", "base"], Some(t.path())).expect("capture");
+            let created = heddle_output_with_env(
+                &[
+                    "env",
+                    "create",
+                    "--name",
+                    "local",
+                    "--from-env",
+                    "DATABASE_URL",
+                ],
+                Some(t.path()),
+                &[("DATABASE_URL", "postgres://example/db")],
+            )
+            .expect("env create fixture");
+            assert!(
+                created.status.success(),
+                "env create fixture failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&created.stdout),
+                String::from_utf8_lossy(&created.stderr),
+            );
+            (t, sv(&["env", "list"]))
+        }
         _ => return None,
     };
+    if output_kind == "env_create" {
+        return Some(RuntimeDocCase::at_root_with_env(
+            case.0,
+            case.1,
+            vec![(
+                "DATABASE_URL".to_string(),
+                "postgres://example/db".to_string(),
+            )],
+        ));
+    }
     Some(RuntimeDocCase::at_root(case.0, case.1))
 }
 
@@ -1392,7 +1462,12 @@ fn doc_samples_match_runtime_for_every_catalog_discriminator() {
                 .chain(std::iter::once("json"))
                 .chain(case.argv.iter().map(String::as_str))
                 .collect();
-            let runtime_keys = runtime_top_level_keys(&argv_refs, &case.cwd);
+            let extra_env: Vec<(&str, &str)> = case
+                .extra_env
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let runtime_keys = runtime_top_level_keys(&argv_refs, &case.cwd, &extra_env);
             if !runtime_keys.contains("output_kind") {
                 failures.push(format!(
                     "{value} ({displays:?}): runtime payload is missing `output_kind` (keys: {runtime_keys:?})"
