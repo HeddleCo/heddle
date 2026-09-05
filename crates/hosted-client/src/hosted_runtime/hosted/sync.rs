@@ -3391,8 +3391,16 @@ mod pull_bootstrap_tests {
         assert!(error.to_string().contains("decode pull bootstrap"));
     }
 
+    fn encode_pull_refs_checkpoint(payload: &impl serde::Serialize) -> String {
+        format!(
+            "{PULL_REFS_LINE_PREFIX}{}\t{}\n",
+            hex::encode(rmp_serde::to_vec_named(payload).expect("encode refs fixture")),
+            StateId::from_bytes([0; 32]).to_string_full(),
+        )
+    }
+
     #[test]
-    fn folded_refs_decode_identically() {
+    fn folded_refs_decode_legacy_four_tuple() {
         let main = StateId::from_bytes([7; 32]);
         let release = StateId::from_bytes([8; 32]);
         let payload: PullRefsPayload = (
@@ -3413,13 +3421,7 @@ mod pull_bootstrap_tests {
                 ),
             ],
         );
-        let checkpoint = format!(
-            "{PULL_REFS_LINE_PREFIX}{}\t{}\n",
-            hex::encode(rmp_serde::to_vec_named(&payload).expect("encode refs fixture")),
-            StateId::from_bytes([0; 32]).to_string_full(),
-        );
-
-        let decoded = decode_pull_refs(checkpoint.as_bytes())
+        let decoded = decode_pull_refs(encode_pull_refs_checkpoint(&payload).as_bytes())
             .expect("decode folded refs")
             .expect("new server advertises refs");
         assert_eq!(decoded.head_thread.as_deref(), Some("main"));
@@ -3430,11 +3432,82 @@ mod pull_bootstrap_tests {
         assert_eq!(decoded.refs[0].revision_address, "git:0123456789abcdef");
         assert!(
             decoded.refs[0].thread_id.is_none(),
-            "folded PullReady refs currently decode without thread_id"
+            "legacy 4-tuple folded refs omit thread_id"
         );
         assert_eq!(decoded.refs[1].name, "release");
         assert_eq!(decoded.refs[1].state_id, release);
         assert_eq!(decoded.refs[1].kind, RefKind::Marker);
+        assert!(decoded.refs[1].thread_id.is_none());
+    }
+
+    #[test]
+    fn folded_refs_decode_five_tuple_adopts_thread_id() {
+        let main = StateId::from_bytes([7; 32]);
+        let release = StateId::from_bytes([8; 32]);
+        let change = objects::object::ChangeId::from_bytes([9; 16]);
+        let frontier = objects::object::SyntheticFrontierName::new("main", change)
+            .unwrap()
+            .as_name();
+        let hosted_id = "019f0000-aaaa-7bbb-8ccc-ddddeeeeffff";
+        let payload = (
+            "main".to_string(),
+            Some(main.as_bytes().to_vec()),
+            vec![
+                (
+                    "main".to_string(),
+                    main.as_bytes().to_vec(),
+                    true,
+                    "git:0123456789abcdef".to_string(),
+                    hosted_id.to_string(),
+                ),
+                (
+                    "empty".to_string(),
+                    main.as_bytes().to_vec(),
+                    true,
+                    RevisionAddress::heddle(main).to_string(),
+                    String::new(),
+                ),
+                (
+                    "release".to_string(),
+                    release.as_bytes().to_vec(),
+                    false,
+                    RevisionAddress::heddle(release).to_string(),
+                    hosted_id.to_string(),
+                ),
+                (
+                    frontier.clone(),
+                    main.as_bytes().to_vec(),
+                    true,
+                    String::new(),
+                    hosted_id.to_string(),
+                ),
+            ],
+        );
+        let decoded = decode_pull_refs(encode_pull_refs_checkpoint(&payload).as_bytes())
+            .expect("weft 5-tuple folded refs must decode")
+            .expect("new server advertises refs");
+        assert_eq!(decoded.head_thread.as_deref(), Some("main"));
+        assert_eq!(decoded.refs.len(), 4);
+        assert_eq!(decoded.refs[0].name, "main");
+        assert_eq!(decoded.refs[0].kind, RefKind::Thread);
+        assert_eq!(decoded.refs[0].thread_id.as_deref(), Some(hosted_id));
+        assert_eq!(decoded.refs[1].name, "empty");
+        assert!(
+            decoded.refs[1].thread_id.is_none(),
+            "empty folded thread_id must stay absent so ListRefs can still supply it"
+        );
+        assert_eq!(decoded.refs[2].name, "release");
+        assert_eq!(decoded.refs[2].kind, RefKind::Marker);
+        assert!(
+            decoded.refs[2].thread_id.is_none(),
+            "markers must not adopt a folded thread_id"
+        );
+        assert_eq!(decoded.refs[3].name, frontier);
+        assert_eq!(decoded.refs[3].kind, RefKind::SyntheticFrontierRoot);
+        assert!(
+            decoded.refs[3].thread_id.is_none(),
+            "synthetic frontiers must not adopt a folded thread_id"
+        );
     }
 
     #[test]
@@ -4496,6 +4569,55 @@ mod native_exchange_tests {
 
         client.close().await;
         server.await.unwrap();
+    }
+
+    #[test]
+    fn persist_advertised_identity_adopts_folded_five_tuple_thread_id() {
+        let source = TempDir::new().unwrap();
+        let (repo, state) = repository(&source);
+        let hosted_id = "019f0000-aaaa-7bbb-8ccc-ddddeeeeffff";
+        let minted = ThreadManager::new(repo.heddle_dir())
+            .find_record_by_thread("main")
+            .unwrap()
+            .expect("init persists main");
+        assert_ne!(minted.id, hosted_id);
+
+        let payload = (
+            "main".to_string(),
+            Some(state.as_bytes().to_vec()),
+            vec![(
+                "main".to_string(),
+                state.as_bytes().to_vec(),
+                true,
+                format!("heddle:{}", state.to_string_full()),
+                hosted_id.to_string(),
+            )],
+        );
+        let checkpoint = format!(
+            "{PULL_REFS_LINE_PREFIX}{}\t{}\n",
+            hex::encode(rmp_serde::to_vec_named(&payload).expect("encode refs fixture")),
+            StateId::from_bytes([0; 32]).to_string_full(),
+        );
+        let decoded = decode_pull_refs(checkpoint.as_bytes())
+            .expect("decode folded 5-tuple")
+            .expect("new server advertises refs");
+        assert_eq!(decoded.refs[0].thread_id.as_deref(), Some(hosted_id));
+
+        persist_advertised_thread_identity_with_live_fallback(
+            &repo,
+            &decoded.refs,
+            None,
+            "main",
+            &state,
+        )
+        .expect("folded 5-tuple thread_id must be adopted without live ListRefs");
+
+        let persisted = ThreadManager::new(repo.heddle_dir())
+            .find_record_by_thread("main")
+            .unwrap()
+            .expect("clone must persist a main record");
+        assert_eq!(persisted.id, hosted_id);
+        assert_ne!(persisted.id, minted.id);
     }
 
     #[test]
