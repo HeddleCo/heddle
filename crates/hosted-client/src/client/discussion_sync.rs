@@ -1495,9 +1495,11 @@ fn adopt_hosted_canonical_turns(
     let already_canonical = linked_ops.len() == canonical.len()
         && canonical.iter().all(|(id, _)| linked_ops.contains(id));
     if already_canonical {
+        // Refresh mirror links (e.g. fill `server_turn_id`) without
+        // reporting a content change. apply_hosted_discussion still
+        // persists the mirror; live replay stays Unchanged.
         if entry.links != new_links {
             entry.links = new_links;
-            return Ok(true);
         }
         return Ok(false);
     }
