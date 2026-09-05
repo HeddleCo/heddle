@@ -40,6 +40,16 @@ fn test_merge_missing_base_subtree_fails_loud_not_silent_erase() {
     fs::write(temp.path().join("sub/a.txt"), "base content\n").unwrap();
     fs::write(temp.path().join("top.txt"), "top base\n").unwrap();
     heddle(&["capture", "-m", "base"], Some(temp.path())).unwrap();
+    // Pin the merge-base id now. Later captures (and auto-capture on
+    // switch) can insert extra parents, so do not infer the base from
+    // each tip's `parents[0]` after the fact.
+    let base_state_id = {
+        let repo = Repository::open(temp.path()).unwrap();
+        repo.refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("base capture advanced main")
+    };
 
     // Feature side: modify the file inside sub/ so the merger has a
     // real reason to recurse into the subtree.
@@ -62,27 +72,6 @@ fn test_merge_missing_base_subtree_fails_loud_not_silent_erase() {
     // guarantees no in-process tree cache hides the corruption.
     let sub_hash_hex = {
         let repo = Repository::open(temp.path()).unwrap();
-        let main_tip = repo
-            .refs()
-            .get_thread(&ThreadName::new("main"))
-            .unwrap()
-            .unwrap();
-        let main_state = repo.store().get_state(&main_tip).unwrap().unwrap();
-        // The merge base IS the initial state: main and feature both
-        // forked from the initial capture, then captured once on each
-        // side. We need the base state's tree, not main's tip tree.
-        let feature_tip = repo
-            .refs()
-            .get_thread(&ThreadName::new("feature"))
-            .unwrap()
-            .unwrap();
-        let feature_state = repo.store().get_state(&feature_tip).unwrap().unwrap();
-        // Both tips have a single parent — the base capture.
-        let base_state_id = main_state.parents[0];
-        assert_eq!(
-            base_state_id, feature_state.parents[0],
-            "test setup: main and feature must share a single merge base",
-        );
         let base_state = repo.store().get_state(&base_state_id).unwrap().unwrap();
         let base_tree = repo.store().get_tree(&base_state.tree).unwrap().unwrap();
         let sub_entry = base_tree
