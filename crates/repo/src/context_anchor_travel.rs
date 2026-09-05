@@ -85,6 +85,7 @@ mod tests {
     }
 
     const SOURCE: &str = "fn guarded() {\n    let value = 1;\n}\n";
+    const PYTHON: &str = "def greet(name):\n    return f\"hello {name}\"\n";
 
     #[test]
     fn unique_candidate_moves() {
@@ -107,6 +108,18 @@ mod tests {
                 &files(&[("src/a.rs", SOURCE), ("src/b.rs", SOURCE)]),
             ),
             ContextFileTravel::Ambiguous(vec!["src/a.rs".to_string(), "src/b.rs".to_string(),])
+        );
+    }
+
+    #[test]
+    fn python_mkdir_rename_is_a_unique_move() {
+        assert_eq!(
+            context_file_travel(
+                "lib.py",
+                &files(&[("lib.py", PYTHON)]),
+                &files(&[("pkg/greeter.py", PYTHON)]),
+            ),
+            ContextFileTravel::Moved("pkg/greeter.py".to_string())
         );
     }
 

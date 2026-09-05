@@ -10,6 +10,8 @@
 mod support;
 use support::*;
 
+#[path = "cli_integration/context_anchor_travel.rs"]
+mod context_anchor_travel;
 #[path = "cli_integration/context_recovery_advice.rs"]
 mod context_recovery_advice;
 #[path = "cli_integration/context_rides_diff.rs"]

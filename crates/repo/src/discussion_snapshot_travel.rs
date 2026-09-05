@@ -34,6 +34,7 @@ where
         new_state: &State,
         new_tree: &Tree,
         source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
+        source_trees: Option<&HashMap<ContentHash, &Tree>>,
     ) -> Result<Option<ContentHash>> {
         let parent_discussions_hash = self
             .latest_state_attachment(&parent_state.id(), crate::StateAttachmentKind::Discussions)?
@@ -64,7 +65,7 @@ where
             return Ok(None);
         }
 
-        let new_files = self.collect_tree_file_bytes(new_tree, source_blobs)?;
+        let new_files = self.collect_tree_file_bytes(new_tree, source_blobs, source_trees)?;
         if let Some(store) = &collaboration_store {
             self.persist_collaboration_anchor_travel(
                 store,
@@ -159,7 +160,7 @@ where
                     .ok_or_else(|| missing_object("tree", baseline_state.tree))?;
                 baseline_files.insert(
                     *state_id,
-                    self.collect_tree_file_bytes(&baseline_tree, None)?,
+                    self.collect_tree_file_bytes(&baseline_tree, None, None)?,
                 );
             }
             let old_files = baseline_files.get(state_id).ok_or_else(|| {
@@ -210,13 +211,20 @@ where
         Ok(())
     }
 
-    fn collect_tree_file_bytes(
+    pub(crate) fn collect_tree_file_bytes(
         &self,
         tree: &Tree,
         source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
+        source_trees: Option<&HashMap<ContentHash, &Tree>>,
     ) -> Result<HashMap<String, Vec<u8>>> {
         let mut files = HashMap::new();
-        self.collect_tree_file_bytes_inner(tree, PathBuf::new(), source_blobs, &mut files)?;
+        self.collect_tree_file_bytes_inner(
+            tree,
+            PathBuf::new(),
+            source_blobs,
+            source_trees,
+            &mut files,
+        )?;
         Ok(files)
     }
 
@@ -239,7 +247,7 @@ where
                 .ok_or_else(|| missing_object("tree", baseline_state.tree))?;
             baselines.insert(
                 discussion.opened_against_state,
-                self.collect_tree_file_bytes(&baseline_tree, None)?,
+                self.collect_tree_file_bytes(&baseline_tree, None, None)?,
             );
         }
         Ok(baselines)
@@ -250,6 +258,7 @@ where
         tree: &Tree,
         prefix: PathBuf,
         source_blobs: Option<&HashMap<ContentHash, &[u8]>>,
+        source_trees: Option<&HashMap<ContentHash, &Tree>>,
         files: &mut HashMap<String, Vec<u8>>,
     ) -> Result<()> {
         for entry in tree.entries() {
@@ -277,11 +286,32 @@ where
                     let Some(hash) = entry.tree_hash() else {
                         continue;
                     };
-                    let subtree = self
-                        .store()
-                        .get_tree(&hash)?
-                        .ok_or_else(|| missing_object("tree", hash))?;
-                    self.collect_tree_file_bytes_inner(&subtree, path, source_blobs, files)?;
+                    // Worktree captures keep new subtrees in the pending
+                    // artifact until the pack commits. Overlay those here
+                    // the same way semantic index does — a store miss used
+                    // to abort travel and silently inherit the prior blob.
+                    if let Some(subtree) = source_trees.and_then(|trees| trees.get(&hash).copied())
+                    {
+                        self.collect_tree_file_bytes_inner(
+                            subtree,
+                            path,
+                            source_blobs,
+                            source_trees,
+                            files,
+                        )?;
+                    } else {
+                        let subtree = self
+                            .store()
+                            .get_tree(&hash)?
+                            .ok_or_else(|| missing_object("tree", hash))?;
+                        self.collect_tree_file_bytes_inner(
+                            &subtree,
+                            path,
+                            source_blobs,
+                            source_trees,
+                            files,
+                        )?;
+                    }
                 }
                 EntryType::Symlink => {}
                 EntryType::Gitlink => {}

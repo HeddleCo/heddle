@@ -858,6 +858,66 @@ mod tests {
 
     #[cfg(feature = "tree-sitter-symbols")]
     #[test]
+    fn context_symbol_annotation_rebinds_across_worktree_mkdir_rename() {
+        const SOURCE: &str = "def greet(name):\n    return f\"hello {name}\"\n";
+        let (dir, repo) = setup();
+        fs::write(dir.path().join("lib.py"), SOURCE).unwrap();
+        let first = repo.snapshot(Some("first".to_string()), None).unwrap();
+        attach_context(
+            &repo,
+            &first,
+            "lib.py",
+            vec![travel_annotation(
+                &first,
+                AnnotationScope::Symbol {
+                    name: "greet".to_string(),
+                    resolved_lines: Some((1, 2)),
+                },
+                Some(ContentHash::compute(SOURCE.as_bytes())),
+            )],
+        );
+
+        fs::create_dir(dir.path().join("pkg")).unwrap();
+        fs::rename(dir.path().join("lib.py"), dir.path().join("pkg/greeter.py")).unwrap();
+        let second = repo
+            .snapshot(Some("mkdir+rename".to_string()), None)
+            .unwrap();
+        let moved_root = repo
+            .inherit_parent_context(&second)
+            .unwrap()
+            .expect("renamed snapshot context");
+
+        assert!(
+            repo.get_context_blob(&moved_root, &ContextTarget::file("lib.py").unwrap())
+                .unwrap()
+                .is_none(),
+            "traveled context must leave the old path empty"
+        );
+        let moved = repo
+            .get_context_blob(&moved_root, &ContextTarget::file("pkg/greeter.py").unwrap())
+            .unwrap()
+            .expect("context moved to renamed path");
+        assert_eq!(moved.annotations.len(), 1);
+        assert!(matches!(
+            moved.annotations[0].scope,
+            AnnotationScope::Symbol { ref name, .. } if name == "greet"
+        ));
+        let status = crate::staleness::check_annotation_staleness(
+            &repo,
+            &moved.annotations[0],
+            &ContextTarget::file("pkg/greeter.py").unwrap(),
+            &second,
+        )
+        .unwrap();
+        assert_ne!(
+            status,
+            StalenessStatus::FileMissing,
+            "traveled annotation must resolve on the new path, got {status:?}"
+        );
+    }
+
+    #[cfg(feature = "tree-sitter-symbols")]
+    #[test]
     fn context_file_rename_with_two_candidates_is_ambiguous() {
         const SOURCE: &str = "fn guarded() {\n    let value = 1;\n}\n";
         let (dir, repo) = setup();
