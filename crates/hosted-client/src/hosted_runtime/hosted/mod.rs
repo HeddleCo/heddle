@@ -72,7 +72,7 @@ pub use session::{HostedAuthMode, HostedSession};
 pub(crate) use sync::PullBootstrapMetadata;
 pub use sync::{
     HostedRefEntry, advertised_user_thread_id, decode_pull_bootstrap, decode_pull_refs,
-    persist_advertised_thread_identity, persist_advertised_thread_identity_with_live_fallback,
+    persist_advertised_thread_identity,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -80,10 +80,18 @@ type PullBootstrapPayload = (
     bool,
     Vec<(ContextTarget, ContextBlob)>,
 );
+/// Current weft folded PullReady refs: `(name, state, is_thread, revision)`.
 type PullRefsPayload = (
     String,
     Option<Vec<u8>>,
     Vec<(String, Vec<u8>, bool, String)>,
+);
+/// weft#2055+ PullReady advertisement: same 4-tuple plus `thread_id`.
+/// Empty `thread_id` is treated as absent (defense in depth).
+type PullRefsPayloadWithThreadId = (
+    String,
+    Option<Vec<u8>>,
+    Vec<(String, Vec<u8>, bool, String, String)>,
 );
 type PullRepositoryInitializer<'a> =
     Box<dyn FnOnce(&PullReady) -> Result<Repository, ProtocolError> + 'a>;
@@ -217,21 +225,23 @@ pub fn decode_pull_refs(checkpoint: &[u8]) -> Result<Option<PullBootstrapRefs>, 
         })?;
     let payload = hex::decode(payload)
         .map_err(|error| ProtocolError::InvalidState(format!("decode pull refs: {error}")))?;
-    let (head_thread, head_state, refs): PullRefsPayload = rmp_serde::from_slice(&payload)
-        .map_err(|error| ProtocolError::InvalidState(format!("decode pull refs: {error}")))?;
+    // Primary path: adopt the PullReady advertisement when weft includes
+    // `thread_id` (weft#2055+). Legacy 4-tuples still decode; clone/pull
+    // then refresh live ListRefs only because those folds omit the id.
+    let (head_thread, head_state, refs) = decode_folded_ref_records(&payload)?;
     let head_state = head_state
         .map(|value| decode_bootstrap_state_id(value, "head state"))
         .transpose()?;
     let refs = refs
         .into_iter()
-        .map(|(name, state_id, is_thread, revision_address)| {
+        .map(|(name, state_id, is_thread, revision_address, thread_id)| {
             let state_id = decode_bootstrap_state_id(state_id, "ref state")?;
             Ok(HostedRefEntry::from_advertised(
                 name,
                 state_id,
                 is_thread,
                 revision_address,
-                None,
+                thread_id,
             ))
         })
         .collect::<Result<Vec<_>, ProtocolError>>()?;
@@ -245,6 +255,46 @@ pub fn decode_pull_refs(checkpoint: &[u8]) -> Result<Option<PullBootstrapRefs>, 
         }
     };
     Ok(Some(PullBootstrapRefs { head_thread, refs }))
+}
+
+fn decode_folded_ref_records(
+    payload: &[u8],
+) -> Result<
+    (
+        String,
+        Option<Vec<u8>>,
+        Vec<(String, Vec<u8>, bool, String, Option<String>)>,
+    ),
+    ProtocolError,
+> {
+    if let Ok((head_thread, head_state, refs)) =
+        rmp_serde::from_slice::<PullRefsPayloadWithThreadId>(payload)
+    {
+        let refs = refs
+            .into_iter()
+            .map(|(name, state_id, is_thread, revision_address, thread_id)| {
+                (
+                    name,
+                    state_id,
+                    is_thread,
+                    revision_address,
+                    (!thread_id.is_empty()).then_some(thread_id),
+                )
+            })
+            .collect();
+        return Ok((head_thread, head_state, refs));
+    }
+    let (head_thread, head_state, refs): PullRefsPayload = rmp_serde::from_slice(payload)
+        .map_err(|error| ProtocolError::InvalidState(format!("decode pull refs: {error}")))?;
+    Ok((
+        head_thread,
+        head_state,
+        refs.into_iter()
+            .map(|(name, state_id, is_thread, revision_address)| {
+                (name, state_id, is_thread, revision_address, None)
+            })
+            .collect(),
+    ))
 }
 
 fn decode_bootstrap_state_id(value: Vec<u8>, field: &str) -> Result<StateId, ProtocolError> {
@@ -509,7 +559,10 @@ impl HostedRefEntry {
     }
 }
 
-/// Advertised ListRefs `thread_id` for a user thread, if present and non-empty.
+/// Advertised `thread_id` for a user thread, if present and non-empty.
+///
+/// The primary source is PullReady/folded refs once weft#2055+ includes
+/// the field. ListRefs entries use the same `HostedRefEntry` shape.
 pub fn advertised_user_thread_id<'a>(
     remote_refs: &'a [HostedRefEntry],
     track_name: &str,
@@ -521,10 +574,11 @@ pub fn advertised_user_thread_id<'a>(
         .filter(|id| !id.is_empty())
 }
 
-/// Persist the ListRefs-advertised stable id as the local thread identity.
+/// Persist an advertised stable id as the local thread identity.
 ///
-/// Clone uses this when GetThread is missing; tests drive the same helper so
-/// a later push cannot mint a different UUIDv7.
+/// Clone and pull share this after GetThread misses. Callers pass the
+/// refs that already advertise — PullReady first, live ListRefs only
+/// while folded refs still omit the id.
 pub fn persist_advertised_thread_identity(
     repo: &Repository,
     remote_refs: &[HostedRefEntry],
@@ -541,27 +595,6 @@ pub fn persist_advertised_thread_identity(
         *final_state,
     )?;
     Ok(())
-}
-
-/// Persist from folded PullReady refs when they advertise an id; otherwise
-/// from a live ListRefs advertisement. Folded refs currently decode with
-/// `thread_id: None`.
-pub fn persist_advertised_thread_identity_with_live_fallback(
-    repo: &Repository,
-    folded_refs: &[HostedRefEntry],
-    live_refs: Option<&[HostedRefEntry]>,
-    track_name: &str,
-    final_state: &StateId,
-) -> objects::error::Result<()> {
-    if advertised_user_thread_id(folded_refs, track_name).is_some() {
-        return persist_advertised_thread_identity(repo, folded_refs, track_name, final_state);
-    }
-    persist_advertised_thread_identity(
-        repo,
-        live_refs.unwrap_or(folded_refs),
-        track_name,
-        final_state,
-    )
 }
 
 impl PullObjectMix {
@@ -773,8 +806,8 @@ impl HostedClient {
 
     /// Like [`get_thread_metadata`], but returns `None` when the remote has
     /// no managed record yet, including GetThread with an empty `thread_id`.
-    /// Clone/pull use this so a missing or empty-id GetThread can fall back
-    /// to the advertised ListRefs stable id.
+    /// Empty-id is defense in depth: clone/pull then adopt from the
+    /// PullReady/ListRefs advertisement instead of failing closed.
     pub async fn try_get_thread_metadata(
         &mut self,
         repo: &Repository,
@@ -810,6 +843,43 @@ impl HostedClient {
             }
         };
         super::thread_metadata::try_from_summary(repo, remote_thread, pulled_state, summary)
+    }
+
+    /// Adopt hosted thread identity after clone or default-thread pull.
+    ///
+    /// Order:
+    /// 1. GetThread metadata when it carries a non-empty `thread_id`.
+    /// 2. The PullReady/folded advertisement already in hand.
+    /// 3. Live ListRefs only while those folded refs still omit the id.
+    ///
+    /// ListRefs is not the design center. weft PullReady should advertise
+    /// `thread_id` (weft#2055+); keep the refresh until stock folds do.
+    pub async fn adopt_advertised_thread_identity(
+        &mut self,
+        repo: &Repository,
+        repo_path: &str,
+        folded_refs: &[HostedRefEntry],
+        track_name: &str,
+        final_state: StateId,
+    ) -> Result<(), ProtocolError> {
+        if let Some(metadata) = self
+            .try_get_thread_metadata(repo, repo_path, track_name, final_state)
+            .await?
+        {
+            ThreadManager::new(repo.heddle_dir())
+                .save_pulled_metadata(track_name, &final_state, metadata)
+                .map_err(ProtocolError::from)?;
+            return Ok(());
+        }
+        if advertised_user_thread_id(folded_refs, track_name).is_some() {
+            persist_advertised_thread_identity(repo, folded_refs, track_name, &final_state)
+                .map_err(ProtocolError::from)?;
+            return Ok(());
+        }
+        let live_refs = self.list_refs_with_revision_addresses(repo_path).await?;
+        persist_advertised_thread_identity(repo, &live_refs, track_name, &final_state)
+            .map_err(ProtocolError::from)?;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3430,11 +3500,70 @@ mod pull_bootstrap_tests {
         assert_eq!(decoded.refs[0].revision_address, "git:0123456789abcdef");
         assert!(
             decoded.refs[0].thread_id.is_none(),
-            "folded PullReady refs currently decode without thread_id"
+            "legacy 4-tuple PullReady refs omit thread_id until weft#2055+"
         );
         assert_eq!(decoded.refs[1].name, "release");
         assert_eq!(decoded.refs[1].state_id, release);
         assert_eq!(decoded.refs[1].kind, RefKind::Marker);
+    }
+
+    #[test]
+    fn folded_refs_decode_advertised_thread_id_when_present() {
+        let main = StateId::from_bytes([7; 32]);
+        let payload: PullRefsPayloadWithThreadId = (
+            "main".to_string(),
+            Some(main.as_bytes().to_vec()),
+            vec![(
+                "main".to_string(),
+                main.as_bytes().to_vec(),
+                true,
+                RevisionAddress::heddle(main).to_string(),
+                "019f0000-aaaa-7bbb-8ccc-ddddeeeeffff".to_string(),
+            )],
+        );
+        let checkpoint = format!(
+            "{PULL_REFS_LINE_PREFIX}{}\t{}\n",
+            hex::encode(rmp_serde::to_vec_named(&payload).expect("encode refs fixture")),
+            StateId::from_bytes([0; 32]).to_string_full(),
+        );
+
+        let decoded = decode_pull_refs(checkpoint.as_bytes())
+            .expect("decode folded refs")
+            .expect("new server advertises refs");
+        assert_eq!(
+            decoded.refs[0].thread_id.as_deref(),
+            Some("019f0000-aaaa-7bbb-8ccc-ddddeeeeffff"),
+            "weft#2055+ PullReady advertisement must land on HostedRefEntry"
+        );
+    }
+
+    #[test]
+    fn folded_refs_empty_thread_id_is_treated_as_absent() {
+        let main = StateId::from_bytes([7; 32]);
+        let payload: PullRefsPayloadWithThreadId = (
+            "main".to_string(),
+            Some(main.as_bytes().to_vec()),
+            vec![(
+                "main".to_string(),
+                main.as_bytes().to_vec(),
+                true,
+                RevisionAddress::heddle(main).to_string(),
+                String::new(),
+            )],
+        );
+        let checkpoint = format!(
+            "{PULL_REFS_LINE_PREFIX}{}\t{}\n",
+            hex::encode(rmp_serde::to_vec_named(&payload).expect("encode refs fixture")),
+            StateId::from_bytes([0; 32]).to_string_full(),
+        );
+
+        let decoded = decode_pull_refs(checkpoint.as_bytes())
+            .expect("decode folded refs")
+            .expect("new server advertises refs");
+        assert!(
+            decoded.refs[0].thread_id.is_none(),
+            "empty PullReady thread_id is a miss, same as empty GetThread"
+        );
     }
 
     #[test]
@@ -4499,7 +4628,7 @@ mod native_exchange_tests {
     }
 
     #[test]
-    fn persist_advertised_identity_uses_live_refs_when_folded_omit_thread_id() {
+    fn persist_advertised_identity_is_noop_when_folded_omit_thread_id() {
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
         let hosted_id = "019f0000-aaaa-7bbb-8ccc-ddddeeeeffff";
@@ -4524,14 +4653,16 @@ mod native_exchange_tests {
             Some(hosted_id.to_string()),
         )];
 
-        persist_advertised_thread_identity_with_live_fallback(
-            &repo,
-            &folded,
-            Some(&live),
-            "main",
-            &state,
-        )
-        .expect("live ListRefs must supply the omitted folded thread_id");
+        persist_advertised_thread_identity(&repo, &folded, "main", &state)
+            .expect("omitted advertisement must not mint or fail");
+        let after_fold = ThreadManager::new(repo.heddle_dir())
+            .find_record_by_thread("main")
+            .unwrap()
+            .expect("init persists main");
+        assert_eq!(after_fold.id, minted.id);
+
+        persist_advertised_thread_identity(&repo, &live, "main", &state)
+            .expect("live ListRefs must supply the omitted folded thread_id");
 
         let persisted = ThreadManager::new(repo.heddle_dir())
             .find_record_by_thread("main")

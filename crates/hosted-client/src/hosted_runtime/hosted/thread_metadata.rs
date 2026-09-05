@@ -12,8 +12,9 @@ use wire::ProtocolError;
 /// Convert a GetThread summary, treating an empty `thread_id` as absent.
 ///
 /// weft `native_thread_summary` historically hardcodes an empty
-/// `thread_id`. Clone/pull then fall back to ListRefs instead of failing
-/// with "metadata is missing its stable identity".
+/// `thread_id`. Empty is a miss (defense in depth) so clone/pull adopt
+/// from the PullReady/ListRefs advertisement instead of failing with
+/// "metadata is missing its stable identity".
 pub(super) fn try_from_summary(
     repo: &Repository,
     remote_thread: &str,
@@ -268,7 +269,7 @@ mod tests {
         let missing = try_from_summary(&repo, "main", tip, summary.clone()).unwrap();
         assert!(
             missing.is_none(),
-            "empty GetThread thread_id must fall through to ListRefs"
+            "empty GetThread thread_id must fall through to PullReady/ListRefs advertisement"
         );
 
         let err = from_summary(&repo, "main", tip, summary).unwrap_err();

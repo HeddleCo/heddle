@@ -16,7 +16,9 @@ use heddle_git_projection::credential::EmbeddingSafeCredentialProvider;
 use hosted_client::client::HostedClient;
 use hosted_client::client::LocalSync;
 #[cfg(feature = "client")]
-use hosted_client::hosted_runtime::hosted::{HostedAuthMode, PullMaterialization};
+use hosted_client::hosted_runtime::hosted::{
+    HostedAuthMode, PullMaterialization, decode_pull_refs,
+};
 use objects::{
     object::{StateId, ThreadName, Tree},
     store::ObjectStore,
@@ -43,8 +45,6 @@ use verbs::{
     plan_pull, pull_should_materialize, show_plain_git_remote, show_remote,
 };
 pub(crate) use verbs::{resolve_default_remote_name, resolved_default_remote_name};
-#[cfg(feature = "client")]
-use wire::ProtocolError;
 
 use super::super::{
     action_line::print_next,
@@ -1176,41 +1176,21 @@ async fn pull_network_connected(
                             .await?,
                     )
                 } else {
-                    match client
-                        .try_get_thread_metadata(
+                    let folded_refs = decode_pull_refs(&result.checkpoint)
+                        .context("decode hosted pull refs")?
+                        .map(|decoded| decoded.refs)
+                        .unwrap_or_default();
+                    client
+                        .adopt_advertised_thread_identity(
                             repo,
                             repo_path,
+                            &folded_refs,
                             options.remote_thread,
                             final_state_id,
                         )
-                        .await?
-                    {
-                        Some(metadata) => Some(metadata),
-                        None => {
-                            match client
-                                .require_thread_id(repo_path, options.remote_thread)
-                                .await
-                            {
-                                Ok(stable_id) => {
-                                    ThreadManager::new(repo.heddle_dir())
-                                        .adopt_stable_identity_for_thread(
-                                            repo,
-                                            track_to_update,
-                                            &stable_id,
-                                            final_state_id,
-                                        )
-                                        .context(
-                                            "failed to persist hosted thread identity after pull",
-                                        )?;
-                                }
-                                Err(ProtocolError::ObjectNotFound(_)) => {
-                                    // Nothing advertised; first push may mint.
-                                }
-                                Err(error) => return Err(error.into()),
-                            }
-                            None
-                        }
-                    }
+                        .await
+                        .context("failed to persist hosted thread identity after pull")?;
+                    None
                 };
                 let track_tn = ThreadName::new(track_to_update);
                 let pre_target = repo.refs().get_thread(&track_tn)?;
