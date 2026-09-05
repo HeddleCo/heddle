@@ -173,6 +173,11 @@ const SWEPT: &[&str] = &[
     "thread resolve",
     "thread revoke-approval",
     "thread switch",
+    // heddle#1709 — `heddle env` (confidential-runtime env-store) verbs emit
+    // `output_kind: "env_create"/"env_list"`; discriminators are in the catalog
+    // but were never enumerated here.
+    "env create",
+    "env list",
 ];
 
 /// The catalog itself advertises its container kind as `"kind":
