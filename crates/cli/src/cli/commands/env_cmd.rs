@@ -1,20 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `heddle env` — broker-backed confidential-runtime profiles.
 
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result, anyhow};
 use crypto::Signer;
+use env_store::{DecryptPurpose, DecryptRequest, EnvStore, PolicyBroker, SlotWrite};
 use repo::Repository;
-use env_store::{DecryptPurpose, DecryptRequest, PolicyBroker, EnvStore, SlotWrite};
 use serde::Serialize;
 
-use super::advice::RecoveryAdvice;
-use super::next_action::{NextActionValidationContext, write_full_command_json};
-use crate::cli::{
-    Cli, EnvCommands, EnvCreateArgs, EnvListArgs, EnvRunArgs, should_output_json,
+use super::{
+    advice::RecoveryAdvice,
+    next_action::{NextActionValidationContext, write_full_command_json},
 };
+use crate::cli::{Cli, EnvCommands, EnvCreateArgs, EnvListArgs, EnvRunArgs, should_output_json};
 
 pub fn cmd_env(cli: &Cli, command: EnvCommands) -> Result<()> {
     let repo = cli.open_repo()?;
@@ -141,7 +143,12 @@ fn cmd_env_list(cli: &Cli, repo: &Repository, _args: EnvListArgs) -> Result<()> 
 
 fn cmd_env_run(repo: &Repository, args: EnvRunArgs) -> Result<()> {
     if args.command.is_empty() {
-        return Err(anyhow!("env run requires a child command after `--`"));
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "env_run_missing_command",
+            "env run requires a child command after `--`",
+            "Retry as `heddle env run --profile <name> -- <command>`.",
+            "heddle env run --profile <name> -- <command>",
+        )));
     }
     let store = EnvStore::open(repo.heddle_dir()).map_err(map_profile_error)?;
     let signer = require_signer(repo)?;
@@ -153,8 +160,14 @@ fn cmd_env_run(repo: &Repository, args: EnvRunArgs) -> Result<()> {
         .hold_profile_recipients(&args.profile)
         .map_err(map_profile_error)?;
     let now = now_ms()?;
-    let ttl_ms = i64::try_from(args.ttl.saturating_mul(1000))
-        .map_err(|_| anyhow!("ttl overflow"))?;
+    let ttl_ms = i64::try_from(args.ttl.saturating_mul(1000)).map_err(|_| {
+        anyhow!(RecoveryAdvice::invalid_usage(
+            "env_run_ttl_overflow",
+            "ttl overflow",
+            "Pass a smaller `--ttl` in seconds.",
+            "heddle env run --profile <name> --ttl <seconds> -- <command>",
+        ))
+    })?;
     let request = DecryptRequest {
         profile: args.profile.clone(),
         slots: args.slots.clone(),
@@ -179,7 +192,16 @@ fn cmd_env_run(repo: &Repository, args: EnvRunArgs) -> Result<()> {
     match status.code() {
         Some(0) => Ok(()),
         Some(code) => std::process::exit(code),
-        None => Err(anyhow!("child was terminated by a signal")),
+        None => Err(anyhow!(RecoveryAdvice::safety_refusal(
+            "env_run_child_signaled",
+            "child was terminated by a signal",
+            "Inspect the child process and retry `heddle env run`.",
+            "the spawned command was terminated by a signal",
+            "the command did not complete",
+            "env-store contents were left unchanged",
+            "heddle env run --profile <name> -- <command>",
+            vec!["heddle env run --profile <name> -- <command>".to_string()],
+        ))),
     }
 }
 
@@ -187,7 +209,12 @@ fn require_signer(repo: &Repository) -> Result<Box<dyn Signer>> {
     let local = repo.heddle_dir().join(repo::identity::LOCAL_IDENTITY_FILE);
     let device = repo::identity::device_identity_path();
     repo::identity::resolve_signer(&local, &device).ok_or_else(|| {
-        anyhow!("runtime profiles require a protected local signing identity")
+        anyhow!(RecoveryAdvice::invalid_usage(
+            "env_run_missing_signer",
+            "runtime profiles require a protected local signing identity",
+            "Create a local signing identity, then retry `heddle env run`.",
+            "heddle env run --profile <name> -- <command>",
+        ))
     })
 }
 
@@ -201,9 +228,7 @@ fn now_ms() -> Result<i64> {
 fn map_profile_error(err: env_store::EnvStoreError) -> anyhow::Error {
     let message = err.to_string();
     match err {
-        env_store::EnvStoreError::BrokerDenied(
-            env_store::BrokerDenialReason::Expired,
-        ) => {
+        env_store::EnvStoreError::BrokerDenied(env_store::BrokerDenialReason::Expired) => {
             anyhow!(RecoveryAdvice::safety_refusal(
                 "env_store_expired",
                 message,
@@ -215,9 +240,8 @@ fn map_profile_error(err: env_store::EnvStoreError) -> anyhow::Error {
                 vec!["heddle env run --profile <name> -- <cmd>".to_string()],
             ))
         }
-        env_store::EnvStoreError::BrokerDenied(_)
-        | env_store::EnvStoreError::InvalidGrant(_) => anyhow!(
-            RecoveryAdvice::safety_refusal(
+        env_store::EnvStoreError::BrokerDenied(_) | env_store::EnvStoreError::InvalidGrant(_) => {
+            anyhow!(RecoveryAdvice::safety_refusal(
                 "env_store_denied",
                 message,
                 "Ask for a named profile and slots this broker holds, then retry `heddle env run`.",
@@ -226,32 +250,28 @@ fn map_profile_error(err: env_store::EnvStoreError) -> anyhow::Error {
                 "the worktree and store were left unchanged",
                 "heddle env list",
                 vec!["heddle env list".to_string()],
-            )
-        ),
-        env_store::EnvStoreError::ProfileNotFound(_) => anyhow!(
-            RecoveryAdvice::safety_refusal(
-                "env_store_not_found",
-                message,
-                "Create the profile with `heddle env create --name <name> --from-env SLOT`, then retry.",
-                "no runtime profile with that name exists",
-                "no child would start",
-                "the worktree and store were left unchanged",
-                "heddle env create --name <name> --from-env SLOT",
-                vec!["heddle env create --name <name> --from-env SLOT".to_string()],
-            )
-        ),
-        env_store::EnvStoreError::SlotNotFound(_) => anyhow!(
-            RecoveryAdvice::safety_refusal(
-                "env_store_slot_not_found",
-                message,
-                "List slot names with `heddle env list`, then pass a slot that exists.",
-                "the named slot is not on the profile head",
-                "no child would start",
-                "the worktree and store were left unchanged",
-                "heddle env list",
-                vec!["heddle env list".to_string()],
-            )
-        ),
+            ))
+        }
+        env_store::EnvStoreError::ProfileNotFound(_) => anyhow!(RecoveryAdvice::safety_refusal(
+            "env_store_not_found",
+            message,
+            "Create the profile with `heddle env create --name <name> --from-env SLOT`, then retry.",
+            "no runtime profile with that name exists",
+            "no child would start",
+            "the worktree and store were left unchanged",
+            "heddle env create --name <name> --from-env SLOT",
+            vec!["heddle env create --name <name> --from-env SLOT".to_string()],
+        )),
+        env_store::EnvStoreError::SlotNotFound(_) => anyhow!(RecoveryAdvice::safety_refusal(
+            "env_store_slot_not_found",
+            message,
+            "List slot names with `heddle env list`, then pass a slot that exists.",
+            "the named slot is not on the profile head",
+            "no child would start",
+            "the worktree and store were left unchanged",
+            "heddle env list",
+            vec!["heddle env list".to_string()],
+        )),
         other => anyhow!(other),
     }
 }

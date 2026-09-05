@@ -3055,7 +3055,12 @@ async fn cmd_land_many(cli: &Cli, args: LandArgs) -> Result<()> {
         }
     }
     if ordered.is_empty() {
-        return Err(anyhow!("--threads requires at least one thread name"));
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "land_threads_empty",
+            "--threads requires at least one thread name",
+            "Pass one or more thread names: `heddle land --threads <name>`.",
+            "heddle land --threads <name>",
+        )));
     }
 
     MULTI_LAND_COLLECTOR.with(|collector| {
