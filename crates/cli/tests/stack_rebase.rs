@@ -94,7 +94,13 @@ fn compute_stacks_finds_all_roots_and_descendants() {
     );
 
     let stacks = repo.compute_thread_stacks().unwrap();
-    assert_eq!(stacks.len(), 2, "expected two stack roots");
+    // `init` persists default `main` as a singleton root alongside the
+    // two fixture stacks.
+    assert_eq!(
+        stacks.len(),
+        3,
+        "two fixture stacks plus persisted default main"
+    );
 
     // Sorted by root name.
     assert_eq!(stacks[0].root_name(), "feat-a");
@@ -104,6 +110,9 @@ fn compute_stacks_finds_all_roots_and_descendants() {
     assert_eq!(stacks[1].root_name(), "infra-x");
     assert_eq!(stacks[1].member_count(), 1);
     assert_eq!(stacks[1].depth(), 0);
+
+    assert_eq!(stacks[2].root_name(), "main");
+    assert_eq!(stacks[2].member_count(), 1);
 }
 
 #[test]
@@ -289,10 +298,16 @@ fn repository_snapshot_round_trips_through_json() {
     let parsed: RepositorySnapshot = serde_json::from_str(&json).unwrap();
     assert_eq!(snapshot, parsed);
 
-    // Snapshot carries the stack view + the thread records we just wrote.
-    assert_eq!(parsed.stacks.len(), 1);
-    assert_eq!(parsed.stacks[0].root_name(), "feat-a");
-    assert_eq!(parsed.threads.len(), 2);
+    // Snapshot carries the stack view + the thread records we just wrote,
+    // plus persisted default `main`.
+    assert_eq!(parsed.stacks.len(), 2);
+    let feat = parsed
+        .stacks
+        .iter()
+        .find(|stack| stack.root_name() == "feat-a")
+        .expect("feat-a stack");
+    assert_eq!(feat.member_count(), 2);
+    assert_eq!(parsed.threads.len(), 3);
 }
 
 #[test]
@@ -447,7 +462,11 @@ fn repository_snapshot_for_stack_scopes_to_one_stack_only() {
     );
 
     let full = RepositorySnapshot::capture(&repo).unwrap();
-    assert_eq!(full.stacks.len(), 2, "fixture must have two stacks");
+    assert_eq!(
+        full.stacks.len(),
+        3,
+        "two fixture stacks plus persisted default main"
+    );
 
     let scoped = full.for_stack("feat-a").expect("feat-a belongs to a stack");
     assert_eq!(scoped.stacks.len(), 1);
