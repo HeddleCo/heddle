@@ -453,6 +453,82 @@ fn undo_visibility_promote_reverts_tier() {
 }
 
 #[test]
+fn owner_clone_of_private_spool_after_visibility_discuss_and_context() {
+    // Field regression (2026-09-05): after `visibility set --tier private`
+    // plus discuss/context, owner clone failed exit 78 `state not found`.
+    // Local clone is the same object path (state + sidecar + attachments)
+    // without weft. The unrelated-principal deny stays grant-level Public
+    // (see `grant_can_see_tier`); this test is the owner's way in.
+    let (temp, _) = init_and_capture("ax-only");
+    fs::write(temp.path().join("note.rs"), "fn note() {}\n").unwrap();
+    let state = capture_state(temp.path(), "private head");
+    heddle(
+        &[
+            "visibility",
+            "set",
+            &state,
+            "--tier",
+            "private",
+            "--label",
+            "ax-only",
+        ],
+        Some(temp.path()),
+    )
+    .expect("visibility set private");
+    heddle(
+        &[
+            "discuss",
+            "open",
+            "note.rs",
+            "note",
+            "keep this ax-only",
+            "--visibility",
+            "private:ax-only",
+        ],
+        Some(temp.path()),
+    )
+    .expect("discuss open private");
+    heddle(
+        &[
+            "context",
+            "set",
+            "--path",
+            "note.rs",
+            "--kind",
+            "constraint",
+            "-m",
+            "ax-only guidance",
+        ],
+        Some(temp.path()),
+    )
+    .expect("context set");
+
+    let clone = TempDir::new().unwrap();
+    let dest = clone.path().join("owner-clone");
+    heddle(
+        &[
+            "clone",
+            &temp.path().to_string_lossy(),
+            &dest.to_string_lossy(),
+        ],
+        None,
+    )
+    .unwrap_or_else(|err| panic!("owner clone of private-tier spool must succeed: {err}"));
+
+    let show = show_json(&dest, &state);
+    assert_eq!(
+        show["tier"], "private",
+        "cloned owner checkout must keep the Private sidecar: {show}"
+    );
+    assert_eq!(show["label"], "ax-only");
+    let note = fs::read(dest.join("note.rs")).expect("cloned worktree note");
+    assert_eq!(
+        note, b"fn note() {}\n",
+        "owner clone must materialize the advertised private head, not withhold it"
+    );
+}
+
+#[test]
 fn visibility_list_enumerates_tiered_states() {
     let (temp, _) = init_and_capture("ordinary");
     let state = capture_state(temp.path(), "ordinary capture");

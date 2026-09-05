@@ -11,8 +11,8 @@ use api::heddle::api::v1alpha1::{
 };
 use crypto::Signer;
 use heddleco_capability_verifier::{
-    Decision, PurgeContext, VerificationLimits, verify_authorization_bundle,
-    verify_purge_authorization, verify_spool_owner_genesis,
+    verify_authorization_bundle, verify_purge_authorization, verify_spool_owner_genesis, Decision,
+    PurgeContext, VerificationLimits,
 };
 use objects::{fs_atomic::write_file_atomic, lock::RepositoryLockExt};
 use prost::Message;
@@ -75,6 +75,15 @@ struct PinnedOwnerGenesis {
 impl Repository {
     fn owner_genesis_pin_path(&self) -> std::path::PathBuf {
         self.heddle_dir().join(OWNER_GENESIS_PIN_FILE)
+    }
+
+    /// Hex public key of the TOFU-pinned owner genesis, when a clone has
+    /// already verified `PullReady`. Used to accept owner-signed metadata
+    /// (state visibility) without requiring the fresh clone to pre-seed
+    /// `[metadata] trusted_keys`.
+    pub(crate) fn pinned_owner_metadata_key(&self) -> Option<(String, String)> {
+        let pin = self.read_owner_genesis_pin().ok()?;
+        Some(("ed25519".to_string(), hex::encode(pin.owner_public_key)))
     }
 
     fn read_owner_genesis_pin(&self) -> Result<PinnedOwnerGenesis> {

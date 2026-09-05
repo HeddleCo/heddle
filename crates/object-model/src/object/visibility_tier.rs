@@ -28,12 +28,13 @@ pub enum VisibilityTier {
     Restricted {
         scope_label: String,
     },
-    /// The strictest tier: withheld from **every** audience — including the
-    /// otherwise all-seeing `Internal` audience — except the one holder of
-    /// the matching `Restricted(scope_label)`. Used for embargoed per-state
-    /// commit visibility, where even internal callers must not see the
-    /// content. The who-sees-what arm lives in `visible`, placed above the
-    /// `(_, Internal) => true` arm so the embargo holds.
+    /// The strictest tier: withheld from **every ordinary** audience —
+    /// including the otherwise all-seeing `Internal` audience — except the
+    /// matching `Restricted(scope_label)` holder and the spool `Owner`.
+    /// Used for embargoed per-state commit visibility, where even internal
+    /// callers must not see the content. The who-sees-what arm lives in
+    /// `visible`, placed above the `(_, Internal) => true` arm so the
+    /// embargo holds.
     Private {
         scope_label: String,
     },
@@ -119,9 +120,7 @@ mod tests {
     #[test]
     fn strictly_less_restrictive_only_when_rank_drops() {
         // Opening transitions (lower rank) are strictly less restrictive.
-        assert!(
-            VisibilityTier::Public.is_strictly_less_restrictive_than(&VisibilityTier::Internal)
-        );
+        assert!(VisibilityTier::Public.is_strictly_less_restrictive_than(&VisibilityTier::Internal));
         assert!(VisibilityTier::Internal.is_strictly_less_restrictive_than(&restricted("legal")));
         assert!(VisibilityTier::Internal.is_strictly_less_restrictive_than(&team("infra")));
 

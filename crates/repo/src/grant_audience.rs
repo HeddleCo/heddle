@@ -5,6 +5,8 @@
 //! Unknown or missing roles fail closed to [`AudienceTier::Public`] so an
 //! unauthorized puller can never be treated as the internal trusted set.
 
+use objects::object::{visible, VisibilityTier};
+
 use super::visibility::AudienceTier;
 
 /// Hosted grant-role ordinal. Mirrors `HostedRole` without depending on
@@ -36,18 +38,22 @@ impl GrantRole {
 
 /// Map a caller's grant to the audience the visibility gate must use.
 ///
-/// * A non-empty `audience_label` is the authorized embargo scope and maps to
+/// * [`GrantRole::Owner`] is [`AudienceTier::Owner`] so the spool owner can
+///   see `Private` heads they declared. A non-empty `audience_label` still
+///   narrows them to [`AudienceTier::Restricted`] (one embargo scope).
+/// * A non-empty `audience_label` on any authorized role maps to
 ///   [`AudienceTier::Restricted`]. Private content is visible only to that
 ///   label, not to Internal.
-/// * Developer and above are the workspace-internal trusted set.
+/// * Developer and above (except Owner without a label) are Internal.
 /// * Reader, unspecified, and missing grants are [`AudienceTier::Public`].
-///   An unauthorized puller must never receive Internal.
+///   An unauthorized puller must never receive Internal or Owner.
 pub fn audience_tier_for_grant(
     role: Option<GrantRole>,
     audience_label: Option<&str>,
 ) -> AudienceTier {
     // Role is authoritative. A stale or untrusted label must not promote a
-    // missing/unknown grant into Restricted (which can disclose Private).
+    // missing/unknown grant into Restricted or Owner (which can disclose
+    // Private).
     match role {
         None | Some(GrantRole::Unspecified) => return AudienceTier::Public,
         Some(GrantRole::Reader)
@@ -63,12 +69,25 @@ pub fn audience_tier_for_grant(
         return AudienceTier::Restricted(label.to_string());
     }
     match role {
-        Some(GrantRole::Developer)
-        | Some(GrantRole::Maintainer)
-        | Some(GrantRole::Admin)
-        | Some(GrantRole::Owner) => AudienceTier::Internal,
+        Some(GrantRole::Owner) => AudienceTier::Owner,
+        Some(GrantRole::Developer) | Some(GrantRole::Maintainer) | Some(GrantRole::Admin) => {
+            AudienceTier::Internal
+        }
         Some(GrantRole::Reader) | Some(GrantRole::Unspecified) | None => AudienceTier::Public,
     }
+}
+
+/// Whether this grant may be served a record at `tier`.
+///
+/// Weft's ListRefs/Pull pre-pass and this CLI share this helper so an
+/// unlabeled owner is not treated as Internal and then denied their own
+/// `Private` head (clone exit 78 `state not found`).
+pub fn grant_can_see_tier(
+    role: Option<GrantRole>,
+    audience_label: Option<&str>,
+    tier: &VisibilityTier,
+) -> bool {
+    visible(tier, &audience_tier_for_grant(role, audience_label))
 }
 
 #[cfg(test)]
@@ -98,13 +117,34 @@ mod tests {
             GrantRole::Developer,
             GrantRole::Maintainer,
             GrantRole::Admin,
-            GrantRole::Owner,
         ] {
             assert_eq!(
                 audience_tier_for_grant(Some(role), None),
                 AudienceTier::Internal
             );
         }
+    }
+
+    #[test]
+    fn unlabeled_owner_sees_private_and_unrelated_principal_does_not() {
+        let private = VisibilityTier::Private {
+            scope_label: "ax-only".into(),
+        };
+        assert_eq!(
+            audience_tier_for_grant(Some(GrantRole::Owner), None),
+            AudienceTier::Owner
+        );
+        assert!(grant_can_see_tier(Some(GrantRole::Owner), None, &private));
+        assert!(!grant_can_see_tier(Some(GrantRole::Admin), None, &private));
+        assert!(
+            !grant_can_see_tier(None, None, &private),
+            "a missing grant must stay Public and must not see Private"
+        );
+        assert!(!grant_can_see_tier(
+            Some(GrantRole::Unspecified),
+            None,
+            &private
+        ));
     }
 
     #[test]
@@ -115,7 +155,7 @@ mod tests {
         );
         assert_eq!(
             audience_tier_for_grant(Some(GrantRole::Owner), Some("  ")),
-            AudienceTier::Internal
+            AudienceTier::Owner
         );
     }
 

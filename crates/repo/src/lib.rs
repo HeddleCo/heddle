@@ -170,7 +170,7 @@ pub use git_ref_name::{
     GitRefContentNamespace, GitRefKind, GitRefName, GitRefNamespace, ParsedGitRef,
     REMOTE_NAME_FOR_LOCAL_GIT_REPO, is_reserved_git_remote_name,
 };
-pub use grant_audience::{GrantRole, audience_tier_for_grant};
+pub use grant_audience::{GrantRole, audience_tier_for_grant, grant_can_see_tier};
 pub use hooks::{Hook, HookContext, HookManager, HookResponse};
 pub use merge_state::{MergeState, MergeStateManager};
 pub use objects::{

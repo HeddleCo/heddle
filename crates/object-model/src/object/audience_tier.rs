@@ -9,18 +9,19 @@
 //! The mapping from [`VisibilityTier`](super::VisibilityTier) to [`AudienceTier`]
 //! is the single source of truth for "who sees what":
 //!
-//! | annotation visibility    | shown to `Internal` | `Public` | `Team(X)`               | `Restricted` |
-//! |--------------------------|---------------------|----------|-------------------------|--------------|
-//! | `Public`                 | yes                 | yes      | yes                     | yes          |
-//! | `Internal`               | yes                 | no       | yes                     | no           |
-//! | `TeamScoped { team }`    | yes                 | no       | only if `team == X`     | no           |
-//! | `Restricted { ... }`     | yes                 | no       | no                      | only equal label |
-//! | `Private { ... }`        | no                  | no       | no                      | only equal label |
+//! | annotation visibility    | shown to `Owner` | `Internal` | `Public` | `Team(X)`               | `Restricted` |
+//! |--------------------------|------------------|------------|----------|-------------------------|--------------|
+//! | `Public`                 | yes              | yes        | yes      | yes                     | yes          |
+//! | `Internal`               | yes              | yes        | no       | yes                     | no           |
+//! | `TeamScoped { team }`    | yes              | yes        | no       | only if `team == X`     | no           |
+//! | `Restricted { ... }`     | yes              | yes        | no       | no                      | only equal label |
+//! | `Private { ... }`        | yes              | no         | no       | no                      | only equal label |
 //!
+//! `Owner` is the spool owner — grant-derived, not a CLI `--audience` value.
 //! `Internal` is the broadest ordinary audience (used by the
 //! workspace-internal reader); `Public` is the anonymous/public audience.
-//! `Private` is stricter than both: only the matching restricted-scope holder
-//! can read it.
+//! `Private` is stricter than Internal: only the matching restricted-scope
+//! holder **or the spool owner** can read it.
 
 use std::str::FromStr;
 
@@ -31,8 +32,13 @@ use super::VisibilityTier;
 /// shaping context.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AudienceTier {
+    /// Spool owner. Grant-derived only (not a CLI `--audience` token).
+    /// Sees every tier including `Private`, so an owner can clone and
+    /// serve their own embargoed head. Unrelated principals never map here.
+    Owner,
     /// Workspace-internal viewer — sees every annotation regardless of
-    /// scope. The `--audience internal` value on Git projection export.
+    /// scope except `Private`. The `--audience internal` value on Git
+    /// projection export.
     Internal,
     /// Anonymous public viewer — sees only `Public` annotations. Default
     /// for Git projection export and the public-PR review surface.
@@ -95,13 +101,19 @@ pub fn visible(visibility: &VisibilityTier, audience: &AudienceTier) -> bool {
     match (visibility, audience) {
         // Public is universally visible.
         (VisibilityTier::Public, _) => true,
-        // Private is the strictest tier: visible ONLY to the holder of the
-        // exact matching Restricted scope label, and withheld from everyone
-        // else — *including* the otherwise all-seeing Internal audience. These
-        // two arms MUST stay above `(_, AudienceTier::Internal) => true`:
-        // match arms evaluate top-to-bottom, so a Private arm below it would
-        // never be reached for an Internal audience and the embargo would
-        // silently leak to internal callers.
+        // The spool owner sees every remaining tier, including Private.
+        // Must sit above the Private embargo arms so an unlabeled Owner
+        // grant is not treated as Internal and then denied the head it
+        // just embargoed.
+        (_, AudienceTier::Owner) => true,
+        // Private is the strictest ordinary tier: visible to the holder of
+        // the exact matching Restricted scope label, and withheld from
+        // everyone else — *including* the otherwise all-seeing Internal
+        // audience. These two arms MUST stay above
+        // `(_, AudienceTier::Internal) => true`: match arms evaluate
+        // top-to-bottom, so a Private arm below it would never be reached
+        // for an Internal audience and the embargo would silently leak
+        // to internal callers.
         (VisibilityTier::Private { scope_label }, AudienceTier::Restricted(viewer)) => {
             scope_label == viewer
         }
@@ -182,6 +194,9 @@ mod tests {
         assert!(!visible(&vis, &AudienceTier::Internal));
         assert!(!visible(&vis, &AudienceTier::Public));
         assert!(!visible(&vis, &AudienceTier::Team("infra".into())));
+        // The spool owner is the other admit — unlabeled Owner must not
+        // collapse into Internal or clone of a private-tier head fails.
+        assert!(visible(&vis, &AudienceTier::Owner));
     }
 
     #[test]
