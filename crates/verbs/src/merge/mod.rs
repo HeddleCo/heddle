@@ -26,7 +26,7 @@ use merge::{
     detect_renames_between_trees, merge_trees,
 };
 use objects::{
-    object::{Attribution, Blob, ContentHash, StateId, ThreadName, Tree},
+    object::{Attribution, Blob, ContentHash, FacetKind, StateId, ThreadName, Tree},
     store::ObjectStore,
 };
 use oplog::{OpBatch, OpLogBackend, OpLogRecorder, OpRecord};
@@ -524,6 +524,9 @@ pub struct MergeOptions {
 
 /// Merge `opts.track_name` into the repository's current HEAD.
 pub fn merge_thread(repo: &Repository, opts: MergeOptions) -> Result<MergeReport> {
+    FacetKind::SourceHistory
+        .require_land()
+        .map_err(|kind| anyhow!("{kind} cannot be landed onto source history"))?;
     merge_thread_into_current(
         repo,
         &opts.track_name,
@@ -609,6 +612,9 @@ pub fn merge_thread_into_current_transactional(
     machine_contract: &MachineContractInput,
     transaction_id: Option<&str>,
 ) -> Result<MergeReport> {
+    FacetKind::SourceHistory
+        .require_land()
+        .map_err(|kind| anyhow!("{kind} cannot be landed onto source history"))?;
     // Strategy + diff-semantics decided ONCE per merge attempt
     // (HeddleCo/heddle#503). Preview, refresh, apply, and diff all read
     // their strategy back off this single plan instead of re-deriving it

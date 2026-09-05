@@ -21,7 +21,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use objects::{
     lock::RepositoryLockExt,
-    object::{State, StateId, ThreadName, Tree, VisibilityTier},
+    object::{FacetKind, State, StateId, ThreadName, Tree, VisibilityTier},
     store::ObjectStore,
 };
 use oplog::OpRecord;
@@ -162,6 +162,13 @@ impl Repository {
         dest: &Path,
         audience: &AudienceTier,
     ) -> Result<ThreadManifest> {
+        FacetKind::SourceHistory
+            .require_worktree_materialization()
+            .map_err(|kind| {
+                HeddleError::Config(format!(
+                    "{kind} cannot be checked out or materialized into a worktree"
+                ))
+            })?;
         let state_id = self
             .refs()
             .resolve(thread)?

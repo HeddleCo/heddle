@@ -28,6 +28,7 @@ members = [
     "crates/wire",
     "crates/refs",
     "crates/repo",
+    "crates/runtime-profile",
     "crates/semantic",
     "crates/semantic-recovery",
     "crates/state-review",
@@ -46,6 +47,7 @@ keywords = ["vcs", "version-control", "ai", "git"]
 categories = ["development-tools"]
 
 [workspace.dependencies]
+aes-gcm = "0.10"
 anyhow = "1"
 api = { package = "heddle-api", version = "0.27.0" }
 async-trait = "0.1"
@@ -65,6 +67,7 @@ getrandom = { version = "0.4", features = ["sys_rng"] }
 sley = { version = "0.8.0", features = ["mmap", "fast-sha1"] }
 sley-transport = "0.8.0"
 hex = "0.4"
+hmac = "0.13"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 ignore = "0.4"
 iroh = { package = "heddleco-iroh", version = "0.1.0", default-features = false, features = ["tls-ring", "unstable-custom-transports", "unstable-custom-transport-backpressure"] }
@@ -149,6 +152,7 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 walkdir = "2"
 wait-timeout = "0.2"
 webpki-roots = "1.0"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 windows-sys = "0.61"
 zstd = "0.13"
 
@@ -183,6 +187,7 @@ objects = { path = "crates/objects", package = "heddle-objects", version = "0.20
 oplog = { path = "crates/oplog", package = "heddle-oplog", version = "0.20.0", default-features = false }
 refs = { path = "crates/refs", package = "heddle-refs", version = "0.20.0" }
 repo = { path = "crates/repo", package = "heddle-repo", version = "0.20.0", default-features = false }
+heddle-runtime-profile = { path = "crates/runtime-profile", version = "0.20.0" }
 semantic = { path = "crates/semantic", package = "heddle-semantic", version = "0.20.0" }
 semantic-recovery = { path = "crates/semantic-recovery", package = "heddle-semantic-recovery", version = "0.20.0" }
 state_review = { path = "crates/state-review", package = "heddle-state-review", version = "0.20.0" }

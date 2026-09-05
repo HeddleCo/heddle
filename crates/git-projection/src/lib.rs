@@ -5,6 +5,7 @@
 //! projection state.
 
 pub mod credential;
+pub mod facet_gate;
 pub mod git_core;
 pub mod git_export;
 pub mod git_frontier;

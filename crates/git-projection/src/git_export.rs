@@ -5,7 +5,10 @@ use std::collections::HashSet;
 
 use objects::{
     error::HeddleError,
-    object::{AnnotatedTag, AudienceTier, ContentHash, MarkerName, State, StateId, ThreadName, TreeEntryTarget, visible},
+    object::{
+        AnnotatedTag, AudienceTier, ContentHash, FacetKind, MarkerName, State, StateId, ThreadName,
+        TreeEntryTarget, visible,
+    },
     store::ObjectStore,
 };
 use repo::Repository as HeddleRepository;
@@ -16,6 +19,7 @@ use sley::{
 use tracing::debug;
 
 use crate::{
+    facet_gate::require_source_history_projection,
     git_core::{
         GitProjection, GitProjectionError, GitProjectionResult, LocalGitIdentity, RefNamespace,
         SyncMapping, collect_ref_updates, copy_reachable_objects, count_exported_commits,
@@ -105,6 +109,7 @@ pub fn export_state(
     state_id: &StateId,
     options: ExportStateOptions<'_>,
 ) -> GitProjectionResult<Option<ObjectId>> {
+    let _laws = require_source_history_projection(FacetKind::SourceHistory)?;
     let state = heddle_repo
         .store()
         .get_state(state_id)?
@@ -305,6 +310,7 @@ pub fn export_tree(
 
 /// Export all Heddle states to Git commits.
 pub fn export_all(bridge: &mut GitProjection) -> GitProjectionResult<ExportStats> {
+    let _laws = require_source_history_projection(FacetKind::SourceHistory)?;
     bridge.with_mapping_rollback(|bridge| export_scoped(bridge, None))
 }
 
@@ -313,6 +319,7 @@ pub fn export_current_thread(
     bridge: &mut GitProjection,
     thread: &str,
 ) -> GitProjectionResult<ExportStats> {
+    let _laws = require_source_history_projection(FacetKind::SourceHistory)?;
     bridge.with_mapping_rollback(|bridge| export_scoped(bridge, Some(thread)))
 }
 

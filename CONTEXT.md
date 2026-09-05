@@ -168,6 +168,22 @@ _Avoid_: model of the thread, hoped-for env, /proc hunt, Cursor-guesses-Sonnet
 A Heddle-native record stream for an agent run's tool-call activity, cursor movement, branches, and captures. Foundation objects and local storage are in place; richer cursor views, capture automation, and hosted projection are still planned. The public `AgentGatewayService` and `AgentService` contracts are also planned and are not registered as live services in the current v1alpha1 API contract. Agent timelines are adjacent repository metadata that explain agent execution without becoming source history states.
 _Avoid_: raw transcript, runner log, chat history
 
+**FacetKind**:
+The typed history-graph domain a durable fact belongs to. Source History is the only facet Git Projection, checkout, and land may select. Confidential runtime, collaboration, and agent timeline are adjacent facets with their own identities and laws. A path prefix or thread name is not a facet.
+_Avoid_: env/* thread, name-prefix convention
+
+**Runtime Profile**:
+A confidential-runtime facet: a typed `RuntimeProfileRef` pointing at immutable `RuntimeProfileState` versions of named encrypted slots. It is not a Source History state or tree, cannot be checked out, landed, or selected by Git Projection, and must not be stored as an `env/*` source thread. Ciphertext bytes may reuse a byte store only if ownership, reachability, authorization, sync, purge, and projection stay facet-aware.
+_Avoid_: env thread, encrypted source state, VisibilityTier::Private as encryption
+
+**Runtime Profile Recipient**:
+A versioned encryption public descriptor created or imported by a selected provider and endorsed by the principal's signing identity. The default is not an X25519 key derived from the signing seed. A software-exportable key is an explicit weaker-custody fallback.
+_Avoid_: derived encryption subkey, signing-seed HKDF
+
+**Policy Broker**:
+The authorization boundary that grants scoped, time-boxed decrypt requests and returns values, never key material. It holds provider handles rather than exportable private keys. Hardware protects custody; the broker enforces authorization, revocation, and audit. Same-UID callers are cooperative, not an adversarial boundary.
+_Avoid_: daemon-as-key-holder, CLI-held unwrap as agent isolation
+
 **Timeline Operation**:
 An immutable event in an agent timeline, such as creating a timeline step, moving a cursor, opening a timeline branch, or linking a tool capture. Timeline operations use Heddle-native attribution, versioned durable encoding, and explicit operation kinds rather than mutable log rows.
 _Avoid_: latest timeline JSON, append-only text log
