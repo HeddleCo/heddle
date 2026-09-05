@@ -10,6 +10,7 @@ pub const LIFECYCLE_SIGNING_DOMAIN: &[u8] = b"hd-runtime-lifecycle-v1";
 pub const RECIPIENT_ENDORSE_DOMAIN: &[u8] = b"hd-runtime-recipient-v1";
 pub const SLOT_AAD_DOMAIN: &[u8] = b"heddle-runtime-slot-v1";
 pub const AUDIT_SIGNING_DOMAIN: &[u8] = b"hd-runtime-audit-v1";
+pub const WRAP_AAD_DOMAIN: &[u8] = b"heddle-runtime-wrap-aad-v1";
 
 /// Paths source capture must refuse to ingest as ordinary files once a
 /// materialization path exists. `.heddleignore` is defense in depth only.
@@ -41,6 +42,21 @@ impl LifecycleStatus {
 
     pub const fn decrypt_allowed(self) -> bool {
         matches!(self, Self::Staged | Self::Active | Self::Superseded)
+    }
+
+    /// Monotonic position in the lifecycle. Transitions only ever move forward
+    /// (`can_transition_to`), so the most-advanced `to` among a version's
+    /// signed records is its current status — robust to same-millisecond
+    /// records that a timestamp tiebreak could order wrong.
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Staged => 0,
+            Self::Active => 1,
+            Self::Superseded => 2,
+            Self::Revoked => 3,
+            Self::PurgeEligible => 4,
+            Self::Purged => 5,
+        }
     }
 
     pub const fn can_transition_to(self, next: Self) -> bool {
@@ -204,6 +220,8 @@ pub struct AuditRecord {
     pub state_id: Option<RuntimeProfileStateId>,
     pub slots: Vec<String>,
     pub purpose: String,
+    /// Who requested the decrypt (e.g. the IPC client identity). Signed.
+    pub caller: String,
     pub event: AuditEventKind,
     pub reason: Option<String>,
     pub occurred_at_ms: i64,
@@ -244,6 +262,25 @@ pub struct ProfileMetadata {
 pub fn slot_aad(profile_id: RuntimeProfileId, slot: &str) -> Vec<u8> {
     let mut aad = SLOT_AAD_DOMAIN.to_vec();
     aad.extend_from_slice(profile_id.as_bytes());
+    aad.extend_from_slice(slot.as_bytes());
+    aad
+}
+
+/// AAD binding a wrapped DEK to `(recipient, profile, slot, version)` so a wrap
+/// cannot be transplanted to another recipient, profile, slot, or version
+/// (credential-rollback / injection defense). Length-prefixed fields keep the
+/// concatenation unambiguous.
+pub fn wrap_aad(
+    recipient_id: RecipientId,
+    profile_id: RuntimeProfileId,
+    slot: &str,
+    version: u64,
+) -> Vec<u8> {
+    let mut aad = WRAP_AAD_DOMAIN.to_vec();
+    aad.extend_from_slice(recipient_id.as_bytes());
+    aad.extend_from_slice(profile_id.as_bytes());
+    aad.extend_from_slice(&version.to_be_bytes());
+    aad.extend_from_slice(&(slot.len() as u64).to_be_bytes());
     aad.extend_from_slice(slot.as_bytes());
     aad
 }

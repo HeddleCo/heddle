@@ -163,10 +163,10 @@ fn cmd_env_run(repo: &Repository, args: EnvRunArgs) -> Result<()> {
         caller: "heddle-env-run".to_string(),
     };
     let grant = broker
-        .authorize(&request, now, &signer)
+        .authorize(&request, &signer)
         .map_err(map_profile_error)?;
     let secrets = broker
-        .unwrap_for_run(grant, now, &signer)
+        .unwrap_for_run(grant, &signer)
         .map_err(map_profile_error)?;
     let pairs = secrets.into_env_pairs().map_err(map_profile_error)?;
     let mut child = Command::new(&args.command[0]);
@@ -201,9 +201,9 @@ fn now_ms() -> Result<i64> {
 fn map_profile_error(err: runtime_profile::RuntimeProfileError) -> anyhow::Error {
     let message = err.to_string();
     match err {
-        runtime_profile::RuntimeProfileError::BrokerDenied(ref denied)
-            if denied.contains("expired") =>
-        {
+        runtime_profile::RuntimeProfileError::BrokerDenied(
+            runtime_profile::BrokerDenialReason::Expired,
+        ) => {
             anyhow!(RecoveryAdvice::safety_refusal(
                 "runtime_profile_expired",
                 message,

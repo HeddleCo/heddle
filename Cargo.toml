@@ -47,7 +47,7 @@ keywords = ["vcs", "version-control", "ai", "git"]
 categories = ["development-tools"]
 
 [workspace.dependencies]
-aes-gcm = "0.10"
+aes-gcm = { version = "0.10", features = ["zeroize"] }
 anyhow = "1"
 api = { package = "heddle-api", version = "0.27.0" }
 async-trait = "0.1"
@@ -154,6 +154,7 @@ wait-timeout = "0.2"
 webpki-roots = "1.0"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 windows-sys = "0.61"
+zeroize = { version = "1", features = ["zeroize_derive"] }
 zstd = "0.13"
 
 # Internal heddle crates. Declared here so a release version bump only edits

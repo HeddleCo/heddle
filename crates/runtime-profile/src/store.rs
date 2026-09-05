@@ -12,17 +12,19 @@ use std::path::{Path, PathBuf};
 
 use crypto::{
     AEAD_AES256_GCM_V1, AeadCiphertext, Dek, Signer, SoftwareRecipientSecret, decrypt_padded,
-    encrypt_padded, unwrap_dek, wrap_dek,
+    encrypt_padded, unwrap_dek, verify_payload_signature, wrap_dek,
 };
 use heddle_fs_prims::fs_atomic::{
     create_private_dir_all, write_file_atomic, write_file_atomic_secret,
 };
 use heddle_object_model::object::{Attribution, FacetKind};
+use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 use crate::codec::{
     StoredCiphertext, assign_audit_id, assign_lifecycle_id, assign_state_id, audit_signing_payload,
     decode_audit, decode_ciphertext, decode_lifecycle, decode_recipient, decode_ref, decode_state,
-    encode_recipient, encode_ref, encode_state, lifecycle_signing_payload,
+    encode_named, encode_recipient, encode_ref, encode_state, lifecycle_signing_payload,
     recipient_endorsement_payload,
 };
 use crate::error::{Result, RuntimeProfileError};
@@ -33,7 +35,7 @@ use crate::types::{
     AuditEventKind, AuditRecord, FacetKindWire, LifecycleRecord, LifecycleStatus, ProfileMetadata,
     ProviderCapability, RUNTIME_PROFILE_SCHEMA_VERSION, RecipientDescriptor, RuntimeProfileRef,
     RuntimeProfileState, SignatureBlock, SlotMetadata, SlotRecord, WrappedDekRecord, slot_aad,
-    validate_profile_name, validate_slot_name,
+    validate_profile_name, validate_slot_name, wrap_aad,
 };
 
 const STORE_DIR: &str = "runtime-profiles";
@@ -44,6 +46,7 @@ const CIPHERTEXT_DIR: &str = "ciphertext";
 const RECIPIENTS_DIR: &str = "recipients";
 const KEYS_DIR: &str = "keys";
 const AUDIT_DIR: &str = "audit";
+const IDENTITY_FILE: &str = "identity.msgpack";
 const WRAP_ALG: &str = "x25519-hkdf-sha256-aes-256-gcm-v1";
 
 pub struct RuntimeProfileStore {
@@ -53,6 +56,24 @@ pub struct RuntimeProfileStore {
 pub struct SlotWrite {
     pub name: String,
     pub value: Vec<u8>,
+}
+
+impl Drop for SlotWrite {
+    fn drop(&mut self) {
+        // Plaintext secret material — wipe it, don't leave it in a freed Vec.
+        self.value.zeroize();
+    }
+}
+
+/// The store's pinned signing identity (trust anchor). Every signed record
+/// (lifecycle, recipient endorsement, audit) must verify against this key;
+/// it is written on first signed use and is immutable thereafter.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PinnedIdentity {
+    schema_version: u16,
+    algorithm: String,
+    #[serde(with = "serde_bytes")]
+    public_key: Vec<u8>,
 }
 
 impl RuntimeProfileStore {
@@ -78,6 +99,114 @@ impl RuntimeProfileStore {
         &self.root
     }
 
+    fn identity_path(&self) -> PathBuf {
+        self.root.join(IDENTITY_FILE)
+    }
+
+    /// Pin the store's signing identity on first signed use, or require that a
+    /// later signer matches the pinned one. This is the trust anchor: reads
+    /// verify every signed record against this key.
+    fn pin_or_check_identity(&self, signer: &impl Signer) -> Result<()> {
+        match self.load_pinned_identity()? {
+            Some(pinned) => {
+                if pinned.algorithm != signer.algorithm()
+                    || pinned.public_key != signer.public_key()
+                {
+                    return Err(RuntimeProfileError::Invalid(
+                        "signer does not match the store's pinned identity".to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            None => {
+                let identity = PinnedIdentity {
+                    schema_version: RUNTIME_PROFILE_SCHEMA_VERSION,
+                    algorithm: signer.algorithm().to_string(),
+                    public_key: signer.public_key().to_vec(),
+                };
+                let bytes = encode_named(&identity, "runtime-profile-identity")?;
+                write_file_atomic(&self.identity_path(), &bytes)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn load_pinned_identity(&self) -> Result<Option<PinnedIdentity>> {
+        match fs::read(self.identity_path()) {
+            Ok(bytes) => {
+                let identity: PinnedIdentity = rmp_serde::from_slice(&bytes).map_err(|err| {
+                    RuntimeProfileError::Decoding(format!("decode store identity: {err}"))
+                })?;
+                Ok(Some(identity))
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(RuntimeProfileError::Io(err)),
+        }
+    }
+
+    /// The pinned identity, or a fail-closed error. A store that holds signed
+    /// records but no pinned identity is malformed and must not be trusted.
+    fn require_identity(&self) -> Result<PinnedIdentity> {
+        self.load_pinned_identity()?.ok_or_else(|| {
+            RuntimeProfileError::Invalid("store has no pinned signing identity".to_string())
+        })
+    }
+
+    /// Verify a signature block over `payload` against the pinned identity:
+    /// integrity (the signature is valid over the bytes) AND authenticity (the
+    /// signer is the store's pinned key, not an arbitrary attacker key).
+    fn verify_block(
+        &self,
+        identity: &PinnedIdentity,
+        payload: &[u8],
+        block: &SignatureBlock,
+    ) -> Result<()> {
+        if block.algorithm != identity.algorithm || block.public_key != identity.public_key {
+            return Err(RuntimeProfileError::Invalid(
+                "signed record is not from the store's pinned identity".to_string(),
+            ));
+        }
+        verify_payload_signature(payload, &block.algorithm, &block.public_key, &block.signature)
+            .map_err(RuntimeProfileError::Signature)
+    }
+
+    /// The authoritative lifecycle status of a version, derived from its signed
+    /// lifecycle records — NOT the unsigned `lifecycle` field baked into the
+    /// version file (which an attacker with store-write access could edit).
+    /// Every record is verified against the pinned identity; the latest wins.
+    pub(crate) fn effective_lifecycle(
+        &self,
+        profile_id: RuntimeProfileId,
+        state_id: RuntimeProfileStateId,
+    ) -> Result<LifecycleStatus> {
+        let identity = self.require_identity()?;
+        let mut current: Option<LifecycleStatus> = None;
+        for entry in fs::read_dir(self.root.join(LIFECYCLE_DIR))? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let record = decode_lifecycle(&fs::read(entry.path())?)?;
+            if record.profile_id != profile_id || record.state_id != state_id {
+                continue;
+            }
+            self.verify_block(
+                &identity,
+                &lifecycle_signing_payload(&record)?,
+                &record.signature,
+            )?;
+            // Transitions are monotonic, so the most-advanced `to` is current.
+            if current.is_none_or(|status| record.to.rank() > status.rank()) {
+                current = Some(record.to);
+            }
+        }
+        current.ok_or_else(|| {
+            RuntimeProfileError::Invalid(
+                "version has no signed lifecycle record; refusing to trust it".to_string(),
+            )
+        })
+    }
+
     /// Create a software-exportable recipient and persist its public descriptor
     /// plus the 0600 secret (weaker-custody fallback).
     pub fn create_software_recipient(
@@ -85,6 +214,7 @@ impl RuntimeProfileStore {
         signer: &impl Signer,
         key_version: u32,
     ) -> Result<(RecipientDescriptor, SoftwareRecipientSecret)> {
+        self.pin_or_check_identity(signer)?;
         let secret = SoftwareRecipientSecret::generate()?;
         let mut descriptor = RecipientDescriptor {
             schema_version: RUNTIME_PROFILE_SCHEMA_VERSION,
@@ -118,7 +248,29 @@ impl RuntimeProfileStore {
                 RuntimeProfileError::Io(err)
             }
         })?;
-        decode_recipient(&bytes)
+        let descriptor = decode_recipient(&bytes)?;
+        // Verify the endorsement against the pinned identity, and that the id
+        // is the content hash of the endorsed payload — a forged/edited
+        // recipient (e.g. an attacker-chosen wrap public key) is rejected here.
+        let identity = self.require_identity()?;
+        self.verify_block(
+            &identity,
+            &recipient_endorsement_payload(&descriptor)?,
+            &descriptor.endorsement,
+        )?;
+        let mut id_bytes = recipient_endorsement_payload(&descriptor)?;
+        id_bytes.extend_from_slice(&descriptor.endorsement.signature);
+        if descriptor.recipient_id != RecipientId::for_bytes(&id_bytes) {
+            return Err(RuntimeProfileError::Invalid(
+                "recipient id does not match its endorsed bytes".to_string(),
+            ));
+        }
+        if descriptor.recipient_id != id {
+            return Err(RuntimeProfileError::Invalid(
+                "recipient descriptor id does not match its path".to_string(),
+            ));
+        }
+        Ok(descriptor)
     }
 
     /// Load the on-disk software secret. Weaker-custody fallback only.
@@ -145,8 +297,29 @@ impl RuntimeProfileStore {
         attribution: Attribution,
         signer: &impl Signer,
     ) -> Result<RuntimeProfileRef> {
+        self.create_profile_with_recipients(name, slots, &[recipient_id], attribution, signer)
+    }
+
+    /// Create a profile wrapped to more than one recipient (e.g. a device key
+    /// plus a recovery key). Each slot's DEK is wrapped to every recipient.
+    pub fn create_profile_with_recipients(
+        &self,
+        name: &str,
+        slots: Vec<SlotWrite>,
+        recipient_ids: &[RecipientId],
+        attribution: Attribution,
+        signer: &impl Signer,
+    ) -> Result<RuntimeProfileRef> {
         validate_profile_name(name).map_err(RuntimeProfileError::Invalid)?;
-        let recipient = self.load_recipient(recipient_id)?;
+        if recipient_ids.is_empty() {
+            return Err(RuntimeProfileError::Invalid(
+                "a runtime profile requires at least one recipient".to_string(),
+            ));
+        }
+        let recipients = recipient_ids
+            .iter()
+            .map(|id| self.load_recipient(*id))
+            .collect::<Result<Vec<_>>>()?;
         let now = now_ms()?;
         let profile_id = RuntimeProfileId::generate();
         let (state, _) = self.write_version(
@@ -154,7 +327,7 @@ impl RuntimeProfileStore {
             None,
             1,
             slots,
-            &[recipient],
+            &recipients,
             attribution.clone(),
             now,
         )?;
@@ -223,6 +396,10 @@ impl RuntimeProfileStore {
             attribution.clone(),
             now,
         )?;
+        // Crash-safe ordering: bring the new version fully Active and flip head
+        // to it FIRST, THEN supersede the old one. A crash between leaves head
+        // pointing at a valid Active version (the old one merely stays Active a
+        // little longer), never at a Superseded version with no repair path.
         self.record_lifecycle(
             profile_id,
             staged.state_id,
@@ -231,21 +408,6 @@ impl RuntimeProfileStore {
             now,
             attribution.clone(),
             signer,
-        )?;
-        self.record_lifecycle(
-            profile_id,
-            previous.state_id,
-            Some(LifecycleStatus::Active),
-            LifecycleStatus::Superseded,
-            now,
-            attribution.clone(),
-            signer,
-        )?;
-        let mut superseded = previous;
-        superseded.lifecycle = LifecycleStatus::Superseded;
-        write_file_atomic(
-            &self.version_path(superseded.state_id),
-            &encode_state(&superseded)?,
         )?;
         self.record_lifecycle(
             profile_id,
@@ -261,8 +423,23 @@ impl RuntimeProfileStore {
         write_file_atomic(&self.version_path(active.state_id), &encode_state(&active)?)?;
         profile.head = active.state_id;
         profile.updated_at_ms = now;
-        profile.attribution = attribution;
+        profile.attribution = attribution.clone();
         write_file_atomic(&self.profile_path(profile_id), &encode_ref(&profile)?)?;
+        self.record_lifecycle(
+            profile_id,
+            previous.state_id,
+            Some(LifecycleStatus::Active),
+            LifecycleStatus::Superseded,
+            now,
+            attribution,
+            signer,
+        )?;
+        let mut superseded = previous;
+        superseded.lifecycle = LifecycleStatus::Superseded;
+        write_file_atomic(
+            &self.version_path(superseded.state_id),
+            &encode_state(&superseded)?,
+        )?;
         Ok(profile)
     }
 
@@ -367,11 +544,13 @@ impl RuntimeProfileStore {
         state_id: Option<RuntimeProfileStateId>,
         slots: &[String],
         purpose: &str,
+        caller: &str,
         event: AuditEventKind,
         reason: Option<String>,
         attribution: Attribution,
         signer: &impl Signer,
     ) -> Result<AuditRecordId> {
+        self.pin_or_check_identity(signer)?;
         let now = now_ms()?;
         let mut record = AuditRecord {
             schema_version: RUNTIME_PROFILE_SCHEMA_VERSION,
@@ -381,6 +560,7 @@ impl RuntimeProfileStore {
             state_id,
             slots: slots.to_vec(),
             purpose: purpose.to_string(),
+            caller: caller.to_string(),
             event,
             reason,
             occurred_at_ms: now,
@@ -399,19 +579,23 @@ impl RuntimeProfileStore {
     }
 
     pub fn list_audit(&self) -> Result<Vec<AuditRecord>> {
+        let identity = self.require_identity()?;
         let mut out = Vec::new();
         for entry in fs::read_dir(self.root.join(AUDIT_DIR))? {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
                 continue;
             }
-            out.push(decode_audit(&fs::read(entry.path())?)?);
+            let record = decode_audit(&fs::read(entry.path())?)?;
+            self.verify_block(&identity, &audit_signing_payload(&record)?, &record.signature)?;
+            out.push(record);
         }
         out.sort_by_key(|record| record.occurred_at_ms);
         Ok(out)
     }
 
     pub fn list_lifecycle(&self, profile_id: RuntimeProfileId) -> Result<Vec<LifecycleRecord>> {
+        let identity = self.require_identity()?;
         let mut out = Vec::new();
         for entry in fs::read_dir(self.root.join(LIFECYCLE_DIR))? {
             let entry = entry?;
@@ -420,6 +604,11 @@ impl RuntimeProfileStore {
             }
             let record = decode_lifecycle(&fs::read(entry.path())?)?;
             if record.profile_id == profile_id {
+                self.verify_block(
+                    &identity,
+                    &lifecycle_signing_payload(&record)?,
+                    &record.signature,
+                )?;
                 out.push(record);
             }
         }
@@ -433,39 +622,59 @@ impl RuntimeProfileStore {
         &self,
         profile_id: RuntimeProfileId,
         slot_name: &str,
+        recipient_id: RecipientId,
         recipient: &SoftwareRecipientSecret,
     ) -> Result<Vec<u8>> {
         let profile = self.load_profile(profile_id)?;
-        self.decrypt_slot_in_state(profile.head, slot_name, recipient)
+        self.decrypt_slot_in_state(profile.head, slot_name, recipient_id, recipient)
     }
 
     pub fn decrypt_slot_in_state(
         &self,
         state_id: RuntimeProfileStateId,
         slot_name: &str,
+        recipient_id: RecipientId,
         recipient: &SoftwareRecipientSecret,
     ) -> Result<Vec<u8>> {
         let state = self.load_state(state_id)?;
-        if !state.lifecycle.decrypt_allowed() {
-            return Err(RuntimeProfileError::DecryptForbidden(
-                state.lifecycle.to_string(),
-            ));
+        // Gate on the authoritative signed lifecycle, NOT the unsigned field
+        // baked into the version file.
+        let lifecycle = self.effective_lifecycle(state.profile_id, state_id)?;
+        if !lifecycle.decrypt_allowed() {
+            return Err(RuntimeProfileError::DecryptForbidden(lifecycle.to_string()));
         }
         let slot = state
             .slots
             .iter()
             .find(|slot| slot.name == slot_name)
             .ok_or_else(|| RuntimeProfileError::SlotNotFound(slot_name.to_string()))?;
-        let wrap = slot.dek_wraps.first().ok_or_else(|| {
-            RuntimeProfileError::Invalid(format!("slot {slot_name} has no recipient wrap"))
-        })?;
+        // Select the wrap for THIS recipient — never blindly the first wrap,
+        // or a multi-recipient profile only ever decrypts via recipient[0].
+        let wrap = slot
+            .dek_wraps
+            .iter()
+            .find(|wrap| wrap.recipient_id == recipient_id)
+            .ok_or_else(|| {
+                RuntimeProfileError::Invalid(format!(
+                    "slot {slot_name} has no wrap for the presented recipient"
+                ))
+            })?;
         let wrapped = crypto::WrappedDek {
             ephemeral_public: vec_to_array(&wrap.ephemeral_public)?,
             nonce: vec_to_array(&wrap.nonce)?,
             ciphertext: wrap.ciphertext.clone(),
         };
-        let dek = unwrap_dek(&wrapped, recipient)?;
+        let dek = unwrap_dek(
+            &wrapped,
+            recipient,
+            &wrap_aad(recipient_id, state.profile_id, slot_name, state.version),
+        )?;
         let stored = decode_ciphertext(&fs::read(self.ciphertext_path(slot.ciphertext_id))?)?;
+        if stored.ciphertext_id != slot.ciphertext_id {
+            return Err(RuntimeProfileError::Invalid(
+                "stored ciphertext id does not match the slot record".to_string(),
+            ));
+        }
         let nonce: [u8; 12] = vec_to_array(&stored.nonce)?;
         let sealed = AeadCiphertext {
             alg: AEAD_AES256_GCM_V1,
@@ -480,13 +689,68 @@ impl RuntimeProfileStore {
         )?)
     }
 
+    /// Revoke the whole credential, not just its head. Every Active or
+    /// Superseded version of the profile is transitioned to `Revoked` (each
+    /// with a signed lifecycle record), so a revoked secret's earlier versions
+    /// stop decrypting too — not just the current head.
     pub fn revoke(
         &self,
         profile_id: RuntimeProfileId,
         attribution: Attribution,
         signer: &impl Signer,
     ) -> Result<RuntimeProfileRef> {
-        self.advance_head_lifecycle(profile_id, LifecycleStatus::Revoked, attribution, signer)
+        let mut profile = self.load_profile(profile_id)?;
+        let now = now_ms()?;
+        let mut revoked_any = false;
+        for state_id in self.version_ids_for_profile(profile_id)? {
+            let current = self.effective_lifecycle(profile_id, state_id)?;
+            if !matches!(current, LifecycleStatus::Active | LifecycleStatus::Superseded) {
+                continue;
+            }
+            self.record_lifecycle(
+                profile_id,
+                state_id,
+                Some(current),
+                LifecycleStatus::Revoked,
+                now,
+                attribution.clone(),
+                signer,
+            )?;
+            let mut state = self.load_state(state_id)?;
+            state.lifecycle = LifecycleStatus::Revoked;
+            write_file_atomic(&self.version_path(state_id), &encode_state(&state)?)?;
+            revoked_any = true;
+        }
+        if !revoked_any {
+            let head = self.effective_lifecycle(profile_id, profile.head)?;
+            return Err(RuntimeProfileError::IllegalLifecycle {
+                from: head.to_string(),
+                to: LifecycleStatus::Revoked.to_string(),
+            });
+        }
+        profile.updated_at_ms = now;
+        profile.attribution = attribution;
+        write_file_atomic(&self.profile_path(profile_id), &encode_ref(&profile)?)?;
+        Ok(profile)
+    }
+
+    /// All version ids belonging to `profile_id`, from the versions directory.
+    fn version_ids_for_profile(
+        &self,
+        profile_id: RuntimeProfileId,
+    ) -> Result<Vec<RuntimeProfileStateId>> {
+        let mut out = Vec::new();
+        for entry in fs::read_dir(self.root.join(VERSIONS_DIR))? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let state = decode_state(&fs::read(entry.path())?)?;
+            if state.profile_id == profile_id {
+                out.push(state.state_id);
+            }
+        }
+        Ok(out)
     }
 
     pub fn mark_purge_eligible(
@@ -587,7 +851,11 @@ impl RuntimeProfileStore {
             let mut wraps = Vec::new();
             for recipient in recipients {
                 let public: [u8; 32] = vec_to_array(&recipient.public_key)?;
-                let wrapped = wrap_dek(&dek, &public)?;
+                let wrapped = wrap_dek(
+                    &dek,
+                    &public,
+                    &wrap_aad(recipient.recipient_id, profile_id, &slot.name, version),
+                )?;
                 wraps.push(WrappedDekRecord {
                     recipient_id: recipient.recipient_id,
                     ephemeral_public: wrapped.ephemeral_public.to_vec(),
@@ -596,7 +864,7 @@ impl RuntimeProfileStore {
                 });
             }
             slot_records.push(SlotRecord {
-                name: slot.name,
+                name: slot.name.clone(),
                 aead_alg: AEAD_AES256_GCM_V1.to_string(),
                 pad_bucket: sealed.pad_bucket,
                 ciphertext_id,
@@ -641,6 +909,7 @@ impl RuntimeProfileStore {
                 to: to.to_string(),
             });
         }
+        self.pin_or_check_identity(signer)?;
         let mut record = LifecycleRecord {
             schema_version: RUNTIME_PROFILE_SCHEMA_VERSION,
             record_id: LifecycleRecordId::from_bytes([0; 32]),

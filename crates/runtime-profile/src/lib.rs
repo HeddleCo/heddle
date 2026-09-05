@@ -22,7 +22,7 @@ mod types;
 pub use broker::{
     DecryptGrant, DecryptPurpose, DecryptRequest, PolicyBroker, ProviderHandle, RunSecrets,
 };
-pub use error::{Result, RuntimeProfileError};
+pub use error::{BrokerDenialReason, Result, RuntimeProfileError};
 pub use ids::{
     AuditRecordId, CiphertextId, LifecycleRecordId, RecipientId, RuntimeProfileId,
     RuntimeProfileStateId,
@@ -96,6 +96,12 @@ mod tests {
         }
     }
 
+    /// A valid near-future expiry within the broker's TTL ceiling. The broker
+    /// reads its own clock, so a request must expire relative to real time.
+    fn future() -> i64 {
+        crate::store::now_ms().expect("now") + 60_000
+    }
+
     #[test]
     fn ciphertext_in_store_is_not_plaintext() {
         let (_temp, store) = open_store();
@@ -136,7 +142,12 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "DATABASE_URL");
         let decrypted = store
-            .decrypt_slot(profile.profile_id, "DATABASE_URL", &secret)
+            .decrypt_slot(
+                profile.profile_id,
+                "DATABASE_URL",
+                recipient.recipient_id,
+                &secret,
+            )
             .expect("decrypt");
         assert_eq!(decrypted, plaintext);
     }
@@ -162,7 +173,12 @@ mod tests {
             .expect("create");
         let stranger = SoftwareRecipientSecret::generate().expect("stranger");
         store
-            .decrypt_slot(profile.profile_id, "API_TOKEN", &stranger)
+            .decrypt_slot(
+                profile.profile_id,
+                "API_TOKEN",
+                recipient.recipient_id,
+                &stranger,
+            )
             .expect_err("wrong recipient must fail");
     }
 
@@ -231,13 +247,13 @@ mod tests {
 
         assert_eq!(
             store
-                .decrypt_slot(profile.profile_id, "TOKEN", &secret)
+                .decrypt_slot(profile.profile_id, "TOKEN", recipient.recipient_id, &secret)
                 .expect("head decrypt"),
             b"v2"
         );
         assert_eq!(
             store
-                .decrypt_slot_in_state(first_head, "TOKEN", &secret)
+                .decrypt_slot_in_state(first_head, "TOKEN", recipient.recipient_id, &secret)
                 .expect("superseded still decrypts in the rollback window"),
             b"v1"
         );
@@ -338,11 +354,12 @@ mod tests {
             }],
         );
         let grant = broker
-            .authorize(&run_request("production", &["DATABASE_URL"], 9_000_000_000_000), 1, &signer)
+            .authorize(
+                &run_request("production", &["DATABASE_URL"], future()),
+                &signer,
+            )
             .expect("authorize");
-        let secrets = broker
-            .unwrap_for_run(grant, 2, &signer)
-            .expect("unwrap");
+        let secrets = broker.unwrap_for_run(grant, &signer).expect("unwrap");
         let pairs = secrets.into_env_pairs().expect("utf8");
         assert_eq!(
             pairs,
@@ -394,17 +411,13 @@ mod tests {
             }],
         );
         broker
-            .authorize(&run_request("production", &["TOKEN"], 10), 11, &signer)
+            .authorize(&run_request("production", &["TOKEN"], 1), &signer)
             .expect_err("expired");
         broker
-            .authorize(&run_request("missing", &["TOKEN"], 9_000_000_000_000), 1, &signer)
+            .authorize(&run_request("missing", &["TOKEN"], future()), &signer)
             .expect_err("wrong profile");
         broker
-            .authorize(
-                &run_request("production", &["OTHER"], 9_000_000_000_000),
-                1,
-                &signer,
-            )
+            .authorize(&run_request("production", &["OTHER"], future()), &signer)
             .expect_err("wrong slot");
 
         let denied = broker
@@ -438,7 +451,7 @@ mod tests {
             .expect("create");
         let empty = PolicyBroker::new(store, attribution());
         empty
-            .authorize(&run_request("production", &["TOKEN"], 9_000_000_000_000), 1, &signer)
+            .authorize(&run_request("production", &["TOKEN"], future()), &signer)
             .expect_err("no handle");
 
         let (_temp, broker, signer, _id, _held) = seeded_broker(
@@ -449,16 +462,12 @@ mod tests {
             }],
         );
         let grant = broker
-            .authorize(&run_request("production", &["TOKEN"], 9_000_000_000_000), 1, &signer)
+            .authorize(&run_request("production", &["TOKEN"], future()), &signer)
             .expect("authorize");
         let replay = grant.clone();
-        drop(
-            broker
-                .unwrap_for_run(grant, 2, &signer)
-                .expect("first unwrap"),
-        );
+        drop(broker.unwrap_for_run(grant, &signer).expect("first unwrap"));
         assert!(
-            broker.unwrap_for_run(replay, 3, &signer).is_err(),
+            broker.unwrap_for_run(replay, &signer).is_err(),
             "grant is single-use"
         );
         let _ = secret;
@@ -493,7 +502,7 @@ mod tests {
             });
             let pairs = request_run_unwrap(
                 &socket,
-                &run_request("production", &["TOKEN"], 9_000_000_000_000),
+                &run_request("production", &["TOKEN"], future()),
             )
             .expect("ipc unwrap");
             assert_eq!(pairs, vec![("TOKEN".to_string(), "from-ipc".to_string())]);
@@ -507,6 +516,197 @@ mod tests {
             request_run_unwrap(&socket, &run_request("production", &["TOKEN"], 1))
                 .expect_err("expired ipc");
         });
+    }
+
+    #[test]
+    fn signed_lifecycle_is_authoritative_over_an_edited_version_field() {
+        // The HIGH finding: flipping the unsigned `lifecycle` field in a
+        // version file must NOT re-enable decrypt — the signed record wins.
+        let (_temp, store) = open_store();
+        let signer = signer();
+        let (recipient, secret) = store
+            .create_software_recipient(&signer, 1)
+            .expect("recipient");
+        let profile = store
+            .create_profile(
+                "p",
+                vec![SlotWrite {
+                    name: "TOKEN".to_string(),
+                    value: b"v".to_vec(),
+                }],
+                recipient.recipient_id,
+                attribution(),
+                &signer,
+            )
+            .expect("create");
+        store
+            .revoke(profile.profile_id, attribution(), &signer)
+            .expect("revoke");
+        let head = store.load_profile(profile.profile_id).expect("profile").head;
+        // Attacker rewrites the version file's lifecycle back to Active. The
+        // state id excludes lifecycle, so the file still "decodes".
+        let mut state = store.load_state(head).expect("state");
+        state.lifecycle = LifecycleStatus::Active;
+        std::fs::write(
+            store
+                .root()
+                .join("versions")
+                .join(format!("{}.msgpack", head.to_hex())),
+            crate::codec::encode_state(&state).expect("encode"),
+        )
+        .expect("rewrite");
+        let err = store
+            .decrypt_slot(profile.profile_id, "TOKEN", recipient.recipient_id, &secret)
+            .expect_err("a revoked version must not decrypt despite an edited field");
+        assert!(matches!(err, RuntimeProfileError::DecryptForbidden(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_tampered_lifecycle_record_is_rejected_on_read() {
+        let (_temp, store) = open_store();
+        let signer = signer();
+        let (recipient, secret) = store
+            .create_software_recipient(&signer, 1)
+            .expect("recipient");
+        let profile = store
+            .create_profile(
+                "p",
+                vec![SlotWrite {
+                    name: "TOKEN".to_string(),
+                    value: b"v".to_vec(),
+                }],
+                recipient.recipient_id,
+                attribution(),
+                &signer,
+            )
+            .expect("create");
+        let dir = store.root().join("lifecycle");
+        let entry = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .next()
+            .expect("a record")
+            .expect("entry")
+            .path();
+        let mut record = crate::codec::decode_lifecycle(&std::fs::read(&entry).expect("read"))
+            .expect("decode");
+        record.to = LifecycleStatus::Purged; // signature no longer covers `to`
+        std::fs::write(&entry, crate::codec::encode_lifecycle(&record).expect("encode"))
+            .expect("rewrite");
+        assert!(
+            store
+                .decrypt_slot(profile.profile_id, "TOKEN", recipient.recipient_id, &secret)
+                .is_err(),
+            "a tampered lifecycle record must fail the read closed"
+        );
+        assert!(store.list_lifecycle(profile.profile_id).is_err());
+    }
+
+    #[test]
+    fn multi_recipient_profile_decrypts_via_each_recipient() {
+        let (_temp, store) = open_store();
+        let signer = signer();
+        let (r1, s1) = store.create_software_recipient(&signer, 1).expect("r1");
+        let (r2, s2) = store.create_software_recipient(&signer, 1).expect("r2");
+        let profile = store
+            .create_profile_with_recipients(
+                "p",
+                vec![SlotWrite {
+                    name: "TOKEN".to_string(),
+                    value: b"multi".to_vec(),
+                }],
+                &[r1.recipient_id, r2.recipient_id],
+                attribution(),
+                &signer,
+            )
+            .expect("create");
+        assert_eq!(
+            store
+                .decrypt_slot(profile.profile_id, "TOKEN", r1.recipient_id, &s1)
+                .expect("r1 decrypt"),
+            b"multi"
+        );
+        // The second recipient — must NOT depend on wrap ordering.
+        assert_eq!(
+            store
+                .decrypt_slot(profile.profile_id, "TOKEN", r2.recipient_id, &s2)
+                .expect("r2 decrypt"),
+            b"multi"
+        );
+        assert!(
+            store
+                .decrypt_slot(profile.profile_id, "TOKEN", r2.recipient_id, &s1)
+                .is_err(),
+            "presenting r2's id with r1's key must fail"
+        );
+    }
+
+    #[test]
+    fn revoke_refuses_head_and_superseded_history() {
+        let (_temp, store) = open_store();
+        let signer = signer();
+        let (recipient, secret) = store
+            .create_software_recipient(&signer, 1)
+            .expect("recipient");
+        let profile = store
+            .create_profile(
+                "p",
+                vec![SlotWrite {
+                    name: "TOKEN".to_string(),
+                    value: b"v1".to_vec(),
+                }],
+                recipient.recipient_id,
+                attribution(),
+                &signer,
+            )
+            .expect("create");
+        let first_head = profile.head;
+        store
+            .update_slots(
+                profile.profile_id,
+                vec![SlotWrite {
+                    name: "TOKEN".to_string(),
+                    value: b"v2".to_vec(),
+                }],
+                attribution(),
+                &signer,
+            )
+            .expect("update");
+        assert_eq!(
+            store
+                .decrypt_slot_in_state(first_head, "TOKEN", recipient.recipient_id, &secret)
+                .expect("superseded decrypts before revoke"),
+            b"v1"
+        );
+        store
+            .revoke(profile.profile_id, attribution(), &signer)
+            .expect("revoke");
+        assert!(
+            store
+                .decrypt_slot(profile.profile_id, "TOKEN", recipient.recipient_id, &secret)
+                .is_err(),
+            "revoked head must not decrypt"
+        );
+        assert!(
+            store
+                .decrypt_slot_in_state(first_head, "TOKEN", recipient.recipient_id, &secret)
+                .is_err(),
+            "revoke must cover superseded history"
+        );
+    }
+
+    #[test]
+    fn a_second_signer_cannot_write_to_a_pinned_store() {
+        let (_temp, store) = open_store();
+        let first = signer();
+        store
+            .create_software_recipient(&first, 1)
+            .expect("first signer pins the identity");
+        let foreign = signer();
+        match store.create_software_recipient(&foreign, 1) {
+            Err(RuntimeProfileError::Invalid(_)) => {}
+            Ok(_) => panic!("a foreign signer must be rejected against the pinned identity"),
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
     }
 
     fn walkdir(root: &std::path::Path) -> Vec<std::path::PathBuf> {

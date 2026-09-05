@@ -18,11 +18,16 @@ use std::sync::Mutex;
 use crypto::{Signer, SoftwareRecipientSecret};
 use heddle_object_model::object::Attribution;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
-use crate::error::{Result, RuntimeProfileError};
+use crate::error::{BrokerDenialReason, Result, RuntimeProfileError};
 use crate::ids::{RecipientId, RuntimeProfileId, RuntimeProfileStateId};
-use crate::store::RuntimeProfileStore;
+use crate::store::{RuntimeProfileStore, now_ms};
 use crate::types::AuditEventKind;
+
+/// Ceiling on a grant's time-to-live. A caller cannot request an unbounded
+/// decrypt window; the broker clamps and rejects anything larger.
+pub const MAX_GRANT_TTL_MS: i64 = 15 * 60 * 1000;
 
 /// The only v1 decrypt purpose. Phase 4 may add more; the broker still
 /// refuses anything except `run`.
@@ -72,6 +77,10 @@ impl DecryptGrant {
 
     pub fn slots(&self) -> &[String] {
         &self.slots
+    }
+
+    pub fn expires_at_ms(&self) -> i64 {
+        self.expires_at_ms
     }
 }
 
@@ -124,10 +133,8 @@ impl RunSecrets {
 impl Drop for RunSecrets {
     fn drop(&mut self) {
         for (_, value) in &mut self.values {
-            for byte in value.iter_mut() {
-                *byte = 0;
-            }
-            value.clear();
+            // Volatile zeroization the optimizer may not elide.
+            value.zeroize();
         }
     }
 }
@@ -137,6 +144,8 @@ struct PendingGrant {
     profile_name: String,
     state_id: RuntimeProfileStateId,
     slots: Vec<String>,
+    caller: String,
+    expires_at_ms: i64,
 }
 
 pub struct PolicyBroker {
@@ -191,13 +200,13 @@ impl PolicyBroker {
         Ok(())
     }
 
-    pub fn authorize(
-        &self,
-        request: &DecryptRequest,
-        now_ms: i64,
-        signer: &impl Signer,
-    ) -> Result<DecryptGrant> {
-        match self.authorize_inner(request, now_ms) {
+    /// Authorize a request. The broker reads its OWN clock — a caller cannot
+    /// supply `now` and neutralize the time-box — and enforces a TTL ceiling.
+    /// Both the grant and the denial are audited (and an audit-write failure
+    /// is surfaced, never swallowed).
+    pub fn authorize(&self, request: &DecryptRequest, signer: &impl Signer) -> Result<DecryptGrant> {
+        let now = now_ms()?;
+        match self.authorize_inner(request, now) {
             Ok(grant) => {
                 self.store.record_audit(
                     Some(grant.profile_id),
@@ -205,6 +214,7 @@ impl PolicyBroker {
                     Some(grant.state_id),
                     &grant.slots,
                     request.purpose.as_str(),
+                    &request.caller,
                     AuditEventKind::Granted,
                     None,
                     self.attribution.clone(),
@@ -213,42 +223,50 @@ impl PolicyBroker {
                 Ok(grant)
             }
             Err(err) => {
-                let reason = err.to_string();
-                let _ = self.store.record_audit(
+                self.store.record_audit(
                     None,
                     &request.profile,
                     None,
                     &request.slots,
                     request.purpose.as_str(),
+                    &request.caller,
                     AuditEventKind::Denied,
-                    Some(reason),
+                    Some(err.to_string()),
                     self.attribution.clone(),
                     signer,
-                );
+                )?;
                 Err(err)
             }
         }
     }
 
-    fn authorize_inner(&self, request: &DecryptRequest, now_ms: i64) -> Result<DecryptGrant> {
+    fn authorize_inner(&self, request: &DecryptRequest, now: i64) -> Result<DecryptGrant> {
         if request.purpose != DecryptPurpose::Run {
             return Err(RuntimeProfileError::BrokerDenied(
-                "only the run purpose is authorized".to_string(),
+                BrokerDenialReason::PurposeNotAllowed,
             ));
         }
-        if now_ms >= request.expires_at_ms {
+        if request.expires_at_ms <= now {
+            return Err(RuntimeProfileError::BrokerDenied(BrokerDenialReason::Expired));
+        }
+        if request.expires_at_ms.saturating_sub(now) > MAX_GRANT_TTL_MS {
             return Err(RuntimeProfileError::BrokerDenied(
-                "request expired".to_string(),
+                BrokerDenialReason::TtlTooLong,
             ));
         }
         let profile = self.store.find_profile_by_name(&request.profile)?;
-        let state = self.store.load_state(profile.head)?;
-        if !state.lifecycle.decrypt_allowed() {
-            return Err(RuntimeProfileError::DecryptForbidden(
-                state.lifecycle.to_string(),
-            ));
+        // Gate on the authoritative signed lifecycle, not the unsigned field.
+        let lifecycle = self
+            .store
+            .effective_lifecycle(profile.profile_id, profile.head)?;
+        if !lifecycle.decrypt_allowed() {
+            return Err(RuntimeProfileError::DecryptForbidden(lifecycle.to_string()));
         }
-        let slot_names = if request.slots.is_empty() {
+        let state = self.store.load_state(profile.head)?;
+        // Empty `slots` explicitly means "every slot on the head version"; the
+        // resolved set is recorded in the grant and audit, so it is never a
+        // silent all-access.
+        let slot_names: Vec<String> = if request.slots.is_empty() {
             state.slots.iter().map(|slot| slot.name.clone()).collect()
         } else {
             for name in &request.slots {
@@ -269,9 +287,9 @@ impl PolicyBroker {
                 .iter()
                 .any(|wrap| self.handles.contains_key(&wrap.recipient_id));
             if !has_handle {
-                return Err(RuntimeProfileError::BrokerDenied(format!(
-                    "no provider handle for slot {name}"
-                )));
+                return Err(RuntimeProfileError::BrokerDenied(
+                    BrokerDenialReason::NoProviderHandle(name.clone()),
+                ));
             }
         }
         let id = Uuid::now_v7();
@@ -285,6 +303,8 @@ impl PolicyBroker {
                 profile_name: profile.name.clone(),
                 state_id: profile.head,
                 slots: slot_names.clone(),
+                caller: request.caller.clone(),
+                expires_at_ms: request.expires_at_ms,
             },
         );
         Ok(DecryptGrant {
@@ -297,29 +317,12 @@ impl PolicyBroker {
         })
     }
 
-    /// Return slot values for the run path only. Consumes the grant.
-    pub fn unwrap_for_run(
-        &self,
-        grant: DecryptGrant,
-        now_ms: i64,
-        signer: &impl Signer,
-    ) -> Result<RunSecrets> {
-        if now_ms >= grant.expires_at_ms {
-            let _ = self.store.record_audit(
-                Some(grant.profile_id),
-                &grant.profile_name,
-                Some(grant.state_id),
-                &grant.slots,
-                DecryptPurpose::Run.as_str(),
-                AuditEventKind::Denied,
-                Some("grant expired".to_string()),
-                self.attribution.clone(),
-                signer,
-            );
-            return Err(RuntimeProfileError::BrokerDenied(
-                "request expired".to_string(),
-            ));
-        }
+    /// Return slot values for the run path only. Consumes the grant; the broker
+    /// reads its own clock for the expiry check.
+    pub fn unwrap_for_run(&self, grant: DecryptGrant, signer: &impl Signer) -> Result<RunSecrets> {
+        let now = now_ms()?;
+        // Consume the grant first so an expired or replayed grant cannot linger
+        // in the pending map.
         let pending = {
             let mut map = self.pending.lock().map_err(|_| {
                 RuntimeProfileError::Invalid("broker grant lock was poisoned".to_string())
@@ -329,12 +332,27 @@ impl PolicyBroker {
         let Some(pending) = pending else {
             return Err(RuntimeProfileError::InvalidGrant(grant.id.to_string()));
         };
+        if now >= pending.expires_at_ms {
+            self.store.record_audit(
+                Some(pending.profile_id),
+                &pending.profile_name,
+                Some(pending.state_id),
+                &pending.slots,
+                DecryptPurpose::Run.as_str(),
+                &pending.caller,
+                AuditEventKind::Denied,
+                Some("grant expired".to_string()),
+                self.attribution.clone(),
+                signer,
+            )?;
+            return Err(RuntimeProfileError::BrokerDenied(BrokerDenialReason::Expired));
+        }
         let mut values = Vec::with_capacity(pending.slots.len());
         for slot_name in &pending.slots {
-            let secret = self.secret_for_slot(pending.state_id, slot_name)?;
-            let plaintext = self
-                .store
-                .decrypt_slot_in_state(pending.state_id, slot_name, secret)?;
+            let (recipient_id, secret) = self.secret_for_slot(pending.state_id, slot_name)?;
+            let plaintext =
+                self.store
+                    .decrypt_slot_in_state(pending.state_id, slot_name, recipient_id, secret)?;
             values.push((slot_name.clone(), plaintext));
         }
         self.store.record_audit(
@@ -343,6 +361,7 @@ impl PolicyBroker {
             Some(pending.state_id),
             &pending.slots,
             DecryptPurpose::Run.as_str(),
+            &pending.caller,
             AuditEventKind::Run,
             None,
             self.attribution.clone(),
@@ -355,7 +374,7 @@ impl PolicyBroker {
         &self,
         state_id: RuntimeProfileStateId,
         slot_name: &str,
-    ) -> Result<&SoftwareRecipientSecret> {
+    ) -> Result<(RecipientId, &SoftwareRecipientSecret)> {
         let state = self.store.load_state(state_id)?;
         let slot = state
             .slots
@@ -364,11 +383,11 @@ impl PolicyBroker {
             .ok_or_else(|| RuntimeProfileError::SlotNotFound(slot_name.to_string()))?;
         for wrap in &slot.dek_wraps {
             if let Some(handle) = self.handles.get(&wrap.recipient_id) {
-                return Ok(&handle.secret);
+                return Ok((wrap.recipient_id, &handle.secret));
             }
         }
-        Err(RuntimeProfileError::BrokerDenied(format!(
-            "no provider handle for slot {slot_name}"
-        )))
+        Err(RuntimeProfileError::BrokerDenied(
+            BrokerDenialReason::NoProviderHandle(slot_name.to_string()),
+        ))
     }
 }

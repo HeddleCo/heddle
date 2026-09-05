@@ -162,9 +162,16 @@ pub fn decode_lifecycle(bytes: &[u8]) -> Result<LifecycleRecord> {
 
 pub fn decode_ciphertext(bytes: &[u8]) -> Result<StoredCiphertext> {
     require_v1(bytes, "runtime-profile-ciphertext")?;
-    rmp_serde::from_slice(bytes).map_err(|err| {
+    let decoded: StoredCiphertext = rmp_serde::from_slice(bytes).map_err(|err| {
         RuntimeProfileError::Decoding(format!("decode runtime-profile-ciphertext: {err}"))
-    })
+    })?;
+    let expected = CiphertextId::for_bytes(&ciphertext_id_payload(&decoded)?);
+    if decoded.ciphertext_id != expected {
+        return Err(RuntimeProfileError::Invalid(
+            "ciphertext id does not match canonical bytes".to_string(),
+        ));
+    }
+    Ok(decoded)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,6 +252,7 @@ pub fn audit_signing_payload(record: &AuditRecord) -> Result<Vec<u8>> {
         state_id: Option<RuntimeProfileStateId>,
         slots: &'a [String],
         purpose: &'a str,
+        caller: &'a str,
         event: crate::types::AuditEventKind,
         reason: &'a Option<String>,
         occurred_at_ms: i64,
@@ -259,6 +267,7 @@ pub fn audit_signing_payload(record: &AuditRecord) -> Result<Vec<u8>> {
             state_id: record.state_id,
             slots: &record.slots,
             purpose: &record.purpose,
+            caller: &record.caller,
             event: record.event,
             reason: &record.reason,
             occurred_at_ms: record.occurred_at_ms,

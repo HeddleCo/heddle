@@ -5,6 +5,45 @@ use std::io;
 use crypto::{AeadError, SignerError};
 use heddle_object_model::object::FacetKind;
 
+/// Typed reason a broker request was denied. Callers classify by variant, not
+/// by matching message text (see `heddle env run` recovery advice).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BrokerDenialReason {
+    /// The request or grant is past its expiry.
+    Expired,
+    /// A purpose other than `run` was requested.
+    PurposeNotAllowed,
+    /// No provider handle is held for the named slot's recipients.
+    NoProviderHandle(String),
+    /// The requested time-to-live exceeds the broker's ceiling.
+    TtlTooLong,
+}
+
+impl std::fmt::Display for BrokerDenialReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Expired => f.write_str("request expired"),
+            Self::PurposeNotAllowed => f.write_str("only the run purpose is authorized"),
+            Self::NoProviderHandle(slot) => {
+                write!(f, "no provider handle for slot {slot}")
+            }
+            Self::TtlTooLong => f.write_str("requested ttl exceeds the broker maximum"),
+        }
+    }
+}
+
+impl BrokerDenialReason {
+    /// Stable machine code for IPC / recovery-advice classification.
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Expired => "expired",
+            Self::PurposeNotAllowed => "purpose_not_allowed",
+            Self::NoProviderHandle(_) => "no_provider_handle",
+            Self::TtlTooLong => "ttl_too_long",
+        }
+    }
+}
+
 /// Failures from the local runtime-profile store.
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeProfileError {
@@ -27,7 +66,7 @@ pub enum RuntimeProfileError {
     #[error("refusing to decrypt a {0} runtime-profile version")]
     DecryptForbidden(String),
     #[error("broker refused the request: {0}")]
-    BrokerDenied(String),
+    BrokerDenied(BrokerDenialReason),
     #[error("decrypt grant {0} is not valid")]
     InvalidGrant(String),
     #[error("reserved materialization path {0} cannot be captured")]

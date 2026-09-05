@@ -13,7 +13,7 @@ use crypto::Signer;
 use serde::{Deserialize, Serialize};
 
 use crate::broker::{DecryptPurpose, DecryptRequest, PolicyBroker};
-use crate::error::{Result, RuntimeProfileError};
+use crate::error::{BrokerDenialReason, Result, RuntimeProfileError};
 
 const FRAME_LIMIT: u32 = 1024 * 1024;
 
@@ -86,7 +86,23 @@ pub fn request_run_unwrap(
             .into_iter()
             .map(|slot| (slot.name, slot.value))
             .collect()),
-        BrokerResponse::Denied { message, .. } => Err(RuntimeProfileError::BrokerDenied(message)),
+        BrokerResponse::Denied { code, message } => Err(broker_denied_from_wire(&code, message)),
+    }
+}
+
+/// Reconstruct a typed error from a wire denial so the client classifies by
+/// code, not by matching message text.
+fn broker_denied_from_wire(code: &str, message: String) -> RuntimeProfileError {
+    match code {
+        "expired" => RuntimeProfileError::BrokerDenied(BrokerDenialReason::Expired),
+        "purpose_not_allowed" => {
+            RuntimeProfileError::BrokerDenied(BrokerDenialReason::PurposeNotAllowed)
+        }
+        "ttl_too_long" => RuntimeProfileError::BrokerDenied(BrokerDenialReason::TtlTooLong),
+        "no_provider_handle" => {
+            RuntimeProfileError::BrokerDenied(BrokerDenialReason::NoProviderHandle(message))
+        }
+        _ => RuntimeProfileError::Invalid(message),
     }
 }
 
@@ -98,15 +114,6 @@ fn dispatch(broker: &PolicyBroker, signer: &impl Signer, request: BrokerRequest)
             expires_at_ms,
             caller,
         } => {
-            let now = match crate::store::now_ms() {
-                Ok(now) => now,
-                Err(err) => {
-                    return BrokerResponse::Denied {
-                        code: "invalid".to_string(),
-                        message: err.to_string(),
-                    };
-                }
-            };
             let request = DecryptRequest {
                 profile,
                 slots,
@@ -114,8 +121,8 @@ fn dispatch(broker: &PolicyBroker, signer: &impl Signer, request: BrokerRequest)
                 purpose: DecryptPurpose::Run,
                 caller,
             };
-            match broker.authorize(&request, now, signer) {
-                Ok(grant) => match broker.unwrap_for_run(grant, now, signer) {
+            match broker.authorize(&request, signer) {
+                Ok(grant) => match broker.unwrap_for_run(grant, signer) {
                     Ok(secrets) => match secrets.into_env_pairs() {
                         Ok(pairs) => BrokerResponse::Unwrapped {
                             slots: pairs
@@ -135,10 +142,8 @@ fn dispatch(broker: &PolicyBroker, signer: &impl Signer, request: BrokerRequest)
 
 fn deny(err: RuntimeProfileError) -> BrokerResponse {
     let code = match &err {
-        RuntimeProfileError::BrokerDenied(message) if message.contains("expired") => "expired",
-        RuntimeProfileError::BrokerDenied(_) | RuntimeProfileError::InvalidGrant(_) => {
-            "unauthorized"
-        }
+        RuntimeProfileError::BrokerDenied(reason) => reason.code(),
+        RuntimeProfileError::InvalidGrant(_) => "unauthorized",
         RuntimeProfileError::ProfileNotFound(_) | RuntimeProfileError::SlotNotFound(_) => {
             "not_found"
         }

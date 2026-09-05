@@ -9,7 +9,8 @@ use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use hkdf::Hkdf;
 use sha2::Sha256;
-use x25519_dalek::{PublicKey, StaticSecret};
+use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
+use zeroize::Zeroizing;
 
 /// Domain for HKDF used when wrapping a DEK to an X25519 recipient.
 pub const WRAP_HKDF_INFO: &[u8] = b"heddle-runtime-wrap-v1";
@@ -31,7 +32,8 @@ pub struct Dek([u8; DEK_LEN]);
 
 impl Drop for Dek {
     fn drop(&mut self) {
-        self.0.fill(0);
+        // Volatile zeroization the optimizer may not elide (unlike `fill(0)`).
+        zeroize::Zeroize::zeroize(&mut self.0);
     }
 }
 
@@ -110,6 +112,8 @@ pub enum AeadError {
     TruncatedWrap,
     #[error("padded plaintext is truncated or corrupt")]
     CorruptPadding,
+    #[error("x25519 shared secret is non-contributory (low-order point)")]
+    NonContributory,
 }
 
 /// Choose the pad bucket for a plaintext length (including the 4-byte prefix).
@@ -127,19 +131,25 @@ fn fill_random(dest: &mut [u8]) -> Result<(), AeadError> {
     getrandom::fill(dest).map_err(|err| AeadError::Random(err.to_string()))
 }
 
-/// HKDF-SHA256 extract+expand for a single 32-byte OKM (RFC 5869).
-fn hkdf_sha256(salt: &[u8], ikm: &[u8], info: &[u8]) -> Result<[u8; DEK_LEN], AeadError> {
+/// HKDF-SHA256 extract+expand for a single 32-byte OKM (RFC 5869). The OKM is
+/// wrapping-key material; it zeroizes on drop.
+fn hkdf_sha256(
+    salt: &[u8],
+    ikm: &[u8],
+    info: &[u8],
+) -> Result<Zeroizing<[u8; DEK_LEN]>, AeadError> {
     let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
-    let mut okm = [0u8; DEK_LEN];
-    hk.expand(info, &mut okm).map_err(|_| AeadError::Hkdf)?;
+    let mut okm = Zeroizing::new([0u8; DEK_LEN]);
+    hk.expand(info, okm.as_mut_slice())
+        .map_err(|_| AeadError::Hkdf)?;
     Ok(okm)
 }
 
-fn pad_plaintext(plaintext: &[u8]) -> Result<(Vec<u8>, u32), AeadError> {
+fn pad_plaintext(plaintext: &[u8]) -> Result<(Zeroizing<Vec<u8>>, u32), AeadError> {
     let len = u32::try_from(plaintext.len()).map_err(|_| AeadError::CorruptPadding)?;
     let bucket = pad_bucket_for(plaintext.len());
     let bucket_u32 = u32::try_from(bucket).map_err(|_| AeadError::CorruptPadding)?;
-    let mut out = vec![0u8; bucket];
+    let mut out = Zeroizing::new(vec![0u8; bucket]);
     out[..LENGTH_PREFIX].copy_from_slice(&len.to_be_bytes());
     let end = LENGTH_PREFIX + plaintext.len();
     if end > bucket {
@@ -178,7 +188,13 @@ pub fn encrypt_padded(
     fill_random(&mut nonce)?;
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(dek.as_bytes()));
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), Payload { msg: &padded, aad })
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: padded.as_slice(),
+                aad,
+            },
+        )
         .map_err(|_| AeadError::Encrypt)?;
     Ok(AeadCiphertext {
         alg: AEAD_AES256_GCM_V1,
@@ -197,45 +213,66 @@ pub fn decrypt_padded(
         return Err(AeadError::Decrypt);
     }
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(dek.as_bytes()));
-    let padded = cipher
-        .decrypt(
-            Nonce::from_slice(&sealed.nonce),
-            Payload {
-                msg: &sealed.ciphertext,
-                aad,
-            },
-        )
-        .map_err(|_| AeadError::Decrypt)?;
+    let padded = Zeroizing::new(
+        cipher
+            .decrypt(
+                Nonce::from_slice(&sealed.nonce),
+                Payload {
+                    msg: &sealed.ciphertext,
+                    aad,
+                },
+            )
+            .map_err(|_| AeadError::Decrypt)?,
+    );
     if padded.len() != sealed.pad_bucket as usize {
         return Err(AeadError::CorruptPadding);
     }
     unpad_plaintext(&padded)
 }
 
-fn wrap_key(
-    ephemeral_secret: &StaticSecret,
+/// Derive the wrapping key from an X25519 shared secret, rejecting a
+/// non-contributory (low-order) shared secret so a forged low-order
+/// `ephemeral_public` cannot coerce an attacker-known all-zero shared secret.
+fn wrap_key_from_shared(
+    shared: &SharedSecret,
+    ephemeral_public: &[u8; X25519_LEN],
     recipient_public: &[u8; X25519_LEN],
-) -> Result<[u8; DEK_LEN], AeadError> {
-    let shared = ephemeral_secret.diffie_hellman(&PublicKey::from(*recipient_public));
-    let ephemeral_public = PublicKey::from(ephemeral_secret).to_bytes();
+) -> Result<Zeroizing<[u8; DEK_LEN]>, AeadError> {
+    if !shared.was_contributory() {
+        return Err(AeadError::NonContributory);
+    }
     let mut salt = [0u8; X25519_LEN * 2];
-    salt[..X25519_LEN].copy_from_slice(&ephemeral_public);
+    salt[..X25519_LEN].copy_from_slice(ephemeral_public);
     salt[X25519_LEN..].copy_from_slice(recipient_public);
     hkdf_sha256(&salt, shared.as_bytes(), WRAP_HKDF_INFO)
 }
 
-/// Wrap `dek` to `recipient_public` with an ephemeral X25519 key.
-pub fn wrap_dek(dek: &Dek, recipient_public: &[u8; X25519_LEN]) -> Result<WrappedDek, AeadError> {
+/// Wrap `dek` to `recipient_public` with an ephemeral X25519 key. `aad` binds
+/// the wrap to its recipient/profile/slot/version so a wrap cannot be
+/// transplanted onto another record.
+pub fn wrap_dek(
+    dek: &Dek,
+    recipient_public: &[u8; X25519_LEN],
+    aad: &[u8],
+) -> Result<WrappedDek, AeadError> {
     let ephemeral = SoftwareRecipientSecret::generate()?;
-    let wrap_key = wrap_key(&ephemeral.0, recipient_public)?;
+    let ephemeral_public = ephemeral.public_key();
+    let shared = ephemeral.0.diffie_hellman(&PublicKey::from(*recipient_public));
+    let wrap_key = wrap_key_from_shared(&shared, &ephemeral_public, recipient_public)?;
     let mut nonce = [0u8; NONCE_LEN];
     fill_random(&mut nonce)?;
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&wrap_key));
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(wrap_key.as_slice()));
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), dek.as_bytes().as_slice())
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: dek.as_bytes().as_slice(),
+                aad,
+            },
+        )
         .map_err(|_| AeadError::Encrypt)?;
     Ok(WrappedDek {
-        ephemeral_public: ephemeral.public_key(),
+        ephemeral_public,
         nonce,
         ciphertext,
     })
@@ -244,26 +281,32 @@ pub fn wrap_dek(dek: &Dek, recipient_public: &[u8; X25519_LEN]) -> Result<Wrappe
 pub fn unwrap_dek(
     wrapped: &WrappedDek,
     recipient: &SoftwareRecipientSecret,
+    aad: &[u8],
 ) -> Result<Dek, AeadError> {
     if wrapped.ciphertext.len() < 16 {
         return Err(AeadError::TruncatedWrap);
     }
-    let ephemeral_secret_for_shared = &recipient.0;
-    let shared =
-        ephemeral_secret_for_shared.diffie_hellman(&PublicKey::from(wrapped.ephemeral_public));
+    let shared = recipient
+        .0
+        .diffie_hellman(&PublicKey::from(wrapped.ephemeral_public));
     let recipient_public = recipient.public_key();
-    let mut salt = [0u8; X25519_LEN * 2];
-    salt[..X25519_LEN].copy_from_slice(&wrapped.ephemeral_public);
-    salt[X25519_LEN..].copy_from_slice(&recipient_public);
-    let okm = hkdf_sha256(&salt, shared.as_bytes(), WRAP_HKDF_INFO)?;
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&okm));
-    let dek_bytes = cipher
-        .decrypt(
-            Nonce::from_slice(&wrapped.nonce),
-            wrapped.ciphertext.as_slice(),
-        )
-        .map_err(|_| AeadError::Decrypt)?;
-    let dek_arr: [u8; DEK_LEN] = dek_bytes.try_into().map_err(|_| AeadError::TruncatedWrap)?;
+    let okm = wrap_key_from_shared(&shared, &wrapped.ephemeral_public, &recipient_public)?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(okm.as_slice()));
+    let dek_bytes = Zeroizing::new(
+        cipher
+            .decrypt(
+                Nonce::from_slice(&wrapped.nonce),
+                Payload {
+                    msg: wrapped.ciphertext.as_slice(),
+                    aad,
+                },
+            )
+            .map_err(|_| AeadError::Decrypt)?,
+    );
+    let dek_arr: [u8; DEK_LEN] = dek_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| AeadError::TruncatedWrap)?;
     Ok(Dek::from_bytes(dek_arr))
 }
 
@@ -294,12 +337,46 @@ mod tests {
         let dek = Dek::generate().expect("dek");
         let alice = SoftwareRecipientSecret::generate().expect("alice");
         let bob = SoftwareRecipientSecret::generate().expect("bob");
-        let wrapped = wrap_dek(&dek, &alice.public_key()).expect("wrap");
-        let opened = unwrap_dek(&wrapped, &alice).expect("alice unwraps");
+        let wrapped = wrap_dek(&dek, &alice.public_key(), b"wrap-aad-v1").expect("wrap");
+        let opened = unwrap_dek(&wrapped, &alice, b"wrap-aad-v1").expect("alice unwraps");
         assert_eq!(opened.as_bytes(), dek.as_bytes());
         assert!(
-            unwrap_dek(&wrapped, &bob).is_err(),
+            unwrap_dek(&wrapped, &bob, b"wrap-aad-v1").is_err(),
             "bob cannot unwrap alice's wrap"
+        );
+    }
+
+    #[test]
+    fn wrap_aad_mismatch_cannot_unwrap() {
+        let dek = Dek::generate().expect("dek");
+        let alice = SoftwareRecipientSecret::generate().expect("alice");
+        let wrapped = wrap_dek(&dek, &alice.public_key(), b"recip|profile|SLOT|v1").expect("wrap");
+        assert!(
+            unwrap_dek(&wrapped, &alice, b"recip|profile|SLOT|v2").is_err(),
+            "a wrap must not unwrap under a different binding (transplant/rollback)"
+        );
+    }
+
+    #[test]
+    fn low_order_ephemeral_public_is_rejected() {
+        // A forged wrap whose ephemeral_public is a low-order point yields an
+        // all-zero shared secret on the recipient side; the contributory check
+        // must reject it rather than derive an attacker-known wrap key.
+        let dek = Dek::generate().expect("dek");
+        let alice = SoftwareRecipientSecret::generate().expect("alice");
+        let good = wrap_dek(&dek, &alice.public_key(), b"aad").expect("wrap");
+        // The canonical all-zero point is low order.
+        let forged = WrappedDek {
+            ephemeral_public: [0u8; X25519_LEN],
+            nonce: good.nonce,
+            ciphertext: good.ciphertext,
+        };
+        assert!(
+            matches!(
+                unwrap_dek(&forged, &alice, b"aad"),
+                Err(AeadError::NonContributory)
+            ),
+            "a low-order ephemeral_public must be rejected as non-contributory"
         );
     }
 
