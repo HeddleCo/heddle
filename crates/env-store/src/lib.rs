@@ -695,6 +695,64 @@ mod tests {
     }
 
     #[test]
+    fn revoke_skips_an_orphan_version_instead_of_aborting() {
+        // A version file left with no signed lifecycle records (crash between
+        // write_version and its first record) must not brick revocation of the
+        // whole profile. revoke skips it (it is already undecryptable) and
+        // still revokes the live head.
+        let (_temp, store) = open_store();
+        let signer = signer();
+        let (recipient, secret) = store
+            .create_software_recipient(&signer, 1)
+            .expect("recipient");
+        let profile = store
+            .create_profile(
+                "p",
+                vec![SlotWrite {
+                    name: "TOKEN".to_string(),
+                    value: b"v1".to_vec(),
+                }],
+                recipient.recipient_id,
+                attribution(),
+                &signer,
+            )
+            .expect("create");
+        let orphan = profile.head;
+        store
+            .update_slots(
+                profile.profile_id,
+                vec![SlotWrite {
+                    name: "TOKEN".to_string(),
+                    value: b"v2".to_vec(),
+                }],
+                attribution(),
+                &signer,
+            )
+            .expect("update");
+        // Delete every lifecycle record for the first (now superseded) version,
+        // leaving its version file orphaned on disk.
+        for entry in std::fs::read_dir(store.root().join("lifecycle")).expect("read_dir") {
+            let path = entry.expect("entry").path();
+            let record =
+                crate::codec::decode_lifecycle(&std::fs::read(&path).expect("read")).expect("decode");
+            if record.state_id == orphan {
+                std::fs::remove_file(&path).expect("remove");
+            }
+        }
+        // revoke must succeed (not abort on the orphan) and the live head must
+        // stop decrypting.
+        store
+            .revoke(profile.profile_id, attribution(), &signer)
+            .expect("revoke must not abort on an orphan version");
+        assert!(
+            store
+                .decrypt_slot(profile.profile_id, "TOKEN", recipient.recipient_id, &secret)
+                .is_err(),
+            "revoked head must not decrypt"
+        );
+    }
+
+    #[test]
     fn a_second_signer_cannot_write_to_a_pinned_store() {
         let (_temp, store) = open_store();
         let first = signer();

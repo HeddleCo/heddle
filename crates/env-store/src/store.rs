@@ -179,6 +179,24 @@ impl EnvStore {
         profile_id: EnvProfileId,
         state_id: EnvProfileVersionId,
     ) -> Result<LifecycleStatus> {
+        self.effective_lifecycle_opt(profile_id, state_id)?
+            .ok_or_else(|| {
+                EnvStoreError::Invalid(
+                    "version has no signed lifecycle record; refusing to trust it".to_string(),
+                )
+            })
+    }
+
+    /// Like [`Self::effective_lifecycle`] but `None` when the version has no
+    /// signed lifecycle records at all (e.g. a version file left orphaned by a
+    /// crash between `write_version` and its first lifecycle record). Callers
+    /// that gate decrypt treat `None` as fail-closed; `revoke` treats it as
+    /// "already undecryptable" and skips it rather than aborting.
+    fn effective_lifecycle_opt(
+        &self,
+        profile_id: EnvProfileId,
+        state_id: EnvProfileVersionId,
+    ) -> Result<Option<LifecycleStatus>> {
         let identity = self.require_identity()?;
         let mut current: Option<LifecycleStatus> = None;
         for entry in fs::read_dir(self.root.join(LIFECYCLE_DIR))? {
@@ -200,11 +218,7 @@ impl EnvStore {
                 current = Some(record.to);
             }
         }
-        current.ok_or_else(|| {
-            EnvStoreError::Invalid(
-                "version has no signed lifecycle record; refusing to trust it".to_string(),
-            )
-        })
+        Ok(current)
     }
 
     /// Create a software-exportable recipient and persist its public descriptor
@@ -465,7 +479,15 @@ impl EnvStore {
 
     pub fn load_state(&self, state_id: EnvProfileVersionId) -> Result<EnvProfileVersion> {
         let bytes = fs::read(self.version_path(state_id))?;
-        decode_state(&bytes)
+        let state = decode_state(&bytes)?;
+        // The file must actually be the version its path names — reject a
+        // valid-but-misfiled version blob.
+        if state.state_id != state_id {
+            return Err(EnvStoreError::Invalid(
+                "version file id does not match its path".to_string(),
+            ));
+        }
+        Ok(state)
     }
 
     pub fn list_profiles(&self) -> Result<Vec<ProfileMetadata>> {
@@ -703,8 +725,16 @@ impl EnvStore {
         let now = now_ms()?;
         let mut revoked_any = false;
         for state_id in self.version_ids_for_profile(profile_id)? {
-            let current = self.effective_lifecycle(profile_id, state_id)?;
-            if !matches!(current, LifecycleStatus::Active | LifecycleStatus::Superseded) {
+            // A version with no signed lifecycle record is already undecryptable
+            // (the decrypt gate fails closed on it) — skip it, don't abort the
+            // whole revoke.
+            let Some(current) = self.effective_lifecycle_opt(profile_id, state_id)? else {
+                continue;
+            };
+            if !matches!(
+                current,
+                LifecycleStatus::Staged | LifecycleStatus::Active | LifecycleStatus::Superseded
+            ) {
                 continue;
             }
             self.record_lifecycle(

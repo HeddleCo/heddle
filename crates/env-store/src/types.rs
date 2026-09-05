@@ -63,6 +63,7 @@ impl LifecycleStatus {
         matches!(
             (self, next),
             (Self::Staged, Self::Active)
+                | (Self::Staged, Self::Revoked)
                 | (Self::Active, Self::Superseded)
                 | (Self::Active, Self::Revoked)
                 | (Self::Superseded, Self::Revoked)
