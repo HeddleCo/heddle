@@ -471,6 +471,7 @@ impl RuntimeProfileStore {
         Ok(profile)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_version(
         &self,
         profile_id: RuntimeProfileId,
@@ -531,6 +532,7 @@ impl RuntimeProfileStore {
         Ok((state, bytes))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_lifecycle(
         &self,
         profile_id: RuntimeProfileId,
@@ -541,13 +543,13 @@ impl RuntimeProfileStore {
         attribution: Attribution,
         signer: &impl Signer,
     ) -> Result<LifecycleRecordId> {
-        if let Some(from) = from {
-            if !from.can_transition_to(to) {
-                return Err(RuntimeProfileError::IllegalLifecycle {
-                    from: from.to_string(),
-                    to: to.to_string(),
-                });
-            }
+        if let Some(from) = from
+            && !from.can_transition_to(to)
+        {
+            return Err(RuntimeProfileError::IllegalLifecycle {
+                from: from.to_string(),
+                to: to.to_string(),
+            });
         }
         let mut record = LifecycleRecord {
             schema_version: RUNTIME_PROFILE_SCHEMA_VERSION,
