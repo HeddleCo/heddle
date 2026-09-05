@@ -359,6 +359,7 @@ impl RuntimeProfileStore {
         Ok(descriptor)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_audit(
         &self,
         profile_id: Option<RuntimeProfileId>,
