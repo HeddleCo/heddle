@@ -1877,11 +1877,15 @@ fn thread_summary_from_thread(
                 .and_then(|entry| entry.path.as_ref())
                 .map(|path| path.display().to_string())
         });
-    let execution_path = if thread.execution_path == repo.root() {
-        None
-    } else {
-        Some(thread.execution_path.display().to_string())
-    };
+    let execution_path =
+        if thread.execution_path.as_os_str().is_empty() || thread.execution_path == repo.root() {
+            // An empty execution_path is an identity-only thread (default main /
+            // `thread create`) with no distinct execution root — omit it, same as
+            // when it equals the repo root.
+            None
+        } else {
+            Some(thread.execution_path.display().to_string())
+        };
     let git_backed_tip = is_current
         && repo.capability() == RepositoryCapability::GitOverlay
         && thread.current_state.is_none();
@@ -3577,7 +3581,11 @@ mod tests {
         )
         .expect_err("truncated recovery marker must fail closed");
 
-        assert!(error.to_string().contains("failed to parse incomplete-land marker"));
+        assert!(
+            error
+                .to_string()
+                .contains("failed to parse incomplete-land marker")
+        );
     }
 
     #[test]
