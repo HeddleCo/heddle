@@ -71,6 +71,7 @@ dependencies = [
  "ctr 0.9.2",
  "ghash 0.5.1",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -267,7 +268,7 @@ checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.4",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -602,9 +603,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.4.4"
+version = "1.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ad534f4357a5264cce5019c989cf66a4f0dc4e0d1b1d15f8aacec0ff7360273"
+checksum = "005ec2760ca554fae18df7a11195552ec576cd665632a881bc011d5bb2fd4d80"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -743,7 +744,7 @@ dependencies = [
  "heck",
  "proc-macro2",
  "quote",
- "syn 3.0.4",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -937,18 +938,18 @@ checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
 name = "crossbeam-channel"
-version = "0.5.16"
+version = "0.5.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d85363c37faeca707aef026efa9f3b34d077bce547e48f770770625c6013679e"
+checksum = "98b0cc327b5bc766e7fda9c9260cc0fa81b43a8e240440422dff70788e3f9ef1"
 dependencies = [
  "crossbeam-utils",
 ]
 
 [[package]]
 name = "crossbeam-deque"
-version = "0.8.7"
+version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5181e0de7b61eb03a81e347d6dd8797bae9da5146707b51077e2d71a54ec0ceb"
+checksum = "622f3fc73690be383c7214310406f28a90e6edeadc3cea882f9d71e495b9711a"
 dependencies = [
  "crossbeam-epoch",
  "crossbeam-utils",
@@ -956,18 +957,18 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.20"
+version = "0.9.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
+checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
 dependencies = [
  "crossbeam-utils",
 ]
 
 [[package]]
 name = "crossbeam-utils"
-version = "0.8.22"
+version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
+checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "crunchy"
@@ -1179,7 +1180,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 3.0.4",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -1213,9 +1214,9 @@ dependencies = [
 
 [[package]]
 name = "der"
-version = "0.8.1"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a69dedd701da44b0536442edf09c81a64b0ab97a7a4a5e3d1971f00027cbc63d"
+checksum = "a878c850e9e421b20262e9b41f9c860e4785fa07541c266b62ff9d1ef998a80a"
 dependencies = [
  "const-oid 0.10.2",
  "pem-rfc7468 1.0.0",
@@ -1355,7 +1356,7 @@ checksum = "c6232dd377dcc64799954cbd3a9bb882e9cdc1308ccd87b1c098f1fb2eaf82a8"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.4",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -1396,7 +1397,7 @@ version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0681a4fc24c767085329728d8dfba959af91228aa4610cca4f8ce317ba46ae0"
 dependencies = [
- "der 0.8.1",
+ "der 0.8.2",
  "digest 0.11.3",
  "elliptic-curve 0.14.1",
  "rfc6979 0.6.0",
@@ -1543,7 +1544,7 @@ checksum = "0590c4a94da3372e83493b956755a6e2266830b6e4e3b101afe66e3f39477b91"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.4",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -1676,9 +1677,9 @@ dependencies = [
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.11"
+version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
+checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
 name = "findshlibs"
@@ -1872,7 +1873,7 @@ checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.4",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -2120,7 +2121,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "heddle-agent-relay"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2160,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-ci-config"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "heddle-api",
  "hex",
@@ -2173,7 +2174,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-ci-engine"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "blake3",
  "heddle-ci-config",
@@ -2189,7 +2190,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2211,6 +2212,7 @@ dependencies = [
  "heddle-cli-render",
  "heddle-config",
  "heddle-crypto",
+ "heddle-env-store",
  "heddle-format",
  "heddle-git-projection",
  "heddle-hosted-client",
@@ -2222,7 +2224,6 @@ dependencies = [
  "heddle-perf-contract",
  "heddle-refs",
  "heddle-repo",
- "heddle-runtime-profile",
  "heddle-semantic",
  "heddle-verbs",
  "heddle-wire",
@@ -2254,7 +2255,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
@@ -2264,7 +2265,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli-args"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -2276,7 +2277,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli-contract"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -2297,7 +2298,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli-render"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "anstream",
  "anstyle",
@@ -2319,7 +2320,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-config"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2332,7 +2333,7 @@ dependencies = [
  "opentelemetry_sdk",
  "serde",
  "thiserror 2.0.18",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
@@ -2340,7 +2341,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-crypto"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "aes-gcm 0.10.3",
  "base64 0.22.1",
@@ -2359,11 +2360,12 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
 name = "heddle-devtools"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "anyhow",
  "libc",
@@ -2371,17 +2373,34 @@ dependencies = [
  "serde_json",
  "syn 2.0.119",
  "tempfile",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "walkdir",
 ]
 
 [[package]]
 name = "heddle-docsgen"
-version = "0.20.3"
+version = "0.20.5"
+
+[[package]]
+name = "heddle-env-store"
+version = "0.20.5"
+dependencies = [
+ "chrono",
+ "heddle-crypto",
+ "heddle-fs-prims",
+ "heddle-object-model",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
+ "zeroize",
+]
 
 [[package]]
 name = "heddle-format"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "blake3",
  "thiserror 2.0.18",
@@ -2390,7 +2409,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-fs-prims"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "fs2",
  "heddle-object-model",
@@ -2401,7 +2420,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-git-projection"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "heddle-ingest",
  "heddle-objects",
@@ -2421,7 +2440,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-hosted-client"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2470,7 +2489,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-tungstenite",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
@@ -2480,7 +2499,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-ingest"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2502,7 +2521,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-merge"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "anyhow",
  "heddle-format",
@@ -2514,7 +2533,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-mount"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2546,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-object-model"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "anyhow",
  "base32",
@@ -2563,14 +2582,14 @@ dependencies = [
  "serde_json",
  "sley",
  "thiserror 2.0.18",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "uuid",
  "zstd",
 ]
 
 [[package]]
 name = "heddle-objects"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "anyhow",
  "base32",
@@ -2598,7 +2617,7 @@ dependencies = [
  "sley",
  "tempfile",
  "thiserror 2.0.18",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "tracing",
  "uuid",
  "zstd",
@@ -2606,7 +2625,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-oplog"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "chrono",
  "criterion",
@@ -2623,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-pack"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "blake3",
  "bytes",
@@ -2639,11 +2658,11 @@ dependencies = [
 
 [[package]]
 name = "heddle-perf-contract"
-version = "0.20.3"
+version = "0.20.5"
 
 [[package]]
 name = "heddle-refs"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "chrono",
  "fs2",
@@ -2662,7 +2681,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-repo"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "anyhow",
  "base32",
@@ -2694,31 +2713,15 @@ dependencies = [
  "sley",
  "tempfile",
  "thiserror 2.0.18",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
-name = "heddle-runtime-profile"
-version = "0.20.3"
-dependencies = [
- "chrono",
- "heddle-crypto",
- "heddle-fs-prims",
- "heddle-object-model",
- "rmp-serde",
- "serde",
- "serde_bytes",
- "tempfile",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
 name = "heddle-semantic"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "anyhow",
  "criterion",
@@ -2740,7 +2743,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-semantic-recovery"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "blake3",
  "fastembed",
@@ -2754,7 +2757,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-state-review"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "heddle-objects",
  "heddle-repo",
@@ -2766,19 +2769,19 @@ dependencies = [
 
 [[package]]
 name = "heddle-verbs"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "anyhow",
  "chrono",
  "fs2",
  "heddle-crypto",
+ "heddle-env-store",
  "heddle-git-projection",
  "heddle-merge",
  "heddle-objects",
  "heddle-oplog",
  "heddle-refs",
  "heddle-repo",
- "heddle-runtime-profile",
  "heddle-semantic",
  "heddle-state-review",
  "hex",
@@ -2797,7 +2800,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-wire"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "blake3",
  "chrono",
@@ -2880,9 +2883,9 @@ dependencies = [
 
 [[package]]
 name = "hermit-abi"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
+checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "hex"
@@ -2892,9 +2895,9 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hickory-net"
-version = "0.26.1"
+version = "0.26.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2295ed2f9c31e471e1428a8f88a3f0e1f4b27c15049592138d1eebe9c35b183"
+checksum = "084e7bd6a377435d568f652153e571b50970d7ccc1d1eeec0519f834632287e1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2921,9 +2924,9 @@ dependencies = [
 
 [[package]]
 name = "hickory-proto"
-version = "0.26.1"
+version = "0.26.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bab31817bfb44672a252e97fe81cd0c18d1b2cf892108922f6818820df8c643"
+checksum = "7e2da0694c15b44c6f68a6b05e0233617008c54080e31d6eb848d858a9c5b38d"
 dependencies = [
  "data-encoding",
  "idna",
@@ -2941,9 +2944,9 @@ dependencies = [
 
 [[package]]
 name = "hickory-resolver"
-version = "0.26.1"
+version = "0.26.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0d58d28879ceecde6607729660c2667a081ccdc082e082675042793960f178c"
+checksum = "0e4f9f4603319422d482738f3f6fe5aac03157fdbfed1cd85a3ff45adb09072f"
 dependencies = [
  "cfg-if",
  "futures-util",
@@ -3274,9 +3277,9 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "2.14.1"
+version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07aa2048142242915a31d35844fb311e0e53fcca590c3a0a40dcf1b841fa09eb"
+checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
@@ -3489,7 +3492,7 @@ dependencies = [
  "tokio-rustls-acme",
  "tokio-util",
  "tokio-websockets",
- "toml 1.1.4+spec-1.1.0",
+ "toml 1.1.5+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -3763,9 +3766,9 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.18.3"
+version = "0.18.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d317b4b9eb398e6acce275758ec6125535505e7a146fb1a9b8bda2451b0ff4c"
+checksum = "ff9840bcc50b71349309900da0ce7279aa336ae71d73250b07998932c7d97c25"
 dependencies = [
  "hashbrown 0.17.1",
 ]
@@ -3880,9 +3883,9 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427"
+checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
 dependencies = [
  "libc",
  "log",
@@ -3937,9 +3940,9 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "n0-error"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c37e81176a83a77d2514528b91bdafc70ef88aab428f0e1b91aebb8d99888895"
+checksum = "26c59ea174675ce6bc196878851e5049e11b8b1f9af3ba87e4d6df8d828bb001"
 dependencies = [
  "n0-error-macros",
  "spez",
@@ -3947,9 +3950,9 @@ dependencies = [
 
 [[package]]
 name = "n0-error-macros"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2acd8b070213b0299282f884b4beba4e7b52d624fdcd504a3ad3665390c11e1"
+checksum = "4412346410d6616f3668c40e53c298e5320c7b856f7a960e5914e442601be79f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4011,9 +4014,9 @@ checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 
 [[package]]
 name = "netdev"
-version = "0.45.0"
+version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "569dfbdd2efd771b24ec9bb57f956e04d4fbfc72f62b2f11961723f9b3f4b020"
+checksum = "096c44b66a9b09b99b4dd36b1c295ff3a492039ccecaf55466bd6ddcdba59968"
 dependencies = [
  "block2",
  "dispatch2",
@@ -4023,9 +4026,9 @@ dependencies = [
  "libc",
  "mac-addr",
  "ndk-context",
- "netlink-packet-core",
- "netlink-packet-route",
- "netlink-sys",
+ "netlink-packet-core 0.8.2",
+ "netlink-packet-route 0.31.0",
+ "netlink-sys 0.8.8",
  "objc2",
  "objc2-core-foundation",
  "objc2-core-wlan",
@@ -4038,9 +4041,9 @@ dependencies = [
 
 [[package]]
 name = "netdev"
-version = "0.46.1"
+version = "0.46.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a5f88621a4b468e8ce92626f847cc02462cef3e06d793baa8b1c8617e304b20"
+checksum = "4db4135b187ddae3b6813c4f9d9ac9d5181859fa6a08b4e006c63a130974ed62"
 dependencies = [
  "block2",
  "dispatch2",
@@ -4050,9 +4053,9 @@ dependencies = [
  "libc",
  "mac-addr",
  "ndk-context",
- "netlink-packet-core",
- "netlink-packet-route",
- "netlink-sys",
+ "netlink-packet-core 0.9.0",
+ "netlink-packet-route 0.33.0",
+ "netlink-sys 0.9.0",
  "objc2-core-foundation",
  "objc2-system-configuration",
  "once_cell",
@@ -4070,6 +4073,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "netlink-packet-core"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d6e2daf9a8c2e21302714706860a0e6be02e03d17294ecc66b354ea7d4059dd"
+
+[[package]]
 name = "netlink-packet-route"
 version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4078,7 +4087,20 @@ dependencies = [
  "bitflags 2.13.1",
  "libc",
  "log",
- "netlink-packet-core",
+ "netlink-packet-core 0.8.2",
+]
+
+[[package]]
+name = "netlink-packet-route"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59d48ffc8b73a506e1ff0878528c72668f2bfbc3d875b6be890a96be5d0d5576"
+dependencies = [
+ "bitflags 2.13.1",
+ "libc",
+ "log",
+ "netlink-packet-core 0.9.0",
+ "zerocopy",
 ]
 
 [[package]]
@@ -4091,8 +4113,8 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "log",
- "netlink-packet-core",
- "netlink-sys",
+ "netlink-packet-core 0.8.2",
+ "netlink-sys 0.8.8",
  "thiserror 2.0.18",
 ]
 
@@ -4107,6 +4129,17 @@ dependencies = [
  "libc",
  "log",
  "tokio",
+]
+
+[[package]]
+name = "netlink-sys"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c99d38e00b420df49e940fe0826e667c3dad82ac68eb4c2bbf754c1c14a83a10"
+dependencies = [
+ "bytes",
+ "libc",
+ "log",
 ]
 
 [[package]]
@@ -4125,12 +4158,12 @@ dependencies = [
  "n0-error",
  "n0-future",
  "n0-watcher",
- "netdev 0.45.0",
- "netdev 0.46.1",
- "netlink-packet-core",
- "netlink-packet-route",
+ "netdev 0.45.1",
+ "netdev 0.46.2",
+ "netlink-packet-core 0.8.2",
+ "netlink-packet-route 0.31.0",
  "netlink-proto",
- "netlink-sys",
+ "netlink-sys 0.8.8",
  "noq-udp",
  "objc2-core-foundation",
  "objc2-system-configuration",
@@ -4916,7 +4949,7 @@ dependencies = [
  "aes 0.9.3",
  "aes-gcm 0.11.1",
  "cbc",
- "der 0.8.1",
+ "der 0.8.2",
  "pbkdf2",
  "rand_core 0.10.1",
  "scrypt",
@@ -4950,7 +4983,7 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7"
 dependencies = [
- "der 0.8.1",
+ "der 0.8.2",
  "pkcs5",
  "rand_core 0.10.1",
  "spki 0.8.0",
@@ -5043,9 +5076,9 @@ dependencies = [
 
 [[package]]
 name = "portable-atomic-util"
-version = "0.2.7"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2a106d1259c23fac8e543272398ae0e3c0b8d33c88ed73d0cc71b0f1d902618"
+checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
 dependencies = [
  "portable-atomic",
 ]
@@ -5397,9 +5430,9 @@ checksum = "95067976aca6421a523e491fce939a3e65249bac4b977adee0ee9771568e8aa3"
 
 [[package]]
 name = "psl"
-version = "2.1.226"
+version = "2.1.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bc88482eea924ca3a2f56a547454169af58deef35567965eb4fc2392a834841"
+checksum = "534732a31a0850a1ab425e90b9aa820a1ba9295efb5c8535da04747dc14f2197"
 dependencies = [
  "psl-types",
 ]
@@ -5626,7 +5659,7 @@ checksum = "92ecd8964f8453721699a1ed72037b0db49ce2f5a5138486ee89bed6f67cdf3a"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.4",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -6065,7 +6098,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde_derive_internals",
- "syn 3.0.4",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -6115,7 +6148,7 @@ checksum = "d56d437c2f19203ce5f7122e507831de96f3d2d4d3be5af44a0b0a09d8a80e4d"
 dependencies = [
  "base16ct 1.0.0",
  "ctutils",
- "der 0.8.1",
+ "der 0.8.2",
  "hybrid-array",
  "subtle",
  "zeroize",
@@ -6199,7 +6232,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.4",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -6210,7 +6243,7 @@ checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.4",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -6821,9 +6854,9 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.15.2"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 
 [[package]]
 name = "socket2"
@@ -6898,7 +6931,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d9efca8738c78ee9484207732f728b1ef517bbb1833d6fc0879ca898a522f6f"
 dependencies = [
  "base64ct",
- "der 0.8.1",
+ "der 0.8.2",
 ]
 
 [[package]]
@@ -7028,9 +7061,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.4"
+version = "3.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6275cddf4610d1775e6d1fe9469b2e77d0f39fd98fb7450901b821e0c53649f"
+checksum = "12df2e0110f65b775f769bb17ef989067a1d931b2eb822bd4346631eeada89f9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7199,9 +7232,9 @@ dependencies = [
 
 [[package]]
 name = "tinyvec"
-version = "1.12.0"
+version = "1.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb4ebadaa0af04fab11ae01eb5f9fdb5f9c5b875506e210e71c07873528baa7f"
+checksum = "4cf0ded5c4e56918d8f8a339e1bb67d038d3bc6d144ac407904015ba2e4cde9b"
 dependencies = [
  "tinyvec_macros",
 ]
@@ -7269,14 +7302,14 @@ checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.4",
+ "syn 3.0.5",
 ]
 
 [[package]]
 name = "tokio-rustls"
-version = "0.26.4"
+version = "0.26.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
+checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
 dependencies = [
  "rustls",
  "tokio",
@@ -7393,9 +7426,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.1.4+spec-1.1.0"
+version = "1.1.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
+checksum = "12c0ba9680044b4ce98d391a62094047eada0d64860b80166c39f4a6b5640785"
 dependencies = [
  "indexmap",
  "serde_core",
@@ -7589,7 +7622,7 @@ dependencies = [
 
 [[package]]
 name = "treadle-schema"
-version = "0.20.3"
+version = "0.20.5"
 dependencies = [
  "blake3",
  "ed25519-dalek 3.0.0",
@@ -7666,9 +7699,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-language"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
+checksum = "ca0d1bf6fdd806e43ae5198f82f527056d359def39e54e67a0f478ac09dac081"
 
 [[package]]
 name = "tree-sitter-python"
@@ -8504,13 +8537,14 @@ dependencies = [
 
 [[package]]
 name = "wnaf"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab12e7090f27e2ffd9322651492942d50c2926094af30601e1964337db39daf1"
+checksum = "795ca18b3fdb5e62bf982199278341ddcf7ebf7d32e25e212ad05d496e95f6fa"
 dependencies = [
  "ff 0.14.0",
  "group 0.14.0",
  "hybrid-array",
+ "primefield",
 ]
 
 [[package]]
@@ -8692,7 +8726,7 @@ checksum = "34df6fc39dbd26ddc9c10e6a2984476e13acce22e64e4487636ef494369225da"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.4",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -8718,18 +8752,18 @@ dependencies = [
 
 [[package]]
 name = "zstd-safe"
-version = "7.2.4"
+version = "7.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
+checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
 dependencies = [
  "zstd-sys",
 ]
 
 [[package]]
 name = "zstd-sys"
-version = "2.0.16+zstd.1.5.7"
+version = "2.1.0+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+checksum = "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0"
 dependencies = [
  "cc",
  "pkg-config",

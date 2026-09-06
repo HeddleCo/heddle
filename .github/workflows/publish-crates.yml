@@ -99,6 +99,7 @@ env:
     heddle-config
     heddle-ingest
     heddle-git-projection
+    heddle-env-store
     heddle-verbs
     heddle-mount
     heddle-ci-config

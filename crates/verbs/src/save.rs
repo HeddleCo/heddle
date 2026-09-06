@@ -563,7 +563,7 @@ pub fn capture(
         ));
     }
 
-    if let Some(path) = runtime_profile::reserved_materialization_on_disk(repo.root()) {
+    if let Some(path) = env_store::reserved_materialization_on_disk(repo.root()) {
         return Err(capture_refusal(
             "reserved_materialization_path",
             format!("Refusing to capture reserved path `{path}`"),
@@ -1042,7 +1042,7 @@ fn active_task_assignment_id(repo: &Repository, thread: Option<&Thread>) -> Resu
     Ok(store
         .active_entries()?
         .into_iter()
-        .filter(|entry| entry.thread == thread.id)
+        .filter(|entry| entry.thread == thread.thread || entry.thread == thread.id)
         .max_by_key(|entry| entry.started_at)
         .and_then(|entry| entry.task_assignment_id))
 }

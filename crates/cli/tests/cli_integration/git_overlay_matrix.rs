@@ -1134,7 +1134,7 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
     assert_eq!(doctor["verification"]["verified"], true);
     assert_eq!(doctor["verification"]["status"], "clean");
     assert_eq!(doctor["verification"]["recommended_action"], Value::Null);
-    assert_eq!(doctor["recommended_action"], "heddle ready --thread main");
+    assert_eq!(doctor["recommended_action"], Value::Null);
     assert!(
         doctor["recovery_commands"]
             .as_array()

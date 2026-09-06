@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `heddle env run` injects broker-unwrapped slots into a child only.
 
-use std::path::Path;
-use std::process::{Command, Output};
+use std::{
+    path::Path,
+    process::{Command, Output},
+};
 
-use crypto::Ed25519Signer;
+use env_store::{EnvStore, SlotWrite};
 use objects::object::{Attribution, Principal};
 use repo::Repository;
-use runtime_profile::{RuntimeProfileStore, SlotWrite};
 use tempfile::TempDir;
 
 fn isolated_heddle(cwd: &Path, home: &Path, args: &[&str]) -> Command {
@@ -33,8 +34,14 @@ fn run_heddle(cwd: &Path, home: &Path, args: &[&str]) -> Output {
 
 fn seed_profile(repo: &Path, name: &str, slot: &str, value: &str) {
     let opened = Repository::open(repo).expect("open");
-    let store = RuntimeProfileStore::open(opened.heddle_dir()).expect("store");
-    let signer = Ed25519Signer::generate().expect("signer");
+    let store = EnvStore::open(opened.heddle_dir()).expect("store");
+    // `heddle env run` resolves the per-repo local identity. Seed with
+    // that same signer so the store pin matches the CLI process.
+    let local = opened
+        .heddle_dir()
+        .join(repo::identity::LOCAL_IDENTITY_FILE);
+    let signer = repo::identity::resolve_signer(&local, Path::new("/nonexistent"))
+        .expect("mint local signer");
     let (recipient, _secret) = store
         .create_software_recipient(&signer, 1)
         .expect("recipient");
@@ -89,7 +96,10 @@ fn env_run_injects_slot_and_leaves_no_worktree_plaintext() {
     assert!(listed.status.success());
     let json = String::from_utf8_lossy(&listed.stdout);
     assert!(json.contains("\"output_kind\":\"env_list\"") || json.contains("env_list"));
-    assert!(!json.contains(secret), "plaintext leaked into env list JSON");
+    assert!(
+        !json.contains(secret),
+        "plaintext leaked into env list JSON"
+    );
     assert!(!String::from_utf8_lossy(&listed.stderr).contains(secret));
 }
 
@@ -126,7 +136,15 @@ fn env_create_then_run_uses_cli_and_leaves_no_plaintext() {
     let output = run_heddle(
         &repo,
         &home,
-        &["env", "run", "--profile", "local", "--", "printenv", "TOKEN"],
+        &[
+            "env",
+            "run",
+            "--profile",
+            "local",
+            "--",
+            "printenv",
+            "TOKEN",
+        ],
     );
     assert!(
         output.status.success(),

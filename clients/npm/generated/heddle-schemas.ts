@@ -3,7 +3,7 @@
 // (`schema_for_verb` / `crates/cli-contract/src/cli/commands/schemas.rs`).
 // Regenerate with `scripts/gen-ts-types.sh`; a drift test keeps it in sync.
 
-export const HEDDLE_SCHEMA_VERSION = "0.20.1" as const;
+export const HEDDLE_SCHEMA_VERSION = "0.20.4" as const;
 
 export interface AbortSchema {
   action: OperatorAction;
@@ -1157,6 +1157,16 @@ export interface DoctorSchema {
   thread?: unknown;
   verification: RepositoryVerificationState;
   workspace: unknown;
+}
+
+export interface EnvCreateSchema {
+  output_kind: "env_create";
+  [key: string]: unknown;
+}
+
+export interface EnvListSchema {
+  output_kind: "env_list";
+  [key: string]: unknown;
 }
 
 /** Ephemeral thread metadata. Lives at the tail of [`ThreadRecord`]. Ephemeral threads are spawned for short-lived agent work that should not crowd `heddle log` or the thread workspace. If not promoted before `ttl_seconds` elapses, the thread auto-collapses on the next read-side sweep (`heddle status`, `heddle log`, `heddle thread list`). */
@@ -3566,6 +3576,8 @@ export interface HeddleVerbOutputs {
   doctor: DoctorSchema;
   "doctor docs": DocsReport;
   "doctor schemas": SchemaReport;
+  "env create": EnvCreateSchema;
+  "env list": EnvListSchema;
   error: ErrorEnvelopeSchema;
   help: HelpSchema;
   "hook events": HookEventsSchema;
@@ -3734,6 +3746,8 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "doctor",
   "doctor docs",
   "doctor schemas",
+  "env create",
+  "env list",
   "error",
   "help",
   "hook events",

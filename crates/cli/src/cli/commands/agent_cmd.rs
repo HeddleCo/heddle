@@ -366,7 +366,7 @@ fn ensure_thread_record(
     task: &Option<String>,
 ) -> Result<()> {
     let manager = ThreadManager::new(repo.heddle_dir());
-    if manager.load(thread_name)?.is_some() {
+    if manager.load_id_or_name(thread_name)?.is_some() {
         return Ok(());
     }
     let state = repo

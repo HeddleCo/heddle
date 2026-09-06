@@ -2,12 +2,14 @@
 status: accepted
 ---
 
-# RuntimeProfile is a confidential-runtime facet, not Source History
+# EnvProfile is a confidential-runtime facet, not Source History
+
+> **Naming (2026-09-05):** the implementing crate is `heddle-env-store` (lib `env_store`), types `EnvProfile`/`EnvProfileVersion`/`EnvStore`; the law-bearing `FacetKind::ConfidentialRuntime` and the `heddle env` CLI are unchanged. Renamed pre-publish; the local v1 on-disk format was updated in lockstep (no migration owed).
 
 A Heddle runtime profile is a **distinct confidential-runtime facet**. It is
 not a Source History `State` or `Tree`, not a checkoutable thread, and not an
-`env/*` source thread. A typed [`RuntimeProfileRef`] names a profile and points
-at immutable [`RuntimeProfileState`] versions. Those versions carry named slot
+`env/*` source thread. A typed [`EnvProfileRef`] names a profile and points
+at immutable [`EnvProfileVersion`] versions. Those versions carry named slot
 records (ciphertext hashes and per-recipient DEK wraps), recipient and policy
 references, attribution, and signed lifecycle records.
 
@@ -53,20 +55,20 @@ first). V1 encoding:
 - Canonical MessagePack envelopes with an explicit `schema_version`.
 - One latest encoder, explicit version dispatch, no blind unversioned decode.
 - Content-addressed identities over canonical bytes:
-  - `RuntimeProfileStateId` — typed hash prefix `runtime-profile-state`
-  - `LifecycleRecordId` — typed hash prefix `runtime-profile-lifecycle`
-  - `RecipientId` — typed hash prefix `runtime-profile-recipient`
-- `RuntimeProfileId` is a UUIDv7, stable across versions.
-- `RuntimeProfileStateId` is **not** a `StateId`. The types do not convert.
+  - `EnvProfileVersionId` — typed hash prefix `heddle-env-state`
+  - `LifecycleRecordId` — typed hash prefix `heddle-env-lifecycle`
+  - `RecipientId` — typed hash prefix `heddle-env-recipient`
+- `EnvProfileId` is a UUIDv7, stable across versions.
+- `EnvProfileVersionId` is **not** a `StateId`. The types do not convert.
   Git Projection and land continue to take `StateId` only.
 
-A `RuntimeProfileRef` is the mutable typed root (atomically replaced):
+A `EnvProfileRef` is the mutable typed root (atomically replaced):
 
 - `profile_id`, `name`, `facet = ConfidentialRuntime`
-- `head` — current `RuntimeProfileStateId`
+- `head` — current `EnvProfileVersionId`
 - attribution and timestamps
 
-A `RuntimeProfileState` is immutable:
+A `EnvProfileVersion` is immutable:
 
 - `profile_id`, `parent`, monotonic `version`
 - `lifecycle` at the time the version was sealed
@@ -75,7 +77,7 @@ A `RuntimeProfileState` is immutable:
 - attribution
 
 Ciphertext **bytes** may later reuse the content-addressed byte store. V1
-keeps them in a dedicated `.heddle/runtime-profiles/` namespace so ownership,
+keeps them in a dedicated `.heddle/env/` namespace so ownership,
 reachability, authorization, sync, purge, and projection stay facet-aware.
 Sharing loose objects without a facet-aware GC would let Source History
 maintenance treat confidential ciphertext as ordinary blobs.
@@ -148,7 +150,7 @@ Fingerprint matching against broker-known secrets is a follow-up.
 1. **Git Projection selects typed Source History roots only.** It never walks
    runtime profile roots, ciphertext, recipient descriptors, or policy data.
    `export_state` / `export_all` require `SourceHistoryLaws`. A
-   `RuntimeProfileStateId` cannot be passed where a `StateId` is required.
+   `EnvProfileVersionId` cannot be passed where a `StateId` is required.
 
 2. **Checkout and land** resolve threads to Source History `StateId`s. They
    require `SourceHistoryLaws` at the materialize and merge chokepoints. A
@@ -174,7 +176,7 @@ Fingerprint matching against broker-known secrets is a follow-up.
   first.
 - Software recipient keys on disk are documented weaker custody. Do not
   market the library decrypt API as agent isolation.
-- Do not add `ObjectType::RuntimeProfile` to the pack/transfer graph until
+- Do not add `ObjectType::EnvProfile` to the pack/transfer graph until
   facet-aware sync exists. Ciphertext must not become an ordinary blob that
   Git Projection or source GC can discover by walking states.
 
@@ -189,7 +191,7 @@ These are accepted limits of the library MVP, not the long-term model:
   undefined until the broker owns mutation.
 - Version files are content-addressed and unsigned. Authenticity is on the
   signed lifecycle records and the recipient endorsement, not on each
-  `RuntimeProfileState` blob.
+  `EnvProfileVersion` blob.
 
 ## Considered options
 

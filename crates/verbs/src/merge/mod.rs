@@ -1551,7 +1551,7 @@ fn land_command_for_thread(repo: &Repository, thread_id: &str) -> String {
 fn mark_merge_previewed(repo: &Repository, thread_id: &str) -> Result<()> {
     let manager = ThreadManager::new(repo.heddle_dir());
     let mut thread = manager
-        .load(thread_id)?
+        .load_id_or_name(thread_id)?
         .ok_or_else(|| anyhow!(advice::thread_not_found(thread_id, "mark merge previewed")))?;
     thread.integration_policy_result = ThreadIntegrationPolicy {
         status: Some("previewed".to_string()),

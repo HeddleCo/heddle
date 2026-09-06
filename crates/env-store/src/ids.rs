@@ -6,11 +6,11 @@ use heddle_object_model::object::ContentHash;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Stable identity of a runtime profile (UUIDv7). Distinct from any `StateId`.
+/// Stable identity of a env store (UUIDv7). Distinct from any `StateId`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct RuntimeProfileId(Uuid);
+pub struct EnvProfileId(Uuid);
 
-impl RuntimeProfileId {
+impl EnvProfileId {
     pub fn generate() -> Self {
         Self(Uuid::now_v7())
     }
@@ -28,22 +28,22 @@ impl RuntimeProfileId {
     }
 }
 
-impl fmt::Display for RuntimeProfileId {
+impl fmt::Display for EnvProfileId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-/// Content-addressed identity of an immutable runtime-profile version.
+/// Content-addressed identity of an immutable env-store version.
 ///
 /// Deliberately not a [`heddle_object_model::object::StateId`]: Git Projection
 /// and land take `StateId` only, so this type cannot be selected by those paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct RuntimeProfileStateId([u8; 32]);
+pub struct EnvProfileVersionId([u8; 32]);
 
-impl RuntimeProfileStateId {
+impl EnvProfileVersionId {
     pub fn for_bytes(bytes: &[u8]) -> Self {
-        let hash = ContentHash::compute_typed("runtime-profile-state", bytes);
+        let hash = ContentHash::compute_typed("heddle-env-state", bytes);
         Self(*hash.as_bytes())
     }
 
@@ -60,7 +60,7 @@ impl RuntimeProfileStateId {
     }
 }
 
-impl fmt::Display for RuntimeProfileStateId {
+impl fmt::Display for EnvProfileVersionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.to_hex())
     }
@@ -71,7 +71,7 @@ pub struct RecipientId([u8; 32]);
 
 impl RecipientId {
     pub fn for_bytes(bytes: &[u8]) -> Self {
-        let hash = ContentHash::compute_typed("runtime-profile-recipient", bytes);
+        let hash = ContentHash::compute_typed("heddle-env-recipient", bytes);
         Self(*hash.as_bytes())
     }
 
@@ -99,7 +99,7 @@ pub struct LifecycleRecordId([u8; 32]);
 
 impl LifecycleRecordId {
     pub fn for_bytes(bytes: &[u8]) -> Self {
-        let hash = ContentHash::compute_typed("runtime-profile-lifecycle", bytes);
+        let hash = ContentHash::compute_typed("heddle-env-lifecycle", bytes);
         Self(*hash.as_bytes())
     }
 
@@ -127,7 +127,7 @@ pub struct CiphertextId([u8; 32]);
 
 impl CiphertextId {
     pub fn for_bytes(bytes: &[u8]) -> Self {
-        let hash = ContentHash::compute_typed("runtime-profile-ciphertext", bytes);
+        let hash = ContentHash::compute_typed("heddle-env-ciphertext", bytes);
         Self(*hash.as_bytes())
     }
 
@@ -155,7 +155,7 @@ pub struct AuditRecordId([u8; 32]);
 
 impl AuditRecordId {
     pub fn for_bytes(bytes: &[u8]) -> Self {
-        let hash = ContentHash::compute_typed("runtime-profile-audit", bytes);
+        let hash = ContentHash::compute_typed("heddle-env-audit", bytes);
         Self(*hash.as_bytes())
     }
 

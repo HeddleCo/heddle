@@ -1346,7 +1346,7 @@ impl HarnessBridgeRuntime {
         task: Option<String>,
     ) -> Result<()> {
         let manager = ThreadManager::new(self.repo.heddle_dir());
-        if manager.load(name)?.is_some() {
+        if manager.load_id_or_name(name)?.is_some() {
             return Ok(());
         }
 
@@ -2405,7 +2405,7 @@ fn thread_id_for_name(repo: &Repository, thread_name: Option<&str>) -> Result<Op
         return Ok(None);
     };
     Ok(ThreadManager::new(repo.heddle_dir())
-        .load(thread_name)?
+        .load_id_or_name(thread_name)?
         .map(|thread| thread.id))
 }
 
@@ -2439,7 +2439,7 @@ fn resolve_named_thread_base_state(
     repo: &Repository,
     thread_name: &str,
 ) -> Result<Option<objects::object::StateId>> {
-    if let Some(thread) = ThreadManager::new(repo.heddle_dir()).load(thread_name)?
+    if let Some(thread) = ThreadManager::new(repo.heddle_dir()).load_id_or_name(thread_name)?
         && let Some(state_spec) = thread
             .current_state
             .as_deref()
@@ -2492,7 +2492,9 @@ fn native_key_slug(value: &str) -> String {
 }
 
 fn allocate_thread_name(repo: &Repository, base: &str) -> Result<String> {
-    if ThreadManager::new(repo.heddle_dir()).load(base)?.is_none()
+    if ThreadManager::new(repo.heddle_dir())
+        .load_id_or_name(base)?
+        .is_none()
         && repo.refs().get_thread(&ThreadName::new(base))?.is_none()
     {
         return Ok(base.to_string());
@@ -2500,7 +2502,7 @@ fn allocate_thread_name(repo: &Repository, base: &str) -> Result<String> {
     for idx in 2..1000 {
         let candidate = format!("{base}-{idx}");
         if ThreadManager::new(repo.heddle_dir())
-            .load(&candidate)?
+            .load_id_or_name(&candidate)?
             .is_none()
             && repo
                 .refs()

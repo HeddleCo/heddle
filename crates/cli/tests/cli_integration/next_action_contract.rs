@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use objects::object::ThreadName;
 use refs::Head;
 use repo::{Repository, ThreadIntegrationPolicy, ThreadManager, ThreadState};
 use serde_json::Value;
@@ -372,8 +373,11 @@ fn presence_show_multi_match_next_is_not_help_catalog() {
             .unwrap();
     }
 
-    let output = heddle_output(&["--output", "json", "agent", "presence", "show"], Some(repo.path()))
-        .expect("presence show should spawn");
+    let output = heddle_output(
+        &["--output", "json", "agent", "presence", "show"],
+        Some(repo.path()),
+    )
+    .expect("presence show should spawn");
     assert!(
         !output.status.success(),
         "multi-match presence show must fail closed"
@@ -616,17 +620,39 @@ fn sync_on_default_main_thread_succeeds() {
 
 /// heddle#1461 / #1467: `--thread` must not bypass `load_thread`'s
 /// imported-ref advice just because the unmanaged ref is currently checked out.
+/// Default `main` now has a persisted ThreadManager record, so this plants a
+/// ref-only imported name rather than using `main`.
 #[test]
 fn sync_named_unmanaged_ref_keeps_imported_ref_advice() {
-    let repo = setup_native_repo();
+    let repo_dir = setup_native_repo();
+    let repo = Repository::open(repo_dir.path()).unwrap();
+    let current = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .expect("main exists");
+    let imported = ThreadName::new("imported/feature");
+    repo.set_thread_recorded(&imported, &current).unwrap();
+    repo.write_head_recorded(&Head::Attached {
+        thread: imported.clone(),
+    })
+    .unwrap();
+    assert!(
+        ThreadManager::new(repo.heddle_dir())
+            .find_by_thread(imported.as_str())
+            .unwrap()
+            .is_none(),
+        "imported ref must not have a managed record"
+    );
+
     let output = heddle_output(
-        &["--output", "json", "sync", "--thread", "main"],
-        Some(repo.path()),
+        &["--output", "json", "sync", "--thread", imported.as_str()],
+        Some(repo_dir.path()),
     )
-    .expect("sync --thread main should spawn");
+    .expect("sync --thread imported/feature should spawn");
     assert!(
         !output.status.success(),
-        "unmanaged main must not silently no-op: stdout={} stderr={}",
+        "unmanaged imported ref must not silently no-op: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
