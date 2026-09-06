@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "0.20.3",
+  "schemaVersion": "0.20.4",
   "verbs": {
     "abort": {
       "$defs": {
