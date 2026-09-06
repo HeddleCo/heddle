@@ -777,16 +777,32 @@ impl Repository {
         //    via `touch` or atime updates even though the bytes
         //    didn't change — refresh the manifest's stat fields so
         //    the next call hits the fast path.
+        //
+        //    Persisted default `main` often has no thread manifest.
+        //    Compare against the thread tip so a clean auto-capture
+        //    (thread switch) does not mint a sibling snapshot.
+        let thread_name = ThreadName::from(thread);
+        let current_tree_matches = match self.refs().get_thread(&thread_name)? {
+            Some(id) => self
+                .store()
+                .get_state(&id)?
+                .is_some_and(|state| state.tree == new_tree_hash),
+            None => false,
+        };
         if existing_manifest
             .as_ref()
             .map(|m| m.tree_hash == new_tree_hash)
             .unwrap_or(false)
+            || current_tree_matches
         {
-            let mut refreshed = existing_manifest.expect("checked Some above");
-            refreshed.files.clear();
-            populate_manifest_from_tree(self, &new_tree, root, "", &mut refreshed.files)?;
-            write_manifest(self.heddle_dir(), thread, &refreshed).map_err(HeddleError::Io)?;
-            debug!(thread = %thread, "thread capture no-op (content-hash refresh)");
+            if let Some(mut refreshed) = existing_manifest {
+                refreshed.files.clear();
+                populate_manifest_from_tree(self, &new_tree, root, "", &mut refreshed.files)?;
+                write_manifest(self.heddle_dir(), thread, &refreshed).map_err(HeddleError::Io)?;
+                debug!(thread = %thread, "thread capture no-op (content-hash refresh)");
+            } else {
+                debug!(thread = %thread, "thread capture no-op (matches thread tip)");
+            }
             return Ok(ThreadCaptureOutcome::NoOp);
         }
 
@@ -794,7 +810,6 @@ impl Repository {
         //    current thread head (if any), put it, advance the
         //    thread ref.
         let attribution = self.get_attribution()?;
-        let thread_name = ThreadName::from(thread);
         let parents = match self.refs().get_thread(&thread_name)? {
             Some(prev) => vec![prev],
             None => vec![],

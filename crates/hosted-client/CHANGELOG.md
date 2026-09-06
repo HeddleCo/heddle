@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Side-channel `heddle-pull-refs-v1` removed. Clone bootstrap refs are
+  heddle-api `RefEntry` from `PullReady.refs` (ListRefs when that field is
+  empty). The old hex-msgpack fold fails closed. Pins heddle-api 0.28.0
+  and heddleco-capability-verifier 0.17.0.
 - Sign `CreateDeviceAuthorization` and `RegisterPublicKey` with the enrolling
   device key (`principal:device-key:<hex>`) and send only
   `device_proof_public_key` on RegisterPublicKey (weft#2047 one-key cutover).
