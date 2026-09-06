@@ -9,6 +9,11 @@ use std::{
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use heddle_cli_contract::cli::commands::wire::thread::ThreadRecordOutput as ThreadOutput;
+// The cleanup wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::thread::{
+    DroppedThread, SkippedThread, ThreadCleanupOutput,
+};
 use objects::{
     fs_ops::remove_path_recursively,
     object::{Blob, StateId, ThreadName},
@@ -46,12 +51,6 @@ use super::{
     worktree_safety::ensure_worktree_clean,
 };
 use crate::cli::{Cli, ThreadCleanupArgs, ThreadCommands, should_output_json, style};
-
-// The cleanup wire payloads live in cli-contract so the schema registry
-// registers the real serialization types.
-pub(crate) use heddle_cli_contract::cli::commands::wire::thread::{
-    DroppedThread, SkippedThread, ThreadCleanupOutput,
-};
 
 pub(crate) fn thread_manager(repo: &Repository) -> ThreadManager {
     ThreadManager::new(repo.heddle_dir())
@@ -148,53 +147,85 @@ pub(crate) fn resolve_thread_name_or_current(
 }
 
 pub(crate) fn current_thread(repo: &Repository) -> Result<Option<Thread>> {
-    if let Some(thread) = thread_manager(repo).find_by_execution_root(repo.root())? {
-        return Ok(Some(thread));
+    let manager = thread_manager(repo);
+    if let Head::Attached { thread } = repo.head_ref()? {
+        if let Some(record) = manager.find_by_thread(thread.as_str())? {
+            return Ok(Some(record));
+        }
+        let current_state_id = repo.refs().get_thread(&thread)?;
+        let current_state = current_state_id.map(|id| id.short());
+        let base_root = current_state_id
+            .and_then(|id| repo.store().get_state(&id).ok().flatten())
+            .map(|state| state.tree.short())
+            .unwrap_or_default();
+
+        let thread_str = thread.to_string();
+        return Ok(Some(Thread {
+            id: thread_str.clone(),
+            thread: thread_str,
+            target_thread: None,
+            parent_thread: None,
+            mode: ThreadMode::Materialized,
+            state: ThreadState::Active,
+            base_state: current_state.clone().unwrap_or_default(),
+            base_root,
+            current_state,
+            merged_state: None,
+            task: None,
+            execution_path: repo.root().to_path_buf(),
+            materialized_path: None,
+            changed_paths: Vec::new(),
+            impact_categories: Vec::new(),
+            heavy_impact_paths: Vec::new(),
+            promotion_suggested: false,
+            freshness: ThreadFreshness::Unknown,
+            verification_summary: Default::default(),
+            confidence_summary: Default::default(),
+            integration_policy_result: Default::default(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            ephemeral: None,
+            auto: false,
+            shared_target_dir: None,
+        }));
     }
 
-    let Head::Attached { thread } = repo.head_ref()? else {
-        return Ok(None);
-    };
-    let current_state_id = repo.refs().get_thread(&thread)?;
-    let current_state = current_state_id.map(|id| id.short());
-    let base_root = current_state_id
-        .and_then(|id| repo.store().get_state(&id).ok().flatten())
-        .map(|state| state.tree.short())
-        .unwrap_or_default();
+    // Detached HEAD: a dedicated worktree still has a thread record
+    // whose execution_path is this checkout. Default `main` always
+    // records the shared repo root, which is not a current-thread
+    // signal when HEAD is detached.
+    let canonical = repo
+        .root()
+        .canonicalize()
+        .unwrap_or_else(|_| repo.root().to_path_buf());
+    let mut matches: Vec<Thread> = manager
+        .list()?
+        .into_iter()
+        .filter(|thread| {
+            thread.thread != "main" && thread_matches_execution_root(thread, &canonical)
+        })
+        .collect();
+    matches.sort_by_key(|thread| thread.updated_at);
+    Ok(matches.pop())
+}
 
-    let thread_str = thread.to_string();
-    Ok(Some(Thread {
-        id: thread_str.clone(),
-        thread: thread_str,
-        target_thread: None,
-        parent_thread: None,
-        mode: ThreadMode::Materialized,
-        state: ThreadState::Active,
-        base_state: current_state.clone().unwrap_or_default(),
-        base_root,
-        current_state,
-        merged_state: None,
-        task: None,
-        execution_path: repo.root().to_path_buf(),
-        materialized_path: None,
-        changed_paths: Vec::new(),
-        impact_categories: Vec::new(),
-        heavy_impact_paths: Vec::new(),
-        promotion_suggested: false,
-        freshness: ThreadFreshness::Unknown,
-        verification_summary: Default::default(),
-        confidence_summary: Default::default(),
-        integration_policy_result: Default::default(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        ephemeral: None,
-        auto: false,
-        shared_target_dir: None,
-    }))
+fn thread_matches_execution_root(thread: &Thread, canonical: &Path) -> bool {
+    let execution = thread
+        .execution_path
+        .canonicalize()
+        .unwrap_or_else(|_| thread.execution_path.clone());
+    if execution == *canonical {
+        return true;
+    }
+    thread
+        .materialized_path
+        .as_ref()
+        .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()) == *canonical)
+        .unwrap_or(false)
 }
 
 pub(crate) fn load_thread(repo: &Repository, thread_id: &str) -> Result<Thread> {
-    match thread_manager(repo).load(thread_id)? {
+    match thread_manager(repo).load_id_or_name(thread_id)? {
         Some(thread) => Ok(thread),
         None if repo
             .refs()
@@ -454,7 +485,7 @@ fn cmd_thread_refresh(cli: &Cli, repo: &Repository, thread_id: &str) -> Result<(
 pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> Result<Thread> {
     let manager = thread_manager(repo);
     let mut thread = manager
-        .load(thread_id)?
+        .load_id_or_name(thread_id)?
         .ok_or_else(|| anyhow!(thread_not_found_advice(thread_id, "refresh thread")))?;
     // Missing-target is a pure gate and must refuse before freshness I/O so
     // the error path matches historical CLI behavior (no side-channel ref
@@ -1175,7 +1206,7 @@ fn cmd_thread_promote(
 ) -> Result<()> {
     let manager = thread_manager(repo);
     let mut thread = manager
-        .load(thread_id)?
+        .load_id_or_name(thread_id)?
         .ok_or_else(|| anyhow!(thread_not_found_advice(thread_id, "promote thread")))?;
     let state_id = repo
         .refs()
@@ -1319,7 +1350,7 @@ pub(crate) fn drop_thread_silent(
     force: bool,
 ) -> Result<DropOutcome> {
     let manager = thread_manager(repo);
-    let loaded = manager.load(thread_id)?;
+    let loaded = manager.load_id_or_name(thread_id)?;
     let is_current_lane = repo.current_lane()?.as_deref() == Some(thread_id);
     let disposition = match &loaded {
         None => plan_thread_drop(&ThreadDropOptions {

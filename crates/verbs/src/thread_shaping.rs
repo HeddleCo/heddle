@@ -241,7 +241,7 @@ fn current_thread(repo: &Repository) -> Result<Option<Thread>> {
 }
 
 fn load_thread(repo: &Repository, thread_id: &str, action: &'static str) -> Result<Thread> {
-    match thread_manager(repo).load(thread_id)? {
+    match thread_manager(repo).load_id_or_name(thread_id)? {
         Some(thread) => Ok(thread),
         None if repo
             .refs()

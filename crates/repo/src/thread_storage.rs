@@ -257,7 +257,13 @@ fn materialized_thread_for_state(
         current_state: Some(ref_state.to_string_full()),
         merged_state: None,
         task: None,
-        execution_path: repo.root().to_path_buf(),
+        // Identity-only. `heddle thread create` leaves execution_path
+        // empty for in-repo threads; `heddle start --path` sets both
+        // execution_path and materialized_path to the isolated checkout.
+        // Claiming `repo.root()` here makes `find_by_execution_root`
+        // treat default `main` as a managed checkout, so every capture
+        // diffs against genesis and rewrites the record on the warm path.
+        execution_path: PathBuf::new(),
         materialized_path: None,
         changed_paths: Vec::new(),
         impact_categories: Vec::new(),
@@ -333,6 +339,18 @@ impl ThreadManager {
         self.load_record_file(thread_id)?
             .map(|record| self.hydrate_thread_from_record(record))
             .transpose()
+    }
+
+    /// Load by record id, then by human thread name.
+    ///
+    /// User-facing verbs pass names. Persisted records use a stable UUID
+    /// identity that is not the ref name (`save_pulled_metadata`,
+    /// `find_or_materialize_synced_record_by_thread`).
+    pub fn load_id_or_name(&self, id_or_name: &str) -> Result<Option<Thread>> {
+        match self.load(id_or_name)? {
+            Some(thread) => Ok(Some(thread)),
+            None => self.find_by_thread(id_or_name),
+        }
     }
 
     pub fn list(&self) -> Result<Vec<Thread>> {
@@ -546,6 +564,11 @@ impl ThreadManager {
     /// `metadata.id` is the stable identity and must be preserved — it is
     /// not the thread ref name. Landing fields an unauthenticated peer can
     /// forge are cleared before the record is filed.
+    ///
+    /// When the source record has no target (default `main`) and a local
+    /// record already exists, keep the local `target_thread`. Pulling
+    /// source `main` into a pre-created landable thread must not strip
+    /// that thread's integration authority.
     pub fn save_pulled_metadata(
         &self,
         local_thread: &str,
@@ -565,6 +588,11 @@ impl ThreadManager {
         metadata
             .integration_policy_result
             .clear_untrusted_landing_fields();
+        if metadata.target_thread.is_none()
+            && let Some(existing) = self.find_record_by_thread(local_thread)?
+        {
+            metadata.target_thread = existing.target_thread;
+        }
         self.converge_records(local_thread, &[Thread::from_record(metadata)])
     }
 
@@ -1109,12 +1137,93 @@ mod adopt_identity_tests {
             Some(main_state.to_string_full().as_str())
         );
         assert_ne!(saved.id, "main");
-        assert!(saved
-            .integration_policy_result
-            .manual_resolution_state
-            .is_none());
+        assert!(
+            saved
+                .integration_policy_result
+                .manual_resolution_state
+                .is_none()
+        );
         assert!(!saved.integration_policy_result.conflicts_resolved_manually);
         assert!(manager.load_record(&local.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn save_pulled_metadata_keeps_local_target_when_source_has_none() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let main_state = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("init seeds main");
+        let manager = ThreadManager::new(repo.heddle_dir());
+        let local = manager
+            .find_record_by_thread("main")
+            .unwrap()
+            .expect("init persists main");
+
+        let mut dest = Thread::from_record(local.clone());
+        dest.id = "from-source".to_string();
+        dest.thread = "from-source".to_string();
+        dest.target_thread = Some("main".to_string());
+        manager.save(&dest).unwrap();
+
+        let mut pulled = local.clone();
+        pulled.id = "source-stable-main".to_string();
+        pulled.thread = "main".to_string();
+        pulled.target_thread = None;
+
+        manager
+            .save_pulled_metadata("from-source", &main_state, pulled)
+            .unwrap();
+
+        let saved = manager
+            .find_record_by_thread("from-source")
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.id, "source-stable-main");
+        assert_eq!(saved.thread, "from-source");
+        assert_eq!(saved.target_thread.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn load_id_or_name_finds_pulled_record_by_thread_name() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let main_state = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("init seeds main");
+        let manager = ThreadManager::new(repo.heddle_dir());
+        let local = manager
+            .find_record_by_thread("main")
+            .unwrap()
+            .expect("init persists main");
+
+        let mut pulled = local.clone();
+        pulled.id = "source-stable-main".to_string();
+        pulled.thread = "from-source".to_string();
+
+        manager
+            .save_pulled_metadata("from-source", &main_state, pulled)
+            .unwrap();
+
+        assert!(
+            manager.load("from-source").unwrap().is_none(),
+            "record is filed under the stable id, not the thread name"
+        );
+        let found = manager
+            .load_id_or_name("from-source")
+            .unwrap()
+            .expect("name lookup finds the pulled record");
+        assert_eq!(found.id, "source-stable-main");
+        assert_eq!(found.thread, "from-source");
+        let by_id = manager
+            .load_id_or_name("source-stable-main")
+            .unwrap()
+            .expect("id lookup still works");
+        assert_eq!(by_id.id, "source-stable-main");
     }
 
     #[test]

@@ -59,6 +59,13 @@ pub fn refresh_active_thread_metadata(
     let Some(mut thread) = manager.find_by_execution_root(repo.root())? else {
         return Ok(ThreadMetadataRefresh::default());
     };
+    // Isolated checkouts only. Identity-only records (default `main`,
+    // in-repo `thread create`) have no materialized_path. Refreshing
+    // those diffs against genesis and persists every changed path on
+    // the warm capture path.
+    if thread.materialized_path.is_none() {
+        return Ok(ThreadMetadataRefresh::default());
+    }
     let base_state = repo
         .resolve_state(&thread.base_state)?
         .and_then(|id| repo.store().get_state(&id).ok().flatten());
@@ -141,8 +148,12 @@ pub fn summarize_verification(verification: Option<&Verification>) -> ThreadVeri
     }
 }
 
-/// Re-evaluate freshness against the thread's target. Mirrors the
-/// CLI's `refresh_thread_freshness`.
+/// Re-evaluate freshness against the thread's target.
+///
+/// A persisted default `main` has no target by design — it is the
+/// integration tip — so it is Current. A feature thread with
+/// `target_thread: None` (detached-HEAD start) stays Unknown so sync
+/// fails closed on `missing_target_thread`.
 pub fn refresh_thread_freshness(repo: &Repository, thread: &mut Thread) -> Result<(), HeddleError> {
     thread.freshness = if let Some(target_thread) = thread.target_thread.as_deref() {
         if let Some(target_state) = repo.refs().get_thread(&ThreadName::from(target_thread))? {
@@ -154,6 +165,8 @@ pub fn refresh_thread_freshness(repo: &Repository, thread: &mut Thread) -> Resul
         } else {
             ThreadFreshness::Unknown
         }
+    } else if thread.thread == "main" {
+        ThreadFreshness::Current
     } else {
         ThreadFreshness::Unknown
     };

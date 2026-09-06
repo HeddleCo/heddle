@@ -2,6 +2,12 @@
 use std::{cell::RefCell, collections::HashSet, fs, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+// The sync/land wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::{
+    LandBlockerCheck, LandBlockerCode, LandBlockerDetail, LandBlockerStateContext, LandOutput,
+    MultiLandOutput, MultiLandPeerResult, SiblingRestackFailure, SyncOutput,
+};
 use objects::{
     lock::{RepositoryLockExt, WriteLockGuard},
     object::{State, StateId, ThreadName},
@@ -70,13 +76,6 @@ use crate::{
     config::UserConfig,
 };
 
-// The sync/land wire payloads live in cli-contract so the schema registry
-// registers the real serialization types.
-pub(crate) use heddle_cli_contract::cli::commands::wire::{
-    LandBlockerCheck, LandBlockerCode, LandBlockerDetail, LandBlockerStateContext, LandOutput,
-    MultiLandOutput, MultiLandPeerResult, SiblingRestackFailure, SyncOutput,
-};
-
 /// Internal accumulator for sibling restack outcomes; never serialized
 /// directly — the wire sees `LandOutput.siblings_restack*`.
 #[derive(Debug, Default)]
@@ -129,14 +128,14 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
             operator: OperatorCommandOutput {
                 status: "current".to_string(),
                 action: OperatorAction::Sync,
-                message: format!("Thread '{}' is already current", thread.id),
+                message: format!("Thread '{}' is already current", thread.thread),
                 blockers: vec![],
                 warnings: Vec::new(),
                 next_action: recommended_action.clone(),
                 recommended_action,
             },
             trust,
-            thread: thread.id.clone(),
+            thread: thread.thread.clone(),
             current_state: thread.current_state.clone(),
             chosen_path: "no_op".to_string(),
         }
@@ -171,14 +170,14 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
             operator: OperatorCommandOutput {
                 status: "blocked".to_string(),
                 action: OperatorAction::Sync,
-                message: format!("Thread '{}' needs manual sync", thread.id),
+                message: format!("Thread '{}' needs manual sync", thread.thread),
                 blockers: stale_report.blockers.clone(),
                 warnings: Vec::new(),
                 next_action: non_empty_next_action(&recommended_action),
                 recommended_action: non_empty_next_action(&recommended_action),
             },
             trust,
-            thread: thread.id.clone(),
+            thread: thread.thread.clone(),
             current_state: thread.current_state.clone(),
             chosen_path: "blocked".to_string(),
         }
@@ -211,14 +210,14 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
                     operator: OperatorCommandOutput {
                         status: "refreshed".to_string(),
                         action: OperatorAction::Sync,
-                        message: format!("Refreshed thread '{}'", refreshed.id),
+                        message: format!("Refreshed thread '{}'", refreshed.thread),
                         blockers: vec![],
                         warnings: Vec::new(),
                         next_action: recommended_action.clone(),
                         recommended_action,
                     },
                     trust,
-                    thread: refreshed.id.clone(),
+                    thread: refreshed.thread.clone(),
                     current_state: refreshed.current_state.clone(),
                     chosen_path: "refresh".to_string(),
                 }
@@ -242,14 +241,17 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
                     operator: OperatorCommandOutput {
                         status: "blocked".to_string(),
                         action: OperatorAction::Sync,
-                        message: format!("Thread '{}' has merge conflicts to resolve", thread.id),
+                        message: format!(
+                            "Thread '{}' has merge conflicts to resolve",
+                            thread.thread
+                        ),
                         blockers: stale_report.blockers.clone(),
                         warnings: Vec::new(),
                         next_action: Some(recommended_action.clone()),
                         recommended_action: Some(recommended_action),
                     },
                     trust,
-                    thread: thread.id.clone(),
+                    thread: thread.thread.clone(),
                     current_state: thread.current_state.clone(),
                     chosen_path: "blocked".to_string(),
                 }
@@ -295,6 +297,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     recover_incomplete_land_if_present(&repo)?;
     let user_config = UserConfig::load_default().unwrap_or_default();
     let thread = resolve_land_subject_thread(cli, &repo, args.thread.as_deref())?;
+    if thread.target_thread.is_none() {
+        return Err(anyhow!(RecoveryAdvice::missing_target_thread(
+            &thread.thread,
+            "land",
+        )));
+    }
     let thread_repo = if thread.execution_path.as_os_str().is_empty() {
         None
     } else if thread.execution_path.exists() {
@@ -797,7 +805,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     let merge_output = if let Some(transaction_id) = integration_transaction_id.as_deref() {
         merge_thread_into_current_transactional(
             &repo,
-            &merge_thread.id,
+            &merge_thread.thread,
             None,
             false,
             false,
@@ -810,7 +818,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     } else {
         merge_thread_into_current(
             &repo,
-            &merge_thread.id,
+            &merge_thread.thread,
             None,
             false,
             false,
@@ -1205,13 +1213,13 @@ fn collapse_thread_for_land(
         &sources,
         intent,
         None,
-        CollapsePublishedRef::Thread(ThreadName::new(&thread.id)),
+        CollapsePublishedRef::Thread(ThreadName::new(&thread.thread)),
     )?;
     Ok(Some(result.state_id))
 }
 
 fn thread_source_states(repo: &Repository, thread: &Thread) -> Result<Vec<State>> {
-    let Some(tip) = repo.refs().get_thread(&ThreadName::new(&thread.id))? else {
+    let Some(tip) = repo.refs().get_thread(&ThreadName::new(&thread.thread))? else {
         return Ok(Vec::new());
     };
     let base = repo.resolve_state(&thread.base_state)?;
@@ -1325,10 +1333,9 @@ fn resolve_thread(
 
 /// Resolve the thread `sync` refreshes onto its target.
 ///
-/// Omit `--thread` to use the current checkout, including a synthesized
-/// default thread such as `main` (ref from `seed_default_thread`, no
-/// ThreadManager record). An explicit `--thread` always goes through
-/// `load_thread` so unmanaged imported refs keep their typed advice.
+/// Omit `--thread` to use the current checkout. An explicit `--thread`
+/// always goes through `load_thread` so unmanaged imported refs keep
+/// their typed advice.
 fn resolve_sync_thread(repo: &Repository, thread: Option<&str>) -> Result<Thread> {
     match thread {
         Some(name) => load_thread(repo, name),
@@ -1440,7 +1447,7 @@ fn update_integration_policy(
     reason: impl Into<String>,
 ) -> Result<()> {
     let manager = thread_manager(repo);
-    let mut thread = manager.load(thread_id)?.ok_or_else(|| {
+    let mut thread = manager.load_id_or_name(thread_id)?.ok_or_else(|| {
         anyhow!(thread_not_found_advice(
             thread_id,
             "update integration policy"
@@ -1470,7 +1477,7 @@ fn update_integration_policy(
 
 fn clear_manual_resolution_state(repo: &Repository, thread_id: &str) -> Result<()> {
     let manager = thread_manager(repo);
-    let mut thread = manager.load(thread_id)?.ok_or_else(|| {
+    let mut thread = manager.load_id_or_name(thread_id)?.ok_or_else(|| {
         anyhow!(thread_not_found_advice(
             thread_id,
             "clear manual resolution"
@@ -1772,7 +1779,7 @@ fn adopt_manual_resolution(
     transaction_id: Option<&str>,
 ) -> Result<String> {
     let manager = thread_manager(repo);
-    let mut thread = manager.load(thread_id)?.ok_or_else(|| {
+    let mut thread = manager.load_id_or_name(thread_id)?.ok_or_else(|| {
         anyhow!(thread_not_found_advice(
             thread_id,
             "adopt manual resolution"
@@ -2381,7 +2388,7 @@ fn write_prepared_land_marker(
             .map(|state| state.state_id.to_string_full()),
         pre_source_state: repo
             .refs()
-            .get_thread(&ThreadName::new(&thread.id))?
+            .get_thread(&ThreadName::new(&thread.thread))?
             .map(|state| state.to_string_full()),
         pre_thread: Some(thread.clone()),
     };
@@ -3048,7 +3055,12 @@ async fn cmd_land_many(cli: &Cli, args: LandArgs) -> Result<()> {
         }
     }
     if ordered.is_empty() {
-        return Err(anyhow!("--threads requires at least one thread name"));
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "land_threads_empty",
+            "--threads requires at least one thread name",
+            "Pass one or more thread names: `heddle land --threads <name>`.",
+            "heddle land --threads <name>",
+        )));
     }
 
     MULTI_LAND_COLLECTOR.with(|collector| {

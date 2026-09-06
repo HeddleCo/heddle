@@ -229,8 +229,11 @@ fn crash_capture_at(repo: &std::path::Path, checkpoint: &str, message: &str) {
 }
 
 fn crash_goto_at(repo: &std::path::Path, checkpoint: &str, target: &str) {
+    // `--force` skips auto-capture-on-switch. That capture is a separate
+    // source-thread mutation that runs *before* the goto checkpoint; this
+    // helper exists to isolate recovery of the Goto record itself.
     let crashed = heddle_output_with_env(
-        &["thread", "switch", target],
+        &["thread", "switch", "--force", target],
         Some(repo),
         &[("HEDDLE_FAULT_INJECT", checkpoint)],
     )

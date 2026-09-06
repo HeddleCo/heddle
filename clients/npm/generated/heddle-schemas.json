@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "0.20.1",
+  "schemaVersion": "0.20.4",
   "verbs": {
     "abort": {
       "$defs": {
@@ -20486,6 +20486,40 @@
         "doc_path"
       ],
       "title": "SchemaReport",
+      "type": "object"
+    },
+    "env create": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "output_kind": {
+          "enum": [
+            "env_create"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind"
+      ],
+      "title": "GenericJsonObjectSchema",
+      "type": "object"
+    },
+    "env list": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "output_kind": {
+          "enum": [
+            "env_list"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind"
+      ],
+      "title": "GenericJsonObjectSchema",
       "type": "object"
     },
     "error": {

@@ -1877,11 +1877,15 @@ fn thread_summary_from_thread(
                 .and_then(|entry| entry.path.as_ref())
                 .map(|path| path.display().to_string())
         });
-    let execution_path = if thread.execution_path == repo.root() {
-        None
-    } else {
-        Some(thread.execution_path.display().to_string())
-    };
+    let execution_path =
+        if thread.execution_path.as_os_str().is_empty() || thread.execution_path == repo.root() {
+            // An empty execution_path is an identity-only thread (default main /
+            // `thread create`) with no distinct execution root — omit it, same as
+            // when it equals the repo root.
+            None
+        } else {
+            Some(thread.execution_path.display().to_string())
+        };
     let git_backed_tip = is_current
         && repo.capability() == RepositoryCapability::GitOverlay
         && thread.current_state.is_none();
@@ -2381,6 +2385,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
         changed_paths: Vec::new(),
         changed_path_count: thread_summary
             .as_ref()
+            .filter(|thread| thread.target_thread.is_some())
             .map(|thread| thread.changed_paths.len())
             .unwrap_or_default(),
         worktree_changed_path_count: changes_path_count(&changes),
@@ -3248,7 +3253,10 @@ pub fn changes_paths(changes: &ChangesInfo) -> BTreeSet<String> {
 
 fn changed_path_count(thread: Option<&StatusThreadSummary>, changes: &ChangesInfo) -> usize {
     let mut paths = BTreeSet::new();
-    if let Some(thread) = thread {
+    // `thread.changed_paths` is vs-base. Only a thread with a target
+    // has a base that is not itself; main and detached-no-target use
+    // the worktree alone.
+    if let Some(thread) = thread.filter(|thread| thread.target_thread.is_some()) {
         paths.extend(thread.changed_paths.iter().cloned());
     }
     paths.extend(changes.modified.iter().cloned());
@@ -3259,7 +3267,7 @@ fn changed_path_count(thread: Option<&StatusThreadSummary>, changes: &ChangesInf
 
 fn changed_paths(thread: Option<&StatusThreadSummary>, changes: &ChangesInfo) -> Vec<String> {
     let mut paths = BTreeSet::new();
-    if let Some(thread) = thread {
+    if let Some(thread) = thread.filter(|thread| thread.target_thread.is_some()) {
         paths.extend(thread.changed_paths.iter().cloned());
     }
     paths.extend(changes.modified.iter().cloned());
@@ -3272,7 +3280,7 @@ fn captured_thread_path_count(
     thread: Option<&StatusThreadSummary>,
     changes: &ChangesInfo,
 ) -> usize {
-    let Some(thread) = thread else {
+    let Some(thread) = thread.filter(|thread| thread.target_thread.is_some()) else {
         return 0;
     };
     let dirty_paths = changes_paths(changes);
@@ -3573,7 +3581,11 @@ mod tests {
         )
         .expect_err("truncated recovery marker must fail closed");
 
-        assert!(error.to_string().contains("failed to parse incomplete-land marker"));
+        assert!(
+            error
+                .to_string()
+                .contains("failed to parse incomplete-land marker")
+        );
     }
 
     #[test]

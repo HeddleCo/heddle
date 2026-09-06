@@ -5468,6 +5468,46 @@ The foreground daemon emits one JSON value when it exits cleanly.
 
 ---
 
+## `heddle netd serve --output json`
+
+The foreground network daemon does not emit a JSON payload while it runs.
+
+```json
+{
+  "output_kind": "netd_serve"
+}
+```
+
+---
+
+## `heddle netd status --output json`
+
+```json
+{
+  "output_kind": "netd_status",
+  "status": "not_running",
+  "running": false,
+  "endpoint_path": "/home/user/.heddle/netd.json",
+  "node_id": null,
+  "version": null,
+  "uptime_s": null
+}
+```
+
+---
+
+## `heddle netd stop --output json`
+
+```json
+{
+  "output_kind": "netd_stop",
+  "action": "netd stop",
+  "status": "not_running"
+}
+```
+
+---
+
 ## `heddle agent reserve --output json`
 
 `heddle agent reserve --output json` emits the bearer token once. Heartbeat
@@ -7511,6 +7551,28 @@ nothing to stop — both exit 0):
 
 ```json
 {"output_kind": "daemon_stop", "action": "daemon stop", "status": "not_running"}
+```
+
+`heddle netd status --output json` emits liveness without requiring a live
+daemon (`status` is `"not_running"` when nothing is listening):
+
+```json
+{"output_kind": "netd_status", "status": "not_running", "running": false, "endpoint_path": "/home/user/.heddle/netd.json", "node_id": null, "version": null, "uptime_s": null}
+```
+
+`heddle netd stop --output json` emits its own envelope (`status` is
+`"stopped"` after a live daemon shuts down, `"not_running"` when there was
+nothing to stop — both exit 0):
+
+```json
+{"output_kind": "netd_stop", "action": "netd stop", "status": "not_running"}
+```
+
+`heddle netd serve --output json` is a long-running foreground process; the
+catalog still documents a discriminator for the command:
+
+```json
+{"output_kind": "netd_serve"}
 ```
 
 `heddle discuss open|append|resolve|reopen --output json` emit a write

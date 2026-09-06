@@ -154,12 +154,15 @@ pub fn describe_thread_advice_with_initial(
     // cascade below otherwise falls through to a misleading
     // "needs_attention" + "heddle ready" recommendation for repos that have
     // genuinely nothing to do yet.
+    // `changed_paths` is vs-base. A thread with no target (default main)
+    // has no base that is not itself, so those paths do not make it busy.
+    let vs_base_counts = thread.target_thread.is_some();
     let fresh_and_idle = !worktree_dirty
         && conflicts == 0
         && !clean_ready_merges_to_apply
         && thread.state == ThreadState::Active
         && thread.freshness != ThreadFreshness::Stale
-        && thread.changed_paths.is_empty()
+        && (!vs_base_counts || thread.changed_paths.is_empty())
         && !thread.promotion_suggested;
     if fresh_and_idle {
         return ThreadAdvice {
