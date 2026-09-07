@@ -427,7 +427,6 @@ assert_transcript_claims() {
     ".heddle metadata" \
     "Git worktree stays clean" \
     "query --attribution" \
-    "Git checkpoint:" \
     "merge type:" \
     "landed: on parent" \
     "Next: heddle --repo" \

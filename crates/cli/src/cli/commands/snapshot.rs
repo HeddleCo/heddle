@@ -180,9 +180,6 @@ pub fn cmd_snapshot(
             style::state_id(&output.state_id),
             style::dim(&output.content_hash),
         );
-        if let Some(checkpoint) = output.git_checkpoint.as_deref() {
-            println!("  {}", style::field("Git checkpoint", checkpoint));
-        }
         println!(
             "Captured by: {} from {}",
             style::principal(&output.principal.name, &output.principal.email),

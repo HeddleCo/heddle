@@ -2845,6 +2845,10 @@ fn capture_without_default_remote_does_not_recommend_unconfigured_push() {
         !capture_text.contains("Next: heddle push"),
         "capture should not recommend a default push when no default remote is configured: {capture_text}"
     );
+    assert!(
+        !capture_text.contains("Git checkpoint:"),
+        "default human capture should hide the raw Git checkpoint: {capture_text}"
+    );
 
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed again\n").unwrap();
     let capture_json = json_value(
@@ -2855,6 +2859,7 @@ fn capture_without_default_remote_does_not_recommend_unconfigured_push() {
     assert_eq!(capture_json["next_action_template"], Value::Null);
     assert_eq!(capture_json["recommended_action"], Value::Null);
     assert_eq!(capture_json["recommended_action_template"], Value::Null);
+    assert!(capture_json["git_checkpoint"].as_str().is_some());
     assert!(capture_json.get("next").is_none());
     assert!(capture_json.get("next_argv").is_none());
     assert!(capture_json.get("next_template").is_none());
