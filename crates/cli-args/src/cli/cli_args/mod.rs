@@ -42,7 +42,7 @@ pub use commands_args::{
     AgentProvenanceListArgs, AgentProvenanceSegmentArgs, AgentProvenanceShowArgs, AgentReadyArgs,
     AgentReleaseArgs, AgentReleaseStatusArg, AgentReserveArgs, AgentTaskCreateArgs,
     AgentTaskListArgs, AgentTaskShowArgs, AgentTaskStatusArg, AgentTaskUpdateArgs, CloneArgs,
-    CollapseArgs, CommitArgs, DiffArgs, DiffBaseArg, DoctorArgs, DoctorCommands, DoctorDocsArgs,
+    CollapseArgs, DiffArgs, DiffBaseArg, DoctorArgs, DoctorCommands, DoctorDocsArgs,
     DoctorSchemasArgs, ExpandArgs, INIT_VERB, InitArgs, LandArgs, LogArgs, PullArgs, PushArgs,
     ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs, ThreadAbsorbArgs,
     ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs, ThreadCheckMergeArgs,
@@ -56,17 +56,17 @@ pub use commands_args::{
 pub use commands_ci::{CiCommands, CiRunArgs};
 #[cfg(feature = "client")]
 pub use commands_client::{
-    AgentTemplateArg, AuthCommands, AuthInviteCommands, AuthTrustCommands, ClaimArgs,
-    DEFAULT_CLAIM_WEB_ORIGIN,
+    AgentTemplateArg, AuthCommands, AuthInviteCommands, AuthTrustCommands, AuthTrustReplaceArgs,
+    AuthTrustShowArgs, ClaimArgs, DEFAULT_CLAIM_WEB_ORIGIN,
 };
 pub use commands_context::ContextCommands;
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 pub use commands_context::ContextReasonCommands;
-pub use commands_env::{EnvCommands, EnvCreateArgs, EnvListArgs, EnvRunArgs};
 pub use commands_discuss::{
     DiscussAppendArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs, DiscussReopenArgs,
     DiscussResolveArgs, DiscussShowArgs, DiscussWaitArgs, ResolveModeArg,
 };
+pub use commands_env::{EnvCommands, EnvCreateArgs, EnvListArgs, EnvRunArgs};
 #[cfg(feature = "git-overlay")]
 pub use commands_git_projection::{BridgeCommands, BridgeGitCommands, GitSource, SyncCommands};
 pub use commands_hook::{HookCommands, HookInstallSource};

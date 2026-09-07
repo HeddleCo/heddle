@@ -280,6 +280,7 @@ impl Repository {
         }
 
         objects::fs_atomic::create_private_dir_all(&heddle_dir)?;
+        objects::fs_atomic::create_private_dir_all(&heddle_dir.join("state"))?;
         let store = FsStore::new(&heddle_dir);
         store.init()?;
         let refs = RefManager::new(&heddle_dir);
@@ -323,7 +324,6 @@ impl Repository {
             git_overlay_repo: RwLock::new(None),
             progress: RwLock::new(Progress::null()),
         };
-        crate::migration::apply_pending(&repo)?;
         Ok(repo)
     }
 
@@ -340,6 +340,7 @@ impl Repository {
 
         // Owner-only `.heddle` tree: holds keys, credentials, and object store.
         objects::fs_atomic::create_private_dir_all(&heddle_dir)?;
+        objects::fs_atomic::create_private_dir_all(&heddle_dir.join("state"))?;
 
         let store = FsStore::new(&heddle_dir);
         #[cfg(feature = "git-overlay")]
@@ -406,10 +407,6 @@ impl Repository {
             progress: RwLock::new(Progress::null()),
         };
 
-        // A freshly initialized repository is already in the current format.
-        // Record that fact during the mutating init operation so the first
-        // observe-only command does not have to create the migration ledger.
-        crate::migration::apply_pending(&repo)?;
         Ok(repo)
     }
 

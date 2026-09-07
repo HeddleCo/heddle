@@ -23,7 +23,6 @@ pub const CANONICAL_ROOT_COMMANDS: &[&str] = &[
     "claim",
     "clean",
     "clone",
-    "commit",
     "context",
     "continue",
     "diff",

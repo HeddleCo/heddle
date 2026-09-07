@@ -46,14 +46,12 @@ use objects::{
 use repo::{BlobHydrator, Repository, ThreadManager};
 #[cfg(feature = "client")]
 use repo::{RepositorySourceAuthority, clone_intent::CloneIntent};
-#[cfg(feature = "client")]
-use sley::plumbing::sley_worktree;
 use sley::{
     ConfigEdit, ConfigEditPlan, ConfigEditScope, ConfigSectionEntry, GitObjectType,
     IndexWriteOptions, ObjectId, RefPrecondition, RemoteConfigSet, Repository as SleyRepository,
-    plumbing::sley_core::redact_url_for_display,
     remote::{ProgressSink as SleyProgressSink, TransferProgress},
 };
+use sley_core::redact_url_for_display;
 use verbs::{
     CloneMode, ClonePlanError, ClonePlanFacts, ClonePlanOptions, CloneRemoteSource,
     CloneThreadSelectError, UnsupportedCloneFlag, plan_clone, select_clone_checkout_thread,
@@ -568,9 +566,7 @@ fn finish_git_overlay_clone(
         refs.join(", ")
     };
     let mut progress = ImportProgress::start(cli, &repo, &scope_label, &remote_display);
-    heddle_git_projection::git_core::GitProjection::hydrate_checkout_heddle_notes_without_mirror(
-        local_path,
-    );
+    heddle_git_projection::git_core::GitProjection::hydrate_checkout_heddle_notes(local_path);
     progress.begin_commit_import();
     let mut on_commit = |event| progress.commit_tick(event);
     let ingest_start = std::time::Instant::now();
@@ -1572,7 +1568,12 @@ async fn clone_network(
             .with_allow_insecure(options.insecure);
     let repo_path = repo_path.context("network remotes must include a hosted repository path")?;
 
-    let mut client = session.connect(authority).await?;
+    let mut client = session
+        .connect(authority)
+        .await?
+        .with_warning_sink(std::sync::Arc::new(
+            crate::cli::warning_render::StderrWarningSink,
+        ));
     let result = clone_network_connected(
         cli,
         authority,
@@ -1751,6 +1752,15 @@ async fn clone_network_connected(
                 })?
                 .resolve(&local_repo, Some(final_state))
                 .context("resolve hosted clone bootstrap")?;
+        for warning in [
+            bootstrap.discussions_pack_fallback.as_deref(),
+            bootstrap.context_pack_fallback.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            eprintln!("{} {warning}", style::warn_marker());
+        }
 
         if lazy {
             use repo::lazy_hydrator::LazyHydratorConfig;
@@ -1918,7 +1928,12 @@ pub async fn recover_interrupted_clone(cli: &Cli, start: &Path) -> Result<bool> 
     let server_key = credential_key_from_remote_url(&intent.origin);
     let session =
         HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?;
-    let mut client = session.connect(&authority).await?;
+    let mut client = session
+        .connect(&authority)
+        .await?
+        .with_warning_sink(std::sync::Arc::new(
+            crate::cli::warning_render::StderrWarningSink,
+        ));
     let recovered = recover_interrupted_clone_connected(cli, &root, &intent, &mut client).await;
     client.close().await;
     recovered?;
@@ -2021,6 +2036,15 @@ async fn recover_interrupted_clone_connected(
                 ))
             })?
             .resolve(&repo, Some(final_state))?;
+    for warning in [
+        bootstrap.discussions_pack_fallback.as_deref(),
+        bootstrap.context_pack_fallback.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        eprintln!("{} {warning}", style::warn_marker());
+    }
     if let Err(error) = hosted_client::client::discussion_sync::pull_discussions(
         &repo,
         client,
@@ -2159,7 +2183,12 @@ async fn clone_monorepo(
         HostedSession::build(&user_config, server_key, HostedAuthMode::CredentialFallback)?
             .with_allow_insecure(options.insecure);
 
-    let mut client = session.connect(authority).await?;
+    let mut client = session
+        .connect(authority)
+        .await?
+        .with_warning_sink(std::sync::Arc::new(
+            crate::cli::warning_render::StderrWarningSink,
+        ));
     let result = clone_monorepo_connected(
         cli,
         authority,
@@ -2658,6 +2687,7 @@ fn finish_hosted_git_overlay_checkout(repo: &Repository, branch: &str) -> Result
     let git_repo = SleyRepository::discover(repo.root()).map_err(anyhow::Error::msg)?;
     let config = git_repo.config_snapshot().map_err(anyhow::Error::msg)?;
     let checkout = sley_worktree::checkout_branch_filtered(
+        Some(repo.root()),
         repo.root(),
         git_repo.git_dir(),
         git_repo.object_format(),
@@ -2671,6 +2701,7 @@ fn finish_hosted_git_overlay_checkout(repo: &Repository, branch: &str) -> Result
         anyhow::bail!("hosted Git-overlay clone missing {branch_ref}");
     }
     sley_worktree::reset_index_and_worktree_to_commit(
+        Some(repo.root()),
         repo.root(),
         git_repo.git_dir(),
         git_repo.object_format(),

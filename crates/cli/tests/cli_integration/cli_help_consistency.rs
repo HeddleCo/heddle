@@ -311,15 +311,14 @@ fn restore_story_is_documented_and_start_requires_path() {
     );
 }
 
-/// Commit help must explain the capture-to-Git authority boundary.
+/// Capture help must explain the single save boundary.
 #[test]
-fn commit_help_explains_capture_boundary() {
-    let help = heddle_help(&["commit", "--help"]);
+fn capture_help_explains_single_save_boundary() {
+    let help = heddle_help(&["capture", "--help"]);
     assert!(
-        help.contains("Defaults to the current capture intent")
-            && help.contains("Commits the complete captured tree")
-            && help.contains("Git pre-commit and commit-msg hooks are not run"),
-        "commit help should explain how a capture becomes Git history: {help}"
+        help.contains("save state (and its Git Overlay checkpoint)")
+            && !help.contains("heddle commit"),
+        "capture help should present one save operation: {help}"
     );
 }
 
@@ -346,7 +345,7 @@ fn git_concepts_topic_explains_authority_and_current_surface() {
     }
     assert!(
         help.contains("`clone`,")
-            && help.contains("`commit`,")
+            && help.contains("`capture`,")
             && help.contains("`pull`,")
             && help.contains("`push`, and `remote`")
             && help.contains("embedded Sley engine directly"),
@@ -354,7 +353,7 @@ fn git_concepts_topic_explains_authority_and_current_surface() {
     );
     for mapping in [
         "| Intent | Git Overlay | Native Heddle |",
-        "`heddle capture`, then `heddle commit`",
+        "| Save source history | `heddle capture` | `heddle capture` |",
         "| Record a granular Heddle savepoint | `heddle capture` | `heddle capture` |",
         "| Check integration readiness | `heddle ready` | `heddle ready` |",
         "| Integrate a managed thread | `heddle land` | `heddle land` |",

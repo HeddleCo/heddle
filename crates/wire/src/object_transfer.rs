@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use objects::{
-    object::{AnnotatedTag, State},
+    object::{AnnotatedTag, State, StateAttachment},
     store::ObjectStore,
 };
 
@@ -150,7 +150,10 @@ pub fn load_requested_object(store: &impl ObjectStore, req: &ObjectRequest) -> R
             let state = store
                 .get_state(state_id)?
                 .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string()))?;
-            (ObjectType::State, rmp_serde::to_vec_named(&state)?)
+            (
+                ObjectType::State,
+                state.encode_current_msgpack().map_err(object_codec_error)?,
+            )
         }
         ObjectId::StateAttachment { state, id, kind: _ } => {
             let attachment = store
@@ -158,7 +161,9 @@ pub fn load_requested_object(store: &impl ObjectStore, req: &ObjectRequest) -> R
                 .ok_or_else(|| ProtocolError::ObjectNotFound(id.to_string()))?;
             (
                 ObjectType::StateAttachment,
-                rmp_serde::to_vec_named(&attachment)?,
+                attachment
+                    .encode_current_msgpack()
+                    .map_err(object_codec_error)?,
             )
         }
     };
@@ -193,7 +198,7 @@ pub fn load_object_data(
             let state = store
                 .get_state(state_id)?
                 .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string()))?;
-            rmp_serde::to_vec_named(&state)?
+            state.encode_current_msgpack().map_err(object_codec_error)?
         }
         (ObjectId::Hash(hash), ObjectType::Redaction) => store
             .get_redactions_bytes_for_blob(hash)?
@@ -208,7 +213,9 @@ pub fn load_object_data(
             let attachment = store
                 .get_state_attachment(state, id)?
                 .ok_or_else(|| ProtocolError::ObjectNotFound(id.to_string()))?;
-            rmp_serde::to_vec_named(&attachment)?
+            attachment
+                .encode_current_msgpack()
+                .map_err(object_codec_error)?
         }
         (ObjectId::Hash(_), ObjectType::KeyBinding) => {
             return Err(ProtocolError::InvalidState(
@@ -258,7 +265,7 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
             store.put_annotated_tag(&tag)?;
         }
         (ObjectId::StateId(state_id), ObjectType::State) => {
-            let state: State = rmp_serde::from_slice(&data.data)?;
+            let state = State::decode_current_msgpack(&data.data).map_err(object_codec_error)?;
             if state.id() != *state_id {
                 return Err(ProtocolError::InvalidState(format!(
                     "StateId mismatch: expected {state_id}, computed {}",
@@ -268,7 +275,8 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
             store.put_state_serialized(&data.data, *state_id)?;
         }
         (ObjectId::StateAttachment { state, id, kind }, ObjectType::StateAttachment) => {
-            let attachment: objects::object::StateAttachment = rmp_serde::from_slice(&data.data)?;
+            let attachment =
+                StateAttachment::decode_current_msgpack(&data.data).map_err(object_codec_error)?;
             if attachment.state_id != *state || attachment.id() != *id {
                 return Err(ProtocolError::InvalidState(
                     "state attachment id mismatch".to_string(),
@@ -327,6 +335,10 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
     }
 
     Ok(())
+}
+
+fn object_codec_error(error: objects::error::HeddleError) -> ProtocolError {
+    ProtocolError::Serialization(error.to_string())
 }
 
 #[cfg(test)]

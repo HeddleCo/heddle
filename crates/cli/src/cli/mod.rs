@@ -8,7 +8,7 @@ pub mod commands;
 pub use heddle_cli_args as cli_args;
 pub use heddle_cli_args::*;
 pub use heddle_cli_contract::cli::help;
-pub use heddle_cli_render::cli::{progress_render, render, style, tips};
+pub use heddle_cli_render::cli::{progress_render, render, style, tips, warning_render};
 use repo::{Config, Repository};
 
 use crate::config::UserConfig;
@@ -31,28 +31,23 @@ pub fn execution_context_from_cli(cli: &Cli) -> anyhow::Result<verbs::ExecutionC
     let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();
     let repo = cli.open_repo()?;
     let config = UserConfig::load_default()?;
-    execution_context_from_cli_parts(cli, &start, Some(repo), &config)
+    Ok(execution_context_from_cli_parts(
+        &start,
+        Some(repo),
+        &config,
+    ))
 }
 
 /// Canonical CLI adapter for the embeddable execution context.
 ///
 /// Callers may choose how repository discovery happens (notably observe-only
-/// `verify`, which must not create a Heddle sidecar), but every CLI path maps
-/// verbosity, principal fallback, fsmonitor policy, sinks, and operation id in
-/// this one place.
+/// `verify`, which must not create a Heddle sidecar). Repository, principal
+/// fallback, and fsmonitor policy are resolved here rather than in verbs.
 pub(crate) fn execution_context_from_cli_parts(
-    cli: &Cli,
     start: &Path,
     repo: Option<Repository>,
     config: &UserConfig,
-) -> anyhow::Result<verbs::ExecutionContext> {
-    let verbosity = if cli.quiet {
-        verbs::Verbosity::Quiet
-    } else if cli.verbose > 0 {
-        verbs::Verbosity::Verbose
-    } else {
-        verbs::Verbosity::Normal
-    };
+) -> verbs::ExecutionContext {
     let fsmonitor_mode = config
         .worktree_status_options(repo.as_ref().map(Repository::config))
         .fsmonitor
@@ -64,20 +59,13 @@ pub(crate) fn execution_context_from_cli_parts(
                 .principal_pair()
                 .map(|(name, email)| (name.to_string(), email.to_string())),
         )
-        .fsmonitor_mode(fsmonitor_mode)
-        .verbosity(verbosity)
-        .progress(std::sync::Arc::new(verbs::NoopProgress))
-        .warnings(std::sync::Arc::new(verbs::NoopWarnings));
+        .fsmonitor_mode(fsmonitor_mode);
 
     if let Some(repo) = repo {
         builder = builder.repo(repo);
     }
 
-    if let Some(op_id) = crate::operation_id::resolve_operation_id(cli)? {
-        builder = builder.op_id(op_id.to_string());
-    }
-
-    Ok(builder.build())
+    builder.build()
 }
 
 pub fn user_config_or_exit() -> &'static UserConfig {
@@ -188,18 +176,12 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp repository");
         Repository::init_default(temp.path()).expect("init repository");
         let repo = Repository::open(temp.path()).expect("open repository");
-        let path = temp.path().to_string_lossy().into_owned();
-        let cli = Cli::try_parse_from(["heddle", "-v", "-C", &path, "status"])
-            .expect("status should parse");
         let config = UserConfig::default();
 
-        let ctx = execution_context_from_cli_parts(&cli, temp.path(), Some(repo), &config)
-            .expect("build execution context");
+        let ctx = execution_context_from_cli_parts(temp.path(), Some(repo), &config);
 
         assert_eq!(ctx.start_path(), Some(temp.path()));
         assert_eq!(ctx.require_repo().expect("repo").root(), temp.path());
-        assert_eq!(ctx.verbosity(), verbs::Verbosity::Verbose);
-        assert!(ctx.op_id().is_none());
         assert_eq!(
             ctx.fsmonitor_mode(),
             config

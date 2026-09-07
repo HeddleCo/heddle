@@ -13,10 +13,6 @@ use super::Result;
 use crate::FsMonitorConfig;
 
 pub(crate) const SUPPORTED_REPO_FORMAT: u32 = 5;
-/// Oldest format this binary can open and migrate forward. Format 4
-/// repositories keep pre-cursor agent ids; `0006_identity_cursor_attribution`
-/// records the HCS2 / cursor-hash boundary and bumps the version.
-pub(crate) const MIN_MIGRATABLE_REPO_FORMAT: u32 = 4;
 
 /// Repository configuration stored in `.heddle/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -612,8 +608,8 @@ pub(crate) fn reject_unsupported_repo_format(path: &Path, version: u32) -> Resul
             supported: SUPPORTED_REPO_FORMAT,
         });
     }
-    if version < MIN_MIGRATABLE_REPO_FORMAT {
-        return Err(HeddleError::RepositoryFormatMigrationRequired {
+    if version < SUPPORTED_REPO_FORMAT {
+        return Err(HeddleError::RepositoryFormatTooOld {
             path: path.to_path_buf(),
             found: version,
             required: SUPPORTED_REPO_FORMAT,
@@ -798,7 +794,7 @@ format = "auto"
     }
 
     #[test]
-    fn legacy_config_requires_explicit_migration() {
+    fn older_config_is_refused_without_mutation() {
         let root = TempDir::new().unwrap();
         let path = root.path().join("config.toml");
         std::fs::write(&path, "[repository]\nversion = 2\n").unwrap();
@@ -806,7 +802,7 @@ format = "auto"
         let error = RepoConfig::load_for_repository(&path).unwrap_err();
         assert!(matches!(
             error,
-            HeddleError::RepositoryFormatMigrationRequired {
+            HeddleError::RepositoryFormatTooOld {
                 found: 2,
                 required: SUPPORTED_REPO_FORMAT,
                 ..
@@ -815,14 +811,22 @@ format = "auto"
     }
 
     #[test]
-    fn format_4_is_migratable_without_rewriting_the_file() {
+    fn format_4_is_refused_without_rewriting_the_file() {
         let root = TempDir::new().unwrap();
         let path = root.path().join("config.toml");
         let fixture = "[repository]\nversion = 4\nsource_authority = \"native\"\n";
         std::fs::write(&path, fixture).unwrap();
 
-        let loaded = RepoConfig::load_for_repository(&path).expect("format 4 must still load");
-        assert_eq!(loaded.repository.version, 4);
+        let error = RepoConfig::load_for_repository(&path)
+            .expect_err("format 4 must not enter the current runtime");
+        assert!(matches!(
+            error,
+            HeddleError::RepositoryFormatTooOld {
+                found: 4,
+                required: SUPPORTED_REPO_FORMAT,
+                ..
+            }
+        ));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), fixture);
     }
 

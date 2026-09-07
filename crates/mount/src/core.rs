@@ -68,7 +68,7 @@ use std::{
 
 use objects::{
     object::{Blob, ContentHash, EntryType, FileMode, StateId, Tree, TreeEntry, TreeEntryTarget},
-    store::{FsStore, ObjectStore},
+    store::{FsStore, ObjectCacheControl, ObjectStore},
     sync::{LockExt, RwLockExt},
     util::gitlink_placeholder_bytes,
 };
@@ -1384,7 +1384,10 @@ impl<R: RefBackend + 'static, O: OpLogBackend + 'static, S: ObjectStore + 'stati
     /// decompression cost. Exposed for benchmarks that want to
     /// measure the true cold-cache path without rebuilding the
     /// whole mount.
-    pub fn clear_blob_cache(&self) {
+    pub fn clear_blob_cache(&self)
+    where
+        S: ObjectCacheControl,
+    {
         self.inner.blob_cache.clear();
         self.inner.repo.store().clear_recent_caches();
     }

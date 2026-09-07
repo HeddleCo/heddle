@@ -26,10 +26,11 @@ use repo::{
     refresh_thread_freshness,
 };
 use sley::{
-    DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions, IndexWriteOptions, ObjectId,
-    RefPrecondition, ReferenceTarget, Repository as SleyRepository, Signature,
-    plumbing::sley_core::BString as GitByteString,
+    BString as GitByteString, DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions,
+    IndexWriteOptions, ObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
+    Signature,
 };
+use sley_refs::ReflogEntry;
 
 use super::{advice::RecoveryAdvice, thread_cmd::thread_not_found_advice};
 
@@ -1059,9 +1060,8 @@ fn apply_ff_redo(
 }
 
 /// The pre-entry Git state a checkpoint undo/redo entry overwrites, captured
-/// before any write so a partial failure restores it exactly. `git`-side writes
-/// span the checkout repo (HEAD file, branch ref, index) and the heddle mirror
-/// (branch ref), so all four are snapshotted.
+/// before any write so a partial failure restores it exactly. Git-side writes
+/// span the checkout's HEAD file, branch ref, and index.
 #[derive(Clone)]
 struct GitState {
     /// Raw `.git/HEAD` of the checkout repo (symref or detached oid line).
@@ -1070,8 +1070,6 @@ struct GitState {
     checkout_branch_oid: Option<ObjectId>,
     /// Resolved checkout HEAD commit — the index is reset back to this.
     checkout_head_oid: Option<String>,
-    /// `refs/heads/{branch}` in the heddle mirror.
-    mirror_branch_oid: Option<ObjectId>,
 }
 
 fn capture_git_state(repo: &Repository, branch: &str) -> HeddleResult<GitState> {
@@ -1086,16 +1084,14 @@ fn capture_git_state(repo: &Repository, branch: &str) -> HeddleResult<GitState> 
         .head()
         .ok()
         .and_then(|head| head.oid.map(|id| id.to_string()));
-    let mirror_branch_oid = capture_mirror_oid(repo, branch).map_err(apply_error)?;
     Ok(GitState {
         head_file,
         checkout_branch_oid,
         checkout_head_oid,
-        mirror_branch_oid,
     })
 }
 
-/// Restore the checkout + mirror Git state captured in [`GitState`]. Runs only on
+/// Restore the checkout Git state captured in [`GitState`]. Runs only on
 /// the rollback path; absolute SET/DELETE ops, so re-running it (LIFO across the
 /// entry's steps) is idempotent.
 fn restore_git_state(repo: &Repository, branch: &str, state: &GitState) -> HeddleResult<()> {
@@ -1123,43 +1119,7 @@ fn restore_git_state(repo: &Repository, branch: &str, state: &GitState) -> Heddl
         let oid = parse_git_oid(oid).map_err(apply_error)?;
         reset_git_index_to_commit(&git, oid).map_err(apply_error)?;
     }
-    restore_mirror_oid(repo, branch, state.mirror_branch_oid).map_err(apply_error)?;
     Ok(())
-}
-
-fn capture_mirror_oid(repo: &Repository, branch: &str) -> Result<Option<ObjectId>> {
-    if branch == "HEAD" {
-        return Ok(None);
-    }
-    let mirror = repo.heddle_dir().join("git");
-    if !mirror.exists() {
-        return Ok(None);
-    }
-    let git = open_git_repo(&mirror)?;
-    ref_target_oid(&git, &format!("refs/heads/{branch}"))
-}
-
-fn restore_mirror_oid(repo: &Repository, branch: &str, oid: Option<ObjectId>) -> Result<()> {
-    if branch == "HEAD" {
-        return Ok(());
-    }
-    let mirror = repo.heddle_dir().join("git");
-    if !mirror.exists() {
-        return Ok(());
-    }
-    let git = open_git_repo(&mirror)?;
-    let ref_name = format!("refs/heads/{branch}");
-    match oid {
-        Some(oid) => set_reference(
-            &git,
-            &ref_name,
-            oid,
-            RefPrecondition::Any,
-            "heddle: rollback mirror checkpoint ref",
-        )
-        .map_err(|error| anyhow!(error)),
-        None => delete_ref_if_present(&git, &ref_name),
-    }
 }
 
 fn delete_ref_if_present(git: &SleyRepository, ref_name: &str) -> Result<()> {
@@ -1208,10 +1168,6 @@ fn apply_git_checkpoint_undo(
             steps.git_restore_snapshot(repo, branch, &snapshot, || {
                 reset_git_index_to_commit(&git_checkout_repo(repo)?, previous_oid)
             })?;
-            let previous = previous.to_string();
-            steps.git_restore_snapshot(repo, branch, &snapshot, || {
-                reconcile_mirror_branch_ref(repo, branch, Some(&previous))
-            })?;
         }
         None => {
             if branch != "HEAD" {
@@ -1223,9 +1179,6 @@ fn apply_git_checkpoint_undo(
                     )
                 })?;
             }
-            steps.git_restore_snapshot(repo, branch, &snapshot, || {
-                reconcile_mirror_branch_ref(repo, branch, None)
-            })?;
         }
     }
     Ok(())
@@ -1280,43 +1233,7 @@ fn apply_git_checkpoint_redo(
     steps.git_restore_snapshot(repo, branch, &snapshot, || {
         reset_git_index_to_commit(&git_checkout_repo(repo)?, new_oid)
     })?;
-    let new_git_oid = new_git_oid.to_string();
-    steps.git_restore_snapshot(repo, branch, &snapshot, || {
-        reconcile_mirror_branch_ref(repo, branch, Some(&new_git_oid))
-    })?;
     Ok(())
-}
-
-fn reconcile_mirror_branch_ref(
-    repo: &Repository,
-    branch: &str,
-    target_oid: Option<&str>,
-) -> Result<()> {
-    if branch == "HEAD" {
-        return Ok(());
-    }
-    let mirror = repo.heddle_dir().join("git");
-    if !mirror.exists() {
-        return Ok(());
-    }
-    let git = open_git_repo(&mirror)?;
-    let ref_name = format!("refs/heads/{branch}");
-    if let Some(target) = target_oid
-        && ref_target_oid(&git, &ref_name)? == Some(parse_git_oid(target)?)
-    {
-        return Ok(());
-    }
-    match target_oid {
-        Some(target) => set_reference(
-            &git,
-            &ref_name,
-            parse_git_oid(target)?,
-            RefPrecondition::Any,
-            "heddle: update mirror checkpoint ref",
-        )
-        .map_err(|error| anyhow!(error)),
-        None => delete_reference_matching(&git, &ref_name, None),
-    }
 }
 
 fn ensure_git_head_is(repo: &Repository, expected: &str, action: &str) -> Result<()> {
@@ -1508,12 +1425,8 @@ fn git_signature() -> Signature {
     }
 }
 
-fn git_reflog_entry(
-    old_oid: ObjectId,
-    new_oid: ObjectId,
-    message: &str,
-) -> sley::plumbing::sley_refs::ReflogEntry {
-    sley::plumbing::sley_refs::ReflogEntry {
+fn git_reflog_entry(old_oid: ObjectId, new_oid: ObjectId, message: &str) -> ReflogEntry {
+    ReflogEntry {
         old_oid,
         new_oid,
         committer: git_signature().to_ident_bytes(),

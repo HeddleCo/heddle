@@ -1,6 +1,6 @@
 ---
 name: heddle
-description: Drive the `heddle` version-control CLI correctly as an agent — the command mental model (capture/commit/push, start/ready/land, discuss/context/review), the `--output json` machine contract and per-verb schemas, the exit-code contract (75 = only safe-retry), `--op-id` idempotent replay, attribution, delegated scoped tokens, and the hosted push flow. Use whenever running any `heddle` command in automation, scripting a heddle workflow, or deciding whether a failed heddle command is safe to retry.
+description: Drive the `heddle` version-control CLI correctly as an agent — the command mental model (capture/push, start/ready/land, discuss/context/review), the `--output json` machine contract and per-verb schemas, the exit-code contract (75 = only safe-retry), `--op-id` idempotent replay, attribution, delegated scoped tokens, and the hosted push flow. Use whenever running any `heddle` command in automation, scripting a heddle workflow, or deciding whether a failed heddle command is safe to retry.
 ---
 
 # Driving Heddle as an agent
@@ -63,8 +63,8 @@ heddle doctor
 
 **Three verb families you will use most:**
 
-- **Save & publish:** `capture` is the save. The everyday loop does not run
-  `capture` then `commit`.
+- **Save & publish:** `capture` is the save and writes the Git Overlay checkpoint
+  when needed; `push` publishes it.
 - **Thread lifecycle:** `start` → `ready` → `land` (managed threads). Prefer
   `land` over the raw `merge`/`rebase` primitives.
 - **Collaboration & review:** `discuss` (open/append/resolve discussions
@@ -119,7 +119,7 @@ text, so rewording an error never changes its code.
 | ---: | ----------- | --- |
 | 0    | `Ok`        | Success. |
 | 64   | `Usage`     | Bad CLI args / unknown subcommand. Fix the invocation; do not retry as-is. |
-| 65   | `DataErr`   | Well-formed input, semantically rejected (nothing to commit, unresolvable conflict, corrupt state, or `--output json` on a text-only verb). No retry helps — surface it. |
+| 65   | `DataErr`   | Well-formed input, semantically rejected (nothing to capture, unresolvable conflict, corrupt state, or `--output json` on a text-only verb). No retry helps — surface it. |
 | 73   | `CantCreat` | Output file refused (exists / unwritable / state dir uncreatable). |
 | 74   | `IoErr`     | Generic IO failure. **Catch-all** — treat any undeclared non-zero as this. |
 | **75** | **`TempFail`** | **Transient — the ONLY code that is safe to retry with the same args.** |

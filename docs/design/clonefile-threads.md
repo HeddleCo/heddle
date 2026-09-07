@@ -342,7 +342,7 @@ Scan-on-capture wins because:
   use `mmap(MAP_SHARED)` to write, which the FSKit overlay path
   can't observe.
 - It matches the mental model the user already has from git/jj
-  ("changes don't exist until I run `commit`/`capture`").
+  ("changes don't exist until I run `capture`").
 
 The overlay path reintroduces FSKit specifically on the case we're
 removing it from, which defeats the structural argument for this

@@ -37,6 +37,14 @@ toward these bands:
 - Replace the one-path status/capture ratchets with absolute 75/100 ms p95
   gates, add 100 ms gates for bounded diff/log/thread-list, and optimize the
   durable capture and local-read paths until all gates pass at 100k paths.
+- Count network client creation, opened RPC streams, and transferred bytes in
+  the structural profile so hosted regressions are visible as operations rather
+  than a single yes/no bit.
+- Reuse capture's authority-aware worktree observation through safety checks,
+  mutation, and final verification instead of scanning the checkout again at
+  each layer.
+- Remove repository-open migration probes; current-format repositories recover
+  snapshot artifacts and inspect optional lazy-hydrator metadata only.
 
 ## Next
 
@@ -44,7 +52,5 @@ toward these bands:
   current-thread summary, thread-list summary, and full workspace summary.
 - Teach short/default status to request a cheaper worktree status shape when it
   only needs sorted path lists.
-- Reduce repo-open work by skipping migration/hydrator probes when a repo has a
-  clean schema ledger and no lazy-hydrator file.
 - Recalibrate the historical controlled-runner scale ratios after the next
   dedicated Blacksmith run; absolute latency gates do not depend on them.

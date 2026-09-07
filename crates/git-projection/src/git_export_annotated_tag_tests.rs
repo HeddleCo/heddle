@@ -3,9 +3,8 @@
 use objects::object::{AnnotatedTagMarker, Attribution, MarkerName, Principal};
 use repo::Repository as HeddleRepository;
 use sley::{
-    CommitObject, EntryKind, GitObjectType, GitTime, ObjectFormat, ObjectId, RefPrecondition,
-    Repository as SleyRepository, Signature, TagObject, TreeEditor,
-    plumbing::{sley_core::BString, sley_object::EncodedObject},
+    BString, CommitObject, EntryKind, GitObjectType, GitTime, ObjectFormat, ObjectId,
+    RefPrecondition, Repository as SleyRepository, Signature, TagObject, TreeEditor,
 };
 
 use super::*;
@@ -40,7 +39,7 @@ fn write_commit(repo: &SleyRepository, message: &str) -> ObjectId {
         encoding: None,
         message: format!("{message}\n").into_bytes(),
     };
-    repo.write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
+    repo.write_raw_object(GitObjectType::Commit, commit.write())
         .expect("write commit")
 }
 
@@ -61,7 +60,7 @@ fn write_annotated_tag(repo: &SleyRepository, name: &str, target: ObjectId) -> O
         message: b"annotated release\n".to_vec(),
         raw_body: None,
     };
-    repo.write_object(EncodedObject::new(GitObjectType::Tag, tag.write()))
+    repo.write_raw_object(GitObjectType::Tag, tag.write())
         .expect("write annotated tag")
 }
 

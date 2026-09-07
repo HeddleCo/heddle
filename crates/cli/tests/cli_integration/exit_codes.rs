@@ -2,13 +2,13 @@
 //! Documented exit-code contract for the swept command subset.
 //!
 //! `docs/exit-codes.md` promises a sysexits-style taxonomy for the swept
-//! commands (`init`, `status`, `verify`, `commit`, `push`,
+//! commands (`init`, `status`, `verify`, `capture`, `push`,
 //! `pull`, and the Git import/sync/repair verbs). Agents branch on these
 //! codes without parsing stderr, so a divergence between the documented
 //! code and the runtime exit silently mis-handles a failure path.
 //!
 //! Persona round 3/5 (HeddleCo/heddle#252) caught two such divergences
-//! (`push`/`commit` returning the `IoErr` catch-all instead of the
+//! (`push`/`capture` returning the `IoErr` catch-all instead of the
 //! documented `Config`/`DataErr`) plus the `pull` and
 //! `fsck repair git` siblings. These tests pin the documented code
 //! for a reproducible documented condition of each swept command so the
@@ -124,9 +124,9 @@ fn removed_resolve_abort_flag_is_a_clean_usage_error() {
 }
 
 #[test]
-fn commit_without_git_overlay_is_data_err() {
+fn capture_with_no_changes_is_data_err() {
     let repo = init_repo();
-    assert_exit(&["commit", "-m", "again"], repo.path(), 65);
+    assert_exit(&["capture", "-m", "again"], repo.path(), 65);
 }
 
 #[test]

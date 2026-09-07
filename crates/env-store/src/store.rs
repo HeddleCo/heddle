@@ -3,12 +3,14 @@
 //!
 //! Decrypt APIs that accept a [`SoftwareRecipientSecret`] are the provider
 //! unwrap boundary. The policy broker calls them after authorizing a request
-//! and returns values, never key material. Holding the software secret in
-//! the broker process is the explicit weaker-custody fallback — not agent
-//! isolation.
+//! and owns the child command that consumes the values. Holding the software
+//! secret in the broker process is the explicit weaker-custody fallback — not
+//! agent isolation.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use crypto::{
     AEAD_AES256_GCM_V1, AeadCiphertext, Dek, Signer, SoftwareRecipientSecret, decrypt_padded,
@@ -21,21 +23,21 @@ use heddle_object_model::object::{Attribution, FacetKind};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
-use crate::codec::{
-    StoredCiphertext, assign_audit_id, assign_lifecycle_id, assign_state_id, audit_signing_payload,
-    decode_audit, decode_ciphertext, decode_lifecycle, decode_recipient, decode_ref, decode_state,
-    encode_named, encode_recipient, encode_ref, encode_state, lifecycle_signing_payload,
-    recipient_endorsement_payload,
-};
-use crate::error::{Result, EnvStoreError};
-use crate::ids::{
-    AuditRecordId, LifecycleRecordId, RecipientId, EnvProfileId, EnvProfileVersionId,
-};
-use crate::types::{
-    AuditEventKind, AuditRecord, FacetKindWire, LifecycleRecord, LifecycleStatus, ProfileMetadata,
-    ProviderCapability, ENV_STORE_SCHEMA_VERSION, RecipientDescriptor, EnvProfileRef,
-    EnvProfileVersion, SignatureBlock, SlotMetadata, SlotRecord, WrappedDekRecord, slot_aad,
-    validate_profile_name, validate_slot_name, wrap_aad,
+use crate::{
+    codec::{
+        StoredCiphertext, assign_audit_id, assign_lifecycle_id, assign_state_id,
+        audit_signing_payload, decode_audit, decode_ciphertext, decode_lifecycle, decode_recipient,
+        decode_ref, decode_state, encode_named, encode_recipient, encode_ref,
+        lifecycle_signing_payload, recipient_endorsement_payload,
+    },
+    error::{EnvStoreError, Result},
+    ids::{AuditRecordId, EnvProfileId, EnvProfileVersionId, LifecycleRecordId, RecipientId},
+    types::{
+        AuditEventKind, AuditRecord, ENV_STORE_SCHEMA_VERSION, EnvProfileRef, EnvProfileVersion,
+        FacetKindWire, LifecycleRecord, LifecycleStatus, ProfileMetadata, ProviderCapability,
+        RecipientDescriptor, SignatureBlock, SlotRecord, WrappedDekRecord, slot_aad,
+        validate_profile_name, validate_slot_name, wrap_aad,
+    },
 };
 
 const STORE_DIR: &str = "env";
@@ -166,14 +168,18 @@ impl EnvStore {
                 "signed record is not from the store's pinned identity".to_string(),
             ));
         }
-        verify_payload_signature(payload, &block.algorithm, &block.public_key, &block.signature)
-            .map_err(EnvStoreError::Signature)
+        verify_payload_signature(
+            payload,
+            &block.algorithm,
+            &block.public_key,
+            &block.signature,
+        )
+        .map_err(EnvStoreError::Signature)
     }
 
     /// The authoritative lifecycle status of a version, derived from its signed
-    /// lifecycle records — NOT the unsigned `lifecycle` field baked into the
-    /// version file (which an attacker with store-write access could edit).
-    /// Every record is verified against the pinned identity; the latest wins.
+    /// lifecycle records. Every record is verified against the pinned identity;
+    /// the most advanced valid transition wins.
     pub(crate) fn effective_lifecycle(
         &self,
         profile_id: EnvProfileId,
@@ -336,7 +342,7 @@ impl EnvStore {
             .collect::<Result<Vec<_>>>()?;
         let now = now_ms()?;
         let profile_id = EnvProfileId::generate();
-        let (state, _) = self.write_version(
+        let state = self.write_version(
             profile_id,
             None,
             1,
@@ -363,15 +369,12 @@ impl EnvStore {
             attribution.clone(),
             signer,
         )?;
-        let mut active = state;
-        active.lifecycle = LifecycleStatus::Active;
-        write_file_atomic(&self.version_path(active.state_id), &encode_state(&active)?)?;
         let profile = EnvProfileRef {
             schema_version: ENV_STORE_SCHEMA_VERSION,
             profile_id,
             name: name.to_string(),
             facet: FacetKindWire::ConfidentialRuntime,
-            head: active.state_id,
+            head: state.state_id,
             created_at_ms: now,
             updated_at_ms: now,
             attribution,
@@ -389,9 +392,10 @@ impl EnvStore {
     ) -> Result<EnvProfileRef> {
         let mut profile = self.load_profile(profile_id)?;
         let previous = self.load_state(profile.head)?;
-        if previous.lifecycle != LifecycleStatus::Active {
+        let previous_lifecycle = self.effective_lifecycle(profile_id, previous.state_id)?;
+        if previous_lifecycle != LifecycleStatus::Active {
             return Err(EnvStoreError::IllegalLifecycle {
-                from: previous.lifecycle.to_string(),
+                from: previous_lifecycle.to_string(),
                 to: LifecycleStatus::Superseded.to_string(),
             });
         }
@@ -401,7 +405,7 @@ impl EnvStore {
             .map(|id| self.load_recipient(*id))
             .collect::<Result<Vec<_>>>()?;
         let now = now_ms()?;
-        let (staged, _) = self.write_version(
+        let staged = self.write_version(
             profile_id,
             Some(previous.state_id),
             previous.version + 1,
@@ -432,10 +436,7 @@ impl EnvStore {
             attribution.clone(),
             signer,
         )?;
-        let mut active = staged;
-        active.lifecycle = LifecycleStatus::Active;
-        write_file_atomic(&self.version_path(active.state_id), &encode_state(&active)?)?;
-        profile.head = active.state_id;
+        profile.head = staged.state_id;
         profile.updated_at_ms = now;
         profile.attribution = attribution.clone();
         write_file_atomic(&self.profile_path(profile_id), &encode_ref(&profile)?)?;
@@ -447,12 +448,6 @@ impl EnvStore {
             now,
             attribution,
             signer,
-        )?;
-        let mut superseded = previous;
-        superseded.lifecycle = LifecycleStatus::Superseded;
-        write_file_atomic(
-            &self.version_path(superseded.state_id),
-            &encode_state(&superseded)?,
         )?;
         Ok(profile)
     }
@@ -499,39 +494,19 @@ impl EnvStore {
             }
             let profile = decode_ref(&fs::read(entry.path())?)?;
             let state = self.load_state(profile.head)?;
+            let lifecycle = self.effective_lifecycle(profile.profile_id, profile.head)?;
             out.push(ProfileMetadata {
                 profile_id: profile.profile_id,
                 name: profile.name,
                 facet: profile.facet.facet_kind(),
                 head: profile.head,
                 version: state.version,
-                lifecycle: state.lifecycle,
+                lifecycle,
                 slot_names: state.slots.iter().map(|slot| slot.name.clone()).collect(),
             });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
-    }
-
-    /// List slot metadata for the current head. Does not decrypt.
-    pub fn list_slots(&self, profile_id: EnvProfileId) -> Result<Vec<SlotMetadata>> {
-        let profile = self.load_profile(profile_id)?;
-        let state = self.load_state(profile.head)?;
-        Ok(state
-            .slots
-            .into_iter()
-            .map(|slot| SlotMetadata {
-                name: slot.name,
-                aead_alg: slot.aead_alg,
-                pad_bucket: slot.pad_bucket,
-                ciphertext_id: slot.ciphertext_id,
-                recipient_ids: slot
-                    .dek_wraps
-                    .into_iter()
-                    .map(|wrap| wrap.recipient_id)
-                    .collect(),
-            })
-            .collect())
     }
 
     pub fn list_recipients(&self) -> Result<Vec<RecipientDescriptor>> {
@@ -559,14 +534,12 @@ impl EnvStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn record_audit(
+    pub(crate) fn record_audit(
         &self,
         profile_id: Option<EnvProfileId>,
         profile_name: &str,
         state_id: Option<EnvProfileVersionId>,
         slots: &[String],
-        purpose: &str,
-        caller: &str,
         event: AuditEventKind,
         reason: Option<String>,
         attribution: Attribution,
@@ -581,8 +554,6 @@ impl EnvStore {
             profile_name: profile_name.to_string(),
             state_id,
             slots: slots.to_vec(),
-            purpose: purpose.to_string(),
-            caller: caller.to_string(),
             event,
             reason,
             occurred_at_ms: now,
@@ -609,7 +580,11 @@ impl EnvStore {
                 continue;
             }
             let record = decode_audit(&fs::read(entry.path())?)?;
-            self.verify_block(&identity, &audit_signing_payload(&record)?, &record.signature)?;
+            self.verify_block(
+                &identity,
+                &audit_signing_payload(&record)?,
+                &record.signature,
+            )?;
             out.push(record);
         }
         out.sort_by_key(|record| record.occurred_at_ms);
@@ -746,9 +721,6 @@ impl EnvStore {
                 attribution.clone(),
                 signer,
             )?;
-            let mut state = self.load_state(state_id)?;
-            state.lifecycle = LifecycleStatus::Revoked;
-            write_file_atomic(&self.version_path(state_id), &encode_state(&state)?)?;
             revoked_any = true;
         }
         if !revoked_any {
@@ -806,9 +778,10 @@ impl EnvStore {
     ) -> Result<EnvProfileRef> {
         let profile = self.load_profile(profile_id)?;
         let state = self.load_state(profile.head)?;
-        if state.lifecycle != LifecycleStatus::PurgeEligible {
+        let lifecycle = self.effective_lifecycle(profile_id, profile.head)?;
+        if lifecycle != LifecycleStatus::PurgeEligible {
             return Err(EnvStoreError::IllegalLifecycle {
-                from: state.lifecycle.to_string(),
+                from: lifecycle.to_string(),
                 to: LifecycleStatus::Purged.to_string(),
             });
         }
@@ -829,10 +802,11 @@ impl EnvStore {
         signer: &impl Signer,
     ) -> Result<EnvProfileRef> {
         let mut profile = self.load_profile(profile_id)?;
-        let mut state = self.load_state(profile.head)?;
-        if !state.lifecycle.can_transition_to(to) {
+        let state = self.load_state(profile.head)?;
+        let lifecycle = self.effective_lifecycle(profile_id, state.state_id)?;
+        if !lifecycle.can_transition_to(to) {
             return Err(EnvStoreError::IllegalLifecycle {
-                from: state.lifecycle.to_string(),
+                from: lifecycle.to_string(),
                 to: to.to_string(),
             });
         }
@@ -840,14 +814,12 @@ impl EnvStore {
         self.record_lifecycle(
             profile_id,
             state.state_id,
-            Some(state.lifecycle),
+            Some(lifecycle),
             to,
             now,
             attribution.clone(),
             signer,
         )?;
-        state.lifecycle = to;
-        write_file_atomic(&self.version_path(state.state_id), &encode_state(&state)?)?;
         profile.head = state.state_id;
         profile.updated_at_ms = now;
         profile.attribution = attribution;
@@ -865,7 +837,7 @@ impl EnvStore {
         recipients: &[RecipientDescriptor],
         attribution: Attribution,
         created_at_ms: i64,
-    ) -> Result<(EnvProfileVersion, Vec<u8>)> {
+    ) -> Result<EnvProfileVersion> {
         if recipients.is_empty() {
             return Err(EnvStoreError::Invalid(
                 "a env store requires at least one recipient".to_string(),
@@ -876,7 +848,7 @@ impl EnvStore {
             validate_slot_name(&slot.name).map_err(EnvStoreError::Invalid)?;
             let dek = Dek::generate()?;
             let sealed = encrypt_padded(&dek, &slot.value, &slot_aad(profile_id, &slot.name))?;
-            let (_stored, ciphertext_id, cipher_bytes) = StoredCiphertext::from_aead(&sealed)?;
+            let (ciphertext_id, cipher_bytes) = StoredCiphertext::from_aead(&sealed)?;
             write_file_atomic(&self.ciphertext_path(ciphertext_id), &cipher_bytes)?;
             let mut wraps = Vec::new();
             for recipient in recipients {
@@ -908,7 +880,6 @@ impl EnvStore {
             profile_id,
             parent,
             version,
-            lifecycle: LifecycleStatus::Staged,
             slots: slot_records,
             recipient_ids: recipients.iter().map(|r| r.recipient_id).collect(),
             policy_ref: None,
@@ -917,7 +888,7 @@ impl EnvStore {
         };
         let bytes = assign_state_id(&mut state)?;
         write_file_atomic(&self.version_path(state.state_id), &bytes)?;
-        Ok((state, bytes))
+        Ok(state)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1001,22 +972,19 @@ impl EnvStore {
     }
 }
 
-/// Compile-time proof that this facet cannot be selected by Source History
-/// verbs. `EnvProfileVersionId` is a distinct type from `StateId`.
-pub const fn confidential_runtime_source_history_laws()
--> Option<heddle_object_model::object::SourceHistoryLaws> {
-    FacetKind::ConfidentialRuntime.source_history_laws()
-}
-
-const _: () = assert!(confidential_runtime_source_history_laws().is_none());
+const _: () = assert!(
+    FacetKind::ConfidentialRuntime
+        .source_history_laws()
+        .is_none()
+);
 const _: () = assert!(!FacetKind::ConfidentialRuntime.git_projection_visits());
 const _: () = assert!(!FacetKind::ConfidentialRuntime.may_checkout());
 const _: () = assert!(!FacetKind::ConfidentialRuntime.may_land());
 
 fn vec_to_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N]> {
-    bytes.try_into().map_err(|_| {
-        EnvStoreError::Invalid(format!("expected {N} bytes, found {}", bytes.len()))
-    })
+    bytes
+        .try_into()
+        .map_err(|_| EnvStoreError::Invalid(format!("expected {N} bytes, found {}", bytes.len())))
 }
 
 pub(crate) fn now_ms() -> Result<i64> {

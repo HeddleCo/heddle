@@ -37,6 +37,23 @@ Both paths carry the same ALPN, method descriptors, protobuf messages, call
 context, failure envelope, and collaboration streams to the same application
 endpoint.
 
+Heddle and Tapestry are equal clients of that application endpoint. A method is
+not owned by the web or CLI surface: both clients address the same governed RPC
+operation whenever their local interaction and key capabilities permit it.
+Tapestry currently has the practical advantage for human-key operations because
+the browser can perform native passkey ceremonies. That is a client capability,
+not a separate Tapestry business API, and the contract must allow another client
+with equivalent key access to perform the same operation later.
+
+An agent or a client without the required human key may prepare and submit a
+human-signable action for later authorization. The pending action fixes the
+canonical method and request bytes, payload digest, requested scope, expiry, and
+client operation identity; it grants no authority and causes no protected
+mutation. A passkey-capable client presents those exact semantics to the human,
+signs the same canonical bytes, and submits the authorization through the shared
+contract. Weft verifies and applies the authorized operation but never rewrites
+the proposal between review and execution or signs on the human's behalf.
+
 The first production protocol advertises ALPN `heddle-api/1`. The earlier
 `heddle-sync/3` value remains experiment-only and is not accepted by production
 clients or endpoints.

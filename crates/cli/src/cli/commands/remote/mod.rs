@@ -169,9 +169,11 @@ fn push_git_overlay_refs(
     let mut sley_progress = GitPushProgress {
         progress: progress.clone(),
     };
+    let original_cwd = std::env::current_dir().context("read current directory for Git push")?;
     let refs_written = push_authoritative_git_refs(
         &git,
         AuthoritativeGitPushOptions {
+            original_cwd: Some(&original_cwd),
             heddle_dir: repo.heddle_dir(),
             remote: &remote_name,
             scope,
@@ -1385,7 +1387,10 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         .session
         .connect(options.authority)
         .await?
-        .with_human_signature_callback(hosted_client::client::cli_human_signature_callback());
+        .with_human_signature_callback(hosted_client::client::headless_human_signature_callback())
+        .with_warning_sink(std::sync::Arc::new(
+            crate::cli::warning_render::StderrWarningSink,
+        ));
     let result = push_network_connected(repo, &mut client, options).await;
     client.close().await;
     result

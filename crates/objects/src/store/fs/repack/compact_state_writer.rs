@@ -14,7 +14,7 @@ pub(super) fn add_state_frames(
     let mut logical_bytes = 0u64;
     for id in order {
         let state = states[id].clone();
-        let bytes = rmp_serde::to_vec_named(&state).map_err(HeddleError::from)?;
+        let bytes = state.encode_current_msgpack()?;
         source_bytes = source_bytes.saturating_add(bytes.len());
         logical_bytes = logical_bytes.saturating_add(bytes.len() as u64);
         batch.push((*id, state));
@@ -74,8 +74,8 @@ fn verify_state_frame(records: &[(StateId, State)], frame: &[u8]) -> Result<(), 
             )
             .into());
         }
-        let actual_bytes = rmp_serde::to_vec_named(&actual).map_err(HeddleError::from)?;
-        let expected_bytes = rmp_serde::to_vec_named(expected).map_err(HeddleError::from)?;
+        let actual_bytes = actual.encode_current_msgpack()?;
+        let expected_bytes = expected.encode_current_msgpack()?;
         if actual_bytes != expected_bytes {
             return Err(HeddleError::InvalidObject(
                 "compact state frame changed native bytes".into(),

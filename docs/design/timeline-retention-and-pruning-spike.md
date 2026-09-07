@@ -117,8 +117,8 @@ settle it. This does not change the append-only finding.
 - it removes Git-projection mapping rows whose Git commits are unreachable
   (`crates/cli/src/cli/commands/gc.rs:108-116`,
   `crates/git-projection/src/git_mapping.rs:218-227`);
-- it losslessly packs the Git bridge mirror's complete on-disk object set
-  (`crates/git-projection/src/git_mapping.rs:230-272`);
+- it prunes unreachable Git Projection Mapping rows without maintaining a
+  second Git object warehouse;
 - it removes loose blob/tree copies only after a packed canonical copy exists,
   and removes incomplete or unpaired pack artifacts
   (`crates/cli/src/cli/commands/gc.rs:134-177`,

@@ -181,9 +181,7 @@ fn import_ingest_for_adopt(
     progress: &mut ImportProgress,
 ) -> Result<AdoptImportStats> {
     progress.checking_notes();
-    heddle_git_projection::git_core::GitProjection::hydrate_checkout_heddle_notes_without_mirror(
-        repo.root(),
-    );
+    heddle_git_projection::git_core::GitProjection::hydrate_checkout_heddle_notes(repo.root());
     progress.ordering_commits();
     use ingest::{ImportOptions, import_git_into_scoped_with_options_and_progress};
 

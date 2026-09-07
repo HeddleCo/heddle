@@ -15,7 +15,7 @@ use std::{
 
 use sley::{
     GitConfig, GitError,
-    plumbing::sley_remote::{CredentialHelperProvider, CredentialProvider},
+    remote::{CredentialHelperProvider, CredentialProvider},
 };
 use sley_transport::{
     GitCredential,
@@ -460,7 +460,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use sley::plumbing::sley_remote::{CredentialProvider as _, http_send_with_auth};
+    use sley::remote::{CredentialProvider as _, http_send_with_auth};
     use sley_transport::{GitCredential, HttpResponse, parse_remote_url};
     use tempfile::TempDir;
 

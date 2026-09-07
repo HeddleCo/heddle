@@ -22,8 +22,8 @@ use super::agent_node_identity;
 /// bind — including after a restart — reuses the same secret key and
 /// therefore the same node id.
 pub(crate) async fn bind(relay_mode: RelayMode) -> Result<Endpoint> {
-    let identity = agent_node_identity::load_or_create()
-        .context("loading persisted device node identity")?;
+    let identity =
+        agent_node_identity::load_or_create().context("loading persisted device node identity")?;
     Endpoint::builder(presets::Minimal)
         .relay_mode(relay_mode)
         .secret_key(identity.secret_key())

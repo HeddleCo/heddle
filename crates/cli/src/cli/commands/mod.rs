@@ -14,7 +14,6 @@ mod checkpoint;
 mod ci;
 mod clone;
 mod collapse;
-mod commit;
 pub(crate) mod compact;
 mod compact_projections;
 mod completion;
@@ -23,8 +22,8 @@ mod daemon;
 mod diff;
 mod discuss;
 mod doctor;
-mod env_cmd;
 pub(crate) mod dry_run;
+mod env_cmd;
 mod error_envelope;
 mod expand;
 mod ff_record;
@@ -36,6 +35,8 @@ mod git_projection_io;
 pub(crate) mod heddleignore_defaults;
 mod history_target;
 mod hook;
+#[cfg(feature = "client")]
+mod hosted_identity;
 mod import_progress;
 mod init;
 mod integration;
@@ -111,7 +112,6 @@ pub use command_catalog::{
     command_surface, command_uses_bootstrap_op_id_store, observe_only_root_commands,
     operator_envelope_verbs, ranked_visible_roots, root_commands_for_help_visibility,
 };
-pub use commit::cmd_commit;
 pub use completion::{cmd_complete, cmd_completion, cmd_completions};
 pub use context::{
     cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get, cmd_context_history,
@@ -120,13 +120,12 @@ pub use context::{
 #[allow(unused_imports)]
 pub(crate) use daemon::client as daemon_client;
 pub use daemon::{cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop};
-pub use netdaemon::{cmd_netd_serve, cmd_netd_status, cmd_netd_stop};
 pub use diff::cmd_diff;
 pub use discuss::run as cmd_discuss;
 pub use doctor::cmd_doctor;
-pub use env_cmd::cmd_env;
 pub use doctor_docs::cmd_doctor_docs;
 pub use doctor_schemas::{cmd_doctor_schemas, documented_samples_with_bound_verbs};
+pub use env_cmd::cmd_env;
 pub use error_envelope::{
     print_error_with_hint, print_error_with_hint_with_config, print_or_suggest_parse_error,
     print_parse_error_json_envelope,
@@ -143,12 +142,15 @@ pub use heddle_cli_contract::cli::commands::{
     verification_health,
 };
 pub use hook::cmd_hook;
+#[cfg(feature = "client")]
+pub use hosted_identity::{cmd_hosted_auth, cmd_hosted_claim, cmd_hosted_whoami};
 pub use init::cmd_init;
 pub use integration::{
     cmd_integration, maybe_prompt_init_install, perform_init_install, prompt_init_install_decision,
 };
 pub use log::{LogCommandOptions, cmd_log};
 pub use maintenance::cmd_maintenance;
+pub use netdaemon::{cmd_netd_serve, cmd_netd_status, cmd_netd_stop};
 pub use operator_core::operator_emission_output_kinds;
 pub use operator_loop::{cmd_abort, cmd_continue, cmd_sync_smart};
 pub use oplog::cmd_oplog;

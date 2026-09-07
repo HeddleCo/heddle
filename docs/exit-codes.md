@@ -45,7 +45,7 @@ intentionally — let it surface naturally.
   limited to config-file parse errors. Agents should print the missing
   setting rather than retry.
 - **`65` (DataErr) covers semantic rejection of well-formed input**
-  (e.g. `commit` with nothing to capture, `merge` with unresolvable
+  (e.g. `capture` with nothing to save, `merge` with unresolvable
   conflict, `fsck repair git` requested against the repository's source authority,
   repository state that fails decoding — `state_corrupted` — and
   `--output json`/`json-compact` requested from a command without that
@@ -75,7 +75,7 @@ declared discriminators, `exit_codes`) are stable for that minor.
 Today, only a representative subset of commands has populated
 `exit_codes`:
 
-- `init`, `verify`, `push`, `pull`, `commit`, `merge`, `status`
+- `init`, `verify`, `push`, `pull`, `capture`, `merge`, `status`
 - `import git`, `fsck repair git`, `sync git`
 
 Commands not yet swept implicitly contract to `0` on success and an

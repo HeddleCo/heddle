@@ -309,9 +309,9 @@ export class Heddle {
     return this.run("start", args, options);
   }
 
-  /** `heddle commit` — capture working changes. Mutating. */
-  commit(args: readonly string[] = [], options: RunOptions = {}) {
-    return this.run("commit", args, options);
+  /** `heddle capture` — save one attributed state and Git checkpoint. Mutating. */
+  capture(args: readonly string[] = [], options: RunOptions = {}) {
+    return this.run("capture", args, options);
   }
 
   /** `heddle log` — history. Read-only. */

@@ -174,7 +174,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn peer_uid_mismatch_is_rejected_before_mount_reply_is_trusted() {
-        use std::{io::{ BufRead, Write}, os::unix::net::UnixListener, path::PathBuf, thread};
+        use std::{
+            io::{BufRead, Write},
+            os::unix::net::UnixListener,
+            path::PathBuf,
+            thread,
+        };
 
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let path = tmp.path().join("heddled.sock");
@@ -187,7 +192,10 @@ mod tests {
                     // EPIPE, which would mask the peer-uid behavior under
                     // test with a transport error.
                     let mut line = String::new();
-                    if std::io::BufReader::new(&stream).read_line(&mut line).is_err() {
+                    if std::io::BufReader::new(&stream)
+                        .read_line(&mut line)
+                        .is_err()
+                    {
                         continue;
                     }
                     let reply = MountDaemonResponse::Mount {

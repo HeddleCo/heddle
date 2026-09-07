@@ -4,12 +4,12 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use config::credentials;
 use crypto::{Ed25519Signer, Signer as _};
-use heddle_cli_args::CliContext;
-use heddle_cli_contract::cli::commands::RecoveryAdvice;
+use objects::{HeddleError, RecoveryDetails};
 
 use super::{
     agent_node_identity,
-    auth::{cmd_auth_login_browser, headless_token_metadata},
+    auth::{AuthEvent, AuthLoginOutcome, headless_token_metadata, login_browser},
+    auth_requests::{AuthOptions, LoginPermission},
     hosted::{ResolvedHostedCredential, resolve_hosted_credential},
     identity_state,
 };
@@ -28,8 +28,7 @@ pub(crate) struct LoginInputs {
     pub reusable_cred: bool,
     pub node_key_account: bool,
     pub has_invite: bool,
-    pub interactive: bool,
-    pub force_browser: bool,
+    pub browser_allowed: bool,
 }
 
 pub(crate) fn login_path(inputs: LoginInputs) -> LoginPath {
@@ -39,7 +38,7 @@ pub(crate) fn login_path(inputs: LoginInputs) -> LoginPath {
         LoginPath::Remint
     } else if inputs.has_invite {
         LoginPath::CreateWithInvite
-    } else if inputs.interactive || inputs.force_browser {
+    } else if inputs.browser_allowed {
         LoginPath::Browser
     } else {
         LoginPath::FailClosed
@@ -47,12 +46,12 @@ pub(crate) fn login_path(inputs: LoginInputs) -> LoginPath {
 }
 
 pub(crate) async fn login(
-    ctx: &dyn CliContext,
+    options: &AuthOptions,
     server: &str,
-    open_browser: bool,
+    permission: LoginPermission,
     invite: Option<String>,
-    interactive: bool,
-) -> Result<()> {
+    on_event: &mut impl FnMut(AuthEvent) -> Result<()>,
+) -> Result<AuthLoginOutcome> {
     let resolved = resolve_hosted_credential(Some(server))?;
     let reusable_cred = credential_is_reusable(&resolved);
     let node_key_account = node_key_account_exists(server, &resolved)?;
@@ -60,16 +59,20 @@ pub(crate) async fn login(
         reusable_cred,
         node_key_account,
         has_invite: invite.is_some(),
-        interactive,
-        force_browser: open_browser,
+        browser_allowed: matches!(permission, LoginPermission::Browser { .. }),
     }) {
         LoginPath::Reuse => reuse(server, &resolved),
         LoginPath::Remint => super::auth_login_agent::remint(server).await,
         LoginPath::CreateWithInvite => {
             let invite = invite.context("login decision lost invite")?;
-            super::auth_login_agent::create_with_invite(ctx, server, invite).await
+            super::auth_login_agent::create_with_invite(options, server, invite).await
         }
-        LoginPath::Browser => cmd_auth_login_browser(server, open_browser).await,
+        LoginPath::Browser => {
+            let LoginPermission::Browser { open_browser } = permission else {
+                return fail_closed(server);
+            };
+            login_browser(server, open_browser, on_event).await
+        }
         LoginPath::FailClosed => fail_closed(server),
     }
 }
@@ -113,7 +116,7 @@ fn cred_bound_to_node_key(resolved: &ResolvedHostedCredential, node_id: &str) ->
         .is_some_and(|metadata| metadata.proof_public_key_hex.eq_ignore_ascii_case(node_id))
 }
 
-fn reuse(server: &str, resolved: &ResolvedHostedCredential) -> Result<()> {
+fn reuse(server: &str, resolved: &ResolvedHostedCredential) -> Result<AuthLoginOutcome> {
     if let Some(pem) = resolved.proof_key_pem.as_deref() {
         super::auth_login_agent::record_claimable_root_for_stored_account(server, pem)?;
     }
@@ -128,30 +131,25 @@ fn reuse(server: &str, resolved: &ResolvedHostedCredential) -> Result<()> {
                 .map(|metadata| metadata.subject)
         })
         .unwrap_or_else(|| server.to_string());
-    print_reused(&subject);
-    Ok(())
+    Ok(AuthLoginOutcome::Authenticated {
+        subject,
+        credential_saved: false,
+    })
 }
 
-fn fail_closed(server: &str) -> Result<()> {
+fn fail_closed(server: &str) -> Result<AuthLoginOutcome> {
     let primary = "heddle auth login --invite <code>".to_string();
-    Err(anyhow::Error::new(RecoveryAdvice::safety_refusal(
-        "auth_login_invite_required",
-        format!("Not authenticated with {server}"),
-        format!("Run `{primary}` to create an account, then retry."),
-        "this session has no TTY and no reusable credential or hosted account for this node key",
-        "starting a browser or Iroh claim wait would hang until a human opens a URL",
-        "no hosted request was sent and local credentials were left unchanged",
-        primary.clone(),
-        vec![primary],
+    Err(anyhow::Error::new(HeddleError::recovery(
+        RecoveryDetails::safety_refusal(
+            "auth_login_invite_required",
+            format!("Not authenticated with {server}"),
+            format!("Run `{primary}` to create an account, then retry."),
+            "the caller did not permit a browser ceremony and no reusable credential or hosted account exists for this node key",
+            "starting a browser or Iroh claim wait would hang until a human opens a URL",
+            "no hosted request was sent and local credentials were left unchanged",
+        )
+        .with_recovery_commands(vec![primary]),
     )))
-}
-
-pub(crate) fn print_reused(subject: &str) {
-    println!("Authenticated as {subject}.");
-}
-
-pub(crate) fn print_success(subject: &str) {
-    println!("Authenticated as {subject}. Credentials saved.");
 }
 
 pub(crate) fn store_agent_root(

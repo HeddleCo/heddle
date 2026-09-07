@@ -9,145 +9,25 @@
 //! `git-projection-mapping.json` sidecar is a local served/export cache; notes are
 //! the portable source that survives plain Git clones and exports.
 //!
-//! Sley provides the tree-backed notes plumbing; this module owns Heddle's
-//! JSON payload and the fixed `refs/notes/heddle` location.
+//! Sley provides the tree-backed notes plumbing. This module owns the fixed
+//! `refs/notes/heddle` location and re-exports the object model's one canonical
+//! payload codec for projection callers.
 
 use std::{
     collections::HashMap,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use objects::object::{State, StateId, Status};
-use serde::{Deserialize, Serialize};
+use objects::object::StateId;
 use sley::{ObjectId, Repository};
 
 use super::git_core::{GitProjectionError, GitProjectionResult, git_err};
 
+pub use objects::object::{HeddleNote, NoteAgent, NoteAttribution, OmittedBreakdown, SignalCounts};
+
 /// The notes ref heddle uses. Git-compatible notes readers can opt into
 /// this location, while Heddle reads and writes it natively.
 pub const NOTES_REF: &str = "refs/notes/heddle";
-
-/// JSON payload stored inside each note blob.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HeddleNote {
-    pub state_id: String,
-    pub change_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_state: Option<State>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<NoteAgent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confidence: Option<f32>,
-    /// Either "draft" or "published".
-    pub status: String,
-    // --- W2/R6 tail fields below; new fields go here. All optional + skip-if-none. ---
-    /// Per-scope counts of annotations dropped at export because their
-    /// visibility exceeded the export's audience tier. Populated when the
-    /// caller exports with `--notes` and `--audience`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub omitted_annotations_breakdown: Option<OmittedBreakdown>,
-    /// Per-module signal counts on the state at export time. Read-only
-    /// metadata for downstream tooling.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signal_counts: Option<SignalCounts>,
-    /// Author + agent attribution rolled up into a richer shape than the
-    /// commit's own author signature can carry.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attribution: Option<NoteAttribution>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct NoteAgent {
-    pub provider: String,
-    pub model: String,
-}
-
-/// Per-scope omitted-annotation counts emitted alongside `refs/notes/heddle`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct OmittedBreakdown {
-    #[serde(default)]
-    pub internal: u32,
-    #[serde(default)]
-    pub team: u32,
-    #[serde(default)]
-    pub restricted: u32,
-}
-
-/// Per-module risk-signal fire counts on this state.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct SignalCounts {
-    #[serde(default)]
-    pub novelty: u32,
-    #[serde(default)]
-    pub test_reachability: u32,
-    #[serde(default)]
-    pub pattern_deviation: u32,
-    #[serde(default)]
-    pub invariant_adjacency: u32,
-    #[serde(default)]
-    pub self_flagged_uncertainty: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct NoteAttribution {
-    pub principal_name: String,
-    pub principal_email: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<NoteAgent>,
-}
-
-impl HeddleNote {
-    /// Construct a note from a heddle state (the form written on export).
-    pub fn from_state(state: &State) -> Self {
-        let status = match state.status {
-            Status::Draft => "draft".to_string(),
-            Status::Published => "published".to_string(),
-        };
-        let agent = state.attribution.agent.as_ref().map(|a| NoteAgent {
-            provider: a.provider.clone(),
-            model: a.model.clone(),
-        });
-        Self {
-            state_id: state.id().to_string_full(),
-            change_id: state.change_id.to_string_full(),
-            source_state: Some(state.clone()),
-            agent,
-            confidence: state.confidence,
-            status,
-            omitted_annotations_breakdown: None,
-            signal_counts: None,
-            attribution: None,
-        }
-    }
-
-    /// R6 builder: set the per-scope omitted-annotation breakdown.
-    pub fn with_omitted_breakdown(mut self, breakdown: OmittedBreakdown) -> Self {
-        self.omitted_annotations_breakdown = Some(breakdown);
-        self
-    }
-
-    /// R6 builder: set the per-module signal counts.
-    pub fn with_signal_counts(mut self, counts: SignalCounts) -> Self {
-        self.signal_counts = Some(counts);
-        self
-    }
-
-    /// R6 builder: set richer attribution (principal + agent).
-    pub fn with_attribution(mut self, attribution: NoteAttribution) -> Self {
-        self.attribution = Some(attribution);
-        self
-    }
-
-    pub fn to_json_bytes(&self) -> GitProjectionResult<Vec<u8>> {
-        serde_json::to_vec_pretty(self)
-            .map_err(|e| GitProjectionError::Git(format!("note serialize: {e}")))
-    }
-
-    pub fn from_json_bytes(bytes: &[u8]) -> GitProjectionResult<Self> {
-        serde_json::from_slice(bytes)
-            .map_err(|e| GitProjectionError::Git(format!("note parse: {e}")))
-    }
-}
 
 fn notes_ref() -> sley::notes::NotesRef {
     sley::notes::NotesRef::expand(NOTES_REF)
@@ -162,7 +42,9 @@ pub fn write_note(
     commit_oid: ObjectId,
     note: &HeddleNote,
 ) -> GitProjectionResult<()> {
-    let json = note.to_json_bytes()?;
+    let json = note
+        .to_json_bytes()
+        .map_err(|error| GitProjectionError::Git(format!("note serialize: {error}")))?;
     let notes_ref = notes_ref();
     let refs = repo.references();
     sley::notes::upsert_note_bytes_for(
@@ -229,7 +111,9 @@ pub fn read_note(
     else {
         return Ok(None);
     };
-    HeddleNote::from_json_bytes(&bytes).map(Some)
+    HeddleNote::from_json_bytes(&bytes)
+        .map(Some)
+        .map_err(|error| GitProjectionError::Git(format!("note parse: {error}")))
 }
 
 /// Read every portable Git↔Heddle identity recorded under `refs/notes/heddle`.

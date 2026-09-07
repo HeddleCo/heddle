@@ -1,14 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
 
-fn temp_leaf(temp: &RepoFixture) -> String {
-    temp.path()
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("repo")
-        .to_string()
-}
-
 #[test]
 fn start_registers_thread_with_agent_metadata() {
     let main = setup_repo("base.txt", "base");
@@ -343,13 +335,7 @@ fn agent_task_create_list_show_update_round_trip() {
 #[test]
 fn agent_fanout_plan_is_read_only_and_returns_start_commands() {
     let main = setup_repo("base.txt", "base");
-    let lane_path = main
-        .path()
-        .with_file_name(format!("{}-fanout-plan-lane", temp_leaf(&main)));
-    let lane_spec = format!(
-        "feature/fanout-plan={}:Implement fanout plan lane",
-        lane_path.display()
-    );
+    let lane_spec = "feature/fanout-plan=Implement fanout plan lane";
 
     let planned: Value = serde_json::from_str(
         &heddle(
@@ -364,7 +350,7 @@ fn agent_fanout_plan_is_read_only_and_returns_start_commands() {
                 "--coordination-discussion-id",
                 "discussion-123",
                 "--lane",
-                &lane_spec,
+                lane_spec,
             ],
             Some(main.path()),
         )
@@ -379,6 +365,11 @@ fn agent_fanout_plan_is_read_only_and_returns_start_commands() {
         Some("discussion-123")
     );
     assert_eq!(planned["lanes"][0]["status"].as_str(), Some("planned"));
+    let lane_path = std::path::PathBuf::from(
+        planned["lanes"][0]["path"]
+            .as_str()
+            .expect("managed checkout path"),
+    );
     assert_eq!(
         planned["commands"][0]["argv"].as_array().unwrap()[1].as_str(),
         Some("agent")
@@ -404,23 +395,32 @@ fn agent_fanout_plan_is_read_only_and_returns_start_commands() {
 #[test]
 fn agent_fanout_start_preflights_all_lanes_before_creating_tasks() {
     let main = setup_repo("base.txt", "base");
-    let first_lane_path = main
-        .path()
-        .with_file_name(format!("{}-fanout-preflight-first", temp_leaf(&main)));
-    let blocked_lane_path = main
-        .path()
-        .with_file_name(format!("{}-fanout-preflight-blocked", temp_leaf(&main)));
+    let first_lane = "feature/fanout-preflight-a=First lane";
+    let blocked_lane = "feature/fanout-preflight-b=Blocked lane";
+    let planned: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "agent",
+                "fanout",
+                "plan",
+                "--title",
+                "Coordinate failing fanout",
+                "--lane",
+                first_lane,
+                "--lane",
+                blocked_lane,
+            ],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let first_lane_path = std::path::PathBuf::from(planned["lanes"][0]["path"].as_str().unwrap());
+    let blocked_lane_path = std::path::PathBuf::from(planned["lanes"][1]["path"].as_str().unwrap());
     std::fs::create_dir_all(&blocked_lane_path).unwrap();
     std::fs::write(blocked_lane_path.join("already-here.txt"), "occupied").unwrap();
-
-    let first_lane = format!(
-        "feature/fanout-preflight-a={}:First lane",
-        first_lane_path.display()
-    );
-    let blocked_lane = format!(
-        "feature/fanout-preflight-b={}:Blocked lane",
-        blocked_lane_path.display()
-    );
     let output = heddle_output(
         &[
             "--output",
@@ -431,9 +431,9 @@ fn agent_fanout_start_preflights_all_lanes_before_creating_tasks() {
             "--title",
             "Coordinate failing fanout",
             "--lane",
-            &first_lane,
+            first_lane,
             "--lane",
-            &blocked_lane,
+            blocked_lane,
         ],
         Some(main.path()),
     )
@@ -458,20 +458,8 @@ fn agent_fanout_start_preflights_all_lanes_before_creating_tasks() {
 #[test]
 fn agent_fanout_start_rejects_duplicate_lane_threads_before_creating_tasks() {
     let main = setup_repo("base.txt", "base");
-    let lane_path_a = main
-        .path()
-        .with_file_name(format!("{}-fanout-dup-a", temp_leaf(&main)));
-    let lane_path_b = main
-        .path()
-        .with_file_name(format!("{}-fanout-dup-b", temp_leaf(&main)));
-    let lane_a = format!(
-        "feature/fanout-duplicate={}:First duplicate lane",
-        lane_path_a.display()
-    );
-    let lane_b = format!(
-        "feature/fanout-duplicate={}:Second duplicate lane",
-        lane_path_b.display()
-    );
+    let lane_a = "feature/fanout-duplicate=First duplicate lane";
+    let lane_b = "feature/fanout-duplicate=Second duplicate lane";
     let output = heddle_output(
         &[
             "--output",
@@ -482,9 +470,9 @@ fn agent_fanout_start_rejects_duplicate_lane_threads_before_creating_tasks() {
             "--title",
             "Coordinate duplicate fanout",
             "--lane",
-            &lane_a,
+            lane_a,
             "--lane",
-            &lane_b,
+            lane_b,
         ],
         Some(main.path()),
     )
@@ -495,20 +483,12 @@ fn agent_fanout_start_rejects_duplicate_lane_threads_before_creating_tasks() {
         !main.path().join(".heddle").join("agent-tasks").exists(),
         "duplicate lane preflight must not create task records"
     );
-    assert!(!lane_path_a.exists());
-    assert!(!lane_path_b.exists());
 }
 
 #[test]
 fn agent_fanout_start_creates_tasks_lanes_and_reservation_links() {
     let main = setup_repo("base.txt", "base");
-    let lane_path = main
-        .path()
-        .with_file_name(format!("{}-fanout-start-lane", temp_leaf(&main)));
-    let lane_spec = format!(
-        "feature/fanout-start={}:Implement fanout start lane",
-        lane_path.display()
-    );
+    let lane_spec = "feature/fanout-start=Implement fanout start lane";
 
     let started: Value = serde_json::from_str(
         &heddle(
@@ -523,7 +503,7 @@ fn agent_fanout_start_creates_tasks_lanes_and_reservation_links() {
                 "--coordination-discussion-id",
                 "discussion-start",
                 "--lane",
-                &lane_spec,
+                lane_spec,
             ],
             Some(main.path()),
         )
@@ -532,6 +512,11 @@ fn agent_fanout_start_creates_tasks_lanes_and_reservation_links() {
     .unwrap();
 
     assert_eq!(started["output_kind"].as_str(), Some("agent_fanout_start"));
+    let lane_path = std::path::PathBuf::from(
+        started["lanes"][0]["path"]
+            .as_str()
+            .expect("managed checkout path"),
+    );
     let parent_task_id = started["parent_task"]["task_id"]
         .as_str()
         .expect("parent task id");

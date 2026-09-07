@@ -3,7 +3,6 @@
 
 pub mod blame;
 pub mod fault_inject;
-pub mod legacy;
 pub mod observe;
 pub mod progress;
 pub mod store;

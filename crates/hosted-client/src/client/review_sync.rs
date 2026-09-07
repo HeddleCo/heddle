@@ -186,10 +186,12 @@ pub async fn push_review_signatures(
     let principal = match repo.get_principal() {
         Ok(principal) => principal,
         Err(error) => {
-            eprintln!(
-                "{} review sync skipped: could not resolve the local principal ({error}); \
-                 set one with `heddle init --principal-name <name> --principal-email <email>`",
-                heddle_cli_render::cli::style::warn_marker(),
+            client.warn(
+                "hosted_review_principal_unavailable",
+                format!(
+                    "review sync skipped: could not resolve the local principal ({error}); \
+                     set one with `heddle init --principal-name <name> --principal-email <email>`"
+                ),
             );
             return Ok(0);
         }
@@ -219,10 +221,9 @@ pub async fn push_review_signatures(
         let signatures = match read_signatures(repo, &state.state_id) {
             Ok(signatures) => signatures,
             Err(error) => {
-                eprintln!(
-                    "{} hosted review {}: {error:#}",
-                    heddle_cli_render::cli::style::warn_marker(),
-                    state.state_id.short()
+                client.warn(
+                    "hosted_review_read_failed",
+                    format!("hosted review {}: {error:#}", state.state_id.short()),
                 );
                 continue;
             }
@@ -255,17 +256,21 @@ pub async fn push_review_signatures(
                         .rejected
                         .push(key);
                     save_mirror(&heddle_dir, &mirror)?;
-                    eprintln!(
-                        "{} hosted review {}: permanently rejected, will not retry: {message}",
-                        heddle_cli_render::cli::style::warn_marker(),
-                        state.state_id.short()
+                    client.warn(
+                        "hosted_review_permanently_rejected",
+                        format!(
+                            "hosted review {}: permanently rejected, will not retry: {message}",
+                            state.state_id.short()
+                        ),
                     );
                 }
                 ForwardOutcome::Transient(message) => {
-                    eprintln!(
-                        "{} hosted review {}: {message} (will retry on next push)",
-                        heddle_cli_render::cli::style::warn_marker(),
-                        state.state_id.short()
+                    client.warn(
+                        "hosted_review_transient_failure",
+                        format!(
+                            "hosted review {}: {message} (will retry on next push)",
+                            state.state_id.short()
+                        ),
                     );
                 }
             }

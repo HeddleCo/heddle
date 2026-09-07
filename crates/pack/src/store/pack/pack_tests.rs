@@ -86,7 +86,7 @@ fn test_pack_index_header_codec_matches_current_bytes() {
 }
 
 #[test]
-fn test_pack_reader_refuses_v3_pack_with_migration_advice() {
+fn test_pack_reader_refuses_v3_pack_with_recreation_advice() {
     let hash = create_test_hash(77);
     let payload = b"legacy-v3-pack".to_vec();
     let (mut pack_data, index_data) = single_record_pack(hash, |record| {
@@ -103,11 +103,11 @@ fn test_pack_reader_refuses_v3_pack_with_migration_advice() {
         Ok(_) => panic!("legacy pack version must be refused"),
         Err(error) => error,
     };
-    assert_invalid_object_message_contains(error, "run `heddle migrate`");
+    assert_invalid_object_message_contains(error, "recreate the repository");
 }
 
 #[test]
-fn test_pack_reader_refuses_v3_index_with_migration_advice() {
+fn test_pack_reader_refuses_v3_index_with_recreation_advice() {
     let hash = create_test_hash(77);
     let payload = b"legacy-v3-index".to_vec();
     let (pack_data, mut index_data) = single_record_pack(hash, |record| {
@@ -121,7 +121,7 @@ fn test_pack_reader_refuses_v3_index_with_migration_advice() {
         Ok(_) => panic!("legacy pack index version must be refused"),
         Err(error) => error,
     };
-    assert_invalid_object_message_contains(error, "run `heddle migrate`");
+    assert_invalid_object_message_contains(error, "recreate the repository");
 }
 
 #[test]

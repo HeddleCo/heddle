@@ -10,8 +10,8 @@ use serde_json::Value;
 use sley::{
     CommitObject, DeleteRef, EntryKind, GitObjectType, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository,
-    plumbing::{sley_object::EncodedObject, sley_refs::ReflogEntry},
 };
+use sley_refs::ReflogEntry;
 use tempfile::TempDir;
 
 fn write_commit(
@@ -36,7 +36,7 @@ fn write_commit(
         encoding: None,
         message: message.to_vec(),
     };
-    repo.write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
+    repo.write_raw_object(GitObjectType::Commit, commit.write())
         .expect("write commit")
 }
 
@@ -506,6 +506,7 @@ fn overlay_push_all_threads_carries_git_refs_and_spares_foreign_destination_refs
         feature,
         &heddle_git_projection::git_notes::HeddleNote {
             source_state: None,
+            parents_rewritten: false,
             state_id: "hs-test-state".to_string(),
             change_id: "hc-test-change".to_string(),
             agent: None,
@@ -647,6 +648,7 @@ fn overlay_pull_fetches_heddle_notes_with_the_branch() {
         first,
         &heddle_git_projection::git_notes::HeddleNote {
             source_state: None,
+            parents_rewritten: false,
             state_id: state.to_string(),
             change_id: state.to_string(),
             agent: None,

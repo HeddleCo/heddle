@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Smart-HTTP authoritative-ref push now reconciles and executes from one
+  operation-scoped Sley 0.9 receive-pack observation.
+
 ## [0.15.1](https://github.com/HeddleCo/heddle/compare/heddle-git-projection-v0.15.0...heddle-git-projection-v0.15.1) - 2026-08-27
 
 ### Fixed

@@ -561,11 +561,6 @@ fn reflog_roots(root: &Path) -> Result<Vec<(String, PathBuf)>> {
         }
     }
 
-    let mirror_logs = root.join(".heddle").join("git").join("logs");
-    if mirror_logs.is_dir() {
-        roots.push(("mirror".to_string(), mirror_logs));
-    }
-
     Ok(roots)
 }
 
@@ -661,7 +656,7 @@ fn write_reflog_full<W: std::io::Write>(out: &mut W, output: &ReflogOutput) -> s
     writeln!(out, "Reflog: {} entrie(s)", output.entries.len())?;
     if output.entries.is_empty() {
         if let Some(line) = format_next_step_dim(
-            "run `heddle commit` after capturing work, `heddle pull`, or `heddle bridge git import`",
+            "run `heddle capture` after making changes, `heddle pull`, or `heddle bridge git import`",
             0,
         ) {
             writeln!(out, "{line}")?;

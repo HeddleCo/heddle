@@ -834,9 +834,7 @@ fn failure(code: CallFailureCode, message: impl Into<String>) -> CallFailure {
 /// See `crates/hosted-client/contracts/README.md`.
 #[cfg(test)]
 mod contract {
-    use super::{
-        AgentAccountSummary, AgentConsent, ClaimReply, ClaimRequest, parse_request,
-    };
+    use super::{AgentAccountSummary, AgentConsent, ClaimReply, ClaimRequest, parse_request};
     use serde_json::{Value, json};
 
     const GOLDEN: &str = include_str!("../../contracts/heddle-claim-v1.golden.json");
@@ -953,7 +951,8 @@ mod contract {
         let golden = golden();
         let requests = &golden["requests"];
 
-        let bytes = |kind: &str| serde_json::to_vec(&requests[kind]).expect("request re-serializes");
+        let bytes =
+            |kind: &str| serde_json::to_vec(&requests[kind]).expect("request re-serializes");
 
         assert!(matches!(
             parse_request(&bytes("resolve")).expect("resolve parses"),

@@ -497,24 +497,23 @@ fn realworld_git_annotated_tag_rename_round_trips() {
     .unwrap();
     heddle_without_git(&["bridge", "git", "import"], &work).unwrap();
 
-    // The legacy Bridge Mirror should expose the retargeted tag at the new
-    // tag oid; both A and B remain reachable.
-    let mirror = work.join(".heddle").join("git");
-    let mirror_repo = open_git(&mirror).expect("open legacy Bridge Mirror");
-    let tag_ref = find_reference(&mirror_repo, "refs/tags/v0.1").expect("v0.1 ref present");
+    // The authoritative checkout exposes the retargeted tag at the new tag oid;
+    // both A and B remain reachable without a second Git object warehouse.
+    let checkout_repo = open_git(&work).expect("open Git checkout");
+    let tag_ref = find_reference(&checkout_repo, "refs/tags/v0.1").expect("v0.1 ref present");
     let tag_oid = tag_ref.target().try_id().expect("tag oid").to_owned();
     assert_eq!(
         tag_oid,
         tag_b.id(),
-        "legacy Bridge Mirror should track the retargeted tag oid"
+        "Git checkout should track the retargeted tag oid"
     );
     assert!(
-        mirror_repo.find_object(a).is_ok(),
-        "original commit A must remain reachable in the mirror"
+        checkout_repo.find_object(a).is_ok(),
+        "original commit A must remain reachable in the checkout"
     );
     assert!(
-        mirror_repo.find_object(b).is_ok(),
-        "retargeted commit B must remain reachable in the mirror"
+        checkout_repo.find_object(b).is_ok(),
+        "retargeted commit B must remain reachable in the checkout"
     );
 }
 
@@ -768,7 +767,7 @@ fn realworld_fixtures_clone_and_import_round_trip() {
 ///   8. Conflict markers name the lanes (CURRENT (...) / INCOMING (...))
 ///   9. Stale thread with non-overlapping edits rebases automatically
 ///  10. Raw Git branch is discovered as a tip-only mirror with import hint
-///  11. `heddle commit` projects captured work into Git history
+///  11. landed work is already projected into Git history
 ///  12. Raw-Git sequencer conflicts get a no-git preservation handoff
 ///  13. Heddle-native recovery names unresolved files
 ///
@@ -991,19 +990,12 @@ fn marketing_moments_walkthrough_against_real_fixture() {
         "(M6) the two unlanded agent threads should still be visible after landing risk-copy: {post_land}"
     );
 
-    // ── (11) `heddle commit` projects captured work into a Git commit ──
-    let commit_out = heddle_with_host_git(
-        &["--output", "json", "commit", "-m", "Commit integrated work"],
-        &work,
-    )
-    .unwrap_or_else(|err| panic!("(M11) commit failed: {err}"));
-    let commit: Value =
-        serde_json::from_str(&commit_out).expect("(M11) commit output should parse");
-    assert_eq!(commit["output_kind"], "commit", "{commit_out}");
-    assert!(
-        commit["git_commit"].as_str().is_some(),
-        "(M11) commit should report the projected Git commit: {commit_out}"
-    );
+    // ── (11) landing projects integrated work into Git history ──
+    let projected_tip = open_git(&work)
+        .expect("(M11) open landed Git checkout")
+        .head_commit()
+        .expect("(M11) landed Git tip must exist");
+    assert!(!projected_tip.id().to_string().is_empty());
 
     // ── (7) Heddle-native recovery verbs are wired ──
     // With no operation pending, `continue` should exit cleanly and

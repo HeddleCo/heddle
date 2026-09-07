@@ -1,19 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Execution context shared by future facade operations.
 
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
-use objects::{HeddleError, NoopProgress, NoopWarnings, ProgressSink, WarningSink};
+use objects::HeddleError;
 use repo::{FsMonitorMode, Repository, WorktreeStatusOptions};
-
-/// Semantic detail level for facade operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Verbosity {
-    Quiet,
-    #[default]
-    Normal,
-    Verbose,
-}
 
 /// Semantic execution state for embeddable Heddle operations.
 ///
@@ -24,11 +15,6 @@ pub struct ExecutionContext {
     start_path: Option<PathBuf>,
     principal_fallback: Option<(String, String)>,
     fsmonitor_mode: FsMonitorMode,
-    verbosity: Verbosity,
-    progress: Arc<dyn ProgressSink>,
-    warnings: Arc<dyn WarningSink>,
-    op_id: Option<String>,
-    // TODO(F3): faults + semantic_cache once de-singletoned.
 }
 
 impl ExecutionContext {
@@ -69,49 +55,15 @@ impl ExecutionContext {
             },
         }
     }
-
-    pub fn progress(&self) -> &dyn ProgressSink {
-        &*self.progress
-    }
-
-    pub fn warnings(&self) -> &dyn WarningSink {
-        &*self.warnings
-    }
-
-    pub fn verbosity(&self) -> Verbosity {
-        self.verbosity
-    }
-
-    pub fn op_id(&self) -> Option<&str> {
-        self.op_id.as_deref()
-    }
 }
 
 /// Builder for [`ExecutionContext`].
+#[derive(Default)]
 pub struct ExecutionContextBuilder {
     repo: Option<Repository>,
     start_path: Option<PathBuf>,
     principal_fallback: Option<(String, String)>,
     fsmonitor_mode: FsMonitorMode,
-    verbosity: Verbosity,
-    progress: Arc<dyn ProgressSink>,
-    warnings: Arc<dyn WarningSink>,
-    op_id: Option<String>,
-}
-
-impl Default for ExecutionContextBuilder {
-    fn default() -> Self {
-        Self {
-            repo: None,
-            start_path: None,
-            principal_fallback: None,
-            fsmonitor_mode: FsMonitorMode::default(),
-            verbosity: Verbosity::Normal,
-            progress: Arc::new(NoopProgress),
-            warnings: Arc::new(NoopWarnings),
-            op_id: None,
-        }
-    }
 }
 
 impl ExecutionContextBuilder {
@@ -135,36 +87,12 @@ impl ExecutionContextBuilder {
         self
     }
 
-    pub fn verbosity(mut self, verbosity: Verbosity) -> Self {
-        self.verbosity = verbosity;
-        self
-    }
-
-    pub fn progress(mut self, progress: Arc<dyn ProgressSink>) -> Self {
-        self.progress = progress;
-        self
-    }
-
-    pub fn warnings(mut self, warnings: Arc<dyn WarningSink>) -> Self {
-        self.warnings = warnings;
-        self
-    }
-
-    pub fn op_id(mut self, op_id: impl Into<String>) -> Self {
-        self.op_id = Some(op_id.into());
-        self
-    }
-
     pub fn build(self) -> ExecutionContext {
         ExecutionContext {
             repo: self.repo,
             start_path: self.start_path,
             principal_fallback: self.principal_fallback,
             fsmonitor_mode: self.fsmonitor_mode,
-            verbosity: self.verbosity,
-            progress: self.progress,
-            warnings: self.warnings,
-            op_id: self.op_id,
         }
     }
 }
@@ -181,17 +109,8 @@ mod tests {
             ctx.require_repo(),
             Err(HeddleError::RepositoryNotFound(_))
         ));
-        assert_eq!(ctx.verbosity(), Verbosity::Normal);
-        assert!(ctx.op_id().is_none());
         assert_eq!(ctx.fsmonitor_mode(), FsMonitorMode::Off);
         assert!(ctx.principal_fallback().is_none());
-        ctx.progress().event(objects::ProgressEvent::Finish {
-            id: objects::TaskId(1),
-        });
-        ctx.warnings().warn(objects::Warning {
-            kind: "test".into(),
-            message: "ignored".to_string(),
-        });
     }
 
     #[test]
@@ -200,12 +119,8 @@ mod tests {
             .start_path("/tmp/heddle-verbs-context-test")
             .principal_fallback(Some(("Luke".into(), "luke@example.com".into())))
             .fsmonitor_mode(FsMonitorMode::Watchman)
-            .verbosity(Verbosity::Verbose)
-            .op_id("op-123")
             .build();
 
-        assert_eq!(ctx.verbosity(), Verbosity::Verbose);
-        assert_eq!(ctx.op_id(), Some("op-123"));
         assert_eq!(
             ctx.start_path(),
             Some(std::path::Path::new("/tmp/heddle-verbs-context-test"))

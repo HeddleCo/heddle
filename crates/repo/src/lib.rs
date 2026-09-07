@@ -22,7 +22,6 @@ pub mod agent_task;
 pub mod atomic;
 mod ci_runner_trust;
 pub mod clone_intent;
-mod collaboration_migration;
 mod collaboration_store;
 #[cfg(feature = "tree-sitter-symbols")]
 mod context_anchor_travel;
@@ -40,7 +39,6 @@ mod hooks;
 pub mod identity;
 pub mod lazy_hydrator;
 mod merge_state;
-pub mod migration;
 pub mod namespace_policy;
 pub mod operation_dedup;
 mod owner_authorization;
@@ -151,12 +149,6 @@ pub use agent_task::{
     generate_agent_task_id, validate_task_id,
 };
 pub use ci_runner_trust::{CiRunnerTrustEntry, CiRunnerTrustSet};
-pub use collaboration_migration::{
-    LegacyDiscussionMigrationBlocker, LegacyDiscussionMigrationItem, LegacyDiscussionMigrationPlan,
-    LegacyDiscussionMigrationReport, apply_legacy_discussion_migration,
-    mark_legacy_discussions_migrated, migrate_legacy_discussions_once,
-    plan_legacy_discussion_migration,
-};
 pub use collaboration_store::{
     CollaborationIntegrityReport, CollaborationStore, CollaborationWriteDisposition,
     CollaborationWriteOutcome,

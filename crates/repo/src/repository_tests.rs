@@ -399,7 +399,7 @@ fn open_refuses_newer_repository_format_with_recovery_advice() {
         "error should name supported format: {message}"
     );
     assert!(
-        message.contains("upgrade heddle or run `heddle migrate`"),
+        message.contains("upgrade Heddle before opening it"),
         "error should include recovery advice: {message}"
     );
 }
@@ -420,47 +420,7 @@ fn open_accepts_supported_repository_format() {
 }
 
 #[test]
-fn open_migrates_format_4_identity_cursor_boundary_to_supported() {
-    let temp_dir = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
-    let config_path = repo.heddle_dir().join("config.toml");
-    let ledger_path = repo.heddle_dir().join("state/schema_versions.toml");
-    fs::write(
-        &ledger_path,
-        "applied = [\n\
-         \"0002_canonicalize_thread_records\",\n\
-         \"0003_canonicalize_tree_entries\",\n\
-         \"0004_first_class_annotated_tags\",\n\
-         \"0005_streamable_tree_encoding\",\n\
-         ]\n",
-    )
-    .unwrap();
-    fs::write(
-        &config_path,
-        "[repository]\nversion = 4\nsource_authority = \"native\"\n",
-    )
-    .unwrap();
-    drop(repo);
-
-    let first = Repository::open(temp_dir.path())
-        .expect("format 4 must open and migrate instead of state-id mismatch");
-    drop(first);
-    let on_disk = fs::read_to_string(&config_path).unwrap();
-    assert!(
-        on_disk.contains(&format!("version = {SUPPORTED_REPO_FORMAT}")),
-        "0006 must bump the on-disk repository format, got: {on_disk}"
-    );
-    let ledger = fs::read_to_string(&ledger_path).unwrap();
-    assert!(
-        ledger.contains("0006_identity_cursor_attribution"),
-        "open must record the identity-cursor format boundary: {ledger}"
-    );
-    let reopened = Repository::open(temp_dir.path()).expect("migrated format 5 must reopen");
-    assert_eq!(reopened.config().repository.version, SUPPORTED_REPO_FORMAT);
-}
-
-#[test]
-fn open_refuses_v2_as_migration_required_without_rewriting_fixture() {
+fn open_refuses_v2_without_rewriting_fixture() {
     let temp_dir = TempDir::new().unwrap();
     Repository::init_default(temp_dir.path()).unwrap();
 
@@ -469,12 +429,12 @@ fn open_refuses_v2_as_migration_required_without_rewriting_fixture() {
     fs::write(&config_path, fixture).unwrap();
 
     let error = match Repository::open(temp_dir.path()) {
-        Ok(_) => panic!("v2 repository format must require migration"),
+        Ok(_) => panic!("v2 repository format must be refused"),
         Err(error) => error,
     };
     assert!(matches!(
         error,
-        HeddleError::RepositoryFormatMigrationRequired {
+        HeddleError::RepositoryFormatTooOld {
             found: 2,
             required: SUPPORTED_REPO_FORMAT,
             ..
@@ -508,7 +468,7 @@ fn open_refuses_legacy_oplog_before_mutating_repository() {
 
     assert!(matches!(
         error,
-        HeddleError::StorageFormatMigrationRequired {
+        HeddleError::StorageFormatTooOld {
             ref storage,
             found: 2,
             required: 4,
@@ -603,11 +563,6 @@ fn explicit_native_authority_survives_alongside_git_metadata() {
 fn open_refuses_v1_before_reading_legacy_objects() {
     let temp_dir = TempDir::new().unwrap();
     let repo = Repository::init_default(temp_dir.path()).unwrap();
-    let ledger = repo.heddle_dir().join("state/schema_versions.toml");
-    if ledger.exists() {
-        fs::remove_file(&ledger).unwrap();
-    }
-
     let config_path = repo.heddle_dir().join("config.toml");
     fs::write(&config_path, "[repository]\nversion = 1\n").unwrap();
 
@@ -619,7 +574,7 @@ fn open_refuses_v1_before_reading_legacy_objects() {
     };
     assert!(matches!(
         err,
-        HeddleError::RepositoryFormatMigrationRequired {
+        HeddleError::RepositoryFormatTooOld {
             found: 1,
             required: SUPPORTED_REPO_FORMAT,
             ..

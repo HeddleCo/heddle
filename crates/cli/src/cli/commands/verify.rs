@@ -21,7 +21,7 @@ pub fn cmd_verify(cli: &Cli, verbose: bool, provenance: bool) -> Result<()> {
     let body_start = Instant::now();
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd).to_path_buf();
-    let prepared = verify_execution_context_from_cli(cli, &start)?;
+    let prepared = verify_execution_context(&start)?;
     let output = core_verify(
         &prepared.ctx,
         VerifyOptions::new()
@@ -92,7 +92,7 @@ struct VerifyExecutionPrep {
     repo_open_ms: u128,
 }
 
-fn verify_execution_context_from_cli(cli: &Cli, start: &Path) -> Result<VerifyExecutionPrep> {
+fn verify_execution_context(start: &Path) -> Result<VerifyExecutionPrep> {
     let config = UserConfig::load_default()?;
     // Open once when a Heddle sidecar is already present so core reuses the
     // handle and JSON mode can read config without a second open.
@@ -118,7 +118,7 @@ fn verify_execution_context_from_cli(cli: &Cli, start: &Path) -> Result<VerifyEx
     } else {
         (None, None, 0)
     };
-    let ctx = execution_context_from_cli_parts(cli, start, repo, &config)?;
+    let ctx = execution_context_from_cli_parts(start, repo, &config);
 
     Ok(VerifyExecutionPrep {
         ctx,

@@ -3,7 +3,7 @@
 // (`schema_for_verb` / `crates/cli-contract/src/cli/commands/schemas.rs`).
 // Regenerate with `scripts/gen-ts-types.sh`; a drift test keeps it in sync.
 
-export const HEDDLE_SCHEMA_VERSION = "0.20.5" as const;
+export const HEDDLE_SCHEMA_VERSION = "0.21.0" as const;
 
 export interface AbortSchema {
   action: OperatorAction;
@@ -127,6 +127,8 @@ export interface AgentCaptureSchema {
   captured_path_count: number;
   confidence?: number | null;
   content_hash: string;
+  /** Git commit written for this state in Git Overlay mode. Native Heddle repositories do not emit a checkpoint. */
+  git_checkpoint?: string | null;
   heavy_impact_paths: string[];
   idempotency_status?: string | null;
   intent?: string | null;
@@ -684,6 +686,8 @@ export interface CaptureSchema {
   captured_path_count: number;
   confidence?: number | null;
   content_hash: string;
+  /** Git commit written for this state in Git Overlay mode. Native Heddle repositories do not emit a checkpoint. */
+  git_checkpoint?: string | null;
   heavy_impact_paths: string[];
   idempotency_status?: string | null;
   intent?: string | null;
@@ -816,23 +820,6 @@ export interface CommitGraphInspection {
 export interface CommitPrincipalSchema {
   email: string;
   name: string;
-}
-
-/** JSON payload for `heddle commit`. */
-export interface CommitSchema {
-  action: string;
-  git_commit: string;
-  idempotency_status?: string | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "commit";
-  recommended_action?: string | null;
-  recommended_action_template?: ActionTemplate | null;
-  replayed?: boolean | null;
-  state_id: string;
-  status: string;
-  summary: string;
-  verification: RepositoryVerificationState;
 }
 
 export type ConfidenceBand = "low" | "medium" | "high";
@@ -3549,7 +3536,6 @@ export interface HeddleVerbOutputs {
   capture: CaptureSchema;
   "ci run": CiRunSchema;
   clone: CloneSchema;
-  commit: CommitSchema;
   "context audit": ContextAuditSchema;
   "context check": ContextCheckSchema;
   "context edit": ContextEditSchema;
@@ -3719,7 +3705,6 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "capture",
   "ci run",
   "clone",
-  "commit",
   "context audit",
   "context check",
   "context edit",

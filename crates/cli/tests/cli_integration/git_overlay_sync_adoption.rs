@@ -464,7 +464,7 @@ fn init_then_start_binds_git_tip_not_orphan_bootstrap() {
         "must not invent a synthetic Bootstrap git-overlay root when a Git tip exists; intents={intents:?}"
     );
 
-    // Capture + commit on main: write-through must parent onto the real Git tip.
+    // Capture on main: write-through must parent onto the real Git tip.
     std::fs::write(work.join("story.txt"), "one\ntwo\nmain-work\n").unwrap();
     heddle(&["capture", "-m", "main agent work"], Some(&work)).unwrap();
     let show: Value =
@@ -484,12 +484,11 @@ fn init_then_start_binds_git_tip_not_orphan_bootstrap() {
         "parent should be the mapped tip {mapped}; parents={parents:?}"
     );
 
-    heddle(&["commit", "-m", "main checkpoint"], Some(&work)).unwrap();
     let new_git_tip = git(&work, &["rev-parse", "HEAD"]);
     let parent_of_new = git(&work, &["rev-parse", "HEAD^"]);
     assert_eq!(
         parent_of_new, main_tip,
-        "write-through commit must parent the pre-bind Git tip (merge-base with main history); \
+        "write-through capture must parent the pre-bind Git tip (merge-base with main history); \
          new={new_git_tip} parent={parent_of_new} expected={main_tip}"
     );
     let merge_base = git(&work, &["merge-base", &main_tip, &new_git_tip]);

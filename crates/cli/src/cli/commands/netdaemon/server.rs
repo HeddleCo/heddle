@@ -184,9 +184,8 @@ impl UnixDaemonHandler for NetworkDaemonHandler {
         let started = self.started;
         let node_id = self.node_id.clone();
         let shutdown = Arc::clone(&self.shutdown);
-        handle_authenticated_unix_connection(
-            stream,
-            move |request: NetworkDaemonRequest| match request {
+        handle_authenticated_unix_connection(stream, move |request: NetworkDaemonRequest| {
+            match request {
                 NetworkDaemonRequest::Health {} => NetworkDaemonResponse::Health {
                     version: NETWORK_DAEMON_PROTOCOL_VERSION,
                     ok: true,
@@ -200,8 +199,8 @@ impl UnixDaemonHandler for NetworkDaemonHandler {
                         ok: true,
                     }
                 }
-            },
-        )
+            }
+        })
     }
 
     fn on_tick(&mut self, _idle_for: Duration) -> IdleDecision {

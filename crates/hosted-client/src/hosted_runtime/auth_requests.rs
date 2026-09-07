@@ -1,10 +1,38 @@
-//! Typed requests for `heddle auth` handlers.
+//! Typed requests for hosted authentication operations.
+
+/// Per-operation metadata supplied by an embedding caller.
+#[derive(Clone, Debug, Default)]
+pub struct AuthOptions {
+    operation_id: Option<String>,
+}
+
+impl AuthOptions {
+    pub fn new(operation_id: Option<String>) -> Self {
+        Self {
+            operation_id: operation_id.filter(|value| !value.is_empty()),
+        }
+    }
+
+    pub(crate) fn operation_id(&self) -> Option<&str> {
+        self.operation_id.as_deref()
+    }
+}
+
+/// Whether login may wait for a human browser ceremony.
+///
+/// A process Adapter such as the CLI decides whether a terminal is available;
+/// the hosted Module only receives this semantic permission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LoginPermission {
+    HeadlessOnly,
+    Browser { open_browser: bool },
+}
 
 #[derive(Clone, Debug)]
 pub enum AuthCommand {
     Login {
         server: Option<String>,
-        open_browser: bool,
+        permission: LoginPermission,
         /// Invite consumed only when this machine has no hosted account yet.
         invite: Option<String>,
         /// Install a verified `.hcred` credential file without a browser.

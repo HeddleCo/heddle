@@ -1315,12 +1315,6 @@ fn recommended_action_templates() -> Vec<ActionTemplate> {
             &["message"][..],
             true,
         ),
-        (
-            "heddle commit -m \"...\"",
-            &["heddle", "commit", "-m", "<message>"][..],
-            &["message"][..],
-            true,
-        ),
         ("heddle init", &["heddle", "init"][..], &[][..], false),
         (
             "heddle init --principal-name <name> --principal-email <email>",

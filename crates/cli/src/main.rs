@@ -27,17 +27,17 @@ use cli::{
         cli_args::LandArgs,
         commands::{
             LogCommandOptions, SnapshotAgentOverrides, build_command_catalog, cmd_abort, cmd_adopt,
-            cmd_agent, cmd_capture_split, cmd_clone, cmd_commit, cmd_complete, cmd_completions,
+            cmd_agent, cmd_capture_split, cmd_clone, cmd_complete, cmd_completions,
             cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
             cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
             cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
             cmd_daemon_status, cmd_daemon_stop, cmd_diff, cmd_discuss, cmd_doctor, cmd_doctor_docs,
             cmd_doctor_schemas, cmd_hook, cmd_init, cmd_integration, cmd_land, cmd_log,
             cmd_maintenance, cmd_netd_serve, cmd_netd_status, cmd_netd_stop, cmd_pull, cmd_push,
-            cmd_query, cmd_ready, cmd_redo, cmd_remote,
-            cmd_resolve, cmd_revert, cmd_review, cmd_shell, cmd_show, cmd_snapshot, cmd_start,
-            cmd_status, cmd_sync_smart, cmd_thread, cmd_undo, cmd_undo_recover, cmd_verify,
-            cmd_watch, command_runtime_contract_for_command, print_error_with_hint,
+            cmd_query, cmd_ready, cmd_redo, cmd_remote, cmd_resolve, cmd_revert, cmd_review,
+            cmd_shell, cmd_show, cmd_snapshot, cmd_start, cmd_status, cmd_sync_smart, cmd_thread,
+            cmd_undo, cmd_undo_recover, cmd_verify, cmd_watch,
+            command_runtime_contract_for_command, print_error_with_hint,
             print_or_suggest_parse_error, print_parse_error_json_envelope,
             recover_incomplete_land_if_present,
         },
@@ -53,6 +53,9 @@ use cli::{
     perf::{ProfileField, emit_command_profile, profile_enabled},
 };
 use tracing::debug;
+
+#[cfg(feature = "client")]
+use cli::cli::commands::{cmd_hosted_auth, cmd_hosted_claim, cmd_hosted_whoami};
 
 // `current_thread` flavor avoids spinning up a CPU-count-sized worker
 // pool on every CLI invocation. The foreground `heddle` binary is a
@@ -99,7 +102,7 @@ async fn async_main() -> Result<()> {
     // The repository owns the signal-computation seam while state-review owns
     // its concrete implementation. Install it once at the process entry point,
     // before any command can open a repository, so direct snapshot paths such
-    // as `revert` behave the same as capture and commit.
+    // as `revert` behave the same as capture.
     verbs::install_capture_signal_computer();
 
     // Register lazy-clone hydrator factories with the `repo` crate's
@@ -116,13 +119,6 @@ async fn async_main() -> Result<()> {
 
     #[cfg(feature = "client")]
     cli::register_hosted_factory();
-
-    // Hosted command dispatch (auth / identity / whoami).
-    #[cfg(feature = "client")]
-    let hosted: Box<dyn hosted_client::extensions::HostedExtensions> =
-        Box::new(hosted_client::extensions::EnabledHostedExtensions);
-    // OSS builds dispatch no hosted commands (those `Commands` variants
-    // are gated behind `client`), so no trait object is needed.
 
     let profile = profile_enabled();
     // Intercept the bare-help shapes BEFORE clap parses, so we
@@ -487,8 +483,6 @@ async fn async_main() -> Result<()> {
             }
         }
 
-        Commands::Commit(args) => cmd_commit(&cli, args.clone()),
-
         Commands::Log(LogArgs {
             state,
             limit,
@@ -641,19 +635,13 @@ async fn async_main() -> Result<()> {
         Commands::Remote { command } => cmd_remote(&cli, command.clone()).await,
 
         #[cfg(feature = "client")]
-        Commands::Auth { command } => {
-            let cmd = command.clone();
-            hosted.auth(&cli, cmd).await
-        }
+        Commands::Auth { command } => cmd_hosted_auth(&cli, command.clone()).await,
 
         #[cfg(feature = "client")]
-        Commands::Claim(args) => hosted.claim(args.clone()).await,
+        Commands::Claim(args) => cmd_hosted_claim(args.clone()).await,
 
         #[cfg(feature = "client")]
-        Commands::Whoami { server } => {
-            let server = server.clone();
-            hosted.whoami(&cli, server).await
-        }
+        Commands::Whoami { server } => cmd_hosted_whoami(&cli, server.clone()).await,
 
         Commands::Context { command } => match command {
             ContextCommands::Set(args) => {

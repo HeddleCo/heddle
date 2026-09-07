@@ -388,10 +388,9 @@ pub async fn push_context(
                 Ok(true) => synced += 1,
                 Ok(false) => {}
                 Err(error) => {
-                    eprintln!(
-                        "{} hosted context {}: {error:#}",
-                        heddle_cli_render::cli::style::warn_marker(),
-                        annotation.annotation_id
+                    client.warn(
+                        "hosted_context_sync_failed",
+                        format!("hosted context {}: {error:#}", annotation.annotation_id),
                     );
                 }
             }
@@ -431,10 +430,12 @@ async fn push_one(
             .context("annotation has no revisions")?;
         let is_self = self_local_attr.is_some_and(|me| me == first.attribution);
         if !is_self {
-            eprintln!(
-                "{} hosted context {}: not attributed to the local principal; left unpublished",
-                heddle_cli_render::cli::style::warn_marker(),
-                annotation.annotation_id
+            client.warn(
+                "hosted_context_foreign_attribution",
+                format!(
+                    "hosted context {}: not attributed to the local principal; left unpublished",
+                    annotation.annotation_id
+                ),
             );
             return Ok(false);
         }
@@ -625,10 +626,12 @@ async fn sync_revisions_push(
         // A local-only revision. Only forward our own (a foreign unlinked
         // revision not on the server is anomalous — skip rather than mis-author).
         if self_local_attr != Some(revision.attribution.as_str()) {
-            eprintln!(
-                "{} hosted context {}: unlinked revision not attributed to the local principal; left unpublished",
-                heddle_cli_render::cli::style::warn_marker(),
-                annotation.annotation_id
+            client.warn(
+                "hosted_context_foreign_revision",
+                format!(
+                    "hosted context {}: unlinked revision not attributed to the local principal; left unpublished",
+                    annotation.annotation_id
+                ),
             );
             continue;
         }
@@ -667,10 +670,12 @@ async fn sync_revisions_push(
                 pushed += 1;
             }
             None => {
-                eprintln!(
-                    "{} hosted context {}: could not recover the minted revision id",
-                    heddle_cli_render::cli::style::warn_marker(),
-                    annotation.annotation_id
+                client.warn(
+                    "hosted_context_revision_id_unavailable",
+                    format!(
+                        "hosted context {}: could not recover the minted revision id",
+                        annotation.annotation_id
+                    ),
                 );
             }
         }
@@ -751,10 +756,9 @@ pub async fn pull_context(
                     Ok(true) => changed += 1,
                     Ok(false) => {}
                     Err(error) => {
-                        eprintln!(
-                            "{} hosted context {}: {error:#}",
-                            heddle_cli_render::cli::style::warn_marker(),
-                            annotation.annotation_id
+                        client.warn(
+                            "hosted_context_sync_failed",
+                            format!("hosted context {}: {error:#}", annotation.annotation_id),
                         );
                     }
                 }
@@ -782,10 +786,9 @@ pub async fn pull_context(
             Ok(true) => changed += 1,
             Ok(false) => {}
             Err(error) => {
-                eprintln!(
-                    "{} hosted context {}: {error:#}",
-                    heddle_cli_render::cli::style::warn_marker(),
-                    annotation.id
+                client.warn(
+                    "hosted_context_sync_failed",
+                    format!("hosted context {}: {error:#}", annotation.id),
                 );
             }
         }
@@ -1522,7 +1525,9 @@ mod tests {
             .set_context_blob(None, &target, &ContextBlob::new(vec![annotation]))
             .unwrap();
         put_context_attachment(&repo, &head_state, Some(root)).unwrap();
-        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        let (client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        let warnings = std::sync::Arc::new(objects::CollectingWarnings::default());
+        let mut client = client.with_warning_sink(warnings.clone());
 
         assert_eq!(
             push_context(&repo, &mut client, "acme/widgets")
@@ -1537,6 +1542,7 @@ mod tests {
                 .pending_create_op
                 .is_some()
         );
+        assert_eq!(warnings.warnings()[0].kind, "hosted_context_sync_failed");
 
         client.close().await;
         server.await.unwrap();

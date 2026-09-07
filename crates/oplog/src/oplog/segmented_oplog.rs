@@ -976,7 +976,7 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest> {
     }
     let version = cursor.read_u32()?;
     if version < MANIFEST_VERSION {
-        return Err(HeddleError::StorageFormatMigrationRequired {
+        return Err(HeddleError::StorageFormatTooOld {
             storage: "oplog manifest".to_string(),
             found: version,
             required: MANIFEST_VERSION,

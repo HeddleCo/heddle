@@ -88,7 +88,7 @@ test("parses a success payload into the typed shape", async () => {
 test("threads --op-id through the executor for mutating verbs", async () => {
   const fake = new FakeExecutor({ exitCode: 0, stdout: "{}", stderr: "" });
   const heddle = new Heddle({ executor: fake });
-  await heddle.commit(["-m", "msg"], { opId: "op-123" });
+  await heddle.capture(["-m", "msg"], { opId: "op-123" });
   assert.equal(fake.lastRequest?.opId, "op-123");
   assert.deepEqual(fake.lastRequest?.args, ["-m", "msg"]);
 });

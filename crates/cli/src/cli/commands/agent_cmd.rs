@@ -27,10 +27,9 @@ use repo::{
 use verbs::{
     AgentCaptureOptions, AgentCaptureThreadCheck, AgentReadyOptions, FanoutLaneAvailability,
     FanoutLanePreflightBlock, FanoutNodeSpec, FanoutPlan, FanoutPlanError, FanoutPlanRequest,
-    assemble_agent_reservation_list, assemble_fanout_plan_report, check_agent_capture_thread,
-    check_fanout_start_preflight, fanout_child_body, fanout_parent_delegated_by,
-    fanout_start_attach_rule, plan_agent_capture, plan_agent_ready, plan_fanout,
-    select_fanout_parent_thread,
+    assemble_agent_reservation_list, check_agent_capture_thread, check_fanout_start_preflight,
+    fanout_child_body, fanout_parent_delegated_by, fanout_start_attach_rule, plan_agent_capture,
+    plan_agent_ready, plan_fanout, select_fanout_parent_thread,
 };
 
 use super::{
@@ -484,36 +483,38 @@ fn cmd_agent_fanout_plan(cli: &Cli, args: AgentFanoutPlanArgs) -> Result<()> {
         parent_thread,
     })
     .map_err(map_fanout_plan_error)?;
-    let report = assemble_fanout_plan_report(&plan);
     let output = AgentFanoutOutput {
-        output_kind: report.output_kind,
-        title: report.title,
-        parent_thread: report.parent_thread,
-        base_state: report.base_state,
-        base_root: report.base_root,
-        coordination_discussion_id: report.coordination_discussion_id,
+        output_kind: "agent_fanout_plan",
+        title: plan.title.clone(),
+        parent_thread: plan.parent_thread.clone(),
+        base_state: plan.base_state.clone(),
+        base_root: plan.base_root.clone(),
+        coordination_discussion_id: plan.coordination_discussion_id.clone(),
         parent_task: None,
-        lanes: report
-            .lanes
-            .into_iter()
+        lanes: plan
+            .nodes
+            .iter()
             .map(|lane| AgentFanoutLaneOutput {
-                thread: lane.thread,
-                path: lane.path,
-                title: lane.title,
+                thread: lane.thread.clone(),
+                path: repo
+                    .managed_checkout_path(&lane.thread)
+                    .display()
+                    .to_string(),
+                title: lane.title.clone(),
                 task: None,
-                session_id: lane.session_id,
+                session_id: None,
                 lease_id: None,
                 token: None,
-                status: lane.status,
+                status: "planned".to_string(),
             })
             .collect(),
-        commands: report
-            .commands
-            .into_iter()
+        commands: plan
+            .start_commands
+            .iter()
             .map(|command| AgentFanoutCommandOutput {
-                lane_thread: command.lane_thread,
-                command: command.command,
-                argv: command.argv,
+                lane_thread: command.lane_thread.clone(),
+                command: command.command.clone(),
+                argv: command.argv.clone(),
             })
             .collect(),
         trust: build_repository_verification_state(&repo),
@@ -561,6 +562,7 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
     let start_result = (|| -> Result<Vec<AgentFanoutLaneOutput>> {
         let mut outputs = Vec::new();
         for lane in &plan.nodes {
+            let checkout_path = repo.managed_checkout_path(&lane.thread);
             let mut child =
                 AgentTaskRecord::new(String::new(), lane.title.clone(), lane.thread.clone());
             child.body = fanout_child_body(&parent.task_id);
@@ -579,7 +581,7 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
                 ThreadStartArgs {
                     name: lane.thread.clone(),
                     from: Some(base_state.clone()),
-                    path: Some(lane.path.clone()),
+                    path: Some(checkout_path.clone()),
                     workspace: Some(WorkspaceModeArg::Auto),
                     agent_provider: None,
                     agent_model: None,
@@ -615,7 +617,7 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
                     task_assignment_id: Some(child.task_id.clone()),
                     anchor_state: Some(base_state.clone()),
                     anchor_root: Some(base_root.clone()),
-                    path: Some(lane.path.clone()),
+                    path: Some(checkout_path.clone()),
                     pid: None,
                     boot_id: None,
                 },
@@ -633,7 +635,7 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
             };
             outputs.push(AgentFanoutLaneOutput {
                 thread: lane.thread.clone(),
-                path: lane.path.display().to_string(),
+                path: checkout_path.display().to_string(),
                 title: lane.title.clone(),
                 task: Some(AgentTaskOutput::from(&child)),
                 session_id,
@@ -798,15 +800,15 @@ fn map_fanout_plan_error(err: FanoutPlanError) -> anyhow::Error {
     match err {
         FanoutPlanError::LaneRequired => anyhow!(RecoveryAdvice::invalid_usage(
             "agent_fanout_lane_required",
-            "agent fanout requires at least one --lane <thread>=<path>:<title>",
-            "Pass --lane once for each child checkout to create.",
-            "heddle agent fanout plan --title <title> --lane <thread>=<path>:<title>",
+            "agent fanout requires at least one --lane <thread>=<title>",
+            "Pass --lane once for each Child Thread to create.",
+            "heddle agent fanout plan --title <title> --lane <thread>=<title>",
         )),
         FanoutPlanError::LaneInvalid { raw } => anyhow!(RecoveryAdvice::invalid_usage(
             "agent_fanout_lane_invalid",
             format!("invalid fanout lane '{raw}'"),
-            "Use <thread>=<path>:<title>. Thread, path, and title must all be non-empty.",
-            "heddle agent fanout plan --title <title> --lane feature/a=../a:Task title",
+            "Use <thread>=<title>. Thread and title must both be non-empty.",
+            "heddle agent fanout plan --title <title> --lane feature/a=Task title",
         )),
         FanoutPlanError::InvalidThreadName { source, .. } => {
             anyhow!(thread_name_invalid_advice(&source))
@@ -855,7 +857,8 @@ fn preflight_fanout_start_io(repo: &Repository, lanes: &[FanoutNodeSpec]) -> Res
     let leases = WriterLeaseStore::new(repo.heddle_dir()).list()?;
     let mut facts = Vec::with_capacity(lanes.len());
     for lane in lanes {
-        let prepared = plan_worktree_target(repo, &lane.path, Some(&lane.thread))?;
+        let path = repo.managed_checkout_path(&lane.thread);
+        plan_worktree_target(repo, &path, Some(&lane.thread))?;
         let active_thread_record = match manager.find_by_thread(&lane.thread)? {
             Some(existing) => existing.state == ThreadState::Active,
             None => false,
@@ -870,7 +873,6 @@ fn preflight_fanout_start_io(repo: &Repository, lanes: &[FanoutNodeSpec]) -> Res
                 .get_thread(&ThreadName::new(&lane.thread))?
                 .is_some(),
             active_thread_record,
-            resolved_path: prepared.path,
         });
     }
     if let Err(block) = check_fanout_start_preflight(&facts) {
@@ -900,12 +902,6 @@ fn fanout_lane_preflight_block_advice(block: FanoutLanePreflightBlock) -> Recove
             format!("fanout lane '{thread}' already has an active thread record"),
             "Drop or finish the existing thread before reusing the lane name.",
         ),
-        FanoutLanePreflightBlock::DuplicatePath { .. } => fanout_lane_unavailable_advice(
-            "agent_fanout_duplicate_path",
-            &thread,
-            format!("fanout lane '{thread}' resolves to a checkout path used by another lane"),
-            "Use a distinct checkout path for each child lane.",
-        ),
     }
 }
 
@@ -919,7 +915,7 @@ fn fanout_lane_unavailable_advice(
         kind,
         error,
         guidance,
-        format!("heddle agent fanout plan --title <title> --lane {thread}=<path>:<title>"),
+        format!("heddle agent fanout plan --title <title> --lane {thread}=<title>"),
     )
 }
 

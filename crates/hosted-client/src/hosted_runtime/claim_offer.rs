@@ -12,7 +12,6 @@ use api::heddle::api::v1alpha1::{
     AuthChallengeResponse, BeginWebAuthnRegistrationRequest, CallFailure, CallFailureCode,
 };
 use config::UserConfig;
-use heddle_cli_args::{ClaimArgs, DEFAULT_CLAIM_WEB_ORIGIN};
 
 use super::{
     HostedAuthMode, HostedSession, agent_node_identity,
@@ -33,6 +32,31 @@ const BEGIN_WEBAUTHN_REGISTRATION: &str =
     "/heddle.api.v1alpha1.IdentityService/BeginWebAuthnRegistration";
 
 const CLAIM_STATUS_POLL: Duration = Duration::from_millis(200);
+const HEDDLE_SAAS_CLAIM_ORIGIN: &str = "https://app.heddle.sh";
+
+/// Resolved inputs for the hosted claim ceremony.
+#[derive(Clone, Debug)]
+pub struct ClaimOptions {
+    pub server: Option<String>,
+    pub web_origin: Option<String>,
+    pub timeout: Duration,
+}
+
+/// A short-lived claim offer that must be shown to the human before waiting.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimOfferReady {
+    pub pet_name: String,
+    pub claim_link: String,
+    pub timeout: Duration,
+}
+
+/// Terminal state of a claim ceremony.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClaimOutcome {
+    Claimed,
+    Expired,
+    Interrupted,
+}
 
 struct ActiveClaimOffer {
     secret: ClaimSecret,
@@ -49,7 +73,15 @@ enum ClaimWaitOutcome {
     Replaced,
 }
 
-pub(crate) async fn cmd_claim(args: ClaimArgs) -> Result<()> {
+/// Run the claim ceremony without owning its presentation.
+///
+/// `on_ready` runs once after the short-lived offer is active and before the
+/// operation waits for a human. Callers can render it, forward it as an event,
+/// or retain it for another surface.
+pub async fn claim(
+    args: ClaimOptions,
+    on_ready: impl FnOnce(&ClaimOfferReady) -> Result<()>,
+) -> Result<ClaimOutcome> {
     let server = resolve_server(args.server.as_deref())?;
     let state = claimable_state(&server)?;
     // Bind the destination before activate_offer mints the local bearer.
@@ -104,13 +136,17 @@ pub(crate) async fn cmd_claim(args: ClaimArgs) -> Result<()> {
         }
     };
     let claim_link = claim_link(&web_origin, &offer.node_id, offer.secret.as_str());
-    println!("Claim offer ready for {}.", offer.pet_name);
-    println!("\nOpen this short-lived claim link:\n\n{claim_link}\n");
-    println!(
-        "Waiting up to {} for a human to finish claiming this account. Press Ctrl-C to stop.",
-        display_duration(args.timeout)
-    );
-    drop(claim_link);
+    let ready = ClaimOfferReady {
+        pet_name: offer.pet_name.clone(),
+        claim_link,
+        timeout: args.timeout,
+    };
+    if let Err(error) = on_ready(&ready) {
+        client.close().await;
+        deactivate_offer(&offer.authorization_hash)?;
+        return Err(error);
+    }
+    drop(ready);
     drop(offer.secret);
 
     let outcome = wait_for_claim(
@@ -134,21 +170,16 @@ pub(crate) async fn cmd_claim(args: ClaimArgs) -> Result<()> {
     owner_root_claim?;
 
     match outcome? {
-        ClaimWaitOutcome::Claimed => {
-            // Iroh promotes the handle. Owner-root claim is RegisterPublicKey
-            // plus ClaimDeferredHuman (tag 16) over the existing sequence-0
-            // agent key — never a replacement OwnerRootInstall.
-            println!("Claim complete. This agent account now has a human owner.")
-        }
-        ClaimWaitOutcome::Expired => println!("Claim offer expired without changing the account."),
-        ClaimWaitOutcome::Interrupted => {
-            println!("Claim offer stopped; the link is no longer active.")
-        }
+        // Iroh promotes the handle. Owner-root claim is RegisterPublicKey
+        // plus ClaimDeferredHuman (tag 16) over the existing sequence-0
+        // agent key — never a replacement OwnerRootInstall.
+        ClaimWaitOutcome::Claimed => Ok(ClaimOutcome::Claimed),
+        ClaimWaitOutcome::Expired => Ok(ClaimOutcome::Expired),
+        ClaimWaitOutcome::Interrupted => Ok(ClaimOutcome::Interrupted),
         ClaimWaitOutcome::Replaced => {
             bail!("this claim offer was replaced by another `heddle claim` process")
         }
     }
-    Ok(())
 }
 
 fn claimable_state(server: &str) -> Result<ClaimState> {
@@ -518,7 +549,7 @@ fn normalized_web_origin(value: &str) -> Result<String> {
 /// Precedence: explicit `--web-origin` (https origin-only, any host), then a
 /// server-advertised origin that binds to the configured hosted server
 /// (same host or same Public Suffix registrable domain), then
-/// [`DEFAULT_CLAIM_WEB_ORIGIN`] only when that server is `api.heddle.sh`.
+/// [`HEDDLE_SAAS_CLAIM_ORIGIN`] only when that server is `api.heddle.sh`.
 fn resolve_web_origin(
     explicit: Option<&str>,
     advertised: Option<&str>,
@@ -537,7 +568,7 @@ fn resolve_web_origin(
         return Ok(origin);
     }
     if is_heddle_saas_api(server)? {
-        return normalized_web_origin(DEFAULT_CLAIM_WEB_ORIGIN);
+        return normalized_web_origin(HEDDLE_SAAS_CLAIM_ORIGIN);
     }
     bail!(
         "hosted server {server} is not {HEDDLE_SAAS_API} and has no bound claim web origin; pass --web-origin <https origin>"
@@ -592,19 +623,6 @@ fn claim_link(web_origin: &str, node_id: &str, secret: &str) -> String {
     format!("{web_origin}/claim/{node_id}.{secret}")
 }
 
-fn display_duration(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-    if seconds.is_multiple_of(24 * 60 * 60) {
-        format!("{}d", seconds / (24 * 60 * 60))
-    } else if seconds.is_multiple_of(60 * 60) {
-        format!("{}h", seconds / (60 * 60))
-    } else if seconds.is_multiple_of(60) {
-        format!("{}m", seconds / 60)
-    } else {
-        format!("{seconds}s")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,13 +674,13 @@ mod tests {
     fn saas_api_falls_back_to_app_heddle_sh() {
         assert_eq!(
             resolve_web_origin(None, None, "api.heddle.sh").expect("saas default"),
-            DEFAULT_CLAIM_WEB_ORIGIN
+            HEDDLE_SAAS_CLAIM_ORIGIN
         );
         assert_eq!(
             resolve_web_origin(None, None, "https://api.heddle.sh").expect("canonical saas"),
-            DEFAULT_CLAIM_WEB_ORIGIN
+            HEDDLE_SAAS_CLAIM_ORIGIN
         );
-        assert_eq!(DEFAULT_CLAIM_WEB_ORIGIN, "https://app.heddle.sh");
+        assert_eq!(HEDDLE_SAAS_CLAIM_ORIGIN, "https://app.heddle.sh");
     }
 
     #[test]
@@ -675,7 +693,7 @@ mod tests {
             "refusal should name the override: {message}"
         );
         assert!(
-            !message.contains(DEFAULT_CLAIM_WEB_ORIGIN) || message.contains("pass --web-origin"),
+            !message.contains(HEDDLE_SAAS_CLAIM_ORIGIN) || message.contains("pass --web-origin"),
             "refusal must not silently select the SaaS app origin: {message}"
         );
     }

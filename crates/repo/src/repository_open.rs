@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The config-driven open path: locating `.heddle` state on disk, building
-//! the object store, replaying snapshot artifacts, and running the local-only
-//! open hooks (migrations + lazy-hydrator reconstruction).
+//! the object store, replaying snapshot artifacts, and reconstructing any
+//! configured lazy hydrator.
 
 use std::{
     collections::BTreeSet,
@@ -100,35 +100,18 @@ fn validate_snapshot_artifact_records(
 }
 
 impl Repository {
-    /// Run the local-only hooks that follow a config-driven [`Repository::open`]:
-    /// declarative migrations + lazy-clone hydrator reconstruction. Both are
-    /// bound to the default [`FsStore`] flavor (`apply_pending` and
-    /// `BlobHydrator` operate on the bare `Repository`), so they live here
-    /// rather than in the generic `open_raw`.
+    /// Run the local-only hooks that follow a config-driven [`Repository::open`].
+    ///
+    /// Repository formats are clean-cut at config validation, so normal open
+    /// never runs migrations or compatibility readers. The remaining hooks
+    /// recover current-format snapshot views and reconstruct lazy hydration.
     pub(super) fn run_open_hooks(&self) -> Result<()> {
         self.recover_snapshot_artifact_views()?;
 
-        // Hot-path skip: when the schema ledger already records every
-        // registered migration *and* there is no lazy-hydrator metadata,
-        // both probes below are pure no-ops. Avoid the ledger parse /
-        // hydrator path.exists work on every warm open.
-        // See docs/perf/cli-core-loop-todo.md ("Reduce repo-open work by
-        // skipping migration/hydrator probes when a repo has a clean
-        // schema ledger and no lazy-hydrator file").
         let hydrator_path = crate::lazy_hydrator::LazyHydratorConfig::path_in(self.heddle_dir());
-        let schema_clean = crate::migration::is_schema_ledger_complete(self.heddle_dir());
         let no_lazy_hydrator = !hydrator_path.exists();
-        if schema_clean && no_lazy_hydrator {
+        if no_lazy_hydrator {
             return Ok(());
-        }
-
-        // Run any pending declarative migrations. Idempotent:
-        // re-opening a repo a second time is a no-op for the migration pass.
-        // Hard schema migrations are part of the open contract: if they cannot
-        // complete, continuing with a partially-upgraded repo would make later
-        // strict readers fail at arbitrary call sites.
-        if !schema_clean {
-            crate::migration::apply_pending(self)?;
         }
 
         // Reconstruct any persisted lazy-clone blob hydrator. When
@@ -138,19 +121,14 @@ impl Repository {
         // missing-blob marker can fetch transparently — without this
         // reconstruction, lazy clones would only work inside the single
         // `cmd_clone` process. See `lazy_hydrator.rs` for the shape.
-        if !no_lazy_hydrator {
-            match crate::lazy_hydrator::try_reconstruct(self.root(), self.heddle_dir()) {
-                Ok(Some(hydrator)) => self.set_blob_hydrator(hydrator),
-                Ok(None) => {}
-                Err(err) => {
-                    // Hydrator construction failed (factory error or
-                    // malformed metadata). Surface as a warning rather
-                    // than blocking `open` — eager `heddle verify` calls
-                    // shouldn't fail just because a stale hosted
-                    // endpoint is unreachable; the user will get the real
-                    // error on the first `require_blob` that needs it.
-                    tracing::warn!("lazy hydrator reconstruction failed during open: {err}");
-                }
+        match crate::lazy_hydrator::try_reconstruct(self.root(), self.heddle_dir()) {
+            Ok(Some(hydrator)) => self.set_blob_hydrator(hydrator),
+            Ok(None) => {}
+            Err(err) => {
+                // Hydrator construction failed (factory error or malformed
+                // metadata). Surface as a warning rather than blocking open;
+                // the first read that needs hydration returns the real error.
+                tracing::warn!("lazy hydrator reconstruction failed during open: {err}");
             }
         }
         Ok(())

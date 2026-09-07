@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `heddle env` — broker-backed confidential-runtime profiles.
 
-use std::{
-    process::Command,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 use crypto::Signer;
-use env_store::{DecryptPurpose, DecryptRequest, EnvStore, PolicyBroker, SlotWrite};
+use env_store::{EnvStore, PolicyBroker, SlotWrite};
 use repo::Repository;
 use serde::Serialize;
 
@@ -156,39 +153,13 @@ fn cmd_env_run(repo: &Repository, args: EnvRunArgs) -> Result<()> {
         .get_attribution()
         .context("resolve current attribution")?;
     let mut broker = PolicyBroker::new(store, attribution);
-    broker
-        .hold_profile_recipients(&args.profile)
-        .map_err(map_profile_error)?;
-    let now = now_ms()?;
-    let ttl_ms = i64::try_from(args.ttl.saturating_mul(1000)).map_err(|_| {
-        anyhow!(RecoveryAdvice::invalid_usage(
-            "env_run_ttl_overflow",
-            "ttl overflow",
-            "Pass a smaller `--ttl` in seconds.",
-            "heddle env run --profile <name> --ttl <seconds> -- <command>",
-        ))
-    })?;
-    let request = DecryptRequest {
-        profile: args.profile.clone(),
-        slots: args.slots.clone(),
-        expires_at_ms: now.saturating_add(ttl_ms),
-        purpose: DecryptPurpose::Run,
-        caller: "heddle-env-run".to_string(),
-    };
-    let grant = broker
-        .authorize(&request, &signer)
-        .map_err(map_profile_error)?;
-    let secrets = broker
-        .unwrap_for_run(grant, &signer)
-        .map_err(map_profile_error)?;
-    let pairs = secrets.into_env_pairs().map_err(map_profile_error)?;
     let mut child = Command::new(&args.command[0]);
     child.args(&args.command[1..]);
     child.current_dir(repo.root());
-    for (name, value) in pairs {
-        child.env(name, value);
-    }
-    let status = child.status().context("spawn env run child")?;
+    let status = broker
+        .run(&args.profile, &args.slots, &signer, child)
+        .map_err(map_profile_error)
+        .context("spawn env run child")?;
     match status.code() {
         Some(0) => Ok(()),
         Some(code) => std::process::exit(code),
@@ -218,34 +189,15 @@ fn require_signer(repo: &Repository) -> Result<Box<dyn Signer>> {
     })
 }
 
-fn now_ms() -> Result<i64> {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock before epoch")?;
-    i64::try_from(duration.as_millis()).context("timestamp overflow")
-}
-
 fn map_profile_error(err: env_store::EnvStoreError) -> anyhow::Error {
     let message = err.to_string();
     match err {
-        env_store::EnvStoreError::BrokerDenied(env_store::BrokerDenialReason::Expired) => {
-            anyhow!(RecoveryAdvice::safety_refusal(
-                "env_store_expired",
-                message,
-                "Retry `heddle env run --profile <name> -- <cmd>`. Use a larger --ttl only if authorize itself is slow.",
-                "the broker request or grant was past expires_at",
-                "no child would start and no plaintext would be written",
-                "the worktree and store were left unchanged",
-                "heddle env run --profile <name> -- <cmd>",
-                vec!["heddle env run --profile <name> -- <cmd>".to_string()],
-            ))
-        }
-        env_store::EnvStoreError::BrokerDenied(_) | env_store::EnvStoreError::InvalidGrant(_) => {
+        env_store::EnvStoreError::NoProviderHandle(_) => {
             anyhow!(RecoveryAdvice::safety_refusal(
                 "env_store_denied",
                 message,
                 "Ask for a named profile and slots this broker holds, then retry `heddle env run`.",
-                "the broker refused an unauthorized, expired, or unscoped request",
+                "the broker could not resolve a provider handle for the requested slot",
                 "no plaintext would be returned",
                 "the worktree and store were left unchanged",
                 "heddle env list",

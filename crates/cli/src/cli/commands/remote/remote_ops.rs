@@ -27,7 +27,8 @@ use sley::{
     ConfigEdit, ConfigEditPlan, ConfigEditScope, HeadUpdateOptions, RefChange, ReferenceTarget,
     RemoteConfigRefusal, RemoteConfigRemove, RemoteConfigSet, Repository as SleyRepository,
     remote::{
-        FetchOptions, PackGenerationProgress, ProgressSink as SleyProgressSink, TransferProgress,
+        FetchOptions, PackGenerationProgress, ProgressSink as SleyProgressSink, RemotePolicy,
+        TransferProgress,
     },
 };
 #[cfg(feature = "client")]
@@ -616,6 +617,7 @@ fn pull_git_overlay(
 
 fn git_pull_fetch_options(remote_thread: &str) -> FetchOptions {
     FetchOptions {
+        policy: RemotePolicy::default(),
         quiet: true,
         progress: None,
         auto_follow_tags: false,
@@ -677,7 +679,8 @@ fn publish_git_pull_branch(
     materialized: bool,
 ) -> Result<()> {
     if materialized {
-        sley::plumbing::sley_worktree::checkout_detached_filtered(
+        sley_worktree::checkout_detached_filtered(
+            Some(repo.root()),
             repo.root(),
             git.git_dir(),
             git.object_format(),
@@ -720,7 +723,8 @@ fn rollback_git_pull_branch(
 ) -> Result<()> {
     let old_oid = old_oid.context("the previous branch was unborn")?;
     if materialized {
-        sley::plumbing::sley_worktree::checkout_detached_filtered(
+        sley_worktree::checkout_detached_filtered(
+            Some(repo.root()),
             repo.root(),
             git.git_dir(),
             git.object_format(),
@@ -1097,7 +1101,10 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
         options.insecure,
     )
     .await?
-    .with_human_signature_callback(hosted_client::client::cli_human_signature_callback());
+    .with_human_signature_callback(hosted_client::client::headless_human_signature_callback())
+    .with_warning_sink(std::sync::Arc::new(
+        crate::cli::warning_render::StderrWarningSink,
+    ));
     let result = pull_network_connected(repo, &mut client, repo_path, options).await;
     client.close().await;
     result
@@ -1151,6 +1158,17 @@ async fn pull_network_connected(
     } else {
         None
     };
+    if let Some(bootstrap) = &bootstrap {
+        for warning in [
+            bootstrap.discussions_pack_fallback.as_deref(),
+            bootstrap.context_pack_fallback.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            eprintln!("{} {warning}", crate::cli::style::warn_marker());
+        }
+    }
 
     // Keep typed StateId for ref/worktree I/O; map string fields for pure parse.
     let final_state_id = result.final_state;

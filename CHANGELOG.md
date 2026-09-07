@@ -42,6 +42,11 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- **Git projection uses Sley 0.9's reader-backed push seam.** Smart-HTTP ref
+  reconciliation and exact-action execution now share one receive-pack
+  observation, eliminating the second discovery request while preserving
+  receive-pack CAS. The workspace consumes published Sley 0.9 crates.
+
 - **Durable trees are HTR4.** Loose, packed, ingest, and wire tree bodies
   use the canonical encoding. Migration `0005_streamable_tree_encoding`
   rewrites leftover msgpack trees on repo open (heddle#1457).

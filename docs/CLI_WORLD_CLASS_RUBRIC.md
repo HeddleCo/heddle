@@ -52,7 +52,7 @@ hard gate and clears the weighted score thresholds.
 Release thresholds:
 
 - Everyday commands must score **A or better**: `init`, `adopt`, `status`,
-  `verify`, `start`, `capture`, `commit`, `log`, `show`, `diff`, `ready`,
+  `verify`, `start`, `capture`, `log`, `show`, `diff`, `ready`,
   `land`, `resolve`, `undo`, `thread`, `doctor`, `help`, `version`.
   Git projection commands, including `import git`, `export git`, and `sync git`, must meet the
   same hard gates but are evaluated as explicit Git projection surfaces rather than
@@ -70,7 +70,7 @@ score. A global hard-gate failure blocks release.
 
 1. **No `git` executable dependency in Git-overlay mode.** With `PATH` stripped
    of `git`, supported overlay workflows must still work: init/adopt, status,
-   verify, clone from local/bare repos where implemented, log/show/diff, commit,
+   verify, clone from local/bare repos where implemented, log/show/diff, capture,
    merge, and fsck. Explicit Git projection workflows such as `import git`, `export git`, and
    `sync git` have their own projection gates. Production CLI
    runtime code must not spawn `git`; raw-Git operation interop must preserve

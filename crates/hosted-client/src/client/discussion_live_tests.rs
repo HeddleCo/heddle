@@ -4,14 +4,8 @@ use api::heddle::api::v1alpha1::{
     CallFailureCode, Discussion as ProtoDiscussion, DiscussionKind, DiscussionTurn as ProtoTurn,
     PathSymbolRef, RepoEvent, RepoEventKind, StateId as ProtoStateId, discussion_resolution,
 };
-use objects::{
-    object::{
-        Attribution, Blob, CollaborationAnchor, Discussion, DiscussionResolution, DiscussionTurn,
-        DiscussionsBlob, Principal, StateAttachment, StateAttachmentBody, SymbolAnchor,
-    },
-    store::ObjectStore,
-};
-use repo::{CollaborationStore, Repository, migrate_legacy_discussions_once};
+use objects::object::{Attribution, CollaborationAnchor, Principal};
+use repo::{CollaborationStore, Repository};
 use tempfile::TempDir;
 
 use super::{
@@ -1620,26 +1614,6 @@ async fn empty_anchor_get_discussion_uses_repository_and_advances() {
     server.await.unwrap();
 }
 
-#[tokio::test]
-async fn bootstrap_claims_legacy_migration_marker_before_local_import() {
-    let (_temp, repo) = seed_repo();
-    let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-    bootstrap_discussions(&repo, &mut client, "acme/widgets", Some(&[]))
-        .await
-        .unwrap();
-
-    let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-    let report = migrate_legacy_discussions_once(&repo, &store, repo.get_attribution().unwrap())
-        .expect("legacy migration after hosted bootstrap");
-    assert!(
-        report.is_none(),
-        "pull_discussions must claim the legacy marker so Wait cannot convert server-minted attachments first"
-    );
-
-    client.close().await;
-    server.await.unwrap();
-}
-
 fn proto_discussion_on_thread(
     id: &str,
     thread_ref: &str,
@@ -2005,109 +1979,6 @@ fn wait_reconnect_backoff_is_bounded() {
         wait_reconnect_backoff(7),
         Some(std::time::Duration::from_millis(6_400))
     );
-}
-
-fn migration_marker(repo: &Repository) -> std::path::PathBuf {
-    repo.heddle_dir()
-        .join("collaboration/migrations/legacy-discussions-v1")
-}
-
-fn plant_legacy_discussion(repo: &Repository, id: &str, body: &str) {
-    let state_id = repo.head().unwrap().unwrap();
-    let bytes = DiscussionsBlob::new(vec![Discussion {
-        id: id.to_string(),
-        anchor: SymbolAnchor::new("lib.rs", "run"),
-        opened_against_state: state_id,
-        opened_at: 1_700_000_000,
-        thread_ref: Some("bar".to_string()),
-        turns: vec![DiscussionTurn {
-            author: Principal::new("Ada", "ada@example.com"),
-            body: body.to_string(),
-            posted_at: 1_700_000_000,
-            references: Vec::new(),
-        }],
-        resolution: DiscussionResolution::Open,
-        body_changed_since_open: false,
-        anchor_ambiguous: false,
-        orphaned: false,
-        visibility: objects::object::VisibilityTier::default(),
-        resolved_annotation_id: None,
-    }])
-    .encode()
-    .unwrap();
-    let blob_hash = repo.store().put_blob(&Blob::new(bytes)).unwrap();
-    repo.put_state_attachment(&StateAttachment {
-        state_id,
-        body: StateAttachmentBody::Discussions(blob_hash),
-        attribution: Attribution::human(Principal::new("Test", "test@example.com")),
-        created_at: chrono::Utc::now(),
-        supersedes: None,
-    })
-    .unwrap();
-}
-
-#[tokio::test]
-async fn filtered_bootstrap_does_not_claim_the_legacy_migration_marker() {
-    let (_temp, repo) = seed_repo();
-    plant_legacy_discussion(&repo, "legacy-bar", "from bar thread");
-    assert!(
-        !migration_marker(&repo).exists(),
-        "the fixture is an unmigrated clone with a legacy attachment"
-    );
-
-    let foo = proto_discussion_on_thread("disc-foo", "foo", &[("turn-foo", "from foo", 1)]);
-    let fixture = CollaborationFixture {
-        list: vec![foo],
-        ..CollaborationFixture::default()
-    };
-    let (mut client, server, _fixture) =
-        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
-
-    let scoped = DiscussionCursorScope {
-        repo_path: "acme/widgets".into(),
-        thread: "foo".into(),
-        thread_id: "thr-foo".into(),
-        ..DiscussionCursorScope::default()
-    };
-    bootstrap_discussions_scoped(&repo, &mut client, "acme/widgets", &scoped, None)
-        .await
-        .unwrap();
-    assert!(
-        !migration_marker(&repo).exists(),
-        "wait --thread must not claim the repo-wide marker for discussions it did not import"
-    );
-
-    let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-    let hosted = store.materialize().unwrap();
-    assert_eq!(hosted.discussions.len(), 1);
-    assert_eq!(
-        hosted
-            .discussions
-            .values()
-            .next()
-            .unwrap()
-            .thread_ref
-            .as_deref(),
-        Some("foo")
-    );
-
-    let report = migrate_legacy_discussions_once(&repo, &store, repo.get_attribution().unwrap())
-        .expect("unfiltered migrate after a filtered wait");
-    assert!(
-        report.is_some(),
-        "a later list/migrate must still see the other thread's legacy discussion"
-    );
-    let after = store.materialize().unwrap();
-    let bodies: Vec<_> = after
-        .discussions
-        .values()
-        .flat_map(|discussion| discussion.turns.iter().map(|turn| turn.1.body.as_str()))
-        .collect();
-    assert!(bodies.contains(&"from foo"));
-    assert!(bodies.contains(&"from bar thread"));
-
-    client.close().await;
-    server.await.unwrap();
 }
 
 #[tokio::test]

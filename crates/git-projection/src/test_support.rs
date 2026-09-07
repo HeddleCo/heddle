@@ -245,10 +245,6 @@ pub fn open_git_repo(bridge: &GitProjection<'_>) -> GitProjectionResult<SleyRepo
     bridge.open_git_repo()
 }
 
-pub fn consolidate_mirror(bridge: &GitProjection<'_>) -> GitProjectionResult<usize> {
-    bridge.consolidate_mirror()
-}
-
 pub fn heddle_repo<'a>(bridge: &'a GitProjection<'a>) -> &'a HeddleRepository {
     bridge.heddle_repo
 }
@@ -258,13 +254,11 @@ pub fn open_repo(path: &Path) -> GitProjectionResult<SleyRepository> {
 }
 
 /// Drive the #568 P1 checkout-materialization closure walk directly: reconstruct
-/// faithful commits from heddle state into `object_repo`, mirror-backstop the
-/// lossy residual. Used by the bridge integration tests to prove a faithful
-/// commit materializes WITHOUT the mirror holding its objects (and that the OID
-/// safety gate fires on a divergence).
+/// faithful commits from heddle state into `object_repo` and install lossy
+/// commits from residual storage. Used by integration tests to prove both paths
+/// and the OID safety gate.
 pub fn materialize_checkout_closure_from_state(
     bridge: &GitProjection<'_>,
-    mirror_repo: &SleyRepository,
     object_repo: &SleyRepository,
     tip_state_id: &StateId,
     tip_oid: ObjectId,
@@ -273,7 +267,6 @@ pub fn materialize_checkout_closure_from_state(
     git_core::materialize_checkout_closure_from_state(
         bridge.heddle_repo,
         &bridge.mapping,
-        mirror_repo,
         object_repo,
         tip_state_id,
         tip_oid,

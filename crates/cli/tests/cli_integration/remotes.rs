@@ -1927,6 +1927,7 @@ fn setup_git_overlay_push_fixture() -> (TempDir, TempDir, SleyRepository) {
         main,
         &heddle_git_projection::git_notes::HeddleNote {
             source_state: None,
+            parents_rewritten: false,
             state_id: "hs-fixture".to_string(),
             change_id: "hc-fixture".to_string(),
             agent: None,
@@ -2854,16 +2855,15 @@ fn test_cli_git_overlay_remote_add_does_not_steal_tracked_branch_default() {
     );
 
     std::fs::write(work.join("README.md"), "base\nlocal heddle\n").unwrap();
-    heddle(&["capture", "-m", "local heddle"], Some(work)).expect("capture local change");
-    let commit_json = heddle(
-        &["commit", "-m", "local heddle", "--output", "json"],
+    let capture_json = heddle(
+        &["capture", "-m", "local heddle", "--output", "json"],
         Some(work),
     )
-    .expect("heddle commit succeeds");
-    let commit: Value = serde_json::from_str(&commit_json).expect("commit JSON parses");
-    let git_oid = commit["git_commit"]
+    .expect("capture local change");
+    let capture: Value = serde_json::from_str(&capture_json).expect("capture JSON parses");
+    let git_oid = capture["git_checkpoint"]
         .as_str()
-        .expect("commit should report Git OID")
+        .expect("capture should report Git checkpoint")
         .to_string();
 
     let push_json = heddle(&["push", "--output", "json"], Some(work)).expect("push succeeds");
@@ -2921,17 +2921,15 @@ fn test_cli_git_overlay_current_push_carries_notes_for_cross_clone_identity() {
 
     initialize_direct_git_overlay(&work);
     std::fs::write(work.join("README.md"), "seed\nfirst heddle change\n").unwrap();
-    heddle(&["capture", "-m", "First Heddle change"], Some(&work))
-        .expect("capture first Heddle change");
-    let commit_json = heddle(
-        &["--output", "json", "commit", "-m", "First Heddle change"],
+    let capture_json = heddle(
+        &["--output", "json", "capture", "-m", "First Heddle change"],
         Some(&work),
     )
-    .expect("heddle commit succeeds");
-    let commit: Value = serde_json::from_str(&commit_json).expect("commit JSON parses");
-    let first_state = commit["state_id"]
+    .expect("capture first Heddle change");
+    let capture: Value = serde_json::from_str(&capture_json).expect("capture JSON parses");
+    let first_state = capture["state_id"]
         .as_str()
-        .expect("commit should report state_id")
+        .expect("capture should report state_id")
         .to_string();
 
     let push_text = heddle(&["push", "origin"], Some(&work)).expect("current-thread push succeeds");
@@ -2966,11 +2964,6 @@ fn test_cli_git_overlay_current_push_carries_notes_for_cross_clone_identity() {
     .unwrap();
     heddle(&["capture", "-m", "Second Heddle change"], Some(&work))
         .expect("capture second Heddle change");
-    heddle(
-        &["--output", "json", "commit", "-m", "Second Heddle change"],
-        Some(&work),
-    )
-    .expect("second heddle commit succeeds");
     heddle(&["push", "origin"], Some(&work)).expect("second current-thread push succeeds");
 
     let pull_json = heddle(&["--output", "json", "pull", "origin"], Some(&clone))
@@ -3004,7 +2997,6 @@ fn test_cli_git_overlay_explicit_path_push_discloses_configured_git_tracking_rem
     initialize_direct_git_overlay(&work);
     std::fs::write(work.join("README.md"), "seed\nlocal heddle\n").unwrap();
     heddle(&["capture", "-m", "local heddle"], Some(&work)).expect("capture local change");
-    heddle(&["commit", "-m", "local heddle"], Some(&work)).expect("heddle commit succeeds");
 
     let origin_arg = origin.to_str().expect("origin path utf8");
     let push_text = heddle(&["--output", "text", "push", origin_arg], Some(&work))
@@ -3041,7 +3033,6 @@ fn test_cli_git_overlay_explicit_path_push_json_reports_configured_git_tracking_
     initialize_direct_git_overlay(&work);
     std::fs::write(work.join("README.md"), "seed\nlocal heddle\n").unwrap();
     heddle(&["capture", "-m", "local heddle"], Some(&work)).expect("capture local change");
-    heddle(&["commit", "-m", "local heddle"], Some(&work)).expect("heddle commit succeeds");
 
     let origin_arg = origin.to_str().expect("origin path utf8");
     let push_json = heddle(&["--output", "json", "push", origin_arg], Some(&work))
@@ -3091,8 +3082,6 @@ fn test_cli_raw_git_clone_pull_fetches_notes_before_import() {
     std::fs::write(work.join("README.md"), "seed\npublished by heddle\n").unwrap();
     heddle(&["capture", "-m", "Publish Heddle identity"], Some(&work))
         .expect("first Heddle capture succeeds");
-    heddle(&["commit", "-m", "Publish Heddle identity"], Some(&work))
-        .expect("publish captured Git checkpoint");
     let published_oid = git_stdout_trimmed(&["rev-parse", "HEAD"], &work)
         .parse()
         .expect("published Git commit id parses");
@@ -3149,8 +3138,6 @@ fn test_cli_raw_git_clone_pull_fetches_notes_before_import() {
     .unwrap();
     heddle(&["capture", "-m", "Raw clone follow-up"], Some(&raw_clone))
         .expect("raw clone capture succeeds");
-    heddle(&["commit", "-m", "Raw clone follow-up"], Some(&raw_clone))
-        .expect("raw clone Git checkpoint succeeds");
     heddle(&["push", "origin"], Some(&raw_clone)).expect("raw clone push succeeds");
 
     let pull_json = heddle(&["--output", "json", "pull", "origin"], Some(&work))
@@ -3195,17 +3182,6 @@ fn test_cli_git_overlay_push_refuses_to_rewrite_remote_heddle_notes() {
     std::fs::write(work.join("README.md"), "seed\npublished by heddle\n").unwrap();
     heddle(&["capture", "-m", "Publish Heddle identity"], Some(&work))
         .expect("capture published change");
-    heddle(
-        &[
-            "--output",
-            "json",
-            "commit",
-            "-m",
-            "Publish Heddle identity",
-        ],
-        Some(&work),
-    )
-    .expect("first Heddle commit succeeds");
     heddle(&["push", "origin"], Some(&work)).expect("initial push succeeds");
     let remote_notes_before = git_stdout_trimmed(&["rev-parse", "refs/notes/heddle"], &origin);
 
@@ -3327,11 +3303,6 @@ fn test_cli_git_overlay_push_refuses_diverged_branch_without_local_mutation() {
 
     std::fs::write(local.join("file.txt"), "local heddle\n").unwrap();
     heddle(&["capture", "-m", "local heddle commit"], Some(&local)).expect("capture local change");
-    heddle(
-        &["--output", "json", "commit", "-m", "local heddle commit"],
-        Some(&local),
-    )
-    .expect("local Heddle commit");
     let head_before = git_stdout_trimmed(&["rev-parse", "HEAD"], &local);
 
     std::fs::write(peer.join("file.txt"), "remote git\n").unwrap();
@@ -3413,11 +3384,6 @@ fn test_cli_git_overlay_pull_refuses_diverged_branch_before_visible_git_updates(
 
     std::fs::write(local.join("file.txt"), "local heddle\n").unwrap();
     heddle(&["capture", "-m", "local heddle commit"], Some(&local)).expect("capture local change");
-    heddle(
-        &["--output", "json", "commit", "-m", "local heddle commit"],
-        Some(&local),
-    )
-    .expect("local Heddle commit");
     let head_before = git_stdout_trimmed(&["rev-parse", "HEAD"], &local);
 
     std::fs::write(peer.join("file.txt"), "remote git\n").unwrap();
@@ -3740,17 +3706,15 @@ fn test_cli_git_overlay_push_to_native_heddle_local_path_uses_heddle_sync() {
         "seed\nnative remote push\n",
     )
     .unwrap();
-    heddle(&["capture", "-m", "Native local push"], Some(source.path()))
-        .expect("capture native local push");
-    let commit_json = heddle(
-        &["--output", "json", "commit", "-m", "Native local push"],
+    let capture_json = heddle(
+        &["--output", "json", "capture", "-m", "Native local push"],
         Some(source.path()),
     )
-    .expect("heddle commit succeeds");
-    let commit: Value = serde_json::from_str(&commit_json).expect("commit JSON parses");
-    let source_state = commit["state_id"]
+    .expect("capture native local push");
+    let capture: Value = serde_json::from_str(&capture_json).expect("capture JSON parses");
+    let source_state = capture["state_id"]
         .as_str()
-        .expect("commit should report state_id")
+        .expect("capture should report state_id")
         .to_string();
 
     heddle(&["init"], Some(remote.path())).expect("init native target");

@@ -414,7 +414,7 @@ assert_transcript_claims() {
   local transcript="$1"
   for needle in \
     "adopt" \
-    "commit" \
+    "capture" \
     "undo" \
     "pull" \
     "push" \
@@ -427,7 +427,6 @@ assert_transcript_claims() {
     ".heddle metadata" \
     "Git worktree stays clean" \
     "query --attribution" \
-    "saved: local Git commit recorded" \
     "merge type:" \
     "landed: on parent" \
     "Next: heddle --repo" \
@@ -645,10 +644,6 @@ for arg in args[1:]:
 ' "$message"
   )
   run_text "$transcript" "$repo" "${action_args[@]}" --output text
-  if [[ "${action_args[0]}" == "capture" ]] \
-    && grep -F -- 'source_authority = "git-overlay"' "$repo/.heddle/config.toml" >/dev/null; then
-    run_text "$transcript" "$repo" commit -m "$message" --output text
-  fi
   assert_current_verify_clean "$repo"
 }
 
@@ -722,8 +717,8 @@ run_shape() {
   run_text "$transcript" "$repo" status --output text
   capture_verify_failed_verification "$repo" "$ARTIFACT_ROOT/$shape.dirty-verify.json" "$ARTIFACT_ROOT/$shape.dirty-verify.stderr"
   run_verify_recommended_action_text "$transcript" "$repo" "verify cold flow $shape"
-  run_text "$transcript" "$repo" undo --output text
-  assert_dirty_git_status "$repo"
+  run_text "$transcript" "$repo" undo --hard --output text
+  assert_clean_git_status "$repo"
   make_human_main_edit "$repo" "$shape" after_undo
   run_text "$transcript" "$repo" status --output text
   capture_verify_failed_verification "$repo" "$ARTIFACT_ROOT/$shape.after-undo-dirty-verify.json" "$ARTIFACT_ROOT/$shape.after-undo-dirty-verify.stderr"

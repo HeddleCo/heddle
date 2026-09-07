@@ -1,16 +1,108 @@
 # Heddle
 
-Heddle is a local-first, agent-native version control context. It is useful without a hosted account, while hosted products add coordination and visibility around the same core ideas.
+Heddle is a local-first, agent-native version control context. It is useful without a hosted account and is intended to be the everyday VCS interface for both humans and agents; hosted products add coordination and visibility around the same core ideas.
 
 ## Language
 
 **Heddle**:
-The local-first, self-contained agent-native version control system and OSS CLI. Heddle must remain useful without a hosted account.
-_Avoid_: hosted-only Heddle, web app, hosted backend
+The local-first, self-contained agent-native version control system and OSS CLI. It is the everyday VCS interface for humans and agents; raw Git is an escape hatch and interoperability boundary, not a parallel workflow.
+_Avoid_: Git add-on, hosted-only Heddle, web app, hosted backend
+
+**Local-First**:
+The complete everyday Heddle workflow remains available locally and offline, including Threads, Captures, Timeline navigation, context, discussion, review, readiness, landing, and recovery. Weft adds shared synchronization, hosted policy, identity, and private storage; Tapestry adds a richer decision interface without becoming prerequisites for core work.
+_Avoid_: offline-only, hosted-required workflow, local cache
+
+**Everyday Workflow**:
+The shared human-and-agent verb path built from status, capture, start, ready, land, and undo, with machine output as an additive contract. Harness integrations manage checkout, Writer Lease, and heartbeat plumbing ambiently rather than creating a second agent workflow.
+_Avoid_: agent-only workflow, lease protocol, raw Git workflow
 
 **Agent-Native Version Control**:
-Version control designed around durable agent workflows as first-class behavior: isolated work, explicit attribution, retryable operations, disposable attempts, provenance, and machine-readable contracts.
+Version control that makes agent work, whether performed by one agent or many in parallel, cheap to attempt, legible to assess, and safe to accept, reject, or recover through isolated work, attribution, provenance, and machine-readable proof. It removes repository archaeology from supervision so the human decides whether a change is right for the product; human-authored edits use the same everyday workflow.
 _Avoid_: AI-native version control
+
+**Principal**:
+The human identity accountable for delegating or directly producing work. Principal attribution does not imply that the person manually authored agent-produced code or directly approved its landing.
+_Avoid_: Git author, agent identity, automatic reviewer
+
+**Agent**:
+The producer identity for an AI agent and harness session that performed work on behalf of a Principal. Agent attribution explains production provenance; it does not confer authority or establish correctness.
+_Avoid_: principal, approver, verifier
+
+**Agent Identity Assurance**:
+The evidence level behind Agent attribution: unknown, claimed by local input, observed through an authenticated harness integration, or attested by a signed binding from a policy-trusted provider, harness, or runner. Heddle pursues broad coverage and displays it honestly, but Heddle-owned ambient detection is capped at observed and model identity is not correctness evidence.
+_Avoid_: verified agent without level, model trust score, inferred identity
+
+**Capture**:
+The sole everyday save boundary, naming a coherent unit of work with its intent, attribution, and available proof. In Git Overlay it atomically writes the required Git Checkpoint; automatic recovery may preserve finer-grained intermediate states without promoting them to peer entries in meaningful history.
+_Avoid_: Git commit, autosave, arbitrary snapshot
+
+**Capture Selection**:
+The one-shot selection of paths, hunks, or semantic units included in a Capture while unrelated working edits remain in place. It is evaluated at the save boundary and does not create a persistent staging area.
+_Avoid_: Git index, staged state, partial worktree
+
+**Conflict Set**:
+An immutable, content-addressed collection of independently addressable unresolved source conflicts referenced by a State. Each conflict preserves stable identity, path or semantic anchor, one base, and a deduplicated set of attributed Conflict Candidates without making conflict-marker bytes canonical source.
+_Avoid_: MERGE_STATE file, conflict-marker tree, list of conflicted paths
+
+**Conflict Candidate**:
+One attributed alternative within a source conflict, identifying its content, source State, Thread, producer, and relationship to prior candidates. Candidate identity is not directional; current and incoming are temporary presentation labels rather than durable ours and theirs sides.
+_Avoid_: ours side, theirs side, conflict-marker section
+
+**Conflict ID**:
+The stable opaque identity of one source-conflict episode across candidate additions, anchor movement, and resolution attempts. It names the continuing conflict, not any exact candidate set or file location.
+_Avoid_: hunk hash, path-derived ID, Conflict Version ID
+
+**Conflict Version ID**:
+The content address of one exact immutable version of a conflict's anchor, base, candidate set, and status. Resolutions cite the version they considered so a stale resolution cannot silently close a conflict changed by concurrent work.
+_Avoid_: Conflict ID, mutable conflict record, latest version alias
+
+**Conflicted State**:
+A valid source-history State whose Conflict Set is non-empty. It can be captured, synced, inspected, extended, and used as a merge parent, but cannot become ready, land, or project as an ordinary Git commit until its source conflicts are resolved through attributed successor States.
+_Avoid_: failed merge, invalid State, merge-in-progress file
+
+**Conflict Working Candidate**:
+The marker-free ordinary file content materialized for continued work while a source conflict remains open, initially using the current Thread's content for each unresolved region plus every conflict-free merge result. Capturing an edited working candidate adds an attributed Conflict Candidate without resolving the conflict; resolution is a separate operation.
+_Avoid_: conflict markers, automatic resolution, canonical winner
+
+**Source Conflict Resolution**:
+An attributed operation that closes an exact Conflict Version by selecting a Conflict Candidate or synthesizing a new one. Agents and deterministic drivers may resolve only under signed policy with the required proof; otherwise their output remains a candidate proposal.
+_Avoid_: deleting markers, path-level resolved flag, implicit merge winner
+
+**Source Resolution Conflict**:
+The state produced when actors make incompatible resolution claims against the same Conflict Version. Neither claim wins by ordering; both remain visible and readiness stays blocked until a later resolution explicitly considers them.
+_Avoid_: last-write-wins resolution, latest resolver wins, hidden conflict
+
+**Thread**:
+The canonical unit of work and human product decision, carrying an evolving source tip with its captures, timeline, and collaboration from local attempt through ready review and landing. A ready Thread replaces the branch-plus-pull-request as workflow truth; Git representations are projections.
+_Avoid_: Git branch, pull request, chat thread
+
+**Thread Checkout**:
+A disposable filesystem materialization of a Thread, not the Thread's identity or durable home. Heddle manages private checkout locations automatically for agents; humans may work in the current checkout or explicitly choose a visible location.
+_Avoid_: thread directory, Git worktree identity, required path
+
+**Writer Lease**:
+Exclusive, scoped authority to advance one Thread's source lineage, managed ambiently by a harness integration during normal agent work. Declared fan-out receives separate Child Threads; unexpected writer contention fails closed with a machine-readable recovery action rather than silently forking.
+_Avoid_: agent presence, filesystem lock, manual heartbeat workflow
+
+**Child Thread**:
+A Thread created automatically beneath a parent for declared parallel work, with its own Writer Lease and managed Thread Checkout. Its accepted result integrates into the parent, whose review surface aggregates the child's contribution and provenance.
+_Avoid_: shared writer, timeline branch, manually managed worktree
+
+**Thread Refresh**:
+A controlled update of a Child Thread onto a moved parent: a true fast-forward when the child has no unique work, otherwise a provenance-preserving replay when conflict-free. It runs only at transactional or harness-declared idle boundaries; conflicts, changed intent or policy, and ambiguous side effects block it instead of changing files beneath an active worker.
+_Avoid_: background rebase, asynchronous checkout mutation, unconditional fast-forward
+
+**Thread Intent**:
+The versioned, attributed statement of a Thread's desired outcome and acceptance criteria, optionally linked to its originating issue, prompt, or assignment. Agent-authored amendments remain proposals until principal-approved; unapproved material changes create attention and prevent delegated landing.
+_Avoid_: task assignment, issue, agent prompt, mutable description
+
+**Landing Delegation Policy**:
+A signed, versioned delegation from a principal permitting a bounded class of ready Threads to land within explicit scope, impact ceilings, proof requirements, destination, and validity. Evaluation fails closed and records the exact policy version; missing evidence requires human judgment, agent confidence cannot grant authority, and policy changes cannot authorize themselves.
+_Avoid_: confidence threshold, agent approval, automatic trust
+
+**Offline Delegated Landing**:
+A local landing authorized without contacting Weft by an unexpired Landing Delegation Policy and locally verifiable required evidence, unless the policy explicitly requires fresh hosted authorization. Weft independently accepts or rejects later publication without rewriting the local landing.
+_Avoid_: cached hosted approval, unconditional offline authority, automatic rollback
 
 **Gitlink**:
 A source tree entry representing a Git submodule pointer to a commit in another repository. Its durable meaning is the entry path and format-aware target Git object ID, not ordinary file bytes.
@@ -24,8 +116,12 @@ _Avoid_: submodule file, synthetic source file, magic blob
 Heddle's native Git-format engine. Sley owns Git object identity semantics and Git operation behavior, while Heddle owns the stable durable encoding of Heddle source history objects.
 _Avoid_: external Git adapter, optional Git backend, Git subprocess wrapper
 
+**Git Compatibility Boundary**:
+The promise to preserve source fidelity, support everyday interoperability, and keep raw Git as a reliable escape hatch without reproducing every Git porcelain command, hook, index behavior, or historical accident. Advanced compatibility belongs in explicit bridge tooling rather than the Everyday Workflow.
+_Avoid_: Git feature parity, Git porcelain clone, raw Git as parallel workflow
+
 **Git Overlay**:
-A Heddle sidecar operating on an existing Git checkout. Active Git-overlay reads and writes use the checkout's real `.git` repository for Git commits, refs, packs, index, and worktree state; Heddle stores native metadata such as captures, threads, provenance, discussions, and Git Projection Mapping under `.heddle`.
+A Heddle sidecar operating on an existing Git checkout. It remains a first-class Repository Source Authority indefinitely: active Git reads and writes use the checkout's real `.git`, while Heddle stores Captures, Threads, provenance, discussions, and Git Projection Mapping under `.heddle`.
 _Avoid_: copied Git mirror, imported-only Git repo, hidden Git checkout
 
 **Repository Source Authority**:
@@ -37,15 +133,15 @@ A repository whose source history is stored in Heddle's native object model unde
 _Avoid_: adopted Git Overlay, hidden Git repository, Git-backed Heddle repository
 
 **Repository Adoption**:
-The explicit transition from Git Overlay source storage into a Native Heddle Repository. Adoption is not normal Git Overlay initialization and is chosen when the repository needs Heddle-native source storage.
+The explicit transition from Git Overlay source storage into a Native Heddle Repository when native storage is desired. Adoption is not initialization, routine product maturity, or a prerequisite for continued first-class Heddle use.
 _Avoid_: Git Overlay initialization, sidecar setup, ordinary Git import
 
 **Bridge Mirror**:
-The bare Git repository at `.heddle/git` used by explicit Git bridge import, export, sync, reconstruction, and maintenance paths. It is not the active Git-overlay repository: normal Git-overlay reads use the checkout, while `commit` and branch movement write through to the checkout's real `.git` repository.
-_Avoid_: active Git store, Git-overlay `.git`, canonical Git object store
+The retired bare Git repository formerly stored at `.heddle/git`. Current-format repositories never create, read, repair, or migrate it; Git projection uses reconstructable Heddle state plus Raw Git Object Residuals. Use this term only for historical design context.
+_Avoid_: active Git store, projection cache, current repository component
 
 **Git Checkpoint (internal operation, not a CLI verb)**:
-The Git commit that binds a Heddle state into the Git history of a Git-overlay checkout. The `commit` flow writes it through to the checkout's real `.git` repository, and it is the Git-facing handle shown to raw Git tooling; the Heddle-facing handle remains the `hd-...` state id.
+The Git commit that binds a Heddle State into the Git history of a Git Overlay checkout. The `capture` flow writes it automatically through to the checkout's real `.git`; it is the Git-facing handle shown to raw Git tooling, while the Heddle-facing handle remains the `hd-...` State ID.
 _Avoid_: Heddle capture, bridge mirror commit, native state id
 
 **Raw Git Object Residual**:
@@ -59,6 +155,10 @@ _Avoid_: bridge mapping, mirror mapping, Git checkout state
 **Repository Verification State**:
 The machine-readable proof surface that describes repository mode, Git/Heddle agreement, worktree dirt, remote drift, active operations, workflow guidance, and machine-contract coverage. Human status text and command breadcrumbs should be rendered from this proof rather than from separate local guesses.
 _Avoid_: health text, status prose, ad hoc preflight
+
+**Verification Attestation**:
+An immutable signed claim that an identified verifier ran a versioned check against an exact source State, with its result and completion time. Landing Delegation Policies choose trusted verifiers and required checks; a different source state, changed check definition, or revoked verifier makes the attestation inapplicable.
+_Avoid_: tests-passed flag, agent confidence, verification log
 
 **Machine-Contract Proof**:
 The verification dimension that proves command catalog metadata, JSON envelopes, schema introspection, documentation drift checks, and op-id support agree. It should be derived from the command contract source of truth, not hand-maintained counters.
@@ -97,7 +197,7 @@ The explicit act of distilling a discussion into a context annotation. Decision 
 _Avoid_: automatic context extraction
 
 **Context Snapshot**:
-The frozen view of context annotations associated with an immutable source state. It records what guidance was known for provenance or replay, but it is not the live source of truth for context annotations.
+The frozen relevant view of Context Annotations associated with an immutable source State or supplied at an agent work boundary. It records exactly which intent-, path-, and symbol-scoped guidance was known for provenance or replay, while stale or ambiguous guidance creates attention rather than being silently trusted.
 _Avoid_: live context store
 
 **Discussion Turn**:
@@ -160,17 +260,41 @@ _Avoid_: done agent, generic blocked agent
 Operational metadata that defines an agent's delegated work and execution policy, such as whether offline continuation is allowed. Its identifier can be referenced by collaboration operations as optional provenance, but it is not repository collaboration history in v1.
 _Avoid_: discussion task, collaboration assignment
 
+**Agent Harness**:
+An external runtime that selects models and drives agent prompts, tools, and processes. Heddle integrates with harnesses ambiently and owns the durable work lifecycle, but does not require agent execution to run through Heddle.
+_Avoid_: Heddle runner, VCS orchestrator
+
 **Identity Cursor**:
 The current harness identity published into the workspace sidecar `.heddle/identity` by installed hooks. Fields use ACP names (`provider`, `model`, `thought_level`, `session`, `parent`). Each capture freezes that cursor onto that state. Mid-thread `/model` or `/effort` updates the cursor only; earlier states keep the pair they froze. Session segments rotate when a published provider, model, or thought_level changes. Empty → set is attach, not a rotate. Unpublished fields are omitted. Heddle does not invent a model from hoped-for env or `/proc`.
 _Avoid_: model of the thread, hoped-for env, /proc hunt, Cursor-guesses-Sonnet
 
 **Agent Timeline**:
-A Heddle-native record stream for an agent run's tool-call activity, cursor movement, branches, and captures. Foundation objects and local storage are in place; richer cursor views, capture automation, and hosted projection are still planned. The public `AgentGatewayService` and `AgentService` contracts are also planned and are not registered as live services in the current v1alpha1 API contract. Agent timelines are adjacent repository metadata that explain agent execution without becoming source history states.
+A navigable Heddle-native history of an agent run's tool-call activity, cursor movement, branches, and linked source captures. It supports seeking to a recorded state and using that point as the origin of an alternate Heddle Thread without rewriting prior timeline or source history.
 _Avoid_: raw transcript, runner log, chat history
 
+**Timeline Retention Policy**:
+An explicit user or organization policy permitting selected operational Timeline detail to be compacted while preserving identities, tombstones, fork points, decisions, and honest loss-of-materialization status. Without one, recorded states remain navigable and are never silently removed by age-based maintenance.
+_Avoid_: automatic garbage collection, silent expiry, cache eviction
+
+**Forensic Session Material**:
+Raw agent traces and optional session transcripts that Heddle retains only after explicit local-retention consent. They remain local unless separately disclosed through Weft's Private State Substrate after a PII warning; normal push, readiness, and Timeline sync imply neither consent.
+_Avoid_: agent timeline, default review evidence, required transcript
+
+**Forensic Retention Consent**:
+An explicit, scoped choice permitting Heddle to retain raw traces or session transcripts. It is independent of Forensic Disclosure Consent and is not implied by automatic scrubbed Timeline recording.
+_Avoid_: timeline capture, repository privacy setting, upload consent
+
+**Forensic Disclosure Consent**:
+An explicit, scoped choice permitting retained Forensic Session Material to be encrypted and sent to Weft. It is independent of local retention and must identify the destination and PII risk.
+_Avoid_: push consent, private-repository setting, retention consent
+
 **FacetKind**:
-The typed history-graph domain a durable fact belongs to. Source History is the only facet Git Projection, checkout, and land may select. Confidential runtime, collaboration, and agent timeline are adjacent facets with their own identities and laws. A path prefix or thread name is not a facet.
+The typed history-graph domain a durable fact belongs to. Source History is the only facet Git Projection, checkout, and land may select; confidential runtime, collaboration, agent timeline, and forensic material are adjacent facets with their own identities and laws.
 _Avoid_: env/* thread, name-prefix convention
+
+**Private State Substrate**:
+Weft's reusable encrypted storage, recipient-policy, authorization, audit, and purge primitive for typed confidential objects. Runtime Profiles and opt-in Forensic Session Material share this security substrate without sharing schemas or graph laws.
+_Avoid_: VisibilityTier::Private, private Source History, environment-version schema
 
 **Runtime Profile**:
 A confidential-runtime facet: a typed `EnvProfileRef` pointing at immutable `EnvProfileVersion` versions of named encrypted slots. It is not a Source History state or tree, cannot be checked out, landed, or selected by Git Projection, and must not be stored as an `env/*` source thread. Ciphertext bytes may reuse a byte store only if ownership, reachability, authorization, sync, purge, and projection stay facet-aware.
@@ -181,7 +305,7 @@ A versioned encryption public descriptor created or imported by a selected provi
 _Avoid_: derived encryption subkey, signing-seed HKDF
 
 **Policy Broker**:
-The authorization boundary that grants scoped, time-boxed decrypt requests and returns values, never key material. It holds provider handles rather than exportable private keys. Hardware protects custody; the broker enforces authorization, revocation, and audit. Same-UID callers are cooperative, not an adversarial boundary.
+The authorization boundary that resolves scoped decrypt requests and runs a child with the selected values without returning values or key material to its caller. It holds provider handles rather than exporting private keys. Hardware protects custody; the broker enforces authorization, revocation, and audit. Same-UID callers are cooperative, not an adversarial boundary.
 _Avoid_: daemon-as-key-holder, CLI-held unwrap as agent isolation
 
 **Timeline Operation**:
@@ -193,11 +317,11 @@ The durable timeline unit for one OpenCode tool call. A timeline step records th
 _Avoid_: raw tool invocation, console transcript
 
 **Timeline Cursor**:
-The explicit position of a human, agent, or runner view within an agent timeline. Cursor movement is recorded as timeline history, not inferred from the latest displayed step.
+The explicit position of a human, agent, or runner within an agent timeline. Seeking may materialize a linked source state without rewriting history; the first source mutation from a historical point automatically creates a Timeline Branch and an alternate Heddle Thread.
 _Avoid_: UI scroll position, implicit last step
 
 **Timeline Branch**:
-A divergent continuation of an agent timeline from a prior timeline point, used for retries, alternate attempts, or reviewable forks of agent execution. Timeline branches do not create source branches by themselves.
+A divergent continuation of an agent timeline from a prior timeline point, used for retries, alternate attempts, or reviewable forks of agent execution. Heddle creates one automatically, together with an alternate Heddle Thread, when source work resumes from a historical Timeline Cursor.
 _Avoid_: source branch, Git branch, thread fork
 
 **Native Tool Call ID**:
@@ -205,7 +329,7 @@ The stable identifier emitted by the OpenCode adapter or another native tool run
 _Avoid_: display name, request log line, change id
 
 **Tool Capture**:
-A Heddle capture created because a tool call changed repository or worktree state. Repo-changing tool calls create tool captures, and failed tool calls still create captures when they changed tracked state before failing.
+An automatic recovery point linked to a tool call that changed repository or worktree state, including a failed call that partially changed tracked state. It remains inspectable and recoverable without becoming a meaningful source-history boundary by itself.
 _Avoid_: screenshot, raw command archive, tool transcript
 
 **Task Provenance**:
@@ -385,17 +509,29 @@ The core Heddle workflow: inspect status, check inbox, isolate or fan out work, 
 _Avoid_: developer loop, AI workflow
 
 **Weft**:
-The hosted collaboration and coordination product for Heddle repositories. Weft owns hosted identity, policy, multi-user coordination, and remote collaboration behavior.
+The hosted store and policy-verification boundary for Heddle repositories. Weft serves the governed Iroh RPC contract to equal Heddle and Tapestry clients; it verifies client authority and coordinates shared state without owning either client's workflow.
 _Avoid_: Heddle server, Heddle core
 
 **Iroh Hosted Transport**:
 The shared hosted call transport used by native Heddle clients, browser WebAssembly clients, and Weft application endpoints. It carries the governed protobuf contract over operation-scoped Iroh QUIC streams while keeping framing, call context, failures, and replay policy behind one interface.
 _Avoid_: gRPC replacement contract, pack-only transport, browser WebTransport
 
+**Hosted Client Parity**:
+The requirement that Heddle and Tapestry address the same governed Weft operations over the Iroh RPC contract. A client's current interface or key capability may change how an operation is prepared or authorized, but does not make that operation exclusive to the client.
+_Avoid_: Tapestry-only operation, CLI-only hosted API, web workflow authority
+
+**Human-Signable Action**:
+An exact canonical hosted operation proposed by an agent or client that lacks the required human key, with its payload digest, scope, expiry, and idempotency identity fixed before approval. It has no effect until a human reviews and signs it in a capable client and submits those same bytes for Weft verification.
+_Avoid_: agent approval, unsigned mutation, mutable approval request
+
+**Passkey-Capable Client**:
+A client able to perform human-key operations with a passkey while keeping the private key inside its authenticator boundary. Tapestry has this capability natively in the browser today; that is a temporary signing-surface advantage, not ownership of the underlying Weft operation.
+_Avoid_: Tapestry authority, server-held human key, browser-only operation
+
 **Weft Relay**:
 The Weft-operated Iroh relay that gives browser clients secure-WebSocket access and gives native clients a fallback path when direct UDP connectivity is unavailable. It forwards encrypted Iroh traffic and is distinct from the Weft application endpoint that terminates calls and enforces hosted policy.
 _Avoid_: WebTransport endpoint, application proxy, hosted authorization service
 
 **Tapestry**:
-The hosted web product for Heddle collaboration, review, onboarding, and operational visibility.
+The browser client for Heddle collaboration, review, onboarding, and operational visibility. It is an equal client of Weft's Iroh RPC contract and currently provides native passkey ceremonies for human-key operations and Human-Signable Actions.
 _Avoid_: Heddle web, Heddle core

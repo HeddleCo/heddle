@@ -1053,7 +1053,7 @@ hard gate and clears the weighted score thresholds.
 Release thresholds:
 
 - Everyday commands must score **A or better**: `init`, `adopt`, `status`,
-  `verify`, `start`, `capture`, `commit`, `log`, `show`, `diff`, `ready`,
+  `verify`, `start`, `capture`, `log`, `show`, `diff`, `ready`,
   `land`, `resolve`, `undo`, `thread`, `doctor`, `help`, `version`.
   Git projection commands, including `import git`, `export git`, and `sync git`, must meet the
   same hard gates but are evaluated as explicit Git projection surfaces rather than
@@ -1071,7 +1071,7 @@ score. A global hard-gate failure blocks release.
 
 1. **No `git` executable dependency in Git-overlay mode.** With `PATH` stripped
    of `git`, supported overlay workflows must still work: init/adopt, status,
-   verify, clone from local/bare repos where implemented, log/show/diff, commit,
+   verify, clone from local/bare repos where implemented, log/show/diff, capture,
    merge, and fsck. Explicit Git projection workflows such as `import git`, `export git`, and
    `sync git` have their own projection gates. Production CLI
    runtime code must not spawn `git`; raw-Git operation interop must preserve
@@ -1325,213 +1325,6 @@ Heddle is ready to present as a best-of-class OSS CLI only when:
 
 Until then, call it alpha/beta honestly and keep breaking the surface where the
 surface is wrong.
-
-========================================================================
-Source: docs/LEGACY_DELETION_NEXT_WAVE.md
-========================================================================
-
-# Legacy Deletion Next Wave
-
-This note tracks cleanup that should come after the current deletion wave. The
-project is pre-1.0 and should prefer the current model over compatibility shims,
-but durable signed data still needs a deletion path that preserves verification.
-
-Active cleanup plan: `docs/VERIFICATION_CLEANUP_PLAN.md` tracks the staged
-removal of duplicate CLI/core verification ownership and stale bridge-mirror
-language. The null-only plain-Git import hint sidecar has been deleted, and
-public `status` / `doctor` JSON no longer emits legacy
-`git_overlay_import_hint` / `git_overlay_health` sidecars. Remaining work is
-core/CLI verification ownership and internal naming cleanup.
-
-## Deleted In The Current Wave
-
-- `objects::delta` and `objects::store::compression` re-export modules were
-  removed. Callers now import canonical `heddle_format::delta` and
-  `heddle_format::compression` APIs directly.
-- The raw exit-code string sentinels in `crates/cli/src/exit.rs` were removed.
-  Exit classification now depends on typed `RecoveryAdvice`,
-  `HeddleError::Recovery`, `HeddleError::Config`, and `RemoteError::NotFound`
-  values.
-- The dirty-worktree full-rematerialize refusal now returns typed
-  `RecoveryDetails` instead of relying on rendered message text for exit-code
-  behavior.
-- The local daemon single-line pidfile fallback was removed. Probe logic now
-  accepts only the structured `daemon::local_daemon::PidFileContents` format.
-- The public diff schema title and generated TypeScript interface were renamed
-  from `DiffOutput` to `DiffReport`.
-- Legacy direct-path context reads were removed from the normal context API.
-  `Repository::get_context_blob`, `list_context_entries`, `set_context_blob`,
-  and `remove_context_target` now operate on canonical `__files/<path>` /
-  `__states/<id>` entries only. Repository format v3 does not carry the old
-  layout forward.
-- Top-level `ThreadRecord` serde defaults were removed from the live durable
-  reader. Old minimal TOML is parsed only by the private, migration-only
-  `LegacyThreadRecord` used by `0002_canonicalize_thread_records`, then
-  rewritten as current canonical TOML.
-- The pre-fidelity state-hash compatibility path was removed at the repository
-  format v3 boundary.
-- The oplog accepts the V5 manifest over immutable V4 containers with the
-  StateId-native OpRecord schema. A manifest-free V4 container is the initial
-  base; V2/V3 containers and record schemas 1–3 are refused without rewrite.
-- The deprecated ignore-driven worktree descendant remover was deleted.
-  `revert` now uses the tree-driven tracked-removal interface when it can prove
-  the target state contains a subtree for the path, and otherwise refuses the
-  unexpected file-vs-directory mismatch instead of recursing by current ignore
-  rules.
-- Git command projection now lives under `git_projection` internals. `commit`
-  remains the porcelain verb; the broad `switch` surface was retired.
-- `maintenance index` and `maintenance monitor` graduated from hidden clap
-  subcommands to discoverable admin maintenance commands. Their machine
-  contracts were already cataloged under the admin surface.
-
-Lane 6 registered the first deletion-prep migrations in
-`crates/repo/src/migration.rs`:
-
-- `0002_canonicalize_thread_records`
-- `0003_canonicalize_tree_entries`
-
-These migrations are durable gates. The current deletion pass moved the
-remaining old readers behind those gates rather than leaving them mixed into
-normal runtime code.
-
-## Compatibility and Refusal Boundaries
-
-### Thread-record serde defaults
-
-Live thread metadata now requires current canonical fields. Missing-field legacy
-records are parsed only by the private, migration-only `LegacyThreadRecord`.
-
-Registered migration: `0002_canonicalize_thread_records`.
-
-Current migration behavior:
-- Loads every thread record through the private legacy shape, then saves it back
-  through `FilesystemThreadRecordStore` as a current `ThreadRecord`.
-- The migration must be idempotent and should not invent values for genuinely
-  unknown optional metadata; it should persist the current semantic defaults
-  (`freshness = unknown`, `auto = false`, empty path/impact vectors, empty
-  summaries, `shared_target_dir = None`, etc.).
-- After migration, the live `ThreadRecord` reader rejects the old minimal
-  missing-field fixture.
-
-Deletion-prep tests:
-- `thread_storage::tests::thread_record_reader_rejects_minimal_legacy_shape_after_migration_gate`
-  documents that the live reader no longer accepts the smallest legacy shape.
-- `migration::tests::migration_0002_rewrites_minimal_thread_record_with_concrete_defaults`
-  opens and migrates the legacy shape, then asserts the rewritten file contains
-  the current concrete defaults.
-
-Verification:
-- `cargo test -p heddle-repo thread_storage::tests::thread_record_reader_rejects_minimal_legacy_shape_after_migration_gate -- --nocapture`
-- `cargo test -p heddle-repo migration::tests:: -- --nocapture`
-- `cargo test -p heddle-cli --test multi_agent_worktrees -- --nocapture`
-- `cargo test -p heddle-cli --test cli_integration thread -- --nocapture`
-
-### Old packed-oplog schemas
-
-Normal oplog loads accept the V5 manifest layout and manifest-free V4 base
-containers with StateId-native OpRecord schema 4. Old V2/V3 containers and record schemas 1–3 contain
-16-byte ChangeIds that cannot be converted into content-derived StateIds from
-the oplog alone. They are therefore refused before entry decoding and are
-never rewritten.
-
-Refusal verification:
-- `cargo test -p heddle-oplog packed_oplog -- --nocapture`
-
-## Product Or Sley-Gated Cleanup
-
-### Legacy gitlink blob convention
-
-The `heddle-submodule:` blob convention was a bridge compromise. Runtime
-import/export no longer uses it; the remaining allowance is migration-only
-decoding of old stores. The settled target model is in
-[`ADR-0041`](adr/0041-first-class-gitlinks.md): Gitlinks are first-class tree
-entry targets whose value is a format-aware Sley Git object id.
-
-Removed runtime writers/readers:
-- `crates/ingest/src/importer.rs` now writes first-class Gitlink tree entries.
-- `crates/cli/src/cli/commands/git_projection.rs` now writes first-class Gitlink
-  entries for Git-index gitlinks.
-- `crates/git-projection/src/git_export.rs` now emits Git gitlinks only from
-  first-class Gitlink targets and never sniffs ordinary blob content.
-
-Completed deletion direction:
-- Replaced the flat `TreeEntry { name, mode, entry_type, hash }` shape with a
-  closed target model: blob, tree, symlink, or gitlink.
-- Added explicit V2 durable tree encoding with stable target tags.
-- Moved import/export paths to first-class Gitlink targets.
-- Moved the old marker parser out of general utilities into
-  `objects::legacy::decode_gitlink_blob_marker`.
-- Registered `0003_canonicalize_tree_entries` as the hard tree-format gate.
-  It decodes the old unversioned tree shape only inside the migration and
-  rewrites it as current V2 tree bytes at the same semantic tree hash.
-- Bumped the repo-level format gate to 2 so older binaries refuse migrated
-  repositories cleanly.
-- Fixed GC pack/prune so migrated loose V2 tree shadows are not erased in
-  favor of older packed V1 bodies with the same semantic tree hash.
-
-Remaining migration direction:
-- Convert legacy magic blobs only when Sley can prove the original mapped Git
-  tree had mode `160000` at the same path with the same target OID. Preserve
-  ambiguous magic blobs as ordinary files and report
-  `ambiguous_legacy_gitlink_blob` from migration/verify/fsck.
-- Preserve logical `ChangeId` while recomputing affected tree/state hashes.
-  Re-sign locally owned rewritten states with the existing `resign_if_owned`
-  path and refuse foreign signed states that require rewrite.
-
-Verification:
-- Golden V1 and V2 tree fixtures.
-- Proven legacy gitlink migration and ambiguous magic-prefix-file migration
-  tests.
-- Git Projection round-trip tests for submodules.
-- Diff patch conformance against Git worktrees containing gitlinks.
-- Export test proving the Gitlink target object does not need to exist in the
-  superproject object database.
-- Object traversal/pack/wire tests proving Gitlink targets are not treated as
-  Heddle object dependencies.
-
-### Hidden maintenance commands
-
-`maintenance index` and `maintenance monitor` have graduated into the admin
-maintenance surface. The remaining cleanup is contract polish, not deletion:
-`maintenance monitor` still has an opaque schema in the command catalog.
-
-Verification:
-- Command catalog visibility tests.
-- `cargo test -p heddle-cli --lib command_catalog -- --nocapture`
-
-### Sley-gated Git pack and remote seams
-
-Do not replace remaining Git pack/remote gaps with Heddle-local plumbing. Delete
-Heddle-side compensating code only after Sley exposes the corresponding facade.
-
-Verification:
-- Sley parity tests for the facade.
-- Heddle hosted/local sync targeted tests after dependency update.
-
-### Raw Git Object Residuals + Bridge Mirror retirement (foundation)
-
-Foundation is in place; the persistent Bridge Mirror (`.heddle/git`) is **not**
-deleted yet.
-
-Shipped foundation:
-- Durable residual store at `.heddle/git-residuals/<format>/<oid-prefix>/<oid-rest>`
-  (`heddle_git_projection::ResidualStore`): put/get/has/list, hash-identity
-  verification, lazy migrate-from-mirror helper.
-- Checkout materialize / export lossy paths prefer reconstruct, then residual,
-  then Bridge Mirror; hard-fail when a mapped non-reconstructable object has
-  neither residual nor mirror bytes.
-- Maintenance inspection via `bridge_mirror_retirement_status` (report only;
-  no mirror deletion).
-- `init_mirror` remains for migration paths.
-
-Not yet complete (do not claim done):
-- Full residual capture on lossy import for entire tree/blob closures.
-- Fsck residual validation for every mapped non-reconstructable oid.
-- Explicit maintenance command that deletes an empty migrated Bridge Mirror.
-- Export/push/sync that never opens `.heddle/git` at all.
-
-See `docs/adr/0042-retire-persistent-bridge-mirror.md` and
-`docs/VERIFICATION_CLEANUP_PLAN.md` (Track B).
 
 ========================================================================
 Source: docs/PRINCIPLES.md
@@ -2342,7 +2135,7 @@ Tradeoffs:
   compares against a stored baseline.
 - **What gets gated, what gets observed.** Not every CLI verb needs
   a budget. Proposed: budget the verbs in the AGENTS.md "core thread
-  workflow" (`status`, `capture`, `commit`, `log`, `show`, `start`,
+  workflow" (`status`, `capture`, `log`, `show`, `start`,
   `merge --preview`) plus the Git Projection import/export/sync entry
   points; track the rest as observed timings without a
   fail-the-build gate.
@@ -2831,7 +2624,7 @@ Related ADRs:
 Use the glossary terms in `CONTEXT.md` exactly.
 
 - Git Overlay: Heddle sidecar over an existing Git checkout. Active Git reads and writes use the checkout's real `.git`.
-- Bridge Mirror: the legacy bare Git repository at `.heddle/git`, used by explicit bridge import/export/sync, reconstruction, fsck, and maintenance paths. It is not active Git Overlay state.
+- Bridge Mirror: the retired bare Git repository formerly stored at `.heddle/git`; the term is historical and names no current runtime component.
 - Raw Git Object Residual: verbatim Git object bytes preserved when Heddle cannot reconstruct an object byte-for-byte from native state.
 - Git Projection Mapping: durable repository metadata mapping Heddle states to Git object ids, refs, and projection metadata.
 - Repository Verification State: the proof surface for repository mode, Git/Heddle agreement, worktree dirt, remote drift, active operations, workflow guidance, and Machine-Contract Proof.
@@ -2875,18 +2668,18 @@ Use the glossary terms in `CONTEXT.md` exactly.
 ### Workflow Vocabulary
 
 - `land` is the long-term managed-thread landing verb. Do not keep `ship` as a long-term alias.
-- `commit` is the ordinary human save path and should compose shared lower-level save/projection modules directly.
-- `capture` remains public as an advanced granular savepoint for agents and advanced users. It is not legacy.
-- `checkpoint` remains public as a Git-facing milestone primitive for agents and advanced workflows. It is not legacy.
-- For `needs_checkpoint`, preserve the precise proof state and keep `checkpoint` as an executable machine/agent action. Human-facing general guidance should bias toward `commit` unless the command context is explicitly Git/checkpoint oriented.
+- `capture` is the sole everyday save boundary for humans and agents. In Git Overlay it writes the matching Git checkpoint in the same operation.
+- `commit` is removed rather than retained as an alias. A Git checkpoint is an internal write-through operation, not a second save verb.
+- Capture selection is one-shot; Heddle does not expose a persistent staging/index workflow.
+- For `needs_checkpoint`, preserve the precise proof state and recommend `capture`, which can safely complete an interrupted write-through without duplicating the Heddle state.
 - `ready` may auto-capture, but it must route through the shared save primitive and receive next actions from structured verification action selection.
 - `thread refresh` and `thread resolve` should become advanced-only or retire from ordinary breadcrumbs. Normal guidance should prefer top-level `sync`, `resolve`, `continue`, `abort`, `ready`, and `land`.
 - `docs/spikes/save-verb-consolidation.md` remains historical context, not the active plan as written.
 
 ### Bridge Mirror And Git Projection
 
-- The persistent `.heddle/git` Bridge Mirror is not the desired end state.
-- Normal Git Overlay flows should never create `.heddle/git`.
+- The persistent `.heddle/git` Bridge Mirror is removed from the current runtime.
+- No current-format flow creates or reads `.heddle/git`.
 - Public `bridge git` commands are retired in favor of `adopt`, `import git`, `export git`, and top-level remote verbs routed by remote capability.
 - `bridge git init` is removed; it exists to initialize the persistent mirror that the target model deletes.
 - Legacy bridge status is removed from public UX; useful diagnostics move into `verify`, `fsck`, import/export dry-runs, or explicit diagnostics.
@@ -2918,8 +2711,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 - Residual garbage collection is reachability-based from current mappings, served refs, and retained imported history.
 - Rewrites must preserve residuals while any retained mapping needs them.
 - New Heddle-authored Git projections should not create residuals by default.
-- Existing `.heddle/git` mirrors migrate lazily: verification, fsck, import, or export can copy needed residuals out of the old mirror and then report that the mirror is removable.
-- Deletion of migrated mirrors should happen through explicit maintenance cleanup during the replacement phase.
+- Current-format runtime paths never read or migrate `.heddle/git`. Older repositories require offline conversion before admission.
 - Hosted Heddle remotes that advertise Git projection support must store/sync Git Projection Mapping and Raw Git Object Residuals so clones preserve Git byte fidelity.
 
 ## Implementation Tracks
@@ -2932,21 +2724,19 @@ Use the glossary terms in `CONTEXT.md` exactly.
 4. Split and rename modules by cohesive responsibility after ownership is stable.
 5. Delete old CLI proof builders by migrated slice. Temporary equivalence tests may exist during migration, then should be removed or inverted into reachability tests proving no CLI-owned proof builder remains reachable.
 
-### Track B: Bridge Mirror Retirement
+### Track B: Bridge Mirror Retirement (complete)
 
-1. Add Raw Git Object Residual durable objects and fsck checks without deleting `.heddle/git` yet.
-2. Add replacement public command shells: `import git` and `export git` route to current internals first and establish parity. Shipped as top-level wrappers, legacy `bridge git import/export` is now removed.
-3. Route top-level Git remote `push` / `pull` / `sync` by remote capability.
-4. Teach checkout write-through, export, push, sync, clone, and reconstruction paths to compose reconstructed Heddle state plus residuals without requiring a persistent bare mirror.
-5. Replace mirror fsck with Git Projection Mapping and Raw Git Object Residual validation. First slice shipped: `fsck repair git` performs explicit, authority-directed projection repair and reruns Git projection checks; residual validation remains follow-on work.
-6. Public `bridge git` commands are retired after replacement import/export and fsck diagnostics.
-7. Lazy-migrate old `.heddle/git` mirrors into residual storage and leave deletion to explicit maintenance cleanup.
+Current-format checkout write-through, import, export, push, sync, clone,
+reconstruction, fsck, log, undo, and gc operate without `.heddle/git`.
+Git Projection Mapping plus complete Raw Git Object Residual closures own the
+fidelity seam; missing closure fails closed. Runtime mirror fallback,
+migration, reporting, and maintenance are deleted.
 
 ### Track C: Workflow Verb Cleanup
 
 1. Replace `ship` with `land` in docs, tests, command routing, and breadcrumbs.
-2. Keep `capture` and `checkpoint` as advanced public primitives.
-3. Route `commit`, `capture`, `checkpoint`, and `ready` auto-capture through shared lower-level save/projection modules.
+2. Make `capture` the only public save verb and remove `commit` without a compatibility alias.
+3. Route capture, internal Git checkpointing, and `ready` auto-capture through shared lower-level save/projection modules.
 4. Move ordinary breadcrumbs away from `thread refresh` / `thread resolve` and toward top-level workflow verbs.
 5. Assert structured actions by audience rather than exact `recommended_action` strings wherever possible.
 
@@ -2954,11 +2744,10 @@ Use the glossary terms in `CONTEXT.md` exactly.
 
 - The Git repair surface is `fsck repair git`. Git Overlay permits Git-to-Heddle metadata and ref repair; native repositories permit Heddle-to-Git repair for a named projection ref.
 - `verify` proves and recommends; it must not mutate Git Projection Mapping or Raw Git Object Residuals unless an explicit repair mode is requested.
-- `fsck` owns integrity checks and repair flows for Git Projection Mapping, Raw Git Object Residuals, and migrated Bridge Mirror state.
+- `fsck` owns integrity checks and repair flows for Git Projection Mapping and Raw Git Object Residuals.
 - The Git repair mode may synthesize missing Git Projection Mapping only when a Heddle state match or Git note/provenance link proves the mapping unambiguously. It must not guess.
 - Opposite-direction repair is refused without mutation and points to `adopt` or `import git`, which make the authority change or import explicit.
-- The Git repair mode may migrate needed residual bytes from an old `.heddle/git` Bridge Mirror into Raw Git Object Residual storage.
-- The Git repair mode reports when an old mirror is removable but does not delete it; deletion belongs to maintenance cleanup or an explicit cleanup flag.
+- The Git repair mode never consults `.heddle/git`; old repositories are converted offline before this runtime opens them.
 - Metadata-only Git repair is allowed in dirty worktrees. Any repair that would write real `.git` refs, index, or worktree state requires clean verification or explicit confirmation.
 - Normal user output should not expose Git Projection Mapping internals. Verbose, fsck, import/export dry-run, and diagnostics can.
 - `log` / `show --verbose` should keep showing the Git Checkpoint commit ID as the user-facing Git handle.
@@ -2983,27 +2772,22 @@ Use the glossary terms in `CONTEXT.md` exactly.
    - Dry-run JSON exists for both.
    - README and command docs no longer teach `bridge git`.
 4. Raw Git Object Residuals
-   - Residual durable object model exists. **Foundation shipped:**
-     `heddle_git_projection::ResidualStore` under `.heddle/git-residuals/`,
-     put/get/has/list + hash identity, lazy migrate-from-mirror helper, and
-     `bridge_mirror_retirement_status` (report-only). Checkout materialize and
-     export lossy paths prefer reconstruct → residual → Bridge Mirror, with a
-     hard fail when neither residual nor mirror can supply the object.
+   - Residual durable object model exists under `.heddle/git-residuals/` with
+     put/get/has/list and hash identity. Checkout materialize and export lossy
+     paths use reconstructable state or a verified residual closure and hard
+     fail when neither can supply the object.
    - Fsck verifies mapped non-reconstructable objects have residuals.
      (**Shipped** — missing or invalid residual bytes are a hard fsck failure.)
    - Export/write-through can use residuals instead of the mirror for lossy objects.
      (**Shipped** — imports capture non-reconstructable commits with their full
      tree/blob closure plus annotated-tag wrappers; fresh export and
      write-through install that closure without the mirror object warehouse.)
-   - Old `.heddle/git` mirrors can lazily migrate needed residuals.
-     (**Partial** — migrate helper exists; automatic full-mirror migration and
-     explicit mirror deletion maintenance are not complete. Mirror is **not**
-     deleted.)
+   - Mirror readers and migrations are absent from the current runtime.
 5. Retire public bridge/mirror workflow (done for public bridge-git)
    - The public bridge-git workflow is removed; diagnostics, repair, and ingest behavior live on replacement surfaces.
    - Top-level `push`/`pull`/`sync` route Git remotes.
    - Normal flows no longer create persistent `.heddle/git`.
-   - Maintenance cleanup can remove migrated mirrors.
+   - Current-format runtime paths never inspect a retired mirror.
 6. Workflow verb cleanup
    - `land` replaces `ship`.
    - `capture` and `checkpoint` are documented as advanced primitives, not legacy.
@@ -3015,8 +2799,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 Keep these tests until their replacement track has landed:
 
 - Plain-Git observe/adopt/init loop tests; they protect the `init` versus `adopt` split.
-- The regression proving active Git Overlay no longer creates an eager `.heddle/git` mirror.
-- Bridge Mirror behavior tests until Raw Git Object Residuals and replacement import/export/remote surfaces cover the same behavior.
+- Negative regressions proving no current-format flow creates `.heddle/git`.
 - Machine-contract integration tests; they become proof that core receives command-catalog coverage rather than hardcoded counters.
 - Checkpoint guidance tests; `checkpoint` is an advanced primitive, not legacy.
 
@@ -3030,8 +2813,7 @@ Move or invert these tests during migration:
 
 ## Immediate Cleanup Candidates
 
-- Rename stale wording that calls `.heddle/git` the active or canonical Git store to Bridge Mirror language.
-- Do not delete `.heddle/git` bridge paths wholesale until Raw Git Object Residual storage, replacement commands, and fsck coverage exist.
+- Keep current documentation and diagnostics free of retired mirror behavior.
 
 ========================================================================
 Source: docs/VERIFICATION_STATE_LOGIC_MAP.md
@@ -3061,11 +2843,11 @@ Target rows describe the next model and must not be cited as shipped behavior.
   isolated checkout` describe the operator context; they are not new state
   machines. Use `CONTEXT.md` as the glossary for Git Overlay, Git Projection Mapping,
   Git Checkpoint, Repository Verification State, and Machine-Contract Proof. Use
-  Bridge Mirror only when describing legacy mirror migration or repair.
+  Bridge Mirror only for historical context; it is not a runtime component.
 - In Git-overlay mode, active Git reads and writes use the checkout's real
   `.git`. Heddle stores Git Projection Mapping metadata under
-  `.heddle/git-projection/` and uses legacy Bridge Mirror data only as
-  migration or repair input when present.
+  `.heddle/git-projection/`; projection fidelity comes from reconstructable
+  state and Raw Git Object Residuals.
 - `verified: true` means repository safety checks are clean. It does not mean
   there is no useful workflow action. Ready threads and local commits waiting to
   push can keep repository verification clean while setting a next action.
@@ -3152,14 +2934,14 @@ flowchart TD
 | Side-branch import | Missing side-branch tips are surfaced as available import work, but do not make the current checkout unverified and must not replace the active repair action. |
 | Tag import and marker agreement | Git tags visible to the checkout must map to Heddle markers. Missing markers report `tags_need_import`; disagreeing or unmapped markers report `tag_marker_mismatch`. Both are current hard blockers because tag names are user-facing refs, not optional side-branch hints. |
 | Dirty materialization | `pull`, `thread drop`, `thread promote`, `start --path`, `sync`, `revert`, and `undo` must refuse dirty work unless a command has an explicit safe preview or force path. |
-| Commit/checkpoint | Git-compatible `commit` is one logical operation: capture Heddle state, checkpoint Git, return one verification proof, and make one safe `undo` restore both when possible. A commit may not create a Heddle-only state if Git checkpoint preflight is blocked by remote divergence or import repair. |
+| Capture/checkpoint | In Git Overlay, `capture` is one logical operation: save Heddle state, checkpoint Git, return one verification proof, and make one safe `undo` restore both when possible. Capture may not create a Heddle-only state if Git checkpoint preflight is blocked by remote divergence or import repair. |
 | Ready/land | `ready` preflights active-branch import before auto-capture and then points to `land`. Ready workflow guidance takes priority over local-ahead or untracked-branch push guidance. |
 | Resolve | `resolve` and `thread resolve` must distinguish no operation, no conflicts, conflict resolution, and thread-review resolution. No-op resolve failures use typed errors and should point back to `status` rather than leaking object lookup internals. |
 | Undo | `undo --preview` and real `undo` share safety refusals. Both refuse dirty worktree and active-operation states before moving refs or worktree bytes. Post-undo text must report the current verification state and next action instead of claiming clean by default. |
 | Remote push/pull | Transfer commands refresh tracking and return post-transfer verification. `remote_ahead` and `remote_untracked` are verified clean publish guidance and recommend `push`; behind and diverged states are blockers. If upstream still points at the exact Git checkpoint just undone locally, verification reports `remote_contains_undone_checkpoint` and recommends `heddle push --force` with `heddle undo --redo` as the restore-work option, never `heddle pull` as the primary action. A command may not claim synced while blocking remote drift remains. |
-| Integrated remote divergence | If a diverged upstream has been pulled, imported, and integrated into the current Heddle state, `needs_checkpoint` becomes the primary blocker even while Git tracking still reports divergence. `commit` is allowed in exactly that integrated state because it writes the Git commit that turns the remaining state into ordinary `heddle push` work. |
+| Integrated remote divergence | If a diverged upstream has been pulled, imported, and integrated into the current Heddle state, `needs_checkpoint` becomes the primary blocker even while Git tracking still reports divergence. `capture` may complete that pending Git checkpoint, turning the remaining state into ordinary `heddle push` work. |
 | Git projection import/repair JSON (**Target**) | `import git` and `fsck repair git` success JSON do not yet embed the post-operation `RepositoryVerificationState` — the `verification` field is `#[serde(skip_serializing)]` on those envelopes, so it is omitted from `--output json`. Agents still need a follow-up `verify` call to know whether the operation left the repository verified or still blocked. Embedding the proof inline (alongside recommended action and recovery command metadata) is target behavior. |
-| Generated artifact safety | `status`, `capture`, `commit`, `ready`, and `land` must respect the ordered union of root `.gitignore` and `.heddleignore`, keep explicitly ignored changes from becoming fake work, and surface unignored generated/vendor/dist/build paths as ordinary dirty work or heavy-impact work when captured. Heddle must not install or assume default generated-noise patterns beyond `.heddle/`. Git-overlay captures above the existing safety limits require explicit force; every capture changing 500 or more paths also emits a non-blocking warning. |
+| Generated artifact safety | `status`, `capture`, `ready`, and `land` must respect the ordered union of root `.gitignore` and `.heddleignore`, keep explicitly ignored changes from becoming fake work, and surface unignored generated/vendor/dist/build paths as ordinary dirty work or heavy-impact work when captured. Heddle must not install or assume default generated-noise patterns beyond `.heddle/`. Git-overlay captures above the existing safety limits require explicit force; every capture changing 500 or more paths also emits a non-blocking warning. |
 | JSON and op-id | Runtime command surfaces, command catalog output, schemas, JSON envelopes, and op-id support are derived from the command contract table. No current command advertises generated-resume op-id persistence; agents that need replay must supply an explicit id only to commands with `supports_op_id: true`. |
 | Persona-driven UX | Human text answers what happened, current state, and next step. Agent/script JSON keeps stdout parseable, stderr reserved for error envelopes, and action metadata executable or explicitly templated. Support/maintainer diagnostics live in `doctor`, and verbose/version surfaces. |
 
@@ -3247,6 +3029,129 @@ the new behavior.
 - Cross-worktree undo and remote-affecting undo remain intentionally limited.
   They should not be modeled as available recovery paths until the undo design
   document and implementation move them out of follow-up status.
+
+========================================================================
+Source: docs/WEFT_CLEAN_CUT_HANDOFF.md
+========================================================================
+
+# Weft clean-cut handoff
+
+Heddle's `codex/agent-native-vcs` branch is based on `origin/main` at
+`92a9b0705370d2c04f8bcaf9b7141937085d0ad9`. Weft should cut directly to the
+Heddle commit produced from this branch. Do not add dual readers, legacy
+writers, or server-side migration behavior.
+
+## Durable data contract
+
+- Use `heddle_object_model::object::HeddleNote` as the only
+  `refs/notes/heddle` payload. Encode and decode with `to_json_bytes` and
+  `from_json_bytes`; do not keep a Weft-local note struct or parser.
+- Use `State::encode_current_msgpack` / `State::decode_current_msgpack` and
+  `StateAttachment::encode_current_msgpack` /
+  `StateAttachment::decode_current_msgpack` for durable object-transfer bytes.
+  These named-field codecs now live beside the models. The Heddle wire layer
+  only classifies transport errors around them.
+- Repository format 5 is the only accepted local format. Heddle no longer runs
+  an open-time schema ledger or any runtime format migration. If Weft persists
+  repository-format metadata, reject anything other than the paired format at
+  admission and migrate stored data offline before deploying the cut.
+- Old repository and storage bytes now report `RepositoryFormatTooOld` and
+  `StorageFormatTooOld`. Do not preserve the former “migration required” error
+  names in Weft; there is no matching runtime migration operation.
+- Raw Git Object Residual closures are the only durable source for imported Git
+  objects that Heddle cannot reconstruct byte-for-byte. `.heddle/git` and all
+  Bridge Mirror fallback/migration behavior are gone. Reject a mapped lossy
+  object without a complete residual closure.
+
+## Storage seam
+
+`ObjectStore` contains durable object behavior only. The following are no
+longer trait methods:
+
+- `clear_recent_caches`
+- `pack_objects`
+- `prune_loose_objects`
+- `discard_corrupt_clone_packs`
+
+Filesystem maintenance is inherent on `FsStore`; benchmark-only cache control
+is the separate `ObjectCacheControl` Interface. Weft's object backend should
+delete no-op implementations and any call sites that treated local pack files
+or process caches as remote-store capabilities. Keep sidecar persistence
+(redaction and visibility) behind `SidecarStore`.
+
+## Operation and client boundaries
+
+- `verbs::capture(&ExecutionContext, CaptureOptions) -> CaptureReport` owns the
+  local capture sequence: safety checks, attribution/session resolution,
+  mutation, Git-overlay checkpoint, recovery policy, and semantic report. CLI
+  code maps process inputs and renders only. Weft should accept the resulting
+  typed action/data contracts and verify authority; it must not reproduce CLI
+  argument precedence or output logic.
+- The hosted client accepts typed domain inputs, returns typed outcomes/events,
+  and routes warnings through a caller-owned `WarningSink`. It no longer
+  depends on CLI argument, contract, or rendering crates. Preserve this split
+  in Weft: Iroh/protobuf types terminate at the transport Adapter;
+  domain/storage code consumes Heddle model types. Do not introduce a second
+  view RPC for Tapestry.
+- Client roots and human-authorized operations remain client-minted. Weft
+  verifies them. Tapestry may perform the current passkey-bound human-key step;
+  Heddle and agents may submit the unsigned action for a human to sign and
+  submit.
+
+## Confidential runtime state
+
+- `EnvProfileVersion` has no unsigned lifecycle field. Derive its state only
+  from verified signed `LifecycleRecord`s and fail closed when none exist.
+- The env broker exposes one bounded run operation; it does not expose secret
+  unwraps, provider keys, grants, or TTL knobs. The removed TTL bounded only the
+  broker call and could not constrain a child's copy of an environment value.
+- Raw traces/session transcripts may use this private-state primitive only by
+  explicit opt-in. Keep them out of default views and make the PII disclosure
+  visible before capture.
+
+## Observation contract
+
+Heddle's structural performance profile now exposes counts for
+`network_client_initializations`, `network_streams_opened`,
+`network_bytes_sent`, and `network_bytes_received`. Instrument Weft at the
+corresponding Iroh transport boundary so cross-client tests can distinguish
+connection churn from useful traffic. The old boolean “network client
+initialized” signal is gone.
+
+## Git transport seam
+
+- Consume `sley` and `sley-transport` 0.10.0. The released
+  `HttpPushActionsRequest` accepts Weft's `ObjectReader` directly; do not
+  materialize a temporary bare repository or copy projected objects into a
+  filesystem ODB.
+- Call `observe_http_receive_pack`, reconcile desired refs against
+  `HttpReceivePackObservation::refs()`, then consume that observation with
+  `push_http_actions_with_reader_from_observation`. The observation carries its
+  HTTP client/session source, so this is one discovery plus one receive-pack
+  request rather than an `ls-remote` followed by a second discovery.
+- Keep exact old ids in `PushActionPlan`. Sley validates them against the
+  observation before pack generation and sends the same ids as receive-pack
+  CAS preconditions, which still reject a concurrent remote move.
+- This end-to-end observation seam is smart-HTTP-specific. Keep SSH, `git://`,
+  and local pushes on Sley's transport-owned live-session paths; only the
+  lower streaming pack/body writer is transport-neutral.
+
+## Cutover order
+
+1. Pin Weft to the paired Heddle/object-model revision and Sley 0.9.0.
+2. Convert stored notes, states, attachments, env lifecycle data, and lossy Git
+   residual closures offline.
+3. Update Weft's repository/ObjectStore Adapter and delete local-maintenance
+   stubs.
+4. Deploy Weft readers and writers together; reject old formats rather than
+   silently translating them.
+5. Run cross-client fixtures through Heddle and Tapestry against the same Weft
+   deployment, asserting byte-identical model round trips and identical view
+   responses.
+
+The release gate is one writer and one reader for every durable type, no
+`.heddle/git`, no schema-ledger activity during repository open, no CLI types in
+Weft storage code, and no server-minted client authority.
 
 ========================================================================
 Source: docs/WIRE_PROTOCOL.md
@@ -3815,7 +3720,7 @@ intentionally — let it surface naturally.
   limited to config-file parse errors. Agents should print the missing
   setting rather than retry.
 - **`65` (DataErr) covers semantic rejection of well-formed input**
-  (e.g. `commit` with nothing to capture, `merge` with unresolvable
+  (e.g. `capture` with nothing to save, `merge` with unresolvable
   conflict, `fsck repair git` requested against the repository's source authority,
   repository state that fails decoding — `state_corrupted` — and
   `--output json`/`json-compact` requested from a command without that
@@ -3845,7 +3750,7 @@ declared discriminators, `exit_codes`) are stable for that minor.
 Today, only a representative subset of commands has populated
 `exit_codes`:
 
-- `init`, `verify`, `push`, `pull`, `commit`, `merge`, `status`
+- `init`, `verify`, `push`, `pull`, `capture`, `merge`, `status`
 - `import git`, `fsck repair git`, `sync git`
 
 Commands not yet swept implicitly contract to `0` on success and an
@@ -4429,7 +4334,7 @@ standard recovery fields plus nested verification proof:
   "primary_command": "heddle capture -m <message>",
   "primary_command_template": {
     "action": "heddle capture -m <message>",
-    "argv_template": ["heddle", "commit", "-m", "<message>"],
+    "argv_template": ["heddle", "capture", "-m", "<message>"],
     "required_inputs": ["message"],
     "agent_may_fill": true
   },
@@ -4437,7 +4342,7 @@ standard recovery fields plus nested verification proof:
   "recovery_action_templates": [
     {
       "action": "heddle capture -m <message>",
-      "argv_template": ["heddle", "commit", "-m", "<message>"],
+      "argv_template": ["heddle", "capture", "-m", "<message>"],
       "required_inputs": ["message"],
       "agent_may_fill": true
     }
@@ -4460,8 +4365,8 @@ standard recovery fields plus nested verification proof:
 These verbs are the everyday loop agents use after discovery through
 `heddle help --output json`: capture state, undo/redo the last logical
 operation, and ask whether a thread is ready. In Git Overlay repositories,
-`heddle commit` writes the captured state to the authoritative `.git` store
-through Sley; it does not require a Git executable.
+`heddle capture` also writes the matching checkpoint to the authoritative
+`.git` store through Sley; it does not require a Git executable.
 
 `heddle capture --output json` emits:
 
@@ -4472,6 +4377,7 @@ through Sley; it does not require a Git executable.
   "action": "capture",
   "state_id": "hc-capture123",
   "content_hash": "deadbeef",
+  "git_checkpoint": "e97f61a",
   "intent": "tighten parser validation",
   "confidence": 0.86,
   "task_assignment_id": "task-parser-validation",
@@ -4484,23 +4390,7 @@ through Sley; it does not require a Git executable.
   "heavy_impact_paths": [],
   "captured_path_count": 3,
   "warnings": [],
-  "message": "captured state hc-capture123"
-}
-```
-
-`heddle commit --output json` emits after writing the current captured state
-to Git Overlay source history. `-m/--message` is optional and defaults to the
-capture intent. The command commits the complete captured tree, replaces the
-Git index with that tree, and does not run Git `pre-commit` or `commit-msg`
-hooks.
-
-```json
-{
-  "output_kind": "commit",
-  "status": "committed",
-  "state_id": "hc-head456",
-  "git_commit": "e97f61a",
-  "summary": "committed",
+  "message": "captured state hc-capture123",
   "recommended_action": null,
   "verification": {"verified":true,"status":"clean","repository_mode":"git-overlay","heddle_initialized":true,"git_branch":"main","heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"clean","mapping_state":"clean","remote_drift":"clean","active_operation":null,"default_remote":"origin","clone_verification":"verified","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Git overlay and Heddle agree","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}
 }
@@ -4572,7 +4462,7 @@ payload above):
 }
 ```
 
-In native Heddle repositories, `git_commit` is `null` and the command
+In native Heddle repositories, `git_checkpoint` is `null` and the command
 saves a Heddle state without recommending a Git checkpoint.
 
 `heddle ready --output json` emits:
@@ -4674,7 +4564,8 @@ blocked peer in `stopped_at`.
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
 | `change_id` | string | required when present | Stable Heddle state ID for the captured state. |
-| `state_id`, `git_commit` | string | required for `commit` | Captured Heddle state and the Git commit written to the authoritative `.git` store. |
+| `state_id` | string | required for `capture` | Captured Heddle state. |
+| `git_checkpoint` | string \| null | required for `capture` | Git commit written to the authoritative `.git` store in Git Overlay; `null` in Native Heddle. |
 | `content_hash` | string | required for `capture` | Short content hash for the captured state. |
 | `intent` | string \| null | required for `capture` | User-provided intent/message, when supplied. |
 | `confidence` | number \| null | required for `capture` | Agent or human confidence score, when supplied. |
@@ -6318,7 +6209,7 @@ them.
 | `push_scope`, `thread` | string \| null | push | Whether the push published the current thread or all threads, and the named thread when applicable. |
 | `force` | bool \| null | push | Whether Heddle-native ref protection was explicitly overridden. |
 | `next_action`, `recommended_action`, `next_action_template`, `recommended_action_template` | mixed | required for push | Post-push action metadata promoted from verification; all are `null` when the push closes the remote loop. |
-| `verification` | object | required for clone, remote mutations, pull, push, and commit | Post-operation repository verification proof. Observe-only `remote list` and `remote show` do not emit this field. |
+| `verification` | object | required for clone, capture, remote mutations, pull, and push | Post-operation repository verification proof. Observe-only `remote list` and `remote show` do not emit this field. |
 
 ---
 
@@ -6952,7 +6843,6 @@ instead of treating it as a global catalog option.
   ],
   "recommended_action_placeholders": [
     "heddle capture -m \"...\"",
-    "heddle commit -m \"...\"",
     "heddle ready -m \"...\"",
     "heddle remote add <name> <url>",
     "heddle clone <remote> <path>",
@@ -7328,36 +7218,36 @@ as one; no `help advanced`).
     "advanced_scope_json_commands_with_accepted_opaque_schema": 44,
     "advanced_scope_mutating_commands_total": 61,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 24,
-    "catalog_commands_total": 195,
-    "catalog_mutating_commands_total": 95,
-    "json_commands_total": 155,
+    "catalog_commands_total": 194,
+    "catalog_mutating_commands_total": 94,
+    "json_commands_total": 154,
     "json_commands_with_accepted_opaque_schema": 44,
-    "json_commands_with_schema": 111,
+    "json_commands_with_schema": 110,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 91,
+    "json_mutating_commands_total": 90,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 91,
+    "mutating_commands_total": 90,
     "mutating_commands_with_accepted_opaque_schema": 24,
-    "mutating_commands_with_schema": 67,
+    "mutating_commands_with_schema": 66,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 44,
     "status": "available",
-    "summary": "197 command(s), 155 JSON command(s), 95 mutating command(s), 91 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
+    "summary": "196 command(s), 154 JSON command(s), 94 mutating command(s), 90 mutating JSON command(s); verified everyday/agent machine surface has 47 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
     "undocumented_schema_verbs_total": 0,
     "verified_scope": "everyday_and_agent",
     "verified_scope_accepted_opaque_schema_examples": [],
-    "verified_scope_json_commands_total": 48,
+    "verified_scope_json_commands_total": 47,
     "verified_scope_json_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_json_commands_with_schema": 48,
+    "verified_scope_json_commands_with_schema": 47,
     "verified_scope_json_commands_without_schema": 0,
     "verified_scope_missing_schema_examples": [],
-    "verified_scope_mutating_commands_total": 30,
+    "verified_scope_mutating_commands_total": 29,
     "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_mutating_commands_with_schema": 30,
+    "verified_scope_mutating_commands_with_schema": 29,
     "verified_scope_mutating_commands_without_schema": 0
   },
   "doc_path": "/repo/docs/json-schemas.md",
@@ -7381,7 +7271,7 @@ as one; no `help advanced`).
     "try"
   ],
   "status": "available",
-  "summary": "197 command(s), 155 JSON command(s), 95 mutating command(s), 91 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
+  "summary": "196 command(s), 154 JSON command(s), 94 mutating command(s), 90 mutating JSON command(s); verified everyday/agent machine surface has 47 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -7664,11 +7554,10 @@ from an earlier recovery:
 
 `heddle maintenance gc --output json` emits the pack/prune report (counts
 are zero on a fresh repository; `pinned_redactions` / `preserved_redactions`
-report redacted blobs the collector refused to touch; `consolidated_mirror_loose`
-counts loose legacy Bridge Mirror objects packed into the mirror's own pack):
+report redacted blobs the collector refused to touch):
 
 ```json
-{"output_kind": "gc", "action": "gc", "status": "ok", "dry_run": false, "prune": false, "packed_count": 1, "bytes_saved": 0, "pruned_loose": 0, "bytes_freed": 0, "timeline_packed_count": 0, "timeline_bytes_saved": 0, "timeline_pruned_loose": 0, "timeline_bytes_freed": 0, "timeline_unpaired_packs_pruned": 0, "unpaired_packs_pruned": 0, "pack_install_intents_completed": 0, "pack_install_intents_aborted": 0, "pack_install_metrics": {"installs_ok": 0, "installs_err": 0, "recover_completed": 0, "recover_aborted": 0, "recover_skipped_in_progress": 0, "recover_quarantined": 0}, "pinned_redactions": 0, "preserved_redactions": 0, "pruned_git_mapping_entries": 0, "consolidated_mirror_loose": 0}
+{"output_kind": "gc", "action": "gc", "status": "ok", "dry_run": false, "prune": false, "packed_count": 1, "bytes_saved": 0, "pruned_loose": 0, "bytes_freed": 0, "timeline_packed_count": 0, "timeline_bytes_saved": 0, "timeline_pruned_loose": 0, "timeline_bytes_freed": 0, "timeline_unpaired_packs_pruned": 0, "unpaired_packs_pruned": 0, "pack_install_intents_completed": 0, "pack_install_intents_aborted": 0, "pack_install_metrics": {"installs_ok": 0, "installs_err": 0, "recover_completed": 0, "recover_aborted": 0, "recover_skipped_in_progress": 0, "recover_quarantined": 0}, "pinned_redactions": 0, "preserved_redactions": 0, "pruned_git_mapping_entries": 0}
 ```
 
 `heddle redact purge apply|list --output json` emit (each carries `output_kind`

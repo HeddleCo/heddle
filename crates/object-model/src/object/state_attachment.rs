@@ -82,6 +82,17 @@ pub struct StateAttachment {
 }
 
 impl StateAttachment {
+    /// Encode the canonical named-field msgpack representation shared by
+    /// packs and object transfer.
+    pub fn encode_current_msgpack(&self) -> crate::error::Result<Vec<u8>> {
+        Ok(rmp_serde::to_vec_named(self)?)
+    }
+
+    /// Decode the canonical named-field msgpack representation.
+    pub fn decode_current_msgpack(bytes: &[u8]) -> crate::error::Result<Self> {
+        Ok(rmp_serde::from_slice(bytes)?)
+    }
+
     pub fn id(&self) -> StateAttachmentId {
         let bytes = rmp_serde::to_vec_named(self).expect("state attachment encoding is infallible");
         StateAttachmentId::from_hash(ContentHash::compute_typed("state-attachment", &bytes))

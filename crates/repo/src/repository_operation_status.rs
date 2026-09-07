@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use objects::error::Result;
 
-use super::{Repository, RepositoryCapability};
 use super::overlay::resolve_git_dir;
+use super::{Repository, RepositoryCapability};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "kebab-case")]

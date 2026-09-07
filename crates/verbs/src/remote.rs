@@ -28,11 +28,10 @@ use repo::{
     remote::{RemoteConfig, RemoteTarget},
 };
 use serde::Serialize;
-use sley::{
-    GitConfig, Repository as SleyRepository,
-    plumbing::sley_config::{
-        ConfigIncludeContext, ConfigOriginKind, ConfigScope, ConfigStack, ConfigStackEntry,
-    },
+use sley::{GitConfig, Repository as SleyRepository};
+use sley_config::{
+    ConfigIncludeContext, ConfigOriginKind, ConfigScope, ConfigSection, ConfigStack,
+    ConfigStackEntry,
 };
 
 /// Machine JSON for `heddle remote list`.
@@ -2563,10 +2562,7 @@ fn config_entry_origin_path(entry: &ConfigStackEntry) -> Option<PathBuf> {
     (entry.origin.kind == ConfigOriginKind::File).then(|| PathBuf::from(&entry.origin.name))
 }
 
-fn config_section_value<'a>(
-    section: &'a sley::plumbing::sley_config::ConfigSection,
-    key: &str,
-) -> Option<&'a str> {
+fn config_section_value<'a>(section: &'a ConfigSection, key: &str) -> Option<&'a str> {
     section
         .entries
         .iter()

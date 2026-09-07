@@ -9,8 +9,6 @@ pub mod attachments;
 pub mod attribution;
 pub mod client;
 #[cfg(feature = "client")]
-pub mod extensions;
-#[cfg(feature = "client")]
 pub mod hosted_runtime;
 pub mod network;
 

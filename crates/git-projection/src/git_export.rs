@@ -13,8 +13,8 @@ use objects::{
 };
 use repo::Repository as HeddleRepository;
 use sley::{
-    CommitObject, EntryKind, GitObjectType, ObjectId, ReferenceTarget,
-    Repository as SleyRepository, Signature, plumbing::sley_object::EncodedObject,
+    BString, CommitObject, EntryKind, GitObjectType, ObjectId, ReferenceTarget,
+    Repository as SleyRepository, Signature,
 };
 use tracing::debug;
 
@@ -24,8 +24,8 @@ use crate::{
         GitProjection, GitProjectionError, GitProjectionResult, LocalGitIdentity, RefNamespace,
         SyncMapping, collect_ref_updates, copy_reachable_objects, count_exported_commits,
         delete_reference_if_present, git_config_identity_with_global_fallback, git_err,
-        materialize_projection_managed_refs, open_repo, principal_is_default_unknown,
-        read_or_seed_projection_managed_refs, set_reference, write_projection_managed_refs,
+        materialize_projection_managed_refs, principal_is_default_unknown,
+        read_projection_managed_refs, set_reference, write_projection_managed_refs,
     },
     git_notes,
     git_reconstruct::{
@@ -63,14 +63,14 @@ fn has_git_fidelity(state: &State) -> bool {
 /// relying on Git Projection Mapping sidecar state. The state flag closes the whole
 /// class, including any future lossy entry point.
 ///
-/// When false the caller MUST keep the verbatim residual / Bridge Mirror bytes
-/// / preserved mapped OID (or fall through to the native mint) rather than mint
+/// When false the caller MUST keep the verbatim residual bytes / preserved
+/// mapped OID (or fall through to the native mint) rather than mint
 /// a wrong-SHA reconstructed object.
 ///
 /// `pub` so the checkout write-through path (#568 P1,
 /// `git_core::write_thread_state_checkout_from_existing_projection`) reads the SAME
 /// single faithful-or-lossy discriminator the export path does — reconstruct
-/// faithful commits from state, residual-then-mirror backstop the lossy residual.
+/// faithful commits from state and require residuals for lossy commits.
 /// Keeping ONE chokepoint for the decision means a new consumer cannot drift to a
 /// different (wrong-SHA) rule.
 pub fn commit_is_byte_faithful(state: &State) -> bool {
@@ -226,7 +226,7 @@ fn write_state_object(
         encoding: None,
         message: message.into_bytes(),
     };
-    repo.write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
+    repo.write_raw_object(GitObjectType::Commit, commit.write())
         .map_err(git_err)
 }
 
@@ -360,12 +360,6 @@ fn materialize_cached_mappings(
         .map(|(state, _)| *state)
         .collect::<Vec<_>>();
     let sorted = bridge.sort_states_topologically(&state_ids)?;
-    let legacy = bridge
-        .mirror_path()
-        .exists()
-        .then(|| open_repo(&bridge.mirror_path()))
-        .transpose()?;
-
     for state_id in sorted {
         let Some(mapped_oid) = bridge.mapping.get_git(&state_id) else {
             continue;
@@ -376,12 +370,9 @@ fn materialize_cached_mappings(
         if commit_requires_residual(&state) {
             let installed = residuals.install_commit_closure_into(repo, &mapped_oid)?;
             if !installed && repo.read_object(&mapped_oid).is_err() {
-                let Some(legacy) = legacy.as_ref() else {
-                    return Err(GitProjectionError::Git(format!(
-                        "mapped non-reconstructable Git object {mapped_oid} for state {state_id} has no Raw Git Object Residual"
-                    )));
-                };
-                copy_reachable_objects(legacy, repo, [mapped_oid])?;
+                return Err(GitProjectionError::Git(format!(
+                    "mapped non-reconstructable Git object {mapped_oid} for state {state_id} has no complete Raw Git Object Residual"
+                )));
             }
             continue;
         }
@@ -622,7 +613,7 @@ fn export_scoped(
                 // Incremental-export fast path (perf, latent O(history) fix): the
                 // regenerate-from-state step below is purely a #567 idempotent
                 // re-write — it rebuilds the commit object from state and writes it
-                // so a correct export no longer DEPENDS on the mirror's verbatim
+                // so a correct export no longer depends on retained verbatim
                 // bytes. But when the mapped commit object is ALREADY in the mirror,
                 // that re-write is a no-op (sley hashes-then-skips), preceded by
                 // `reconstruct_commit_bytes`'s FULL recursive tree re-walk + re-hash.
@@ -633,7 +624,7 @@ fn export_scoped(
                 // byte-identical output: the served object, its OID, and the mapping
                 // are all unchanged. The reconstruct still runs (and the safety net
                 // still guards the write) for any mapped commit whose object is NOT
-                // yet in the mirror — the case #567/#568 actually need it for.
+                // yet in the projection repository.
                 if mapped.is_some_and(|oid| repo.read_object(&oid).is_ok()) {
                     continue;
                 }
@@ -642,9 +633,8 @@ fn export_scoped(
                 // non-byte-faithful commit (non-UTF8 identity, or a `--lossy`
                 // import — both import-lossy and ingest-lossy carry the canonical
                 // `git_lossy` flag) would reconstruct to a WRONG SHA, so leave it
-                // on the preserved mapped OID — Raw Git Object Residual bytes
-                // (preferred) or Bridge Mirror verbatim bytes stay the served
-                // object.
+                // on the preserved mapped OID; Raw Git Object Residual bytes
+                // stay the served object.
                 if commit_is_byte_faithful(&state) {
                     let content = reconstruct_commit_bytes(
                         bridge.heddle_repo,
@@ -669,14 +659,13 @@ fn export_scoped(
                     write_commit_object(&repo, &content)?;
                 } else if let Some(mapped_oid) = mapped {
                     // Lossy path: install the commit plus its exact tree/blob
-                    // closure. Import capture guarantees this is complete, so a
-                    // fresh projection no longer needs the Bridge Mirror as an
-                    // object warehouse.
+                    // closure. Import capture guarantees this is complete, so
+                    // the projection does not need a second Git object warehouse.
                     let installed =
                         residual_store.install_commit_closure_into(&repo, &mapped_oid)?;
                     if !installed && repo.read_object(&mapped_oid).is_err() {
                         return Err(GitProjectionError::Git(format!(
-                            "mapped non-reconstructable Git object {mapped_oid} for state {state_id} has no Raw Git Object Residual and is unavailable from the Bridge Mirror"
+                            "mapped non-reconstructable Git object {mapped_oid} for state {state_id} has no complete Raw Git Object Residual"
                         )));
                     }
                 }
@@ -744,7 +733,21 @@ fn export_scoped(
         // state_id survives a fresh `git clone` of the destination
         // (when only the git side travels, without our sidecar).
         if let Some(state) = bridge.heddle_repo.store().get_state(&state_id)? {
-            let note = git_notes::HeddleNote::from_state(&state);
+            let rewrites_parents = parent_override.is_some_and(|parents| {
+                state.parents.len() != parents.len()
+                    || state
+                        .parents
+                        .iter()
+                        .zip(parents)
+                        .any(|(state_parent, git_parent)| {
+                            bridge.mapping.get_git(state_parent) != Some(*git_parent)
+                        })
+            });
+            let note = if rewrites_parents {
+                git_notes::HeddleNote::from_projected_state(&state)
+            } else {
+                git_notes::HeddleNote::from_state(&state)
+            };
             git_notes::write_note(&repo, git_oid, &note)?;
         }
     }
@@ -862,7 +865,7 @@ fn export_scoped(
     // record. Read BEFORE the head/tag loops mutate any ref so a genuine first run
     // (absent record) seeds from the prior-run ref set rather than misreading every
     // pre-existing ref as foreign — which would silently stop embargo retraction.
-    let mut managed_record = read_or_seed_projection_managed_refs(bridge.heddle_repo.heddle_dir())?;
+    let mut managed_record = read_projection_managed_refs(bridge.heddle_repo.heddle_dir())?;
     materialize_projection_managed_refs(&repo, &managed_record)?;
 
     // Reconcile the mirror's HEADS via the shared `reconcile_ref` decision. Iterate
@@ -1571,8 +1574,8 @@ fn state_to_signature(state: &objects::object::State) -> Signature {
     raw.extend_from_slice(seconds.to_string().as_bytes());
     raw.extend_from_slice(b" +0000");
     Signature {
-        name: sley::plumbing::sley_core::BString::new(principal.name.clone()),
-        email: sley::plumbing::sley_core::BString::new(principal.email.clone()),
+        name: BString::new(principal.name.clone()),
+        email: BString::new(principal.email.clone()),
         time: sley::GitTime::new(seconds, 0),
         raw,
     }

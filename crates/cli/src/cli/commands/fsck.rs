@@ -104,11 +104,11 @@ fn repair_git_metadata(repo: &repo::Repository) -> Result<Vec<FsckRepair>> {
     use heddle_git_projection::GitProjection;
 
     let mut bridge = GitProjection::new(repo);
-    if !bridge.mirror_path().exists() && sley::Repository::discover(repo.root()).is_err() {
+    if sley::Repository::discover(repo.root()).is_err() {
         return Ok(vec![FsckRepair {
             name: "git_projection_metadata".to_string(),
             repaired: false,
-            detail: "no Git repository or legacy Bridge Mirror was found".to_string(),
+            detail: "no Git checkout was found".to_string(),
             count: 0,
         }]);
     }

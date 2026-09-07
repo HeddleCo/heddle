@@ -171,7 +171,7 @@ pub enum HeddleError {
     #[error("repository clone at {0} is incomplete and must be repaired from its origin")]
     IncompleteClone(std::path::PathBuf),
     #[error(
-        "repository config at {path} uses repository format {found} but this binary supports {supported}; upgrade heddle or run `heddle migrate`"
+        "repository config at {path} uses repository format {found} but this binary supports {supported}; upgrade Heddle before opening it"
     )]
     RepositoryFormatTooNew {
         path: std::path::PathBuf,
@@ -181,7 +181,7 @@ pub enum HeddleError {
     #[error(
         "repository at {path} predates format v{required} (found v{found}); recreate it or re-adopt its Git history with this Heddle version"
     )]
-    RepositoryFormatMigrationRequired {
+    RepositoryFormatTooOld {
         path: std::path::PathBuf,
         found: u32,
         required: u32,
@@ -197,7 +197,7 @@ pub enum HeddleError {
     #[error(
         "{storage} predates required format {required} (found {found}); recreate the repository or re-adopt its Git history with this Heddle version"
     )]
-    StorageFormatMigrationRequired {
+    StorageFormatTooOld {
         storage: String,
         found: u32,
         required: u32,

@@ -161,7 +161,7 @@ fn parse_confidence(s: &str) -> Result<f32, String> {
 #[command(override_usage = "heddle capture -m <INTENT> [OPTIONS]")]
 #[command(after_help = "\
 Examples:
-  heddle capture -m 'add login route'           # capture the worktree with intent
+  heddle capture -m 'add login route'           # save state (and its Git Overlay checkpoint)
   heddle capture -m 'wip' --confidence 0.6      # honest confidence on a draft step
 
 Agent automation flags (provider/model/session/policy/split) are hidden here.
@@ -231,24 +231,6 @@ pub struct SnapshotArgs {
     /// Repository-relative path prefix to include when using `--split`.
     #[arg(long = "path", hide = true, requires = "split", value_name = "PATH")]
     pub paths: Vec<String>,
-}
-
-/// Arguments for the Git-overlay `commit` command.
-#[derive(Clone, Debug, clap::Args)]
-#[command(after_help = "\
-Examples:
-  heddle capture -m 'add login route'
-  heddle commit
-  heddle commit -m 'add login route'
-
-Behavior:
-  Commits the complete captured tree and replaces the Git index with that tree.
-  Git pre-commit and commit-msg hooks are not run.
-")]
-pub struct CommitArgs {
-    /// Git commit message. Defaults to the current capture intent.
-    #[arg(short = 'm', long = "message")]
-    pub message: Option<String>,
 }
 
 /// Arguments for the `log` command.
@@ -1621,8 +1603,8 @@ pub struct AgentFanoutPlanArgs {
     #[arg(long)]
     pub title: String,
 
-    /// Lane spec: `<thread>=<path>:<title>`. Repeat once per child lane.
-    #[arg(long, value_name = "THREAD=PATH:TITLE")]
+    /// Child Thread spec: `<thread>=<title>`. Heddle manages its checkout.
+    #[arg(long, value_name = "THREAD=TITLE")]
     pub lane: Vec<String>,
 
     /// Optional collaboration discussion id to store on task assignments.
@@ -1637,8 +1619,8 @@ pub struct AgentFanoutStartArgs {
     #[arg(long)]
     pub title: String,
 
-    /// Lane spec: `<thread>=<path>:<title>`. Repeat once per child lane.
-    #[arg(long, value_name = "THREAD=PATH:TITLE")]
+    /// Child Thread spec: `<thread>=<title>`. Heddle manages its checkout.
+    #[arg(long, value_name = "THREAD=TITLE")]
     pub lane: Vec<String>,
 
     /// Optional collaboration discussion id to store on task assignments.

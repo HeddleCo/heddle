@@ -13,8 +13,8 @@ use std::{
 use objects::{
     error::HeddleError,
     object::{
-        AudienceTier, ContentHash, FacetKind, FileMode, Principal, StateId, StateIdParseError,
-        ThreadName, Tree,
+        AudienceTier, ContentHash, FacetKind, Principal, StateId, StateIdParseError, ThreadName,
+        Tree,
     },
     store::ObjectStore,
 };
@@ -27,15 +27,17 @@ pub use repo::{
     REMOTE_NAME_FOR_LOCAL_GIT_REPO, is_reserved_git_remote_name,
 };
 use sley::{
-    BString as GitBString, DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions, Index,
-    IndexEntry, IndexWriteOptions, ObjectFormat, ObjectId, RefPrecondition, ReferenceTarget,
+    BString as GitByteString, DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions,
+    IndexWriteOptions, ObjectFormat, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository, Signature,
-    plumbing::sley_core::BString as GitByteString,
     remote::{
-        CredentialProvider, FetchOptions, LsRemoteFilter, NoCredentials, ProgressSink,
-        PushActionPlan, PushCommand, PushOptions, SilentProgress,
+        CredentialProvider, FetchOptions, HttpPushActionsRequest,
+        HttpReceivePackObservationRequest, LsRemoteFilter, NoCredentials, ProgressSink,
+        PushActionPlan, PushCommand, PushDestination, PushOptions, PushServices, RemotePolicy,
+        SilentProgress, observe_http_receive_pack, push_http_actions_with_reader_from_observation,
     },
 };
+use sley_refs::ReflogEntry;
 use sley_transport::{HttpClient, UreqHttpClient};
 
 use super::{
@@ -43,11 +45,11 @@ use super::{
     git_export::{ExportStateOptions, commit_is_byte_faithful, export_all, export_state},
     git_notes,
     git_reconstruct::{commit_object_id, reconstruct_commit_bytes, write_commit_object},
-    git_residual::{ResidualStore, resolve_lossy_object},
+    git_residual::ResidualStore,
     git_util::FailedRefExportReason,
 };
 
-/// Errors specific to Git Projection and Bridge Mirror operations.
+/// Errors specific to Git Projection operations.
 #[derive(Debug, thiserror::Error)]
 pub enum GitProjectionError {
     #[error("git error: {0}")]
@@ -172,7 +174,7 @@ pub fn configured_https_client() -> Option<&'static dyn HttpClient> {
         .map(|client| client as &dyn HttpClient)
 }
 
-/// Type alias for Git Projection and Bridge Mirror results.
+/// Type alias for Git Projection results.
 pub type GitProjectionResult<T> = std::result::Result<T, GitProjectionError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -332,10 +334,10 @@ mod negative_refspec {
 // pass through `NegativeRefSpec::new`.
 pub use negative_refspec::NegativeRefSpec;
 
-/// The fetch refspecs heddle uses to mirror a remote: every branch and every
+/// The fetch refspecs Heddle uses to import a remote: every branch and every
 /// heddle note, forced. Built through [`RefSpec`] so the wire format has a
 /// single typed source of truth.
-fn heddle_mirror_fetch_refspecs() -> GitProjectionResult<[String; 2]> {
+fn heddle_fetch_refspecs() -> GitProjectionResult<[String; 2]> {
     Ok([
         RefSpec::forced("refs/heads/*", "refs/heads/*")?.to_git_format(),
         RefSpec::forced("refs/notes/*", "refs/notes/*")?.to_git_format(),
@@ -354,7 +356,6 @@ pub enum WriteThroughSkipReason {
     DetachedHead,
     NoAttachedThread,
     NoMappedCommit,
-    MirrorIsWorktree,
     IndexAlreadyDirty,
 }
 
@@ -372,9 +373,6 @@ impl std::fmt::Display for WriteThroughSkipReason {
             }
             WriteThroughSkipReason::NoMappedCommit => {
                 write!(f, "the current Heddle state has not been exported to Git")
-            }
-            WriteThroughSkipReason::MirrorIsWorktree => {
-                write!(f, "the legacy Bridge Mirror target is the checkout itself")
             }
             WriteThroughSkipReason::IndexAlreadyDirty => {
                 write!(f, "the Git index is already locked by another operation")
@@ -668,12 +666,17 @@ impl CheckoutWrite {
 
     fn excluded_objects(&self) -> GitProjectionResult<HashSet<ObjectId>> {
         match self.previous_branch {
-            Some(parent) => sley::plumbing::sley_odb::collect_reachable_object_ids(
-                self.object_repo.objects().as_ref(),
-                self.object_repo.object_format(),
-                [parent],
-            )
-            .map_err(git_err),
+            Some(parent) => self
+                .object_repo
+                .reachable_pack_plan()
+                .root(parent)
+                .build()
+                .map(|plan| {
+                    plan.map_or_else(HashSet::new, |plan| {
+                        plan.object_ids().iter().copied().collect()
+                    })
+                })
+                .map_err(git_err),
             None => Ok(HashSet::new()),
         }
     }
@@ -786,27 +789,12 @@ impl<'a> GitProjection<'a> {
         Ok(())
     }
 
-    /// Get the path to the legacy Bridge Mirror directory.
-    pub fn mirror_path(&self) -> PathBuf {
-        self.heddle_repo.heddle_dir().join("git")
-    }
-
-    /// Check if a legacy Bridge Mirror is initialized.
-    pub fn is_initialized(&self) -> bool {
-        self.mirror_path().exists()
-    }
-
-    /// Open the active scratch repository, a legacy mirror, or the checkout.
+    /// Open the active scratch repository or the Git checkout.
     pub fn open_git_repo(&self) -> GitProjectionResult<SleyRepository> {
         if let Some(ref path) = self.git_repo_path {
             open_repo(path)
         } else {
-            let mirror_path = self.mirror_path();
-            if mirror_path.exists() {
-                open_repo(&mirror_path)
-            } else {
-                open_repo(self.heddle_repo.root())
-            }
+            open_repo(self.heddle_repo.root())
         }
     }
 
@@ -993,7 +981,7 @@ impl<'a> GitProjection<'a> {
     /// -> Heddle state identity. Ingest reads directly from the checkout, so
     /// it only needs `refs/notes/heddle` hydrated in the checkout's own object
     /// database before `GitSource` opens the repository.
-    pub fn hydrate_checkout_heddle_notes_without_mirror(root: &Path) -> bool {
+    pub fn hydrate_checkout_heddle_notes(root: &Path) -> bool {
         if checkout_note_ref_exists(root).unwrap_or(false) {
             return true;
         }
@@ -1021,7 +1009,7 @@ impl<'a> GitProjection<'a> {
         remotes.dedup();
 
         for remote in remotes {
-            match hydrate_checkout_notes_from_remote_without_mirror(root, &remote) {
+            match hydrate_checkout_notes_from_remote(root, &remote) {
                 Ok(()) if checkout_note_ref_exists(root).unwrap_or(false) => return true,
                 Ok(()) => {}
                 Err(error) => {
@@ -1165,158 +1153,6 @@ impl<'a> GitProjection<'a> {
         self.write_thread_state_checkout_direct(&thread, &state_id, Some(&summary))
     }
 
-    /// Mark files that Heddle has captured but that Git still sees as
-    /// untracked as `intent-to-add` in the colocated checkout's index,
-    /// so a colocated developer's `git status` shows `AM new_file`
-    /// ("Heddle knows about it; no Git blob committed yet") instead of
-    /// `?? new_file` ("untracked — Git knows nothing"). The placeholder
-    /// entry uses the empty-blob oid and a zeroed stat, so Git always
-    /// reports the working-tree content as modified-against-index.
-    ///
-    /// Ported from jujutsu's `update_intent_to_add` (`lib/src/git.rs`),
-    /// which diffs `old_tree` vs `new_tree` and flags paths present in
-    /// the new tree but absent from the old one. Here `new_tree` is the
-    /// just-captured Heddle state's tree and `old_tree` is whatever the
-    /// checkout's index already tracks — paths already in the index are
-    /// not `??`, so they are left untouched (no spurious marking of
-    /// tracked or unchanged files).
-    ///
-    /// Call frequency mirrors jj: this fires at a Heddle parent/state
-    /// change (`capture`), not on every command. A later `checkpoint`
-    /// rebuilds the index from the committed tree via
-    /// [`Self::write_through_current_checkout`], replacing these
-    /// placeholder entries with real ones — so the index is never
-    /// churned by read-only invocations.
-    pub fn update_intent_to_add(&self, state_id: &StateId) -> GitProjectionResult<()> {
-        let root = self.heddle_repo.root();
-        if !root.join(".git").exists() {
-            return Ok(());
-        }
-        let checkout_repo = SleyRepository::discover(root).map_err(git_err)?;
-        // Skip detached HEAD: write-through only mirrors attached
-        // threads, and there is no branch context to reason about here.
-        if checkout_repo
-            .head()
-            .map(|head| head.is_detached())
-            .unwrap_or(false)
-        {
-            return Ok(());
-        }
-
-        // `new_tree`: every file the just-captured state contains.
-        let Some(state) = self.heddle_repo.store().get_state(state_id)? else {
-            return Ok(());
-        };
-        let Some(tree) = self.heddle_repo.store().get_tree(&state.tree)? else {
-            return Ok(());
-        };
-        let mut captured: Vec<(String, FileMode)> = Vec::new();
-        collect_capture_paths(self.heddle_repo.store(), &tree, "", &mut captured)?;
-        // No early return on an empty captured set: the reconcile below must
-        // run on EVERY recapture path. When the recaptured state is empty,
-        // `captured_paths` is empty too, so the PRUNE pass clears every prior
-        // intent-to-add entry (all are now stale) and the ADD loop is a no-op.
-
-        // Reconcile the index's intent-to-add set against the captured
-        // state. Real (committed) entries are left untouched; the
-        // intent-to-add set must end up equal to the captured paths that
-        // are not yet real entries. So we both ADD newly-captured paths
-        // and PRUNE intent-to-add entries whose path left the captured
-        // set (deleted, or now committed) — otherwise a stale entry
-        // surfaces as a phantom ` D path` in `git status`.
-        let mut index = checkout_repo
-            .open_index()
-            .map_err(git_err)?
-            .unwrap_or_else(|| Index {
-                version: 2,
-                entries: Vec::new(),
-                extensions: Vec::new(),
-                checksum: None,
-            });
-
-        // Partition existing entries: real tracked paths vs. the
-        // intent-to-add placeholders we manage here.
-        let mut real_tracked: HashSet<String> = HashSet::new();
-        let mut existing_ita: HashSet<String> = HashSet::new();
-        for entry in &index.entries {
-            let path = String::from_utf8_lossy(entry.path.as_bytes()).into_owned();
-            if entry.is_intent_to_add() {
-                existing_ita.insert(path);
-            } else {
-                real_tracked.insert(path);
-            }
-        }
-
-        // Desired intent-to-add set: captured paths not backed by a real
-        // (committed) index entry.
-        let captured_paths: HashSet<&str> = captured.iter().map(|(p, _)| p.as_str()).collect();
-
-        // PRUNE: any intent-to-add entry whose path is no longer desired.
-        let before_prune = index.entries.len();
-        index.entries.retain(|entry| {
-            !entry.is_intent_to_add()
-                || captured_paths.contains(String::from_utf8_lossy(entry.path.as_bytes()).as_ref())
-        });
-        let mut changed = index.entries.len() != before_prune;
-
-        // ADD: newly-captured paths not already tracked or marked.
-        for (path, mode) in &captured {
-            if real_tracked.contains(path) || existing_ita.contains(path) {
-                continue;
-            }
-            // Git's index cannot hold both a blob `foo` and a blob
-            // `foo/bar` — a path is either a file or a directory. An
-            // added path that file↔directory-PREFIX-conflicts with a
-            // still-tracked real entry is not a clean "new file": the
-            // real entry wins. Writing an intent-to-add placeholder for
-            // it would corrupt the index into a file/dir conflict, so
-            // skip it (checked in both directions).
-            if real_tracked
-                .iter()
-                .any(|tracked| path_prefix_conflict(path, tracked))
-            {
-                continue;
-            }
-            // Native child-spool edges are not git-tracked files and have no
-            // git index mode: skip them rather than fabricate a 160000
-            // submodule entry.
-            if *mode == FileMode::Spoollink {
-                continue;
-            }
-            let mut entry = IndexEntry::intent_to_add(
-                checkout_repo.object_format(),
-                GitBString::from(path.as_str()),
-            );
-            entry.mode = match mode {
-                FileMode::Executable => 0o100755,
-                FileMode::Symlink => 0o120000,
-                FileMode::Gitlink => 0o160000,
-                FileMode::Normal => 0o100644,
-                // Unreachable: spoollinks are skipped above before this map.
-                FileMode::Spoollink => 0o100644,
-            };
-            changed = true;
-            index.entries.push(entry);
-        }
-
-        if changed {
-            index
-                .entries
-                .sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
-            index.upgrade_version_for_flags();
-            checkout_repo
-                .write_index(
-                    &index,
-                    IndexWriteOptions {
-                        fsync: true,
-                        validate_checksum: true,
-                    },
-                )
-                .map_err(git_err)?;
-        }
-        Ok(())
-    }
-
     /// Make the checkout's real `.git` view agree with a specific Heddle
     /// thread. `thread switch` uses this after writing Heddle HEAD because
     /// resolving "current" through Git-overlay discovery can still see the
@@ -1420,11 +1256,21 @@ impl<'a> GitProjection<'a> {
             }
             self.mapping.insert(reachable, git_oid);
             if let Some(state) = self.heddle_repo.store().get_state(&reachable)? {
-                git_notes::write_note(
-                    &checkout.object_repo,
-                    git_oid,
-                    &git_notes::HeddleNote::from_state(&state),
-                )?;
+                let rewrites_parents =
+                    parent_override.is_some_and(|parents| {
+                        state.parents.len() != parents.len()
+                            || state.parents.iter().zip(parents).any(
+                                |(state_parent, git_parent)| {
+                                    self.mapping.get_git(state_parent) != Some(*git_parent)
+                                },
+                            )
+                    });
+                let note = if rewrites_parents {
+                    git_notes::HeddleNote::from_projected_state(&state)
+                } else {
+                    git_notes::HeddleNote::from_state(&state)
+                };
+                git_notes::write_note(&checkout.object_repo, git_oid, &note)?;
             }
         }
 
@@ -1508,7 +1354,7 @@ impl<'a> GitProjection<'a> {
         thread: &str,
         state_id: &StateId,
     ) -> GitProjectionResult<WriteThroughOutcome> {
-        let projection_repo = self.open_git_repo()?;
+        let git = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
         if self.mapping.is_empty() {
             self.build_existing_mapping(None)?;
         }
@@ -1519,7 +1365,7 @@ impl<'a> GitProjection<'a> {
             .git_overlay_mapped_git_commit_for_state(state_id)
             .map_err(|error| GitProjectionError::Git(error.to_string()))?
         {
-            ObjectId::from_hex(projection_repo.object_format(), &git_commit)
+            ObjectId::from_hex(git.object_format(), &git_commit)
                 .map_err(|error| GitProjectionError::InvalidMapping(error.to_string()))?
         } else {
             return Ok(WriteThroughOutcome::Skipped(
@@ -1527,22 +1373,15 @@ impl<'a> GitProjection<'a> {
             ));
         };
 
-        let git = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
         if git.git_dir().join("index.lock").exists() {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::IndexAlreadyDirty,
             ));
         }
         let checkout = CheckoutWrite::prepare(self.heddle_repo.root(), thread)?;
-        if checkout.checkout_repo.git_dir() == projection_repo.git_dir() {
-            return Ok(WriteThroughOutcome::Skipped(
-                WriteThroughSkipReason::MirrorIsWorktree,
-            ));
-        }
         materialize_checkout_closure_from_state(
             self.heddle_repo,
             &self.mapping,
-            &projection_repo,
             &checkout.object_repo,
             state_id,
             git_oid,
@@ -1573,10 +1412,7 @@ fn checkout_note_ref_exists(root: &Path) -> GitProjectionResult<bool> {
         .is_some())
 }
 
-fn hydrate_checkout_notes_from_remote_without_mirror(
-    root: &Path,
-    remote_name: &str,
-) -> GitProjectionResult<()> {
+fn hydrate_checkout_notes_from_remote(root: &Path, remote_name: &str) -> GitProjectionResult<()> {
     reject_reserved_git_remote_name(remote_name)?;
     let checkout_repo = SleyRepository::discover(root).map_err(git_err)?;
     let object_repo = common_repo_for_worktree(&checkout_repo)?;
@@ -1621,6 +1457,7 @@ fn fetch_heddle_notes_into_repo(
         url,
         &[refspec],
         FetchOptions {
+            policy: RemotePolicy::default(),
             // sley 0.5.0 additions — heddle uses git defaults (no CLI override).
             filter_auto: false,
             progress: None,
@@ -2144,7 +1981,7 @@ pub fn set_reference(
         Some(ReferenceTarget::Direct(oid)) => oid,
         _ => ObjectId::null(repo.object_format()),
     };
-    let reflog = sley::plumbing::sley_refs::ReflogEntry {
+    let reflog = ReflogEntry {
         old_oid,
         new_oid: target,
         committer: git_projection_signature(),
@@ -2161,61 +1998,18 @@ pub fn set_reference(
     Ok(())
 }
 
-/// Whether two index paths file↔directory-PREFIX-conflict: one names a
-/// blob that is a directory prefix of the other (`foo` vs `foo/bar`, in
-/// either order). Git's index cannot hold both, since a path is either a
-/// file or a directory. Equal paths do NOT count here — that case is an
-/// exact match handled separately by the caller.
-fn path_prefix_conflict(a: &str, b: &str) -> bool {
-    let child_of = |parent: &str, child: &str| {
-        child
-            .strip_prefix(parent)
-            .is_some_and(|rest| rest.starts_with('/'))
-    };
-    child_of(a, b) || child_of(b, a)
-}
-
-/// Recursively collect every Git-indexable leaf path in `tree`,
-/// resolving subtrees through `store`. Missing subtree objects are
-/// skipped rather than treated as errors, matching the repo's other
-/// tree walks. Paths use `/` separators, the form Git's index expects.
-fn collect_capture_paths<S: ObjectStore + ?Sized>(
-    store: &S,
-    tree: &Tree,
-    prefix: &str,
-    out: &mut Vec<(String, FileMode)>,
-) -> GitProjectionResult<()> {
-    for entry in tree.iter() {
-        let path = if prefix.is_empty() {
-            entry.name().to_string()
-        } else {
-            format!("{prefix}/{}", entry.name())
-        };
-        if entry.is_tree() {
-            if let Some(hash) = entry.tree_hash()
-                && let Some(subtree) = store.get_tree(&hash)?
-            {
-                collect_capture_paths(store, &subtree, &path, out)?;
-            }
-        } else {
-            out.push((path, entry.mode()));
-        }
-    }
-    Ok(())
-}
-
 fn update_checkout_branch_ref(
     repo: &SleyRepository,
     branch_ref: &str,
     target: ObjectId,
     previous_branch: Option<ObjectId>,
     log_message: &str,
-) -> GitProjectionResult<sley::plumbing::sley_refs::ReflogEntry> {
+) -> GitProjectionResult<ReflogEntry> {
     let expected = previous_branch.map_or(RefPrecondition::MustNotExist, |oid| {
         RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(oid))
     });
     let old_oid = previous_branch.unwrap_or_else(|| ObjectId::null(repo.object_format()));
-    let head_reflog = sley::plumbing::sley_refs::ReflogEntry {
+    let head_reflog = ReflogEntry {
         old_oid,
         new_oid: target,
         committer: git_projection_signature(),
@@ -2663,10 +2457,6 @@ fn projection_managed_refs_path(heddle_dir: &Path) -> PathBuf {
         .join(HEDDLE_PROJECTION_MANAGED_REFS_FILE)
 }
 
-fn legacy_mirror_managed_refs_path(mirror_repo: &SleyRepository) -> PathBuf {
-    mirror_repo.git_dir().join("heddle-mirror-managed-refs")
-}
-
 /// Read the store-owned projection ref record.
 pub fn read_projection_managed_refs(
     heddle_dir: &Path,
@@ -2680,30 +2470,6 @@ pub fn write_projection_managed_refs(
     refs: &HashMap<String, ObjectId>,
 ) -> GitProjectionResult<()> {
     write_exported_refs_at(&projection_managed_refs_path(heddle_dir), refs)
-}
-
-/// Read store-owned reconcile state, lazily migrating a legacy mirror record.
-pub fn read_or_seed_projection_managed_refs(
-    heddle_dir: &Path,
-) -> GitProjectionResult<HashMap<String, ObjectId>> {
-    if projection_managed_refs_path(heddle_dir).exists() {
-        return read_projection_managed_refs(heddle_dir);
-    }
-    let legacy_path = heddle_dir.join("git");
-    if !legacy_path.exists() {
-        return Ok(HashMap::new());
-    }
-    let legacy_repo = open_repo(&legacy_path)?;
-    let refs = if legacy_mirror_managed_refs_path(&legacy_repo).exists() {
-        read_exported_refs_at(&legacy_mirror_managed_refs_path(&legacy_repo))?
-    } else {
-        collect_ref_updates(&legacy_repo)?
-            .into_iter()
-            .map(|update| (full_ref_name(&update), update.target))
-            .collect()
-    };
-    write_projection_managed_refs(heddle_dir, &refs)?;
-    Ok(refs)
 }
 
 /// Recreate the prior managed ref surface in an ephemeral projection repo.
@@ -3343,12 +3109,13 @@ fn clone_url_to_bare_via_sley(
     let repo = SleyRepository::init_bare(dest).map_err(git_err)?;
     let mut credentials =
         EmbeddingSafeCredentialProvider::new(&repo.config_snapshot().map_err(git_err)?);
-    let display_url = sley::plumbing::sley_core::redact_url_for_display(url);
+    let display_url = sley_core::redact_url_for_display(url);
     let outcome = repo
         .fetch_with_http_client(
             url,
-            &heddle_mirror_fetch_refspecs()?,
+            &heddle_fetch_refspecs()?,
             FetchOptions {
+                policy: RemotePolicy::default(),
                 // sley 0.5.0 additions — heddle uses git defaults (no CLI override).
                 filter_auto: false,
                 progress: None,
@@ -3400,8 +3167,7 @@ fn clone_url_to_bare_via_sley(
 
 /// Materialize the checkout `.git` object closure for the commit mapped to
 /// `tip_state_id` (`tip_oid`) — reconstructing every byte-faithful commit from
-/// heddle state, then resolving lossy objects from Raw Git Object Residuals
-/// (preferred) or the Bridge Mirror backstop (#568 P1 + residual foundation).
+/// heddle state, then resolving lossy objects from Raw Git Object Residuals.
 ///
 /// Walks the heddle state DAG from `tip_state_id`. For each visited state:
 ///   * its mapped git OID is already in `excluded` (the prior checkout HEAD's full
@@ -3412,8 +3178,7 @@ fn clone_url_to_bare_via_sley(
 ///     directly into `object_repo`, then recurse into its parents;
 ///   * otherwise (lossy: `--lossy` import or non-UTF8 identity) ⇒ install that
 ///     commit's exact tree/blob closure from residual storage and continue through
-///     its state parents; legacy imports without residuals copy their reachable
-///     closure from the Bridge Mirror and lazily migrate the root.
+///     its state parents.
 ///
 /// CRITICAL safety gate: every reconstructed commit's git OID MUST equal the
 /// mapped `git_oid`. A mismatch means reconstruction diverged from the imported
@@ -3421,28 +3186,22 @@ fn clone_url_to_bare_via_sley(
 /// wrong-OID checkout — so this HARD-ERRORS instead. This assertion is what lets
 /// the reconstruction path be trusted as a mirror replacement.
 ///
-/// When a lossy object has neither a residual nor a mirror copy, this hard-fails
+/// When a lossy object has no residual, this hard-fails
 /// with a clear fidelity error rather than silently omitting the object.
 ///
-/// Output is byte-identical to prior mirror-backed materialization for objects
-/// that remain residual- or mirror-backed: git objects are content-addressed, so
-/// a faithful reconstruction lands the exact same OID the mirror copy would have,
-/// and the lossy path installs verbatim bytes. The exclude set keeps it O(objects
-/// new since the parent). A legacy mirror remains a read-only migration fallback;
-/// this path never creates or populates `.heddle/git`.
+/// Git objects are content-addressed: faithful reconstruction lands the mapped
+/// OID and the lossy path installs verbatim residual bytes. The exclude set keeps
+/// the work O(objects new since the parent).
 #[allow(clippy::too_many_arguments)]
 pub fn materialize_checkout_closure_from_state(
     heddle_repo: &HeddleRepository,
     mapping: &SyncMapping,
-    mirror_repo: &SleyRepository,
     object_repo: &SleyRepository,
     tip_state_id: &StateId,
     tip_oid: ObjectId,
     excluded: &HashSet<ObjectId>,
 ) -> GitProjectionResult<()> {
-    // Lossy commits whose closure must come from residuals or the legacy Bridge
-    // Mirror. Mirror-only roots are batched into one excluding pack install for
-    // performance parity.
+    // Lossy commits must carry a complete Raw Git Object Residual closure.
     let mut lossy_roots: Vec<ObjectId> = Vec::new();
     let mut stack: Vec<StateId> = vec![*tip_state_id];
     let mut seen: HashSet<StateId> = HashSet::new();
@@ -3490,10 +3249,9 @@ pub fn materialize_checkout_closure_from_state(
             debug_assert_eq!(written, git_oid);
             stack.extend(state.parents.iter().copied());
         } else {
-            // Lossy residual path: prefer Raw Git Object Residual, else Bridge
-            // Mirror. New residuals carry the exact commit/tree/blob closure;
-            // parent commits remain independently reconstructable or residual-
-            // backed, so keep walking the native state DAG.
+            // Raw Git Object Residuals carry the exact commit/tree/blob closure;
+            // parent commits remain independently reconstructable or
+            // residual-backed, so keep walking the native state DAG.
             lossy_roots.push(git_oid);
             stack.extend(state.parents.iter().copied());
         }
@@ -3501,7 +3259,7 @@ pub fn materialize_checkout_closure_from_state(
 
     // Ensure the requested tip is materialized even in the degenerate case where
     // the walk skipped it (e.g. an unmapped store state that nonetheless has a
-    // residual/mirror object): fall back for it. The faithful path above already
+    // residual object): fall back for it. The faithful path above already
     // wrote it when reconstructable, and a redundant root here is pruned by the
     // exclude set / idempotent install.
     if object_repo.read_object(&tip_oid).is_err() && !lossy_roots.contains(&tip_oid) {
@@ -3509,9 +3267,8 @@ pub fn materialize_checkout_closure_from_state(
     }
 
     if !lossy_roots.is_empty() {
-        materialize_lossy_roots_from_residual_or_mirror(
+        materialize_lossy_roots_from_residuals(
             &residual_store,
-            mirror_repo,
             object_repo,
             &lossy_roots,
             excluded,
@@ -3521,165 +3278,29 @@ pub fn materialize_checkout_closure_from_state(
     Ok(())
 }
 
-/// Install lossy roots into `object_repo`: residual first (with lazy mirror
-/// migration into residual storage), then Bridge Mirror reachable copy for any
-/// roots (and their closures) still missing. Hard-fails when a root is present
-/// in neither residual nor mirror.
-fn materialize_lossy_roots_from_residual_or_mirror(
+/// Install complete residual closures for lossy roots into `object_repo`.
+/// Hard-fails when a root does not have one.
+fn materialize_lossy_roots_from_residuals(
     residual_store: &ResidualStore,
-    mirror_repo: &SleyRepository,
     object_repo: &SleyRepository,
     lossy_roots: &[ObjectId],
     excluded: &HashSet<ObjectId>,
 ) -> GitProjectionResult<()> {
-    let format = object_repo.object_format();
-    let mut mirror_needed: Vec<ObjectId> = Vec::new();
-
     for oid in lossy_roots {
         if excluded.contains(oid) || object_repo.read_object(oid).is_ok() {
             continue;
         }
-        // New imports capture the complete commit/tree/blob closure, so a
-        // successful residual install needs no mirror fill. Legacy stores that
-        // have no root residual still use the lazy mirror migration below.
         match residual_store.install_commit_closure_into(object_repo, oid) {
             Ok(true) => {}
             Ok(false) => {
-                // No residual: require mirror (and migrate the root into residual
-                // when the mirror has it).
-                let residual = resolve_lossy_object(
-                    residual_store,
-                    Some(mirror_repo),
-                    format,
-                    oid,
-                    true, // lazy migrate mirror → residual
-                )?;
-                let written = object_repo
-                    .write_object(sley::plumbing::sley_object::EncodedObject::new(
-                        residual.object_type,
-                        residual.body,
-                    ))
-                    .map_err(git_err)?;
-                if written != *oid {
-                    return Err(GitProjectionError::Git(format!(
-                        "lossy materialize wrote {written}, expected {oid}"
-                    )));
-                }
-                mirror_needed.push(*oid);
+                return Err(GitProjectionError::Git(format!(
+                    "mapped non-reconstructable Git object {oid} has no complete Raw Git Object Residual; import or adopt must capture one before projection"
+                )));
             }
             Err(error) => return Err(error),
         }
     }
 
-    if !mirror_needed.is_empty() {
-        // Closure fill for legacy root-only residuals / mirror-only imports.
-        if let Err(error) = copy_reachable_objects_excluding(
-            mirror_repo,
-            object_repo,
-            mirror_needed.iter().copied(),
-            excluded,
-        ) {
-            // Do NOT tolerate the copy error merely because the ROOT commits are
-            // readable — a readable commit whose tree/blob closure is missing is
-            // exactly the silent-corruption case. Only tolerate the mirror being
-            // absent when the residual already supplied the FULL object closure
-            // reachable from every root. Otherwise propagate the copy error.
-            match verify_closure_present(object_repo, &mirror_needed, excluded) {
-                Ok(()) => {
-                    // Full closure already materialized from residual; the mirror
-                    // was genuinely unnecessary. Tolerate its absence.
-                }
-                Err(ClosureCheck::Incomplete { missing }) => {
-                    // Partial closure: the mirror copy failed AND residual did
-                    // not carry the full graph. Hard-error rather than emit a
-                    // corrupt checkout; surface the copy error and the first
-                    // missing object for diagnosis.
-                    return Err(GitProjectionError::Git(format!(
-                        "checkout object closure incomplete after mirror copy failure: \
-missing reachable object {missing} (mirror error: {error})"
-                    )));
-                }
-                Err(ClosureCheck::Walk(walk_error)) => {
-                    // The closure walk itself failed (e.g. a malformed object).
-                    // Prefer surfacing the original mirror copy error, chained.
-                    return Err(GitProjectionError::Git(format!(
-                        "mirror copy failed ({error}); closure verification also failed: {walk_error}"
-                    )));
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Outcome of a failed closure check in [`verify_closure_present`].
-enum ClosureCheck {
-    /// The reachable closure is missing at least one object; `missing` is the
-    /// first such object encountered.
-    Incomplete { missing: ObjectId },
-    /// The walk could not complete (a readable object failed to parse, etc.).
-    Walk(GitProjectionError),
-}
-
-/// Verify that the FULL object closure reachable from each root in `roots` is
-/// present and readable in `object_repo`, honoring `excluded` (objects the
-/// caller has intentionally kept out of the checkout store).
-///
-/// Walks commits → their trees → subtrees/blobs, and tags → their targets.
-/// Gitlink (submodule) entries are not part of this repository's closure and
-/// are skipped. Returns `Ok(())` only when every reachable object is present;
-/// otherwise the first missing object (or a walk failure) is reported so the
-/// caller can hard-error instead of emitting a corrupt checkout.
-fn verify_closure_present(
-    object_repo: &SleyRepository,
-    roots: &[ObjectId],
-    excluded: &HashSet<ObjectId>,
-) -> Result<(), ClosureCheck> {
-    const GITLINK_MODE: u32 = 0o160000;
-
-    let mut stack: Vec<ObjectId> = roots.to_vec();
-    let mut seen: HashSet<ObjectId> = HashSet::new();
-    while let Some(oid) = stack.pop() {
-        if excluded.contains(&oid) || !seen.insert(oid) {
-            continue;
-        }
-        let object = match object_repo.read_object(&oid) {
-            Ok(object) => object,
-            Err(_) => return Err(ClosureCheck::Incomplete { missing: oid }),
-        };
-        match object.object_type {
-            GitObjectType::Commit => {
-                let commit = object_repo
-                    .read_commit(&oid)
-                    .map_err(|err| ClosureCheck::Walk(git_err(err)))?;
-                stack.push(commit.tree);
-                for parent in commit.parents {
-                    stack.push(parent);
-                }
-            }
-            GitObjectType::Tree => {
-                let tree = object_repo
-                    .read_tree(&oid)
-                    .map_err(|err| ClosureCheck::Walk(git_err(err)))?;
-                for entry in tree.entries {
-                    // Submodule pointers reference commits in a foreign repo;
-                    // they are not part of this repo's object closure.
-                    if entry.mode == GITLINK_MODE {
-                        continue;
-                    }
-                    stack.push(entry.oid);
-                }
-            }
-            GitObjectType::Tag => {
-                let tag = object_repo
-                    .read_tag(&oid)
-                    .map_err(|err| ClosureCheck::Walk(git_err(err)))?;
-                stack.push(tag.object);
-            }
-            GitObjectType::Blob => {}
-        }
-    }
     Ok(())
 }
 
@@ -3718,52 +3339,6 @@ pub fn copy_reachable_objects(
     let roots = roots.into_iter().collect::<Vec<_>>();
     heddle_perf_contract::record_git_reachable_copy_operation();
     target.copy_reachable_from(source, &roots).map_err(git_err)
-}
-
-/// Incremental variant of [`copy_reachable_objects`]: copy the closure
-/// reachable from `roots`, skipping every object in `excluded`.
-///
-/// INVARIANT: every OID in `excluded` MUST already be present in `target` — the
-/// walk neither visits nor copies an excluded object (nor anything reachable only
-/// through it), so excluding an object the target is missing would silently drop
-/// it. Callers satisfy this by computing `excluded` as the reachable closure of
-/// something already in `target`. Used by checkpoint write-through, which passes
-/// the prior checkout HEAD's full closure (already entirely in the checkout's
-/// object DB): the new commit's tree re-reaches the parent's unchanged
-/// trees/blobs, so excluding the whole closure — not just the parent commit —
-/// prunes them all, turning per-checkpoint object transfer from O(total history)
-/// into O(objects new since the parent). Output is byte-identical — the same
-/// objects end up in `target`; the pruned ones were already there.
-pub fn copy_reachable_objects_excluding(
-    source: &SleyRepository,
-    target: &SleyRepository,
-    roots: impl IntoIterator<Item = ObjectId>,
-    excluded: &HashSet<ObjectId>,
-) -> GitProjectionResult<()> {
-    if excluded.is_empty() {
-        return copy_reachable_objects(source, target, roots);
-    }
-    if source.object_format() != target.object_format() {
-        // Mismatched formats can't share objects; fall back to the plain copy so
-        // its existing format-mismatch error surfaces unchanged.
-        return copy_reachable_objects(source, target, roots);
-    }
-    // TODO: This local incremental transfer already delegates pack installation
-    // to Sley. Keep future reachable-pack planning Sley-gated here too; Heddle
-    // should not grow its own exclusion-aware pack planner.
-    heddle_perf_contract::record_git_reachable_copy_operation();
-    sley::plumbing::sley_odb::install_reachable_pack_excluding(
-        source.objects().as_ref(),
-        target.objects().as_ref(),
-        target.object_format(),
-        roots,
-        excluded,
-    )
-    .map_err(|error| GitProjectionError::Git(error.to_string()))?;
-    // Make the freshly-installed pack visible to subsequent reads on `target`,
-    // mirroring what `copy_reachable_from` does internally.
-    target.refresh_objects();
-    Ok(())
 }
 
 /// Overlay-authoritative Git refs that a push may serve.
@@ -3810,6 +3385,7 @@ fn collect_authoritative_git_ref_updates(
 /// ownership record. The per-remote manifest separately prevents Heddle from
 /// claiming, rewinding, or deleting destination refs it did not publish.
 pub struct AuthoritativeGitPushOptions<'a> {
+    pub original_cwd: Option<&'a Path>,
     pub heddle_dir: &'a Path,
     pub remote: &'a str,
     pub scope: GitPushScope,
@@ -3824,37 +3400,70 @@ pub fn push_authoritative_git_refs(
     progress: &mut dyn ProgressSink,
 ) -> GitProjectionResult<Vec<String>> {
     let AuthoritativeGitPushOptions {
+        original_cwd,
         heddle_dir,
         remote,
         scope,
         current_branch,
         force,
     } = options;
-    let remote_url = source.remote(remote).map_err(git_err)?.push_url();
+    let remote_context = source.remote(remote).map_err(git_err)?;
+    let remote_policy = RemotePolicy::default();
+    let remote_url = remote_context.push_url();
+    let destination = remote_context.push_destination(source).map_err(git_err)?;
+    let http_client = configured_https_client();
     let manifest_path = network_exported_refs_path(heddle_dir, &remote_url);
     let previously_exported = read_exported_refs_at(&manifest_path)?;
     let managed_record = read_projection_managed_refs(heddle_dir)?;
     let served_frontier =
         collect_authoritative_git_ref_updates(source, &managed_record, scope, current_branch)?;
 
-    let records = source
-        .ls_remote_with_http_client(
-            &remote_url,
-            LsRemoteFilter {
-                heads: false,
-                tags: false,
-                refs_only: true,
-            },
-            &|_| true,
-            credentials,
-            configured_https_client(),
-        )
-        .map_err(git_err)?;
-    let remote_refs = records
-        .into_iter()
-        .filter(|record| GitRefName::new(&record.name).content_namespace().is_some())
-        .map(|record| (record.name, record.oid))
-        .collect::<HashMap<_, _>>();
+    let (remote_refs, http_observation) = match &destination {
+        PushDestination::Http(remote_url) => {
+            let observation = observe_http_receive_pack(
+                HttpReceivePackObservationRequest {
+                    policy: &remote_policy,
+                    remote_url,
+                    format: source.object_format(),
+                    config: remote_context.config(),
+                },
+                credentials,
+                http_client,
+            )
+            .map_err(git_err)?;
+            let refs = observation
+                .refs()
+                .iter()
+                .filter(|record| {
+                    !record.name.ends_with("^{}")
+                        && GitRefName::new(&record.name).content_namespace().is_some()
+                })
+                .map(|record| (record.name.clone(), record.oid))
+                .collect::<HashMap<_, _>>();
+            (refs, Some(observation))
+        }
+        _ => (
+            source
+                .ls_remote_with_http_client(
+                    &remote_policy,
+                    &remote_url,
+                    LsRemoteFilter {
+                        heads: false,
+                        tags: false,
+                        refs_only: true,
+                    },
+                    &|_| true,
+                    credentials,
+                    http_client,
+                )
+                .map_err(git_err)?
+                .into_iter()
+                .filter(|record| GitRefName::new(&record.name).content_namespace().is_some())
+                .map(|record| (record.name, record.oid))
+                .collect::<HashMap<_, _>>(),
+            None,
+        ),
+    };
     let creatable = creatable_ref_names(&served_frontier, scope, current_branch);
     let previously_exported_in_scope = previously_exported
         .iter()
@@ -3906,25 +3515,50 @@ pub fn push_authoritative_git_refs(
             force: false,
         });
     }
-    source
-        .push_actions_with_http_client(
-            remote,
-            PushActionPlan {
-                commands,
-                pack_objects,
-                options: PushOptions {
-                    quiet: true,
-                    force: force || force_transport_checks,
-                    thin: sley::remote::PushThinMode::Auto,
-                    atomic: false,
-                    push_options: Vec::new(),
+    let push_plan = PushActionPlan {
+        commands,
+        pack_objects,
+        options: PushOptions {
+            policy: remote_policy,
+            quiet: true,
+            force: force || force_transport_checks,
+            thin: sley::remote::PushThinMode::Auto,
+            atomic: false,
+            push_options: Vec::new(),
+        },
+    };
+    match (&destination, http_observation) {
+        (PushDestination::Http(remote_url), Some(observation)) => {
+            push_http_actions_with_reader_from_observation(
+                HttpPushActionsRequest {
+                    objects: source.object_database(),
+                    format: source.object_format(),
+                    config: remote_context.config(),
+                    remote_url,
+                    plan: &push_plan,
                 },
-            },
-            credentials,
-            progress,
-            configured_https_client(),
-        )
-        .map_err(git_err)?;
+                PushServices {
+                    credentials,
+                    progress,
+                    cancel: sley::CancelFlag::never(),
+                },
+                observation,
+            )
+            .map_err(git_err)?;
+        }
+        _ => {
+            source
+                .push_actions_with_http_client(
+                    original_cwd,
+                    remote,
+                    push_plan,
+                    credentials,
+                    progress,
+                    http_client,
+                )
+                .map_err(git_err)?;
+        }
+    }
     write_exported_refs_at(&manifest_path, &plan.new_manifest)?;
     Ok(planned_write_names(&plan))
 }
@@ -4101,9 +3735,9 @@ mod tests {
     }
 
     #[test]
-    fn mirror_fetch_refspecs_cover_branches_and_notes() {
+    fn fetch_refspecs_cover_branches_and_notes() {
         assert_eq!(
-            heddle_mirror_fetch_refspecs().expect("mirror refspecs are valid"),
+            heddle_fetch_refspecs().expect("fetch refspecs are valid"),
             [
                 "+refs/heads/*:refs/heads/*".to_string(),
                 "+refs/notes/*:refs/notes/*".to_string(),
@@ -4440,11 +4074,8 @@ mod tests {
             encoding: None,
             message: message.as_bytes().to_vec(),
         };
-        repo.write_object(sley::plumbing::sley_object::EncodedObject::new(
-            GitObjectType::Commit,
-            commit.write(),
-        ))
-        .expect("write test commit")
+        repo.write_raw_object(GitObjectType::Commit, commit.write())
+            .expect("write test commit")
     }
 
     fn seed_commit(repo: &SleyRepository, message: &str) -> ObjectId {
@@ -4534,11 +4165,8 @@ mod tests {
     fn checkout_publish_rolls_back_branch_when_head_reflog_fails() {
         let tmp = tempfile::TempDir::new().unwrap();
         let repo = SleyRepository::init(tmp.path()).expect("init repository");
-        repo.write_object(sley::plumbing::sley_object::EncodedObject::new(
-            GitObjectType::Tree,
-            Vec::new(),
-        ))
-        .expect("write empty tree");
+        repo.write_raw_object(GitObjectType::Tree, Vec::new())
+            .expect("write empty tree");
         let previous = test_commit(&repo, "previous", &[]);
         let next = test_commit(&repo, "next", &[previous]);
         set_reference(

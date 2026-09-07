@@ -9,8 +9,8 @@ use serde_json::Value;
 use sley::{
     CommitObject, EntryKind, GitObjectType, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository,
-    plumbing::{sley_object::EncodedObject, sley_refs::ReflogEntry},
 };
+use sley_refs::ReflogEntry;
 use tempfile::TempDir;
 
 #[path = "support/git_https.rs"]
@@ -21,7 +21,7 @@ use git_https::PrivateCaGitServer;
 struct PullFixture {
     ca_path: PathBuf,
     checkout: PathBuf,
-    _server: PrivateCaGitServer,
+    server: PrivateCaGitServer,
     source_path: PathBuf,
     temp: TempDir,
 }
@@ -67,7 +67,7 @@ impl PullFixture {
         Self {
             ca_path,
             checkout,
-            _server: server,
+            server,
             source_path,
             temp,
         }
@@ -136,11 +136,17 @@ fn git_overlay_push_honours_remote_tls_ca_cert() {
     let fixture = PullFixture::new();
     let pulled = fixture.pull(true);
     assert!(pulled.status.success(), "fixture pull: {}", stderr(&pulled));
+    let requests_before_push = fixture.server.request_count();
     let (pushed, expected) = fixture.push_new_commit();
     assert!(
         pushed.status.success(),
         "private-CA push failed: {}",
         stderr(&pushed)
+    );
+    assert_eq!(
+        fixture.server.request_count() - requests_before_push,
+        2,
+        "smart-HTTP push should make one discovery request and one receive-pack request"
     );
     let source = SleyRepository::open(&fixture.source_path).expect("source repository");
     let actual = source
@@ -169,7 +175,7 @@ fn write_commit(repo: &SleyRepository, parent: Option<ObjectId>, content: &[u8])
         encoding: None,
         message: content.to_vec(),
     };
-    repo.write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
+    repo.write_raw_object(GitObjectType::Commit, commit.write())
         .expect("commit")
 }
 

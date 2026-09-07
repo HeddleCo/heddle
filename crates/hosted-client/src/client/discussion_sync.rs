@@ -106,7 +106,7 @@ use objects::{
     },
     store::ObjectStore,
 };
-use repo::{CollaborationStore, Repository, mark_legacy_discussions_migrated};
+use repo::{CollaborationStore, Repository};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -335,10 +335,9 @@ pub async fn push_discussions(
             Ok(true) => synced += 1,
             Ok(false) => {}
             Err(error) => {
-                eprintln!(
-                    "{} hosted discussion {}: {error:#}",
-                    heddle_cli_render::cli::style::warn_marker(),
-                    discussion_id
+                client.warn(
+                    "hosted_discussion_sync_failed",
+                    format!("hosted discussion {discussion_id}: {error:#}"),
                 );
             }
         }
@@ -409,9 +408,11 @@ async fn push_one(
     if skipped_foreign > 0 {
         // F3: surface principal drift / foreign-authored unpushed turns instead
         // of silently producing an empty candidate set.
-        eprintln!(
-            "{} hosted discussion {local_id}: {skipped_foreign} unlinked turn(s) not attributed to the local principal were left unpublished",
-            heddle_cli_render::cli::style::warn_marker(),
+        client.warn(
+            "hosted_discussion_foreign_attribution",
+            format!(
+                "hosted discussion {local_id}: {skipped_foreign} unlinked turn(s) not attributed to the local principal were left unpublished"
+            ),
         );
     }
     let (index, server_id, mut changed, hosted) =
@@ -583,10 +584,7 @@ async fn push_into_annotation_resolution(
 /// call, and `heddle pull feature --local-thread feature` leaves HEAD on the
 /// current checkout — ListByState must not re-read HEAD.
 ///
-/// Repo-wide: clone/pull and unfiltered `discuss wait`. Hosted discussions
-/// arrive as server-minted `Discussions` state-attachments; we claim the
-/// one-shot legacy blob→op-log marker so those attachments are not also
-/// converted (duplicates / multi-turn diverge).
+/// Repo-wide: clone/pull and unfiltered `discuss wait`.
 pub async fn pull_discussions(
     repo: &Repository,
     client: &mut HostedClient,
@@ -624,15 +622,6 @@ async fn pull_discussions_filtered(
     against: Option<StateId>,
     thread_filter: Option<(&str, &str)>,
 ) -> Result<usize> {
-    // Repo-wide import (clone/pull, unfiltered wait) claims the one-shot
-    // marker so pulled hosted attachments are not also converted. A
-    // `--thread` wait only imports that thread; claiming here would hide
-    // other threads' local legacy discussions from later list/show.
-    if thread_filter.is_none() {
-        mark_legacy_discussions_migrated(repo)
-            .context("claim legacy discussion migration marker")?;
-    }
-
     let Some((head_state, hosted)) =
         listed_hosted_discussions(repo, client, repo_path, bootstrap, against, thread_filter)
             .await?
@@ -669,10 +658,9 @@ async fn pull_discussions_filtered(
             Ok(true) => changed += 1,
             Ok(false) => {}
             Err(error) => {
-                eprintln!(
-                    "{} hosted discussion {}: {error:#}",
-                    heddle_cli_render::cli::style::warn_marker(),
-                    discussion.id
+                client.warn(
+                    "hosted_discussion_sync_failed",
+                    format!("hosted discussion {}: {error:#}", discussion.id),
                 );
             }
         }

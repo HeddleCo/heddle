@@ -527,6 +527,21 @@ impl State {
         StateId::from_content_hash(self.compute_hash())
     }
 
+    /// Encode the canonical named-field msgpack representation used in packs
+    /// and object transfer. Local loose storage may wrap a different encoding,
+    /// but it must not redefine the portable object body.
+    pub fn encode_current_msgpack(&self) -> crate::error::Result<Vec<u8>> {
+        Ok(rmp_serde::to_vec_named(self)?)
+    }
+
+    /// Decode the canonical named-field msgpack representation and restore the
+    /// derived in-memory id omitted from serde.
+    pub fn decode_current_msgpack(bytes: &[u8]) -> crate::error::Result<Self> {
+        let mut state: Self = rmp_serde::from_slice(bytes)?;
+        state.refresh_state_id();
+        Ok(state)
+    }
+
     /// Format-4 identity for agent states hashed before `thought_level` and
     /// `parent` entered the transcript. Graph edges keep this id.
     pub fn pre_cursor_id(&self) -> StateId {

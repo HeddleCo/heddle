@@ -18,7 +18,7 @@
 //! (cli_integration/output_kind_invariant.rs): like that test it drives a
 //! curated set of representative invocations rather than every verb, since
 //! most error conditions need a hand-built fixture. The swept set is the
-//! `init`/`status`/`verify`/`commit`/`push`/`pull` plus the current
+//! `init`/`status`/`verify`/`capture`/`push`/`pull` plus the current
 //! Git projection import/sync/repair surfaces whose codes
 //! `docs/exit-codes.md` documents; `SWEPT_COVERAGE`
 //! guards that each is exercised here.
@@ -37,7 +37,7 @@ const SWEPT_COVERAGE: &[&str] = &[
     "init",
     "status",
     "verify",
-    "commit",
+    "capture",
     "push",
     "pull",
     "bridge git import",
@@ -81,12 +81,6 @@ fn init_repo() -> TempDir {
     temp
 }
 
-fn plain_git_repo() -> TempDir {
-    let temp = TempDir::new().expect("tempdir");
-    git(&["init", "-q", "-b", "main", "."], temp.path());
-    temp
-}
-
 fn adopted_git_overlay() -> TempDir {
     let temp = TempDir::new().expect("tempdir");
     let dir = temp.path();
@@ -123,10 +117,10 @@ fn cases() -> Vec<ErrorCase> {
             fixture: bare_dir,
         },
         ErrorCase {
-            covers: &["commit"],
-            label: "commit before Git Overlay initialization",
-            argv: &["commit", "-m", "again"],
-            fixture: plain_git_repo,
+            covers: &["capture"],
+            label: "capture with no changes",
+            argv: &["capture", "-m", "again"],
+            fixture: init_repo,
         },
         ErrorCase {
             covers: &["push"],

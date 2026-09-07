@@ -2,10 +2,7 @@
 //! Byte-exact annotated Git tag objects stored in Heddle's native CAS.
 
 use serde::{Deserialize, Serialize};
-use sley::{
-    GitObjectType, ObjectFormat as GitObjectFormat, ObjectId as GitObjectId, TagObject,
-    plumbing::sley_object::EncodedObject,
-};
+use sley::{GitObjectType, ObjectFormat as GitObjectFormat, ObjectId as GitObjectId, TagObject};
 use thiserror::Error;
 
 use super::{ContentHash, StateId};
@@ -95,8 +92,7 @@ impl AnnotatedTag {
 
     /// Original Git object id, computed from `tag <len>\0<body>`.
     pub fn git_oid(&self) -> Result<GitObjectId, AnnotatedTagError> {
-        EncodedObject::new(GitObjectType::Tag, self.body.clone())
-            .object_id(self.git_format()?)
+        sley_core::object_id_for_bytes(self.git_format()?, GitObjectType::Tag.as_str(), &self.body)
             .map_err(|error| AnnotatedTagError::InvalidGitTag(error.to_string()))
     }
 
@@ -197,7 +193,7 @@ fn git_object_type_name(kind: GitObjectType) -> &'static str {
 #[derive(Debug, Error)]
 pub enum AnnotatedTagError {
     #[error(
-        "unsupported annotated-tag format version {found}; this binary supports {supported}; upgrade heddle or run `heddle migrate`"
+        "unsupported annotated-tag format version {found}; this binary supports {supported}; recreate the repository or re-adopt its Git history with this Heddle version"
     )]
     UnsupportedVersion { found: u8, supported: u8 },
     #[error("unknown annotated-tag Git object format {0}")]

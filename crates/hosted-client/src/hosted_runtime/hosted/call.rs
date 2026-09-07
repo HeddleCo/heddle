@@ -40,19 +40,23 @@ where
     require_shape(method, StreamingShape::Unary)?;
     let frame =
         encode_request_frame(method, context, encoded_request).map_err(HostedError::framing)?;
+    let frame_len = frame.len();
     let (mut send, mut recv) = connection
         .connection
         .open_bi()
         .await
         .map_err(HostedError::transport)?;
+    heddle_perf_contract::record_network_stream_opened();
     send.write_chunk(Bytes::from(frame))
         .await
         .map_err(HostedError::transport)?;
+    heddle_perf_contract::record_network_bytes_sent(frame_len);
     send.finish().map_err(HostedError::transport)?;
     let response = recv
         .read_to_end(MAX_CONTROL_BODY + 1)
         .await
         .map_err(HostedError::transport)?;
+    heddle_perf_contract::record_network_bytes_received(response.len());
     match decode_response_frame(&response).map_err(HostedError::framing)? {
         ResponseFrame::Success(body) => Response::decode(body).map_err(HostedError::from),
         ResponseFrame::Failure(failure) => Err(failure.into()),
@@ -72,14 +76,17 @@ where
     require_shape(method, StreamingShape::ServerStreaming)?;
     let mut frame = encode_request_prelude(method, context).map_err(HostedError::framing)?;
     frame.extend_from_slice(&request.encode_to_vec());
+    let frame_len = frame.len();
     let (mut send, recv) = connection
         .connection
         .open_bi()
         .await
         .map_err(HostedError::transport)?;
+    heddle_perf_contract::record_network_stream_opened();
     send.write_chunk(Bytes::from(frame))
         .await
         .map_err(HostedError::transport)?;
+    heddle_perf_contract::record_network_bytes_sent(frame_len);
     send.finish().map_err(HostedError::transport)?;
     Ok(ServerStream::new(connection, recv))
 }
@@ -95,14 +102,17 @@ where
 {
     require_shape(method, StreamingShape::Bidirectional)?;
     let prelude = encode_request_prelude(method, context).map_err(HostedError::framing)?;
+    let prelude_len = prelude.len();
     let (mut send, recv) = connection
         .connection
         .open_bi()
         .await
         .map_err(HostedError::transport)?;
+    heddle_perf_contract::record_network_stream_opened();
     send.write_chunk(Bytes::from(prelude))
         .await
         .map_err(HostedError::transport)?;
+    heddle_perf_contract::record_network_bytes_sent(prelude_len);
     Ok(BidirectionalStream {
         send: Some(send),
         responses: ServerStream::new(connection, recv),
@@ -182,7 +192,10 @@ where
                 .await
                 .map_err(HostedError::transport)?
             {
-                Some(chunk) => self.buffered.extend_from_slice(&chunk),
+                Some(chunk) => {
+                    heddle_perf_contract::record_network_bytes_received(chunk.len());
+                    self.buffered.extend_from_slice(&chunk);
+                }
                 None if self.buffered.is_empty() => {
                     self.finished = true;
                     return Ok(None);
@@ -222,6 +235,7 @@ where
                 "stream ended within a declared raw body".to_string(),
             ));
         };
+        heddle_perf_contract::record_network_bytes_received(chunk.len());
         let accepted = chunk
             .len()
             .min(usize::try_from(self.raw_remaining).unwrap_or(usize::MAX));
@@ -293,12 +307,15 @@ where
         }
         encode_stream_message_into(&mut self.control, &request.encode_to_vec())
             .map_err(HostedError::framing)?;
+        let frame_len = self.control.len();
         self.send
             .as_mut()
             .ok_or_else(|| HostedError::Framing("request stream is finished".to_string()))?
             .write_all(&self.control)
             .await
-            .map_err(HostedError::transport)
+            .map_err(HostedError::transport)?;
+        heddle_perf_contract::record_network_bytes_sent(frame_len);
+        Ok(())
     }
 
     pub fn finish_requests(&mut self) -> Result<()> {
@@ -345,12 +362,15 @@ where
         }
         encode_stream_message_into(&mut self.control, &request.encode_to_vec())
             .map_err(HostedError::framing)?;
+        let frame_len = self.control.len();
         self.send
             .as_mut()
             .ok_or_else(|| HostedError::Framing("request stream is finished".to_string()))?
             .write_all(&self.control)
             .await
-            .map_err(HostedError::transport)
+            .map_err(HostedError::transport)?;
+        heddle_perf_contract::record_network_bytes_sent(frame_len);
+        Ok(())
     }
 
     pub async fn begin_raw(&mut self, length: u64) -> Result<()> {
@@ -361,12 +381,14 @@ where
         }
         api::framing::encode_stream_raw_body_into(&mut self.control, length)
             .map_err(HostedError::framing)?;
+        let frame_len = self.control.len();
         self.send
             .as_mut()
             .ok_or_else(|| HostedError::Framing("request stream is finished".to_string()))?
             .write_all(&self.control)
             .await
             .map_err(HostedError::transport)?;
+        heddle_perf_contract::record_network_bytes_sent(frame_len);
         self.raw_remaining = length;
         Ok(())
     }
@@ -384,6 +406,7 @@ where
             .write_chunk(chunk)
             .await
             .map_err(HostedError::transport)?;
+        heddle_perf_contract::record_network_bytes_sent(length as usize);
         self.raw_remaining -= length;
         Ok(())
     }

@@ -121,8 +121,12 @@ impl DaemonClaimRouter {
     /// with a `FailedPrecondition` the browser can surface — never a
     /// hang, and never a co-sign the daemon performed itself.
     pub async fn serve_owner_root_bridge(mut self, socket_path: PathBuf) -> Result<()> {
-        let listener = bind_bridge_listener(&socket_path)
-            .with_context(|| format!("binding claim co-sign bridge socket {}", socket_path.display()))?;
+        let listener = bind_bridge_listener(&socket_path).with_context(|| {
+            format!(
+                "binding claim co-sign bridge socket {}",
+                socket_path.display()
+            )
+        })?;
         let mut worker: Option<UnixStream> = None;
         loop {
             tokio::select! {
@@ -326,8 +330,8 @@ async fn cosign_owner_root_request(request_frame: &[u8], client: &HostedClient) 
 /// Bind the co-sign bridge socket, reusing the mount daemon's mode-0600,
 /// fail-closed, same-uid binder so a live worker socket is never stolen.
 fn bind_bridge_listener(socket_path: &Path) -> Result<UnixListener> {
-    let listener = repo::daemon::bind_unix_socket(socket_path)
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let listener =
+        repo::daemon::bind_unix_socket(socket_path).map_err(|error| anyhow::anyhow!("{error}"))?;
     listener
         .set_nonblocking(true)
         .context("marking claim bridge socket non-blocking")?;

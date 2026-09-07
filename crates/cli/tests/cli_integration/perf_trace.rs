@@ -140,16 +140,16 @@ fn perf_trace_jsonl_status_reports_structural_counters() {
         "ref_reads",
         "oplog_reads",
         "repository_opens",
+        "network_client_initializations",
+        "network_streams_opened",
+        "network_bytes_sent",
+        "network_bytes_received",
         "ancestors_visited",
         "history_objects_decoded",
     ] {
         assert!(metrics.contains_key(name), "missing `{name}` in {trace}");
     }
-    assert_eq!(
-        metrics["network_client_initialized"]["value"],
-        Value::Bool(false),
-        "local status must report an actual false boolean: {trace}"
-    );
+    assert_eq!(metrics["network_client_initializations"]["value"], 0);
 }
 
 #[test]
@@ -176,8 +176,8 @@ fn perf_trace_jsonl_version_reports_startup_totals() {
             .unwrap()
             .iter()
             .find(|phase| phase["name"] == "structural counters")
-            .unwrap()["metrics"]["network_client_initialized"]["value"],
-        Value::Bool(false)
+            .unwrap()["metrics"]["network_client_initializations"]["value"],
+        0
     );
 }
 

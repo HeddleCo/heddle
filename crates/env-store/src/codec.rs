@@ -2,15 +2,16 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Result, EnvStoreError};
-use crate::ids::{
-    AuditRecordId, CiphertextId, LifecycleRecordId, RecipientId, EnvProfileId,
-    EnvProfileVersionId,
-};
-use crate::types::{
-    AuditRecord, FacetKindWire, LifecycleRecord, LifecycleStatus, ProviderCapability,
-    ENV_STORE_SCHEMA_VERSION, RecipientDescriptor, EnvProfileRef, EnvProfileVersion,
-    SlotRecord,
+use crate::{
+    error::{EnvStoreError, Result},
+    ids::{
+        AuditRecordId, CiphertextId, EnvProfileId, EnvProfileVersionId, LifecycleRecordId,
+        RecipientId,
+    },
+    types::{
+        AuditRecord, ENV_STORE_SCHEMA_VERSION, EnvProfileRef, EnvProfileVersion, FacetKindWire,
+        LifecycleRecord, LifecycleStatus, ProviderCapability, RecipientDescriptor, SlotRecord,
+    },
 };
 
 #[derive(Deserialize)]
@@ -22,9 +23,7 @@ fn require_v1(bytes: &[u8], what: &str) -> Result<()> {
     let probe: VersionProbe = rmp_serde::from_slice(bytes)
         .map_err(|err| EnvStoreError::Decoding(format!("decode {what} version: {err}")))?;
     if probe.schema_version != ENV_STORE_SCHEMA_VERSION {
-        return Err(EnvStoreError::UnsupportedVersion(
-            probe.schema_version,
-        ));
+        return Err(EnvStoreError::UnsupportedVersion(probe.schema_version));
     }
     Ok(())
 }
@@ -36,9 +35,8 @@ pub fn encode_named<T: Serialize>(value: &T, what: &str) -> Result<Vec<u8>> {
 
 pub fn decode_ref(bytes: &[u8]) -> Result<EnvProfileRef> {
     require_v1(bytes, "heddle-env-ref")?;
-    let decoded: EnvProfileRef = rmp_serde::from_slice(bytes).map_err(|err| {
-        EnvStoreError::Decoding(format!("decode heddle-env-ref: {err}"))
-    })?;
+    let decoded: EnvProfileRef = rmp_serde::from_slice(bytes)
+        .map_err(|err| EnvStoreError::Decoding(format!("decode heddle-env-ref: {err}")))?;
     if decoded.facet != FacetKindWire::ConfidentialRuntime {
         return Err(EnvStoreError::Invalid(
             "env store facet must be confidential-runtime".to_string(),
@@ -49,9 +47,8 @@ pub fn decode_ref(bytes: &[u8]) -> Result<EnvProfileRef> {
 
 pub fn decode_state(bytes: &[u8]) -> Result<EnvProfileVersion> {
     require_v1(bytes, "heddle-env-state")?;
-    let decoded: EnvProfileVersion = rmp_serde::from_slice(bytes).map_err(|err| {
-        EnvStoreError::Decoding(format!("decode heddle-env-state: {err}"))
-    })?;
+    let decoded: EnvProfileVersion = rmp_serde::from_slice(bytes)
+        .map_err(|err| EnvStoreError::Decoding(format!("decode heddle-env-state: {err}")))?;
     let expected = EnvProfileVersionId::for_bytes(&state_id_payload(&decoded)?);
     if decoded.state_id != expected {
         return Err(EnvStoreError::Invalid(
@@ -63,8 +60,8 @@ pub fn decode_state(bytes: &[u8]) -> Result<EnvProfileVersion> {
 
 /// Canonical bytes hashed into `EnvProfileVersionId`.
 ///
-/// Lifecycle is excluded: signed lifecycle records advance status on an
-/// immutable version without minting a new identity.
+/// Signed lifecycle records are the sole source of current status and never
+/// rewrite the immutable version.
 pub fn state_id_payload(state: &EnvProfileVersion) -> Result<Vec<u8>> {
     #[derive(Serialize)]
     struct StateIdentity<'a> {
@@ -96,9 +93,8 @@ pub fn state_id_payload(state: &EnvProfileVersion) -> Result<Vec<u8>> {
 
 pub fn decode_recipient(bytes: &[u8]) -> Result<RecipientDescriptor> {
     require_v1(bytes, "heddle-env-recipient")?;
-    rmp_serde::from_slice(bytes).map_err(|err| {
-        EnvStoreError::Decoding(format!("decode heddle-env-recipient: {err}"))
-    })
+    rmp_serde::from_slice(bytes)
+        .map_err(|err| EnvStoreError::Decoding(format!("decode heddle-env-recipient: {err}")))
 }
 
 pub fn recipient_endorsement_payload(descriptor: &RecipientDescriptor) -> Result<Vec<u8>> {
@@ -154,17 +150,15 @@ pub fn lifecycle_signing_payload(record: &LifecycleRecord) -> Result<Vec<u8>> {
 
 pub fn decode_lifecycle(bytes: &[u8]) -> Result<LifecycleRecord> {
     require_v1(bytes, "heddle-env-lifecycle")?;
-    let decoded: LifecycleRecord = rmp_serde::from_slice(bytes).map_err(|err| {
-        EnvStoreError::Decoding(format!("decode heddle-env-lifecycle: {err}"))
-    })?;
+    let decoded: LifecycleRecord = rmp_serde::from_slice(bytes)
+        .map_err(|err| EnvStoreError::Decoding(format!("decode heddle-env-lifecycle: {err}")))?;
     Ok(decoded)
 }
 
 pub fn decode_ciphertext(bytes: &[u8]) -> Result<StoredCiphertext> {
     require_v1(bytes, "heddle-env-ciphertext")?;
-    let decoded: StoredCiphertext = rmp_serde::from_slice(bytes).map_err(|err| {
-        EnvStoreError::Decoding(format!("decode heddle-env-ciphertext: {err}"))
-    })?;
+    let decoded: StoredCiphertext = rmp_serde::from_slice(bytes)
+        .map_err(|err| EnvStoreError::Decoding(format!("decode heddle-env-ciphertext: {err}")))?;
     let expected = CiphertextId::for_bytes(&ciphertext_id_payload(&decoded)?);
     if decoded.ciphertext_id != expected {
         return Err(EnvStoreError::Invalid(
@@ -187,7 +181,7 @@ pub struct StoredCiphertext {
 }
 
 impl StoredCiphertext {
-    pub fn from_aead(sealed: &crypto::AeadCiphertext) -> Result<(Self, CiphertextId, Vec<u8>)> {
+    pub fn from_aead(sealed: &crypto::AeadCiphertext) -> Result<(CiphertextId, Vec<u8>)> {
         let mut provisional = Self {
             schema_version: ENV_STORE_SCHEMA_VERSION,
             ciphertext_id: CiphertextId::from_bytes([0; 32]),
@@ -200,7 +194,7 @@ impl StoredCiphertext {
         let id = CiphertextId::for_bytes(&identity);
         provisional.ciphertext_id = id;
         let bytes = encode_named(&provisional, "heddle-env-ciphertext")?;
-        Ok((provisional, id, bytes))
+        Ok((id, bytes))
     }
 }
 
@@ -251,8 +245,6 @@ pub fn audit_signing_payload(record: &AuditRecord) -> Result<Vec<u8>> {
         profile_name: &'a str,
         state_id: Option<EnvProfileVersionId>,
         slots: &'a [String],
-        purpose: &'a str,
-        caller: &'a str,
         event: crate::types::AuditEventKind,
         reason: &'a Option<String>,
         occurred_at_ms: i64,
@@ -266,8 +258,6 @@ pub fn audit_signing_payload(record: &AuditRecord) -> Result<Vec<u8>> {
             profile_name: &record.profile_name,
             state_id: record.state_id,
             slots: &record.slots,
-            purpose: &record.purpose,
-            caller: &record.caller,
             event: record.event,
             reason: &record.reason,
             occurred_at_ms: record.occurred_at_ms,

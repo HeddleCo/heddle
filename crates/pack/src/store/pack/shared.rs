@@ -160,7 +160,7 @@ fn verify_supported_container_with(data: &[u8], layout_only: bool) -> Result<(u6
     }
     if version < current.version {
         return Err(StoreError::InvalidObject(format!(
-            "pack uses unsupported format version {version}; run `heddle migrate`"
+            "pack uses unsupported format version {version}; recreate the repository or re-adopt its Git history with this Heddle version"
         )));
     }
     if layout_only {

@@ -487,6 +487,7 @@ fn forbidden_invocation_issue(file: &str, inv: &DocsInvocation) -> Option<DocsIs
     let retired = matches!(
         verb,
         "checkpoint"
+            | "commit"
             | "cherry-pick"
             | "git-overlay"
             | "support"
@@ -497,7 +498,7 @@ fn forbidden_invocation_issue(file: &str, inv: &DocsInvocation) -> Option<DocsIs
     );
     if retired {
         let suggestion = match verb {
-            "checkpoint" => "use `heddle capture`, then `heddle commit` in Git Overlay",
+            "checkpoint" | "commit" => "use `heddle capture`",
             "actor" | "session" => "inspect the `heddle agent` command family",
             _ => "remove the retired Heddle command recommendation",
         };

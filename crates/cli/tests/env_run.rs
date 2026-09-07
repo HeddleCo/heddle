@@ -156,7 +156,7 @@ fn env_create_then_run_uses_cli_and_leaves_no_plaintext() {
 }
 
 #[test]
-fn env_run_refuses_wrong_profile_expired_ttl_and_json() {
+fn env_run_refuses_wrong_profile_and_json() {
     let temp = TempDir::new().expect("temp repo");
     let home = temp.path().join("home");
     let repo = temp.path().join("repo");
@@ -171,22 +171,6 @@ fn env_run_refuses_wrong_profile_expired_ttl_and_json() {
         &["env", "run", "--profile", "missing", "--", "true"],
     );
     assert!(!missing.status.success());
-
-    let expired = run_heddle(
-        &repo,
-        &home,
-        &[
-            "env",
-            "run",
-            "--profile",
-            "production",
-            "--ttl",
-            "0",
-            "--",
-            "true",
-        ],
-    );
-    assert!(!expired.status.success());
 
     let json = run_heddle(
         &repo,

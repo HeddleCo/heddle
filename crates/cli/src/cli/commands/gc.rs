@@ -18,13 +18,12 @@ use objects::store::{
     ObjectStore, PackInstallMetricsSnapshot, pack_install_metrics_snapshot,
     recover_pack_install_intents,
 };
-use repo::TimelineStore;
+use repo::{RepositoryCapability, TimelineStore};
 use serde::Serialize;
 use verbs::{
     gc_plan::{
-        gc_consolidated_mirror_message, gc_dry_run_messages, gc_pack_message,
-        gc_preserved_redactions_message, gc_prune_loose_message, gc_pruned_git_mapping_message,
-        gc_status_token, plan_gc_dry_run,
+        gc_dry_run_messages, gc_pack_message, gc_preserved_redactions_message,
+        gc_prune_loose_message, gc_pruned_git_mapping_message, gc_status_token, plan_gc_dry_run,
     },
     maintenance_plan::{pack_install_recover_line, unpaired_packs_pruned_line},
 };
@@ -60,8 +59,6 @@ struct GcOutput {
     preserved_redactions: usize,
     #[cfg(feature = "git-overlay")]
     pruned_git_mapping_entries: usize,
-    #[cfg(feature = "git-overlay")]
-    consolidated_mirror_loose: usize,
 }
 
 pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result<()> {
@@ -147,25 +144,11 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
 
         #[cfg(feature = "git-overlay")]
         {
-            let mut bridge = GitProjection::new(&repo);
-            if bridge.is_initialized() {
+            if repo.capability() == RepositoryCapability::GitOverlay {
+                let mut bridge = GitProjection::new(&repo);
                 let removed = bridge.prune_unreachable_mapping_entries()?;
                 summary.pruned_git_mapping_entries = removed;
                 if !json && let Some(msg) = gc_pruned_git_mapping_message(removed) {
-                    println!("{msg}");
-                }
-
-                // Consolidate the Bridge Mirror (`.heddle/git`): pack its
-                // loose objects and drop the redundant loose copies. The mirror
-                // is a separate object store (Sley's Git ODB) from Heddle's
-                // native store packed above, and accumulates a loose object per
-                // minted/imported commit, tree, and blob — the dominant
-                // uninstrumented read cost. Lossless + OID-preserving (packs
-                // every object on disk, content-addressed); see
-                // `GitProjection::consolidate_mirror`.
-                let consolidated = bridge.consolidate_mirror()?;
-                summary.consolidated_mirror_loose = consolidated;
-                if !json && let Some(msg) = gc_consolidated_mirror_message(consolidated) {
                     println!("{msg}");
                 }
             }

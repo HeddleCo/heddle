@@ -297,7 +297,7 @@ impl OpLog {
         match SegmentedOpLogIndex::is_healthy(&path) {
             Ok(true) => return Ok(()),
             Err(
-                error @ (HeddleError::StorageFormatMigrationRequired { .. }
+                error @ (HeddleError::StorageFormatTooOld { .. }
                 | HeddleError::StorageFormatTooNew { .. }),
             ) => {
                 return Err(error);
@@ -402,7 +402,7 @@ impl OpLog {
         match SegmentedOpLogIndex::open(path) {
             Ok(index) => Ok(index),
             Err(
-                error @ (HeddleError::StorageFormatMigrationRequired { .. }
+                error @ (HeddleError::StorageFormatTooOld { .. }
                 | HeddleError::StorageFormatTooNew { .. }),
             ) => Err(error),
             Err(_) => {

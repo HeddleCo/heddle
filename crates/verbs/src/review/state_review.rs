@@ -897,19 +897,27 @@ mod tests {
 
     use super::*;
 
-    fn fresh_review() -> (LocalStateReview, Arc<Repository>, TempDir) {
+    fn fresh_review_with_principal(
+        name: &str,
+        email: &str,
+    ) -> (LocalStateReview, Arc<Repository>, TempDir) {
         let temp = TempDir::new().expect("create tempdir");
-        // SAFETY: these serial tests own the process-global attribution.
-        unsafe {
-            std::env::set_var("HEDDLE_PRINCIPAL_NAME", "Alice Tester");
-            std::env::set_var("HEDDLE_PRINCIPAL_EMAIL", "alice@example.com");
-        }
         let repo = Repository::init_default(temp.path()).expect("init repo");
+        let mut config = repo.config().clone();
+        config.set_principal(name, email);
+        config
+            .save(&repo.heddle_dir().join("config.toml"))
+            .expect("save test principal");
+        let repo = Repository::open(temp.path()).expect("reopen configured repo");
         let dedup = OperationDedupStore::open(repo.heddle_dir()).expect("open dedup");
         let repo = Arc::new(repo);
         let review =
             LocalStateReview::new(LocalReviewContext::new(Arc::clone(&repo), Arc::new(dedup)));
         (review, repo, temp)
+    }
+
+    fn fresh_review() -> (LocalStateReview, Arc<Repository>, TempDir) {
+        fresh_review_with_principal("Alice Tester", "alice@example.com")
     }
 
     fn capture_state(repo: &Repository, content: &[u8]) -> StateId {
@@ -938,7 +946,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(process_global)]
     async fn local_interface_signs_lists_and_replays_without_protocol_types() {
         let (review, repo, _temp) = fresh_review();
         let state_id = capture_state(&repo, b"hello\n");
@@ -960,7 +967,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(process_global)]
     async fn legacy_prost_replay_is_a_controlled_operation_id_conflict() {
         use repo::operation_dedup::hash_request_body;
 
@@ -1006,7 +1012,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(process_global)]
     async fn local_interface_rejects_a_forged_signature() {
         let (review, repo, _temp) = fresh_review();
         let state_id = capture_state(&repo, b"hello\n");
@@ -1033,7 +1038,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(process_global)]
     async fn local_interface_rejects_the_reserved_verdict_envelope_prefix() {
         let (review, repo, _temp) = fresh_review();
         let state_id = capture_state(&repo, b"hello\n");
@@ -1059,7 +1063,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(process_global)]
     async fn local_interface_rejects_a_skewed_timestamp() {
         let (review, repo, _temp) = fresh_review();
         let state_id = capture_state(&repo, b"hello\n");
@@ -1085,16 +1088,21 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(process_global)]
     async fn local_interface_attributes_the_signature_to_the_current_principal() {
-        let (review, repo, _temp) = fresh_review();
-        let state_id = capture_state(&repo, b"hello\n");
+        let (review, repo, _temp) = fresh_review_with_principal("Bob Signer", "bob@example.com");
+        std::fs::write(repo.root().join("hello.txt"), b"hello\n").expect("write file");
+        let state_id = repo
+            .snapshot_with_attribution(
+                Some("seed".to_string()),
+                None,
+                objects::object::Attribution::human(objects::object::Principal::new(
+                    "Alice Author",
+                    "alice@example.com",
+                )),
+            )
+            .expect("snapshot")
+            .state_id;
 
-        // SAFETY: this serial test owns the process-global attribution.
-        unsafe {
-            std::env::set_var("HEDDLE_PRINCIPAL_NAME", "Bob Signer");
-            std::env::set_var("HEDDLE_PRINCIPAL_EMAIL", "bob@example.com");
-        }
         review
             .sign_state(sign_request(state_id, ""))
             .await
@@ -1111,7 +1119,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(process_global)]
     async fn local_interface_serializes_concurrent_signature_appends() {
         let (review, repo, _temp) = fresh_review();
         let state_id = capture_state(&repo, b"hello\n");
@@ -1134,7 +1141,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(process_global)]
     fn local_payload_exposes_domain_summary_signals_and_reading_order() {
         let (review, repo, _temp) = fresh_review();
         let state_id = capture_state(&repo, b"first\nsecond\nthird\n");
@@ -1189,7 +1195,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(process_global)]
     fn local_payload_surfaces_gitlink_target_changes() {
         let (review, repo, _temp) = fresh_review();
         let old_target = "0303030303030303030303030303030303030303"
@@ -1234,7 +1239,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(process_global)]
     fn local_payload_tolerates_a_missing_tree() {
         let (review, repo, _temp) = fresh_review();
         let state_id = capture_state(&repo, b"hello\n");
@@ -1264,7 +1268,6 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(process_global)]
     fn local_payload_surfaces_persisted_risk_signals_without_all_signals_flag() {
         let (review, repo, _temp) = fresh_review();
         let state_id = capture_state(&repo, b"hello\n");

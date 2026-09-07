@@ -243,51 +243,6 @@ impl<'a> GitProjection<'a> {
         }
         Ok(removed)
     }
-
-    /// Consolidate the legacy Bridge Mirror (`.heddle/git`) — the bare Sley repo used
-    /// by explicit Git projection import/export/sync paths — by packing every
-    /// on-disk object into a single pack and dropping the now-redundant loose
-    /// copies.
-    ///
-    /// The mirror accumulates one loose object per minted/imported commit, tree,
-    /// and blob (thousands on a real clone). Loose-object reads dominate legacy Bridge Mirror import/export
-    /// and reconstruction paths. Active Git-overlay status
-    /// and checkpoint paths use the checkout's real `.git` repository, not this
-    /// mirror. `heddle maintenance gc` already consolidates Heddle's native
-    /// store; this brings the legacy Bridge Mirror to parity.
-    ///
-    /// Correctness: this uses [`repack_all_objects`], which gathers EVERY object
-    /// on disk (every loose object and every pack), not the reachability closure
-    /// of any ref set. That matters because the mirror holds more than the
-    /// current checkout — every thread's `refs/heads/*`, markers, `refs/notes/heddle`,
-    /// and the served-frontier record — AND because some lossy/non-UTF8 imports'
-    /// verbatim bytes live ONLY in the mirror and cannot be re-minted from heddle
-    /// state (see `git_export.rs` `commit_is_byte_faithful`). Packing everything
-    /// on disk preserves all of them and is content-addressed, so OIDs are
-    /// byte-for-byte unchanged. The prune only drops loose objects whose canonical
-    /// copy is now in the new pack, so it is lossless and fsck stays clean.
-    /// Idempotent: a second run finds nothing new loose and is a no-op.
-    ///
-    /// Returns the number of loose objects consolidated into the pack (and thus
-    /// removed from disk). `Ok(0)` when the mirror has no objects to pack.
-    #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
-    pub fn consolidate_mirror(&self) -> GitProjectionResult<usize> {
-        use sley::plumbing::sley_odb::{install_repack_result, repack_all_objects};
-
-        let repo = self.open_git_repo()?;
-        let git_dir = repo.git_dir().to_path_buf();
-        let format = repo.object_format();
-
-        let Some(result) = repack_all_objects(&git_dir, format).map_err(git_err)? else {
-            return Ok(0);
-        };
-        let pruned_loose = result.packed_loose.len();
-        // prune = true: write the new pack, then drop the loose objects and
-        // superseded packs the new pack now serves (install-before-delete; the
-        // installer validates the new pack's checksum before removing anything).
-        install_repack_result(&git_dir, format, &result, true).map_err(git_err)?;
-        Ok(pruned_loose)
-    }
 }
 
 /// Walk all branch- and tag-tipped commit ancestry. Skips refs that peel
@@ -313,11 +268,7 @@ fn collect_commit_oids(repo: &SleyRepository) -> GitProjectionResult<Vec<SleyObj
                 oid
             }
         };
-        if let Ok(commit_oid) = sley::plumbing::sley_rev::peel_to_commit(
-            repo.objects().as_ref(),
-            repo.object_format(),
-            &oid,
-        ) {
+        if let Ok(commit_oid) = repo.peel_to_commit_oid(oid) {
             tips.push(commit_oid);
         }
     }

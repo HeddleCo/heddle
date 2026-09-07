@@ -22,10 +22,7 @@ use objects::{
     store::{ObjectStore, StoreError},
 };
 use repo::Repository as HeddleRepository;
-use sley::{
-    GitObjectType, ObjectFormat, ObjectId, Repository as SleyRepository,
-    plumbing::sley_object::EncodedObject,
-};
+use sley::{GitObjectType, ObjectFormat, ObjectId, Repository as SleyRepository};
 
 use crate::{
     git_core::{GitProjection, GitProjectionError, GitProjectionResult, SyncMapping, git_err},
@@ -51,7 +48,7 @@ pub fn frame_git_object(kind: &str, content: &[u8]) -> Vec<u8> {
 /// `content`: frame per §0, then hash. Equals the original commit SHA exactly
 /// when `content` is byte-identical to the original object.
 pub fn commit_object_id(content: &[u8]) -> ObjectId {
-    sley::plumbing::sley_core::object_id_for_bytes(ObjectFormat::Sha1, "commit", content)
+    sley_core::object_id_for_bytes(ObjectFormat::Sha1, "commit", content)
         .expect("SHA-1 commit object id over in-memory bytes cannot fail")
 }
 
@@ -89,13 +86,10 @@ pub fn reconstruct_commit_bytes(
 /// the original.
 ///
 /// This is the write side of export-from-state (#567): export regenerates each
-/// commit object from Heddle state and writes it here, rather than relying on the
-/// git mirror still holding the verbatim imported bytes — the dependency #568
-/// removes. Idempotent: sley's object writer hashes first and no-ops when the
-/// object already exists, so re-writing a commit the mirror already carries (the
-/// common case today) costs nothing.
+/// commit object from Heddle state and writes it here. Idempotent: sley's object
+/// writer hashes first and no-ops when the object already exists.
 pub fn write_commit_object(repo: &SleyRepository, content: &[u8]) -> GitProjectionResult<ObjectId> {
-    repo.write_object(EncodedObject::new(GitObjectType::Commit, content.to_vec()))
+    repo.write_raw_object(GitObjectType::Commit, content.to_vec())
         .map_err(git_err)
 }
 
@@ -118,10 +112,7 @@ pub fn write_tag_object(
         ));
     }
     let oid = repo
-        .write_object(EncodedObject::new(
-            GitObjectType::Tag,
-            reconstruct_tag_bytes(tag),
-        ))
+        .write_raw_object(GitObjectType::Tag, reconstruct_tag_bytes(tag))
         .map_err(git_err)?;
     let expected = tag
         .git_oid()
@@ -283,7 +274,7 @@ impl GitProjection<'_> {
     }
 
     /// Reconstruct the byte-exact commit content for `state` against `repo` (see
-    /// [`reconstruct_commit_bytes`]), using the bridge's import-built mapping for
+    /// [`reconstruct_commit_bytes`]), using the import-built mapping for
     /// parent OIDs.
     pub fn reconstruct_commit_bytes(
         &self,
@@ -296,8 +287,7 @@ impl GitProjection<'_> {
     /// Reconstruct `state`'s commit object from Heddle state and WRITE it into
     /// `repo`'s object database, returning its git OID (see [`write_commit_object`]).
     /// The export's commit-minting step (#567): the object is regenerated from
-    /// state, so it lands at the original SHA without the mirror needing to hold
-    /// the verbatim bytes.
+    /// state, so it lands at the original SHA without a second object warehouse.
     pub fn reconstruct_and_write_commit(
         &self,
         repo: &SleyRepository,
@@ -337,7 +327,7 @@ impl GitProjection<'_> {
     /// #567 export-from-state path is exercisable against an arbitrary repo —
     /// notably a FRESH one that never received the verbatim imported bytes, which
     /// is how the export gate proves the object is regenerated from state, not
-    /// copied from the mirror.
+    /// copied from retained Git storage.
     pub fn reconstruct_and_write_commit_for_git_sha(
         &self,
         repo: &SleyRepository,

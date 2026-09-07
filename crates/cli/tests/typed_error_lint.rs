@@ -98,7 +98,7 @@ fn untyped_error_sites_do_not_regress() {
 /// Recovery/advice surfaces used to emit a recommended action three ways:
 /// a human `_string`, a parsed `_argv`, and a fillable `_template`. The
 /// `_argv` sibling is a trap: it is `null` for every placeholder action
-/// (`heddle commit -m "<message>"`), so an agent that prefers `_argv` to
+/// (`heddle capture -m "<message>"`), so an agent that prefers `_argv` to
 /// avoid shell parsing reads `null`, treats it as "no action," and
 /// silently skips recovery. We collapsed the triplet to one canonical
 /// machine shape (`_template`, always present for a valid action) plus the

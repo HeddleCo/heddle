@@ -204,7 +204,7 @@ make_agent_capture_edit() {
   esac
 }
 
-make_agent_commit_edit() {
+make_agent_save_edit() {
   local repo="$1"
   local shape="$2"
   local round="$3"
@@ -407,7 +407,7 @@ PYJSON
 assert_transcript_claims() {
   local transcript="$1"
   for needle in \
-    '"commit"' \
+    '"capture"' \
     '"undo"' \
     '"pull"' \
     '"push"' \
@@ -808,10 +808,6 @@ for arg in args[1:]:
   else
     run_json "$transcript" "$repo" "$label" "${action_args[@]}"
   fi
-  if [[ "${action_args[0]}" == "capture" ]] \
-    && grep -F -- 'source_authority = "git-overlay"' "$repo/.heddle/config.toml" >/dev/null; then
-    run_json "$transcript" "$repo" "$label.commit" commit -m "$message"
-  fi
   assert_current_worktree_clean_json "$repo"
 }
 
@@ -903,16 +899,15 @@ PYJSON
     run_json "$transcript" "$repo" "$shape.13.diff-capture-name-only" diff --name-only
   fi
   run_json "$transcript" "$repo" "$shape.14.capture" capture -m "agent capture $shape" --confidence 0.86
-  run_json "$transcript" "$repo" "$shape.15.commit-captured" commit -m "agent commit $shape"
-  run_json "$transcript" "$repo" "$shape.16.push-commit" push "$origin"
+  run_json "$transcript" "$repo" "$shape.16.push-capture" push "$origin"
   run_json "$transcript" "$repo" "$shape.18.pull" pull origin
   assert_clean_git_status "$repo"
 
-  make_agent_commit_edit "$repo" "$shape" first
-  run_json "$transcript" "$repo" "$shape.19.diff-commit" diff
+  make_agent_save_edit "$repo" "$shape" first
+  run_json "$transcript" "$repo" "$shape.19.diff-capture" diff
   if [[ "$shape" != "small-app" ]]; then
-    run_json "$transcript" "$repo" "$shape.19.diff-commit-stat" diff --stat
-    run_json "$transcript" "$repo" "$shape.19.diff-commit-name-only" diff --name-only
+    run_json "$transcript" "$repo" "$shape.19.diff-capture-stat" diff --stat
+    run_json "$transcript" "$repo" "$shape.19.diff-capture-name-only" diff --name-only
   fi
   run_json "$transcript" "$repo" "$shape.20.status-dirty-template" status
   run_json_expect_verify_failed "$transcript" "$repo" "$shape.20.verify-dirty-template" verify
@@ -925,18 +920,17 @@ PYJSON
   run_verify_recommended_action_json \
     "$transcript" \
     "$repo" \
-    "$shape.20.commit-from-template" \
+    "$shape.20.capture-from-template" \
     "agent verify cold flow $shape" \
     "$template_op_id"
   assert_git_ancestor "$repo" "$overlay_base"
-  assert_local_ahead_verified_json "$ARTIFACT_ROOT/$shape.20.commit-from-template.commit.json"
-  run_json "$transcript" "$repo" "$shape.21.undo" undo
-  assert_dirty_git_status "$repo"
-  make_agent_commit_edit "$repo" "$shape" after_undo
+  assert_local_ahead_verified_json "$ARTIFACT_ROOT/$shape.20.capture-from-template.json"
+  run_json "$transcript" "$repo" "$shape.21.undo" undo --hard
+  assert_clean_git_status "$repo"
+  make_agent_save_edit "$repo" "$shape" after_undo
   run_json "$transcript" "$repo" "$shape.22.capture-after-undo" capture -m "agent verify cold flow after undo $shape" --confidence 0.9
-  run_json "$transcript" "$repo" "$shape.22.commit-after-undo" commit -m "agent verify cold flow after undo $shape"
-  assert_local_ahead_verified_json "$ARTIFACT_ROOT/$shape.22.commit-after-undo.json"
-  run_json "$transcript" "$repo" "$shape.23.push-commit" push "$origin"
+  assert_local_ahead_verified_json "$ARTIFACT_ROOT/$shape.22.capture-after-undo.json"
+  run_json "$transcript" "$repo" "$shape.23.push-capture" push "$origin"
   run_json "$transcript" "$repo" "$shape.24.ready" ready
   assert_clean_git_status "$repo"
   run_json "$transcript" "$repo" "$shape.25.query-attribution" query --attribution "$(agent_attribution_target_for_shape "$shape")"

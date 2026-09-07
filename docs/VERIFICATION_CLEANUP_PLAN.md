@@ -14,7 +14,7 @@ Related ADRs:
 Use the glossary terms in `CONTEXT.md` exactly.
 
 - Git Overlay: Heddle sidecar over an existing Git checkout. Active Git reads and writes use the checkout's real `.git`.
-- Bridge Mirror: the legacy bare Git repository at `.heddle/git`, used by explicit bridge import/export/sync, reconstruction, fsck, and maintenance paths. It is not active Git Overlay state.
+- Bridge Mirror: the retired bare Git repository formerly stored at `.heddle/git`; the term is historical and names no current runtime component.
 - Raw Git Object Residual: verbatim Git object bytes preserved when Heddle cannot reconstruct an object byte-for-byte from native state.
 - Git Projection Mapping: durable repository metadata mapping Heddle states to Git object ids, refs, and projection metadata.
 - Repository Verification State: the proof surface for repository mode, Git/Heddle agreement, worktree dirt, remote drift, active operations, workflow guidance, and Machine-Contract Proof.
@@ -58,18 +58,18 @@ Use the glossary terms in `CONTEXT.md` exactly.
 ### Workflow Vocabulary
 
 - `land` is the long-term managed-thread landing verb. Do not keep `ship` as a long-term alias.
-- `commit` is the ordinary human save path and should compose shared lower-level save/projection modules directly.
-- `capture` remains public as an advanced granular savepoint for agents and advanced users. It is not legacy.
-- `checkpoint` remains public as a Git-facing milestone primitive for agents and advanced workflows. It is not legacy.
-- For `needs_checkpoint`, preserve the precise proof state and keep `checkpoint` as an executable machine/agent action. Human-facing general guidance should bias toward `commit` unless the command context is explicitly Git/checkpoint oriented.
+- `capture` is the sole everyday save boundary for humans and agents. In Git Overlay it writes the matching Git checkpoint in the same operation.
+- `commit` is removed rather than retained as an alias. A Git checkpoint is an internal write-through operation, not a second save verb.
+- Capture selection is one-shot; Heddle does not expose a persistent staging/index workflow.
+- For `needs_checkpoint`, preserve the precise proof state and recommend `capture`, which can safely complete an interrupted write-through without duplicating the Heddle state.
 - `ready` may auto-capture, but it must route through the shared save primitive and receive next actions from structured verification action selection.
 - `thread refresh` and `thread resolve` should become advanced-only or retire from ordinary breadcrumbs. Normal guidance should prefer top-level `sync`, `resolve`, `continue`, `abort`, `ready`, and `land`.
 - `docs/spikes/save-verb-consolidation.md` remains historical context, not the active plan as written.
 
 ### Bridge Mirror And Git Projection
 
-- The persistent `.heddle/git` Bridge Mirror is not the desired end state.
-- Normal Git Overlay flows should never create `.heddle/git`.
+- The persistent `.heddle/git` Bridge Mirror is removed from the current runtime.
+- No current-format flow creates or reads `.heddle/git`.
 - Public `bridge git` commands are retired in favor of `adopt`, `import git`, `export git`, and top-level remote verbs routed by remote capability.
 - `bridge git init` is removed; it exists to initialize the persistent mirror that the target model deletes.
 - Legacy bridge status is removed from public UX; useful diagnostics move into `verify`, `fsck`, import/export dry-runs, or explicit diagnostics.
@@ -101,8 +101,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 - Residual garbage collection is reachability-based from current mappings, served refs, and retained imported history.
 - Rewrites must preserve residuals while any retained mapping needs them.
 - New Heddle-authored Git projections should not create residuals by default.
-- Existing `.heddle/git` mirrors migrate lazily: verification, fsck, import, or export can copy needed residuals out of the old mirror and then report that the mirror is removable.
-- Deletion of migrated mirrors should happen through explicit maintenance cleanup during the replacement phase.
+- Current-format runtime paths never read or migrate `.heddle/git`. Older repositories require offline conversion before admission.
 - Hosted Heddle remotes that advertise Git projection support must store/sync Git Projection Mapping and Raw Git Object Residuals so clones preserve Git byte fidelity.
 
 ## Implementation Tracks
@@ -115,21 +114,19 @@ Use the glossary terms in `CONTEXT.md` exactly.
 4. Split and rename modules by cohesive responsibility after ownership is stable.
 5. Delete old CLI proof builders by migrated slice. Temporary equivalence tests may exist during migration, then should be removed or inverted into reachability tests proving no CLI-owned proof builder remains reachable.
 
-### Track B: Bridge Mirror Retirement
+### Track B: Bridge Mirror Retirement (complete)
 
-1. Add Raw Git Object Residual durable objects and fsck checks without deleting `.heddle/git` yet.
-2. Add replacement public command shells: `import git` and `export git` route to current internals first and establish parity. Shipped as top-level wrappers, legacy `bridge git import/export` is now removed.
-3. Route top-level Git remote `push` / `pull` / `sync` by remote capability.
-4. Teach checkout write-through, export, push, sync, clone, and reconstruction paths to compose reconstructed Heddle state plus residuals without requiring a persistent bare mirror.
-5. Replace mirror fsck with Git Projection Mapping and Raw Git Object Residual validation. First slice shipped: `fsck repair git` performs explicit, authority-directed projection repair and reruns Git projection checks; residual validation remains follow-on work.
-6. Public `bridge git` commands are retired after replacement import/export and fsck diagnostics.
-7. Lazy-migrate old `.heddle/git` mirrors into residual storage and leave deletion to explicit maintenance cleanup.
+Current-format checkout write-through, import, export, push, sync, clone,
+reconstruction, fsck, log, undo, and gc operate without `.heddle/git`.
+Git Projection Mapping plus complete Raw Git Object Residual closures own the
+fidelity seam; missing closure fails closed. Runtime mirror fallback,
+migration, reporting, and maintenance are deleted.
 
 ### Track C: Workflow Verb Cleanup
 
 1. Replace `ship` with `land` in docs, tests, command routing, and breadcrumbs.
-2. Keep `capture` and `checkpoint` as advanced public primitives.
-3. Route `commit`, `capture`, `checkpoint`, and `ready` auto-capture through shared lower-level save/projection modules.
+2. Make `capture` the only public save verb and remove `commit` without a compatibility alias.
+3. Route capture, internal Git checkpointing, and `ready` auto-capture through shared lower-level save/projection modules.
 4. Move ordinary breadcrumbs away from `thread refresh` / `thread resolve` and toward top-level workflow verbs.
 5. Assert structured actions by audience rather than exact `recommended_action` strings wherever possible.
 
@@ -137,11 +134,10 @@ Use the glossary terms in `CONTEXT.md` exactly.
 
 - The Git repair surface is `fsck repair git`. Git Overlay permits Git-to-Heddle metadata and ref repair; native repositories permit Heddle-to-Git repair for a named projection ref.
 - `verify` proves and recommends; it must not mutate Git Projection Mapping or Raw Git Object Residuals unless an explicit repair mode is requested.
-- `fsck` owns integrity checks and repair flows for Git Projection Mapping, Raw Git Object Residuals, and migrated Bridge Mirror state.
+- `fsck` owns integrity checks and repair flows for Git Projection Mapping and Raw Git Object Residuals.
 - The Git repair mode may synthesize missing Git Projection Mapping only when a Heddle state match or Git note/provenance link proves the mapping unambiguously. It must not guess.
 - Opposite-direction repair is refused without mutation and points to `adopt` or `import git`, which make the authority change or import explicit.
-- The Git repair mode may migrate needed residual bytes from an old `.heddle/git` Bridge Mirror into Raw Git Object Residual storage.
-- The Git repair mode reports when an old mirror is removable but does not delete it; deletion belongs to maintenance cleanup or an explicit cleanup flag.
+- The Git repair mode never consults `.heddle/git`; old repositories are converted offline before this runtime opens them.
 - Metadata-only Git repair is allowed in dirty worktrees. Any repair that would write real `.git` refs, index, or worktree state requires clean verification or explicit confirmation.
 - Normal user output should not expose Git Projection Mapping internals. Verbose, fsck, import/export dry-run, and diagnostics can.
 - `log` / `show --verbose` should keep showing the Git Checkpoint commit ID as the user-facing Git handle.
@@ -166,27 +162,22 @@ Use the glossary terms in `CONTEXT.md` exactly.
    - Dry-run JSON exists for both.
    - README and command docs no longer teach `bridge git`.
 4. Raw Git Object Residuals
-   - Residual durable object model exists. **Foundation shipped:**
-     `heddle_git_projection::ResidualStore` under `.heddle/git-residuals/`,
-     put/get/has/list + hash identity, lazy migrate-from-mirror helper, and
-     `bridge_mirror_retirement_status` (report-only). Checkout materialize and
-     export lossy paths prefer reconstruct → residual → Bridge Mirror, with a
-     hard fail when neither residual nor mirror can supply the object.
+   - Residual durable object model exists under `.heddle/git-residuals/` with
+     put/get/has/list and hash identity. Checkout materialize and export lossy
+     paths use reconstructable state or a verified residual closure and hard
+     fail when neither can supply the object.
    - Fsck verifies mapped non-reconstructable objects have residuals.
      (**Shipped** — missing or invalid residual bytes are a hard fsck failure.)
    - Export/write-through can use residuals instead of the mirror for lossy objects.
      (**Shipped** — imports capture non-reconstructable commits with their full
      tree/blob closure plus annotated-tag wrappers; fresh export and
      write-through install that closure without the mirror object warehouse.)
-   - Old `.heddle/git` mirrors can lazily migrate needed residuals.
-     (**Partial** — migrate helper exists; automatic full-mirror migration and
-     explicit mirror deletion maintenance are not complete. Mirror is **not**
-     deleted.)
+   - Mirror readers and migrations are absent from the current runtime.
 5. Retire public bridge/mirror workflow (done for public bridge-git)
    - The public bridge-git workflow is removed; diagnostics, repair, and ingest behavior live on replacement surfaces.
    - Top-level `push`/`pull`/`sync` route Git remotes.
    - Normal flows no longer create persistent `.heddle/git`.
-   - Maintenance cleanup can remove migrated mirrors.
+   - Current-format runtime paths never inspect a retired mirror.
 6. Workflow verb cleanup
    - `land` replaces `ship`.
    - `capture` and `checkpoint` are documented as advanced primitives, not legacy.
@@ -198,8 +189,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 Keep these tests until their replacement track has landed:
 
 - Plain-Git observe/adopt/init loop tests; they protect the `init` versus `adopt` split.
-- The regression proving active Git Overlay no longer creates an eager `.heddle/git` mirror.
-- Bridge Mirror behavior tests until Raw Git Object Residuals and replacement import/export/remote surfaces cover the same behavior.
+- Negative regressions proving no current-format flow creates `.heddle/git`.
 - Machine-contract integration tests; they become proof that core receives command-catalog coverage rather than hardcoded counters.
 - Checkpoint guidance tests; `checkpoint` is an advanced primitive, not legacy.
 
@@ -213,5 +203,4 @@ Move or invert these tests during migration:
 
 ## Immediate Cleanup Candidates
 
-- Rename stale wording that calls `.heddle/git` the active or canonical Git store to Bridge Mirror language.
-- Do not delete `.heddle/git` bridge paths wholesale until Raw Git Object Residual storage, replacement commands, and fsck coverage exist.
+- Keep current documentation and diagnostics free of retired mirror behavior.

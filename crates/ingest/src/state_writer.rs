@@ -31,10 +31,9 @@
 
 use chrono::{DateTime, Utc};
 use objects::object::{
-    Agent, Attribution, ChangeId, ChangeLineage, ChangeLineageKind, ContentHash, Principal, State,
-    StateId, Status,
+    Agent, Attribution, ChangeId, ChangeLineage, ChangeLineageKind, ContentHash, HeddleNote,
+    Principal, State, StateId, Status,
 };
-use serde::Deserialize;
 
 use crate::{
     IngestError,
@@ -101,7 +100,8 @@ fn state_from_commit_with_source_policy(
         if source_id.to_string_full() != note.state_id
             || source_state.change_id.to_string_full() != note.change_id
             || source_state.tree != tree
-            || (matches!(source_parent_policy, SourceStateParentPolicy::Validate)
+            || (!note.parents_rewritten
+                && matches!(source_parent_policy, SourceStateParentPolicy::Validate)
                 && source_state.parents != parents)
         {
             return Err(IngestError::Git(format!(
@@ -203,41 +203,11 @@ fn parse_attribution_with_note(
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct HeddleNote {
-    state_id: String,
-    change_id: String,
-    #[serde(default)]
-    source_state: Option<State>,
-    #[serde(default)]
-    agent: Option<HeddleNoteAgent>,
-    #[serde(default)]
-    confidence: Option<f32>,
-    #[serde(default)]
-    status: String,
-    #[serde(default)]
-    attribution: Option<HeddleNoteAttribution>,
-}
-
-#[derive(Debug, Deserialize)]
-struct HeddleNoteAttribution {
-    principal_name: String,
-    principal_email: String,
-    #[serde(default)]
-    agent: Option<HeddleNoteAgent>,
-}
-
-#[derive(Debug, Deserialize)]
-struct HeddleNoteAgent {
-    provider: String,
-    model: String,
-}
-
 fn read_heddle_note(commit: &CommitEntry) -> crate::Result<Option<HeddleNote>> {
     let Some(note_bytes) = commit.heddle_note.as_ref() else {
         return Ok(None);
     };
-    serde_json::from_slice(note_bytes)
+    HeddleNote::from_json_bytes(note_bytes)
         .map(Some)
         .map_err(|error| {
             IngestError::Git(format!(

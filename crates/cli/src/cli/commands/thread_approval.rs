@@ -107,7 +107,7 @@ async fn open_hosted_session(
         HostedAuthMode::CredentialFallback,
     )
     .await?
-    .with_human_signature_callback(hosted_client::client::cli_human_signature_callback());
+    .with_human_signature_callback(hosted_client::client::headless_human_signature_callback());
     Ok((client, repo_path))
 }
 

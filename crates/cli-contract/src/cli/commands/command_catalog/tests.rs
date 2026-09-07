@@ -106,7 +106,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
             "--title",
             "Coordinate lanes",
             "--lane",
-            "feature/a=../a:Implement A",
+            "feature/a=Implement A",
         ],
     ),
     sample(
@@ -118,7 +118,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
             "--title",
             "Coordinate lanes",
             "--lane",
-            "feature/a=../a:Implement A",
+            "feature/a=Implement A",
         ],
     ),
     #[cfg(feature = "client")]
@@ -199,7 +199,6 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(&["capture"], &["capture"]),
     sample(&["clone"], &["clone", "remote", "local"]),
-    sample(&["commit"], &["commit"]),
     sample(
         &["thread", "collapse"],
         &["thread", "collapse", "s1", "s2", "--into", "squashed"],
@@ -547,7 +546,6 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
         "",
         "heddle init",
         "heddle capture -m \"...\"",
-        "heddle commit -m \"...\"",
         "heddle capture -m \"Preserve raw Git operation work\"",
         "heddle thread switch <branch>",
         "heddle start feature/auth --path <dir>",
@@ -584,23 +582,6 @@ fn recommended_actions_reject_external_git_commands() {
 }
 
 #[test]
-fn commit_catalog_action_matches_optional_message_runtime() {
-    let catalog = build_command_catalog();
-    let commit = catalog
-        .command_by_display("commit")
-        .expect("commit should be cataloged");
-    let action = commit
-        .command_action
-        .as_ref()
-        .expect("commit should advertise an executable action");
-    assert_eq!(
-        action.argv.as_ref(),
-        Some(&vec!["heddle".to_string(), "commit".to_string()])
-    );
-    assert!(action.executable);
-}
-
-#[test]
 fn recommended_action_templates_describe_display_only_placeholders() {
     let catalog = build_command_catalog();
     for placeholder in RECOMMENDED_ACTION_PLACEHOLDERS {
@@ -618,17 +599,17 @@ fn recommended_action_templates_describe_display_only_placeholders() {
         });
     }
 
-    let commit = catalog
+    let capture = catalog
         .recommended_action_templates
         .iter()
-        .find(|template| template.action == "heddle commit -m \"...\"")
-        .expect("commit placeholder should have a structured template");
+        .find(|template| template.action == "heddle capture -m \"...\"")
+        .expect("capture placeholder should have a structured template");
     assert_eq!(
-        commit.argv_template,
-        vec!["heddle", "commit", "-m", "<message>"]
+        capture.argv_template,
+        vec!["heddle", "capture", "-m", "<message>"]
     );
-    assert_eq!(commit.required_inputs, vec!["message"]);
-    assert!(commit.agent_may_fill);
+    assert_eq!(capture.required_inputs, vec!["message"]);
+    assert!(capture.agent_may_fill);
 
     let switch = recommended_action_template("heddle thread switch <branch>")
         .expect("switch placeholder should resolve");
@@ -1810,7 +1791,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             // clone_monorepo discriminator: `clone --recursive --output json`
             // (Spool epic P9) emits a monorepo summary record.
             "clone",
-            "commit",
             "continue",
             "context set",
             "context get",

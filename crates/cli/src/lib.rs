@@ -14,7 +14,6 @@ pub mod cli;
 pub mod exit;
 pub mod harness;
 mod hosted_failure;
-pub mod identity_freeze;
 pub mod identity_stamp;
 pub mod operation_id;
 pub mod perf;

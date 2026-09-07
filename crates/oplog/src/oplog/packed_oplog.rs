@@ -45,7 +45,7 @@ const TX_DIR_RECORD_LEN: u64 = 32;
 
 fn validate_container_version(version: u32) -> Result<()> {
     if version < CURRENT_CONTAINER_VERSION {
-        return Err(HeddleError::StorageFormatMigrationRequired {
+        return Err(HeddleError::StorageFormatTooOld {
             storage: OPLOG_CONTAINER_STORAGE.to_string(),
             found: version,
             required: CURRENT_CONTAINER_VERSION,
@@ -2416,8 +2416,7 @@ mod tests {
         assert_eq!(repeated.to_string(), error.to_string());
         if matches!(
             &error,
-            HeddleError::StorageFormatMigrationRequired { .. }
-                | HeddleError::StorageFormatTooNew { .. }
+            HeddleError::StorageFormatTooOld { .. } | HeddleError::StorageFormatTooNew { .. }
         ) {
             assert_eq!(load_error.to_string(), error.to_string());
         }
@@ -2547,7 +2546,7 @@ mod tests {
             assert!(
                 matches!(
                     &error,
-                    HeddleError::StorageFormatMigrationRequired {
+                    HeddleError::StorageFormatTooOld {
                         storage,
                         found,
                         required,
@@ -2570,7 +2569,7 @@ mod tests {
             assert!(
                 matches!(
                     &error,
-                    HeddleError::StorageFormatMigrationRequired {
+                    HeddleError::StorageFormatTooOld {
                         storage,
                         found,
                         required,
@@ -2632,7 +2631,7 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                HeddleError::StorageFormatMigrationRequired {
+                HeddleError::StorageFormatTooOld {
                     storage,
                     found: 2,
                     required,
@@ -2675,7 +2674,7 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                HeddleError::StorageFormatMigrationRequired {
+                HeddleError::StorageFormatTooOld {
                     storage,
                     found: 1,
                     required,

@@ -176,10 +176,7 @@ pub fn is_reserved_heddle_git_ref(name: &str) -> bool {
 mod tests {
     use objects::object::ChangeId;
     use repo::Repository as HeddleRepository;
-    use sley::{
-        CommitObject, GitObjectType, GitTime, Signature, TreeEditor,
-        plumbing::{sley_core::BString, sley_object::EncodedObject},
-    };
+    use sley::{BString, CommitObject, GitObjectType, GitTime, Signature, TreeEditor};
     use tempfile::TempDir;
 
     use super::*;
@@ -214,7 +211,7 @@ mod tests {
             encoding: None,
             message: format!("{message}\n").into_bytes(),
         };
-        repo.write_object(EncodedObject::new(GitObjectType::Commit, object.write()))
+        repo.write_raw_object(GitObjectType::Commit, object.write())
             .unwrap()
     }
 

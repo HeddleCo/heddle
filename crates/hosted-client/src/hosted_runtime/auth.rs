@@ -1,6 +1,6 @@
-//! `heddle auth` command implementations.
+//! Hosted authentication operations and typed outcomes.
 
-use std::{collections::BTreeSet, io::IsTerminal, path::Path};
+use std::{collections::BTreeSet, path::Path};
 
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha1::{
@@ -12,17 +12,11 @@ use api::heddle::api::v1alpha1::{
 };
 use config::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
-use heddle_cli_args::CliContext;
-use heddle_cli_contract::cli::commands::RecoveryAdvice;
-pub(crate) use heddle_cli_contract::cli::commands::wire::auth::{
-    AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, ServiceTokenOutput,
-    SignupInviteCreatedOutput, SignupInviteListOutput, SignupInviteOutput,
-};
 use objects::{HeddleError, RecoveryDetails};
 use sha2::{Digest, Sha256};
 
 use super::{
-    auth_requests::{AuthCommand, AuthTrustCommand},
+    auth_requests::{AuthCommand, AuthOptions, AuthTrustCommand},
     credential_file::{self, CredentialKind, CredentialProvenance, VerifiedCredential},
     device_flow::{
         AgentAttenuation, AgentTemplate, CI_VERDICT_WRITE_ACTION, SAFE_AGENT_OPERATIONS,
@@ -34,51 +28,189 @@ use super::{
     },
 };
 
-const DERIVED_TOKEN_SECURITY_NOTE: &str = "Derived credential has its own proof key and is operation/TTL/resource-scope-limited and enforced server-side. The token and proof key travel together inside the .hcred file; the parent device key is not exported.";
-
 const SERVICE_TOKEN_TTL_DAYS: u32 = 30;
 const SERVICE_TOKEN_TTL_SECS: i64 = SERVICE_TOKEN_TTL_DAYS as i64 * 24 * 3600;
 const ISSUE_SA_PROOF_DOMAIN: &[u8] = b"heddle-sa-credential-issue-v1";
 
-fn is_interactive_tty() -> bool {
-    std::io::stdin().is_terminal()
-        && std::io::stdout().is_terminal()
-        && std::io::stderr().is_terminal()
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AuthEvent {
+    DeviceAuthorizationReady {
+        verification_uri: String,
+        user_code: String,
+    },
+    BrowserOpenRequested {
+        url: String,
+    },
+    BrowserUrlRejected {
+        reason: String,
+    },
+    WaitingForAuthorization,
 }
 
-pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AuthOutcome {
+    Login(AuthLoginOutcome),
+    Logout(AuthLogout),
+    Status(AuthStatus),
+    SignupInviteCreated(SignupInviteCreated),
+    SignupInviteList(SignupInviteList),
+    Trust(AuthTrust),
+    AgentDerived(DerivedAgent),
+    ServiceTokenCreated(ServiceTokenCreated),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AuthLoginOutcome {
+    Authenticated {
+        subject: String,
+        credential_saved: bool,
+    },
+    AgentAccountCreated(AgentAccountCreated),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentAccountCreated {
+    pub account_id: String,
+    pub pet_name: String,
+    pub subject: String,
+    pub authenticated: bool,
+    pub credential_saved: bool,
+    pub next: HumanPromotionDirective,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HumanPromotionDirective {
+    pub kind: &'static str,
+    pub summary: &'static str,
+    pub account_id: String,
+    pub command: &'static str,
+    pub promotion_uri: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthLogout {
+    pub server: String,
+    pub device_identity_removed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthStatus {
+    pub server: String,
+    pub authenticated: bool,
+    pub source: String,
+    pub proof_key_available: bool,
+    pub subject: Option<String>,
+    pub credential_id: Option<String>,
+    pub expires_at: Option<String>,
+    pub recommended_action: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DescriptorTrustSource {
+    Explicit,
+    Automatic,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthTrust {
+    pub replaced: bool,
+    pub canonical_server: String,
+    pub source: DescriptorTrustSource,
+    pub key_id: String,
+    pub public_key: String,
+    pub fingerprint: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignupInviteCreated {
+    pub invite_id: String,
+    pub invite_code: String,
+    pub allowance_remaining: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignupInvite {
+    pub invite_code: String,
+    pub status: String,
+    pub created_at: Option<String>,
+    pub consumed: bool,
+    pub consumed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignupInviteList {
+    pub invites: Vec<SignupInvite>,
+    pub allowance_remaining: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AgentCredentialDestination {
+    Installed,
+    File(std::path::PathBuf),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DerivedAgent {
+    pub agent_id: String,
+    pub server: String,
+    pub parent_source: String,
+    pub expires_at: String,
+    pub template: Option<AgentTemplate>,
+    pub allowed_operations: Vec<String>,
+    pub scopes: Vec<String>,
+    pub rendered_scope: Option<String>,
+    pub destination: AgentCredentialDestination,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServiceTokenCreated {
+    pub name: String,
+    pub namespace: String,
+    pub scope: String,
+    pub credential_path: String,
+    pub expires_in_days: u32,
+}
+
+pub async fn execute(
+    options: AuthOptions,
+    command: AuthCommand,
+    mut on_event: impl FnMut(AuthEvent) -> Result<()>,
+) -> Result<AuthOutcome> {
     match command {
         AuthCommand::Login {
             server,
-            open_browser,
+            permission,
             invite,
             credential,
         } => match credential {
             Some(credential) => {
                 let subject = install_credential_file(&credential)?;
-                println!("Authenticated as {subject}. Credentials saved.");
-                Ok(())
+                Ok(AuthOutcome::Login(AuthLoginOutcome::Authenticated {
+                    subject,
+                    credential_saved: true,
+                }))
             }
             None => {
                 let server = resolve_server(server.as_deref())?;
                 crate::hosted_runtime::auth_login::login(
-                    ctx,
+                    &options,
                     &server,
-                    open_browser,
+                    permission,
                     invite,
-                    is_interactive_tty(),
+                    &mut on_event,
                 )
                 .await
+                .map(AuthOutcome::Login)
             }
         },
-        AuthCommand::Logout { server } => cmd_auth_logout(ctx, server.as_deref()),
-        AuthCommand::Status { server } => cmd_auth_status(ctx, server.as_deref()),
+        AuthCommand::Logout { server } => auth_logout(server.as_deref()).map(AuthOutcome::Logout),
+        AuthCommand::Status { server } => auth_status(server.as_deref()).map(AuthOutcome::Status),
         AuthCommand::Invite {
             email,
             server,
             list,
-        } => cmd_auth_invite(ctx, server.as_deref(), email, list).await,
-        AuthCommand::Trust { command } => cmd_auth_trust(ctx, command),
+        } => auth_invite(&options, server.as_deref(), email, list).await,
+        AuthCommand::Trust { command } => auth_trust(command).map(AuthOutcome::Trust),
         AuthCommand::DeriveAgent {
             server,
             agent_id,
@@ -87,7 +219,7 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
             allowed_operations,
             template,
             out,
-        } => cmd_auth_derive_agent(
+        } => derive_agent(
             &server,
             agent_id,
             ttl_secs,
@@ -95,28 +227,28 @@ pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommand) -> Result<()> 
             allowed_operations,
             template,
             out.as_deref(),
-            false,
-        ),
+        )
+        .map(AuthOutcome::AgentDerived),
         AuthCommand::CreateServiceToken {
             name,
             namespace,
             server,
             out,
-        } => {
-            cmd_create_service_token(ctx, server.as_deref(), name, namespace, out.as_deref()).await
-        }
+        } => create_service_token(&options, server.as_deref(), name, namespace, out.as_deref())
+            .await
+            .map(AuthOutcome::ServiceTokenCreated),
     }
 }
 
 const CREATE_SIGNUP_INVITE_METHOD: &str = "heddle.api.v1alpha1.IdentityService/CreateSignupInvite";
 const SIGNUP_INVITE_PAGE_SIZE: u32 = 200;
 
-async fn cmd_auth_invite(
-    ctx: &dyn CliContext,
+async fn auth_invite(
+    options: &AuthOptions,
     server: Option<&str>,
     email: Option<String>,
     list: bool,
-) -> Result<()> {
+) -> Result<AuthOutcome> {
     let server = resolve_server(server)?;
     let user_config = UserConfig::load_default()?;
     // HostedSession is the same authenticated credential + device-proof
@@ -128,43 +260,38 @@ async fn cmd_auth_invite(
     )?;
     let mut auth_client = session.connect(&server).await?;
     let result = if list {
-        list_signup_invites_connected(ctx, &mut auth_client).await
+        list_signup_invites_connected(&mut auth_client)
+            .await
+            .map(AuthOutcome::SignupInviteList)
     } else {
-        create_signup_invite_connected(ctx, &mut auth_client, email).await
+        create_signup_invite_connected(options, &mut auth_client, email)
+            .await
+            .map(AuthOutcome::SignupInviteCreated)
     };
     auth_client.close().await;
     result
 }
 
 async fn create_signup_invite_connected(
-    ctx: &dyn CliContext,
+    options: &AuthOptions,
     auth_client: &mut HostedClient,
     email: Option<String>,
-) -> Result<()> {
-    let operation_id =
-        ClientOperationId::caller_or_fresh(CREATE_SIGNUP_INVITE_METHOD, ctx.operation_id_wire());
+) -> Result<SignupInviteCreated> {
+    let operation_id = ClientOperationId::caller_or_fresh(
+        CREATE_SIGNUP_INVITE_METHOD,
+        options.operation_id().unwrap_or_default(),
+    );
     let request = create_signup_invite_request(email, operation_id.to_wire());
     let response = auth_client
         .create_signup_invite(request)
         .await
         .map_err(|error| anyhow::anyhow!("create_signup_invite failed: {error}"))?;
 
-    if ctx.should_output_json(None) {
-        println!(
-            "{}",
-            serde_json::to_string(&SignupInviteCreatedOutput {
-                output_kind: "auth_invite",
-                invite_id: response.invite_id,
-                invite_code: response.invite_code,
-                allowance_remaining: response.allowance_remaining,
-            })?
-        );
-    } else {
-        // The code deliberately appears on exactly one output line.
-        println!("{}", response.invite_code);
-        println!("Allowance remaining: {}", response.allowance_remaining);
-    }
-    Ok(())
+    Ok(SignupInviteCreated {
+        invite_id: response.invite_id,
+        invite_code: response.invite_code,
+        allowance_remaining: response.allowance_remaining,
+    })
 }
 
 fn create_signup_invite_request(
@@ -177,10 +304,7 @@ fn create_signup_invite_request(
     }
 }
 
-async fn list_signup_invites_connected(
-    ctx: &dyn CliContext,
-    auth_client: &mut HostedClient,
-) -> Result<()> {
+async fn list_signup_invites_connected(auth_client: &mut HostedClient) -> Result<SignupInviteList> {
     let mut page_token = String::new();
     let mut seen_page_tokens = BTreeSet::new();
     let mut invites = Vec::new();
@@ -199,33 +323,10 @@ async fn list_signup_invites_connected(
         page_token = response.next_page_token;
     };
 
-    if ctx.should_output_json(None) {
-        println!(
-            "{}",
-            serde_json::to_string(&SignupInviteListOutput {
-                output_kind: "auth_invite_list",
-                invites,
-                allowance_remaining,
-            })?
-        );
-    } else {
-        if invites.is_empty() {
-            println!("No signup invites.");
-        } else {
-            println!("CODE\tSTATUS\tCREATED_AT\tCONSUMED_AT");
-            for invite in invites {
-                println!(
-                    "{}\t{}\t{}\t{}",
-                    invite.invite_code,
-                    invite.status,
-                    invite.created_at.as_deref().unwrap_or("-"),
-                    invite.consumed_at.as_deref().unwrap_or("-")
-                );
-            }
-        }
-        println!("Allowance remaining: {allowance_remaining}");
-    }
-    Ok(())
+    Ok(SignupInviteList {
+        invites,
+        allowance_remaining,
+    })
 }
 
 fn list_signup_invites_request(page_token: String) -> ListSignupInvitesRequest {
@@ -235,13 +336,13 @@ fn list_signup_invites_request(page_token: String) -> ListSignupInvitesRequest {
     }
 }
 
-fn signup_invite_output(invite: SignupInviteSummary) -> SignupInviteOutput {
+fn signup_invite_output(invite: SignupInviteSummary) -> SignupInvite {
     let status = match SignupInviteOwnerStatus::try_from(invite.status) {
         Ok(SignupInviteOwnerStatus::Open) => "open",
         Ok(SignupInviteOwnerStatus::Consumed) => "consumed",
         Ok(SignupInviteOwnerStatus::Unspecified) | Err(_) => "unknown",
     };
-    SignupInviteOutput {
+    SignupInvite {
         invite_code: invite.invite_code,
         status: status.to_string(),
         created_at: invite.created_at.as_ref().and_then(format_proto_timestamp),
@@ -256,7 +357,7 @@ fn format_proto_timestamp(timestamp: &prost_types::Timestamp) -> Option<String> 
         .map(|value| value.to_rfc3339())
 }
 
-fn cmd_auth_trust(ctx: &dyn CliContext, command: AuthTrustCommand) -> Result<()> {
+fn auth_trust(command: AuthTrustCommand) -> Result<AuthTrust> {
     match command {
         AuthTrustCommand::Show { server } => {
             let config = UserConfig::load_default()?.hosted_runtime_config(None)?;
@@ -265,24 +366,21 @@ fn cmd_auth_trust(ctx: &dyn CliContext, command: AuthTrustCommand) -> Result<()>
                 .as_deref()
                 .zip(config.descriptor_public_key.as_ref());
             let report = crate::hosted_runtime::hosted::trust_report(&server, explicit)?;
-            emit_auth_trust(
-                ctx,
-                AuthTrustOutput {
-                    output_kind: "auth_trust_show",
-                    canonical_server: report.canonical_server,
-                    source: match report.source {
-                        crate::hosted_runtime::hosted::DescriptorTrustSource::Explicit => {
-                            heddle_cli_contract::cli::commands::wire::auth::DescriptorTrustSource::Explicit
-                        }
-                        crate::hosted_runtime::hosted::DescriptorTrustSource::Automatic => {
-                            heddle_cli_contract::cli::commands::wire::auth::DescriptorTrustSource::Automatic
-                        }
-                    },
-                    key_id: report.key_id,
-                    public_key: report.public_key,
-                    fingerprint: report.fingerprint,
+            Ok(AuthTrust {
+                replaced: false,
+                canonical_server: report.canonical_server,
+                source: match report.source {
+                    crate::hosted_runtime::hosted::DescriptorTrustSource::Explicit => {
+                        DescriptorTrustSource::Explicit
+                    }
+                    crate::hosted_runtime::hosted::DescriptorTrustSource::Automatic => {
+                        DescriptorTrustSource::Automatic
+                    }
                 },
-            )
+                key_id: report.key_id,
+                public_key: report.public_key,
+                fingerprint: report.fingerprint,
+            })
         }
         AuthTrustCommand::Replace {
             server,
@@ -306,44 +404,22 @@ fn cmd_auth_trust(ctx: &dyn CliContext, command: AuthTrustCommand) -> Result<()>
                 &public_key,
             )?;
             let fingerprint = record.fingerprint()?;
-            emit_auth_trust(
-                ctx,
-                AuthTrustOutput {
-                    output_kind: "auth_trust_replace",
-                    canonical_server,
-                    source: heddle_cli_contract::cli::commands::wire::auth::DescriptorTrustSource::Automatic,
-                    key_id: record.key_id,
-                    public_key: record.public_key,
-                    fingerprint,
-                },
-            )
+            Ok(AuthTrust {
+                replaced: true,
+                canonical_server,
+                source: DescriptorTrustSource::Automatic,
+                key_id: record.key_id,
+                public_key: record.public_key,
+                fingerprint,
+            })
         }
     }
-}
-
-fn emit_auth_trust(ctx: &dyn CliContext, output: AuthTrustOutput) -> Result<()> {
-    if ctx.should_output_json(None) {
-        println!("{}", serde_json::to_string(&output)?);
-    } else {
-        println!("Server:                {}", output.canonical_server);
-        println!(
-            "Source:                {}",
-            match output.source {
-                heddle_cli_contract::cli::commands::wire::auth::DescriptorTrustSource::Explicit => "explicit",
-                heddle_cli_contract::cli::commands::wire::auth::DescriptorTrustSource::Automatic => "automatic",
-            }
-        );
-        println!("Descriptor key id:     {}", output.key_id);
-        println!("Descriptor public key: {}", output.public_key);
-        println!("Fingerprint:           {}", output.fingerprint);
-    }
-    Ok(())
 }
 
 /// Derive an offline child credential with a fresh PoP key, then either install
 /// it as the active credential or write a portable token + child-key bundle.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn cmd_auth_derive_agent(
+pub(crate) fn derive_agent(
     server: &str,
     agent_id: Option<String>,
     ttl_secs: u64,
@@ -351,8 +427,7 @@ pub(crate) fn cmd_auth_derive_agent(
     requested_operations: Vec<String>,
     template: Option<AgentTemplate>,
     out: Option<&Path>,
-    quiet: bool,
-) -> Result<()> {
+) -> Result<DerivedAgent> {
     if ttl_secs == 0 {
         bail!("--ttl must be greater than zero seconds");
     }
@@ -432,6 +507,12 @@ pub(crate) fn cmd_auth_derive_agent(
     let child_private_key_pem = child_signer
         .to_pem()
         .map_err(|error| anyhow::anyhow!("failed to export child proof key: {error}"))?;
+    let parent_source = parent.source.label();
+    let scopes = declared_scopes
+        .iter()
+        .map(|(kind, path)| format!("{kind}:{path}"))
+        .collect::<Vec<_>>();
+    let rendered_scope = rendered_agent_scope(template, &declared_scopes);
     if let Some(out) = out {
         let provenance = CredentialProvenance {
             template: template.map(|template| template.as_str().to_string()),
@@ -457,17 +538,17 @@ pub(crate) fn cmd_auth_derive_agent(
             provenance: Some(provenance),
         };
         credential_file::write_credential_file(out, &verified)?;
-        println!("Agent credential {agent_id} written to {}.", out.display());
-        println!("Parent source: {}", parent.source.label());
-        if let Some(template) = template {
-            println!("Template: {} ceiling", template.as_str());
-        }
-        println!("Allowed operations: {}", allowed_operations.join(", "));
-        if let Some(scope) = rendered_agent_scope(template, &declared_scopes) {
-            println!("Scope: {scope}");
-        }
-        println!("{DERIVED_TOKEN_SECURITY_NOTE}");
-        return Ok(());
+        return Ok(DerivedAgent {
+            agent_id,
+            server: server.to_string(),
+            parent_source,
+            expires_at: expires_at.to_rfc3339(),
+            template,
+            allowed_operations,
+            scopes,
+            rendered_scope,
+            destination: AgentCredentialDestination::File(out.to_path_buf()),
+        });
     }
 
     // The installed derived token must not auto-rotate: reminting the
@@ -486,31 +567,17 @@ pub(crate) fn cmd_auth_derive_agent(
         },
     )?;
 
-    if !quiet {
-        println!("Derived and installed agent token {agent_id} for {server}.");
-        println!("Parent source: {}", parent.source.label());
-        println!("Expires: {expires_at}");
-        if let Some(template) = template {
-            println!("Template: {} ceiling", template.as_str());
-        }
-        println!("Allowed operations: {}", allowed_operations.join(", "));
-        if declared_scopes.is_empty() {
-            println!("Scopes: none (full resource authority inherited from parent)");
-        } else if let Some(scope) = rendered_agent_scope(template, &declared_scopes) {
-            println!("Scope: {scope} (enforced server-side per request)");
-        } else {
-            println!(
-                "Scopes: {} (enforced server-side per request)",
-                declared_scopes
-                    .iter()
-                    .map(|(kind, path)| format!("{kind}:{path}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-        println!("{DERIVED_TOKEN_SECURITY_NOTE}");
-    }
-    Ok(())
+    Ok(DerivedAgent {
+        agent_id,
+        server: server.to_string(),
+        parent_source,
+        expires_at: expires_at.to_rfc3339(),
+        template,
+        allowed_operations,
+        scopes,
+        rendered_scope,
+        destination: AgentCredentialDestination::Installed,
+    })
 }
 
 fn rendered_agent_scope(
@@ -826,7 +893,11 @@ pub(crate) fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetada
 }
 
 /// Authenticate via device authorization flow.
-pub(crate) async fn cmd_auth_login_browser(server: &str, open_browser: bool) -> Result<()> {
+pub(crate) async fn login_browser(
+    server: &str,
+    open_browser: bool,
+    on_event: &mut impl FnMut(AuthEvent) -> Result<()>,
+) -> Result<AuthLoginOutcome> {
     // 1. Generate Ed25519 keypair for device binding.
     let signer = Ed25519Signer::generate()
         .map_err(|e| anyhow::anyhow!("failed to generate keypair: {e}"))?;
@@ -865,13 +936,14 @@ pub(crate) async fn cmd_auth_login_browser(server: &str, open_browser: bool) -> 
     let user_code = &response.user_code;
     let device_code = &response.device_code;
 
-    // 4. Print instructions.
-    println!();
-    println!("Open this URL to authorize:");
-    println!("  {verification_uri}");
-    println!();
-    println!("Enter code: {user_code}");
-    println!();
+    // 4. Hand instructions to the embedding Adapter.
+    if let Err(error) = on_event(AuthEvent::DeviceAuthorizationReady {
+        verification_uri: verification_uri.clone(),
+        user_code: user_code.clone(),
+    }) {
+        auth_client.close().await;
+        return Err(error);
+    }
 
     // 5. Attempt to open browser. The verification URI is server-controlled,
     // so validate scheme/host (and reject shell metacharacters) before
@@ -882,19 +954,27 @@ pub(crate) async fn cmd_auth_login_browser(server: &str, open_browser: bool) -> 
         let url = format!("{verification_uri}?code={encoded_code}");
         match validate_browser_url(&url) {
             Ok(()) => {
-                if let Err(_e) = open_url(&url) {
-                    eprintln!("Could not open browser automatically. Please open the URL above.");
+                if let Err(error) = on_event(AuthEvent::BrowserOpenRequested { url }) {
+                    auth_client.close().await;
+                    return Err(error);
                 }
             }
             Err(err) => {
-                eprintln!("Refusing to open browser URL: {err}");
-                eprintln!("Please open the URL printed above in your browser.");
+                if let Err(error) = on_event(AuthEvent::BrowserUrlRejected {
+                    reason: err.to_string(),
+                }) {
+                    auth_client.close().await;
+                    return Err(error);
+                }
             }
         }
     }
 
     // 6. Poll for approval.
-    println!("Waiting for authorization...");
+    if let Err(error) = on_event(AuthEvent::WaitingForAuthorization) {
+        auth_client.close().await;
+        return Err(error);
+    }
 
     let registered = poll_for_approval(
         &mut auth_client,
@@ -943,13 +1023,14 @@ pub(crate) async fn cmd_auth_login_browser(server: &str, open_browser: bool) -> 
         tracing::warn!(%error, "could not record device signing identity; captures will use the per-repo local key");
     }
 
-    println!();
-    println!("Authenticated as {}. Credentials saved.", root.subject);
-    Ok(())
+    Ok(AuthLoginOutcome::Authenticated {
+        subject: root.subject,
+        credential_saved: true,
+    })
 }
 
 /// Remove stored credentials.
-fn cmd_auth_logout(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
+fn auth_logout(server: Option<&str>) -> Result<AuthLogout> {
     let server = resolve_server(server)?;
 
     // Remove the device signing identity `auth login` recorded for THIS server
@@ -967,74 +1048,30 @@ fn cmd_auth_logout(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
     })?;
     credentials::remove_server_credential(&server)?;
 
-    if ctx.should_output_json(None) {
-        let output = AuthLogoutOutput {
-            output_kind: "auth_logout",
-            server,
-            removed: true,
-            device_identity_removed,
-        };
-        println!("{}", serde_json::to_string(&output)?);
-    } else {
-        println!("Credentials removed for {server}.");
-        if device_identity_removed {
-            println!("Device signing identity removed.");
-        }
-    }
-    Ok(())
+    Ok(AuthLogout {
+        server,
+        device_identity_removed,
+    })
 }
 
 /// Show current authentication status.
-fn cmd_auth_status(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
+fn auth_status(server: Option<&str>) -> Result<AuthStatus> {
     let server = resolve_server(server)?;
     // Report through the SAME precedence the runtime authenticates with, so
     // `auth status` reflects what a hosted op would actually use — including a
     // `HEDDLE_CREDENTIAL` that overrides the keystore.
     let resolved = resolve_hosted_credential(Some(&server))?;
-    let output = auth_status_output(&server, &resolved);
-    if ctx.should_output_json(None) {
-        println!("{}", serde_json::to_string(&output)?);
-    } else if output.authenticated {
-        println!("Server:        {server}");
-        println!("Source:        {}", output.source);
-        println!(
-            "Subject:       {}",
-            output.subject.as_deref().unwrap_or_default()
-        );
-        if let Some(ref cred_id) = output.credential_id {
-            println!("Credential:    {cred_id}");
-        }
-        if let Some(ref expires) = output.expires_at {
-            println!("Expires:       {expires}");
-        }
-        if output.proof_key_available {
-            println!("Hosted writes: ready (device proof key available)");
-        } else {
-            println!(
-                "Hosted writes: unavailable — credential missing device proof key; re-login / re-install"
-            );
-            if let Some(ref action) = output.recommended_action {
-                println!("Run `{action}` to repair the credential.");
-            }
-        }
-    } else {
-        println!("Not authenticated with {server}.");
-        if let Some(ref action) = output.recommended_action {
-            println!("Run `{action}` to authenticate.");
-        }
-    }
-    Ok(())
+    Ok(auth_status_output(&server, &resolved))
 }
 
-fn auth_status_output(server: &str, resolved: &ResolvedHostedCredential) -> AuthStatusOutput {
+fn auth_status_output(server: &str, resolved: &ResolvedHostedCredential) -> AuthStatus {
     let source = resolved.source.label();
     if resolved.token.is_some() {
         let proof_key_available = resolved
             .proof_key_pem
             .as_deref()
             .is_some_and(|pem| Ed25519Signer::from_pem(pem).is_ok());
-        AuthStatusOutput {
-            output_kind: "auth_status",
+        AuthStatus {
             server: server.to_string(),
             authenticated: true,
             source,
@@ -1046,8 +1083,7 @@ fn auth_status_output(server: &str, resolved: &ResolvedHostedCredential) -> Auth
                 .then(|| format!("heddle auth login --server {server}")),
         }
     } else {
-        AuthStatusOutput {
-            output_kind: "auth_status",
+        AuthStatus {
             server: server.to_string(),
             authenticated: false,
             source,
@@ -1069,13 +1105,13 @@ fn auth_status_output(server: &str, resolved: &ResolvedHostedCredential) -> Auth
 /// Emits a single self-verifying `.hcred` credential file. The token and proof
 /// key never touch stdout or the JSON contract — only the credential path,
 /// scope, and expiry are reported.
-async fn cmd_create_service_token(
-    ctx: &dyn CliContext,
+async fn create_service_token(
+    options: &AuthOptions,
     server: Option<&str>,
     name: String,
     namespace: String,
     out: Option<&Path>,
-) -> Result<()> {
+) -> Result<ServiceTokenCreated> {
     let server = resolve_server(server)?;
     let scope = format!("repo:{namespace}/*");
 
@@ -1100,7 +1136,7 @@ async fn cmd_create_service_token(
     )?;
     let mut auth_client = session.connect(&server).await?;
     let result = create_service_token_connected(
-        ctx,
+        options,
         &mut auth_client,
         server,
         name,
@@ -1114,17 +1150,17 @@ async fn cmd_create_service_token(
 }
 
 async fn create_service_token_connected(
-    ctx: &dyn CliContext,
+    options: &AuthOptions,
     auth_client: &mut HostedClient,
     server: String,
     name: String,
     namespace: String,
     scope: String,
     credential_path: std::path::PathBuf,
-) -> Result<()> {
+) -> Result<ServiceTokenCreated> {
     let create_operation_id = ClientOperationId::caller_or_fresh(
         "heddle.api.v1alpha1.IdentityService/CreateServiceAccount",
-        ctx.operation_id_wire(),
+        options.operation_id().unwrap_or_default(),
     );
     let issue_operation_id = ClientOperationId::for_required_method(
         "heddle.api.v1alpha1.IdentityService/IssueServiceAccountCredential",
@@ -1202,30 +1238,13 @@ async fn create_service_token_connected(
     credential_file::write_credential_file(&credential_path, &verified)?;
     let credential_path_display = credential_path.display().to_string();
 
-    if ctx.should_output_json(None) {
-        let output = ServiceTokenOutput {
-            output_kind: "auth_create_service_token",
-            name,
-            namespace,
-            scope,
-            credential_path: credential_path_display,
-            expires_in_days: SERVICE_TOKEN_TTL_DAYS,
-        };
-        println!("{}", serde_json::to_string(&output)?);
-    } else {
-        println!();
-        println!("Service token created for \"{name}\" (scope: {scope})");
-        println!();
-        println!("Credential written to: {credential_path_display}");
-        println!("Expires in {SERVICE_TOKEN_TTL_DAYS} days.");
-        println!(
-            "The single .hcred file carries the token and its proof key; keep it secret (mode 0600)."
-        );
-        println!("Point the runtime at it with HEDDLE_CREDENTIAL={credential_path_display}.");
-        println!("This token is scoped to the {namespace} namespace.");
-    }
-
-    Ok(())
+    Ok(ServiceTokenCreated {
+        name,
+        namespace,
+        scope,
+        credential_path: credential_path_display,
+        expires_in_days: SERVICE_TOKEN_TTL_DAYS,
+    })
 }
 
 /// Resolve where to write the service-account `.hcred` credential.
@@ -1384,20 +1403,21 @@ fn hosted_bootstrap_connect_error(error: impl std::fmt::Display) -> anyhow::Erro
     }
 }
 
-fn hosted_tls_trust_advice(message: &str) -> RecoveryAdvice {
+fn hosted_tls_trust_advice(message: &str) -> HeddleError {
     let annotated = config::annotate_tls_trust_failure(message);
-    RecoveryAdvice::safety_refusal(
-        "hosted_tls_trust",
-        annotated,
-        format!(
-            "Trust this server's CA with {}=/path/to/ca.pem or [remote] tls_ca_certificate_path.",
-            config::REMOTE_TLS_CA_CERT_SETTING
-        ),
-        "the hosted bootstrap HTTPS request failed because the peer certificate is not trusted",
-        "retrying without a trusted CA will fail the same TLS handshake",
-        "no hosted session was opened and local credentials were not written",
-        "heddle help remotes",
-        vec!["heddle help remotes".to_string()],
+    HeddleError::recovery(
+        RecoveryDetails::safety_refusal(
+            "hosted_tls_trust",
+            annotated,
+            format!(
+                "Trust this server's CA with {}=/path/to/ca.pem or [remote] tls_ca_certificate_path.",
+                config::REMOTE_TLS_CA_CERT_SETTING
+            ),
+            "the hosted bootstrap HTTPS request failed because the peer certificate is not trusted",
+            "retrying without a trusted CA will fail the same TLS handshake",
+            "no hosted session was opened and local credentials were not written",
+        )
+        .with_recovery_commands(vec!["heddle help remotes".to_string()]),
     )
 }
 
@@ -1559,7 +1579,7 @@ struct RegisteredDevice {
     expires_at: Option<prost_types::Timestamp>,
 }
 
-/// Validate a URL before handing it to a browser helper.
+/// Validate a URL before emitting a browser-open request to the caller.
 ///
 /// Accepts only `https://` URLs, or `http://` when the host is loopback
 /// (`localhost`, `127.0.0.1`, `::1`). Rejects empty strings, control
@@ -1567,8 +1587,8 @@ struct RegisteredDevice {
 /// `cmd /C start` even when passed as separate argv elements (including `%`
 /// env-var expansion and `<`/`>` redirection).
 ///
-/// Validation is the primary control; Windows still uses the safer
-/// `start "" <url>` form after this check passes.
+/// Validation is the primary control; caller Adapters receive an open request
+/// only after this check passes.
 pub(crate) fn validate_browser_url(url: &str) -> Result<()> {
     if url.is_empty() {
         bail!("browser URL is empty");
@@ -1660,37 +1680,37 @@ fn percent_encode_query_component(s: &str) -> String {
     out
 }
 
-/// Best-effort browser open. Caller MUST pass a URL that already passed
-/// [`validate_browser_url`]. On Windows, validation is the primary control
-/// against command injection via `cmd /C start`.
-fn open_url(url: &str) -> Result<()> {
-    // Defense in depth: refuse to open unvalidated URLs even if a caller
-    // forgets the pre-check.
-    validate_browser_url(url)?;
-
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open").arg(url).spawn()?;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open").arg(url).spawn()?;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // Empty title argument prevents `start` from treating a quoted URL
-        // as a window title. Only invoked after validate_browser_url.
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hosted_runtime::device_flow::CI_VERDICT_WRITE_OPERATION;
+    use crate::hosted_runtime::{
+        auth_requests::LoginPermission, device_flow::CI_VERDICT_WRITE_OPERATION,
+    };
+
+    #[test]
+    fn hosted_auth_has_no_cli_or_process_presentation_dependencies() {
+        let sources = [
+            include_str!("auth.rs"),
+            include_str!("auth_login.rs"),
+            include_str!("auth_login_agent.rs"),
+            include_str!("auth_requests.rs"),
+        ];
+        for forbidden in [
+            concat!("print", "ln!"),
+            concat!("eprint", "ln!"),
+            concat!("heddle_cli", "_contract"),
+            concat!("HostedCommand", "Context"),
+            concat!("Cli", "Context"),
+            concat!("output", "_json"),
+            concat!("inter", "active"),
+            concat!("std::", "process"),
+        ] {
+            assert!(
+                sources.iter().all(|source| !source.contains(forbidden)),
+                "hosted auth source must not contain {forbidden}"
+            );
+        }
+    }
 
     #[test]
     fn signup_invite_commands_construct_the_declared_requests() {
@@ -1762,10 +1782,16 @@ mod tests {
     #[test]
     fn hosted_tls_trust_advice_names_ca_and_avoids_status() {
         let advice = hosted_tls_trust_advice("invalid peer certificate: UnknownIssuer");
-        assert_eq!(advice.kind, "hosted_tls_trust");
-        assert!(advice.error.contains("HEDDLE_REMOTE_TLS_CA_CERT"));
-        assert_eq!(advice.primary_command, "heddle help remotes");
-        assert!(!advice.hint.contains("heddle status"));
+        let HeddleError::Recovery(details) = advice else {
+            panic!("expected recovery details")
+        };
+        assert_eq!(details.kind, "hosted_tls_trust");
+        assert!(details.error.contains("HEDDLE_REMOTE_TLS_CA_CERT"));
+        assert_eq!(
+            details.recovery_commands.as_deref(),
+            Some(["heddle help remotes".to_string()].as_slice())
+        );
+        assert!(!details.hint.contains("heddle status"));
     }
 
     #[test]
@@ -1955,21 +1981,6 @@ mod tests {
         );
     }
 
-    /// Minimal `CliContext` for the logout tests — text output, no repo.
-    struct TextCtx;
-
-    impl CliContext for TextCtx {
-        fn repo_path(&self) -> Option<&std::path::Path> {
-            None
-        }
-        fn operation_id_wire(&self) -> String {
-            String::new()
-        }
-        fn should_output_json(&self, _repo_config: Option<&repo::Config>) -> bool {
-            false
-        }
-    }
-
     #[test]
     fn trust_replace_refuses_active_explicit_config_without_mutating_the_pin() {
         with_isolated_home(|| {
@@ -1988,15 +1999,12 @@ mod tests {
                     hex::encode([0x33; 32]),
                 );
             }
-            let result = cmd_auth_trust(
-                &TextCtx,
-                AuthTrustCommand::Replace {
-                    server: server.to_string(),
-                    expected_current_public_key: hex::encode([0x11; 32]),
-                    key_id: "new-id".to_string(),
-                    public_key: hex::encode([0x22; 32]),
-                },
-            );
+            let result = auth_trust(AuthTrustCommand::Replace {
+                server: server.to_string(),
+                expected_current_public_key: hex::encode([0x11; 32]),
+                key_id: "new-id".to_string(),
+                public_key: hex::encode([0x22; 32]),
+            });
             unsafe {
                 match previous_key_id {
                     Some(value) => std::env::set_var("HEDDLE_REMOTE_IROH_DESCRIPTOR_KEY_ID", value),
@@ -2149,7 +2157,7 @@ mod tests {
             let (parent, private_key_pem, _root) = stored_device_parent();
             credentials::store_server_credential(server, parent).expect("store parent");
 
-            cmd_auth_derive_agent(
+            derive_agent(
                 server,
                 Some("agent-parent".to_string()),
                 3600,
@@ -2157,7 +2165,6 @@ mod tests {
                 vec!["Push".to_string()],
                 None,
                 None,
-                false,
             )
             .expect("derive and install parent agent");
             let installed = credentials::get_server_credential(server)
@@ -2198,7 +2205,7 @@ mod tests {
                 "the child attenuation block must bind the child's PoP public key"
             );
 
-            cmd_auth_derive_agent(
+            derive_agent(
                 server,
                 Some("agent-child".to_string()),
                 600,
@@ -2206,7 +2213,6 @@ mod tests {
                 vec!["Push".to_string()],
                 None,
                 None,
-                false,
             )
             .expect("derive narrower subagent");
             let subagent = credentials::get_server_credential(server)
@@ -2237,7 +2243,7 @@ mod tests {
                 "the subagent attenuation block must bind the subagent's PoP public key"
             );
 
-            let error = cmd_auth_derive_agent(
+            let error = derive_agent(
                 server,
                 Some("agent-widening".to_string()),
                 300,
@@ -2245,7 +2251,6 @@ mod tests {
                 vec!["Push".to_string()],
                 None,
                 None,
-                false,
             )
             .expect_err("subagent scope widening must be rejected");
             assert!(error.to_string().contains("would widen"));
@@ -2260,7 +2265,7 @@ mod tests {
             credentials::store_server_credential(server, parent).expect("store parent");
             let out = repo::identity::heddle_home_dir().join("agent-export.hcred");
 
-            cmd_auth_derive_agent(
+            derive_agent(
                 server,
                 Some("agent-export".to_string()),
                 3600,
@@ -2268,7 +2273,6 @@ mod tests {
                 vec!["Push".to_string()],
                 None,
                 Some(&out),
-                false,
             )
             .expect("derive portable child credential");
 
@@ -2308,7 +2312,7 @@ mod tests {
                 "the token must bind the key packaged alongside it"
             );
 
-            let error = cmd_auth_derive_agent(
+            let error = derive_agent(
                 server,
                 Some("agent-export-again".to_string()),
                 3600,
@@ -2316,7 +2320,6 @@ mod tests {
                 vec!["Push".to_string()],
                 None,
                 Some(&out),
-                false,
             )
             .expect_err("an existing credential file must not be overwritten");
             assert!(error.to_string().contains("already exists"));
@@ -2331,7 +2334,7 @@ mod tests {
             credentials::store_server_credential(server, parent).expect("store human parent");
             let out = repo::identity::heddle_home_dir().join("runner.hcred");
 
-            cmd_auth_derive_agent(
+            derive_agent(
                 server,
                 Some("ci-runner".to_string()),
                 900,
@@ -2339,7 +2342,6 @@ mod tests {
                 Vec::new(),
                 Some(AgentTemplate::Runner),
                 Some(&out),
-                false,
             )
             .expect("derive portable runner credential offline");
 
@@ -2543,14 +2545,15 @@ mod tests {
 
     #[tokio::test]
     async fn login_with_missing_credential_file_fails_closed() {
-        let error = cmd_auth(
-            &TextCtx,
+        let error = execute(
+            AuthOptions::default(),
             AuthCommand::Login {
                 server: None,
-                open_browser: false,
+                permission: LoginPermission::HeadlessOnly,
                 invite: None,
                 credential: Some(std::path::PathBuf::from("/definitely/not/here.hcred")),
             },
+            |_| Ok(()),
         )
         .await
         .expect_err("a missing credential file must fail");
@@ -2658,7 +2661,7 @@ mod tests {
 
             // No explicit --server: resolve_server falls back to the stored
             // default written by `store_server_credential`.
-            cmd_auth_logout(&TextCtx, None).expect("logout succeeds");
+            auth_logout(None).expect("logout succeeds");
 
             assert!(
                 credentials::get_server_credential("api.S")
@@ -2693,7 +2696,7 @@ mod tests {
             )
             .expect("write corrupt device identity");
 
-            let result = cmd_auth_logout(&TextCtx, None);
+            let result = auth_logout(None);
             assert!(
                 result.is_err(),
                 "a failed device unlink must fail the logout, not report a clean removal",
