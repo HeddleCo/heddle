@@ -1151,24 +1151,25 @@ fn test_cli_ready_in_plain_git_repo_captures_mixed_git_state() {
     )
     .expect("invoke ready");
     assert!(
-        !ready_output.status.success(),
-        "ready should preserve the internal capture but require the explicit save boundary before claiming verification"
+        ready_output.status.success(),
+        "ready should capture and checkpoint mixed Git state: {}",
+        String::from_utf8_lossy(&ready_output.stderr)
     );
     let ready = inject_post_verification_at(
         temp.path(),
-        json_stdout(&ready_output, "ready blocked after capture"),
+        json_stdout(&ready_output, "ready after mixed-state capture"),
     );
-    assert_eq!(ready["status"], "blocked");
+    assert_eq!(ready["status"], "completed");
     assert_eq!(ready["captured"], true);
-    assert_eq!(ready["verification"]["status"], "needs_checkpoint");
-    assert_eq!(ready["recommended_action"], "heddle capture -m \"...\"");
+    assert!(ready["captured_state"].as_str().is_some());
+    assert_eq!(ready["verification"]["status"], "clean");
 
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
             .unwrap();
     assert!(status["state"]["state_id"].as_str().is_some());
-    assert_eq!(status["verification"]["status"], "needs_checkpoint");
-    assert_eq!(status["recommended_action"], "heddle capture -m \"...\"");
+    assert!(status["git_checkpoint"].as_object().is_some());
+    assert_eq!(status["verification"]["status"], "clean");
 }
 
 #[test]
@@ -1792,25 +1793,26 @@ fn test_cli_ready_captures_current_git_branch_after_switch() {
     )
     .expect("invoke ready");
     assert!(
-        !ready_output.status.success(),
-        "ready should preserve the internal capture but require the explicit save boundary before claiming verification"
+        ready_output.status.success(),
+        "ready should capture and checkpoint the switched branch: {}",
+        String::from_utf8_lossy(&ready_output.stderr)
     );
     let ready = inject_post_verification_at(
         temp.path(),
-        json_stdout(&ready_output, "ready blocked after switched branch capture"),
+        json_stdout(&ready_output, "ready after switched branch capture"),
     );
-    assert_eq!(ready["status"], "blocked");
+    assert_eq!(ready["status"], "completed");
     assert_eq!(ready["captured"], true);
-    assert_eq!(ready["verification"]["status"], "needs_checkpoint");
-    assert_eq!(ready["recommended_action"], "heddle capture -m \"...\"");
+    assert!(ready["captured_state"].as_str().is_some());
+    assert_eq!(ready["verification"]["status"], "clean");
 
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
             .unwrap();
     assert_eq!(status["thread"], "support/ready-switch");
     assert!(status["state"]["state_id"].as_str().is_some());
-    assert_eq!(status["verification"]["status"], "needs_checkpoint");
-    assert_eq!(status["recommended_action"], "heddle capture -m \"...\"");
+    assert!(status["git_checkpoint"].as_object().is_some());
+    assert_eq!(status["verification"]["status"], "clean");
 }
 
 #[test]
@@ -1916,25 +1918,25 @@ fn test_cli_ready_in_git_overlay_auto_captures_initial_state() {
     )
     .expect("invoke ready");
     assert!(
-        !ready_output.status.success(),
-        "ready should preserve the internal capture but require the explicit save boundary before claiming verification"
+        ready_output.status.success(),
+        "ready should capture and create the initial Git checkpoint: {}",
+        String::from_utf8_lossy(&ready_output.stderr)
     );
     let ready = inject_post_verification_at(
         temp.path(),
-        json_stdout(&ready_output, "ready blocked after initial capture"),
+        json_stdout(&ready_output, "ready after initial capture"),
     );
-    assert_eq!(ready["status"], "blocked");
+    assert_eq!(ready["status"], "completed");
     assert_eq!(ready["captured"], true);
-    assert_eq!(ready["verification"]["status"], "needs_checkpoint");
-    assert_eq!(ready["recommended_action"], "heddle capture -m \"...\"");
+    assert!(ready["captured_state"].as_str().is_some());
+    assert_eq!(ready["verification"]["status"], "clean");
 
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
             .unwrap();
     assert!(status["state"]["state_id"].as_str().is_some());
-    assert!(status["git_checkpoint"].is_null());
-    assert_eq!(status["verification"]["status"], "needs_checkpoint");
-    assert_eq!(status["recommended_action"], "heddle capture -m \"...\"");
+    assert!(status["git_checkpoint"].as_object().is_some());
+    assert_eq!(status["verification"]["status"], "clean");
 }
 
 #[test]
