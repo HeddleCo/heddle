@@ -1341,7 +1341,8 @@ mod tests {
         assert!(projection.contains("It is not Git Overlay"));
         assert!(projection.contains("heddle adopt --ref <branch>"));
         assert!(projection.contains("heddle bridge git export --destination"));
-        assert!(projection.contains("does not retain a second object warehouse"));
+        assert!(projection.contains("normal operation never reads or creates"));
+        assert!(projection.contains("`.heddle/git`"));
     }
 
     /// heddle#278. The agent flags stay `hide = true` in the default surface
