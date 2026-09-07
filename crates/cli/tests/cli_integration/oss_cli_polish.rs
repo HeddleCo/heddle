@@ -2907,53 +2907,52 @@ fn core_mutations_emit_post_verification_in_json() {
 }
 #[test]
 fn plain_git_core_save_refusals_do_not_initialize_heddle() {
-    for (verb, args) in [("capture", vec!["capture", "-m", "should not init"])] {
-        let temp = TempDir::new().unwrap();
-        init_git_repo_for_json_contract(temp.path(), "main");
-        std::fs::write(temp.path().join("tracked.txt"), "seed\n").unwrap();
-        git_commit_all_for_json_contract(temp.path(), "seed");
-        std::fs::write(temp.path().join("tracked.txt"), "dirty\n").unwrap();
-        let before_status = git_status_short_for_json_contract(temp.path());
+    let temp = TempDir::new().unwrap();
+    init_git_repo_for_json_contract(temp.path(), "main");
+    std::fs::write(temp.path().join("tracked.txt"), "seed\n").unwrap();
+    git_commit_all_for_json_contract(temp.path(), "seed");
+    std::fs::write(temp.path().join("tracked.txt"), "dirty\n").unwrap();
+    let before_status = git_status_short_for_json_contract(temp.path());
 
-        let mut command = vec!["--output", "json"];
-        command.extend(args);
-        let output = heddle_output(&command, Some(temp.path()))
-            .unwrap_or_else(|err| panic!("{verb} should execute and refuse cleanly: {err}"));
+    let output = heddle_output(
+        &["--output", "json", "capture", "-m", "should not init"],
+        Some(temp.path()),
+    )
+    .unwrap_or_else(|err| panic!("capture should execute and refuse cleanly: {err}"));
 
-        assert!(
-            !output.status.success(),
-            "{verb} must refuse before Heddle initialization"
-        );
-        assert!(
-            output.stdout.is_empty(),
-            "{verb} refusal should keep JSON errors on stderr only: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        assert!(
-            !temp.path().join(".heddle").exists(),
-            "{verb} refusal must not create .heddle in a plain Git repo"
-        );
-        assert_eq!(
-            git_status_short_for_json_contract(temp.path()),
-            before_status,
-            "{verb} refusal must not change the Git worktree or index"
-        );
-        let stderr = std::str::from_utf8(&output.stderr).unwrap();
-        let envelope: Value = serde_json::from_str(stderr)
-            .unwrap_or_else(|err| panic!("{verb} stderr should be JSON: {err}: {stderr}"));
-        assert_eq!(envelope["kind"], "git_repo_needs_init");
-        assert_eq!(envelope["primary_command"], "heddle init");
-        assert_eq!(
-            envelope["primary_command_template"]["argv_template"],
-            heddle_argv_json(["init"])
-        );
-        assert!(
-            envelope["preserved"]
-                .as_str()
-                .is_some_and(|value| value.contains("Heddle metadata")),
-            "{verb} refusal should say metadata was preserved: {envelope}"
-        );
-    }
+    assert!(
+        !output.status.success(),
+        "capture must refuse before Heddle initialization"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "capture refusal should keep JSON errors on stderr only: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        !temp.path().join(".heddle").exists(),
+        "capture refusal must not create .heddle in a plain Git repo"
+    );
+    assert_eq!(
+        git_status_short_for_json_contract(temp.path()),
+        before_status,
+        "capture refusal must not change the Git worktree or index"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value = serde_json::from_str(stderr)
+        .unwrap_or_else(|err| panic!("capture stderr should be JSON: {err}: {stderr}"));
+    assert_eq!(envelope["kind"], "git_repo_needs_init");
+    assert_eq!(envelope["primary_command"], "heddle init");
+    assert_eq!(
+        envelope["primary_command_template"]["argv_template"],
+        heddle_argv_json(["init"])
+    );
+    assert!(
+        envelope["preserved"]
+            .as_str()
+            .is_some_and(|value| value.contains("Heddle metadata")),
+        "capture refusal should say metadata was preserved: {envelope}"
+    );
 }
 
 #[test]
