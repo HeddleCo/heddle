@@ -54,10 +54,6 @@ pub struct EnvRunArgs {
     #[arg(long = "slot", value_name = "SLOT")]
     pub slots: Vec<String>,
 
-    /// Request lifetime in seconds. The broker refuses after expiry.
-    #[arg(long, default_value_t = 30)]
-    pub ttl: u64,
-
     /// Child command. Use `--` to separate it from Heddle flags.
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<String>,

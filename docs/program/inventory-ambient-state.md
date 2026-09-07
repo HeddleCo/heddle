@@ -69,7 +69,6 @@ Production-ish hits: **78** (test modules filtered heuristically).
 | `crates/refs/src/refs/pg_refs.rs` | 82 | `\bOnceLock\b` | `.expect("OnceLock populated above or by a concurrent caller"))` |
 | `crates/repo/src/lazy_hydrator.rs` | 30 | `\bOnceLock\b` | `sync::{Arc, OnceLock, RwLock},` |
 | `crates/repo/src/lazy_hydrator.rs` | 197 | `\bOnceLock\b` | `static REGISTRY: OnceLock<RwLock<HashMap<String, BlobHydratorFactory>>> = OnceLock::new();` |
-| `crates/repo/src/migration.rs` | 190 | `static\s+[A-Z_][A-Z0-9_]*\s*:\s*` | `pub static MIGRATIONS: &[Migration] = &[` |
 | `crates/repo/src/repository_snapshot.rs` | 521 | `static\s+[A-Z_][A-Z0-9_]*\s*:\s*` | `static SNAPSHOT_FAULT: std::cell::Cell<Option<SnapshotFault>> = const { std::cell::Cell::new(None) };` |
 | `crates/repo/src/repository_state_visibility.rs` | 810 | `static\s+[A-Z_][A-Z0-9_]*\s*:\s*` | `static VISIBILITY_COMMIT_FAULT: std::cell::Cell<Option<VisibilityCommitFault>> =` |
 | `crates/semantic/src/cache.rs` | 6 | `\bOnceLock\b` | `sync::{Arc, Mutex, OnceLock},` |

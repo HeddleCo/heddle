@@ -1033,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    fn thread_record_reader_rejects_minimal_legacy_shape_after_migration_gate() {
+    fn thread_record_reader_rejects_minimal_old_shape_after_format_gate() {
         let raw = r#"
 id = "legacy-minimal"
 thread = "legacy/minimal"

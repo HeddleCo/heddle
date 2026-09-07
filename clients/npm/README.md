@@ -15,7 +15,7 @@ schema introspection — there are no hand-authored types to drift.
 Import from the package (#584) like:
 
 ```ts
-import type { CommitSchema, HeddleVerbOutputs } from "./generated/heddle-schemas";
+import type { CaptureSchema, HeddleVerbOutputs } from "./generated/heddle-schemas";
 ```
 
 ## The `Heddle` API (#583)
@@ -35,7 +35,7 @@ const status = await heddle.status();        // typed StatusSchema
 console.log(status.output_kind);
 
 // Mutating verbs thread --op-id for idempotent retries.
-await heddle.commit(["-m", "msg"], { opId: crypto.randomUUID() });
+await heddle.capture(["-m", "msg"], { opId: crypto.randomUUID() });
 
 try {
   await heddle.push();
@@ -177,7 +177,7 @@ canonical verbs; the doc column links the field-by-field reference.
 | init | `init` | `InitSchema` | `heddle init --output json` |
 | status | `status` | `StatusSchema` | `heddle status --output json` |
 | start / thread create | `start` / `thread create` | `StartSchema` / `ThreadCreateSchema` | `heddle start --output json` |
-| commit | `commit` | `CommitSchema` | Core loop mutation schemas |
+| capture | `capture` | `CaptureSchema` | Core loop mutation schemas |
 | log | `log` | `LogSchema` | `heddle log --output json` |
 | diff | `diff` | `DiffSchema` | `heddle diff --output json` |
 | pull | `pull` | `PullSchema` | (transport schemas) |

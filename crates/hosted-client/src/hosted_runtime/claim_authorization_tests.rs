@@ -1131,12 +1131,18 @@ async fn bridged_owner_root(
     let observed = std::sync::Arc::clone(observed);
     let served = worker
         .serve_next_canned(move |_subject, _authorization_hash, forwarded_body| {
-            observed.lock().expect("observed lock").push(forwarded_body.to_vec());
+            observed
+                .lock()
+                .expect("observed lock")
+                .push(forwarded_body.to_vec());
             Ok(reply)
         })
         .await
         .expect("foreground worker serves one owner-root call");
-    assert!(served, "the daemon forwarded one owner-root call to co-sign");
+    assert!(
+        served,
+        "the daemon forwarded one owner-root call to co-sign"
+    );
     let OwnedResponse::Success(reply_bytes) = dial.await.expect("owner-root dial task") else {
         panic!("bridged owner-root call must succeed");
     };

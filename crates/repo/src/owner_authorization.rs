@@ -11,8 +11,8 @@ use api::heddle::api::v1alpha1::{
 };
 use crypto::Signer;
 use heddleco_capability_verifier::{
-    verify_authorization_bundle, verify_purge_authorization, verify_spool_owner_genesis, Decision,
-    PurgeContext, VerificationLimits,
+    Decision, PurgeContext, VerificationLimits, verify_authorization_bundle,
+    verify_purge_authorization, verify_spool_owner_genesis,
 };
 use objects::{fs_atomic::write_file_atomic, lock::RepositoryLockExt};
 use prost::Message;

@@ -72,8 +72,7 @@ pub use actor::{
 };
 pub use agent_fanout::{
     FanoutBaseFacts, FanoutBaseSelection, FanoutCommandSpec, FanoutLaneAvailability,
-    FanoutLanePreflightBlock, FanoutLaneReport, FanoutNodeSpec, FanoutPlan, FanoutPlanError,
-    FanoutPlanReport, FanoutPlanRequest, FanoutTaskPlaceholder, assemble_fanout_plan_report,
+    FanoutLanePreflightBlock, FanoutNodeSpec, FanoutPlan, FanoutPlanError, FanoutPlanRequest,
     assemble_fanout_start_commands, check_fanout_start_preflight, ensure_unique_thread_names,
     fanout_child_body, fanout_parent_body, fanout_parent_delegated_by, fanout_start_attach_rule,
     parse_fanout_lane, parse_fanout_lanes, plan_fanout, select_fanout_base,
@@ -114,7 +113,7 @@ pub use clone_plan::{
 pub use collapse_plan::{
     CollapsePlan, collapse_has_source_states, collapse_states_required_kind, plan_collapse,
 };
-pub use context::{ExecutionContext, ExecutionContextBuilder, Verbosity};
+pub use context::{ExecutionContext, ExecutionContextBuilder};
 pub use context_plan::{
     ContextContentPlanError, ContextRmPlanError, annotation_passes_filters,
     annotation_status_label, audit_duplicate_count, audit_staleness_key, audit_target_key,
@@ -137,10 +136,9 @@ pub use diff::{
 };
 pub use fsck::{FsckError, FsckOptions, FsckRepair, FsckReport, fsck};
 pub use gc_plan::{
-    GcDryRunPlan, gc_consolidated_mirror_message, gc_dry_run_messages, gc_dry_run_pack_message,
-    gc_dry_run_prune_message, gc_pack_message, gc_pinned_redactions_message,
-    gc_preserved_redactions_message, gc_prune_loose_message, gc_pruned_git_mapping_message,
-    gc_status_token, plan_gc_dry_run,
+    GcDryRunPlan, gc_dry_run_messages, gc_dry_run_pack_message, gc_dry_run_prune_message,
+    gc_pack_message, gc_pinned_redactions_message, gc_preserved_redactions_message,
+    gc_prune_loose_message, gc_pruned_git_mapping_message, gc_status_token, plan_gc_dry_run,
 };
 pub use harness_json::{
     VerificationClaimPolicyFacts, VerificationClaimTrustFacts, first_value_string, map_from_pairs,
@@ -282,12 +280,11 @@ pub use revert_plan::{
     plan_revert, revert_has_no_changes, revert_inspect_command, revert_success_message,
 };
 pub use save::{
-    CaptureAgentReport, CaptureAttribution, CaptureDiagnostics, CaptureOptions,
-    CapturePrincipalReport, CaptureProfile, CaptureReport, CommitGitIndexPlan, GitScope, SavePlan,
-    SaveReport, SaveVerb, capture, commit_next_action_from_trust, commit_scope_text,
-    complete_current_thread_manual_resolution, execute_save, plan_commit_git_index,
-    plan_commit_git_index_only, plan_creates_new_state, plan_git_scope, plan_writes_git_checkpoint,
-    recover_published_git_checkpoint, split_git_extra_paths, staged_commit_summary, tree_leaf_name,
+    CaptureAgentOptions, CaptureAgentReport, CaptureDiagnostics, CaptureOptions,
+    CapturePrincipalReport, CaptureProfile, CaptureReport, GitScope, SavePlan, SaveReport,
+    SaveVerb, capture, complete_current_thread_manual_resolution, execute_save,
+    plan_creates_new_state, plan_writes_git_checkpoint, recover_published_git_checkpoint,
+    resolve_capture_author, tree_leaf_name,
 };
 pub use semantic_plan::{
     HOT_EVENT_KIND_TOKENS, HotEventKindToken, hot_event_kind_label, human_event_kind,

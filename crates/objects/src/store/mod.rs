@@ -87,6 +87,18 @@ pub trait ExternalObjectSource: Send + Sync {
     fn list_states(&self) -> Result<Vec<StateId>>;
 }
 
+/// Explicit cache control for benchmarks and diagnostic tools.
+///
+/// Cache invalidation is not part of durable object storage semantics. Keeping
+/// it separate prevents remote stores such as Weft's backend from having to
+/// pretend they expose process-local cache controls merely to implement
+/// [`ObjectStore`].
+pub trait ObjectCacheControl: Send + Sync {
+    /// Drop process-local decoded-object caches, if this implementation has
+    /// any. The next read should observe the implementation's cold path.
+    fn clear_recent_caches(&self);
+}
+
 pub use crate::error::{HeddleError as StoreError, HeddleError, Result};
 
 /// Sidecar records that live outside the content-addressed object graph —
@@ -293,16 +305,6 @@ pub trait ObjectStore: SidecarStore + Send + Sync {
         Ok(false)
     }
 
-    /// Drop any in-memory caches of decompressed blobs / trees /
-    /// states. The next access to any object pays full I/O +
-    /// decompression cost. No-op for stores that don't cache
-    /// (`InMemoryStore` is already the source of truth).
-    ///
-    /// Exposed primarily for benchmarks that want to measure the
-    /// true cold-cache path without rebuilding the store from
-    /// scratch. Production callers don't need to invoke this.
-    fn clear_recent_caches(&self) {}
-
     fn put_blob_with_hash(&self, blob: &Blob, hash: ContentHash) -> Result<ContentHash> {
         if blob.hash() != hash {
             return Err(HeddleError::InvalidObject("blob hash mismatch".to_string()));
@@ -405,7 +407,7 @@ pub trait ObjectStore: SidecarStore + Send + Sync {
     }
 
     fn put_state_serialized(&self, data: &[u8], id: StateId) -> Result<()> {
-        let state: State = rmp_serde::from_slice(data)?;
+        let state = State::decode_current_msgpack(data)?;
         if !state.accepts_stored_id(&id) {
             return Err(HeddleError::InvalidObject(format!(
                 "state id mismatch: expected {id}, computed {}",
@@ -461,7 +463,7 @@ pub trait ObjectStore: SidecarStore + Send + Sync {
                 if let Some(state) = self.get_state(change_id)? {
                     Ok(Some((
                         pack::ObjectType::State,
-                        rmp_serde::to_vec_named(&state)?,
+                        state.encode_current_msgpack()?,
                     )))
                 } else {
                     Ok(None)
@@ -595,21 +597,6 @@ pub trait ObjectStore: SidecarStore + Send + Sync {
         let _ = std::fs::remove_file(pack_path);
         let _ = std::fs::remove_file(index_path);
         Ok(ids)
-    }
-
-    fn pack_objects(&self, delta_search: bool) -> Result<(u64, u64)> {
-        let _ = delta_search;
-        Ok((0, 0))
-    }
-
-    fn prune_loose_objects(&self) -> Result<(u64, u64)> {
-        Ok((0, 0))
-    }
-
-    /// Remove only pack/index pairs that fail checksum, index, or object-hash
-    /// validation so a clone repair pull advertises their objects as missing.
-    fn discard_corrupt_clone_packs(&self) -> Result<usize> {
-        Ok(0)
     }
 
     fn begin_snapshot_write_batch(&self) -> Result<()> {

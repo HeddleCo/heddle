@@ -26,6 +26,9 @@ pub struct SnapshotOutput {
     pub action: &'static str,
     pub state_id: String,
     pub content_hash: String,
+    /// Git commit written for this state in Git Overlay mode.
+    /// Native Heddle repositories do not emit a checkpoint.
+    pub git_checkpoint: Option<String>,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
     pub task_assignment_id: Option<String>,
@@ -95,24 +98,6 @@ impl From<&Agent> for SnapshotAgentOutput {
             parent: agent.parent.clone(),
         }
     }
-}
-
-// ---- commit ----------------------------------------------------------------
-
-/// JSON payload for `heddle commit`.
-#[derive(Serialize, JsonSchema)]
-#[schemars(rename = "CommitSchema")]
-pub struct CommitOutput {
-    pub output_kind: &'static str,
-    pub action: &'static str,
-    pub status: &'static str,
-    pub state_id: String,
-    pub git_commit: String,
-    pub summary: String,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplate>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationState,
 }
 
 // ---- undo / redo / recover -------------------------------------------------

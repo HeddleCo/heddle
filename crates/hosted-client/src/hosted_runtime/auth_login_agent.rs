@@ -1,26 +1,22 @@
 //! Node-key remint and invite-create for `heddle auth login`.
 
+use super::{
+    HostedAuthMode, HostedSession, agent_node_identity,
+    auth::{AgentAccountCreated, AuthLoginOutcome, headless_token_metadata},
+    auth_login::store_agent_root,
+    auth_requests::AuthOptions,
+    device_flow::restrict_agent_account_root,
+    identity_state::{self, ClaimState},
+    root_mint::{is_local_agent_root, mint_agent_root},
+};
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha1::{
     CreateAgentAccountRequest, CreateAgentAccountResponse, SignedOwnerRoot,
 };
 use config::UserConfig;
 use crypto::{Ed25519Signer, Signer as _};
-use heddle_cli_args::CliContext;
-use heddle_cli_contract::cli::commands::wire::auth::{
-    AgentAccountCreatedOutput, HumanPromotionDirective,
-};
 
-use super::{
-    HostedAuthMode, HostedSession, agent_node_identity,
-    auth::headless_token_metadata,
-    auth_login::{print_success, store_agent_root},
-    device_flow::restrict_agent_account_root,
-    identity_state::{self, ClaimState},
-    root_mint::{is_local_agent_root, mint_agent_root},
-};
-
-pub(crate) async fn remint(server: &str) -> Result<()> {
+pub(crate) async fn remint(server: &str) -> Result<AuthLoginOutcome> {
     let stored = mint_restricted_agent_root()?;
     let subject = stored.subject.clone();
     let claimable_root = claimable_root_for_stored_account(server, &stored.private_key_pem)?;
@@ -44,8 +40,10 @@ pub(crate) async fn remint(server: &str) -> Result<()> {
         stored.private_key_pem,
         stored.expires_at,
     )?;
-    print_success(&subject);
-    Ok(())
+    Ok(AuthLoginOutcome::Authenticated {
+        subject,
+        credential_saved: true,
+    })
 }
 
 pub(crate) fn record_claimable_root_for_stored_account(
@@ -106,10 +104,10 @@ pub(crate) async fn remint_with_client_for_test(
 }
 
 pub(crate) async fn create_with_invite(
-    ctx: &dyn CliContext,
+    options: &AuthOptions,
     server: &str,
     invite: String,
-) -> Result<()> {
+) -> Result<AuthLoginOutcome> {
     let minted = mint_restricted_agent_root()?;
     let user_config = UserConfig::load_default()?;
     let session = HostedSession::build(
@@ -121,10 +119,10 @@ pub(crate) async fn create_with_invite(
         },
     )?;
     let mut client = session.connect(server).await?;
-    let operation_id = match ctx.operation_id_wire() {
-        value if value.is_empty() => uuid::Uuid::new_v4().to_string(),
-        value => value,
-    };
+    let operation_id = options
+        .operation_id()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let response = client
         .create_agent_account(CreateAgentAccountRequest {
             invite_code: invite,
@@ -155,29 +153,14 @@ pub(crate) async fn create_with_invite(
     {
         pin_claimable_owner_root(server, &full_root_token, &proof_key_pem, &subject, root).await?;
     }
-    emit_created(ctx, &output)?;
-    Ok(())
-}
-
-fn emit_created(ctx: &dyn CliContext, output: &AgentAccountCreatedOutput) -> Result<()> {
-    if ctx.should_output_json(None) {
-        println!("{}", serde_json::to_string(output)?);
-    } else {
-        print_success(&output.subject);
-        println!(
-            "Agent account {} is active; a human can claim it later.",
-            output.pet_name
-        );
-        println!("Next: {}", output.next.command);
-    }
-    Ok(())
+    Ok(AuthLoginOutcome::AgentAccountCreated(output))
 }
 
 fn finish_invite_create(
     server: &str,
     minted: RestrictedAgentRoot,
     response: CreateAgentAccountResponse,
-) -> Result<AgentAccountCreatedOutput> {
+) -> Result<AgentAccountCreated> {
     let owner_id = uuid::Uuid::parse_str(&response.account_id)
         .context("server returned a non-UUID account identity")?;
     let web_origin = match response.web_origin.trim() {
@@ -213,14 +196,13 @@ fn finish_invite_create(
         chrono::Utc::now().timestamp(),
     )?;
     identity_state::store(&claim_state)?;
-    Ok(AgentAccountCreatedOutput {
-        output_kind: "agent_account_created",
+    Ok(AgentAccountCreated {
         account_id: account_id.clone(),
         pet_name,
         subject,
         authenticated: true,
         credential_saved: true,
-        next: HumanPromotionDirective {
+        next: super::auth::HumanPromotionDirective {
             kind: "human_promotion_required",
             summary: "Account is active and usable now; a human must complete the claim ceremony to bind ownership.",
             account_id,
@@ -234,7 +216,7 @@ fn finish_invite_create(
 pub(crate) fn finish_invite_create_from_response(
     server: &str,
     response: CreateAgentAccountResponse,
-) -> Result<AgentAccountCreatedOutput> {
+) -> Result<AgentAccountCreated> {
     finish_invite_create(server, mint_restricted_agent_root()?, response)
 }
 

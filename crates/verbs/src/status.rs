@@ -649,7 +649,7 @@ pub fn build_repository_verification_health_with_worktree_status(
                     summary: format!(
                         "{changed} Git worktree path(s) are captured in Heddle but not checkpointed to Git"
                     ),
-                    recovery_commands: vec![source_actions.display(SourceAction::Commit)],
+                    recovery_commands: vec![source_actions.display(SourceAction::Capture)],
                     checks,
                 };
             }
@@ -657,10 +657,7 @@ pub fn build_repository_verification_health_with_worktree_status(
                 status: "dirty_worktree".to_string(),
                 clean: false,
                 summary: format!("{changed} Git worktree path(s) have uncommitted changes"),
-                recovery_commands: vec![
-                    source_actions.display(SourceAction::Capture),
-                    source_actions.display(SourceAction::Commit),
-                ],
+                recovery_commands: vec![source_actions.display(SourceAction::Capture)],
                 checks,
             }
         }
@@ -681,7 +678,7 @@ pub fn build_repository_verification_health_with_worktree_status(
                         .cloned()
                         .unwrap_or_else(|| "<branch>".to_string());
                     let recovery = if status == "needs_checkpoint" {
-                        source_actions.display(SourceAction::Commit)
+                        source_actions.display(SourceAction::Capture)
                     } else {
                         canonical_git_repair_ref_preview_command(None, &ref_name)
                     };
@@ -1217,7 +1214,7 @@ fn remote_drift_health(
     }
 }
 
-fn remote_drift_recovery_commands(
+pub(crate) fn remote_drift_recovery_commands(
     repo: &Repository,
     remote: &GitRemoteTrackingStatus,
     status: &str,

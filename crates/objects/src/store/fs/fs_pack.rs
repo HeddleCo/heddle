@@ -263,7 +263,7 @@ impl FsStore {
         builder.add_id(
             PackObjectId::StateId(state_id),
             PackObjectType::State,
-            rmp_serde::to_vec_named(state)?,
+            state.encode_current_msgpack()?,
         );
         let attachment_ids = attachments
             .iter()
@@ -277,7 +277,7 @@ impl FsStore {
                 builder.add(
                     *id.as_hash(),
                     PackObjectType::StateAttachment,
-                    rmp_serde::to_vec_named(attachment)?,
+                    attachment.encode_current_msgpack()?,
                 );
                 Ok(id)
             })

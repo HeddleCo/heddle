@@ -12,7 +12,7 @@ use crate::{
         StateAttachment, StateAttachmentId, StateId, Tree, TreeEntryReader, TreeResumeCursor,
         decode_tree_delta_header, is_delta_tree, is_streamable_tree,
     },
-    store::{HeddleError, ObjectStore, Result, SidecarStore, codec},
+    store::{HeddleError, ObjectCacheControl, ObjectStore, Result, SidecarStore, codec},
     sync::RwLockExt,
 };
 
@@ -63,6 +63,13 @@ impl InMemoryStore {
         Ok(Some(codec::decode_tree_serialized_with_key(
             &bytes, *hash, None,
         )?))
+    }
+}
+
+impl ObjectCacheControl for InMemoryStore {
+    fn clear_recent_caches(&self) {
+        // The in-memory implementation is already its own source of truth and
+        // has no decoded-object cache distinct from its stored bytes.
     }
 }
 
@@ -203,7 +210,7 @@ impl ObjectStore for InMemoryStore {
     fn get_state(&self, id: &StateId) -> Result<Option<State>> {
         match self.states.read_or_poisoned().get(id) {
             Some(bytes) => {
-                let mut state: State = rmp_serde::from_slice(bytes)?;
+                let mut state = State::decode_current_msgpack(bytes)?;
                 if !state.accepts_stored_id(id) {
                     return Err(crate::error::HeddleError::InvalidObject(format!(
                         "state id mismatch: requested {id}, computed {}",
@@ -241,7 +248,7 @@ impl ObjectStore for InMemoryStore {
             .state_attachments
             .read_or_poisoned()
             .get(id)
-            .map(|bytes| rmp_serde::from_slice::<StateAttachment>(bytes))
+            .map(|bytes| StateAttachment::decode_current_msgpack(bytes))
             .transpose()?;
         Ok(attachment.filter(|attachment: &StateAttachment| attachment.state_id == *state))
     }
@@ -250,14 +257,14 @@ impl ObjectStore for InMemoryStore {
         let id = attachment.id();
         self.state_attachments
             .write_or_poisoned()
-            .insert(id, rmp_serde::to_vec_named(attachment)?);
+            .insert(id, attachment.encode_current_msgpack()?);
         Ok(id)
     }
 
     fn list_state_attachments(&self, state: &StateId) -> Result<Vec<StateAttachment>> {
         let mut attachments = Vec::new();
         for bytes in self.state_attachments.read_or_poisoned().values() {
-            let attachment: StateAttachment = rmp_serde::from_slice(bytes)?;
+            let attachment = StateAttachment::decode_current_msgpack(bytes)?;
             if attachment.state_id == *state {
                 attachments.push(attachment);
             }

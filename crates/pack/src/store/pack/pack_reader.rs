@@ -911,7 +911,8 @@ fn decode_compact_object(
         {
             let state = heddle_object_model::compact::extract_state(data, *id)
                 .map_err(|error| compact_extract_error(requested_id, error))?;
-            rmp_serde::to_vec_named(&state)
+            state
+                .encode_current_msgpack()
                 .map(Some)
                 .map_err(|error| StoreError::InvalidObject(error.to_string()))
         }
@@ -974,7 +975,8 @@ fn decode_compact_objects(
                 .into_iter()
                 .map(|state| {
                     let id = PackObjectId::StateId(state.state_id);
-                    let bytes = rmp_serde::to_vec_named(&state)
+                    let bytes = state
+                        .encode_current_msgpack()
                         .map_err(|error| StoreError::InvalidObject(error.to_string()))?;
                     Ok((id, ObjectType::State, bytes))
                 })

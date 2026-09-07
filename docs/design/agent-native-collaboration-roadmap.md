@@ -87,7 +87,8 @@ Exit criteria:
 
 - `heddle help --output json` exposes side-effect and op-id metadata for discussion writes.
 - `heddle doctor schemas` can validate the new collaboration JSON samples.
-- Existing state-attached `discuss` commands still work until M4 migration replaces them.
+- Repository collaboration records are the only live `discuss` source. Older
+  state-attached discussions require an offline conversion before admission.
 
 ### M1: Local collaboration operation model
 
@@ -273,16 +274,16 @@ Goal: derive useful local collaboration views from the operation log.
   - `orphaned`
 - Do not make anchor resolver thresholds per-user in v1.
 - Do not depend on hosted services or live language-server state for OSS anchor resolution.
-- Treat #492, the existing anchor-travel decision, as a prerequisite. Heddle should wire useful anchor-travel fields into semantic anchor status or explicitly retire them before migrating state-attached discussions.
+- Treat #492, the existing anchor-travel decision, as a prerequisite. Heddle should wire useful anchor-travel fields into semantic anchor status or explicitly retire them before the clean cut.
 - Add ambiguous or orphaned anchor attention when anchor status affects actionability.
 
 Exit criteria:
 
 - Anchor status is deterministic for a repository version.
-- Existing state-attached anchor-travel fields have an explicit migration or retirement rule.
+- Existing state-attached anchor-travel fields have an explicit offline-conversion or retirement rule.
 - Ambiguous or orphaned anchors feed inbox/readiness only when they affect current work or policy gates.
 
-### M4: CLI replacement and migration
+### M4: CLI clean cut
 
 Goal: evolve `heddle discuss` in place from state-attached discussions to repository collaboration records.
 
@@ -321,24 +322,20 @@ First-slice command behavior:
 - `show --json` returns both deterministic display order and graph facts.
 - `show` human output visibly marks conflicts, ambiguous anchors, redactions, hosted-valid divergence, and local-only status.
 
-Migration behavior:
+Cutover behavior:
 
-- Detect legacy state-attached discussions.
-<!-- doctor-docs:planned -->
-- `heddle discuss migrate` is advanced/doctor-oriented, not daily help.
-- Migration is plan-first by default.
-- Applying migration requires `--apply` or equivalent.
-- Migration creates import roots with source metadata.
-- New discussions receive UUIDv7 ids.
-- Legacy ids remain source metadata and aliases.
-- Migration is idempotent through source-derived collaboration idempotency keys.
-- If migration stops halfway, rerunning the same plan completes missing operations and reports already-created records.
-- Legacy source objects remain untouched until a separate cleanup.
+- Runtime commands accept repository collaboration records only.
+- Convert state-attached discussions offline before opening the repository with
+  the paired Heddle release.
+- Conversion creates import roots with source metadata and UUIDv7 discussion
+  ids, and preserves old ids only as source metadata.
+- No compatibility reader or `heddle discuss migrate` command ships in the
+  normal runtime.
 
 Exit criteria:
 
 - State-attached `DiscussionsBlob` is no longer the live discussion source of truth.
-- Migration output labels imported history in JSON/detail output.
+- Imported history is labelled in JSON/detail output.
 - `discuss list` defaults to active/open discussions scoped by current context.
 - `inbox` owns attention-worthy work.
 
@@ -636,7 +633,7 @@ Projection metadata may include imported or hosted project/review fields such as
 
 - Add local discussion getting-started docs with JSON-first examples.
 - Add a human-oriented short workflow after the JSON examples.
-- Add a migration guide for state-attached discussions.
+- Add an offline conversion guide for state-attached discussions.
 - Add an explicit GitHub import/cutover guide once M8 starts.
 - Add a troubleshooting guide for:
   - stale heads

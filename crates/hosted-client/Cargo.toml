@@ -15,7 +15,6 @@ name = "hosted_client"
 
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
 api = { workspace = true, optional = true }
 base64.workspace = true
 biscuit-auth = { workspace = true, optional = true }
@@ -39,9 +38,6 @@ iroh-base = { workspace = true, optional = true }
 n0-watcher = { workspace = true, optional = true }
 noq-udp = { workspace = true, optional = true }
 objects.workspace = true
-heddle-cli-args.workspace = true
-heddle-cli-contract.workspace = true
-heddle-cli-render.workspace = true
 prost = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
 psl = { workspace = true, optional = true }
@@ -97,9 +93,6 @@ client = [
     "dep:tokio-stream",
     "dep:tokio-tungstenite",
     "dep:webpki-roots",
-    "heddle-cli-args/client",
-    "heddle-cli-contract/client",
-    "heddle-cli-render/client",
 ]
 # Forwarded from the CLI's `telemetry` feature: trace-context propagation on
 # hosted calls.

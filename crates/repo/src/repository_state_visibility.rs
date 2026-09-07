@@ -36,7 +36,7 @@ use objects::{
 use oplog::{OpLogRecorder, OpRecord, VisibilitySidecarSnapshots};
 
 use crate::{
-    namespace_policy::{resolve_default_visibility, VisibilityResolutionContext},
+    namespace_policy::{VisibilityResolutionContext, resolve_default_visibility},
     repository::Repository,
 };
 
@@ -710,9 +710,9 @@ impl Repository {
         let _own_lock = if lock_held {
             None
         } else {
-            Some(self.locker().write().with_context(|| {
-                "acquire repo write lock for capture-time default visibility binding"
-            })?)
+            Some(self.locker().write().with_context(
+                || "acquire repo write lock for capture-time default visibility binding",
+            )?)
         };
         let mut record = StateVisibility {
             state: *state,
@@ -862,9 +862,8 @@ impl Repository {
 
     fn record_embargo_membership_from_tier(&self, tier: &VisibilityTier) -> Result<()> {
         let label = match tier {
-            VisibilityTier::Private { scope_label } | VisibilityTier::Restricted { scope_label } => {
-                scope_label.trim()
-            }
+            VisibilityTier::Private { scope_label }
+            | VisibilityTier::Restricted { scope_label } => scope_label.trim(),
             VisibilityTier::Public
             | VisibilityTier::Internal
             | VisibilityTier::TeamScoped { .. } => return Ok(()),
@@ -874,8 +873,7 @@ impl Repository {
         }
         let path = self.embargo_membership_path();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create '{}'", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("create '{}'", parent.display()))?;
         }
         write_file_atomic(&path, label.as_bytes())
             .with_context(|| format!("write embargo membership '{}'", path.display()))
@@ -1318,11 +1316,12 @@ mod tests {
             "a state with no record must be public-by-absence (has_visibility_for_state == false)"
         );
         // And its sidecar load is an empty blob, never an error.
-        assert!(repo
-            .get_state_visibility_for_state(&no_record)
-            .expect("read record-free state")
-            .records
-            .is_empty());
+        assert!(
+            repo.get_state_visibility_for_state(&no_record)
+                .expect("read record-free state")
+                .records
+                .is_empty()
+        );
     }
 
     #[test]

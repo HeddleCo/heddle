@@ -57,7 +57,7 @@ fn ranked_help_roots(catalog: &crate::cli::commands::CommandCatalogOutput) -> Ve
 }
 
 /// Discover source authority for first-screen help. Fail closed to Native
-/// (hide overlay `commit`) when no repository is proven.
+/// when no repository is proven.
 fn probed_source_authority() -> repo::RepositorySourceAuthority {
     let Ok(cwd) = std::env::current_dir() else {
         return repo::RepositorySourceAuthority::Native;
@@ -170,7 +170,7 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
 /// Render curated help for an explicit source authority.
 ///
 /// Topic pages stay authority-independent. The empty-topic first screen
-/// hides overlay `commit` unless [`RepositorySourceAuthority::GitOverlay`].
+/// adapts its source-storage wording to the repository authority.
 pub fn render_help_for_authority(
     cmd: &clap::Command,
     topic: &[String],
@@ -683,12 +683,11 @@ const GIT_CONCEPTS_TOPIC: &str = r#"Git and Heddle own different layers.
 
 In a Git Overlay repository, the checkout's real `.git` owns commits, refs,
 packs, the index, and worktree state. Heddle's thin Git surface — `clone`,
-`commit`, `pull`, `push`, and `remote` — uses the embedded Sley engine directly
+`capture`, `pull`, `push`, and `remote` — uses the embedded Sley engine directly
 against that store. Heddle owns coordination and durable metadata in `.heddle`:
-captures, provenance, threads, readiness, review, and safe landing. Normal
-overlay operation neither creates nor uses `.heddle/git`. Legacy explicit Git
-Projection maintenance can still use an existing Bridge Mirror while its
-retirement is completed.
+captures, provenance, threads, readiness, review, and safe landing. Projection
+uses an ephemeral Git repository when it needs to translate native state; it
+does not retain a second object warehouse in `.heddle/git`.
 
 Use `heddle init` to add that sidecar to an existing Git checkout. Use
 `heddle adopt` when you want one atomic transition that imports source history,
@@ -698,7 +697,7 @@ Common mappings:
 
 | Intent | Git Overlay | Native Heddle |
 |--------|-------------|---------------|
-| Save source history | `heddle capture`, then `heddle commit` | `heddle capture` |
+| Save source history | `heddle capture` | `heddle capture` |
 | Isolate coordinated work | `heddle start` | `heddle start` |
 | Record a granular Heddle savepoint | `heddle capture` | `heddle capture` |
 | Check integration readiness | `heddle ready` | `heddle ready` |
@@ -733,8 +732,8 @@ between threads with `heddle thread switch <name>`, and integrate with\n\
   is just a ref.\n\
 - Multiple threads coexist on disk simultaneously. Each thread's working\n\
   tree is its own.\n\
-- `heddle capture` records Heddle metadata; `heddle commit` asks Sley to\n\
-  write source history directly to `.git` in Git Overlay.\n\
+- `heddle capture` records the Heddle state and, in Git Overlay, asks Sley\n\
+  to write its Git checkpoint in the same operation.\n\
 \n\
 # Workspace modes (`--workspace`)\n\
 \n\
@@ -801,13 +800,13 @@ Resolution paths:\n\
   narrow Git surface. An optional Git-compatible client can update `.git`\n\
   without changing Heddle's active thread or coordination metadata.\n\
 \n\
-# Capture and Git commits\n\
+# Capture and Git checkpoints\n\
 \n\
 - `heddle capture` records a recoverable Heddle step on the current\n\
   thread — for undo, provenance, and review. Captures are\n\
   fine-grained and accumulate freely as work progresses.\n\
-- In Git Overlay, run `heddle commit` when captured source history is ready.\n\
-- Agents and tools can take many small captures without producing noisy Git history.\n\
+- In Git Overlay, the same operation writes the matching Git checkpoint.\n\
+- There is no staging or second save verb to coordinate.\n\
 \n\
 See also: `heddle help config` for environment overrides,\n\
 `heddle thread --help` for the thread subcommand list.\n";
@@ -854,7 +853,7 @@ verification state before and after remote operations.
 const GIT_DEPENDENCIES_TOPIC: &str = r#"Git executable dependencies — Heddle does not have one.
 
 Heddle never requires the `git` executable. Sley is its embedded Git engine. In
-Git Overlay, `heddle clone`, `commit`, `pull`, `push`, and `remote`
+Git Overlay, `heddle clone`, `capture`, `pull`, `push`, and `remote`
 operate on the checkout's real `.git` directly; `.heddle` contains Heddle
 metadata, not a second Git object store.
 
@@ -946,8 +945,7 @@ Start in an existing Git checkout:
 Save and synchronize ordinary work:
 
     heddle diff
-    heddle capture -m "..."                   # save Heddle metadata and provenance
-    heddle commit                             # Sley writes source history to .git
+    heddle capture -m "..."                   # save state; Sley checkpoints it to .git
     heddle pull
     heddle push
 
@@ -968,7 +966,7 @@ Recover or prove state:
 
 State-specific recovery:
 
-    Worktree has unsaved edits: heddle capture -m "...", then heddle commit
+    Worktree has unsaved edits: heddle capture -m "..."
     Move atomically to the full Native Heddle feature set: heddle adopt --ref <branch>
 "#;
 
@@ -991,8 +989,6 @@ Translate explicitly without changing source authority:
 
 `bridge git import` and `sync git` accept a local path or Git URL. Omit `--ref` to
 import all local branches and tags. `bridge git export` writes a bare Git repository.
-Legacy migration and repair may still read an existing Bridge Mirror at
-`.heddle/git` while ADR 0042's retirement work remains incomplete.
 
 Export metadata for Git readers:
 
@@ -1111,9 +1107,8 @@ mod tests {
         }
     }
 
-    /// heddle#1435. Default first screen follows Native source authority:
-    /// capture is the save. The ranked tail may list `commit`, but the
-    /// save loop never routes through it.
+    /// heddle#1435. Default first screen follows the one-save model:
+    /// capture is the save in every repository mode.
     #[test]
     fn first_screen_teaches_capture_as_the_save() {
         use clap::CommandFactory;
@@ -1346,7 +1341,7 @@ mod tests {
         assert!(projection.contains("It is not Git Overlay"));
         assert!(projection.contains("heddle adopt --ref <branch>"));
         assert!(projection.contains("heddle bridge git export --destination"));
-        assert!(projection.contains("Bridge Mirror"));
+        assert!(projection.contains("does not retain a second object warehouse"));
     }
 
     /// heddle#278. The agent flags stay `hide = true` in the default surface

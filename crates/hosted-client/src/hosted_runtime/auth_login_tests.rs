@@ -4,8 +4,9 @@ use api::heddle::api::v1alpha1::CreateAgentAccountResponse;
 use chrono::{Duration, Utc};
 use config::credentials::{self, ServerCredential};
 use crypto::{Ed25519Signer, Signer as _};
-use heddle_cli_args::CliContext;
 use tempfile::TempDir;
+
+use objects::HeddleError;
 
 use super::{
     agent_node_identity,
@@ -15,6 +16,7 @@ use super::{
         finish_invite_create_from_response, owner_root_pin_probe, remint_with_client_for_test,
         test_support::start_recording_client,
     },
+    auth_requests::{AuthOptions, LoginPermission},
     device_flow::{
         authenticated_subject, effective_pop_public_key_hex, restrict_agent_account_root,
     },
@@ -22,18 +24,19 @@ use super::{
     root_mint::mint_agent_root,
 };
 
-struct TextCtx;
-
-impl CliContext for TextCtx {
-    fn repo_path(&self) -> Option<&std::path::Path> {
-        None
-    }
-    fn operation_id_wire(&self) -> String {
-        String::new()
-    }
-    fn should_output_json(&self, _repo_config: Option<&repo::Config>) -> bool {
-        false
-    }
+async fn run_login(
+    server: &str,
+    permission: LoginPermission,
+    invite: Option<String>,
+) -> anyhow::Result<super::auth::AuthLoginOutcome> {
+    login(
+        &AuthOptions::default(),
+        server,
+        permission,
+        invite,
+        &mut |_| Ok(()),
+    )
+    .await
 }
 
 struct IsolatedHome {
@@ -86,13 +89,12 @@ impl Drop for IsolatedHome {
 }
 
 #[test]
-fn login_path_covers_the_five_locked_routes() {
+fn login_path_covers_the_four_locked_routes() {
     let reuse = LoginInputs {
         reusable_cred: true,
         node_key_account: true,
         has_invite: true,
-        interactive: true,
-        force_browser: true,
+        browser_allowed: true,
     };
     assert_eq!(login_path(reuse), LoginPath::Reuse);
 
@@ -100,8 +102,7 @@ fn login_path_covers_the_five_locked_routes() {
         reusable_cred: false,
         node_key_account: true,
         has_invite: true,
-        interactive: false,
-        force_browser: false,
+        browser_allowed: false,
     };
     assert_eq!(login_path(remint), LoginPath::Remint);
 
@@ -109,8 +110,7 @@ fn login_path_covers_the_five_locked_routes() {
         reusable_cred: false,
         node_key_account: false,
         has_invite: true,
-        interactive: false,
-        force_browser: false,
+        browser_allowed: false,
     };
     assert_eq!(login_path(invite), LoginPath::CreateWithInvite);
 
@@ -118,26 +118,15 @@ fn login_path_covers_the_five_locked_routes() {
         reusable_cred: false,
         node_key_account: false,
         has_invite: false,
-        interactive: true,
-        force_browser: false,
+        browser_allowed: true,
     };
     assert_eq!(login_path(browser), LoginPath::Browser);
-
-    let forced = LoginInputs {
-        reusable_cred: false,
-        node_key_account: false,
-        has_invite: false,
-        interactive: false,
-        force_browser: true,
-    };
-    assert_eq!(login_path(forced), LoginPath::Browser);
 
     let fail_closed = LoginInputs {
         reusable_cred: false,
         node_key_account: false,
         has_invite: false,
-        interactive: false,
-        force_browser: false,
+        browser_allowed: false,
     };
     assert_eq!(login_path(fail_closed), LoginPath::FailClosed);
 }
@@ -179,7 +168,7 @@ async fn login_reuses_a_valid_unexpired_credential_without_minting() {
     let _home = IsolatedHome::new();
     let server = "api.reuse.test";
     let token = store_device_cred(server, Some(Utc::now() + Duration::hours(2)));
-    login(&TextCtx, server, false, None, false)
+    run_login(server, LoginPermission::HeadlessOnly, None)
         .await
         .expect("reuse must succeed");
     let stored = credentials::get_server_credential(server)
@@ -193,7 +182,7 @@ async fn login_reuses_a_credential_that_has_no_stored_expiry() {
     let _home = IsolatedHome::new();
     let server = "api.reuse-no-expiry.test";
     let token = store_device_cred(server, None);
-    login(&TextCtx, server, false, None, false)
+    run_login(server, LoginPermission::HeadlessOnly, None)
         .await
         .expect("missing expiry is still a valid stored cred");
     let stored = credentials::get_server_credential(server)
@@ -221,7 +210,7 @@ async fn login_remints_an_expired_node_key_account_without_an_invite() {
         expired,
     )
     .expect("store expired");
-    login(&TextCtx, server, false, None, false)
+    run_login(server, LoginPermission::HeadlessOnly, None)
         .await
         .expect("remint must succeed without invite");
     let stored = credentials::get_server_credential(server)
@@ -245,16 +234,20 @@ async fn login_remints_an_expired_node_key_account_without_an_invite() {
 }
 
 #[tokio::test]
-async fn login_fail_closed_without_tty_invite_or_account() {
+async fn login_fail_closed_without_browser_permission_invite_or_account() {
     let _home = IsolatedHome::new();
-    let error = login(&TextCtx, "api.heddle.sh", false, None, false)
+    let error = run_login("api.heddle.sh", LoginPermission::HeadlessOnly, None)
         .await
         .expect_err("non-TTY login must fail closed");
-    let advice = error
-        .downcast_ref::<heddle_cli_contract::cli::commands::RecoveryAdvice>()
-        .expect("typed refusal");
+    let domain = error.downcast_ref::<HeddleError>().expect("typed refusal");
+    let HeddleError::Recovery(advice) = domain else {
+        panic!("expected recovery refusal")
+    };
     assert_eq!(advice.kind, "auth_login_invite_required");
-    assert_eq!(advice.primary_command, "heddle auth login --invite <code>");
+    assert_eq!(
+        advice.recovery_commands.as_deref(),
+        Some(["heddle auth login --invite <code>".to_string()].as_slice())
+    );
     assert!(
         !agent_node_identity::identity_path().exists(),
         "fail-closed must not mint a node key"
@@ -267,12 +260,10 @@ async fn login_with_invite_does_not_take_the_fail_closed_path() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        login(
-            &TextCtx,
+        run_login(
             "https://127.0.0.1:1",
-            false,
+            LoginPermission::HeadlessOnly,
             Some("invite-secret".to_string()),
-            false,
         ),
     )
     .await
@@ -280,9 +271,9 @@ async fn login_with_invite_does_not_take_the_fail_closed_path() {
     .expect_err("invite create still needs a reachable server");
     let message = error.to_string();
     assert!(
-        error
-            .downcast_ref::<heddle_cli_contract::cli::commands::RecoveryAdvice>()
-            .is_none_or(|advice| advice.kind != "auth_login_invite_required"),
+        error.downcast_ref::<HeddleError>().is_none_or(|domain| {
+            !matches!(domain, HeddleError::Recovery(advice) if advice.kind == "auth_login_invite_required")
+        }),
         "invite must not fail closed: {message}"
     );
 }
@@ -301,15 +292,8 @@ fn login_invite_create_succeeds_with_a_claim_next_directive() {
         },
     )
     .expect("invite create must succeed without a server claim token");
-    assert_eq!(output.output_kind, "agent_account_created");
-    assert!(output.authenticated);
-    assert!(output.credential_saved);
-    assert_eq!(output.next.kind, "human_promotion_required");
-    assert_eq!(output.next.command, "heddle claim");
-    assert_eq!(output.next.account_id, output.account_id);
-    let json = serde_json::to_value(&output).expect("serialize machine contract");
-    assert_eq!(json["next"]["kind"], "human_promotion_required");
-    assert_eq!(json["next"]["command"], "heddle claim");
+    assert_eq!(output.account_id, "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28");
+    assert!(!output.subject.is_empty());
     assert!(
         credentials::get_server_credential(server)
             .expect("load credential")

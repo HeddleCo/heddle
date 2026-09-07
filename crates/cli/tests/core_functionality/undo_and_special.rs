@@ -358,7 +358,7 @@ fn test_capture_escaping_symlink_error_names_path_and_target() {
 }
 
 /// heddle#305: `undo` must not silently discard the worktree edits a prior
-/// `capture`/`commit` absorbed. Before the reset, undo records the pre-undo
+/// `capture` absorbed. Before the reset, undo records the pre-undo
 /// state into a durable `undo-recovery` marker in heddle's thread history, so
 /// the absorbed content is preserved as a first-class, addressable recovery
 /// point — not merely buried in an undone oplog batch — while `redo` still

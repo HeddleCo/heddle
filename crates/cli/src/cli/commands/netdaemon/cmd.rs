@@ -21,12 +21,12 @@ use anyhow::Result;
 use serde::Serialize;
 
 use super::super::next_action::{NextActionValidationContext, write_full_command_json};
-use crate::cli::{Cli, should_output_json};
 #[cfg(unix)]
 use crate::cli::commands::netdaemon::proto::{
     NETWORK_DAEMON_PROTOCOL_VERSION, NetworkDaemonRequest, NetworkDaemonResponse,
     network_daemon_endpoint_path,
 };
+use crate::cli::{Cli, should_output_json};
 
 #[derive(Debug, Serialize)]
 struct NetdStatusOutput {
@@ -142,7 +142,9 @@ pub fn cmd_netd_stop(cli: &Cli) -> Result<()> {
 
     let existing = load_endpoint(&endpoint_path).ok();
     let recorded_pid = existing.as_ref().and_then(|endpoint| endpoint.pid);
-    let socket_path = existing.as_ref().and_then(|endpoint| endpoint.socket_path.clone());
+    let socket_path = existing
+        .as_ref()
+        .and_then(|endpoint| endpoint.socket_path.clone());
 
     let daemon_running = recorded_pid.map(pid_alive).unwrap_or(false);
     if !daemon_running {

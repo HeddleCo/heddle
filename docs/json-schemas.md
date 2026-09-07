@@ -368,7 +368,7 @@ standard recovery fields plus nested verification proof:
   "primary_command": "heddle capture -m <message>",
   "primary_command_template": {
     "action": "heddle capture -m <message>",
-    "argv_template": ["heddle", "commit", "-m", "<message>"],
+    "argv_template": ["heddle", "capture", "-m", "<message>"],
     "required_inputs": ["message"],
     "agent_may_fill": true
   },
@@ -376,7 +376,7 @@ standard recovery fields plus nested verification proof:
   "recovery_action_templates": [
     {
       "action": "heddle capture -m <message>",
-      "argv_template": ["heddle", "commit", "-m", "<message>"],
+      "argv_template": ["heddle", "capture", "-m", "<message>"],
       "required_inputs": ["message"],
       "agent_may_fill": true
     }
@@ -399,8 +399,8 @@ standard recovery fields plus nested verification proof:
 These verbs are the everyday loop agents use after discovery through
 `heddle help --output json`: capture state, undo/redo the last logical
 operation, and ask whether a thread is ready. In Git Overlay repositories,
-`heddle commit` writes the captured state to the authoritative `.git` store
-through Sley; it does not require a Git executable.
+`heddle capture` also writes the matching checkpoint to the authoritative
+`.git` store through Sley; it does not require a Git executable.
 
 `heddle capture --output json` emits:
 
@@ -411,6 +411,7 @@ through Sley; it does not require a Git executable.
   "action": "capture",
   "state_id": "hc-capture123",
   "content_hash": "deadbeef",
+  "git_checkpoint": "e97f61a",
   "intent": "tighten parser validation",
   "confidence": 0.86,
   "task_assignment_id": "task-parser-validation",
@@ -423,23 +424,7 @@ through Sley; it does not require a Git executable.
   "heavy_impact_paths": [],
   "captured_path_count": 3,
   "warnings": [],
-  "message": "captured state hc-capture123"
-}
-```
-
-`heddle commit --output json` emits after writing the current captured state
-to Git Overlay source history. `-m/--message` is optional and defaults to the
-capture intent. The command commits the complete captured tree, replaces the
-Git index with that tree, and does not run Git `pre-commit` or `commit-msg`
-hooks.
-
-```json
-{
-  "output_kind": "commit",
-  "status": "committed",
-  "state_id": "hc-head456",
-  "git_commit": "e97f61a",
-  "summary": "committed",
+  "message": "captured state hc-capture123",
   "recommended_action": null,
   "verification": {"verified":true,"status":"clean","repository_mode":"git-overlay","heddle_initialized":true,"git_branch":"main","heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"clean","mapping_state":"clean","remote_drift":"clean","active_operation":null,"default_remote":"origin","clone_verification":"verified","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Git overlay and Heddle agree","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}
 }
@@ -511,7 +496,7 @@ payload above):
 }
 ```
 
-In native Heddle repositories, `git_commit` is `null` and the command
+In native Heddle repositories, `git_checkpoint` is `null` and the command
 saves a Heddle state without recommending a Git checkpoint.
 
 `heddle ready --output json` emits:
@@ -613,7 +598,8 @@ blocked peer in `stopped_at`.
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
 | `change_id` | string | required when present | Stable Heddle state ID for the captured state. |
-| `state_id`, `git_commit` | string | required for `commit` | Captured Heddle state and the Git commit written to the authoritative `.git` store. |
+| `state_id` | string | required for `capture` | Captured Heddle state. |
+| `git_checkpoint` | string \| null | required for `capture` | Git commit written to the authoritative `.git` store in Git Overlay; `null` in Native Heddle. |
 | `content_hash` | string | required for `capture` | Short content hash for the captured state. |
 | `intent` | string \| null | required for `capture` | User-provided intent/message, when supplied. |
 | `confidence` | number \| null | required for `capture` | Agent or human confidence score, when supplied. |
@@ -2257,7 +2243,7 @@ them.
 | `push_scope`, `thread` | string \| null | push | Whether the push published the current thread or all threads, and the named thread when applicable. |
 | `force` | bool \| null | push | Whether Heddle-native ref protection was explicitly overridden. |
 | `next_action`, `recommended_action`, `next_action_template`, `recommended_action_template` | mixed | required for push | Post-push action metadata promoted from verification; all are `null` when the push closes the remote loop. |
-| `verification` | object | required for clone, remote mutations, pull, push, and commit | Post-operation repository verification proof. Observe-only `remote list` and `remote show` do not emit this field. |
+| `verification` | object | required for clone, capture, remote mutations, pull, and push | Post-operation repository verification proof. Observe-only `remote list` and `remote show` do not emit this field. |
 
 ---
 
@@ -2891,7 +2877,6 @@ instead of treating it as a global catalog option.
   ],
   "recommended_action_placeholders": [
     "heddle capture -m \"...\"",
-    "heddle commit -m \"...\"",
     "heddle ready -m \"...\"",
     "heddle remote add <name> <url>",
     "heddle clone <remote> <path>",
@@ -3267,36 +3252,36 @@ as one; no `help advanced`).
     "advanced_scope_json_commands_with_accepted_opaque_schema": 44,
     "advanced_scope_mutating_commands_total": 61,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 24,
-    "catalog_commands_total": 195,
-    "catalog_mutating_commands_total": 95,
-    "json_commands_total": 155,
+    "catalog_commands_total": 194,
+    "catalog_mutating_commands_total": 94,
+    "json_commands_total": 154,
     "json_commands_with_accepted_opaque_schema": 44,
-    "json_commands_with_schema": 111,
+    "json_commands_with_schema": 110,
     "json_commands_without_schema": 0,
-    "json_mutating_commands_total": 91,
+    "json_mutating_commands_total": 90,
     "missing_mutating_schema_examples": [],
     "missing_schema_examples": [],
-    "mutating_commands_total": 91,
+    "mutating_commands_total": 90,
     "mutating_commands_with_accepted_opaque_schema": 24,
-    "mutating_commands_with_schema": 67,
+    "mutating_commands_with_schema": 66,
     "mutating_commands_without_schema": 0,
     "opaque_schema_verbs_total": 44,
     "status": "available",
-    "summary": "197 command(s), 155 JSON command(s), 95 mutating command(s), 91 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
+    "summary": "196 command(s), 154 JSON command(s), 94 mutating command(s), 90 mutating JSON command(s); verified everyday/agent machine surface has 47 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
     "unaccepted_opaque_schema_verbs_total": 0,
     "undocumented_schema_examples": [],
     "undocumented_schema_verbs_total": 0,
     "verified_scope": "everyday_and_agent",
     "verified_scope_accepted_opaque_schema_examples": [],
-    "verified_scope_json_commands_total": 48,
+    "verified_scope_json_commands_total": 47,
     "verified_scope_json_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_json_commands_with_schema": 48,
+    "verified_scope_json_commands_with_schema": 47,
     "verified_scope_json_commands_without_schema": 0,
     "verified_scope_missing_schema_examples": [],
-    "verified_scope_mutating_commands_total": 30,
+    "verified_scope_mutating_commands_total": 29,
     "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_mutating_commands_with_schema": 30,
+    "verified_scope_mutating_commands_with_schema": 29,
     "verified_scope_mutating_commands_without_schema": 0
   },
   "doc_path": "/repo/docs/json-schemas.md",
@@ -3320,7 +3305,7 @@ as one; no `help advanced`).
     "try"
   ],
   "status": "available",
-  "summary": "197 command(s), 155 JSON command(s), 95 mutating command(s), 91 mutating JSON command(s); verified everyday/agent machine surface has 48 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
+  "summary": "196 command(s), 154 JSON command(s), 94 mutating command(s), 90 mutating JSON command(s); verified everyday/agent machine surface has 47 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 44 accepted opaque schema(s) outside clean verification",
   "undocumented_verbs": [],
   "unmatched_verbs": [],
   "verified": true
@@ -3603,11 +3588,10 @@ from an earlier recovery:
 
 `heddle maintenance gc --output json` emits the pack/prune report (counts
 are zero on a fresh repository; `pinned_redactions` / `preserved_redactions`
-report redacted blobs the collector refused to touch; `consolidated_mirror_loose`
-counts loose legacy Bridge Mirror objects packed into the mirror's own pack):
+report redacted blobs the collector refused to touch):
 
 ```json
-{"output_kind": "gc", "action": "gc", "status": "ok", "dry_run": false, "prune": false, "packed_count": 1, "bytes_saved": 0, "pruned_loose": 0, "bytes_freed": 0, "timeline_packed_count": 0, "timeline_bytes_saved": 0, "timeline_pruned_loose": 0, "timeline_bytes_freed": 0, "timeline_unpaired_packs_pruned": 0, "unpaired_packs_pruned": 0, "pack_install_intents_completed": 0, "pack_install_intents_aborted": 0, "pack_install_metrics": {"installs_ok": 0, "installs_err": 0, "recover_completed": 0, "recover_aborted": 0, "recover_skipped_in_progress": 0, "recover_quarantined": 0}, "pinned_redactions": 0, "preserved_redactions": 0, "pruned_git_mapping_entries": 0, "consolidated_mirror_loose": 0}
+{"output_kind": "gc", "action": "gc", "status": "ok", "dry_run": false, "prune": false, "packed_count": 1, "bytes_saved": 0, "pruned_loose": 0, "bytes_freed": 0, "timeline_packed_count": 0, "timeline_bytes_saved": 0, "timeline_pruned_loose": 0, "timeline_bytes_freed": 0, "timeline_unpaired_packs_pruned": 0, "unpaired_packs_pruned": 0, "pack_install_intents_completed": 0, "pack_install_intents_aborted": 0, "pack_install_metrics": {"installs_ok": 0, "installs_err": 0, "recover_completed": 0, "recover_aborted": 0, "recover_skipped_in_progress": 0, "recover_quarantined": 0}, "pinned_redactions": 0, "preserved_redactions": 0, "pruned_git_mapping_entries": 0}
 ```
 
 `heddle redact purge apply|list --output json` emit (each carries `output_kind`

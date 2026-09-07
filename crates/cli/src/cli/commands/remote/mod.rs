@@ -1385,7 +1385,10 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         .session
         .connect(options.authority)
         .await?
-        .with_human_signature_callback(hosted_client::client::cli_human_signature_callback());
+        .with_human_signature_callback(hosted_client::client::headless_human_signature_callback())
+        .with_warning_sink(std::sync::Arc::new(
+            crate::cli::warning_render::StderrWarningSink,
+        ));
     let result = push_network_connected(repo, &mut client, options).await;
     client.close().await;
     result

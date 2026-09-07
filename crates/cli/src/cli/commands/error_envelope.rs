@@ -554,9 +554,8 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                     return ErrorClassification {
                         kind: "repository_format_too_new".to_string(),
                         human_error: Some(heddle_err.to_string()),
-                        hint:
-                            "Upgrade heddle to a binary that supports this repository format, or run the repository migration command with a compatible binary."
-                                .to_string(),
+                        hint: "Upgrade Heddle to a binary that supports this repository format."
+                            .to_string(),
                         unsafe_condition: format!(
                             "repository format {found} is newer than this binary's supported format {supported}"
                         ),
@@ -571,11 +570,11 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                         extra_json_fields: serde_json::Map::new(),
                     };
                 }
-                HeddleError::RepositoryFormatMigrationRequired {
+                HeddleError::RepositoryFormatTooOld {
                     found, required, ..
                 } => {
                     return ErrorClassification {
-                        kind: "repository_format_migration_required".to_string(),
+                        kind: "repository_format_too_old".to_string(),
                         human_error: Some(heddle_err.to_string()),
                         hint: format!(
                             "This alpha repository uses format v{found}. Back it up, then recreate it or re-adopt its Git history as format v{required}."
@@ -618,13 +617,13 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                         extra_json_fields: serde_json::Map::new(),
                     };
                 }
-                HeddleError::StorageFormatMigrationRequired {
+                HeddleError::StorageFormatTooOld {
                     storage,
                     found,
                     required,
                 } => {
                     return ErrorClassification {
-                        kind: "storage_format_migration_required".to_string(),
+                        kind: "storage_format_too_old".to_string(),
                         human_error: Some(heddle_err.to_string()),
                         hint: format!(
                             "This alpha repository contains {storage} format {found}. Back it up, then recreate it or re-adopt its Git history as format {required}."
@@ -927,15 +926,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_repository_format_is_migration_refusal_not_corruption() {
-        let err = anyhow!(HeddleError::RepositoryFormatMigrationRequired {
+    fn old_repository_format_is_a_refusal_not_corruption() {
+        let err = anyhow!(HeddleError::RepositoryFormatTooOld {
             path: std::path::PathBuf::from("/tmp/legacy/.heddle/config.toml"),
             found: 2,
             required: 3,
         });
 
         let classified = classify_error(&err);
-        assert_eq!(classified.kind, "repository_format_migration_required");
+        assert_eq!(classified.kind, "repository_format_too_old");
         assert_eq!(classified.primary_command, "heddle help adopt");
         assert!(classified.preserved.contains("config"));
         assert!(classified.recovery_commands.iter().all(|command| {
@@ -954,15 +953,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_storage_format_is_migration_refusal_not_corruption() {
-        let err = anyhow!(HeddleError::StorageFormatMigrationRequired {
+    fn old_storage_format_is_a_refusal_not_corruption() {
+        let err = anyhow!(HeddleError::StorageFormatTooOld {
             storage: "packed oplog container".to_string(),
             found: 2,
             required: 4,
         });
 
         let classified = classify_error(&err);
-        assert_eq!(classified.kind, "storage_format_migration_required");
+        assert_eq!(classified.kind, "storage_format_too_old");
         assert_eq!(classified.primary_command, "heddle help adopt");
         assert!(classified.preserved.contains("left unchanged"));
         assert!(classified.recovery_commands.iter().all(|command| {

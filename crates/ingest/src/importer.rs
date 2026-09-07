@@ -979,9 +979,8 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
         }
 
         let state = state_from_commit(commit, tree, parents, git_lossy)?;
-        // `to_vec_named` matches objects's convention; see the longer
-        // explanation in `translate_tree`.
-        let data = rmp_serde::to_vec_named(&state)
+        let data = state
+            .encode_current_msgpack()
             .map_err(|e| IngestError::Other(format!("serialize state for import pack: {e}")))?;
         if self.emit_objects {
             self.builder.add_id(
@@ -1299,7 +1298,8 @@ pub fn bind_single_git_commit_overlay(
         let descriptor_dir = repo.heddle_dir().join("ingest").join("overlay-states");
         objects::fs_atomic::create_private_dir_all(&descriptor_dir)?;
         let path = descriptor_dir.join(format!("{}.state", state.state_id.to_string_full()));
-        let bytes = rmp_serde::to_vec_named(&state)
+        let bytes = state
+            .encode_current_msgpack()
             .map_err(|error| IngestError::Other(format!("serialize overlay state: {error}")))?;
         objects::fs_atomic::write_file_atomic(&path, &bytes)?;
         state_path = Some(path);

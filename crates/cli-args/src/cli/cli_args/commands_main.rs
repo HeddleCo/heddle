@@ -12,8 +12,8 @@ use super::{
     IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
     ShellCommands, ThreadCommands, VisibilityCommands,
     commands_args::{
-        AdoptArgs, CloneArgs, CommitArgs, DiffArgs, DoctorArgs, INIT_VERB, InitArgs, LandArgs,
-        LogArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs,
+        AdoptArgs, CloneArgs, DiffArgs, DoctorArgs, INIT_VERB, InitArgs, LandArgs, LogArgs,
+        PullArgs, PushArgs, ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs,
         ThreadStartArgs, UndoArgs, WatchArgs,
     },
 };
@@ -193,9 +193,6 @@ Examples:
 
     /// Capture a recoverable Heddle step for undo, provenance, and review.
     Capture(SnapshotArgs),
-
-    /// Write captured source history to `.git` in Git Overlay.
-    Commit(CommitArgs),
 
     /// Show state history.
     ///

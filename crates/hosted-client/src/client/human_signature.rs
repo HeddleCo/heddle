@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-//! CLI default human-signature (WebAuthn) callback for destructive hosted RPCs.
+//! Headless human-signature (WebAuthn) callback for destructive hosted RPCs.
 //!
 //! When the server marks an RPC `human`-tier and rejects it with
-//! `x-weft-sig-required: human`, `CLI-owned hosted runtime`'s request-signing interceptor
-//! invokes an app-registered callback to produce a WebAuthn assertion over the
-//! action, then retries once (see `crate::hosted_runtime::hosted::HumanSignatureCallback`).
+//! `x-weft-sig-required: human`, the native hosted runtime's request-signing
+//! interceptor invokes an app-registered callback to produce a WebAuthn
+//! assertion over the action, then retries once (see
+//! `crate::hosted_runtime::hosted::HumanSignatureCallback`).
 //!
 //! # What the CLI supports vs defers
 //!
@@ -18,8 +19,8 @@
 //! Therefore the CLI's default callback **surfaces a clear, typed
 //! user-verification-required error** naming a surface that can complete the
 //! ceremony (the web UI / tapestry), rather than attempting a partial/fake
-//! ceremony. The consent surface (the action summary) is still shown to the
-//! user before the error so they understand what was blocked.
+//! ceremony. The typed error carries the action summary so the caller can show
+//! what was blocked on its own presentation surface.
 //!
 //! Deferred (tracked for a follow-up): binding a platform authenticator via a
 //! native WebAuthn crate (e.g. `webauthn-authenticator-rs`) so the CLI can
@@ -35,43 +36,23 @@ use crate::hosted_runtime::hosted::{
     HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion,
 };
 
-/// The default human-signature callback for CLI-opened hosted sessions.
+/// A quiet callback for clients without an attached WebAuthn authenticator.
 ///
-/// Renders the action being authorized (so the user sees *what* required
-/// verification), then returns a typed error directing the user to a surface
-/// that can complete the WebAuthn ceremony. It never fabricates an assertion.
-pub fn cli_human_signature_callback() -> HumanSignatureCallback {
+/// The action summary and optional Tapestry link travel in the typed error so
+/// the caller can render them on its own output channel. The Adapter never
+/// fabricates an assertion.
+pub fn headless_human_signature_callback() -> HumanSignatureCallback {
     Arc::new(
         |req: HumanSignatureRequest| -> Result<WebAuthnAssertion, ProtocolError> {
-            // Show the consent surface: the user should always learn which action
-            // was gated, even though the CLI can't complete the gesture itself.
-            eprintln!(
-                "⚠ This action requires user verification (WebAuthn), which the CLI can't perform in \
-             a headless terminal:\n  {}",
-                req.action_summary
-            );
-            // When the server sent a deep-link (weft#338), point the user straight at the surface
-            // that CAN complete the ceremony; otherwise fall back to generic guidance. Either way
-            // we return a typed error and NEVER fabricate an assertion.
             match req.action_url.as_deref() {
-                Some(url) => {
-                    eprintln!("Complete it in the web app:\n  {url}");
-                    Err(ProtocolError::AuthorizationFailed(format!(
-                        "user verification required for {}: complete this action in the web app:\n  {}",
-                        req.method_path, url
-                    )))
-                }
-                None => {
-                    eprintln!(
-                        "The `heddle` CLI cannot perform the WebAuthn ceremony in a headless terminal."
-                    );
-                    Err(ProtocolError::AuthorizationFailed(format!(
-                        "user verification required for {}: run this destructive action from a surface \
-                     with a WebAuthn authenticator (the web UI), or re-run once CLI authenticator \
-                     support lands",
-                        req.method_path
-                    )))
-                }
+                Some(url) => Err(ProtocolError::AuthorizationFailed(format!(
+                    "user verification required for {} ({}): complete this action in Tapestry:\n  {}",
+                    req.method_path, req.action_summary, url
+                ))),
+                None => Err(ProtocolError::AuthorizationFailed(format!(
+                    "user verification required for {} ({}): use a client with a WebAuthn authenticator",
+                    req.method_path, req.action_summary
+                ))),
             }
         },
     )
@@ -95,15 +76,15 @@ mod tests {
     /// Without a server deep-link, the callback keeps the generic guidance and still returns a
     /// typed error, never an assertion.
     #[test]
-    fn cli_callback_returns_typed_error_and_never_fakes_an_assertion() {
-        let cb = cli_human_signature_callback();
+    fn headless_callback_returns_typed_error_and_never_fakes_an_assertion() {
+        let cb = headless_human_signature_callback();
         let result = cb(req_with_action_url(None));
         match result {
             Err(ProtocolError::AuthorizationFailed(msg)) => {
                 assert!(msg.contains("user verification required"));
                 assert!(msg.contains("DeleteSpool"));
                 // No URL was provided → generic guidance, no link.
-                assert!(msg.contains("web UI"));
+                assert!(msg.contains("WebAuthn authenticator"));
                 assert!(!msg.contains("https://"));
             }
             other => panic!("expected a typed AuthorizationFailed error, got {other:?}"),
@@ -113,8 +94,8 @@ mod tests {
     /// With a server deep-link (weft#338), the typed error message includes the URL so the user
     /// can open it — and the callback still returns a typed error, never an assertion.
     #[test]
-    fn cli_callback_includes_action_url_in_typed_error_when_present() {
-        let cb = cli_human_signature_callback();
+    fn headless_callback_includes_action_url_in_typed_error_when_present() {
+        let cb = headless_human_signature_callback();
         let url = "https://app.heddle.sh/verify-action?method=%2Fheddle.api.v1alpha1.RegistryService%2FDeleteSpool&challenge=CHAL";
         let result = cb(req_with_action_url(Some(url.to_string())));
         match result {
@@ -125,7 +106,7 @@ mod tests {
                     msg.contains(url),
                     "message must carry the deep-link URL: {msg}"
                 );
-                assert!(msg.contains("web app"));
+                assert!(msg.contains("Tapestry"));
             }
             other => panic!("expected a typed AuthorizationFailed error, got {other:?}"),
         }

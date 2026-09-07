@@ -279,7 +279,7 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
 /// Local-flavor opens generic over the object store `S`.
 ///
 /// `open_raw` assembles a repository from already-resolved pieces and runs
-/// none of the local-only open hooks (migrations, hydrator reconstruction) —
+/// none of the local-only open hooks (snapshot recovery, hydrator reconstruction) —
 /// those are bound to the default [`FsStore`] flavor and live in
 /// [`Repository::run_open_hooks`], which the config-driven [`Repository::open`]
 /// invokes after `open_raw`.

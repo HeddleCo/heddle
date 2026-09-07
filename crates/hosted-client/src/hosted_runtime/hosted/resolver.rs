@@ -94,9 +94,12 @@ async fn resolve_automatic_descriptor_trust(
     let outcome = insert_verified_pin(canonical_server, &document.key_id, &public_key)
         .map_err(|error| HostedError::DescriptorTrust(error.to_string()))?;
     if outcome == PinInsertOutcome::Created {
-        eprintln!("Pinned descriptor trust for {canonical_server}.");
-        eprintln!("Descriptor key id: {}", document.key_id);
-        eprintln!("Descriptor public key: {}", document.public_key);
+        tracing::info!(
+            server = canonical_server,
+            descriptor_key_id = document.key_id,
+            descriptor_public_key = document.public_key,
+            "pinned descriptor trust"
+        );
     }
     Ok(verified)
 }

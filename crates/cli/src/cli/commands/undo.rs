@@ -194,7 +194,7 @@ pub fn cmd_undo(
     // silently discarded. The reset below hard-resets the Git projection ref and
     // rewinds the heddle thread; recording the current tip in the internal
     // recovery ref keeps it a first-class, addressable recovery point —
-    // durable even if a later divergent capture/commit strands the redo path.
+    // durable even if a later divergent capture strands the redo path.
     // The preflights above guarantee the worktree is clean, so the tip's tree
     // *is* the pre-undo worktree. Durability lives in heddle's immutable store
     // + refs; undo never records itself as Git history.

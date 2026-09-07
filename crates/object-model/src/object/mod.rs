@@ -15,6 +15,7 @@ mod diff;
 mod discussion;
 mod facet_kind;
 mod frontier_ref;
+mod git_note;
 mod hash;
 mod identifiers;
 mod key_binding;
@@ -69,6 +70,7 @@ pub use frontier_ref::{
     GIT_SYNTHETIC_FRONTIER_PREFIX, SYNTHETIC_FRONTIER_PREFIX, SyntheticFrontierName,
     SyntheticFrontierNameError,
 };
+pub use git_note::{HeddleNote, NoteAgent, NoteAttribution, OmittedBreakdown, SignalCounts};
 pub use hash::{ChangeId, ChangeIdParseError, ContentHash, StateId, StateIdParseError};
 pub use identifiers::{
     MarkerName, RESERVED_REF_SEGMENT, ReservedRefNameError, Scope, ThreadName,

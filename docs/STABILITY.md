@@ -212,7 +212,7 @@ Tradeoffs:
   compares against a stored baseline.
 - **What gets gated, what gets observed.** Not every CLI verb needs
   a budget. Proposed: budget the verbs in the AGENTS.md "core thread
-  workflow" (`status`, `capture`, `commit`, `log`, `show`, `start`,
+  workflow" (`status`, `capture`, `log`, `show`, `start`,
   `merge --preview`) plus the Git Projection import/export/sync entry
   points; track the rest as observed timings without a
   fail-the-build gate.

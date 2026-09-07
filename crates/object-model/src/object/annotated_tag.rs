@@ -197,7 +197,7 @@ fn git_object_type_name(kind: GitObjectType) -> &'static str {
 #[derive(Debug, Error)]
 pub enum AnnotatedTagError {
     #[error(
-        "unsupported annotated-tag format version {found}; this binary supports {supported}; upgrade heddle or run `heddle migrate`"
+        "unsupported annotated-tag format version {found}; this binary supports {supported}; recreate the repository or re-adopt its Git history with this Heddle version"
     )]
     UnsupportedVersion { found: u8, supported: u8 },
     #[error("unknown annotated-tag Git object format {0}")]

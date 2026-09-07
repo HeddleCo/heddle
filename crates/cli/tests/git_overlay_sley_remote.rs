@@ -506,6 +506,7 @@ fn overlay_push_all_threads_carries_git_refs_and_spares_foreign_destination_refs
         feature,
         &heddle_git_projection::git_notes::HeddleNote {
             source_state: None,
+            parents_rewritten: false,
             state_id: "hs-test-state".to_string(),
             change_id: "hc-test-change".to_string(),
             agent: None,
@@ -647,6 +648,7 @@ fn overlay_pull_fetches_heddle_notes_with_the_branch() {
         first,
         &heddle_git_projection::git_notes::HeddleNote {
             source_state: None,
+            parents_rewritten: false,
             state_id: state.to_string(),
             change_id: state.to_string(),
             agent: None,

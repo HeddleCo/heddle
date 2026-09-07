@@ -30,7 +30,8 @@ use crate::{
         decode_tree_delta_header_prefix, is_delta_tree, is_streamable_tree,
     },
     store::{
-        HeddleError, ObjectStore, Result, SidecarStore, SnapshotCommitDescriptor, TreeWrite, codec,
+        HeddleError, ObjectCacheControl, ObjectStore, Result, SidecarStore,
+        SnapshotCommitDescriptor, TreeWrite, codec,
         codec::{EncodedTree, TreeDeltaBase, TreeEncodingKind, TreeLineage},
         delta_source::DeltaTreeSource,
         pack::{ObjectType, PackManager, PackObjectId},
@@ -103,7 +104,7 @@ fn validate_loaded_state(requested_id: &StateId, mut state: State) -> Result<Sta
 }
 
 pub(super) fn validate_state_serialized(data: &[u8], id: StateId) -> Result<State> {
-    let state: State = rmp_serde::from_slice(data)?;
+    let state = State::decode_current_msgpack(data)?;
     validate_loaded_state(&id, state)
 }
 
@@ -241,7 +242,8 @@ impl FsStore {
         let dir = state_attachments_dir(&self.root, state);
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries {
-                let attachment: StateAttachment = rmp_serde::from_slice(&fs::read(entry?.path())?)?;
+                let attachment =
+                    StateAttachment::decode_current_msgpack(&fs::read(entry?.path())?)?;
                 if attachment.state_id != *state {
                     return Err(HeddleError::InvalidObject(
                         "state attachment stored under wrong state".to_string(),
@@ -260,7 +262,7 @@ impl FsStore {
                 else {
                     continue;
                 };
-                let attachment: StateAttachment = rmp_serde::from_slice(&bytes)?;
+                let attachment = StateAttachment::decode_current_msgpack(&bytes)?;
                 if attachment.state_id == *state {
                     ids.push(attachment.id());
                 }
@@ -397,7 +399,7 @@ fn attachment_entries_from_pack(
     let expected = ids.iter().copied().collect::<HashSet<_>>();
     reader.visit_objects(|id, object_type, data| {
         if expected.contains(&id) && object_type == ObjectType::StateAttachment {
-            attachments.push(rmp_serde::from_slice(data)?);
+            attachments.push(StateAttachment::decode_current_msgpack(data)?);
         }
         Ok(())
     })?;
@@ -424,7 +426,7 @@ pub(super) fn validate_pack_entry(
             validate_state_serialized(data, *change_id).map(|_| ())
         }
         (PackObjectId::Hash(hash), ObjectType::StateAttachment) => {
-            let attachment: StateAttachment = rmp_serde::from_slice(data)?;
+            let attachment = StateAttachment::decode_current_msgpack(data)?;
             if attachment.id().as_hash() != hash {
                 return Err(HeddleError::InvalidObject(
                     "state attachment pack id mismatch".to_string(),
@@ -1062,7 +1064,7 @@ impl FsStore {
             && obj_type == ObjectType::State
         {
             trace!("Found state in packfile");
-            let state = validate_loaded_state(id, rmp_serde::from_slice(&data)?)?;
+            let state = validate_loaded_state(id, State::decode_current_msgpack(&data)?)?;
             heddle_perf_contract::record_object_decode();
             if let Ok(mut cache) = self.recent_states.write() {
                 cache.insert(*id, state.clone());
@@ -1114,14 +1116,14 @@ impl FsStore {
         let path = state_attachment_path(&self.root, state, id);
         let file_bytes = read_file_bytes(&path)?;
         if let Some(bytes) = file_bytes.as_ref() {
-            let attachment: StateAttachment = rmp_serde::from_slice(bytes.as_slice())?;
+            let attachment = StateAttachment::decode_current_msgpack(bytes.as_slice())?;
             return Self::validate_state_attachment(attachment, state, id).map(Some);
         }
         if let Ok(manager) = self.pack_manager().read()
             && let Some((ObjectType::StateAttachment, pack_bytes)) =
                 manager.get_hashed_object(id.as_hash())?
         {
-            let attachment: StateAttachment = rmp_serde::from_slice(&pack_bytes)?;
+            let attachment = StateAttachment::decode_current_msgpack(&pack_bytes)?;
             return Self::validate_state_attachment(attachment, state, id).map(Some);
         }
         Ok(None)
@@ -1180,6 +1182,68 @@ impl FsStore {
             .map_err(|_| HeddleError::Config("Failed to acquire pack manager lock".to_string()))?;
         manager.snapshot_commit_descriptor_for_state(state)
     }
+
+    /// Drop process-local decoded-object caches for benchmarks and
+    /// diagnostics. This is intentionally an FsStore operation rather than a
+    /// durable [`ObjectStore`] requirement.
+    pub fn clear_recent_caches(&self) {
+        self.clear_recent_object_caches();
+    }
+
+    /// Repack loose native objects in this filesystem-backed store.
+    #[instrument(skip(self))]
+    pub fn pack_objects(&self, delta_search: bool) -> Result<(u64, u64)> {
+        self.pack_objects_impl(delta_search)
+    }
+
+    /// Remove loose objects already represented by an installed native pack.
+    #[instrument(skip(self))]
+    pub fn prune_loose_objects(&self) -> Result<(u64, u64)> {
+        self.prune_loose_objects_impl()
+    }
+
+    /// Remove only pack/index pairs that fail validation so clone repair can
+    /// advertise their objects as missing on the next pull.
+    pub fn discard_corrupt_clone_packs(&self) -> Result<usize> {
+        let packs = super::fs_paths::packs_dir(&self.root);
+        let mut removed = 0;
+        for entry in match fs::read_dir(&packs) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error.into()),
+        } {
+            let path = entry?.path();
+            match path.extension().and_then(|value| value.to_str()) {
+                Some("pack") => {
+                    let index = path.with_extension("idx");
+                    let valid = crate::store::pack::PackReader::open(&path, &index)
+                        .and_then(|reader| validate_and_list_pack(self, &reader).map(|_| ()))
+                        .is_ok();
+                    if !valid {
+                        let _ = fs::remove_file(&path);
+                        let _ = fs::remove_file(&index);
+                        removed += 1;
+                    }
+                }
+                Some("npk") if super::npk1::Npk1Pack::open(&path).is_err() => {
+                    let _ = fs::remove_file(&path);
+                    removed += 1;
+                }
+                _ => {}
+            }
+        }
+        if removed > 0 {
+            self.reload_packs()?;
+            self.clear_recent_object_caches();
+        }
+        Ok(removed)
+    }
+}
+
+impl ObjectCacheControl for FsStore {
+    fn clear_recent_caches(&self) {
+        FsStore::clear_recent_caches(self);
+    }
 }
 
 impl ObjectStore for FsStore {
@@ -1214,10 +1278,6 @@ impl ObjectStore for FsStore {
             append_packed_hashes(&mut hashes, &manager, ObjectType::AnnotatedTag)?;
         }
         Ok(hashes)
-    }
-
-    fn clear_recent_caches(&self) {
-        self.clear_recent_object_caches();
     }
 
     /// Zero-copy pack fast path. When the blob lives in a packfile
@@ -1807,7 +1867,7 @@ impl ObjectStore for FsStore {
                 self.write_loose_object_atomic(&index_path, &rmp_serde::to_vec_named(&ids)?)?;
             }
             let path = state_attachment_path(&self.root, &attachment.state_id, &id);
-            self.write_loose_object_atomic(&path, &rmp_serde::to_vec_named(attachment)?)?;
+            self.write_loose_object_atomic(&path, &attachment.encode_current_msgpack()?)?;
             Ok(id)
         })
     }
@@ -1924,11 +1984,6 @@ impl ObjectStore for FsStore {
         Ok(trees)
     }
 
-    #[instrument(skip(self))]
-    fn pack_objects(&self, delta_search: bool) -> Result<(u64, u64)> {
-        self.pack_objects_impl(delta_search)
-    }
-
     #[instrument(skip(self), fields(id = ?id))]
     fn get_pack_object(&self, id: &PackObjectId) -> Result<Option<(ObjectType, Vec<u8>)>> {
         if let Ok(manager) = self.pack_manager().read()
@@ -1961,7 +2016,7 @@ impl ObjectStore for FsStore {
             }
             PackObjectId::StateId(change_id) => {
                 if let Some(state) = self.get_state(change_id)? {
-                    Ok(Some((ObjectType::State, rmp_serde::to_vec_named(&state)?)))
+                    Ok(Some((ObjectType::State, state.encode_current_msgpack()?)))
                 } else {
                     Ok(None)
                 }
@@ -2054,46 +2109,6 @@ impl ObjectStore for FsStore {
             self.put_state_attachment(&attachment)?;
         }
         Ok(ids)
-    }
-
-    #[instrument(skip(self))]
-    fn prune_loose_objects(&self) -> Result<(u64, u64)> {
-        self.prune_loose_objects_impl()
-    }
-
-    fn discard_corrupt_clone_packs(&self) -> Result<usize> {
-        let packs = super::fs_paths::packs_dir(&self.root);
-        let mut removed = 0;
-        for entry in match fs::read_dir(&packs) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(error) => return Err(error.into()),
-        } {
-            let path = entry?.path();
-            match path.extension().and_then(|value| value.to_str()) {
-                Some("pack") => {
-                    let index = path.with_extension("idx");
-                    let valid = crate::store::pack::PackReader::open(&path, &index)
-                        .and_then(|reader| validate_and_list_pack(self, &reader).map(|_| ()))
-                        .is_ok();
-                    if !valid {
-                        let _ = fs::remove_file(&path);
-                        let _ = fs::remove_file(&index);
-                        removed += 1;
-                    }
-                }
-                Some("npk") if super::npk1::Npk1Pack::open(&path).is_err() => {
-                    let _ = fs::remove_file(&path);
-                    removed += 1;
-                }
-                _ => {}
-            }
-        }
-        if removed > 0 {
-            self.reload_packs()?;
-            self.clear_recent_object_caches();
-        }
-        Ok(removed)
     }
 
     #[instrument(skip(self))]

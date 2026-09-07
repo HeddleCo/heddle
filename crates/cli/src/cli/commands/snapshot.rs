@@ -9,14 +9,13 @@ use anyhow::{Result, anyhow};
 pub(crate) use heddle_cli_contract::cli::commands::wire::{
     SnapshotAgentOutput, SnapshotOutput, SnapshotPrincipalOutput,
 };
-use hosted_client::attribution::clean_attribution_value;
 use objects::{
     lock::RepositoryLockExt,
-    object::{Agent, Attribution, Principal, StateId, ThreadName, Tree},
+    object::{Attribution, Principal, StateId, ThreadName, Tree},
     store::ObjectStore,
 };
 use refs::Head;
-use repo::{Repository, RepositoryCapability, SessionManager, SnapshotProfile, format_confidence};
+use repo::{Repository, RepositoryCapability, SnapshotProfile, format_confidence};
 // Re-export the helper derivations so existing CLI call sites
 // (`thread.rs`; the agent relay reads them from `repo` directly) keep
 // `super::snapshot::summarize_*`
@@ -27,8 +26,8 @@ pub(crate) use repo::{summarize_confidence, summarize_verification};
 use serde::Serialize;
 use tracing::{debug, info};
 use verbs::{
-    CaptureOptions, GitScope, MachineContractInput, SavePlan, SaveVerb, execute_save,
-    principal_lacks_accountable_identity,
+    CaptureAgentOptions, CaptureOptions, GitScope, MachineContractInput, SavePlan, SaveVerb,
+    execute_save,
 };
 
 use super::{
@@ -122,7 +121,7 @@ pub fn cmd_snapshot(
     force: bool,
     agent: SnapshotAgentOverrides,
 ) -> Result<()> {
-    let intent = require_capture_intent(intent)?;
+    let intent = intent.unwrap_or_default();
     let cwd;
     let start = if let Some(path) = cli.repo.as_ref() {
         path
@@ -137,8 +136,9 @@ pub fn cmd_snapshot(
     let repo = Repository::open(start)?;
     let user_config = UserConfig::load_default()?;
 
-    let status_options = worktree_status_options(Some(repo.config()));
-    let ctx = execution_context_from_cli_parts(cli, start, Some(repo), &user_config)?;
+    let as_json = should_output_json(cli, Some(repo.config()));
+    let git_overlay = repo.capability() == RepositoryCapability::GitOverlay;
+    let ctx = execution_context_from_cli_parts(start, Some(repo), &user_config);
     let snapshot_start = Instant::now();
     let capture_report = verbs::capture(
         &ctx,
@@ -146,28 +146,29 @@ pub fn cmd_snapshot(
             intent,
             confidence,
             force,
-            worktree_status_options: status_options,
+            agent: capture_agent_options(&user_config, &agent),
             machine_contract_input: Some(MachineContractInput::from_coverage(
                 machine_contract_coverage(),
             )),
         },
-        |repo| build_capture_attribution(repo, &user_config, &agent),
     )?;
     let snapshot_ms = snapshot_start.elapsed().as_millis();
     let worktree_status_ms = capture_report.diagnostics.profile.worktree_status_ms;
     let captured_thread_targets_integration = capture_report.captured_thread_targets_integration;
     let (output, snapshot_profile) = snapshot_output_from_capture_report(capture_report);
-    let repo = ctx.require_repo()?;
-
-    let as_json = should_output_json(cli, Some(repo.config()));
-    let git_overlay = repo.capability() == repo::RepositoryCapability::GitOverlay;
-
     let render_start = Instant::now();
     if as_json {
         write_command_json(
             &output,
             output_is_compact(cli),
-            NextActionValidationContext::new(&["capture"], repo.capability()),
+            NextActionValidationContext::new(
+                &["capture"],
+                if git_overlay {
+                    RepositoryCapability::GitOverlay
+                } else {
+                    RepositoryCapability::NativeHeddle
+                },
+            ),
         )?;
     } else {
         // The bare `{message}` was `"Created state <id> (<hash>)"` —
@@ -179,6 +180,9 @@ pub fn cmd_snapshot(
             style::state_id(&output.state_id),
             style::dim(&output.content_hash),
         );
+        if let Some(checkpoint) = output.git_checkpoint.as_deref() {
+            println!("  {}", style::field("Git checkpoint", checkpoint));
+        }
         println!(
             "Captured by: {} from {}",
             style::principal(&output.principal.name, &output.principal.email),
@@ -227,18 +231,6 @@ pub fn cmd_snapshot(
         }
     }
     let render_ms = render_start.elapsed().as_millis();
-
-    if git_overlay && !captured_thread_targets_integration {
-        // Overlay-only discoverability: commit writes the captured tree
-        // to `.git`. Native capture is already the save boundary.
-        crate::cli::tips::maybe_emit(
-            repo.root(),
-            Some(repo.config()),
-            crate::cli::tips::Tip::CheckpointAfterCapture,
-            as_json,
-            cli.quiet,
-        );
-    }
 
     if instrumentation_enabled() {
         emit_profile(
@@ -329,42 +321,6 @@ pub fn cmd_snapshot(
     Ok(())
 }
 
-pub(crate) fn require_capture_intent(intent: Option<String>) -> Result<String> {
-    match intent {
-        Some(intent) if !intent.trim().is_empty() => Ok(intent),
-        _ => Err(anyhow!(missing_capture_intent_advice())),
-    }
-}
-
-fn missing_capture_intent_advice() -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        "missing_capture_intent",
-        "refusing to capture without an intent",
-        "Provide a short intent with `heddle capture -m \"...\"`.",
-        "no capture intent was supplied with -m/--message/--intent",
-        "capturing without intent would create a weak provenance record",
-        "repository state, refs, metadata, and worktree files were left unchanged",
-        "heddle capture -m \"...\"",
-        vec!["heddle capture -m \"...\"".to_string()],
-    )
-}
-
-fn missing_capture_identity_advice() -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        "capture_identity_required",
-        "Refusing to capture: no accountable identity is configured",
-        "Set `HEDDLE_PRINCIPAL_NAME` and `HEDDLE_PRINCIPAL_EMAIL`, or run `heddle init --principal-name <name> --principal-email <email>`, then retry the capture.",
-        "Heddle would otherwise have to record Unknown <unknown@example.com> on the captured state",
-        "capture would create durable Heddle history without a real principal",
-        "Heddle refs, captured states, Git refs, index, and worktree files were left unchanged",
-        "heddle init --principal-name <name> --principal-email <email>",
-        vec![
-            "heddle init --principal-name <name> --principal-email <email>".to_string(),
-            "heddle capture -m \"...\"".to_string(),
-        ],
-    )
-}
-
 pub(crate) fn create_snapshot(
     repo: &Repository,
     user_config: &UserConfig,
@@ -376,8 +332,7 @@ pub(crate) fn create_snapshot(
 }
 
 /// Shared entry for staged-tree captures that still want CLI-shaped
-/// [`SnapshotOutput`] (hooks + attribution + execute_save). Kept for
-/// non-commit callers; commit now builds a [`SavePlan`] directly.
+/// [`SnapshotOutput`] (hooks + attribution + execute_save).
 #[allow(dead_code)]
 pub(crate) fn create_snapshot_from_tree(
     repo: &Repository,
@@ -461,9 +416,7 @@ fn bind_git_overlay_active_tip(repo: &Repository) -> Result<Option<StateId>> {
         return Ok(Some(existing));
     }
 
-    heddle_git_projection::git_core::GitProjection::hydrate_checkout_heddle_notes_without_mirror(
-        repo.root(),
-    );
+    heddle_git_projection::git_core::GitProjection::hydrate_checkout_heddle_notes(repo.root());
     let state_id = ingest::bind_single_git_commit_overlay(
         repo.root(),
         repo.root(),
@@ -591,7 +544,6 @@ pub(crate) fn create_snapshot_profiled(
         worktree_status_options: worktree_status_options(Some(repo.config())),
         known_worktree_changes: None,
         run_hooks: true,
-        commit_safe_post_verify: false,
         coalesce_snapshot_and_checkpoint: false,
         linearize_git_parent: false,
         precomputed_worktree_status: None,
@@ -646,7 +598,6 @@ pub(crate) fn create_snapshot_from_tree_profiled(
         worktree_status_options: worktree_status_options(Some(repo.config())),
         known_worktree_changes: None,
         run_hooks: true,
-        commit_safe_post_verify: false,
         coalesce_snapshot_and_checkpoint: false,
         linearize_git_parent: false,
         precomputed_worktree_status: None,
@@ -662,11 +613,9 @@ fn snapshot_output_from_capture_report(
     report: verbs::CaptureReport,
 ) -> (SnapshotOutput, SnapshotCommandProfile) {
     let output_build_start = Instant::now();
-    let verbs::CaptureDiagnostics {
-        save,
-        profile: capture_profile,
-    } = report.diagnostics;
-    let previous_state_profile = save.previous_state_profile.clone();
+    let diagnostics = report.diagnostics;
+    let capture_profile = diagnostics.profile;
+    let previous_state_profile = diagnostics.previous_state_profile;
     let next_action = report.recommended_action.clone();
     let next_action_template = report.recommended_action_template.clone();
     let output = SnapshotOutput {
@@ -675,6 +624,7 @@ fn snapshot_output_from_capture_report(
         action: "capture",
         state_id: report.state_id,
         content_hash: report.content_hash,
+        git_checkpoint: report.git_checkpoint,
         intent: report.intent,
         confidence: report.confidence,
         task_assignment_id: report.task_assignment_id,
@@ -705,24 +655,24 @@ fn snapshot_output_from_capture_report(
         trust: report.verification,
     };
     let mut profile = snapshot_command_profile(
-        save.snapshot_profile,
-        save.state_create_ms,
-        save.captured_path_count_ms,
-        save.post_verification_ms,
-        save.thread_metadata_ms,
+        diagnostics.snapshot_profile,
+        diagnostics.state_create_ms,
+        diagnostics.captured_path_count_ms,
+        diagnostics.post_verification_ms,
+        diagnostics.thread_metadata_ms,
     );
     profile.output_build_ms = output_build_start.elapsed().as_millis();
     profile.preflight_ms = capture_profile.preflight_ms;
     profile.attribution_ms = capture_profile.attribution_ms;
     profile.execute_save_ms = capture_profile.execute_save_ms;
-    profile.previous_state_ms = save.previous_state_ms;
+    profile.previous_state_ms = diagnostics.previous_state_ms;
     profile.previous_state_head_ms = previous_state_profile.head_ms;
     profile.previous_state_cache_read_ms = previous_state_profile.cache_read_ms;
     profile.previous_state_cache_decode_ms = previous_state_profile.cache_decode_ms;
     profile.previous_state_cache_validate_ms = previous_state_profile.cache_validate_ms;
     profile.previous_state_store_read_ms = previous_state_profile.store_read_ms;
     profile.previous_state_cache_hit = previous_state_profile.cache_hit;
-    profile.signature_lookup_ms = save.signature_lookup_ms;
+    profile.signature_lookup_ms = diagnostics.signature_lookup_ms;
     (output, profile)
 }
 
@@ -763,6 +713,7 @@ fn snapshot_output_from_save_report(
         action: "capture",
         state_id: report.state_id.short(),
         content_hash: report.content_hash.short(),
+        git_checkpoint: report.git_commit.clone(),
         intent: report.intent,
         confidence: report.confidence,
         task_assignment_id,
@@ -867,108 +818,49 @@ pub(crate) fn build_attribution(
     user_config: &UserConfig,
     agent: &SnapshotAgentOverrides,
 ) -> Result<Attribution> {
-    build_capture_attribution(repo, user_config, agent).map(|resolved| resolved.attribution)
+    verbs::resolve_capture_author(
+        repo,
+        user_config.principal_pair(),
+        &capture_agent_options(user_config, agent),
+    )
 }
 
-fn build_capture_attribution(
-    repo: &Repository,
+fn capture_agent_options(
     user_config: &UserConfig,
     agent: &SnapshotAgentOverrides,
-) -> Result<verbs::CaptureAttribution> {
-    let resolved_principal = verbs::resolve_principal(repo, user_config.principal_pair())?;
-    let principal_source = resolved_principal.source.unwrap_or("unknown").to_string();
-    let principal = resolved_principal.principal;
-    if is_default_unknown_principal(&principal) {
-        return Err(anyhow!(missing_capture_identity_advice()));
+) -> CaptureAgentOptions {
+    let child_environment = std::env::vars()
+        .filter(|(key, value)| {
+            !value.trim().is_empty()
+                && matches!(
+                    key.as_str(),
+                    "CLAUDE_CODE_SESSION_ID"
+                        | "CLAUDE_EFFORT"
+                        | "PI_MODEL"
+                        | "PI_REASONING_LEVEL"
+                        | "PI_SESSION_ID"
+                        | "PI_PROVIDER"
+                        | "PI_PARENT_ID"
+                )
+        })
+        .collect();
+    CaptureAgentOptions {
+        provider: agent.provider.clone(),
+        model: agent.model.clone(),
+        session: agent.session.clone(),
+        segment: agent.segment.clone(),
+        policy: agent.policy.clone(),
+        environment_policy: std::env::var("HEDDLE_AGENT_POLICY").ok(),
+        default_policy: user_config.agent.default_policy.clone(),
+        identity_patch: verbs::cursor_patch_from_child_env(&child_environment),
+        no_policy: agent.no_policy,
+        no_agent: agent.no_agent,
     }
-
-    if agent.no_agent {
-        return Ok(verbs::CaptureAttribution {
-            attribution: Attribution::human(principal),
-            principal_source,
-            harness_session_id: None,
-        });
-    }
-
-    // Put state in. Do not hunt `/proc`, hoped-for env, thread actor, or
-    // repo/user `agent.model` after a cursor miss. Cursor/Grok stay
-    // `agent=null`. Never invent a model.
-    let frozen = crate::identity_freeze::freeze_identity_for_capture(repo).unwrap_or_default();
-    let harness_session_id = frozen.session.clone();
-    let current_session = SessionManager::new(repo.root()).get_current_session()?;
-    let provider = agent
-        .provider
-        .clone()
-        .or(frozen.provider.clone())
-        .and_then(clean_attribution_value);
-    let model = agent
-        .model
-        .clone()
-        .or(frozen.model.clone())
-        .and_then(clean_attribution_value);
-    let session_policy = current_session
-        .as_ref()
-        .and_then(|session| session.current_segment())
-        .and_then(|segment| segment.policy_id.clone())
-        .and_then(clean_attribution_value);
-    // Heddle Session.id — never the sidecar harness session.
-    let session_id = agent
-        .session
-        .clone()
-        .or_else(|| current_session.as_ref().map(|session| session.id.clone()));
-    let segment_id = agent
-        .segment
-        .clone()
-        .or(frozen.segment_id.clone())
-        .or_else(|| {
-            current_session
-                .as_ref()
-                .and_then(|session| session.current_segment_id.clone())
-        });
-    let policy = if agent.no_policy {
-        None
-    } else {
-        agent
-            .policy
-            .clone()
-            .or_else(|| {
-                std::env::var("HEDDLE_AGENT_POLICY")
-                    .ok()
-                    .and_then(clean_attribution_value)
-            })
-            .or(session_policy)
-            .or_else(|| user_config.agent.default_policy.clone())
-            .or_else(|| repo.config().policies.default_policy.clone())
-    };
-
-    let attribution = match (provider, model) {
-        (Some(p), Some(m)) => {
-            let mut agent = Agent::new(p, m);
-            if let (Some(sid), Some(segid)) = (session_id, segment_id) {
-                agent = agent.with_session(sid, segid);
-            }
-            if let Some(pol) = policy {
-                agent = agent.with_policy(pol);
-            }
-            if let Some(thought_level) = frozen.thought_level {
-                agent = agent.with_thought_level(thought_level);
-            }
-            if let Some(parent) = frozen.parent {
-                agent = agent.with_parent(parent);
-            }
-            Attribution::with_agent(principal, agent)
-        }
-        _ => Attribution::human(principal),
-    };
-    Ok(verbs::CaptureAttribution {
-        attribution,
-        principal_source,
-        harness_session_id,
-    })
 }
 
-// Attribution resolution lives in `hosted-client` so the hosted context sync
-// and the CLI verbs share one implementation.
+// Non-capture commands still use the hosted Adapter's simpler ambient
+// attribution policy. Capture itself resolves its richer identity/session
+// contract behind `verbs::capture`.
 pub(crate) use hosted_client::attribution::{resolve_attribution, resolve_principal};
 
 pub(crate) fn is_placeholder_principal(principal: &Principal) -> bool {
@@ -988,10 +880,6 @@ pub(crate) fn placeholder_principal_warning(principal: &Principal) -> String {
     )
 }
 
-fn is_default_unknown_principal(principal: &Principal) -> bool {
-    principal_lacks_accountable_identity(&principal.name_lossy(), &principal.email_lossy())
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -999,6 +887,8 @@ mod tests {
         sync::{Arc, Barrier},
         thread,
     };
+
+    use repo::SessionManager;
 
     use super::*;
 
@@ -1441,42 +1331,5 @@ mod tests {
         assert!(warning.contains("captured 500 paths"));
         assert!(warning.contains(".gitignore"));
         assert!(warning.contains(".heddleignore"));
-    }
-
-    #[test]
-    fn clean_attribution_strips_unknown_placeholder() {
-        assert_eq!(clean_attribution_value("unknown".into()), None);
-        assert_eq!(clean_attribution_value("Unknown".into()), None);
-        assert_eq!(clean_attribution_value("UNKNOWN".into()), None);
-        // Trim-then-compare: the harness writes the bare token but
-        // belt-and-braces against accidental whitespace.
-        assert_eq!(clean_attribution_value("  unknown  ".into()), None);
-    }
-
-    #[test]
-    fn clean_attribution_strips_empty_and_whitespace() {
-        assert_eq!(clean_attribution_value(String::new()), None);
-        assert_eq!(clean_attribution_value("   ".into()), None);
-        assert_eq!(clean_attribution_value("\t\n".into()), None);
-    }
-
-    #[test]
-    fn clean_attribution_preserves_real_values() {
-        // Real provider/model strings must round-trip with their
-        // original casing and surrounding characters intact — the
-        // attribution graph keys on these literally.
-        assert_eq!(
-            clean_attribution_value("anthropic".into()),
-            Some("anthropic".into())
-        );
-        assert_eq!(
-            clean_attribution_value("claude-opus-4-7".into()),
-            Some("claude-opus-4-7".into())
-        );
-        // "unknown" as a substring of a real value must not match.
-        assert_eq!(
-            clean_attribution_value("unknown-model-v2".into()),
-            Some("unknown-model-v2".into())
-        );
     }
 }

@@ -8,7 +8,7 @@ use std::{
     path::Path,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use objects::{
     object::{ActionId, ContentHash, StateAttachment, StateId},
     store::{ObjectStore, SidecarStore},
@@ -450,12 +450,9 @@ mod tests {
             .expect("put context blob");
         let context_root = source
             .store()
-            .put_tree(&Tree::from_entries(vec![TreeEntry::file(
-                "context.msgpack",
-                context_blob,
-                false,
-            )
-            .unwrap()]))
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("context.msgpack", context_blob, false).unwrap(),
+            ]))
             .expect("put context tree");
         let first = StateAttachment {
             state_id,

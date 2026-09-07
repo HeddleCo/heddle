@@ -1097,7 +1097,10 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
         options.insecure,
     )
     .await?
-    .with_human_signature_callback(hosted_client::client::cli_human_signature_callback());
+    .with_human_signature_callback(hosted_client::client::headless_human_signature_callback())
+    .with_warning_sink(std::sync::Arc::new(
+        crate::cli::warning_render::StderrWarningSink,
+    ));
     let result = pull_network_connected(repo, &mut client, repo_path, options).await;
     client.close().await;
     result
@@ -1151,6 +1154,17 @@ async fn pull_network_connected(
     } else {
         None
     };
+    if let Some(bootstrap) = &bootstrap {
+        for warning in [
+            bootstrap.discussions_pack_fallback.as_deref(),
+            bootstrap.context_pack_fallback.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            eprintln!("{} {warning}", crate::cli::style::warn_marker());
+        }
+    }
 
     // Keep typed StateId for ref/worktree I/O; map string fields for pure parse.
     let final_state_id = result.final_state;

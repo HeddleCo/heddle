@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Shared save primitive for `capture` / `commit` / `checkpoint` / ready auto-capture.
+//! Shared save primitive for `capture` / internal checkpoint / ready auto-capture.
 //!
-//! CLI verbs become thin shells that build a [`SavePlan`] and call
-//! [`execute_save`]. Repo keeps atomic tree/state mutation; this module owns
-//! the composition of preflight-adjacent routing, Heddle snapshot, and
-//! optional Git-overlay write-through.
+//! Embedding surfaces call [`capture`] with typed input and receive a typed
+//! [`CaptureReport`]. Repo keeps atomic tree/state mutation; this module owns
+//! safety preflight, attribution/session resolution, Heddle snapshot, optional
+//! Git-overlay write-through, and report assembly. [`execute_save`] remains the
+//! lower-level primitive for compound verbs such as ready.
 
 use std::time::Instant;
 
@@ -22,51 +23,72 @@ use oplog::{OpLogBackend, OpRecord};
 use refs::Head;
 use repo::{
     ActorPresenceStore, CommitGraphIndex, GitCheckpointRecord, Hook, HookContext, HookManager,
-    OperationScope, Repository, RepositoryCapability, SnapshotProfile, Thread, ThreadFreshness,
-    ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState, WorktreeStateLookupProfile,
-    WorktreeStatusOptions, refresh_active_thread_metadata, update_thread_state_from_state,
+    OperationScope, Repository, RepositoryCapability, SessionManager, SnapshotProfile, Thread,
+    ThreadFreshness, ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState,
+    WorktreeStateLookupProfile, WorktreeStatusOptions, refresh_active_thread_metadata,
+    update_thread_state_from_state,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
 use sley::Repository as SleyRepository;
 
 use crate::{
-    ActionTemplate, ExecutionContext, HeddleReport, MachineContractInput, MachineOutputKind,
-    OutputDiscriminator, ReportContract, RepositoryVerificationState,
+    ActionTemplate, ExecutionContext, HeddleReport, IdentityCursor, MachineContractInput,
+    MachineOutputKind, OutputDiscriminator, ReportContract, RepositoryVerificationState,
+    SegmentRotation, attach_published_segment_fields,
     build_repository_verification_health_with_worktree_status, build_repository_verification_state,
     build_repository_verification_state_with_machine_contract,
     build_repository_verification_state_with_worktree_status,
     build_repository_verification_state_with_worktree_status_and_machine_contract,
-    schema_for_report,
-    status::next_action::{contextual_thread_action, import_guidance_includes_active_branch},
+    cursor_segment_rotation, published_field, read_identity_cursor, schema_for_report,
+    stamp_identity_cursor,
+    status::next_action::{
+        contextual_thread_action, heddle_action, import_guidance_includes_active_branch,
+        remote_tracking_status,
+    },
     verify::action_template,
 };
 
 const BULK_CAPTURE_WARNING_THRESHOLD: usize = 500;
 
 /// Fully-resolved inputs for the normal local capture operation.
-///
-/// Attribution remains an embedding concern because the CLI combines explicit
-/// flags, harness detection, sessions, and environment variables. [`capture`]
-/// resolves it lazily after non-mutating safety checks, then owns the remaining
-/// mutation ordering.
 #[derive(Debug)]
 pub struct CaptureOptions {
     pub intent: String,
     pub confidence: Option<f32>,
     pub force: bool,
-    pub worktree_status_options: WorktreeStatusOptions,
+    pub agent: CaptureAgentOptions,
     pub machine_contract_input: Option<MachineContractInput>,
+}
+
+/// Agent inputs supplied by an embedding surface.
+///
+/// Process environment parsing stays in the CLI adapter. Applying the identity
+/// patch, resolving repository/session precedence, and rotating a session
+/// segment are capture semantics and therefore live behind [`capture`].
+#[derive(Debug, Clone, Default)]
+pub struct CaptureAgentOptions {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub session: Option<String>,
+    pub segment: Option<String>,
+    pub policy: Option<String>,
+    pub environment_policy: Option<String>,
+    pub default_policy: Option<String>,
+    pub identity_patch: IdentityCursor,
+    pub no_policy: bool,
+    pub no_agent: bool,
 }
 
 /// Attribution resolved lazily after capture's non-mutating safety checks.
 #[derive(Debug, Clone)]
-pub struct CaptureAttribution {
-    pub attribution: Attribution,
-    pub principal_source: String,
+struct CaptureAttribution {
+    attribution: Attribution,
+    principal_source: String,
     /// Native harness session from the workspace identity stamp. This remains
     /// distinct from Heddle `Session.id` and only advances the last-turn cursor.
-    pub harness_session_id: Option<String>,
+    harness_session_id: Option<String>,
+    warnings: Vec<String>,
 }
 
 /// Capture-specific timings owned by the operation implementation.
@@ -87,6 +109,8 @@ pub struct CaptureReport {
     pub output_kind: &'static str,
     pub state_id: String,
     pub content_hash: String,
+    /// Git commit written for this state in Git Overlay mode.
+    pub git_checkpoint: Option<String>,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
     pub task_assignment_id: Option<String>,
@@ -147,15 +171,22 @@ pub struct CaptureAgentReport {
 
 #[derive(Debug, Clone)]
 pub struct CaptureDiagnostics {
-    pub save: SaveReport,
     pub profile: CaptureProfile,
+    pub snapshot_profile: SnapshotProfile,
+    pub state_create_ms: u128,
+    pub captured_path_count_ms: u128,
+    pub post_verification_ms: u128,
+    pub thread_metadata_ms: u128,
+    pub previous_state_ms: u128,
+    pub previous_state_profile: WorktreeStateLookupProfile,
+    pub signature_lookup_ms: u128,
 }
 
 /// How far a save should write through into Git (Git-overlay only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GitScope {
-    /// Heddle state only — no Git checkpoint (capture; native commit).
+    /// Heddle state only — no Git checkpoint (native capture).
     None,
     /// Checkpoint the staged Git index boundary (caller supplies the tree).
     Staged,
@@ -168,7 +199,6 @@ pub enum GitScope {
 #[serde(rename_all = "snake_case")]
 pub enum SaveVerb {
     Capture,
-    Commit,
     Checkpoint,
 }
 
@@ -199,8 +229,6 @@ pub struct SavePlan {
     pub known_worktree_changes: Option<WorktreeStatus>,
     /// Run pre/post snapshot hooks when creating a new Heddle state.
     pub run_hooks: bool,
-    /// Map post-verify "commit" next actions to `heddle status` (commit UX).
-    pub commit_safe_post_verify: bool,
     /// Fold snapshot + GitCheckpoint oplog batches into one undo unit.
     pub coalesce_snapshot_and_checkpoint: bool,
     /// Export an unmapped checkpoint state on top of the checkout's current
@@ -231,37 +259,7 @@ impl SavePlan {
             worktree_status_options: WorktreeStatusOptions::default(),
             known_worktree_changes: None,
             run_hooks: true,
-            commit_safe_post_verify: false,
             coalesce_snapshot_and_checkpoint: false,
-            linearize_git_parent: false,
-            precomputed_worktree_status: None,
-            machine_contract_input: None,
-        }
-    }
-
-    pub fn commit(
-        intent: impl Into<String>,
-        attribution: Attribution,
-        git_scope: GitScope,
-    ) -> Self {
-        Self {
-            verb: SaveVerb::Commit,
-            intent: Some(intent.into()),
-            confidence: None,
-            attribution,
-            git_scope,
-            supplied_tree: None,
-            reuse_current_state: false,
-            require_clean_worktree: matches!(git_scope, GitScope::WorktreeAll),
-            require_worktree_change: false,
-            worktree_status_options: WorktreeStatusOptions::default(),
-            known_worktree_changes: None,
-            run_hooks: true,
-            commit_safe_post_verify: true,
-            coalesce_snapshot_and_checkpoint: matches!(
-                git_scope,
-                GitScope::Staged | GitScope::WorktreeAll
-            ),
             linearize_git_parent: false,
             precomputed_worktree_status: None,
             machine_contract_input: None,
@@ -286,7 +284,6 @@ impl SavePlan {
             worktree_status_options: WorktreeStatusOptions::default(),
             known_worktree_changes: None,
             run_hooks: true,
-            commit_safe_post_verify: false,
             coalesce_snapshot_and_checkpoint: false,
             linearize_git_parent: false,
             precomputed_worktree_status: None,
@@ -350,37 +347,6 @@ pub struct SaveReport {
     pub signature_lookup_ms: u128,
 }
 
-/// Pure routing helper: which Git write-through scope a verb should use.
-///
-/// Used by unit tests and by CLI shells that build a [`SavePlan`] before
-/// calling [`execute_save`].
-pub fn plan_git_scope(
-    verb: SaveVerb,
-    capability: RepositoryCapability,
-    staged_index_paths: bool,
-    include_all_worktree: bool,
-) -> GitScope {
-    match verb {
-        SaveVerb::Capture => GitScope::None,
-        SaveVerb::Checkpoint => {
-            if staged_index_paths {
-                GitScope::Staged
-            } else {
-                GitScope::WorktreeAll
-            }
-        }
-        SaveVerb::Commit => {
-            if capability != RepositoryCapability::GitOverlay {
-                GitScope::None
-            } else if staged_index_paths && !include_all_worktree {
-                GitScope::Staged
-            } else {
-                GitScope::WorktreeAll
-            }
-        }
-    }
-}
-
 /// Whether this plan should create a new Heddle state (vs reusing HEAD).
 pub fn plan_creates_new_state(plan: &SavePlan, has_current_state: bool) -> bool {
     if plan.supplied_tree.is_some() {
@@ -406,150 +372,13 @@ pub fn tree_leaf_name(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
-/// Next-action after a git-projection commit from verification facts only.
-///
-/// Precedence: explicit trust recommendation → verify when untrusted → push
-/// when a default remote is configured.
-pub fn commit_next_action_from_trust(
-    recommended_action: &str,
-    verified: bool,
-    has_default_remote: bool,
-) -> Option<String> {
-    if !recommended_action.trim().is_empty() {
-        return Some(recommended_action.to_string());
-    }
-    if !verified {
-        return Some("heddle verify".to_string());
-    }
-    has_default_remote.then(|| "heddle push".to_string())
-}
-
-// ---------------------------------------------------------------------------
-// Git-projection commit index planning (pure)
-// ---------------------------------------------------------------------------
-
-/// Pure commit index plan for internal Git projection writes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommitGitIndexPlan {
-    pub commit_mode: &'static str,
-    pub has_staged_changes: bool,
-    pub staged_paths: Vec<String>,
-    pub unstaged_paths: Vec<String>,
-    pub untracked_paths: Vec<String>,
-    pub will_commit: Vec<String>,
-    pub preserved_after_commit: Vec<String>,
-}
-
-/// Split `unstaged: ` / `untracked: ` prefixed extra paths from status rows.
-pub fn split_git_extra_paths(extra_paths: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut unstaged_paths = Vec::new();
-    let mut untracked_paths = Vec::new();
-    for path in extra_paths {
-        if let Some(path) = path.strip_prefix("unstaged: ") {
-            unstaged_paths.push(path.to_string());
-        } else if let Some(path) = path.strip_prefix("untracked: ") {
-            untracked_paths.push(path.to_string());
-        }
-    }
-    (unstaged_paths, untracked_paths)
-}
-
-/// Plan commit scope from staged + extra worktree paths and `--all`.
-pub fn plan_commit_git_index(
-    staged_paths: &[String],
-    extra_paths: &[String],
-    include_all: bool,
-) -> CommitGitIndexPlan {
-    let (unstaged_paths, untracked_paths) = split_git_extra_paths(extra_paths);
-    let has_staged_changes = !staged_paths.is_empty();
-    let mut will_commit = Vec::new();
-    if has_staged_changes {
-        will_commit.extend(staged_paths.iter().cloned());
-    }
-    if include_all || !has_staged_changes {
-        will_commit.extend(unstaged_paths.iter().cloned());
-        will_commit.extend(untracked_paths.iter().cloned());
-    }
-    let commit_mode = if has_staged_changes && include_all {
-        "worktree_all_explicit"
-    } else if has_staged_changes {
-        "staged_index"
-    } else if will_commit.is_empty() {
-        "none"
-    } else {
-        "worktree_all"
-    };
-    let preserved_after_commit = if has_staged_changes && !include_all {
-        extra_paths.to_vec()
-    } else {
-        Vec::new()
-    };
-    CommitGitIndexPlan {
-        commit_mode,
-        has_staged_changes,
-        staged_paths: staged_paths.to_vec(),
-        unstaged_paths,
-        untracked_paths,
-        will_commit,
-        preserved_after_commit,
-    }
-}
-
-/// Index-only plan: commit staged paths, preserve all extras.
-pub fn plan_commit_git_index_only(
-    staged_paths: &[String],
-    extra_paths: &[String],
-) -> CommitGitIndexPlan {
-    let (unstaged_paths, untracked_paths) = split_git_extra_paths(extra_paths);
-    CommitGitIndexPlan {
-        commit_mode: "staged_index",
-        has_staged_changes: !staged_paths.is_empty(),
-        staged_paths: staged_paths.to_vec(),
-        unstaged_paths,
-        untracked_paths,
-        will_commit: staged_paths.to_vec(),
-        preserved_after_commit: extra_paths.to_vec(),
-    }
-}
-
-/// Human scope line for git-projection commit text mode.
-pub fn commit_scope_text(commit_mode: &str) -> &'static str {
-    match commit_mode {
-        "staged_index" => {
-            "staged Git index only; unstaged and untracked paths stay in the worktree"
-        }
-        "worktree_all_explicit" => "all staged, unstaged, and untracked worktree changes (--all)",
-        "worktree_all" => "all unstaged and untracked worktree changes",
-        "none" => "no Git paths",
-        _ => "Git worktree changes",
-    }
-}
-
-/// Annotate a commit summary when staged-only commit leaves extras behind.
-pub fn staged_commit_summary(
-    summary: &str,
-    staged_path_count: usize,
-    extra_path_count: usize,
-) -> String {
-    if extra_path_count == 0 {
-        return summary.to_string();
-    }
-    format!(
-        "{summary} (committed {staged_path_count} staged path(s); left {extra_path_count} unstaged/untracked path(s) in the worktree)"
-    )
-}
-
 /// Capture the current worktree as one synchronous local operation.
 ///
 /// The implementation owns the complete semantic sequence: authority-aware
 /// worktree checks, safety preflight, Heddle mutation, manual-resolution
-/// completion, best-effort intent-to-add maintenance, and final report
-/// assembly. There are no genuine suspension points on this path.
-pub fn capture(
-    ctx: &ExecutionContext,
-    options: CaptureOptions,
-    resolve_attribution: impl FnOnce(&Repository) -> Result<CaptureAttribution>,
-) -> Result<CaptureReport> {
+/// completion, Git checkpointing, and final report assembly. There are no
+/// genuine suspension points on this path.
+pub fn capture(ctx: &ExecutionContext, options: CaptureOptions) -> Result<CaptureReport> {
     let repo = ctx.require_repo()?;
     if options.intent.trim().is_empty() {
         return Err(capture_refusal(
@@ -563,7 +392,33 @@ pub fn capture(
         ));
     }
 
-    if let Some(path) = env_store::reserved_materialization_on_disk(repo.root()) {
+    preflight_unimported_git_history(repo, "capture")?;
+    let complete_thread_resolution = merge_resolution_is_complete(repo)?;
+    let worktree_status_started = Instant::now();
+    let mut reuse_current_state = false;
+    let mut no_changes = false;
+    let known_worktree_changes = if complete_thread_resolution {
+        None
+    } else {
+        let status = capture_worktree_status(repo, &ctx.worktree_status_options())?;
+        if repo.capability() == RepositoryCapability::GitOverlay && status.is_clean() {
+            if repo.pending_git_checkpoint_intent()?.is_some()
+                || uncheckpointed_state_is_ahead_of_git(repo)?
+            {
+                // A prior capture may have created the Heddle state before its
+                // Git write-through failed. Retrying the same verb completes
+                // that state instead of manufacturing a duplicate capture.
+                reuse_current_state = true;
+            } else {
+                no_changes = true;
+            }
+        }
+        Some(status)
+    };
+    if let Some(path) = known_worktree_changes
+        .as_ref()
+        .and_then(reserved_capture_path)
+    {
         return Err(capture_refusal(
             "reserved_materialization_path",
             format!("Refusing to capture reserved path `{path}`"),
@@ -574,18 +429,6 @@ pub fn capture(
             vec!["heddle env run --profile <name> -- <cmd>".to_string()],
         ));
     }
-    preflight_unimported_git_history(repo, "capture")?;
-    let complete_thread_resolution = merge_resolution_is_complete(repo)?;
-    let worktree_status_started = Instant::now();
-    let known_worktree_changes = if complete_thread_resolution {
-        None
-    } else {
-        let status = capture_worktree_status(repo, &options.worktree_status_options)?;
-        if repo.capability() == RepositoryCapability::GitOverlay && status.is_clean() {
-            return Err(map_capture_error(anyhow!(HeddleError::NoChanges)));
-        }
-        Some(status)
-    };
 
     let worktree_status = repo.git_overlay_worktree_status();
     let worktree_status_ms = worktree_status_started.elapsed().as_millis();
@@ -597,38 +440,51 @@ pub fn capture(
         &worktree_status,
         options.machine_contract_input.as_ref(),
     )?;
+    if no_changes {
+        return Err(map_capture_error(anyhow!(HeddleError::NoChanges)));
+    }
     let preflight_ms = preflight_started.elapsed().as_millis();
     let attribution_started = Instant::now();
-    let resolved_attribution = resolve_attribution(repo)?;
+    let resolved_attribution =
+        resolve_capture_attribution(repo, ctx.principal_fallback(), &options.agent)?;
     let harness_session_id = resolved_attribution
         .attribution
         .agent
         .is_some()
         .then(|| resolved_attribution.harness_session_id.clone())
         .flatten();
+    let mut warnings = resolved_attribution.warnings;
     let attribution_ms = attribution_started.elapsed().as_millis();
 
+    let git_overlay = repo.capability() == RepositoryCapability::GitOverlay;
     let plan = SavePlan {
         verb: SaveVerb::Capture,
         intent: Some(options.intent),
         confidence: options.confidence,
         attribution: resolved_attribution.attribution,
-        git_scope: GitScope::None,
+        git_scope: if git_overlay {
+            GitScope::WorktreeAll
+        } else {
+            GitScope::None
+        },
         supplied_tree: None,
-        reuse_current_state: false,
-        require_clean_worktree: false,
+        reuse_current_state,
+        require_clean_worktree: git_overlay,
         // Native repositories compare the built tree with their Heddle HEAD.
         // Git-overlay performs its distinct authority-aware comparison above:
         // an overlay can legitimately have no Heddle HEAD yet and still need
         // to capture an empty tree that represents deletion from Git's base.
         require_worktree_change: repo.capability() == RepositoryCapability::NativeHeddle
             && !complete_thread_resolution,
-        worktree_status_options: options.worktree_status_options,
+        worktree_status_options: ctx.worktree_status_options(),
         known_worktree_changes,
         run_hooks: true,
-        commit_safe_post_verify: false,
-        coalesce_snapshot_and_checkpoint: false,
-        linearize_git_parent: false,
+        coalesce_snapshot_and_checkpoint: git_overlay,
+        // Git Overlay must extend the checkout's authoritative Git tip even
+        // when the lazily-bound Heddle parent has no byte-identical mapping.
+        // Otherwise the first capture after init can replace imported Git
+        // history with a reconstructed metadata root.
+        linearize_git_parent: git_overlay,
         precomputed_worktree_status: Some(worktree_status),
         machine_contract_input: options.machine_contract_input,
     };
@@ -638,7 +494,9 @@ pub fn capture(
     if let Some(session_id) = harness_session_id
         && let Err(error) = crate::record_last_turn_capture(repo, &session_id, save.state_id)
     {
-        tracing::warn!(%error, "could not update reconstructible last-turn anchor");
+        warnings.push(format!(
+            "could not update the reconstructible last-turn anchor: {error}"
+        ));
     }
 
     let manual_resolution_action = if complete_thread_resolution {
@@ -646,7 +504,6 @@ pub fn capture(
     } else {
         None
     };
-    update_capture_intent_to_add(repo, &save.state_id);
 
     let current_thread = current_thread(repo)?;
     let captured_thread_targets_integration = current_thread
@@ -655,9 +512,7 @@ pub fn capture(
         .is_some();
     let task_assignment_id = active_task_assignment_id(repo, current_thread.as_ref())?;
     let principal_source = resolved_attribution.principal_source;
-    let warnings = bulk_capture_warning(save.captured_path_count)
-        .into_iter()
-        .collect();
+    warnings.extend(bulk_capture_warning(save.captured_path_count));
 
     let mut recommended_action = non_empty_action(&save.verification.recommended_action);
     let mut recommended_action_template = recommended_action
@@ -686,6 +541,7 @@ pub fn capture(
         output_kind: "capture",
         state_id: save.state_id.short(),
         content_hash: save.content_hash.short(),
+        git_checkpoint: save.git_commit.clone(),
         intent: save.intent.clone(),
         confidence: save.confidence,
         task_assignment_id,
@@ -703,15 +559,256 @@ pub fn capture(
         verification: save.verification.clone(),
         captured_thread_targets_integration,
         diagnostics: CaptureDiagnostics {
-            save,
             profile: CaptureProfile {
                 worktree_status_ms,
                 preflight_ms,
                 attribution_ms,
                 execute_save_ms,
             },
+            snapshot_profile: save.snapshot_profile,
+            state_create_ms: save.state_create_ms,
+            captured_path_count_ms: save.captured_path_count_ms,
+            post_verification_ms: save.post_verification_ms,
+            thread_metadata_ms: save.thread_metadata_ms,
+            previous_state_ms: save.previous_state_ms,
+            previous_state_profile: save.previous_state_profile,
+            signature_lookup_ms: save.signature_lookup_ms,
         },
     })
+}
+
+/// Resolve attribution using explicit embedding inputs plus repository state.
+///
+/// This remains public for internal save paths that have not yet moved to the
+/// complete [`capture`] operation. New capture callers should use [`capture`]
+/// so safety checks continue to run before identity/session mutation.
+fn resolve_capture_attribution(
+    repo: &Repository,
+    principal_fallback: Option<(&str, &str)>,
+    options: &CaptureAgentOptions,
+) -> Result<CaptureAttribution> {
+    let resolved_principal = crate::resolve_principal(repo, principal_fallback)?;
+    let principal_source = resolved_principal.source.unwrap_or("unknown").to_string();
+    let principal = resolved_principal.principal;
+    if crate::principal_lacks_accountable_identity(
+        &principal.name_lossy(),
+        &principal.email_lossy(),
+    ) {
+        return Err(capture_refusal(
+            "capture_identity_required",
+            "Refusing to capture: no accountable identity is configured",
+            "Set `HEDDLE_PRINCIPAL_NAME` and `HEDDLE_PRINCIPAL_EMAIL`, or run `heddle init --principal-name <name> --principal-email <email>`, then retry the capture.",
+            "Heddle would otherwise have to record Unknown <unknown@example.com> on the captured state",
+            "capture would create durable Heddle history without a real principal",
+            "Heddle refs, captured states, Git refs, index, and worktree files were left unchanged",
+            vec![
+                "heddle init --principal-name <name> --principal-email <email>".to_string(),
+                "heddle capture -m \"...\"".to_string(),
+            ],
+        ));
+    }
+
+    if options.no_agent {
+        return Ok(CaptureAttribution {
+            attribution: Attribution::human(principal),
+            principal_source,
+            harness_session_id: None,
+            warnings: Vec::new(),
+        });
+    }
+
+    // Identity cursor persistence and Heddle session rotation are part of the
+    // capture transaction's semantic prelude. Failure remains best-effort to
+    // preserve the existing rule that missing agent metadata never blocks a
+    // human-attributed capture.
+    let (frozen, warnings) = match freeze_identity_for_capture(repo, &options.identity_patch) {
+        Ok(frozen) => (frozen, Vec::new()),
+        Err(error) => (
+            FrozenCaptureIdentity::default(),
+            vec![format!(
+                "could not freeze agent identity for this capture; recorded human attribution: {error}"
+            )],
+        ),
+    };
+    let harness_session_id = frozen.session.clone();
+    let current_session = SessionManager::new(repo.root()).get_current_session()?;
+    let provider = options
+        .provider
+        .clone()
+        .or(frozen.provider.clone())
+        .and_then(clean_attribution_value);
+    let model = options
+        .model
+        .clone()
+        .or(frozen.model.clone())
+        .and_then(clean_attribution_value);
+    let session_policy = current_session
+        .as_ref()
+        .and_then(|session| session.current_segment())
+        .and_then(|segment| segment.policy_id.clone())
+        .and_then(clean_attribution_value);
+    // Heddle Session.id — never the sidecar harness session.
+    let session_id = options
+        .session
+        .clone()
+        .or_else(|| current_session.as_ref().map(|session| session.id.clone()));
+    let segment_id = options
+        .segment
+        .clone()
+        .or(frozen.segment_id.clone())
+        .or_else(|| {
+            current_session
+                .as_ref()
+                .and_then(|session| session.current_segment_id.clone())
+        });
+    let policy = if options.no_policy {
+        None
+    } else {
+        options
+            .policy
+            .clone()
+            .or_else(|| options.environment_policy.clone())
+            .and_then(clean_attribution_value)
+            .or(session_policy)
+            .or_else(|| options.default_policy.clone())
+            .or_else(|| repo.config().policies.default_policy.clone())
+    };
+
+    let attribution = match (provider, model) {
+        (Some(provider), Some(model)) => {
+            let mut agent = Agent::new(provider, model);
+            if let (Some(session_id), Some(segment_id)) = (session_id, segment_id) {
+                agent = agent.with_session(session_id, segment_id);
+            }
+            if let Some(policy) = policy {
+                agent = agent.with_policy(policy);
+            }
+            if let Some(thought_level) = frozen.thought_level {
+                agent = agent.with_thought_level(thought_level);
+            }
+            if let Some(parent) = frozen.parent {
+                agent = agent.with_parent(parent);
+            }
+            Attribution::with_agent(principal, agent)
+        }
+        _ => Attribution::human(principal),
+    };
+    Ok(CaptureAttribution {
+        attribution,
+        principal_source,
+        harness_session_id,
+        warnings,
+    })
+}
+
+/// Resolve the author for internal save paths that already own orchestration.
+///
+/// Normal callers should use [`capture`], which preserves the required
+/// preflight-before-attribution ordering.
+pub fn resolve_capture_author(
+    repo: &Repository,
+    principal_fallback: Option<(&str, &str)>,
+    options: &CaptureAgentOptions,
+) -> Result<Attribution> {
+    resolve_capture_attribution(repo, principal_fallback, options)
+        .map(|resolved| resolved.attribution)
+}
+
+#[derive(Clone, Debug, Default)]
+struct FrozenCaptureIdentity {
+    provider: Option<String>,
+    model: Option<String>,
+    thought_level: Option<String>,
+    session: Option<String>,
+    parent: Option<String>,
+    segment_id: Option<String>,
+}
+
+fn freeze_identity_for_capture(
+    repo: &Repository,
+    identity_patch: &IdentityCursor,
+) -> Result<FrozenCaptureIdentity> {
+    let _guard = repo.locker().write()?;
+    let mut cursor = read_identity_cursor(repo.root());
+    if !identity_patch.is_empty() {
+        cursor = stamp_identity_cursor(repo.root(), identity_patch)?;
+    }
+    let mut manager = SessionManager::new(repo.root());
+    let session = manager.get_current_session()?;
+    let segment_id = apply_capture_segment_policy(&mut manager, session.as_ref(), &cursor)?;
+    Ok(FrozenCaptureIdentity {
+        provider: cursor.provider,
+        model: cursor.model,
+        thought_level: cursor.thought_level,
+        session: cursor.session,
+        parent: cursor.parent,
+        segment_id,
+    })
+}
+
+fn apply_capture_segment_policy(
+    manager: &mut SessionManager,
+    session: Option<&objects::object::Session>,
+    cursor: &IdentityCursor,
+) -> Result<Option<String>> {
+    let Some(session) = session else {
+        return Ok(None);
+    };
+    let current = session.current_segment();
+    let rotation = cursor_segment_rotation(
+        current.map(|segment| segment.provider.as_str()),
+        current.map(|segment| segment.model.as_str()),
+        current.and_then(|segment| segment.thought_level.as_deref()),
+        cursor.provider.as_deref(),
+        cursor.model.as_deref(),
+        cursor.thought_level.as_deref(),
+    );
+    if rotation == SegmentRotation::Rotate {
+        let provider = cursor
+            .provider
+            .clone()
+            .or_else(|| current.map(|segment| segment.provider.clone()))
+            .unwrap_or_default();
+        let model = cursor
+            .model
+            .clone()
+            .or_else(|| current.map(|segment| segment.model.clone()))
+            .unwrap_or_default();
+        if published_field(Some(&provider)).is_some() && published_field(Some(&model)).is_some() {
+            let segment = manager.add_segment(&session.id, provider, model, None)?;
+            if let Some(thought_level) = cursor.thought_level.clone()
+                && let Some(mut updated) = manager.get_session(&session.id)?
+            {
+                if let Some(current) = updated.current_segment_mut() {
+                    current.thought_level = Some(thought_level);
+                }
+                manager.save_session(&updated)?;
+            }
+            return Ok(Some(segment.id));
+        }
+    } else if rotation == SegmentRotation::Attach
+        && let Some(mut updated) = manager.get_session(&session.id)?
+    {
+        if let Some(segment) = updated.current_segment_mut() {
+            attach_published_segment_fields(
+                segment,
+                cursor.provider.as_deref(),
+                cursor.model.as_deref(),
+                cursor.thought_level.as_deref(),
+            );
+        }
+        manager.save_session(&updated)?;
+    }
+    Ok(session.current_segment_id.clone())
+}
+
+fn clean_attribution_value(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unknown") {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn preflight_unimported_git_history(repo: &Repository, action: &str) -> Result<()> {
@@ -747,6 +844,18 @@ fn preflight_capture_mutation(
     if repo.capability() != RepositoryCapability::GitOverlay {
         return Ok(());
     }
+    if repo.git_overlay_head_is_detached()? {
+        let primary = detached_head_primary_recovery(repo);
+        return Err(capture_refusal(
+            "git_head_detached",
+            "Refusing to capture: Git HEAD is detached",
+            format!("Run `{primary}` before retrying `heddle capture`."),
+            "Git HEAD points directly to a commit instead of an attached branch",
+            "capture would need to write a Git checkpoint through a branch and could reattach or advance the wrong ref",
+            "Git refs, Heddle refs, Git checkpoints, and worktree files were left unchanged",
+            vec![primary],
+        ));
+    }
     if let Some(operation) = repo.operation_status()?
         && matches!(operation.scope, OperationScope::Git)
     {
@@ -781,19 +890,27 @@ fn preflight_capture_mutation(
     } else {
         build_repository_verification_state_with_worktree_status(repo, health, worktree_status)
     };
+    if !checkpoint_trust_allows_ref_update(&trust)
+        && !checkpoint_can_close_integrated_remote_gap(repo, &trust)
+    {
+        let (primary, recovery_commands) = capture_blocked_recovery(repo, &trust);
+        return Err(capture_refusal(
+            "git_checkpoint_preflight_blocked",
+            "Refusing to capture: Git checkpoint preflight is blocked",
+            format!("Run `{primary}` before retrying `heddle capture`."),
+            format!(
+                "repository verification status is {}; remote drift is {}: {}",
+                trust.status, trust.remote_drift, trust.summary
+            ),
+            "capture would write Heddle state before the Git checkpoint ref update is known to be safe",
+            "Git refs, Heddle refs, Git checkpoint metadata, and worktree files were left unchanged",
+            recovery_commands,
+        ));
+    }
     if trust.status != "needs_reconcile" || uncheckpointed_state_is_ahead_of_git(repo)? {
         return Ok(());
     }
-    let primary = if trust.recommended_action.trim().is_empty() {
-        "heddle verify".to_string()
-    } else {
-        trust.recommended_action.clone()
-    };
-    let recovery_commands = if trust.recovery_commands.is_empty() {
-        vec![primary.clone()]
-    } else {
-        trust.recovery_commands.clone()
-    };
+    let (primary, recovery_commands) = capture_blocked_recovery(repo, &trust);
     Err(capture_refusal(
         "repository_verification_blocked",
         format!(
@@ -809,6 +926,102 @@ fn preflight_capture_mutation(
         "Git refs, Heddle refs, Git checkpoint metadata, and worktree files were left unchanged",
         recovery_commands,
     ))
+}
+
+fn detached_head_primary_recovery(repo: &Repository) -> String {
+    if let Ok(Head::Attached { thread }) = repo.refs().read_head()
+        && !thread.trim().is_empty()
+    {
+        return if thread.starts_with('-') {
+            heddle_action(["thread", "switch", "--", thread.as_str()])
+        } else {
+            heddle_action(["thread", "switch", thread.as_str()])
+        };
+    }
+    if let Ok(Some(detached_commit)) = repo.git_overlay_detached_head_commit()
+        && let Ok(branch_tips) = repo.git_overlay_branch_tips()
+        && let Some(tip) = branch_tips
+            .iter()
+            .filter(|tip| tip.history_imported)
+            .find(|tip| tip.git_commit == detached_commit)
+    {
+        return heddle_action(["thread", "switch", tip.branch.as_str()]);
+    }
+    heddle_action(["status"])
+}
+
+fn capture_blocked_recovery(
+    repo: &Repository,
+    trust: &RepositoryVerificationState,
+) -> (String, Vec<String>) {
+    if let Some(recovery) = capture_remote_drift_recovery(repo) {
+        return recovery;
+    }
+    let primary =
+        non_empty_action(&trust.recommended_action).unwrap_or_else(|| "heddle verify".to_string());
+    let recovery_commands = if trust.recovery_commands.is_empty() {
+        vec![primary.clone()]
+    } else {
+        trust.recovery_commands.clone()
+    };
+    (primary, recovery_commands)
+}
+
+fn capture_remote_drift_recovery(repo: &Repository) -> Option<(String, Vec<String>)> {
+    let remote = repo.git_remote_tracking_status().ok().flatten()?;
+    let status = remote_tracking_status(&remote);
+    if !matches!(
+        status,
+        "remote_behind" | "remote_diverged" | "remote_contains_undone_checkpoint"
+    ) {
+        return None;
+    }
+    let recovery_commands = crate::status::remote_drift_recovery_commands(repo, &remote, status);
+    let primary = recovery_commands.first()?.clone();
+    Some((primary, recovery_commands))
+}
+
+fn checkpoint_trust_allows_ref_update(trust: &RepositoryVerificationState) -> bool {
+    let status_allows_checkpoint = matches!(
+        trust.status.as_str(),
+        "clean" | "dirty_worktree" | "needs_checkpoint" | "remote_ahead" | "remote_untracked"
+    );
+    let remote_allows_checkpoint = matches!(
+        trust.remote_drift.as_str(),
+        "clean" | "remote_ahead" | "remote_untracked"
+    );
+    status_allows_checkpoint && remote_allows_checkpoint
+}
+
+fn checkpoint_can_close_integrated_remote_gap(
+    repo: &Repository,
+    trust: &RepositoryVerificationState,
+) -> bool {
+    if trust.status != "needs_checkpoint"
+        || !matches!(
+            trust.remote_drift.as_str(),
+            "remote_behind" | "remote_diverged"
+        )
+    {
+        return false;
+    }
+    let Some(remote) = repo.git_remote_tracking_status().ok().flatten() else {
+        return false;
+    };
+    let upstream = remote.upstream.trim();
+    if upstream.is_empty() {
+        return false;
+    }
+    let Ok(Some(upstream_state)) = repo.refs().get_thread(&ThreadName::new(upstream)) else {
+        return false;
+    };
+    let Ok(Some(current_state)) = repo.head() else {
+        return false;
+    };
+    let mut graph = CommitGraphIndex::new(repo);
+    graph
+        .is_ancestor(&upstream_state, &current_state)
+        .unwrap_or(false)
 }
 
 fn uncheckpointed_state_is_ahead_of_git(repo: &Repository) -> Result<bool> {
@@ -979,16 +1192,6 @@ fn manual_resolution_land_action(
     contextual_thread_action(repo, thread_id, target_thread, &action)
 }
 
-fn update_capture_intent_to_add(repo: &Repository, state_id: &StateId) {
-    if repo.capability() != RepositoryCapability::GitOverlay {
-        return;
-    }
-    let projection = GitProjection::new(repo);
-    if let Err(error) = projection.update_intent_to_add(state_id) {
-        tracing::debug!(%error, "intent-to-add index update skipped");
-    }
-}
-
 fn current_thread(repo: &Repository) -> Result<Option<Thread>> {
     let manager = ThreadManager::new(repo.heddle_dir());
     if let Some(thread) = manager.find_by_execution_root(repo.root())? {
@@ -1053,6 +1256,20 @@ fn bulk_capture_warning(captured_path_count: usize) -> Option<String> {
             "captured {captured_path_count} paths in one operation; check root .gitignore and .heddleignore rules if build artifacts or tool state were included"
         )
     })
+}
+
+/// Return the first added or modified confidential-runtime materialization
+/// path selected by the capture's authoritative worktree observation. Deleted
+/// paths remove plaintext and ignored paths are not part of the capture, so
+/// neither should block the operation.
+fn reserved_capture_path(status: &WorktreeStatus) -> Option<String> {
+    status
+        .added
+        .iter()
+        .chain(&status.modified)
+        .map(|path| path.to_string_lossy())
+        .find(|path| env_store::is_reserved_materialization_path(path))
+        .map(|path| path.into_owned())
 }
 
 fn non_empty_action(action: &str) -> Option<String> {
@@ -1210,10 +1427,10 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
                 return Err(anyhow!(HeddleError::recovery(
                     RecoveryDetails::safety_refusal(
                         "dirty_worktree",
-                        "Save worktree changes before committing",
-                        "Save the work with `heddle capture -m \"...\"`, then retry the commit.",
+                        "Save worktree changes before checkpointing",
+                        "Save the work with `heddle capture -m \"...\"`.",
                         "the current Heddle state was left unchanged; these paths have not been captured",
-                        "commit would write Git history that does not include dirty worktree paths",
+                        "a Git checkpoint would omit dirty worktree paths",
                         "the current Heddle state was left unchanged; these paths have not been captured",
                     ),
                 )));
@@ -1251,7 +1468,7 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
         && repo.capability() == RepositoryCapability::NativeHeddle;
     let captured_worktree_status = Ok(Some(objects::worktree::WorktreeStatus::default()));
     let verification_started = Instant::now();
-    let mut verification = if captured_native_worktree && git_checkpoint.is_none() {
+    let verification = if captured_native_worktree && git_checkpoint.is_none() {
         let health = build_repository_verification_health_with_worktree_status(
             repo,
             &captured_worktree_status,
@@ -1292,9 +1509,6 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
             build_repository_verification_state(repo)?
         }
     };
-    if plan.commit_safe_post_verify {
-        soften_commit_next_action(&mut verification);
-    }
     let post_verification_ms = verification_started.elapsed().as_millis();
 
     let summary = match plan.verb {
@@ -1303,10 +1517,6 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
             state.state_id.short(),
             state.hash().short()
         ),
-        SaveVerb::Commit => plan
-            .intent
-            .clone()
-            .unwrap_or_else(|| format!("Commit {}", state.state_id.short())),
         SaveVerb::Checkpoint => git_checkpoint
             .as_ref()
             .map(|r| r.summary.clone())
@@ -1622,7 +1832,7 @@ fn coalesce_snapshot_and_checkpoint(
     repo.oplog()
         .coalesce_batches(snapshot_batch.id, checkpoint_batch.id)
         .context(
-            "commit completed but failed to record capture and Git checkpoint as one undo batch",
+            "capture completed but failed to record its state and Git checkpoint as one undo batch",
         )?;
     Ok(())
 }
@@ -1646,32 +1856,8 @@ fn git_rev_parse_head(root: &std::path::Path) -> Option<String> {
     git.head().ok()?.oid.map(|id| id.to_string())
 }
 
-fn soften_commit_next_action(trust: &mut RepositoryVerificationState) {
-    if is_commit_action(&trust.recommended_action) {
-        trust.recommended_action = "heddle status".to_string();
-        trust.recommended_action_template = None;
-    }
-    for check in &mut trust.checks {
-        if check
-            .recommended_action
-            .as_deref()
-            .is_some_and(is_commit_action)
-        {
-            check.recommended_action = Some("heddle status".to_string());
-            check.recommended_action_template = None;
-        }
-    }
-}
-
-fn is_commit_action(action: &str) -> bool {
-    let trimmed = action.trim();
-    trimmed == "heddle capture" || trimmed.starts_with("heddle capture ")
-}
-
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-
     use repo::RepositoryCapability;
     use tempfile::TempDir;
 
@@ -1687,22 +1873,14 @@ mod tests {
             .repo(repo)
             .principal_fallback(Some(("Ada".into(), "ada@example.com".into())))
             .build();
-
         let report = capture(
             &ctx,
             CaptureOptions {
                 intent: "exercise the deep capture interface".into(),
                 confidence: Some(0.9),
                 force: false,
-                worktree_status_options: WorktreeStatusOptions::default(),
+                agent: CaptureAgentOptions::default(),
                 machine_contract_input: None,
-            },
-            |_| {
-                Ok(CaptureAttribution {
-                    attribution: Attribution::human(Principal::new("Ada", "ada@example.com")),
-                    principal_source: "embedder".into(),
-                    harness_session_id: None,
-                })
             },
         )
         .expect("capture succeeds");
@@ -1711,7 +1889,7 @@ mod tests {
         assert_eq!(report.captured_path_count, 1);
         assert_eq!(report.principal.name, "Ada");
         assert_eq!(report.principal.email, "ada@example.com");
-        assert_eq!(report.principal_source, "embedder");
+        assert_eq!(report.principal_source, "user_config");
         assert_eq!(CaptureReport::CONTRACT.schema_name, "capture");
         assert_eq!(
             ctx.require_repo()
@@ -1745,13 +1923,12 @@ mod tests {
     }
 
     #[test]
-    fn clean_overlay_refuses_before_resolving_attribution() {
+    fn clean_overlay_refuses_before_requiring_identity() {
         let temp = TempDir::new().expect("create temp repository");
         SleyRepository::init(temp.path()).expect("initialize Git repository");
         let repo = Repository::init_git_overlay_sidecar(temp.path())
             .expect("initialize Git-overlay sidecar");
         let ctx = ExecutionContext::builder().repo(repo).build();
-        let resolver_called = Cell::new(false);
 
         let error = capture(
             &ctx,
@@ -1759,110 +1936,109 @@ mod tests {
                 intent: "nothing changed".into(),
                 confidence: None,
                 force: false,
-                worktree_status_options: WorktreeStatusOptions::default(),
+                agent: CaptureAgentOptions::default(),
                 machine_contract_input: None,
-            },
-            |_| {
-                resolver_called.set(true);
-                Ok(CaptureAttribution {
-                    attribution: Attribution::human(Principal::new("Ada", "ada@example.com")),
-                    principal_source: "embedder".into(),
-                    harness_session_id: None,
-                })
             },
         )
         .expect_err("clean overlay must refuse capture");
 
-        assert!(!resolver_called.get());
         assert!(error.to_string().contains("nothing to capture"));
     }
 
     #[test]
-    fn capture_always_uses_git_scope_none() {
-        assert_eq!(
-            plan_git_scope(
-                SaveVerb::Capture,
-                RepositoryCapability::GitOverlay,
-                true,
-                true
-            ),
-            GitScope::None
+    fn capture_rejects_missing_intent_before_mutation() {
+        let temp = TempDir::new().expect("create temp repository");
+        let repo = Repository::init_default(temp.path()).expect("initialize repository");
+        std::fs::write(temp.path().join("tracked.txt"), "uncaptured\n")
+            .expect("write worktree change");
+        let ctx = ExecutionContext::builder()
+            .repo(repo)
+            .principal_fallback(Some(("Ada".into(), "ada@example.com".into())))
+            .build();
+        let before = ctx.require_repo().expect("repository").head().unwrap();
+
+        let error = capture(
+            &ctx,
+            CaptureOptions {
+                intent: "   ".into(),
+                confidence: None,
+                force: false,
+                agent: CaptureAgentOptions::default(),
+                machine_contract_input: None,
+            },
+        )
+        .expect_err("blank intent must be rejected by the operation interface");
+
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to capture without an intent")
         );
         assert_eq!(
-            plan_git_scope(
-                SaveVerb::Capture,
-                RepositoryCapability::NativeHeddle,
-                false,
-                false
-            ),
-            GitScope::None
+            ctx.require_repo().expect("repository").head().unwrap(),
+            before
         );
     }
 
     #[test]
-    fn commit_native_never_writes_git() {
+    fn attribution_cleaning_only_rejects_the_placeholder_token() {
+        assert_eq!(clean_attribution_value("  unknown  ".into()), None);
+        assert_eq!(clean_attribution_value("   ".into()), None);
         assert_eq!(
-            plan_git_scope(
-                SaveVerb::Commit,
-                RepositoryCapability::NativeHeddle,
-                true,
-                true
-            ),
-            GitScope::None
+            clean_attribution_value("unknown-model-v2".into()),
+            Some("unknown-model-v2".into())
         );
     }
 
     #[test]
-    fn commit_git_overlay_routes_staged_vs_worktree() {
-        assert_eq!(
-            plan_git_scope(
-                SaveVerb::Commit,
-                RepositoryCapability::GitOverlay,
-                true,
-                false
-            ),
-            GitScope::Staged
+    fn identity_freeze_waits_for_the_repository_write_lock() {
+        use std::{sync::mpsc, time::Duration};
+
+        let temp = TempDir::new().expect("create temp repository");
+        let repo = Repository::init_default(temp.path()).expect("initialize repository");
+        let hold = repo.locker().write().expect("hold repository lock");
+        let root = repo.root().to_path_buf();
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let repo = Repository::open(root).expect("open worker repository");
+            let patch = IdentityCursor {
+                provider: Some("anthropic".into()),
+                model: Some("opus".into()),
+                ..IdentityCursor::default()
+            };
+            let frozen = freeze_identity_for_capture(&repo, &patch);
+            let _ = tx.send(frozen.is_ok());
+        });
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(150)).is_err(),
+            "identity mutation must wait for the repository lock"
         );
-        assert_eq!(
-            plan_git_scope(
-                SaveVerb::Commit,
-                RepositoryCapability::GitOverlay,
-                true,
-                true
-            ),
-            GitScope::WorktreeAll
+        drop(hold);
+        assert!(
+            rx.recv_timeout(Duration::from_secs(2))
+                .expect("worker should finish after lock release")
         );
-        assert_eq!(
-            plan_git_scope(
-                SaveVerb::Commit,
-                RepositoryCapability::GitOverlay,
-                false,
-                false
-            ),
-            GitScope::WorktreeAll
-        );
+        worker.join().expect("join identity worker");
     }
 
     #[test]
-    fn checkpoint_routes_staged_flag() {
+    fn reserved_capture_paths_consider_selected_additions_and_modifications_only() {
+        let status = WorktreeStatus {
+            added: vec![std::path::PathBuf::from("services/api/.env.local")],
+            modified: Vec::new(),
+            deleted: vec![std::path::PathBuf::from("old/.env")],
+        };
         assert_eq!(
-            plan_git_scope(
-                SaveVerb::Checkpoint,
-                RepositoryCapability::GitOverlay,
-                true,
-                false
-            ),
-            GitScope::Staged
+            reserved_capture_path(&status).as_deref(),
+            Some("services/api/.env.local")
         );
-        assert_eq!(
-            plan_git_scope(
-                SaveVerb::Checkpoint,
-                RepositoryCapability::GitOverlay,
-                false,
-                false
-            ),
-            GitScope::WorktreeAll
-        );
+
+        let deletion_only = WorktreeStatus {
+            deleted: vec![std::path::PathBuf::from(".env")],
+            ..WorktreeStatus::default()
+        };
+        assert!(reserved_capture_path(&deletion_only).is_none());
     }
 
     #[test]
@@ -1877,33 +2053,26 @@ mod tests {
         assert!(plan_creates_new_state(&checkpoint, false));
 
         let staged =
-            SavePlan::commit("msg", attr, GitScope::Staged).with_supplied_tree(Tree::new());
+            SavePlan::checkpoint(Some("cp".into()), attr, true).with_supplied_tree(Tree::new());
         assert!(plan_creates_new_state(&staged, true));
     }
 
     #[test]
     fn plan_writes_git_checkpoint_respects_scope_and_capability() {
         let attr = Attribution::human(Principal::new("Ada", "ada@example.com"));
-        let capture = SavePlan::capture("wip", attr.clone());
+        let mut capture = SavePlan::capture("wip", attr);
         assert!(!plan_writes_git_checkpoint(
             &capture,
             RepositoryCapability::GitOverlay
         ));
-
-        let commit = SavePlan::commit("msg", attr.clone(), GitScope::WorktreeAll);
+        capture.git_scope = GitScope::WorktreeAll;
         assert!(plan_writes_git_checkpoint(
-            &commit,
+            &capture,
             RepositoryCapability::GitOverlay
         ));
         assert!(!plan_writes_git_checkpoint(
-            &commit,
+            &capture,
             RepositoryCapability::NativeHeddle
-        ));
-
-        let none = SavePlan::commit("msg", attr, GitScope::None);
-        assert!(!plan_writes_git_checkpoint(
-            &none,
-            RepositoryCapability::GitOverlay
         ));
     }
 
@@ -1915,11 +2084,6 @@ mod tests {
         assert_eq!(capture.git_scope, GitScope::None);
         assert!(!capture.coalesce_snapshot_and_checkpoint);
 
-        let commit = SavePlan::commit("msg", attr.clone(), GitScope::WorktreeAll);
-        assert_eq!(commit.verb, SaveVerb::Commit);
-        assert!(commit.coalesce_snapshot_and_checkpoint);
-        assert!(commit.commit_safe_post_verify);
-
         let staged = SavePlan::checkpoint(None, attr, true);
         assert_eq!(staged.git_scope, GitScope::Staged);
         assert!(!staged.require_clean_worktree);
@@ -1927,43 +2091,8 @@ mod tests {
     }
 
     #[test]
-    fn tree_leaf_name_and_commit_next_action() {
+    fn tree_leaf_name_returns_the_final_component() {
         assert_eq!(tree_leaf_name("a/b/c.rs"), "c.rs");
         assert_eq!(tree_leaf_name("solo"), "solo");
-        assert_eq!(
-            commit_next_action_from_trust("heddle push", false, false).as_deref(),
-            Some("heddle push")
-        );
-        assert_eq!(
-            commit_next_action_from_trust("", false, true).as_deref(),
-            Some("heddle verify")
-        );
-        assert_eq!(
-            commit_next_action_from_trust("", true, true).as_deref(),
-            Some("heddle push")
-        );
-        assert_eq!(commit_next_action_from_trust("", true, false), None);
-    }
-
-    #[test]
-    fn commit_git_index_plan_modes() {
-        let staged = vec!["a.rs".into()];
-        let extra = vec!["unstaged: b.rs".into(), "untracked: c.rs".into()];
-        let staged_only = plan_commit_git_index(&staged, &extra, false);
-        assert_eq!(staged_only.commit_mode, "staged_index");
-        assert_eq!(staged_only.will_commit, vec!["a.rs"]);
-        assert_eq!(staged_only.preserved_after_commit.len(), 2);
-
-        let all = plan_commit_git_index(&staged, &extra, true);
-        assert_eq!(all.commit_mode, "worktree_all_explicit");
-        assert_eq!(all.will_commit.len(), 3);
-
-        let index_only = plan_commit_git_index_only(&staged, &extra);
-        assert_eq!(index_only.commit_mode, "staged_index");
-        assert_eq!(index_only.will_commit, vec!["a.rs"]);
-
-        assert!(commit_scope_text("staged_index").contains("staged Git index"));
-        assert!(staged_commit_summary("ok", 1, 2).contains("left 2 unstaged/untracked"));
-        assert_eq!(staged_commit_summary("ok", 1, 0), "ok");
     }
 }

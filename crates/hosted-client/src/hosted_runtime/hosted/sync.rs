@@ -134,7 +134,6 @@ impl PullBootstrapMetadata {
                     let warning = format!(
                         "pull bootstrap advertised packed discussions but this client cannot consume them ({reason}); falling back to ListByState"
                     );
-                    eprintln!("{} {warning}", heddle_cli_render::cli::style::warn_marker());
                     (None, Some(warning))
                 }
             }
@@ -148,7 +147,6 @@ impl PullBootstrapMetadata {
                     let warning = format!(
                         "pull bootstrap advertised packed context but this client cannot consume it ({reason}); falling back to ListContext"
                     );
-                    eprintln!("{} {warning}", heddle_cli_render::cli::style::warn_marker());
                     (None, Some(warning))
                 }
             }

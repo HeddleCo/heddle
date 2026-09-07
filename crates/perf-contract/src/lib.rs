@@ -17,6 +17,9 @@ static REF_READS: AtomicU64 = AtomicU64::new(0);
 static OPLOG_READS: AtomicU64 = AtomicU64::new(0);
 static REPOSITORY_OPENS: AtomicU64 = AtomicU64::new(0);
 static NETWORK_CLIENT_INITIALIZATIONS: AtomicU64 = AtomicU64::new(0);
+static NETWORK_STREAMS_OPENED: AtomicU64 = AtomicU64::new(0);
+static NETWORK_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
+static NETWORK_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 static ANCESTORS_VISITED: AtomicU64 = AtomicU64::new(0);
 static HISTORY_OBJECTS_DECODED: AtomicU64 = AtomicU64::new(0);
 static GIT_REACHABLE_COPY_OPERATIONS: AtomicU64 = AtomicU64::new(0);
@@ -32,7 +35,10 @@ pub struct StructuralCounters {
     pub ref_reads: u64,
     pub oplog_reads: u64,
     pub repository_opens: u64,
-    pub network_client_initialized: bool,
+    pub network_client_initializations: u64,
+    pub network_streams_opened: u64,
+    pub network_bytes_sent: u64,
+    pub network_bytes_received: u64,
     pub ancestors_visited: u64,
     pub history_objects_decoded: u64,
     pub git_reachable_copy_operations: u64,
@@ -89,6 +95,18 @@ pub fn record_network_client_initialization() {
     add(&NETWORK_CLIENT_INITIALIZATIONS, 1);
 }
 
+pub fn record_network_stream_opened() {
+    add(&NETWORK_STREAMS_OPENED, 1);
+}
+
+pub fn record_network_bytes_sent(bytes: usize) {
+    add(&NETWORK_BYTES_SENT, bytes as u64);
+}
+
+pub fn record_network_bytes_received(bytes: usize) {
+    add(&NETWORK_BYTES_RECEIVED, bytes as u64);
+}
+
 pub fn record_ancestors_visited(ancestors_visited: u64) {
     add(&ANCESTORS_VISITED, ancestors_visited);
 }
@@ -112,7 +130,10 @@ pub fn snapshot() -> StructuralCounters {
         ref_reads: REF_READS.load(Ordering::Relaxed),
         oplog_reads: OPLOG_READS.load(Ordering::Relaxed),
         repository_opens: REPOSITORY_OPENS.load(Ordering::Relaxed),
-        network_client_initialized: NETWORK_CLIENT_INITIALIZATIONS.load(Ordering::Relaxed) > 0,
+        network_client_initializations: NETWORK_CLIENT_INITIALIZATIONS.load(Ordering::Relaxed),
+        network_streams_opened: NETWORK_STREAMS_OPENED.load(Ordering::Relaxed),
+        network_bytes_sent: NETWORK_BYTES_SENT.load(Ordering::Relaxed),
+        network_bytes_received: NETWORK_BYTES_RECEIVED.load(Ordering::Relaxed),
         ancestors_visited: ANCESTORS_VISITED.load(Ordering::Relaxed),
         history_objects_decoded: HISTORY_OBJECTS_DECODED.load(Ordering::Relaxed),
         git_reachable_copy_operations: GIT_REACHABLE_COPY_OPERATIONS.load(Ordering::Relaxed),

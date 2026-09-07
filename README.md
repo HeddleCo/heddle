@@ -7,7 +7,7 @@
 Heddle is an agent-native version control CLI written in Rust. It keeps its own state model and writes Git-compatible state through the checkout's real `.git`, adding:
 
 - thread-first agent workflows (lightweight named work units with lifecycle, freshness, and promotion semantics)
-- local captures and Git-compatible commits with explicit human and agent attribution
+- local captures with automatic Git-compatible checkpoints and explicit human and agent attribution
 - content-addressed immutable history with stable change identifiers that survive rewrites
 - provenance-aware inspection (`heddle query --attribution`, `heddle show`, `heddle diff`)
 - operation-agnostic recovery (`heddle continue` / `heddle abort`) without per-command lifecycle flags
@@ -33,7 +33,7 @@ In a plain Git repo, observe-only commands do not create `.heddle/`. `heddle sta
 - whether Heddle has been initialized
 - the exact next command to initialize Git Overlay
 
-Run the exact command printed by `heddle status`. In an existing Git checkout, that is `heddle init`: it creates the `.heddle` sidecar while the real `.git` remains authoritative for commits, trees, refs, packs, index, and worktree state. Heddle stores captures, threads, provenance, discussions, and source mappings in `.heddle`. Those are a native Heddle feature: they travel over `heddle push` / `heddle pull` to a Heddle remote, and are deliberately **not** projected into Git. In a Git Overlay repository, context annotations (`heddle context`) and discussions (`heddle discuss`) are therefore local to that working copy — a collaborator who `git clone`s the repository receives the source history and no Heddle store at all. Its embedded Sley engine powers the thin Git surface — `clone`, `commit`, `pull`, `push`, and `remote` — directly against `.git`. Heddle never requires the `git` executable. A retained `.heddle/git` Bridge Mirror is an internal projection cache used by explicit projection and maintenance paths, including undo recovery; it is never the authoritative Git store and remains scheduled for retirement.
+Run the exact command printed by `heddle status`. In an existing Git checkout, that is `heddle init`: it creates the `.heddle` sidecar while the real `.git` remains authoritative for commits, trees, refs, packs, index, and worktree state. Heddle stores captures, threads, provenance, discussions, and source mappings in `.heddle`. Those are a native Heddle feature: they travel over `heddle push` / `heddle pull` to a Heddle remote, and are deliberately **not** projected into Git. In a Git Overlay repository, context annotations (`heddle context`) and discussions (`heddle discuss`) are therefore local to that working copy — a collaborator who `git clone`s the repository receives the source history and no Heddle store at all. Its embedded Sley engine powers the thin Git surface — `clone`, `capture`, `pull`, `push`, and `remote` — directly against `.git`. Heddle never requires the `git` executable or retains a second object warehouse at `.heddle/git`; explicit projection composes reconstructable state with Raw Git Object Residuals.
 
 `heddle adopt` atomically imports selected Git refs, makes Heddle the source authority, and enables the full Native Heddle feature set. The retained `.git` is then an explicit Git Projection adapter. Adoption is not required for normal Git Overlay use.
 
@@ -101,7 +101,6 @@ New to Heddle? In an existing Git checkout, start with `heddle status` and initi
 heddle status
 heddle init
 heddle capture -m "start project"
-heddle commit
 heddle push
 ```
 
@@ -112,7 +111,7 @@ heddle init --principal-name "Ada Lovelace" --principal-email ada@example.com
 heddle capture -m "start project"
 ```
 
-In a Git checkout, `heddle init` creates the Heddle sidecar and leaves source storage in the checkout's real `.git`. `heddle capture` records Heddle metadata and provenance in `.heddle`; `heddle commit`, `pull`, `push`, and `remote` delegate through Sley to `.git`. `heddle commit` commits the complete captured tree, replaces the Git index with that tree, and does not run Git `pre-commit` or `commit-msg` hooks. Use `heddle adopt` when you want an atomic transition to Heddle-native source authority and its full feature set.
+In a Git checkout, `heddle init` creates the Heddle sidecar and leaves source storage in the checkout's real `.git`. `heddle capture` saves Heddle metadata and provenance in `.heddle` and writes the matching Git checkpoint through Sley as one operation. `pull`, `push`, and `remote` also use Sley directly. A capture includes the complete worktree and replaces the Git index with that tree. Use `heddle adopt` when you want an atomic transition to Heddle-native source authority and its full feature set.
 
 ### The verb-by-verb tour
 
@@ -122,9 +121,8 @@ heddle status
 heddle init
 heddle verify
 
-# Save Heddle provenance, then commit Git-owned source history
+# Save one attributed state and its Git Overlay checkpoint
 heddle capture -m "add user authentication"
-heddle commit
 
 # Start isolated work and prove it is ready
 heddle start feature/auth --path ../feature-auth

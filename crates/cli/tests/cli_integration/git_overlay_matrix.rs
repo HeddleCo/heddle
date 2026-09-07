@@ -120,6 +120,29 @@ fn initialize_git_overlay(path: &std::path::Path) {
 }
 
 #[test]
+fn capture_writes_one_git_overlay_checkpoint_without_replacing_git_history() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    let seed = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+    initialize_git_overlay(temp.path());
+
+    std::fs::write(temp.path().join("tracked.txt"), "changed\n").unwrap();
+    let capture = json(
+        temp.path(),
+        &["--output", "json", "capture", "-m", "change"],
+    );
+    let head = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+
+    assert_eq!(capture["output_kind"], "capture");
+    assert_eq!(capture["git_checkpoint"], head);
+    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD^"]), seed);
+    assert_eq!(capture["verification"]["status"], "clean");
+    assert_eq!(git_status_short(temp.path()), "");
+}
+
+#[test]
 fn initialized_overlay_observe_commands_project_full_git_history_without_writes() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
@@ -549,14 +572,12 @@ fn git_overlay_matrix_undo_reconciles_checkout_without_persistent_mirror() {
     json(&work, &["bridge", "git", "import", "--ref", "main"]);
     std::fs::write(work.join("first.txt"), "first\n").unwrap();
     json(&work, &["capture", "-m", "first"]);
-    json(&work, &["commit", "-m", "first"]);
     json(&work, &["push", origin.to_str().unwrap()]);
     json(&work, &["pull", "origin"]);
 
     let previous = git_stdout(&work, &["rev-parse", "HEAD"]);
     std::fs::write(work.join("second.txt"), "second\n").unwrap();
     json(&work, &["capture", "-m", "second"]);
-    json(&work, &["commit", "-m", "second"]);
     let committed = git_stdout(&work, &["rev-parse", "HEAD"]);
     assert_ne!(committed, previous);
 
@@ -575,7 +596,7 @@ fn git_overlay_matrix_undo_reconciles_checkout_without_persistent_mirror() {
 }
 
 #[test]
-fn git_overlay_matrix_commit_prefers_heddle_principal_over_git_identity() {
+fn git_overlay_matrix_capture_prefers_heddle_principal_over_git_identity() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
     git(&["config", "user.name", "Repo Local"], temp.path());
@@ -598,12 +619,6 @@ fn git_overlay_matrix_commit_prefers_heddle_principal_over_git_identity() {
         ],
         &env,
     );
-    json_success_with_env(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "local identity commit"],
-        &env,
-    );
-
     assert_eq!(capture["principal"]["name"], "Heddle Principal");
     assert_eq!(capture["principal"]["email"], "principal@example.com");
     let identity = git_stdout(temp.path(), &["log", "-1", "--format=%an <%ae>%n%cn <%ce>"]);
@@ -614,7 +629,7 @@ fn git_overlay_matrix_commit_prefers_heddle_principal_over_git_identity() {
 }
 
 #[test]
-fn git_overlay_matrix_commit_uses_local_git_identity_for_state_and_checkpoint() {
+fn git_overlay_matrix_capture_uses_local_git_identity_for_state_and_checkpoint() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
     git(&["config", "user.name", "Repo Local"], temp.path());
@@ -623,7 +638,6 @@ fn git_overlay_matrix_commit_uses_local_git_identity_for_state_and_checkpoint() 
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("local.txt"), "local\n").unwrap();
     let capture = json(temp.path(), &["capture", "-m", "local identity capture"]);
-    json(temp.path(), &["commit", "-m", "local identity commit"]);
 
     assert_eq!(capture["principal"]["name"], "Repo Local");
     assert_eq!(capture["principal"]["email"], "local@example.com");
@@ -635,7 +649,7 @@ fn git_overlay_matrix_commit_uses_local_git_identity_for_state_and_checkpoint() 
 }
 
 #[test]
-fn git_overlay_matrix_commit_prefers_local_git_identity_over_user_config_principal() {
+fn git_overlay_matrix_capture_prefers_local_git_identity_over_user_config_principal() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
     git(&["config", "user.name", "Repo Local"], temp.path());
@@ -651,7 +665,6 @@ fn git_overlay_matrix_commit_prefers_local_git_identity_over_user_config_princip
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("local.txt"), "local\n").unwrap();
     let capture = json(temp.path(), &["capture", "-m", "local identity capture"]);
-    json(temp.path(), &["commit", "-m", "local identity commit"]);
 
     assert_eq!(capture["principal"]["name"], "Repo Local");
     assert_eq!(capture["principal"]["email"], "local@example.com");
@@ -706,27 +719,15 @@ fn git_overlay_matrix_isolated_checkout_uses_native_capture_with_parent_git_iden
     assert_eq!(capture["principal"]["name"], "Audit User");
     assert_eq!(capture["principal"]["email"], "audit@example.com");
 
-    let parent_head = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
-    let output = heddle_output_with_env(
-        &["--output", "json", "commit", "-m", "isolated audit"],
-        Some(&checkout),
-        &env,
-    )
-    .expect("isolated commit refusal should run");
-    assert!(
-        !output.status.success(),
-        "a native isolated checkout must not write the parent Git history: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_eq!(
+        git_stdout(temp.path(), &["rev-parse", "HEAD"]),
+        git_stdout(temp.path(), &["rev-parse", "main"]),
+        "native isolated capture must not write the parent Git history"
     );
-    let refusal: Value =
-        serde_json::from_slice(&output.stderr).expect("isolated commit refusal should be JSON");
-    assert_eq!(refusal["kind"], "commit_requires_git_overlay");
-    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), parent_head);
 }
 
 #[test]
-fn git_overlay_matrix_commit_prefers_repo_principal_over_git_identity() {
+fn git_overlay_matrix_capture_prefers_repo_principal_over_git_identity() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
     git(&["config", "user.name", "Repo Local"], temp.path());
@@ -740,7 +741,6 @@ fn git_overlay_matrix_commit_prefers_repo_principal_over_git_identity() {
 
     std::fs::write(temp.path().join("repo.txt"), "repo\n").unwrap();
     let capture = json(temp.path(), &["capture", "-m", "repo identity capture"]);
-    json(temp.path(), &["commit", "-m", "repo identity commit"]);
 
     assert_eq!(capture["principal"]["name"], "Repo Principal");
     assert_eq!(capture["principal"]["email"], "repo@example.com");
@@ -752,7 +752,7 @@ fn git_overlay_matrix_commit_prefers_repo_principal_over_git_identity() {
 }
 
 #[test]
-fn git_overlay_matrix_commit_uses_global_git_identity_when_repo_local_absent() {
+fn git_overlay_matrix_capture_uses_global_git_identity_when_repo_local_absent() {
     let temp = TempDir::new().unwrap();
     let global_home = TempDir::new().unwrap();
     let global_config = temp.path().join("global.gitconfig");
@@ -783,12 +783,6 @@ fn git_overlay_matrix_commit_uses_global_git_identity_when_repo_local_absent() {
         ],
         &env,
     );
-    json_success_with_env(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "global identity commit"],
-        &env,
-    );
-
     assert_eq!(capture["principal"]["name"], "Global User");
     assert_eq!(capture["principal"]["email"], "global@example.com");
     let identity = git_stdout(temp.path(), &["log", "-1", "--format=%an <%ae>%n%cn <%ce>"]);
@@ -799,7 +793,7 @@ fn git_overlay_matrix_commit_uses_global_git_identity_when_repo_local_absent() {
 }
 
 #[test]
-fn git_overlay_matrix_commit_without_git_identity_uses_heddle_principal() {
+fn git_overlay_matrix_capture_without_git_identity_uses_heddle_principal() {
     let temp = TempDir::new().unwrap();
     let global_home = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
@@ -823,17 +817,6 @@ fn git_overlay_matrix_commit_without_git_identity_uses_heddle_principal() {
             "capture",
             "-m",
             "heddle principal capture",
-        ],
-        &env,
-    );
-    json_success_with_env(
-        temp.path(),
-        &[
-            "--output",
-            "json",
-            "commit",
-            "-m",
-            "heddle principal commit",
         ],
         &env,
     );
@@ -1378,27 +1361,23 @@ fn git_overlay_matrix_new_branch_at_adopted_tip_verifies_without_setup_loop() {
 }
 
 #[test]
-fn git_overlay_matrix_commit_after_adopt_ref_checkpoints_without_import_loop() {
+fn git_overlay_matrix_capture_after_adopt_ref_checkpoints_without_import_loop() {
     let fixture = GitOverlayFixture::imported_main();
     std::fs::write(fixture.path().join("README.md"), "changed\n").unwrap();
-    json(
+    let capture = json(
         fixture.path(),
         &["--output", "json", "capture", "-m", "change"],
     );
 
-    let commit = json(
-        fixture.path(),
-        &["--output", "json", "commit", "-m", "change"],
-    );
-    assert_eq!(commit["output_kind"], "commit");
-    assert!(commit["state_id"].as_str().is_some());
-    assert!(commit["git_commit"].as_str().is_some());
-    assert_eq!(commit["verification"]["verified"], true);
-    assert_eq!(commit["verification"]["status"], "clean");
+    assert_eq!(capture["output_kind"], "capture");
+    assert!(capture["state_id"].as_str().is_some());
+    assert!(capture["git_checkpoint"].as_str().is_some());
+    assert_eq!(capture["verification"]["verified"], true);
+    assert_eq!(capture["verification"]["status"], "clean");
     assert_eq!(
-        commit["verification"]["recommended_action"],
+        capture["verification"]["recommended_action"],
         Value::Null,
-        "commit after single-ref adoption should checkpoint instead of falling into needs_import: {commit}"
+        "capture after single-ref adoption should checkpoint instead of falling into needs_import: {capture}"
     );
     assert_eq!(git_status_short(fixture.path()), "");
 
@@ -1516,7 +1495,6 @@ fn git_overlay_matrix_ready_thread_action_not_overridden_by_remote_push() {
         temp.path(),
         &["--output", "json", "capture", "-m", "main work"],
     );
-    json(temp.path(), &["--output", "json", "commit"]);
     let verify = json(temp.path(), &["--output", "json", "verify"]);
     assert_eq!(
         verify["recommended_action"], "heddle push",
@@ -1874,7 +1852,7 @@ fn git_overlay_matrix_reconcile_prefer_heddle_requires_adoption() {
 }
 
 #[test]
-fn git_overlay_matrix_commit_ignores_gitignored_noise_and_refuses_noop() {
+fn git_overlay_matrix_capture_ignores_gitignored_noise_and_refuses_noop() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
     std::fs::write(temp.path().join(".gitignore"), "__pycache__/\n*.pyc\n").unwrap();
@@ -1892,24 +1870,19 @@ fn git_overlay_matrix_commit_ignores_gitignored_noise_and_refuses_noop() {
     let before_head = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
 
     let output = heddle_output(
-        &["--output", "json", "commit", "-m", "noop"],
+        &["--output", "json", "capture", "-m", "noop"],
         Some(temp.path()),
     )
-    .expect("commit should run");
+    .expect("capture should run");
     assert!(
-        output.status.success(),
-        "ignored-only commit should be a no-op"
-    );
-    assert!(
-        output.stderr.is_empty(),
-        "JSON-mode no-op commit should keep stderr quiet: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "ignored-only capture should report that there is nothing to save"
     );
     assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), before_head);
 }
 
 #[test]
-fn git_overlay_matrix_commit_requires_explicit_ignore_for_python_generated_noise() {
+fn git_overlay_matrix_capture_requires_explicit_ignore_for_python_generated_noise() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
@@ -1947,28 +1920,16 @@ fn git_overlay_matrix_commit_requires_explicit_ignore_for_python_generated_noise
         will_commit.iter().any(|path| path == "src/app.pyc"),
         "unignored generated noise must stay visible in the Git index plan: {status}"
     );
-    json(
+    let capture = json(
         temp.path(),
         &["--output", "json", "capture", "-m", "capture generated"],
     );
-
-    let output = heddle_output(
-        &["--output", "json", "commit", "-m", "capture generated"],
-        Some(temp.path()),
-    )
-    .expect("commit should run");
-    assert!(
-        output.status.success(),
-        "unignored generated files should be committed unless the repo explicitly ignores them: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let commit: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("commit should emit JSON");
-    assert_eq!(commit["status"], "committed");
+    assert_eq!(capture["status"], "captured");
+    assert!(capture["git_checkpoint"].as_str().is_some());
 }
 
 #[test]
-fn git_overlay_matrix_commit_noop_fails_closed_when_verification_blocked() {
+fn git_overlay_matrix_capture_noop_fails_closed_when_verification_blocked() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
@@ -1988,35 +1949,35 @@ fn git_overlay_matrix_commit_noop_fails_closed_when_verification_blocked() {
     .unwrap();
 
     let output = heddle_output(
-        &["--output", "json", "commit", "-m", "noop"],
+        &["--output", "json", "capture", "-m", "noop"],
         Some(temp.path()),
     )
-    .expect("commit should run");
+    .expect("capture should run");
     assert!(
         !output.status.success(),
-        "verified-blocked commit should fail"
+        "verified-blocked capture should fail"
     );
     assert!(
         output.stdout.is_empty(),
-        "JSON-mode verified-blocked commit refusal must keep stdout quiet: {}",
+        "JSON-mode verified-blocked capture refusal must keep stdout quiet: {}",
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
     let envelope: serde_json::Value =
-        serde_json::from_str(stderr).expect("verify-blocked commit should emit JSON envelope");
+        serde_json::from_str(stderr).expect("verify-blocked capture should emit JSON envelope");
     assert_eq!(envelope["kind"], "raw_git_operation_in_progress");
     assert!(
         envelope["error"]
             .as_str()
             .is_some_and(|error| error.contains("externally-started Git merge")),
-        "verify-blocked no-op commit should refuse with full typed advice: {stderr}"
+        "verify-blocked no-op capture should refuse with full typed advice: {stderr}"
     );
     assert!(
         envelope["hint"]
             .as_str()
             .is_some_and(|hint| hint.contains("heddle verify")
                 && hint.contains("finish or abort it with the Git-compatible tool")),
-        "verify-blocked no-op commit should name the verify recovery command: {stderr}"
+        "verify-blocked no-op capture should name the verify recovery command: {stderr}"
     );
 }
 
@@ -2039,28 +2000,27 @@ fn git_overlay_matrix_top_level_push_closes_remote_verification_loop() {
     )
     .unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
-    json(
+    let capture = json(
         temp.path(),
         &["--output", "json", "capture", "-m", "change"],
     );
-    let commit = json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
-    assert_eq!(commit["output_kind"], "commit");
-    assert_eq!(commit["recommended_action"], "heddle push");
+    assert_eq!(capture["output_kind"], "capture");
+    assert_eq!(capture["recommended_action"], "heddle push");
     assert_eq!(
-        commit["recommended_action_template"]["argv_template"],
+        capture["recommended_action_template"]["argv_template"],
         heddle_argv_json(["push"])
     );
     assert!(
-        commit.get("next").is_none(),
-        "old commit next alias removed"
+        capture.get("next").is_none(),
+        "old next alias remains removed"
     );
     assert!(
-        commit.get("next_argv").is_none(),
-        "old commit next_argv alias removed"
+        capture.get("next_argv").is_none(),
+        "old next_argv alias remains removed"
     );
     assert!(
-        commit.get("next_template").is_none(),
-        "old commit next_template alias removed"
+        capture.get("next_template").is_none(),
+        "old next_template alias remains removed"
     );
     let before_push = json(temp.path(), &["--output", "json", "verify"]);
     assert_eq!(before_push["verified"], true, "{before_push}");
@@ -2131,7 +2091,7 @@ fn git_overlay_matrix_top_level_push_closes_remote_verification_loop() {
 }
 
 #[test]
-fn git_overlay_matrix_commit_refuses_remote_divergence_before_capture() {
+fn git_overlay_matrix_capture_refuses_remote_divergence_before_mutation() {
     let temp = TempDir::new().unwrap();
     let origin = TempDir::new().unwrap();
     let peer = TempDir::new().unwrap();
@@ -2159,10 +2119,6 @@ fn git_overlay_matrix_commit_refuses_remote_divergence_before_capture() {
         temp.path(),
         &["--output", "json", "capture", "-m", "local checkpoint"],
     );
-    json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "local checkpoint"],
-    );
     let git_head_before = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
 
     std::fs::write(peer.path().join("tracked.txt"), "remote\n").unwrap();
@@ -2173,27 +2129,23 @@ fn git_overlay_matrix_commit_refuses_remote_divergence_before_capture() {
     assert_eq!(verify["remote_drift"], "remote_diverged", "{verify}");
 
     std::fs::write(temp.path().join("extra.txt"), "blocked\n").unwrap();
-    json(
-        temp.path(),
-        &["--output", "json", "capture", "-m", "should not commit"],
-    );
     let state_before = state_chain_ids(temp.path(), 8);
     let output = heddle_output(
-        &["--output", "json", "commit", "-m", "should not capture"],
+        &["--output", "json", "capture", "-m", "should not capture"],
         Some(temp.path()),
     )
-    .expect("invoke commit against diverged upstream");
+    .expect("invoke capture against diverged upstream");
     assert!(
         !output.status.success(),
-        "commit should refuse before capture when upstream has diverged"
+        "capture should refuse before mutation when upstream has diverged"
     );
     assert!(
         output.stdout.is_empty(),
         "JSON refusal should keep stdout quiet: {}",
         String::from_utf8_lossy(&output.stdout)
     );
-    let stderr = std::str::from_utf8(&output.stderr).expect("commit stderr utf8");
-    let envelope: Value = serde_json::from_str(stderr).expect("commit refusal JSON parses");
+    let stderr = std::str::from_utf8(&output.stderr).expect("capture stderr utf8");
+    let envelope: Value = serde_json::from_str(stderr).expect("capture refusal JSON parses");
     assert_eq!(envelope["kind"], "git_checkpoint_preflight_blocked");
     assert_eq!(
         envelope["primary_command"], "heddle bridge git import --ref origin/main",
@@ -2208,17 +2160,17 @@ fn git_overlay_matrix_commit_refuses_remote_divergence_before_capture() {
     assert_eq!(
         state_chain_ids(temp.path(), 8),
         state_before,
-        "failed commit must not create a Heddle-only state"
+        "failed capture must not create a Heddle-only state"
     );
     assert_eq!(
         git_stdout(temp.path(), &["rev-parse", "HEAD"]),
         git_head_before,
-        "failed commit must not move the local Git branch"
+        "failed capture must not move the local Git branch"
     );
     let status = json(temp.path(), &["--output", "json", "status"]);
     assert_eq!(
-        status["verification"]["status"], "needs_checkpoint",
-        "the explicit capture must remain available after commit refuses remote divergence: {status}"
+        status["verification"]["remote_drift"], "remote_diverged",
+        "refused capture must preserve remote divergence without mutating history: {status}"
     );
 }
 
@@ -2251,7 +2203,6 @@ fn git_overlay_matrix_push_defaults_to_branch_upstream_remote() {
         temp.path(),
         &["--output", "json", "capture", "-m", "change"],
     );
-    json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
     let before_push = json(temp.path(), &["--output", "json", "verify"]);
     assert_eq!(before_push["verified"], true, "{before_push}");
     assert_eq!(before_push["status"], "clean");
@@ -2299,7 +2250,6 @@ fn git_overlay_matrix_local_only_branch_is_clean_until_push_sets_tracking() {
         temp.path(),
         &["--output", "json", "capture", "-m", "change"],
     );
-    json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
     let before_push = json(temp.path(), &["--output", "json", "verify"]);
     assert_eq!(before_push["verified"], true);
     assert_eq!(before_push["status"], "clean");
@@ -2751,8 +2701,8 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     assert!(
         ready["recommended_action"]
             .as_str()
-            .is_some_and(|action| action.contains("heddle commit")),
-        "captured overlay work should recommend committing it to Git: {ready}"
+            .is_some_and(|action| action.contains("heddle capture")),
+        "uncheckpointed overlay work should recommend completing capture: {ready}"
     );
 }
 
@@ -2827,17 +2777,13 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     .unwrap();
 
     std::fs::write(temp.path().join("tracked.txt"), "heddle change\n").unwrap();
-    json(
+    let captured = json(
         temp.path(),
         &["--output", "json", "capture", "-m", "heddle change"],
     );
-    let committed = json(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "heddle change"],
-    );
-    let heddle_state = committed["state_id"]
+    let heddle_state = captured["state_id"]
         .as_str()
-        .expect("commit should report Heddle state")
+        .expect("capture should report Heddle state")
         .to_string();
 
     git(&["reset", "--hard", "HEAD~1"], temp.path());
@@ -2910,16 +2856,16 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
         &[
             "--output",
             "json",
-            "commit",
+            "capture",
             "-m",
             "follow bad reset advice",
         ],
         Some(temp.path()),
     )
-    .expect("commit should run");
+    .expect("capture should run");
     assert!(
         !refused.status.success(),
-        "commit should refuse reconcile drift"
+        "capture should refuse reconcile drift"
     );
     assert!(refused.stdout.is_empty());
     let stderr = std::str::from_utf8(&refused.stderr).unwrap();
@@ -2928,8 +2874,8 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     assert!(
         envelope["error"]
             .as_str()
-            .is_some_and(|error| error.contains("Refusing to commit")),
-        "commit should refuse as commit, not leak capture wording: {envelope}"
+            .is_some_and(|error| error.contains("Refusing to capture")),
+        "capture refusal should name the operation: {envelope}"
     );
     assert_eq!(
         envelope["primary_command"],
@@ -2938,12 +2884,12 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     assert_eq!(
         git_stdout(temp.path(), &["rev-parse", "HEAD"]),
         reset_head,
-        "refused commit must not recreate the reset-away Git commit"
+        "refused capture must not recreate the reset-away Git commit"
     );
     assert_eq!(
         json(temp.path(), &["status", "--output", "json"])["current_state"],
         heddle_state,
-        "refused commit must not add a new Heddle state"
+        "refused capture must not add a new Heddle state"
     );
 }
 
@@ -3221,7 +3167,7 @@ fn git_overlay_matrix_detached_head_sequence_commands() {
 }
 
 #[test]
-fn git_overlay_matrix_commit_refuses_detached_head_without_advancing_branch() {
+fn git_overlay_matrix_capture_refuses_detached_head_without_advancing_branch() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
@@ -3239,13 +3185,13 @@ fn git_overlay_matrix_commit_refuses_detached_head_without_advancing_branch() {
     std::fs::write(temp.path().join("detached-commit.txt"), "detached work").unwrap();
 
     let output = heddle_output(
-        &["--output", "json", "commit", "-m", "detached commit"],
+        &["--output", "json", "capture", "-m", "detached capture"],
         Some(temp.path()),
     )
-    .expect("heddle commit should run");
+    .expect("heddle capture should run");
     assert!(
         !output.status.success(),
-        "commit must refuse on detached Git HEAD: stdout={} stderr={}",
+        "capture must refuse on detached Git HEAD: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -3277,13 +3223,13 @@ fn git_overlay_matrix_commit_refuses_detached_head_without_advancing_branch() {
         .expect("git symbolic-ref should run");
     assert!(
         !symbolic.status.success(),
-        "failed commit must leave Git HEAD detached"
+        "failed capture must leave Git HEAD detached"
     );
     assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), before_head);
     assert_eq!(
         git_stdout(temp.path(), &["rev-parse", "refs/heads/main"]),
         before_main,
-        "failed detached-head commit must not advance or reattach main"
+        "failed detached-head capture must not advance or reattach main"
     );
 }
 
@@ -3354,7 +3300,11 @@ fn git_overlay_matrix_dirty_branch_switch_when_git_allows_carryover() {
         &["--output", "json", "ready", "-m", "first-run ready state"],
     );
     assert_eq!(ready["captured"], true);
-    json(temp.path(), &["--output", "json", "commit"]);
+    let capture = json(
+        temp.path(),
+        &["--output", "json", "capture", "-m", "first-run ready state"],
+    );
+    assert!(capture["git_checkpoint"].as_str().is_some());
 
     let after_ready = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(after_ready["thread"], "support/carry");
@@ -3373,7 +3323,7 @@ fn git_overlay_matrix_dirty_branch_switch_when_git_allows_carryover() {
 }
 
 #[test]
-fn git_overlay_matrix_no_commit_first_run_durability_commands() {
+fn git_overlay_matrix_first_run_capture_is_durable() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "trunk");
     std::fs::write(temp.path().join("checkpoint.txt"), "first run").unwrap();
@@ -3388,10 +3338,13 @@ fn git_overlay_matrix_no_commit_first_run_durability_commands() {
     );
     assert_eq!(ready["captured"], false, "{ready}");
     assert_eq!(ready["status"], "blocked", "{ready}");
-    assert_eq!(ready["recommended_action"], "heddle commit -m \"...\"");
+    assert_eq!(ready["recommended_action"], "heddle capture -m \"...\"");
 
-    let commit = json(temp.path(), &["--output", "json", "commit"]);
-    assert!(commit["git_commit"].as_str().is_some());
+    let capture = json(
+        temp.path(),
+        &["--output", "json", "capture", "-m", "First-run capture"],
+    );
+    assert!(capture["git_checkpoint"].as_str().is_some());
 
     let status = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(status["verification"]["verified"], true);
@@ -3790,8 +3743,11 @@ fn git_overlay_matrix_filemode_changes_surface_and_capture() {
     );
     assert_eq!(ready["captured"], true);
 
-    let commit = json(temp.path(), &["--output", "json", "commit"]);
-    assert!(commit["git_commit"].as_str().is_some());
+    let capture = json(
+        temp.path(),
+        &["--output", "json", "capture", "-m", "mode ready capture"],
+    );
+    assert!(capture["git_checkpoint"].as_str().is_some());
 }
 
 #[test]

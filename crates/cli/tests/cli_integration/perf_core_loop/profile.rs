@@ -144,9 +144,10 @@ fn structural_counters(trace: &Value) -> Counters {
         ref_reads: count("ref_reads"),
         oplog_reads: count("oplog_reads"),
         repository_opens: count("repository_opens"),
-        network_client_initialized: metrics["network_client_initialized"]["value"]
-            .as_bool()
-            .unwrap_or(true),
+        network_client_initializations: count("network_client_initializations"),
+        network_streams_opened: count("network_streams_opened"),
+        network_bytes_sent: count("network_bytes_sent"),
+        network_bytes_received: count("network_bytes_received"),
         ancestors_visited: count("ancestors_visited"),
         history_objects_decoded: count("history_objects_decoded"),
     }

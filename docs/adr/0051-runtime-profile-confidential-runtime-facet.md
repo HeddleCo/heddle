@@ -68,10 +68,10 @@ A `EnvProfileRef` is the mutable typed root (atomically replaced):
 - `head` — current `EnvProfileVersionId`
 - attribution and timestamps
 
-A `EnvProfileVersion` is immutable:
+A `EnvProfileVersion` is immutable. Current lifecycle is derived only from
+signed lifecycle records and never rewrites version bytes:
 
 - `profile_id`, `parent`, monotonic `version`
-- `lifecycle` at the time the version was sealed
 - slot records: name, AEAD algorithm, pad bucket, ciphertext hash, DEK wraps
 - recipient descriptor ids and an optional policy-broker reference
 - attribution
@@ -103,11 +103,16 @@ Provider capabilities (v1 names the set; only software is implemented):
 | `tpm` / `secure-enclave` / `os-provider` | Hardware or OS key store; broker holds a handle | later |
 | `pkcs11` / `remote-hsm` / `kms` | External custody | later |
 
-The local policy broker (phase 3) authorizes scoped, time-boxed `run`
-requests and returns **values, never key material**. It holds provider
-handles, not exportable private keys. `heddle env run` injects those
-values into a child process only. The library decrypt path that accepts
-a software recipient secret remains the weaker-custody fallback.
+The local policy broker (phase 3) resolves scoped `run` values and owns the
+child command through its exit. It returns only the child's status, never
+values or key material. `heddle env run` injects values into a child process
+only. The v1 broker privately loads the on-disk software recipient secret;
+future providers should replace that with a non-exportable handle. The
+library decrypt path that accepts a software recipient secret remains the
+weaker-custody fallback.
+The in-process v1 path has no request TTL: a caller-selected deadline on one
+synchronous function call would not constrain how long the child retains its
+environment and therefore would not enforce a secret-lifetime policy.
 Hardware TPM / OS isolation and Biscuit attenuation are later slices.
 Same-UID callers without OS isolation are cooperative, not an
 adversarial boundary.
@@ -206,7 +211,7 @@ that can sign. Rejected as the default.
 
 **Daemon holds exportable private keys.** A biscuit check is only as real as
 the process boundary. Same-UID agents can read the key file. Replaced by
-provider handles plus a policy broker that returns values.
+provider handles plus a policy broker that owns the child run.
 
 **VisibilityTier / Private states.** Plaintext with an audience tag. Not
 confidential runtime.

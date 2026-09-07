@@ -25,7 +25,4 @@ pub use git_core::{
     WriteThroughSkipReason, configure_https_ca_certificate_pem, configured_https_client,
     git_transport_error_message,
 };
-pub use git_residual::{
-    BridgeMirrorRetirementStatus, RESIDUALS_DIR_NAME, ResidualObject, ResidualStore,
-    bridge_mirror_retirement_status, resolve_lossy_object,
-};
+pub use git_residual::{RESIDUALS_DIR_NAME, ResidualObject, ResidualStore};

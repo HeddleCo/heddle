@@ -246,7 +246,7 @@ impl ExternalObjectSource for GitOverlayObjectSource {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let mut state: State = rmp_serde::from_slice(&bytes)?;
+        let state = State::decode_current_msgpack(&bytes)?;
         let actual = state.id();
         if actual != *id {
             return Err(HeddleError::InvalidObject(format!(
@@ -255,7 +255,6 @@ impl ExternalObjectSource for GitOverlayObjectSource {
                 actual.to_string_full()
             )));
         }
-        state.state_id = actual;
         Ok(Some(state))
     }
 

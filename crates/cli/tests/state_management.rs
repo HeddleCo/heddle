@@ -199,23 +199,19 @@ fn capture_without_message_json_refusal_is_structured_and_preserves_head() {
 }
 
 #[test]
-fn commit_in_native_repo_redirects_to_capture_and_preserves_head() {
+fn removed_commit_verb_is_a_clean_usage_error() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "initial");
     let before = current_head_json(temp.path());
 
-    fs::write(temp.path().join("file.txt"), "changed").unwrap();
     let output = heddle_output(&["--output", "text", "commit"], Some(temp.path())).unwrap();
 
-    assert!(
-        !output.status.success(),
-        "commit in a native repo must refuse"
-    );
+    assert_eq!(output.status.code(), Some(64));
     assert!(
         str::from_utf8(&output.stderr)
             .unwrap_or("")
-            .contains("Next: heddle capture -m \"...\""),
-        "text refusal should include the direct next command: {}",
+            .contains("unrecognized subcommand 'commit'"),
+        "removed verb should fail through clap: {}",
         str::from_utf8(&output.stderr).unwrap_or("")
     );
     assert_eq!(current_head_json(temp.path()), before);

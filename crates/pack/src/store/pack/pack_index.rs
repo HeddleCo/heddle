@@ -235,7 +235,7 @@ fn verify_index_version(data: &[u8]) -> Result<()> {
         )))
     } else {
         Err(crate::store::StoreError::InvalidObject(format!(
-            "pack index uses unsupported format version {version}; run `heddle migrate`"
+            "pack index uses unsupported format version {version}; recreate the repository or re-adopt its Git history with this Heddle version"
         )))
     }
 }

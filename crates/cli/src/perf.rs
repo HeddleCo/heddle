@@ -166,10 +166,13 @@ fn record_structural_counters() {
             ProfileField::count("ref_reads", counters.ref_reads),
             ProfileField::count("oplog_reads", counters.oplog_reads),
             ProfileField::count("repository_opens", counters.repository_opens),
-            ProfileField::boolean(
-                "network_client_initialized",
-                counters.network_client_initialized,
+            ProfileField::count(
+                "network_client_initializations",
+                counters.network_client_initializations,
             ),
+            ProfileField::count("network_streams_opened", counters.network_streams_opened),
+            ProfileField::count("network_bytes_sent", counters.network_bytes_sent),
+            ProfileField::count("network_bytes_received", counters.network_bytes_received),
             ProfileField::count("ancestors_visited", counters.ancestors_visited),
             ProfileField::count("history_objects_decoded", counters.history_objects_decoded),
             ProfileField::count(

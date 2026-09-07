@@ -42,8 +42,7 @@ The curated native loop (`heddle help`). Start here.
 |---|---|---|---|---|
 | `heddle status` | ro | y | - | Show what needs attention and the next safe Heddle action |
 | `heddle diff` | ro | y | - | Show what changed in the worktree, a thread, or two states |
-| `heddle commit` | mut | y | explicit_replay | Write captured source history to `.git` in Git Overlay |
-| `heddle capture` | mut | y | explicit_replay | Capture a recoverable Heddle step for undo, provenance, and review |
+| `heddle capture` | mut | y | explicit_replay | Save a recoverable Heddle state and its Git Overlay checkpoint |
 | `heddle start` | mut | y | explicit_replay | Create or resume an isolated thread for focused work |
 | `heddle ready` | mut | y | explicit_replay | Prepare this thread for review or merge |
 | `heddle land` | mut | y | explicit_replay | Integrate a ready thread into its local target |

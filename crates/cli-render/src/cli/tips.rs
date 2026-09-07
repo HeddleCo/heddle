@@ -18,9 +18,6 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tip {
-    /// "tip: in Git Overlay, run `heddle commit` when the captured state is ready."
-    /// Emitted after a successful capture in Git Overlay only.
-    CheckpointAfterCapture,
     /// "tip: `heddle query --verb capture` searches capture history."
     /// Emitted after the first heavy `heddle log` view.
     QueryFromLog,
@@ -32,7 +29,6 @@ pub enum Tip {
 impl Tip {
     pub fn key(&self) -> &'static str {
         match self {
-            Self::CheckpointAfterCapture => "checkpoint_after_capture",
             Self::QueryFromLog => "query_from_log",
             Self::ConflictForStructured => "conflict_for_structured",
         }
@@ -40,9 +36,6 @@ impl Tip {
 
     pub fn message(&self) -> &'static str {
         match self {
-            Self::CheckpointAfterCapture => {
-                "tip: in Git Overlay, run `heddle commit` when the captured state is ready"
-            }
             Self::QueryFromLog => "tip: `heddle query --verb capture` searches capture history",
             Self::ConflictForStructured => {
                 "tip: `heddle resolve --output json` returns conflicts as structured data agents can resolve programmatically"
@@ -167,11 +160,7 @@ mod tests {
 
     #[test]
     fn tip_keys_are_unique_and_stable() {
-        let keys = [
-            Tip::CheckpointAfterCapture.key(),
-            Tip::QueryFromLog.key(),
-            Tip::ConflictForStructured.key(),
-        ];
+        let keys = [Tip::QueryFromLog.key(), Tip::ConflictForStructured.key()];
         let unique: std::collections::HashSet<_> = keys.iter().collect();
         assert_eq!(unique.len(), keys.len(), "duplicate tip keys");
     }
@@ -184,27 +173,26 @@ mod tests {
         // covers the same logic without touching the environment.
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("tips-shown.toml");
-        assert!(!already_shown_at(&path, Tip::CheckpointAfterCapture));
-        record_shown_at(&path, Tip::CheckpointAfterCapture).unwrap();
-        assert!(already_shown_at(&path, Tip::CheckpointAfterCapture));
+        assert!(!already_shown_at(&path, Tip::QueryFromLog));
+        record_shown_at(&path, Tip::QueryFromLog).unwrap();
+        assert!(already_shown_at(&path, Tip::QueryFromLog));
     }
 
     #[test]
     fn record_shown_at_appends_distinct_tips() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("tips-shown.toml");
-        record_shown_at(&path, Tip::CheckpointAfterCapture).unwrap();
         record_shown_at(&path, Tip::QueryFromLog).unwrap();
-        assert!(already_shown_at(&path, Tip::CheckpointAfterCapture));
+        record_shown_at(&path, Tip::ConflictForStructured).unwrap();
         assert!(already_shown_at(&path, Tip::QueryFromLog));
-        assert!(!already_shown_at(&path, Tip::ConflictForStructured));
+        assert!(already_shown_at(&path, Tip::ConflictForStructured));
     }
 
     #[test]
     fn already_shown_at_missing_file_is_not_shown() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("does-not-exist.toml");
-        assert!(!already_shown_at(&path, Tip::CheckpointAfterCapture));
+        assert!(!already_shown_at(&path, Tip::QueryFromLog));
     }
 
     #[test]
@@ -212,13 +200,13 @@ mod tests {
         // Just exercises the gate — actual eprintln capture is fragile
         // across platforms. This guards the early-return branch.
         let temp = TempDir::new().unwrap();
-        maybe_emit(temp.path(), None, Tip::CheckpointAfterCapture, true, false);
+        maybe_emit(temp.path(), None, Tip::QueryFromLog, true, false);
     }
 
     #[test]
     fn maybe_emit_is_noop_in_quiet_mode() {
         // Same as JSON mode: quiet suppresses nonessential tips.
         let temp = TempDir::new().unwrap();
-        maybe_emit(temp.path(), None, Tip::CheckpointAfterCapture, false, true);
+        maybe_emit(temp.path(), None, Tip::QueryFromLog, false, true);
     }
 }

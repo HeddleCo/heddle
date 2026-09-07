@@ -11,9 +11,9 @@ use config::credentials;
 use crypto::{Ed25519Signer, Signer as _};
 use prost::Message;
 use repo::{
-    authorization_key_id, claim_deferred_human_transition, ed25519_verification_key,
-    owner_key_transition_body, seq0_authority_public_key, sign_agent_claim_binding, sign_canonical,
-    OWNER_TRANSITION_DOMAIN,
+    OWNER_TRANSITION_DOMAIN, authorization_key_id, claim_deferred_human_transition,
+    ed25519_verification_key, owner_key_transition_body, seq0_authority_public_key,
+    sign_agent_claim_binding, sign_canonical,
 };
 
 fn build_with_browser_proofs(
@@ -71,9 +71,9 @@ use super::{
     hosted::{CallContextFactory, HostedError},
     identity_state,
     owner_root::{
+        BootstrapOwnerRootExtension, BrowserClaimDeferredHuman, RegisterPublicKeyClaimExtension,
         build_claim_deferred_human, encode_bootstrap_owner_root, encode_register_public_key_claim,
         load_recorded_root, prepare_register_public_key_claim, require_enrolling_device_proof_key,
-        BootstrapOwnerRootExtension, BrowserClaimDeferredHuman, RegisterPublicKeyClaimExtension,
     },
 };
 

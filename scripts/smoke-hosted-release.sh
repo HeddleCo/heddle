@@ -181,7 +181,6 @@ git_overlay_flow() {
       --principal-email "$HEDDLE_PRINCIPAL_EMAIL" >/dev/null
     printf '\ncheckpointed through heddle\n' >> README.md
     heddle_runtime capture -m "hosted git-overlay smoke capture" >/dev/null
-    heddle_runtime commit -m "hosted git-overlay smoke commit" >/dev/null
   )
 
   run_json "$repo" "git-overlay.push" push "$HEDDLE_SMOKE_REMOTE"

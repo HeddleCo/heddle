@@ -21,7 +21,7 @@ const OP_RECORD_STORAGE: &str = "oplog record schema";
 
 pub fn validate_op_record_schema_version(version: u32) -> Result<()> {
     if version < CURRENT_OP_RECORD_SCHEMA_VERSION {
-        return Err(HeddleError::StorageFormatMigrationRequired {
+        return Err(HeddleError::StorageFormatTooOld {
             storage: OP_RECORD_STORAGE.to_string(),
             found: version,
             required: CURRENT_OP_RECORD_SCHEMA_VERSION,
@@ -584,7 +584,7 @@ mod tests {
             let error = validate_op_record_schema_version(legacy).unwrap_err();
             assert!(matches!(
                 error,
-                HeddleError::StorageFormatMigrationRequired {
+                HeddleError::StorageFormatTooOld {
                     found,
                     required: 4,
                     ..

@@ -1477,7 +1477,7 @@ pub fn merge_thread_into_current_transactional(
                 ));
                 post_snapshot_git_blockers.push(format!(
                     "recovery: integrated Heddle state {} is intact; resolve the Git checkout issue \
-                     (identity, locks, or filesystem errors) and run `heddle commit -m \"{}\"` — do NOT re-run the integration",
+                     (identity, locks, or filesystem errors) and run `heddle capture -m \"{}\"` — do NOT re-run the integration",
                     new_state.state_id.short(),
                     merge_message
                 ));

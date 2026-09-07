@@ -3,7 +3,7 @@
 use heddle_object_model::object::{Attribution, FacetKind};
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{CiphertextId, RecipientId, EnvProfileId, EnvProfileVersionId};
+use crate::ids::{CiphertextId, EnvProfileId, EnvProfileVersionId, RecipientId};
 
 pub const ENV_STORE_SCHEMA_VERSION: u16 = 1;
 pub const LIFECYCLE_SIGNING_DOMAIN: &[u8] = b"heddle-env-lifecycle-v1";
@@ -91,20 +91,6 @@ pub enum ProviderCapability {
     Kms,
 }
 
-impl ProviderCapability {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::SoftwareExportable => "software-exportable",
-            Self::Tpm => "tpm",
-            Self::SecureEnclave => "secure-enclave",
-            Self::OsProvider => "os-provider",
-            Self::Pkcs11 => "pkcs11",
-            Self::RemoteHsm => "remote-hsm",
-            Self::Kms => "kms",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignatureBlock {
     pub algorithm: String,
@@ -180,7 +166,6 @@ pub struct EnvProfileVersion {
     pub profile_id: EnvProfileId,
     pub parent: Option<EnvProfileVersionId>,
     pub version: u64,
-    pub lifecycle: LifecycleStatus,
     pub slots: Vec<SlotRecord>,
     pub recipient_ids: Vec<RecipientId>,
     pub policy_ref: Option<String>,
@@ -201,16 +186,6 @@ pub struct LifecycleRecord {
     pub signature: SignatureBlock,
 }
 
-/// Slot metadata returned without decrypting.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SlotMetadata {
-    pub name: String,
-    pub aead_alg: String,
-    pub pad_bucket: u32,
-    pub ciphertext_id: CiphertextId,
-    pub recipient_ids: Vec<RecipientId>,
-}
-
 /// Signed decrypt/run audit event. Slot names only — never values.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditRecord {
@@ -220,9 +195,6 @@ pub struct AuditRecord {
     pub profile_name: String,
     pub state_id: Option<EnvProfileVersionId>,
     pub slots: Vec<String>,
-    pub purpose: String,
-    /// Who requested the decrypt (e.g. the IPC client identity). Signed.
-    pub caller: String,
     pub event: AuditEventKind,
     pub reason: Option<String>,
     pub occurred_at_ms: i64,
@@ -234,18 +206,7 @@ pub struct AuditRecord {
 #[serde(rename_all = "snake_case")]
 pub enum AuditEventKind {
     Denied,
-    Granted,
     Run,
-}
-
-impl AuditEventKind {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Denied => "denied",
-            Self::Granted => "granted",
-            Self::Run => "run",
-        }
-    }
 }
 
 /// Profile listing row. No slot values.
@@ -304,16 +265,6 @@ pub fn validate_profile_name(name: &str) -> Result<(), String> {
 pub fn is_reserved_materialization_path(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
     RESERVED_MATERIALIZATION_PATHS.contains(&name)
-}
-
-/// First reserved materialization path present on disk under `worktree`.
-pub fn reserved_materialization_on_disk(worktree: &std::path::Path) -> Option<&'static str> {
-    for path in RESERVED_MATERIALIZATION_PATHS {
-        if worktree.join(path).exists() {
-            return Some(*path);
-        }
-    }
-    None
 }
 
 pub fn validate_slot_name(name: &str) -> Result<(), String> {

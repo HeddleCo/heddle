@@ -19,10 +19,10 @@ use crate::cli::SemanticCommands;
 #[cfg(feature = "git-overlay")]
 use crate::cli::cli_args::SyncCommands;
 use crate::cli::{
-    AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands, HookCommands,
-    INIT_VERB, IntegrationCommands, MaintenanceCommands, NetdCommands, OplogCommands, PurgeCommands,
-    RedactCommands, RemoteCommands, ShellCommands, ThreadCommands, ThreadMarkerCommands,
-    TimelineCommands, VisibilityCommands, EnvCommands,
+    AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands, EnvCommands,
+    HookCommands, INIT_VERB, IntegrationCommands, MaintenanceCommands, NetdCommands, OplogCommands,
+    PurgeCommands, RedactCommands, RemoteCommands, ShellCommands, ThreadCommands,
+    ThreadMarkerCommands, TimelineCommands, VisibilityCommands,
     cli_args::{
         AgentFanoutCommands, AgentProvenanceCommands, AgentTaskCommands, DiscussCommands,
         PresenceCommands, ReviewCommands,
@@ -393,7 +393,6 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     // argv because the literal ellipsis would create bad history.
     "heddle capture -m \"...\"",
     "heddle capture -m \"...\" --confidence <confidence>",
-    "heddle commit -m \"...\"",
     "heddle init --principal-name <name> --principal-email <email>",
     "heddle ready -m \"...\"",
     "heddle context get --path <path>",
@@ -443,12 +442,6 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
             "<confidence>",
         ],
         &["message", "confidence"],
-        true,
-    ),
-    (
-        "heddle commit -m \"...\"",
-        &["heddle", "commit", "-m", "<message>"],
-        &["message"],
         true,
     ),
     (
@@ -831,7 +824,10 @@ const INIT: CommandContract = CommandContract {
     ..MUTATION_BASE
 };
 
-const CAPTURE: CommandContract = CommandContract { ..REF_MUTATION };
+const CAPTURE: CommandContract = CommandContract {
+    writes_git_refs: true,
+    ..REF_MUTATION
+};
 
 const fn compact_json(contract: CommandContract) -> CommandContract {
     CommandContract {
@@ -1701,40 +1697,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 "source_authority",
             ),
             220,
-        ),
-    ),
-    entry(
-        &["commit"],
-        exits(
-            front_door(
-                advertised_action(
-                    surface(
-                        json_discriminators(
-                            documented_schemas(
-                                CommandContract {
-                                    writes_git_refs: true,
-                                    writes_metadata: true,
-                                    ..REF_MUTATION
-                                },
-                                &["commit"],
-                            ),
-                            &[json_discriminator(Some("commit"), "output_kind", "commit")],
-                        ),
-                        "source_authority",
-                    ),
-                    "heddle commit",
-                    &["heddle", "commit"],
-                    &[],
-                    true,
-                    true,
-                ),
-                28,
-            ),
-            &[
-                (0, "Git checkpoint written or already current"),
-                (65, "repository mode or worktree preflight refused"),
-                (74, "io while writing Git state"),
-            ],
         ),
     ),
     entry(
@@ -2978,7 +2940,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["env", "list"],
         json_discriminators(
             opaque_schemas(READ_JSON, &["env list"]),
-            &[json_discriminator(Some("env list"), "output_kind", "env_list")],
+            &[json_discriminator(
+                Some("env list"),
+                "output_kind",
+                "env_list",
+            )],
         ),
     ),
     entry(
@@ -4529,7 +4495,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Land(_) => vec!["land"],
         Commands::Ready(_) => vec!["ready"],
         Commands::Capture(_) => vec!["capture"],
-        Commands::Commit(_) => vec!["commit"],
         Commands::Log(_) => vec!["log"],
         Commands::Show { .. } => vec!["show"],
         Commands::Diff(_) => vec!["diff"],

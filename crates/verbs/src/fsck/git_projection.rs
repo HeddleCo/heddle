@@ -1,44 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Fork note: this module mirrors the Git projection note/mapping logic from
-//! `crates/git-projection/src/git_notes.rs` and
-//! `crates/git-projection/src/git_mapping.rs`. Until Git projection support is fully extracted
-//! into `heddle-verbs`, we keep the behavior aligned (notably required note
-//! fields and skip-on-deserialization-failure semantics).
-use std::{
-    collections::HashMap,
-    fs,
-    path::{Path, PathBuf},
-};
+//! Git Projection Mapping and residual integrity checks. Portable note parsing
+//! is delegated to `heddle-git-projection`, so fsck observes exactly the same
+//! note schema and malformed-note policy as ordinary projection reads.
+use std::{collections::HashMap, fs, path::PathBuf};
 
 use objects::{error::Result, object::StateId, store::ObjectStore};
 use repo::Repository;
 use serde::Deserialize;
 use sley::{ObjectFormat, ObjectId, Repository as SleyRepository};
 
-use heddle_git_projection::{ResidualStore, git_export::commit_requires_residual};
+#[cfg(test)]
+use heddle_git_projection::git_notes::NOTES_REF;
+use heddle_git_projection::{
+    ResidualStore,
+    git_export::commit_requires_residual,
+    git_notes::{read_all_notes, read_identity_mappings},
+};
 
 use super::{FsckError, invalid_fsck_config, make_error};
-
-const NOTES_REF: &str = "refs/notes/heddle";
 
 pub(crate) fn check_git_projection(
     repo: &Repository,
     errors: &mut Vec<FsckError>,
-    warnings: &mut Vec<String>,
+    _warnings: &mut Vec<String>,
     objects_checked: &mut usize,
 ) -> Result<()> {
-    let mirror = if mirror_path(repo).exists() {
-        Some(open_git_repo(&mirror_path(repo)).map_err(|err| {
-            invalid_fsck_config(format!("legacy Bridge Mirror open failed: {err}"))
-        })?)
-    } else {
-        warnings.push(
-            "legacy Bridge Mirror is absent; Git projection mapping and residual checks continued"
-                .to_string(),
-        );
-        None
-    };
-    let mapping = build_existing_mapping(repo, mirror.as_ref()).map_err(|err| {
+    let checkout = SleyRepository::discover(repo.root()).ok();
+    let mapping = build_existing_mapping(repo, checkout.as_ref()).map_err(|err| {
         invalid_fsck_config(format!("Git Projection Mapping check failed: {err}"))
     })?;
     let residuals = ResidualStore::open(repo.heddle_dir());
@@ -74,8 +62,8 @@ pub(crate) fn check_git_projection(
         }
     }
 
-    if let Some(mirror) = &mirror {
-        for (git_oid, note) in read_all_notes(mirror).map_err(|err| {
+    if let Some(checkout) = &checkout {
+        for (git_oid, note) in read_all_notes(checkout).map_err(|err| {
             invalid_fsck_config(format!("Git projection notes check failed: {err}"))
         })? {
             *objects_checked += 1;
@@ -146,7 +134,7 @@ fn check_checkout_head(
     *objects_checked += 1;
     if actual_git_oid != expected_git_oid {
         errors.push(make_error(
-            "bridge-checkout",
+            "git-projection-checkout",
             &format!(
                 "checkout branch '{thread}' points at {actual_git_oid}, but Heddle maps the attached thread to {expected_git_oid}"
             ),
@@ -154,10 +142,6 @@ fn check_checkout_head(
         ));
     }
     Ok(())
-}
-
-fn mirror_path(repo: &Repository) -> PathBuf {
-    repo.heddle_dir().join("git")
 }
 
 fn mapping_path(repo: &Repository) -> PathBuf {
@@ -170,17 +154,13 @@ fn mapping_tmp_path(repo: &Repository) -> PathBuf {
     mapping_path(repo).with_extension("json.tmp")
 }
 
-fn open_git_repo(path: &Path) -> std::result::Result<SleyRepository, String> {
-    SleyRepository::open_exact_bare(path).map_err(|err| err.to_string())
-}
-
 fn build_existing_mapping(
     repo: &Repository,
-    mirror: Option<&SleyRepository>,
+    checkout: Option<&SleyRepository>,
 ) -> std::result::Result<SyncMapping, String> {
     let cache = read_mapping_cache_from_disk(repo)?;
-    let mut index = match mirror {
-        Some(mirror) => GitIdentityIndex::from_notes(mirror)?,
+    let mut index = match checkout {
+        Some(checkout) => GitIdentityIndex::from_notes(checkout)?,
         None => GitIdentityIndex::default(),
     };
     index.fill_gaps_from_cache(&cache);
@@ -315,7 +295,9 @@ struct GitIdentityIndex {
 impl GitIdentityIndex {
     fn from_notes(repo: &SleyRepository) -> std::result::Result<Self, String> {
         let mut index = Self::default();
-        for (state_id, git_oid) in read_identity_mappings(repo)? {
+        for (state_id, git_oid) in
+            read_identity_mappings(repo).map_err(|error| error.to_string())?
+        {
             index.mapping.insert_checked(state_id, git_oid)?;
         }
         Ok(index)
@@ -338,48 +320,9 @@ impl GitIdentityIndex {
     }
 }
 
-fn read_identity_mappings(
-    repo: &SleyRepository,
-) -> std::result::Result<Vec<(StateId, ObjectId)>, String> {
-    read_all_notes(repo)?
-        .into_iter()
-        .map(|(oid, note)| {
-            let state_id = StateId::parse(&note.state_id).map_err(|err| err.to_string())?;
-            Ok((state_id, oid))
-        })
-        .collect()
-}
-
-fn read_all_notes(
-    repo: &SleyRepository,
-) -> std::result::Result<HashMap<ObjectId, HeddleNote>, String> {
-    let mut out = HashMap::new();
-    for note_entry in repo
-        .list_notes(&notes_ref())
-        .map_err(|err| err.to_string())?
-    {
-        let object = repo
-            .read_object(&note_entry.blob)
-            .map_err(|err| err.to_string())?;
-        if object.object_type != sley::GitObjectType::Blob {
-            continue;
-        }
-        if let Ok(note) = serde_json::from_slice(&object.body) {
-            out.insert(note_entry.annotated, note);
-        }
-    }
-    Ok(out)
-}
-
+#[cfg(test)]
 fn notes_ref() -> sley::notes::NotesRef {
     sley::notes::NotesRef::expand(NOTES_REF)
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct HeddleNote {
-    state_id: String,
-    #[allow(dead_code)]
-    status: String,
 }
 
 #[cfg(test)]
@@ -404,8 +347,8 @@ mod tests {
         std::fs::write(&mapping_path, contents).expect("write Git projection mapping");
     }
 
-    fn write_bridge_note(mirror: &SleyRepository, target: sley::ObjectId, body: &str) {
-        let refs = mirror.references();
+    fn write_git_note(git: &SleyRepository, target: sley::ObjectId, body: &str) {
+        let refs = git.references();
         let notes_ref = notes_ref();
         let expected_ref =
             sley::notes::notes_ref_expected(&refs, &notes_ref).expect("get notes ref expected");
@@ -414,8 +357,8 @@ mod tests {
             committer: b"heddle test <test@localhost> 0 +0000".to_vec(),
         };
         sley::notes::upsert_note_bytes_for(
-            mirror.git_dir(),
-            mirror.object_format(),
+            git.git_dir(),
+            git.object_format(),
             &refs,
             &notes_ref,
             &target,
@@ -424,7 +367,7 @@ mod tests {
             &identity,
             expected_ref,
         )
-        .expect("write bridge note");
+        .expect("write Git note");
     }
 
     #[test]
@@ -439,27 +382,25 @@ mod tests {
             Attribution::human(Principal::new("Test User", "test@example.com")),
         );
         let state_state_id = state.state_id.to_string_full();
+        let state_change_id = state.change_id.to_string_full();
         repo.store().put_state(&state).expect("store state");
 
-        let mirror_path = repo.heddle_dir().join("git");
-        let mirror = SleyRepository::init_bare(&mirror_path).expect("init mirror");
-        let foreign_note_target = mirror
+        let git = SleyRepository::init(repo.root()).expect("init Git checkout");
+        let foreign_note_target = git
             .write_blob("foreign-note")
             .expect("write foreign note blob");
-        let valid_note_target = mirror
-            .write_blob("valid-note")
-            .expect("write valid note blob");
+        let valid_note_target = git.write_blob("valid-note").expect("write valid note blob");
         let foreign_note = format!(
             r#"{{"state_id":"{}"}}"#,
             objects::object::StateId::from_bytes([0x44; 32])
         );
         let valid_note = format!(
-            r#"{{"state_id":"{}","status":"published"}}"#,
-            state_state_id
+            r#"{{"state_id":"{}","change_id":"{}","status":"published"}}"#,
+            state_state_id, state_change_id
         );
         write_projection_mapping(&repo, &state_state_id, &valid_note_target);
-        write_bridge_note(&mirror, foreign_note_target, &foreign_note);
-        write_bridge_note(&mirror, valid_note_target, &valid_note);
+        write_git_note(&git, foreign_note_target, &foreign_note);
+        write_git_note(&git, valid_note_target, &valid_note);
 
         let mut errors = Vec::new();
         let mut warnings = Vec::new();

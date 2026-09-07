@@ -25,18 +25,9 @@
 //! Content identity is the Git object id of `(type, body)` under the recorded
 //! object format. Put verifies that the body hashes to the claimed oid.
 //!
-//! # Bridge Mirror relationship
-//!
-//! Residuals replace the long-term need for a persistent Bridge Mirror
-//! (`.heddle/git`) as a byte warehouse for lossy objects. The Bridge Mirror
-//! remains available for migration: callers may copy residual bytes out of an
-//! existing mirror, then delete the empty mirror through explicit maintenance
-//! cleanup once no mapped object still depends on it. This module does **not**
-//! delete mirrors.
-//!
-//! See `CONTEXT.md` (Raw Git Object Residual, Bridge Mirror, Git Projection
-//! Mapping), `docs/adr/0042-retire-persistent-bridge-mirror.md`, and
-//! `docs/VERIFICATION_CLEANUP_PLAN.md`.
+//! Residuals are the sole durable byte store for Git objects that cannot be
+//! reconstructed from Heddle state. Projection never falls back to a second Git
+//! object warehouse.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -236,29 +227,6 @@ impl ResidualStore {
             }
         }
         Ok(oids)
-    }
-
-    /// Copy one object from a Bridge Mirror (or any Sley repo) into residual
-    /// storage when missing. Returns `true` when a residual is now present.
-    ///
-    /// This is the lazy migration helper for existing `.heddle/git` mirrors:
-    /// verification, fsck, export, and write-through can call it as needed.
-    /// It never deletes the mirror.
-    pub fn migrate_object_from_git_repo(
-        &self,
-        source: &SleyRepository,
-        oid: &ObjectId,
-    ) -> GitProjectionResult<bool> {
-        let format = source.object_format();
-        if self.has_residual(format, oid)? {
-            return Ok(true);
-        }
-        let object = match source.read_object(oid) {
-            Ok(object) => object,
-            Err(_) => return Ok(false),
-        };
-        self.put_residual_verified(*oid, format, object.object_type, object.body.clone())?;
-        Ok(true)
     }
 
     /// Capture a non-reconstructable commit and its complete file closure.
@@ -614,108 +582,6 @@ impl ResidualStore {
     }
 }
 
-/// Maintenance-oriented report about whether a Bridge Mirror looks removable
-/// after residual migration.
-///
-/// Deletion is intentionally **not** performed here. Callers (future
-/// `maintenance` / `fsck --repair git`) should only remove `.heddle/git` when
-/// this report says the mirror is empty of needed residuals and the operator
-/// opts in.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BridgeMirrorRetirementStatus {
-    /// Path to `.heddle/git` if present.
-    pub mirror_path: PathBuf,
-    pub mirror_exists: bool,
-    /// Residual store root (`.heddle/git-residuals`).
-    pub residuals_dir: PathBuf,
-    pub residual_count: usize,
-    /// True when the mirror directory is absent — retirement already complete
-    /// for this checkout.
-    pub mirror_already_absent: bool,
-    /// Human-oriented note for diagnostics. Not a public CLI contract.
-    pub note: String,
-}
-
-/// Inspect residual + Bridge Mirror state for future maintenance cleanup.
-///
-/// Does not delete anything. Full "mirror is empty of needed residuals"
-/// reachability analysis remains follow-on work once Git Projection Mapping
-/// records residual-vs-reconstructable backing for every mapped oid.
-pub fn bridge_mirror_retirement_status(
-    heddle_dir: impl AsRef<Path>,
-) -> GitProjectionResult<BridgeMirrorRetirementStatus> {
-    let heddle_dir = heddle_dir.as_ref();
-    let mirror_path = heddle_dir.join("git");
-    let store = ResidualStore::open(heddle_dir);
-    let residual_count = store.list_residual_oids(ObjectFormat::Sha1)?.len()
-        + store.list_residual_oids(ObjectFormat::Sha256)?.len();
-    let mirror_exists = mirror_path.exists();
-    let note = if !mirror_exists {
-        "Bridge Mirror absent; no residual migration cleanup required for .heddle/git.".to_string()
-    } else if residual_count == 0 {
-        "Bridge Mirror still present and no Raw Git Object Residuals stored yet; \
-         migrate lossy objects into residuals before considering mirror deletion."
-            .to_string()
-    } else {
-        format!(
-            "Bridge Mirror still present with {residual_count} residual object(s) stored. \
-             After all mapped non-reconstructable oids have residuals and no live path \
-             requires the mirror, delete .heddle/git via explicit maintenance cleanup."
-        )
-    };
-    Ok(BridgeMirrorRetirementStatus {
-        mirror_path: mirror_path.clone(),
-        mirror_exists,
-        residuals_dir: store.residuals_dir(),
-        residual_count,
-        mirror_already_absent: !mirror_exists,
-        note,
-    })
-}
-
-/// Resolve lossy Git object bytes for materialization/export:
-/// prefer residual, else optional Bridge Mirror, else hard fail.
-///
-/// When `migrate_from_mirror` is true and the residual was missing, a
-/// successful mirror read also writes a residual (lazy migration).
-pub fn resolve_lossy_object(
-    residual_store: &ResidualStore,
-    mirror_repo: Option<&SleyRepository>,
-    target_format: ObjectFormat,
-    oid: &ObjectId,
-    migrate_from_mirror: bool,
-) -> GitProjectionResult<ResidualObject> {
-    if let Some(residual) = residual_store.get_residual(target_format, oid)? {
-        return Ok(residual);
-    }
-
-    if let Some(mirror) = mirror_repo
-        && mirror.object_format() == target_format
-        && let Ok(object) = mirror.read_object(oid)
-    {
-        if migrate_from_mirror {
-            residual_store.put_residual_verified(
-                *oid,
-                target_format,
-                object.object_type,
-                object.body.clone(),
-            )?;
-        }
-        return Ok(ResidualObject {
-            oid: *oid,
-            object_format: target_format,
-            object_type: object.object_type,
-            body: object.body.clone(),
-        });
-    }
-
-    Err(GitProjectionError::Git(format!(
-        "mapped Git object {oid} is not reconstructable from Heddle state, has no Raw Git Object Residual, \
-         and is unavailable from the Bridge Mirror; hard fidelity failure (import with residual capture \
-         or restore residual bytes before export/write-through)"
-    )))
-}
-
 fn encode_residual_file(object_type: GitObjectType, body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + 1 + body.len());
     out.extend_from_slice(RESIDUAL_MAGIC);
@@ -834,26 +700,6 @@ committer A <a@e> 1 +0000\n\
         assert_eq!(listed, vec![oid]);
     }
 
-    #[test]
-    fn migrate_from_git_repo_copies_object() {
-        let dir = tempfile::tempdir().unwrap();
-        let mirror_path = dir.path().join("mirror");
-        let heddle = dir.path().join(".heddle");
-        fs::create_dir_all(&heddle).unwrap();
-        let mirror = SleyRepository::init_bare(&mirror_path).unwrap();
-        let oid = mirror.write_blob(b"migrated-bytes\n").unwrap();
-
-        let store = ResidualStore::open(&heddle);
-        assert!(!store.has_residual(ObjectFormat::Sha1, &oid).unwrap());
-        assert!(store.migrate_object_from_git_repo(&mirror, &oid).unwrap());
-        assert!(store.has_residual(ObjectFormat::Sha1, &oid).unwrap());
-        let residual = store
-            .get_residual(ObjectFormat::Sha1, &oid)
-            .unwrap()
-            .unwrap();
-        assert_eq!(residual.body, b"migrated-bytes\n");
-    }
-
     fn write_test_commit(
         repo: &SleyRepository,
         tree: ObjectId,
@@ -965,60 +811,5 @@ committer A <a@e> 1 +0000\n\
         assert!(store.install_into(&target, &oid).unwrap());
         let object = target.read_object(&oid).unwrap();
         assert_eq!(object.body, b"install-me");
-    }
-
-    #[test]
-    fn resolve_lossy_prefers_residual_over_mirror() {
-        let dir = tempfile::tempdir().unwrap();
-        let heddle = dir.path().join(".heddle");
-        let mirror_path = dir.path().join("mirror");
-        fs::create_dir_all(&heddle).unwrap();
-        let store = ResidualStore::open(&heddle);
-        let residual_oid = store
-            .put_residual(ObjectFormat::Sha1, GitObjectType::Blob, b"from-residual")
-            .unwrap();
-        let mirror = SleyRepository::init_bare(&mirror_path).unwrap();
-        // Different body under a different oid so mirror is not the source.
-        let _ = mirror.write_blob(b"from-mirror").unwrap();
-
-        let resolved = resolve_lossy_object(
-            &store,
-            Some(&mirror),
-            ObjectFormat::Sha1,
-            &residual_oid,
-            false,
-        )
-        .unwrap();
-        assert_eq!(resolved.body, b"from-residual");
-    }
-
-    #[test]
-    fn resolve_lossy_hard_fails_when_unavailable() {
-        let dir = tempfile::tempdir().unwrap();
-        let heddle = dir.path().join(".heddle");
-        fs::create_dir_all(&heddle).unwrap();
-        let store = ResidualStore::open(&heddle);
-        let missing = ObjectId::from_hex(
-            ObjectFormat::Sha1,
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        )
-        .unwrap();
-        let err =
-            resolve_lossy_object(&store, None, ObjectFormat::Sha1, &missing, false).unwrap_err();
-        assert!(
-            err.to_string().contains("hard fidelity failure"),
-            "unexpected: {err}"
-        );
-    }
-
-    #[test]
-    fn bridge_mirror_retirement_status_reports_absence() {
-        let dir = tempfile::tempdir().unwrap();
-        let heddle = dir.path().join(".heddle");
-        fs::create_dir_all(&heddle).unwrap();
-        let status = bridge_mirror_retirement_status(&heddle).unwrap();
-        assert!(status.mirror_already_absent);
-        assert!(!status.mirror_exists);
-        assert_eq!(status.residual_count, 0);
     }
 }

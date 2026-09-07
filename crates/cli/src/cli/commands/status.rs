@@ -26,11 +26,10 @@ use tokio_tungstenite::tungstenite::{
 };
 use tracing::debug;
 use verbs::{
-    ChangesInfo, CoordinationStatus, FastShortStatusReport, GitIndexPlan as CoreGitIndexPlan,
-    MachineContractInput, MaterializedThreadInfo, PlainGitStatusReport, StatusDetail,
-    StatusOptions, StatusReport as StatusOutput, changes_paths, coordination_label,
-    fast_short_status_report, human_thread_health, plain_git_status_report, status as core_status,
-    status_combined_verdict,
+    ChangesInfo, CoordinationStatus, FastShortStatusReport, MachineContractInput,
+    MaterializedThreadInfo, PlainGitStatusReport, StatusDetail, StatusOptions,
+    StatusReport as StatusOutput, changes_paths, coordination_label, fast_short_status_report,
+    human_thread_health, plain_git_status_report, status as core_status, status_combined_verdict,
 };
 
 use super::{
@@ -325,7 +324,7 @@ fn build_status_command_output(cli: &Cli, short: bool) -> Result<StatusCommandOu
     };
     let user_config = config::UserConfig::load_default()?;
     let status_options = user_config.worktree_status_options(Some(&repo_config));
-    let ctx = execution_context_from_cli_parts(cli, &start, Some(repo), &user_config)?;
+    let ctx = execution_context_from_cli_parts(&start, Some(repo), &user_config);
     let mut output = core_status(
         &ctx,
         StatusOptions::new(detail, status_options)
@@ -933,7 +932,7 @@ fn render_status_thread(output: &StatusOutput, verbose: bool) {
                 style::dim(&checkpoint.committed_at)
             );
         } else if output.git_checkpoint.is_some() {
-            println!("Git: {}", style::accent("saved to commit"));
+            println!("Git: {}", style::accent("checkpointed"));
         } else if verbose {
             // The fallback "Capture durability: local only" repeats on
             // every status the user runs against a non-checkpointed
@@ -1174,7 +1173,7 @@ fn render_status_advice(output: &StatusOutput) {
     if checkpoint_needed {
         println!(
             "Git checkpoint pending: {}",
-            style::bold("saved Heddle state is not yet a Git commit")
+            style::bold("saved Heddle state is not yet projected to Git")
         );
     } else if matches!(output.thread_state, Some(ThreadState::Ready)) {
         println!(
@@ -1252,15 +1251,16 @@ fn status_next_reason(output: &StatusOutput) -> &'static str {
     {
         return "connect this Git branch to Heddle before using history-oriented commands";
     }
-    if output.changed_path_count > 0 && output.recommended_action.contains("commit") {
+    if output.changed_path_count > 0 && output.recommended_action.contains("capture") {
         if output.repository_capability != "git-overlay" {
-            return "there are uncommitted worktree changes; commit captures them as a Heddle state";
+            return "there are unsaved worktree changes; capture records them as a Heddle state";
         }
-        return "there are uncommitted worktree changes; commit captures them and writes the matching Git commit";
+        return "there are unsaved worktree changes; capture records the state and its Git checkpoint";
     }
-    if output.repository_capability == "git-overlay" && output.recommended_action.contains("commit")
+    if output.repository_capability == "git-overlay"
+        && output.recommended_action.contains("capture")
     {
-        return "the work is saved in Heddle; commit writes the matching Git commit";
+        return "the Heddle state is saved; capture completes its pending Git checkpoint";
     }
     if !output.blockers.is_empty() {
         return "the current thread has blockers that must be cleared before integration";
@@ -1282,8 +1282,8 @@ fn status_next_reason(output: &StatusOutput) -> &'static str {
 
 fn status_next_follow_up(output: &StatusOutput) -> Option<&'static str> {
     let action = output.recommended_action.as_str();
-    if action.contains("commit") && status_has_publish_target(output) {
-        Some("run `heddle push` when the Git commit is ready to publish")
+    if action.contains("capture") && status_has_publish_target(output) {
+        Some("run `heddle push` when the captured checkpoint is ready to publish")
     } else if action.contains("ready") {
         Some("run `heddle land --thread <thread>` after readiness passes")
     } else if action.contains("land") {
@@ -1349,12 +1349,6 @@ fn render_status_changes(output: &StatusOutput) {
     let has_changes = has_status_changes(output);
 
     println!();
-    if let Some(index) = output.git_index.as_ref()
-        && git_index_has_paths(index)
-    {
-        render_git_index_status(index);
-        return;
-    }
     if has_changes {
         println!("{}", style::bold("Changes not yet saved"));
         for path in &output.changes.modified {
@@ -1410,61 +1404,6 @@ fn render_status_submodules(output: &StatusOutput) {
             submodule.path,
             style::dim(short_commit)
         );
-    }
-}
-
-fn git_index_has_paths(index: &CoreGitIndexPlan) -> bool {
-    !index.staged_paths.is_empty()
-        || !index.unstaged_paths.is_empty()
-        || !index.untracked_paths.is_empty()
-}
-
-fn render_git_index_status(index: &CoreGitIndexPlan) {
-    println!("{}", style::bold("Git index and worktree"));
-    if !index.staged_paths.is_empty() {
-        println!("  will commit staged paths:");
-        for path in &index.staged_paths {
-            println!("    {}", path);
-        }
-    }
-    if !index.unstaged_paths.is_empty() {
-        println!("  {}:", git_index_extra_path_label(index, "unstaged"));
-        for path in &index.unstaged_paths {
-            println!("    {}", path);
-        }
-    }
-    if !index.untracked_paths.is_empty() {
-        println!("  {}:", git_index_extra_path_label(index, "untracked"));
-        for path in &index.untracked_paths {
-            println!("    {}", path);
-        }
-    }
-    println!("  commit scope: {}", git_index_commit_scope_text(index));
-    if index.commit_mode == "staged_index" && !index.preserved_after_commit.is_empty() {
-        println!(
-            "  include the rest with: {}",
-            style::bold("heddle capture -m \"...\" && heddle commit -m \"...\"")
-        );
-    }
-}
-
-fn git_index_extra_path_label(index: &CoreGitIndexPlan, kind: &'static str) -> String {
-    if index.commit_mode == "staged_index" {
-        format!("will leave {kind} paths")
-    } else {
-        format!("will commit {kind} paths")
-    }
-}
-
-fn git_index_commit_scope_text(index: &CoreGitIndexPlan) -> &'static str {
-    match index.commit_mode {
-        "staged_index" => "`heddle commit` records the captured Git state",
-        "worktree_all" => {
-            "capture records Heddle provenance; `heddle commit` records source history"
-        }
-        "worktree_all_explicit" => "capture first, then stage and commit the intended Git paths",
-        "none" => "no Git paths are ready to commit",
-        _ => "capture Heddle provenance, then commit source history with Git",
     }
 }
 

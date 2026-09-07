@@ -882,7 +882,7 @@ fn object_info_from_event(
 ) -> Result<Option<ObjectInfo>> {
     match event {
         StateClosureEvent::State { id, state } => {
-            let state_bytes = rmp_serde::to_vec_named(state)?;
+            let state_bytes = state.encode_current_msgpack()?;
             Ok(Some(ObjectInfo {
                 id: ObjectId::StateId(id),
                 obj_type: ObjectType::State,
@@ -931,7 +931,7 @@ fn object_info_from_event(
                 delta_base: None,
             })),
         StateClosureEvent::StateAttachment { state, attachment } => {
-            let bytes = rmp_serde::to_vec_named(attachment)?;
+            let bytes = attachment.encode_current_msgpack()?;
             Ok(Some(ObjectInfo {
                 id: ObjectId::StateAttachment {
                     state,

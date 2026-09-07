@@ -11,7 +11,7 @@ Heddle is a **local-first, agent-native version control system** shipped as the 
 
 | User | Primary surface |
 |------|-----------------|
-| Human developers | CLI: `status`, `adopt`, `commit`, `start`, `land`, `verify`, `diff`, `log` |
+| Human developers | CLI: `status`, `adopt`, `capture`, `start`, `land`, `verify`, `diff`, `log` |
 | Coding agents / harnesses | Machine-readable JSON (`--output json` / auto), command catalog, op-id replay, harness integrations |
 | Embedders (library) | `heddle-core` facade: typed ops returning `*Report` / `Result`, no process control or render |
 | Hosted products | The v1alpha1 cutover target is the public `heddle-api` contract owned by `HeddleCo/api`; Heddle, Weft, and Tapestry remain separately gated consumers |
@@ -90,7 +90,7 @@ delivery (CLI / future daemon / tests)
 - Being a full Git porcelain reimplementation of every `git` subcommand.
 - Requiring a hosted account or always-on network for local VCS.
 - Last-write-wins collaboration on source history (source history is immutable; collaboration is a separate log).
-- Persistent Bridge Mirror (`.heddle/git`) as the active Git store (retired direction; overlay uses real `.git`).
+- Persistent Bridge Mirror (`.heddle/git`) in any runtime role (retired; overlay uses real `.git` and explicit projection uses residuals).
 - 1.0 API freeze until `docs/STABILITY.md` thresholds are set and met (currently strawman / TBD).
 - Partial clone / lazy object fetch (planned).
 - Hosted builds/workflows/artifacts in this OSS repo (planned / weft).

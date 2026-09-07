@@ -82,10 +82,7 @@ impl HarnessCliBridge for CliAgentBridge {
         thread: Option<&str>,
     ) -> Result<()> {
         crate::cli::commands::worktree_cmd::helpers::write_isolated_checkout(
-            repo,
-            path,
-            base_state,
-            thread,
+            repo, path, base_state, thread,
         )
         .map(|_| ())
     }
@@ -174,13 +171,16 @@ mod tests {
             }),
             ..UserConfig::default()
         };
-        let mut runtime =
-            agent_relay::HarnessBridgeRuntime::new(repo, user_config, cli_bridge());
+        let mut runtime = agent_relay::HarnessBridgeRuntime::new(repo, user_config, cli_bridge());
         let payload = opencode_tool_payload("call-2");
 
-        runtime.relay("opencode", "tool.execute.before", &payload).unwrap();
+        runtime
+            .relay("opencode", "tool.execute.before", &payload)
+            .unwrap();
         std::fs::write(root.join("tracked.txt"), b"two\n").unwrap();
-        runtime.relay("opencode", "tool.execute.after", &payload).unwrap();
+        runtime
+            .relay("opencode", "tool.execute.after", &payload)
+            .unwrap();
 
         let head = runtime.repo.head().unwrap().expect("capture advanced HEAD");
         assert_ne!(head, seed.state_id);
@@ -199,7 +199,10 @@ mod tests {
         assert_eq!(step.capture_state, Some(head));
         assert_eq!(step.changed, Some(true));
         assert!(step.touched_paths.contains(&"tracked.txt".to_string()));
-        assert!(step.labels.contains(&objects::object::TimelineLabel::RepoReversible));
+        assert!(
+            step.labels
+                .contains(&objects::object::TimelineLabel::RepoReversible)
+        );
         assert!(
             step.labels
                 .contains(&objects::object::TimelineLabel::ExternalSideEffectsUnknown)
@@ -229,9 +232,13 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&hook_path, perms).unwrap();
 
-        runtime.relay("opencode", "tool.execute.before", &payload).unwrap();
+        runtime
+            .relay("opencode", "tool.execute.before", &payload)
+            .unwrap();
         std::fs::write(root.join("ambient.txt"), b"dirty but uncaptured\n").unwrap();
-        runtime.relay("opencode", "tool.execute.after", &payload).unwrap();
+        runtime
+            .relay("opencode", "tool.execute.after", &payload)
+            .unwrap();
 
         assert_eq!(
             runtime.repo.head().unwrap(),
@@ -248,9 +255,14 @@ mod tests {
         assert_eq!(step.after_state, Some(seed.state_id));
         assert_eq!(step.capture_state, None);
         assert_eq!(step.changed, Some(false));
-        assert!(step.labels.contains(&objects::object::TimelineLabel::CaptureFailed));
         assert!(
-            !step.labels.contains(&objects::object::TimelineLabel::RepoReversible),
+            step.labels
+                .contains(&objects::object::TimelineLabel::CaptureFailed)
+        );
+        assert!(
+            !step
+                .labels
+                .contains(&objects::object::TimelineLabel::RepoReversible),
             "failed captures are not repo-reversible"
         );
         assert_eq!(step.touched_paths, vec!["hinted.txt"]);
@@ -271,7 +283,9 @@ mod tests {
             "agent_id": "worker-1",
             "model": {"id": "claude-sonnet-4-6"},
         });
-        runtime.relay("claude-code", "SubagentStart", &start_payload).unwrap();
+        runtime
+            .relay("claude-code", "SubagentStart", &start_payload)
+            .unwrap();
         drop(runtime);
 
         // Dirty the worktree so SubagentStop also captures a state.
@@ -292,7 +306,9 @@ mod tests {
                 "display_name": "Claude Sonnet 4.6",
             },
         });
-        runtime.relay("claude-code", "SubagentStop", &stop_payload).unwrap();
+        runtime
+            .relay("claude-code", "SubagentStop", &stop_payload)
+            .unwrap();
         drop(runtime);
 
         let verify = Repository::open(temp.path()).unwrap();
@@ -322,7 +338,9 @@ mod tests {
             "agent_id": "child-subagent-xyz",
             "model": {"id": "claude-sonnet-4-6"},
         });
-        runtime.relay("claude-code", "SubagentStart", &payload).unwrap();
+        runtime
+            .relay("claude-code", "SubagentStart", &payload)
+            .unwrap();
         drop(runtime);
 
         let verify = Repository::open(temp.path()).unwrap();

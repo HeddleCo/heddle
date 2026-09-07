@@ -16,7 +16,6 @@ fn git_overlay_guide_is_concise_and_actionable() {
         help.contains("Git Overlay workflow")
             && help.contains("heddle init")
             && help.contains("heddle capture -m")
-            && help.contains("heddle commit")
             && help.contains("heddle land --thread <name>"),
         "help git-overlay should render the actual guide, not only clap usage: {help}"
     );
@@ -931,7 +930,6 @@ fn command_catalog_exposes_agent_metadata_for_options() {
     let parsed: Value = serde_json::from_str(&json).unwrap();
     for placeholder in [
         "heddle capture -m \"...\"",
-        "heddle commit -m \"...\"",
         "heddle ready --thread <thread>",
         "heddle land --thread <thread>",
         "heddle clone <remote> <fresh-path>",
@@ -978,24 +976,6 @@ fn command_catalog_exposes_agent_metadata_for_options() {
         .expect("status --short should be cataloged");
     assert_eq!(short["value_kind"], "boolean");
 
-    let commit = commands
-        .iter()
-        .find(|entry| entry["display"] == "commit")
-        .expect("commit shim should be cataloged");
-    assert_eq!(commit["mutates"], true);
-    assert_eq!(commit["supports_op_id"], true);
-    assert_eq!(commit["persists_op_id"], false);
-    assert_eq!(commit["op_id_behavior"], "explicit_replay");
-    assert_eq!(commit["op_id_store_scope"], "repository");
-    assert_eq!(commit["side_effect_class"], "ref_mutation");
-    assert_eq!(commit["writes_heddle_refs"], true);
-    assert_eq!(commit["writes_git_refs"], true);
-    assert_eq!(
-        commit["side_effects"],
-        serde_json::json!(["writes_heddle_refs", "writes_git_refs", "writes_metadata"])
-    );
-    assert_eq!(commit["first_run_behavior"], "requires_initialized_repo");
-
     let capture = commands
         .iter()
         .find(|entry| entry["display"] == "capture")
@@ -1006,10 +986,10 @@ fn command_catalog_exposes_agent_metadata_for_options() {
     assert_eq!(capture["op_id_store_scope"], "repository");
     assert_eq!(capture["side_effect_class"], "ref_mutation");
     assert_eq!(capture["writes_heddle_refs"], true);
-    assert_eq!(capture["writes_git_refs"], false);
+    assert_eq!(capture["writes_git_refs"], true);
     assert_eq!(
         capture["side_effects"],
-        serde_json::json!(["writes_heddle_refs"])
+        serde_json::json!(["writes_heddle_refs", "writes_git_refs"])
     );
     assert_eq!(capture["first_run_behavior"], "requires_initialized_repo");
 
@@ -1203,7 +1183,7 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
             );
         }
         for proof in [
-            "commit",
+            "capture",
             "undo",
             "pull",
             "push",
@@ -1733,7 +1713,7 @@ fn bootstrap_op_ids_are_scoped_to_first_contact_repo_path() {
 }
 
 #[test]
-fn bootstrap_op_id_reused_by_commit_conflicts_before_noop_execution() {
+fn bootstrap_op_id_reused_by_capture_conflicts_before_noop_execution() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
@@ -1753,20 +1733,20 @@ fn bootstrap_op_id_reused_by_commit_conflicts_before_noop_execution() {
             "json",
             "--op-id",
             &op_id,
-            "commit",
+            "capture",
             "-m",
             "no-op should not run",
         ],
         Some(temp.path()),
     )
-    .expect("invoke commit with reused bootstrap op-id");
+    .expect("invoke capture with reused bootstrap op-id");
     assert!(
         !conflict.status.success(),
-        "cross-command op-id reuse should fail before no-op commit execution"
+        "cross-command op-id reuse should fail before no-op capture execution"
     );
     assert!(
         conflict.stdout.is_empty(),
-        "conflicting op-id should not execute commit or write stdout"
+        "conflicting op-id should not execute capture or write stdout"
     );
     let stderr = std::str::from_utf8(&conflict.stderr).unwrap();
     let parsed: Value = serde_json::from_str(stderr)
@@ -1775,7 +1755,7 @@ fn bootstrap_op_id_reused_by_commit_conflicts_before_noop_execution() {
     assert_eq!(parsed["op_id"], op_id);
     assert_eq!(parsed["idempotency_status"], "conflict");
     assert_eq!(parsed["recorded_command"], "adopt");
-    assert_eq!(parsed["incoming_command"], "commit");
+    assert_eq!(parsed["incoming_command"], "capture");
     assert_eq!(parsed["recorded_status"], "completed");
 }
 
@@ -1824,7 +1804,7 @@ fn op_id_replays_export_git() {
 }
 
 #[test]
-fn commit_schema_declares_real_op_id_commit_and_replay_fields() {
+fn capture_schema_declares_real_op_id_execution_and_replay_fields() {
     let temp = TempDir::new().unwrap();
     let op_id = "550e8400-e29b-41d4-a716-446655440010";
 
@@ -1832,9 +1812,7 @@ fn commit_schema_declares_real_op_id_commit_and_replay_fields() {
     std::fs::write(temp.path().join("tracked.txt"), "seed\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
     heddle(&["init"], Some(temp.path())).expect("initialize direct Git overlay");
-    std::fs::write(temp.path().join("tracked.txt"), "commit me\n").unwrap();
-    heddle(&["capture", "-m", "op-id commit"], Some(temp.path()))
-        .expect("capture state before Git commit");
+    std::fs::write(temp.path().join("tracked.txt"), "capture me\n").unwrap();
 
     let first = json_value(
         temp.path(),
@@ -1843,20 +1821,20 @@ fn commit_schema_declares_real_op_id_commit_and_replay_fields() {
             "json",
             "--op-id",
             op_id,
-            "commit",
+            "capture",
             "-m",
-            "op-id commit",
+            "op-id capture",
         ],
     );
-    assert_eq!(first["output_kind"], "commit");
+    assert_eq!(first["output_kind"], "capture");
     assert_eq!(first["op_id"], op_id);
     assert_eq!(first["idempotency_status"], "executed");
     assert_eq!(first["replayed"], false);
     assert_eq!(first["operation_record"]["op_id"], op_id);
-    assert_eq!(first["operation_record"]["command"], "commit");
+    assert_eq!(first["operation_record"]["command"], "capture");
     assert_eq!(first["operation_record"]["idempotency_status"], "executed");
     assert_eq!(first["operation_record"]["replayed"], false);
-    assert_schema_declares_runtime_top_level(&["commit"], &first);
+    assert_schema_declares_runtime_top_level(&["capture"], &first);
 
     let replayed = json_value(
         temp.path(),
@@ -1865,26 +1843,26 @@ fn commit_schema_declares_real_op_id_commit_and_replay_fields() {
             "json",
             "--op-id",
             op_id,
-            "commit",
+            "capture",
             "-m",
-            "op-id commit",
+            "op-id capture",
         ],
     );
     assert_eq!(
         replayed["state_id"], first["state_id"],
-        "same op-id and args should replay the original commit result"
+        "same op-id and args should replay the original capture result"
     );
-    assert_eq!(replayed["output_kind"], "commit");
+    assert_eq!(replayed["output_kind"], "capture");
     assert_eq!(replayed["op_id"], op_id);
     assert_eq!(replayed["idempotency_status"], "replayed");
     assert_eq!(replayed["replayed"], true);
-    assert_eq!(replayed["operation_record"]["command"], "commit");
+    assert_eq!(replayed["operation_record"]["command"], "capture");
     assert_eq!(
         replayed["operation_record"]["idempotency_status"],
         "replayed"
     );
     assert_eq!(replayed["operation_record"]["replayed"], true);
-    assert_schema_declares_runtime_top_level(&["commit"], &replayed);
+    assert_schema_declares_runtime_top_level(&["capture"], &replayed);
 }
 
 #[test]
@@ -2056,41 +2034,15 @@ fn capture_auto_detects_codex_model_without_fabricating_plain_shell_agent() {
 }
 
 #[test]
-fn git_overlay_commit_without_capture_uses_typed_recovery() {
-    let temp = TempDir::new().unwrap();
-    init_git_repo_for_json_contract(temp.path(), "main");
-    std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
-    git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["init"], Some(temp.path())).expect("initialize direct Git overlay");
-
-    let output = heddle_output(
-        &["--output", "json", "commit", "-m", "missing capture"],
-        Some(temp.path()),
-    )
-    .expect("invoke commit without a captured state");
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    let envelope: Value = serde_json::from_slice(&output.stderr).expect("typed commit refusal");
-    assert_eq!(envelope["kind"], "commit_capture_required");
-    assert_eq!(envelope["primary_command"], "heddle capture -m \"...\"");
-    assert_eq!(
-        envelope["recovery_commands"],
-        serde_json::json!(["heddle capture -m \"...\"", "heddle status"])
-    );
-    assert_json_recovery_advice_fields(&envelope, "commit without capture");
-}
-
-#[test]
-fn git_overlay_commit_updates_head_reflog_for_git_muscle_memory() {
+fn git_overlay_capture_updates_head_reflog_for_git_muscle_memory() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("file.txt"), "base\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
     initialize_direct_git_overlay_for_polish_tests(temp.path());
 
-    std::fs::write(temp.path().join("file.txt"), "heddle commit\n").unwrap();
+    std::fs::write(temp.path().join("file.txt"), "heddle capture\n").unwrap();
     heddle(&["capture", "-m", "reflog audit"], Some(temp.path())).unwrap();
-    heddle(&["commit", "-m", "reflog audit"], Some(temp.path())).unwrap();
 
     let head_reflog = git_stdout_for_json_contract(temp.path(), &["reflog", "-1", "--format=%gs"]);
     let branch_reflog = git_stdout_for_json_contract(
@@ -2152,7 +2104,7 @@ fn unsupported_op_id_fails_from_command_contract_table() {
 }
 
 #[test]
-fn invalid_op_id_fails_before_mutating_commit() {
+fn invalid_op_id_fails_before_mutating_capture() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
@@ -2169,14 +2121,14 @@ fn invalid_op_id_fails_before_mutating_commit() {
             "--output",
             "json",
             "--op-id",
-            "agent-cold-commit-1",
-            "commit",
+            "agent-cold-capture-1",
+            "capture",
             "-m",
-            "agent cold commit",
+            "agent cold capture",
         ],
         Some(temp.path()),
     )
-    .expect("invoke invalid op-id commit");
+    .expect("invoke invalid op-id capture");
     assert!(!output.status.success(), "invalid op-id should fail");
     assert!(
         output.stdout.is_empty(),
@@ -2187,13 +2139,13 @@ fn invalid_op_id_fails_before_mutating_commit() {
     let envelope: Value = serde_json::from_str(stderr)
         .unwrap_or_else(|err| panic!("invalid op-id should be JSON: {err}: {stderr}"));
     assert_eq!(envelope["kind"], "op_id_invalid");
-    assert_eq!(envelope["op_id"], "agent-cold-commit-1");
+    assert_eq!(envelope["op_id"], "agent-cold-capture-1");
     assert_eq!(envelope["idempotency_status"], "invalid");
     assert_eq!(envelope["replayed"], false);
     assert!(
         envelope["error"]
             .as_str()
-            .is_some_and(|error| error.contains("agent-cold-commit-1")),
+            .is_some_and(|error| error.contains("agent-cold-capture-1")),
         "invalid op-id refusal should use typed recovery detail: {stderr}"
     );
 
@@ -2371,7 +2323,6 @@ fn core_loop_schemas_are_discoverable() {
         "init",
         "adopt",
         "capture",
-        "commit",
         "doctor",
         "doctor docs",
         "doctor schemas",
@@ -2606,10 +2557,6 @@ fn core_git_overlay_json_surfaces_emit_one_machine_value() {
         temp.path(),
         &["--output", "json", "capture", "-m", "checkpoint"],
     );
-    json_value(
-        temp.path(),
-        &["--output", "json", "commit", "-m", "checkpoint"],
-    );
 
     for (label, args) in [
         ("help catalog", vec!["help", "--output", "json"]),
@@ -2652,225 +2599,31 @@ fn core_git_overlay_json_surfaces_emit_one_machine_value() {
 }
 
 #[test]
-fn captured_git_overlay_work_recommends_commit_not_recapture() {
+fn git_overlay_capture_is_one_verified_machine_operation() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
-
     heddle(&["init"], Some(temp.path())).unwrap();
+
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
-    let capture_text = heddle(
-        &[
-            "capture",
-            "-m",
-            "captured but not checkpointed",
-            "--output",
-            "text",
-        ],
-        Some(temp.path()),
-    )
-    .unwrap();
-    assert!(
-        capture_text.contains("Next:") && capture_text.contains("heddle commit -m \"...\""),
-        "Git-overlay capture should point to the concrete commit step: {capture_text}"
+    let capture = json_value(
+        temp.path(),
+        &["capture", "-m", "one save", "--output", "json"],
     );
-    assert!(
-        !capture_text.contains("agent-style saves"),
-        "human capture output should not leak agent-oriented copy: {capture_text}"
-    );
-    assert!(
-        !capture_text.contains("Confidence:"),
-        "human capture without an explicit confidence should not render an empty confidence field: {capture_text}"
-    );
+
+    assert_eq!(capture["output_kind"], "capture");
+    assert_eq!(capture["status"], "captured");
+    assert!(capture["state_id"].as_str().is_some());
+    assert!(capture["git_checkpoint"].as_str().is_some());
+    assert_eq!(capture["verification"]["verified"], true);
+    assert_eq!(capture["verification"]["status"], "clean");
+    assert_schema_declares_runtime_top_level(&["capture"], &capture);
 
     let status = json_value(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(status["verification"]["status"], "needs_checkpoint");
-    assert_eq!(status["thread_health"], "needs_checkpoint");
-    assert_ne!(
-        status["coordination_status"], "blocked",
-        "captured work that is already saved in Heddle should not make the thread coordination look blocked: {status}"
-    );
-    assert_ne!(
-        status["thread_state"], "blocked",
-        "captured work that only needs a Git checkpoint should not rewrite lifecycle as blocked: {status}"
-    );
-    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
-    assert!(
-        status["verification"]["recommended_action_template"]["required_inputs"]
-            .as_array()
-            .is_some_and(|inputs| !inputs.is_empty()),
-        "templated checkpoint advice must stay display-only until a message is supplied: {status}"
-    );
-    assert_eq!(
-        status["recovery_commands"],
-        serde_json::json!(["heddle commit -m \"...\""])
-    );
-    assert_eq!(
-        status["recovery_action_templates"], status["verification"]["recovery_action_templates"],
-        "top-level status recovery templates should match verification so agents do not have to mine nested state: {status}"
-    );
-    assert_eq!(
-        status["recovery_action_templates"][0]["argv_template"],
-        heddle_argv_json(["commit", "-m", "<message>"]),
-        "templated commit recovery should be machine-fillable at top level: {status}"
-    );
-    let thread_list = json_value(temp.path(), &["thread", "list", "--output", "json"]);
-    assert_eq!(
-        thread_list["recommended_action"], "heddle commit -m \"...\"",
-        "thread list should use the same verification blocker as status: {thread_list}"
-    );
-    assert_eq!(
-        thread_list["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["commit", "-m", "<message>"]),
-        "thread list top-level placeholder action should be machine-fillable: {thread_list}"
-    );
-    assert_eq!(
-        thread_list["recovery_action_templates"], status["recovery_action_templates"],
-        "thread list recovery templates should match status/verify: {thread_list}"
-    );
-    let workspace = json_value(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(
-        workspace["recommended_action"], "heddle commit -m \"...\"",
-        "workspace should use the same verification blocker as status: {workspace}"
-    );
-    assert_eq!(
-        workspace["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["commit", "-m", "<message>"]),
-        "workspace top-level placeholder action should be machine-fillable: {workspace}"
-    );
-    assert_eq!(status["verification"]["worktree_dirty"], true);
-    assert_eq!(status["changed_path_count"], 1);
-    assert_eq!(
-        status["changes"]["modified"],
-        serde_json::json!(["tracked.txt"])
-    );
-    assert!(
-        status["verification"]["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|check| check["status"] == "needs_checkpoint"
-                && check["details"]["dirty_paths"] == "tracked.txt"),
-        "verification should name the Git-dirty path already captured by Heddle: {status}"
-    );
-
-    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
-    assert!(
-        status_text.contains("Saved in Heddle")
-            && status_text.contains("heddle commit")
-            && !status_text.contains("Changed paths: 0")
-            && !status_text.contains("Coordination: blocked")
-            && !status_text.contains("Lifecycle: blocked"),
-        "captured-but-not-checkpointed status should feel saved locally, not blocked: {status_text}"
-    );
-
-    let verify = json_value(temp.path(), &["verify", "--output", "json"]);
-    assert_eq!(verify["status"], "needs_checkpoint");
-    assert_eq!(verify["recommended_action"], "heddle commit -m \"...\"");
-    assert!(
-        verify["recommended_action_template"]["required_inputs"]
-            .as_array()
-            .is_some_and(|inputs| !inputs.is_empty()),
-        "templated checkpoint advice must stay display-only until a message is supplied: {verify}"
-    );
-    assert!(
-        verify["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|check| check["name"] == "Worktree"
-                && check["status"] == "needs_checkpoint"
-                && check["details"]["dirty_paths"] == "tracked.txt"),
-        "verify JSON should expose dirty-path details at the top-level check surface: {verify}"
-    );
-
-    let commit = heddle_output(
-        &[
-            "commit",
-            "-m",
-            "checkpoint captured work",
-            "--output",
-            "text",
-        ],
-        Some(temp.path()),
-    )
-    .expect("commit should run");
-    assert!(
-        commit.status.success(),
-        "commit should checkpoint already captured work: stdout={} stderr={}",
-        String::from_utf8_lossy(&commit.stdout),
-        String::from_utf8_lossy(&commit.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&commit.stdout);
-    assert!(
-        stdout.contains("Committed as Git commit") && stdout.contains("Heddle state:"),
-        "captured-but-not-checkpointed commit should complete the checkpoint: {stdout}"
-    );
-    let clean_after_commit = json_value(temp.path(), &["verify", "--output", "json"]);
-    assert_eq!(
-        clean_after_commit["verified"], true,
-        "commit should restore verify after checkpointing captured work: {clean_after_commit}"
-    );
-
-    std::fs::write(temp.path().join("tracked.txt"), "captured again\n").unwrap();
-    let capture_again = json_value(
-        temp.path(),
-        &["capture", "-m", "captured again", "--output", "json"],
-    );
-    let captured_again = capture_again["state_id"]
-        .as_str()
-        .expect("capture should report a change id")
-        .to_string();
-    let commit_json = heddle_output(
-        &[
-            "commit",
-            "-m",
-            "json checkpoint captured work",
-            "--output",
-            "json",
-        ],
-        Some(temp.path()),
-    )
-    .expect("commit json should run");
-    assert!(
-        commit_json.status.success(),
-        "json commit should checkpoint already captured work"
-    );
-    let committed: serde_json::Value = inject_post_verification_at(
-        temp.path(),
-        &["commit"],
-        serde_json::from_slice(&commit_json.stdout)
-            .expect("captured-but-not-checkpointed commit should emit JSON success"),
-    );
-    assert_eq!(committed["state_id"], captured_again);
-    assert_eq!(committed["output_kind"], "commit");
-    assert_eq!(committed["action"], "commit");
-    assert_eq!(committed["status"], "committed");
-    assert_eq!(committed["verification"]["verified"], true);
-
-    let clean = json_value(temp.path(), &["verify", "--output", "json"]);
-    assert_eq!(
-        clean["verified"], true,
-        "commit should restore verify: {clean}"
-    );
-    let git_short = std::process::Command::new("git")
-        .args(["status", "--short"])
-        .current_dir(temp.path())
-        .output()
-        .expect("git status should run");
-    assert!(
-        git_short.status.success(),
-        "git status should succeed: {}",
-        String::from_utf8_lossy(&git_short.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&git_short.stdout).trim().is_empty(),
-        "commit should leave Git clean: {}",
-        String::from_utf8_lossy(&git_short.stdout)
-    );
+    assert_eq!(status["verification"]["verified"], true);
+    assert_eq!(status["changed_path_count"], 0);
 }
-
 #[test]
 fn verify_reports_machine_contract_coverage() {
     let temp = TempDir::new().unwrap();
@@ -3074,7 +2827,7 @@ fn verify_text_reports_runtime_contract_cleanly_and_blocked_checks_honestly() {
 }
 
 #[test]
-fn commit_without_default_remote_does_not_recommend_unconfigured_push() {
+fn capture_without_default_remote_does_not_recommend_unconfigured_push() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
@@ -3083,37 +2836,29 @@ fn commit_without_default_remote_does_not_recommend_unconfigured_push() {
     heddle(&["init"], Some(temp.path())).unwrap();
 
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
-    heddle(&["capture", "-m", "local checkpoint"], Some(temp.path())).unwrap();
-    let commit_text = heddle(
-        &["commit", "-m", "local checkpoint", "--output", "text"],
+    let capture_text = heddle(
+        &["capture", "-m", "local checkpoint", "--output", "text"],
         Some(temp.path()),
     )
     .unwrap();
     assert!(
-        !commit_text.contains("Next: heddle push"),
-        "commit should not recommend a default push when no default remote is configured: {commit_text}"
+        !capture_text.contains("Next: heddle push"),
+        "capture should not recommend a default push when no default remote is configured: {capture_text}"
     );
 
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed again\n").unwrap();
-    heddle(
-        &["capture", "-m", "local checkpoint json"],
-        Some(temp.path()),
-    )
-    .unwrap();
-    let commit_json = json_value(
+    let capture_json = json_value(
         temp.path(),
-        &["commit", "-m", "local checkpoint json", "--output", "json"],
+        &["capture", "-m", "local checkpoint json", "--output", "json"],
     );
-    assert_eq!(commit_json["next_action"], Value::Null);
-    assert_eq!(commit_json["next_action_argv"], Value::Null);
-    assert_eq!(commit_json["next_action_template"], Value::Null);
-    assert_eq!(commit_json["recommended_action"], Value::Null);
-    assert_eq!(commit_json["recommended_action_argv"], Value::Null);
-    assert_eq!(commit_json["recommended_action_template"], Value::Null);
-    assert!(commit_json.get("next").is_none());
-    assert!(commit_json.get("next_argv").is_none());
-    assert!(commit_json.get("next_template").is_none());
-    assert_eq!(commit_json["verification"]["verified"], true);
+    assert_eq!(capture_json["next_action"], Value::Null);
+    assert_eq!(capture_json["next_action_template"], Value::Null);
+    assert_eq!(capture_json["recommended_action"], Value::Null);
+    assert_eq!(capture_json["recommended_action_template"], Value::Null);
+    assert!(capture_json.get("next").is_none());
+    assert!(capture_json.get("next_argv").is_none());
+    assert!(capture_json.get("next_template").is_none());
+    assert_eq!(capture_json["verification"]["verified"], true);
 }
 
 #[test]
@@ -3122,130 +2867,47 @@ fn core_mutations_emit_post_verification_in_json() {
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "seed\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
-
     heddle(&["init"], Some(temp.path())).unwrap();
 
     std::fs::write(temp.path().join("tracked.txt"), "captured\n").unwrap();
-    let capture = json_value(
+    let first = json_value(
         temp.path(),
         &["capture", "-m", "captured", "--output", "json"],
     );
-    assert_eq!(capture["status"], "captured");
-    assert_eq!(capture["output_kind"], "capture");
-    assert_eq!(capture["action"], "capture");
-    assert_schema_declares_runtime_top_level(&["capture"], &capture);
-    assert_eq!(
-        capture["verification"]["status"], "needs_checkpoint",
-        "capture should prove the post-capture Git-overlay state needs a checkpoint: {capture}"
-    );
-    assert_eq!(
-        capture["verification"]["recommended_action"],
-        "heddle commit -m \"...\""
-    );
-    assert_eq!(
-        capture["next_action"], capture["verification"]["recommended_action"],
-        "capture should promote post-capture verify advice to the top-level next action: {capture}"
-    );
-    assert_eq!(
-        capture["recommended_action"], capture["verification"]["recommended_action"],
-        "capture should promote post-capture verify advice to the top-level recommendation: {capture}"
-    );
-    assert!(
-        capture["verification"]["recommended_action_template"]["required_inputs"]
-            .as_array()
-            .is_some_and(|inputs| !inputs.is_empty()),
-        "capture's post-verify checkpoint template must be display-only: {capture}"
-    );
-    assert_eq!(
-        capture["recommended_action_template"]["argv_template"],
-        capture["verification"]["recommended_action_template"]["argv_template"],
-        "capture top-level argv should match the promoted verify action: {capture}"
-    );
-    assert_eq!(
-        capture["recommended_action_template"],
-        capture["verification"]["recommended_action_template"],
-        "display-only capture recommendation should carry matching top-level template metadata: {capture}"
-    );
-    assert_eq!(
-        capture["next_action_template"]["argv_template"],
-        capture["recommended_action_template"]["argv_template"],
-        "capture next_action should carry matching argv metadata: {capture}"
-    );
-    assert_eq!(
-        capture["next_action_template"], capture["recommended_action_template"],
-        "capture next_action should carry matching template metadata: {capture}"
-    );
-    let status_after_capture = json_value(temp.path(), &["status", "--output", "json"]);
-    assert_eq!(
-        status_after_capture["state"]["state_id"], capture["state_id"],
-        "status should describe the captured state: {status_after_capture}"
-    );
-    assert_eq!(
-        status_after_capture["state"]["content_hash"], capture["content_hash"],
-        "content_hash should mean the same state hash in capture and status: {status_after_capture}"
-    );
-    let log_after_capture = json_value(temp.path(), &["log", "--output", "json"]);
-    let captured_log_entry = log_after_capture["states"]
-        .as_array()
-        .unwrap_or_else(|| panic!("log states should be an array: {log_after_capture}"))
-        .iter()
-        .find(|entry| entry["state_id"] == capture["state_id"])
-        .unwrap_or_else(|| panic!("log should include captured state: {log_after_capture}"));
-    assert_eq!(
-        captured_log_entry["content_hash"], capture["content_hash"],
-        "content_hash should mean the same state hash in capture and log: {log_after_capture}"
-    );
+    assert_eq!(first["status"], "captured");
+    assert_eq!(first["output_kind"], "capture");
+    assert_eq!(first["action"], "capture");
+    assert!(first["git_checkpoint"].as_str().is_some());
+    assert_eq!(first["verification"]["verified"], true);
+    assert_eq!(first["verification"]["status"], "clean");
+    assert_schema_declares_runtime_top_level(&["capture"], &first);
 
-    let committed_capture = json_value(
-        temp.path(),
-        &["commit", "-m", "committed capture", "--output", "json"],
-    );
-    assert_eq!(committed_capture["status"], "committed");
-    assert_eq!(committed_capture["output_kind"], "commit");
-    assert_schema_declares_runtime_top_level(&["commit"], &committed_capture);
-    assert_eq!(
-        committed_capture["verification"]["verified"], true,
-        "commit should prove the repo is verified after writing Git: {committed_capture}"
-    );
+    let status = json_value(temp.path(), &["status", "--output", "json"]);
+    assert_eq!(status["state"]["state_id"], first["state_id"]);
+    assert_eq!(status["state"]["content_hash"], first["content_hash"]);
 
-    std::fs::write(temp.path().join("tracked.txt"), "committed\n").unwrap();
-    json_value(
+    std::fs::write(temp.path().join("tracked.txt"), "captured again\n").unwrap();
+    let second = json_value(
         temp.path(),
-        &["capture", "-m", "committed", "--output", "json"],
+        &["capture", "-m", "captured again", "--output", "json"],
     );
-    let commit = json_value(
-        temp.path(),
-        &["commit", "-m", "committed", "--output", "json"],
-    );
-    assert_eq!(commit["status"], "committed");
-    assert_eq!(commit["output_kind"], "commit");
-    assert_eq!(commit["action"], "commit");
-    assert_schema_declares_runtime_top_level(&["commit"], &commit);
-    assert_eq!(
-        commit["verification"]["verified"], true,
-        "commit should prove its composite capture+checkpoint post-state: {commit}"
-    );
-    let undo = json_value(temp.path(), &["undo", "--output", "json"]);
+    let second_git = second["git_checkpoint"]
+        .as_str()
+        .expect("capture should report its Git checkpoint")
+        .to_string();
+    let undo = json_value(temp.path(), &["undo", "--hard", "--output", "json"]);
     assert_eq!(undo["output_kind"], "undo");
     assert_eq!(undo["status"], "completed");
     assert_schema_declares_runtime_top_level(&["undo"], &undo);
-    assert!(undo.get("next_action").is_some());
-    assert!(undo.get("next_action_template").is_some());
-    assert!(undo.get("recommended_action").is_some());
-    assert!(undo.get("recommended_action_template").is_some());
-    assert_eq!(undo["verification"]["verified"], false);
-    assert_eq!(
-        undo["verification"]["recommended_action"], "heddle commit -m \"...\"",
-        "undoing a Git checkpoint should honestly report the restored capture as pending commit: {undo}"
+    assert_ne!(
+        git_stdout_for_json_contract(temp.path(), &["rev-parse", "HEAD"]),
+        second_git,
+        "one undo must rewind the capture and its Git checkpoint together"
     );
 }
-
 #[test]
 fn plain_git_core_save_refusals_do_not_initialize_heddle() {
-    for (verb, args) in [
-        ("capture", vec!["capture", "-m", "should not init"]),
-        ("commit", vec!["commit", "-m", "should not init"]),
-    ] {
+    for (verb, args) in [("capture", vec!["capture", "-m", "should not init"])] {
         let temp = TempDir::new().unwrap();
         init_git_repo_for_json_contract(temp.path(), "main");
         std::fs::write(temp.path().join("tracked.txt"), "seed\n").unwrap();
@@ -3343,31 +3005,17 @@ fn dirty_git_repo_after_init_can_save_without_adoption() {
         &["capture", "-m", "save dirty work", "--output", "json"],
     );
     assert_eq!(capture["status"], "captured");
-    assert_eq!(capture["verification"]["status"], "needs_checkpoint");
-    assert_eq!(
-        capture["verification"]["recommended_action"],
-        "heddle commit -m \"...\""
-    );
-
-    let commit = json_value(
-        temp.path(),
-        &["commit", "-m", "save dirty work", "--output", "json"],
-    );
-    assert_eq!(commit["status"], "committed");
-    assert_eq!(commit["verification"]["status"], "clean");
+    assert!(capture["git_checkpoint"].as_str().is_some());
+    assert_eq!(capture["verification"]["status"], "clean");
 
     std::fs::write(temp.path().join("tracked.txt"), "dirty again\n").unwrap();
-    json_value(
+    let capture = json_value(
         temp.path(),
         &["capture", "-m", "save dirty work again", "--output", "json"],
     );
-    let commit = json_value(
-        temp.path(),
-        &["commit", "-m", "save dirty work again", "--output", "json"],
-    );
-    assert_eq!(commit["status"], "committed");
-    assert_eq!(commit["verification"]["status"], "clean");
-    assert_eq!(commit["recommended_action"], Value::Null);
+    assert_eq!(capture["status"], "captured");
+    assert_eq!(capture["verification"]["status"], "clean");
+    assert_eq!(capture["recommended_action"], Value::Null);
 
     let checkout = sibling_checkout_path(temp.path(), "improvements");
     let checkout_str = checkout.to_str().expect("utf-8 path");
@@ -6738,7 +6386,7 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         );
     }
     // One ranked list: the remaining non-hidden roots render too.
-    for verb in ["commit", "thread", "adopt", "verify"] {
+    for verb in ["thread", "adopt", "verify"] {
         assert!(
             stdout.contains(&format!("\n  {verb}")),
             "non-hidden root `{verb}` should be on the ranked screen: {stdout}"
@@ -6854,28 +6502,6 @@ fn field_study_1435_native_help_capture_commit_exits() {
     assert!(
         !capture_err.contains("tip: in Git Overlay, run heddle commit"),
         "native capture must not print the overlay tip: {capture_err}"
-    );
-
-    let commit = heddle_output(&["commit"], Some(temp.path())).expect("invoke native commit");
-    assert_eq!(
-        commit.status.code(),
-        Some(65),
-        "native commit must stay a semantic refuse: stdout={} stderr={}",
-        String::from_utf8_lossy(&commit.stdout),
-        String::from_utf8_lossy(&commit.stderr)
-    );
-    let commit_err = String::from_utf8_lossy(&commit.stderr);
-    assert!(
-        commit_err.contains("`heddle commit` writes Git-overlay source history"),
-        "native commit must name the overlay boundary: {commit_err}"
-    );
-    assert!(
-        !commit_err.contains("Next: heddle capture"),
-        "Next must not tell an already-captured native repo to capture again: {commit_err}"
-    );
-    assert!(
-        commit_err.contains("Next: heddle status"),
-        "already-captured native commit should point at status: {commit_err}"
     );
 
     let missing_intent =
@@ -7024,9 +6650,7 @@ fn thread_show_hides_agent_internals_until_verbose() {
     )
     .unwrap();
     assert!(
-        verbose.contains("Actor: test-provider/test-model")
-            && verbose.contains("Session:")
-            && verbose.contains("Harness:"),
+        verbose.contains("Actor:") && verbose.contains("Session:") && verbose.contains("Harness:"),
         "verbose thread show should expose agent internals for debugging: {verbose}"
     );
     assert!(
@@ -7331,17 +6955,6 @@ fn command_catalog_exposes_public_surface_for_agents() {
     assert_eq!(push["command_action"]["executable"], true);
     assert_eq!(push["command_action"]["argv"], heddle_argv_json(["push"]));
     assert_eq!(push["command_action"]["template"], Value::Null);
-    let commit = commands
-        .iter()
-        .find(|entry| entry["display"] == "commit")
-        .expect("commit command should be cataloged");
-    assert_eq!(commit["command_action"]["action"], "heddle commit");
-    assert_eq!(commit["command_action"]["executable"], true);
-    assert_eq!(
-        commit["command_action"]["argv"],
-        heddle_argv_json(["commit"])
-    );
-    assert_eq!(commit["command_action"]["template"], Value::Null);
     let start = commands
         .iter()
         .find(|entry| entry["display"] == "start")
@@ -7431,19 +7044,19 @@ fn command_catalog_exposes_public_surface_for_agents() {
                 && option["hidden"] == true),
         "catalog should expose hidden global --op-id as machine metadata; use per-command op_id_behavior for acceptance: {json}"
     );
-    let commit = commands
+    let capture = commands
         .iter()
-        .find(|entry| entry["display"] == "commit")
-        .expect("commit should be cataloged");
+        .find(|entry| entry["display"] == "capture")
+        .expect("capture should be cataloged");
     assert!(
-        commit["options"]
+        capture["options"]
             .as_array()
             .unwrap()
             .iter()
             .any(|option| option["long"] == "op-id"
                 && option["global"] == true
                 && option["hidden"] == true),
-        "op-id capable commands should expose --op-id as a per-command option: {commit}"
+        "op-id capable commands should expose --op-id as a per-command option: {capture}"
     );
     let status = commands
         .iter()
@@ -7809,9 +7422,7 @@ fn help_for_verb_prefixes_usage_with_heddle() {
     // `heddle help status` falls through to status's clap-derived help.
     // The Usage line MUST start with `Usage: heddle status` — saying just
     // `Usage: status` would suggest the user can run `status` standalone.
-    for verb in [
-        "status", "capture", "commit", "log", "undo", "start", "init",
-    ] {
+    for verb in ["status", "capture", "log", "undo", "start", "init"] {
         let output = heddle_help(&["help", verb]);
         assert!(
             output.contains(&format!("Usage: heddle {verb}")),
@@ -7838,17 +7449,16 @@ fn help_for_verb_includes_visible_global_flags() {
 
 #[test]
 fn op_id_help_is_visible_only_for_supported_commands() {
-    let commit = heddle_help(&["commit", "--help"]);
+    let capture = heddle_help(&["capture", "--help"]);
     assert!(
-        commit.contains("--op-id <UUID>"),
-        "op-id capable command help should expose --op-id: {commit}"
+        capture.contains("--op-id <UUID>"),
+        "op-id capable command help should expose --op-id: {capture}"
     );
     assert!(
-        commit.contains("Commits the complete captured tree")
-            && commit.contains("replaces the Git index with that tree")
-            && !commit.contains("--all")
-            && !commit.contains("--no-all"),
-        "commit help should explain the captured-state contract: {commit}"
+        capture.contains("Git Overlay checkpoint")
+            && !capture.contains("--all")
+            && !capture.contains("--no-all"),
+        "capture help should explain the one-save contract: {capture}"
     );
 
     let init = heddle_help(&["help", "init"]);
@@ -7968,7 +7578,7 @@ fn everyday_commands_have_all_required_help_entrypoints() {
         .collect::<std::collections::BTreeSet<_>>();
 
     for verb in [
-        "status", "diff", "commit", "start", "ready", "land", "undo", "verify", "doctor",
+        "status", "diff", "capture", "start", "ready", "land", "undo", "verify", "doctor",
     ] {
         assert!(
             everyday_set.contains(verb),
@@ -9450,7 +9060,6 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         "thread list",
         "maintenance fsck repair git",
         "capture",
-        "commit",
         "agent presence list",
         "agent presence show",
         "agent presence explain",
@@ -9918,7 +9527,6 @@ fn default_undo_text_hides_batches_and_checkpoint_ids_until_verbose() {
 
     std::fs::write(temp.path().join("tracked.txt"), "seed\nchanged\n").unwrap();
     heddle(&["capture", "-m", "write saved change"], Some(temp.path())).unwrap();
-    heddle(&["commit", "-m", "write saved change"], Some(temp.path())).unwrap();
 
     let list = heddle(&["--output", "text", "undo", "--list"], Some(temp.path()))
         .expect("undo --list text");
@@ -10584,7 +10192,6 @@ fn read_commands_gate_repository_preamble_on_verbose() {
     .unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
     heddle(&["capture", "-m", "checkpoint"], Some(temp.path())).unwrap();
-    heddle(&["commit", "-m", "checkpoint"], Some(temp.path())).unwrap();
 
     for (label, default_args, verbose_args) in [
         (

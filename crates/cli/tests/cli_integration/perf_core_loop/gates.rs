@@ -77,7 +77,7 @@ pub(super) fn enforce_contract(results: &[CaseResult]) {
         if result
             .samples
             .iter()
-            .any(|sample| sample.counters.network_client_initialized)
+            .any(|sample| sample.counters.network_client_initializations > 0)
         {
             failures.push(format!(
                 "zero-network gate: {} @ {} paths initialized a network client",

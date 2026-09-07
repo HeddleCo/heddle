@@ -2,11 +2,10 @@
 //! Local confidential-env store store (ADR 0051 / heddle#999).
 //!
 //! Typed roots, immutable versions, recipient wrapping, and signed lifecycle
-//! records live in the store. The [`PolicyBroker`] authorizes scoped,
-//! time-boxed decrypt requests and returns **values, never key material**.
-//! `heddle env run` is the only CLI path that consumes those values — it
-//! injects them into a child process. Same-UID callers without OS isolation
-//! are cooperative, not an adversarial boundary.
+//! records live in the store. The [`PolicyBroker`] resolves scoped values and
+//! owns the child command through exit, returning neither values nor key
+//! material. Same-UID callers without OS isolation are cooperative, not an
+//! adversarial boundary.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
@@ -14,35 +13,26 @@ mod broker;
 mod codec;
 mod error;
 mod ids;
-#[cfg(unix)]
-mod ipc;
 mod store;
 mod types;
 
-pub use broker::{
-    DecryptGrant, DecryptPurpose, DecryptRequest, PolicyBroker, ProviderHandle, RunSecrets,
-};
-pub use error::{BrokerDenialReason, Result, EnvStoreError};
+pub use broker::PolicyBroker;
+pub use error::{EnvStoreError, Result};
 pub use ids::{
-    AuditRecordId, CiphertextId, LifecycleRecordId, RecipientId, EnvProfileId,
-    EnvProfileVersionId,
+    AuditRecordId, CiphertextId, EnvProfileId, EnvProfileVersionId, LifecycleRecordId, RecipientId,
 };
-#[cfg(unix)]
-pub use ipc::{
-    BrokerRequest, BrokerResponse, BrokerSlotValue, bind_broker_socket, broker_socket_path,
-    handle_connection, request_run_unwrap, serve_once,
-};
-pub use store::{EnvStore, SlotWrite, confidential_runtime_source_history_laws};
+pub use store::{EnvStore, SlotWrite};
 pub use types::{
-    AuditEventKind, AuditRecord, FacetKindWire, LifecycleRecord, LifecycleStatus, ProfileMetadata,
-    ProviderCapability, RESERVED_MATERIALIZATION_PATHS, ENV_STORE_SCHEMA_VERSION,
-    RecipientDescriptor, EnvProfileRef, EnvProfileVersion, SignatureBlock, SlotMetadata,
-    SlotRecord, WrappedDekRecord, is_reserved_materialization_path,
-    reserved_materialization_on_disk,
+    AuditEventKind, AuditRecord, ENV_STORE_SCHEMA_VERSION, EnvProfileRef, EnvProfileVersion,
+    FacetKindWire, LifecycleRecord, LifecycleStatus, ProfileMetadata, ProviderCapability,
+    RESERVED_MATERIALIZATION_PATHS, RecipientDescriptor, SignatureBlock, SlotRecord,
+    WrappedDekRecord, is_reserved_materialization_path,
 };
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use crypto::{Ed25519Signer, SoftwareRecipientSecret};
     use heddle_object_model::object::{Attribution, FacetKind, Principal, StateId};
     use tempfile::TempDir;
@@ -81,25 +71,41 @@ mod tests {
         let profile = store
             .create_profile(name, slots, recipient.recipient_id, attribution(), &signer)
             .expect("create");
-        let mut broker = PolicyBroker::new(store, attribution());
-        broker.hold_software_secret(recipient.recipient_id, secret.clone());
+        let broker = PolicyBroker::new(store, attribution());
         (temp, broker, signer, profile.profile_id, secret)
     }
 
-    fn run_request(profile: &str, slots: &[&str], expires_at_ms: i64) -> DecryptRequest {
-        DecryptRequest {
-            profile: profile.to_string(),
-            slots: slots.iter().map(|slot| (*slot).to_string()).collect(),
-            expires_at_ms,
-            purpose: DecryptPurpose::Run,
-            caller: "test".to_string(),
-        }
+    fn requested_slots(slots: &[&str]) -> Vec<String> {
+        slots.iter().map(|slot| (*slot).to_string()).collect()
     }
 
-    /// A valid near-future expiry within the broker's TTL ceiling. The broker
-    /// reads its own clock, so a request must expire relative to real time.
-    fn future() -> i64 {
-        crate::store::now_ms().expect("now") + 60_000
+    #[cfg(unix)]
+    fn success_command() -> Command {
+        Command::new("true")
+    }
+
+    #[cfg(windows)]
+    fn success_command() -> Command {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "exit", "0"]);
+        command
+    }
+
+    #[cfg(unix)]
+    fn env_assertion_command() -> Command {
+        let mut command = Command::new("sh");
+        command.args(["-c", "test \"$DATABASE_URL\" = \"super-secret-value\""]);
+        command
+    }
+
+    #[cfg(windows)]
+    fn env_assertion_command() -> Command {
+        let mut command = Command::new("cmd");
+        command.args([
+            "/C",
+            "if \"%DATABASE_URL%\"==\"super-secret-value\" (exit /B 0) else (exit /B 1)",
+        ]);
+        command
     }
 
     #[test]
@@ -138,9 +144,8 @@ mod tests {
         }
         assert!(saw_ciphertext_file, "expected dedicated ciphertext files");
 
-        let listed = store.list_slots(profile.profile_id).expect("list");
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].name, "DATABASE_URL");
+        let listed = store.list_profiles().expect("list");
+        assert_eq!(listed[0].slot_names, vec!["DATABASE_URL"]);
         let decrypted = store
             .decrypt_slot(
                 profile.profile_id,
@@ -214,10 +219,19 @@ mod tests {
             )
             .expect("update");
         assert_ne!(updated.head, first_head);
-        let old = store.load_state(first_head).expect("old state");
         let new = store.load_state(updated.head).expect("new state");
-        assert_eq!(old.lifecycle, LifecycleStatus::Superseded);
-        assert_eq!(new.lifecycle, LifecycleStatus::Active);
+        assert_eq!(
+            store
+                .effective_lifecycle(profile.profile_id, first_head)
+                .expect("old lifecycle"),
+            LifecycleStatus::Superseded
+        );
+        assert_eq!(
+            store
+                .effective_lifecycle(profile.profile_id, updated.head)
+                .expect("new lifecycle"),
+            LifecycleStatus::Active
+        );
         assert_eq!(new.parent, Some(first_head));
         assert_eq!(new.version, 2);
 
@@ -294,7 +308,11 @@ mod tests {
 
     #[test]
     fn facet_cannot_be_selected_as_source_history() {
-        assert!(confidential_runtime_source_history_laws().is_none());
+        assert!(
+            FacetKind::ConfidentialRuntime
+                .source_history_laws()
+                .is_none()
+        );
         assert!(!FacetKind::ConfidentialRuntime.git_projection_visits());
         assert!(!FacetKind::ConfidentialRuntime.may_checkout());
         assert!(!FacetKind::ConfidentialRuntime.may_land());
@@ -346,32 +364,24 @@ mod tests {
     #[test]
     fn broker_run_injects_values_and_audits_without_plaintext() {
         let plaintext = b"super-secret-value";
-        let (temp, broker, signer, _id, _secret) = seeded_broker(
+        let (temp, mut broker, signer, _id, _secret) = seeded_broker(
             "production",
             vec![SlotWrite {
                 name: "DATABASE_URL".to_string(),
                 value: plaintext.to_vec(),
             }],
         );
-        let grant = broker
-            .authorize(
-                &run_request("production", &["DATABASE_URL"], future()),
+        let status = broker
+            .run(
+                "production",
+                &requested_slots(&["DATABASE_URL"]),
                 &signer,
+                env_assertion_command(),
             )
-            .expect("authorize");
-        let secrets = broker.unwrap_for_run(grant, &signer).expect("unwrap");
-        let pairs = secrets.into_env_pairs().expect("utf8");
-        assert_eq!(
-            pairs,
-            vec![("DATABASE_URL".to_string(), "super-secret-value".to_string())]
-        );
+            .expect("run child");
+        assert!(status.success(), "child did not receive the selected slot");
 
         let audit = broker.store().list_audit().expect("audit");
-        assert!(
-            audit
-                .iter()
-                .any(|record| record.event == AuditEventKind::Granted)
-        );
         assert!(
             audit
                 .iter()
@@ -402,23 +412,36 @@ mod tests {
     }
 
     #[test]
-    fn broker_refuses_expired_and_wrong_profile_or_slot() {
-        let (_temp, broker, signer, _id, _secret) = seeded_broker(
+    fn broker_refuses_wrong_profile_or_slot() {
+        let (_temp, mut broker, signer, _id, _secret) = seeded_broker(
             "production",
             vec![SlotWrite {
                 name: "TOKEN".to_string(),
                 value: b"abc".to_vec(),
             }],
         );
-        broker
-            .authorize(&run_request("production", &["TOKEN"], 1), &signer)
-            .expect_err("expired");
-        broker
-            .authorize(&run_request("missing", &["TOKEN"], future()), &signer)
-            .expect_err("wrong profile");
-        broker
-            .authorize(&run_request("production", &["OTHER"], future()), &signer)
-            .expect_err("wrong slot");
+        assert!(
+            broker
+                .run(
+                    "missing",
+                    &requested_slots(&["TOKEN"]),
+                    &signer,
+                    success_command(),
+                )
+                .is_err(),
+            "wrong profile"
+        );
+        assert!(
+            broker
+                .run(
+                    "production",
+                    &requested_slots(&["OTHER"]),
+                    &signer,
+                    success_command(),
+                )
+                .is_err(),
+            "wrong slot"
+        );
 
         let denied = broker
             .store()
@@ -427,11 +450,11 @@ mod tests {
             .into_iter()
             .filter(|record| record.event == AuditEventKind::Denied)
             .count();
-        assert!(denied >= 3, "expected denied audit rows, got {denied}");
+        assert!(denied >= 2, "expected denied audit rows, got {denied}");
     }
 
     #[test]
-    fn broker_refuses_grant_reuse_and_missing_handle() {
+    fn broker_refuses_missing_handle() {
         let (_temp, store) = open_store();
         let signer = signer();
         let (recipient, secret) = store
@@ -449,79 +472,28 @@ mod tests {
                 &signer,
             )
             .expect("create");
-        let empty = PolicyBroker::new(store, attribution());
-        empty
-            .authorize(&run_request("production", &["TOKEN"], future()), &signer)
-            .expect_err("no handle");
-
-        let (_temp, broker, signer, _id, _held) = seeded_broker(
-            "production",
-            vec![SlotWrite {
-                name: "TOKEN".to_string(),
-                value: b"abc".to_vec(),
-            }],
-        );
-        let grant = broker
-            .authorize(&run_request("production", &["TOKEN"], future()), &signer)
-            .expect("authorize");
-        let replay = grant.clone();
-        drop(broker.unwrap_for_run(grant, &signer).expect("first unwrap"));
+        let key_path = store
+            .root()
+            .join("keys")
+            .join(recipient.recipient_id.to_hex());
+        std::fs::remove_file(key_path).expect("remove recipient secret");
+        let mut empty = PolicyBroker::new(store, attribution());
         assert!(
-            broker.unwrap_for_run(replay, &signer).is_err(),
-            "grant is single-use"
+            empty
+                .run(
+                    "production",
+                    &requested_slots(&["TOKEN"]),
+                    &signer,
+                    success_command(),
+                )
+                .is_err(),
+            "no handle"
         );
         let _ = secret;
     }
 
     #[test]
-    fn reserved_materialization_paths_are_detected_on_disk() {
-        let temp = TempDir::new().expect("tempdir");
-        assert!(reserved_materialization_on_disk(temp.path()).is_none());
-        std::fs::write(temp.path().join(".env"), b"LEAK=1").expect("write");
-        assert_eq!(
-            reserved_materialization_on_disk(temp.path()),
-            Some(".env")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn ipc_run_unwrap_returns_values_and_denies_expired() {
-        let (_temp, broker, signer, _id, _secret) = seeded_broker(
-            "production",
-            vec![SlotWrite {
-                name: "TOKEN".to_string(),
-                value: b"from-ipc".to_vec(),
-            }],
-        );
-        let listener = bind_broker_socket(broker.store().root()).expect("bind");
-        let socket = broker_socket_path(broker.store().root());
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                serve_once(&listener, &broker, &signer).expect("serve");
-            });
-            let pairs = request_run_unwrap(
-                &socket,
-                &run_request("production", &["TOKEN"], future()),
-            )
-            .expect("ipc unwrap");
-            assert_eq!(pairs, vec![("TOKEN".to_string(), "from-ipc".to_string())]);
-        });
-
-        let listener = bind_broker_socket(broker.store().root()).expect("rebind");
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                serve_once(&listener, &broker, &signer).expect("serve expired");
-            });
-            request_run_unwrap(&socket, &run_request("production", &["TOKEN"], 1))
-                .expect_err("expired ipc");
-        });
-    }
-
-    #[test]
-    fn signed_lifecycle_is_authoritative_over_an_edited_version_field() {
-        // The HIGH finding: flipping the unsigned `lifecycle` field in a
-        // version file must NOT re-enable decrypt — the signed record wins.
+    fn signed_lifecycle_governs_decrypt_listing_and_update() {
         let (_temp, store) = open_store();
         let signer = signer();
         let (recipient, secret) = store
@@ -542,23 +514,68 @@ mod tests {
         store
             .revoke(profile.profile_id, attribution(), &signer)
             .expect("revoke");
-        let head = store.load_profile(profile.profile_id).expect("profile").head;
-        // Attacker rewrites the version file's lifecycle back to Active. The
-        // state id excludes lifecycle, so the file still "decodes".
-        let mut state = store.load_state(head).expect("state");
-        state.lifecycle = LifecycleStatus::Active;
-        std::fs::write(
-            store
-                .root()
-                .join("versions")
-                .join(format!("{}.msgpack", head.to_hex())),
-            crate::codec::encode_state(&state).expect("encode"),
-        )
-        .expect("rewrite");
         let err = store
             .decrypt_slot(profile.profile_id, "TOKEN", recipient.recipient_id, &secret)
-            .expect_err("a revoked version must not decrypt despite an edited field");
+            .expect_err("a revoked version must not decrypt");
         assert!(matches!(err, EnvStoreError::DecryptForbidden(_)), "{err:?}");
+        assert_eq!(
+            store.list_profiles().expect("list")[0].lifecycle,
+            LifecycleStatus::Revoked
+        );
+        store
+            .update_slots(
+                profile.profile_id,
+                vec![SlotWrite {
+                    name: "TOKEN".to_string(),
+                    value: b"replacement".to_vec(),
+                }],
+                attribution(),
+                &signer,
+            )
+            .expect_err("a revoked profile must not update");
+    }
+
+    #[test]
+    fn lifecycle_transitions_do_not_rewrite_version_bytes() {
+        let (_temp, store) = open_store();
+        let signer = signer();
+        let (recipient, _secret) = store
+            .create_software_recipient(&signer, 1)
+            .expect("recipient");
+        let profile = store
+            .create_profile(
+                "p",
+                vec![SlotWrite {
+                    name: "TOKEN".to_string(),
+                    value: b"v".to_vec(),
+                }],
+                recipient.recipient_id,
+                attribution(),
+                &signer,
+            )
+            .expect("create");
+        let path = store
+            .root()
+            .join("versions")
+            .join(format!("{}.msgpack", profile.head.to_hex()));
+        let sealed = std::fs::read(&path).expect("read sealed version");
+
+        store
+            .revoke(profile.profile_id, attribution(), &signer)
+            .expect("revoke");
+        assert_eq!(std::fs::read(&path).expect("read revoked version"), sealed);
+        store
+            .mark_purge_eligible(profile.profile_id, attribution(), &signer)
+            .expect("mark purge eligible");
+        assert_eq!(std::fs::read(&path).expect("read eligible version"), sealed);
+        store
+            .purge(profile.profile_id, attribution(), &signer)
+            .expect("purge");
+        assert_eq!(std::fs::read(&path).expect("read purged version"), sealed);
+        assert_eq!(
+            store.list_profiles().expect("list")[0].lifecycle,
+            LifecycleStatus::Purged
+        );
     }
 
     #[test]
@@ -587,11 +604,14 @@ mod tests {
             .expect("a record")
             .expect("entry")
             .path();
-        let mut record = crate::codec::decode_lifecycle(&std::fs::read(&entry).expect("read"))
-            .expect("decode");
+        let mut record =
+            crate::codec::decode_lifecycle(&std::fs::read(&entry).expect("read")).expect("decode");
         record.to = LifecycleStatus::Purged; // signature no longer covers `to`
-        std::fs::write(&entry, crate::codec::encode_lifecycle(&record).expect("encode"))
-            .expect("rewrite");
+        std::fs::write(
+            &entry,
+            crate::codec::encode_lifecycle(&record).expect("encode"),
+        )
+        .expect("rewrite");
         assert!(
             store
                 .decrypt_slot(profile.profile_id, "TOKEN", recipient.recipient_id, &secret)
@@ -733,8 +753,8 @@ mod tests {
         // leaving its version file orphaned on disk.
         for entry in std::fs::read_dir(store.root().join("lifecycle")).expect("read_dir") {
             let path = entry.expect("entry").path();
-            let record =
-                crate::codec::decode_lifecycle(&std::fs::read(&path).expect("read")).expect("decode");
+            let record = crate::codec::decode_lifecycle(&std::fs::read(&path).expect("read"))
+                .expect("decode");
             if record.state_id == orphan {
                 std::fs::remove_file(&path).expect("remove");
             }

@@ -573,14 +573,13 @@ impl Repository {
         profile.cache_read_ms = cache_read_started.elapsed().as_millis();
         if let Ok(bytes) = cached {
             let cache_decode_started = Instant::now();
-            let decoded = rmp_serde::from_slice::<State>(&bytes);
+            let decoded = State::decode_current_msgpack(&bytes);
             profile.cache_decode_ms = cache_decode_started.elapsed().as_millis();
-            if let Ok(mut state) = decoded {
+            if let Ok(state) = decoded {
                 let cache_validate_started = Instant::now();
                 let matches = state.id() == *id;
                 profile.cache_validate_ms = cache_validate_started.elapsed().as_millis();
                 if matches {
-                    state.state_id = *id;
                     profile.cache_hit = true;
                     return Ok((state, profile));
                 }
@@ -592,7 +591,7 @@ impl Repository {
             .get_state(id)?
             .ok_or(HeddleError::StateNotFound(*id))?;
         profile.store_read_ms = store_read_started.elapsed().as_millis();
-        if let Ok(bytes) = rmp_serde::to_vec_named(&state)
+        if let Ok(bytes) = state.encode_current_msgpack()
             && let Err(error) =
                 objects::fs_atomic::write_file_atomic_reconstructible(&cache_path, &bytes)
         {
@@ -638,7 +637,7 @@ impl Repository {
         tree_chain: &[Tree],
     ) {
         let state_path = self.root().join(".heddle/state/worktree-current-state.bin");
-        if let Ok(bytes) = rmp_serde::to_vec_named(state)
+        if let Ok(bytes) = state.encode_current_msgpack()
             && let Err(error) = fs::write(&state_path, &bytes)
         {
             warn!(path = %state_path.display(), %error, "Could not refresh worktree state cache");

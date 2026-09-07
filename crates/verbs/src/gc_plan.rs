@@ -106,17 +106,6 @@ pub fn gc_pruned_git_mapping_message(removed: usize) -> Option<String> {
     }
 }
 
-/// Bridge Mirror consolidation line when loose objects were packed.
-pub fn gc_consolidated_mirror_message(consolidated: usize) -> Option<String> {
-    if consolidated > 0 {
-        Some(format!(
-            "Consolidated {consolidated} loose Bridge Mirror objects into a pack"
-        ))
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,12 +149,6 @@ mod tests {
             gc_pruned_git_mapping_message(5)
                 .unwrap()
                 .contains("Pruned 5")
-        );
-        assert!(gc_consolidated_mirror_message(0).is_none());
-        assert!(
-            gc_consolidated_mirror_message(7)
-                .unwrap()
-                .contains("Consolidated 7")
         );
     }
 }

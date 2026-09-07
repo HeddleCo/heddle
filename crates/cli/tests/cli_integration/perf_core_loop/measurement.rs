@@ -138,7 +138,10 @@ pub(super) struct Counters {
     pub ref_reads: u64,
     pub oplog_reads: u64,
     pub repository_opens: u64,
-    pub network_client_initialized: bool,
+    pub network_client_initializations: u64,
+    pub network_streams_opened: u64,
+    pub network_bytes_sent: u64,
+    pub network_bytes_received: u64,
     pub ancestors_visited: u64,
     pub history_objects_decoded: u64,
 }
@@ -200,7 +203,10 @@ impl Counters {
         self.ref_reads += other.ref_reads;
         self.oplog_reads += other.oplog_reads;
         self.repository_opens += other.repository_opens;
-        self.network_client_initialized |= other.network_client_initialized;
+        self.network_client_initializations += other.network_client_initializations;
+        self.network_streams_opened += other.network_streams_opened;
+        self.network_bytes_sent += other.network_bytes_sent;
+        self.network_bytes_received += other.network_bytes_received;
         self.ancestors_visited += other.ancestors_visited;
         self.history_objects_decoded += other.history_objects_decoded;
     }
@@ -278,7 +284,7 @@ impl CaseResult {
             self.metric(|sample| sample.network_ms),
         );
         println!(
-            "COUNTERS case={} paths={} dirs_scanned={} dirs_skipped={} files_hashed={} monitor_paths={} object_decodes={} ref_reads={} oplog_reads={} repo_opens={} network_initialized={} ancestors_visited={} history_objects_decoded={}",
+            "COUNTERS case={} paths={} dirs_scanned={} dirs_skipped={} files_hashed={} monitor_paths={} object_decodes={} ref_reads={} oplog_reads={} repo_opens={} network_clients={} network_streams={} network_sent={} network_received={} ancestors_visited={} history_objects_decoded={}",
             self.kind.name(),
             self.path_count,
             self.counter(|value| value.directories_scanned),
@@ -289,9 +295,10 @@ impl CaseResult {
             self.counter(|value| value.ref_reads),
             self.counter(|value| value.oplog_reads),
             self.counter(|value| value.repository_opens),
-            self.samples
-                .iter()
-                .any(|sample| sample.counters.network_client_initialized),
+            self.counter(|value| value.network_client_initializations),
+            self.counter(|value| value.network_streams_opened),
+            self.counter(|value| value.network_bytes_sent),
+            self.counter(|value| value.network_bytes_received),
             self.counter(|value| value.ancestors_visited),
             self.counter(|value| value.history_objects_decoded),
         );

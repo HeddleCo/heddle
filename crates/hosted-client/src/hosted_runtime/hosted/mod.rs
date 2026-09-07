@@ -66,6 +66,7 @@ pub use human::{HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion
 pub use hydration::register_hosted_factory;
 use iroh::{Endpoint, EndpointAddr};
 pub use methods::HostedRoutes;
+use objects::{NoopWarnings, Warning, WarningSink};
 use prost::Message;
 pub use session::{HostedAuthMode, HostedSession};
 #[cfg(test)]
@@ -148,13 +149,17 @@ impl PullMaterialization {
     }
 }
 
-/// One reusable native connection to a terminating Weft application endpoint.
+/// Quiet embeddable Iroh Adapter for one terminating Weft application endpoint.
+///
+/// Domain operations return data and emit structured observations through
+/// caller-installed sinks; terminal presentation belongs to the CLI.
 #[derive(Clone)]
 pub struct HostedClient {
     connection: Arc<HostedConnection>,
     context: CallContextFactory,
     transport: helpers::HostedTransportPolicy,
     on_human_signature: Option<HumanSignatureCallback>,
+    warnings: Arc<dyn WarningSink>,
     server_key: Option<String>,
 }
 
@@ -193,6 +198,7 @@ impl HostedClient {
             context: CallContextFactory::default(),
             transport: helpers::HostedTransportPolicy::from_client_config(&config),
             on_human_signature: None,
+            warnings: Arc::new(NoopWarnings),
             server_key: None,
         })
     }
@@ -207,6 +213,7 @@ impl HostedClient {
             context,
             transport: helpers::HostedTransportPolicy::from_client_config(config),
             on_human_signature: None,
+            warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
         })
     }
@@ -226,6 +233,7 @@ impl HostedClient {
             context,
             transport: helpers::HostedTransportPolicy::from_client_config(config),
             on_human_signature: None,
+            warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
         })
     }
@@ -237,6 +245,7 @@ impl HostedClient {
             context: CallContextFactory::default(),
             transport: helpers::HostedTransportPolicy::from_client_config(&ClientConfig::default()),
             on_human_signature: None,
+            warnings: Arc::new(NoopWarnings),
             server_key: None,
         })
     }
@@ -252,6 +261,7 @@ impl HostedClient {
             context,
             transport: helpers::HostedTransportPolicy::from_client_config(config),
             on_human_signature: None,
+            warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
         })
     }
@@ -266,6 +276,7 @@ impl HostedClient {
             context,
             transport: helpers::HostedTransportPolicy::from_client_config(&ClientConfig::default()),
             on_human_signature: None,
+            warnings: Arc::new(NoopWarnings),
             server_key: None,
         })
     }
@@ -273,6 +284,20 @@ impl HostedClient {
     pub fn with_human_signature_callback(mut self, callback: HumanSignatureCallback) -> Self {
         self.on_human_signature = Some(callback);
         self
+    }
+
+    /// Install the caller-owned warning Adapter used by best-effort hosted
+    /// reconciliation. The default is quiet for embedders.
+    pub fn with_warning_sink(mut self, warnings: Arc<dyn WarningSink>) -> Self {
+        self.warnings = warnings;
+        self
+    }
+
+    pub(crate) fn warn(&self, kind: &'static str, message: impl Into<String>) {
+        self.warnings.warn(Warning {
+            kind: kind.into(),
+            message: message.into(),
+        });
     }
 
     /// Gracefully close the native connection and its owning Iroh endpoint.

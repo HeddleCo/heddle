@@ -169,7 +169,7 @@ pub fn cmd_diff(
     }
 
     let config = UserConfig::load_default().unwrap_or_default();
-    let ctx = execution_context_from_cli_parts(cli, start, Some(repo), &config)?;
+    let ctx = execution_context_from_cli_parts(start, Some(repo), &config);
     let report = core_diff(&ctx, options)?;
     render_diff_report(
         cli,

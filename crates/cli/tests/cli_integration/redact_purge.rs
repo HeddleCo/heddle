@@ -86,7 +86,6 @@ fn setup_git_overlay_repo_with_secret() -> (TempDir, String) {
     )
     .unwrap();
     heddle(&["capture", "-m", "leak the secret"], Some(temp.path())).expect("heddle capture");
-    heddle(&["commit", "-m", "leak the secret"], Some(temp.path())).expect("heddle commit");
 
     let raw = heddle(
         &["--output", "json", "log", "--limit", "1"],

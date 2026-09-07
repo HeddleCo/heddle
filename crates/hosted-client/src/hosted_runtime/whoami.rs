@@ -11,21 +11,62 @@ use api::heddle::api::v1alpha1::HostedRole;
 use biscuit_auth::builder::{BlockBuilder, Term};
 use config::UserConfig;
 use crypto::Ed25519Signer;
-use heddle_cli_args::CliContext;
-// The whoami wire payloads live in cli-contract so the schema registry
-// registers the real serialization types.
-use heddle_cli_contract::cli::commands::wire::auth::{
-    CaptureActor, WhoamiIdentity, WhoamiOutput, WhoamiRole,
-};
 use repo::Repository;
-use verbs::{
-    ResolvedPrincipal, principal_source_display, resolve_principal, resolve_principal_without_repo,
-};
+use verbs::{ResolvedPrincipal, resolve_principal, resolve_principal_without_repo};
 
 use super::{
     auth::{headless_token_metadata, resolve_server},
     hosted::{HostedAuthMode, HostedSession, ResolvedHostedCredential, resolve_hosted_credential},
 };
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CaptureActor {
+    pub name: String,
+    pub email: String,
+    pub source: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WhoamiReport {
+    pub capture_actor: CaptureActor,
+    pub server: String,
+    pub authenticated: bool,
+    pub source: String,
+    pub subject: Option<String>,
+    pub reachable: bool,
+    pub token_kind: Option<String>,
+    pub scopes: Vec<String>,
+    pub operation_ceiling: Option<Vec<String>>,
+    pub expires_at: Option<String>,
+    pub ttl_seconds_remaining: Option<i64>,
+    pub proof_key_available: bool,
+    pub identity: Option<WhoamiIdentity>,
+    pub recommended_action: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WhoamiIdentity {
+    pub subject: String,
+    pub actor_subject: String,
+    pub is_staff: bool,
+    pub is_service_account: bool,
+    pub is_biscuit: bool,
+    pub session_id: String,
+    pub amr: Vec<String>,
+    pub server_scope: String,
+    pub credential_id: String,
+    pub device_id: Option<String>,
+    pub agent_provider: Option<String>,
+    pub agent_model: Option<String>,
+    pub roles: Vec<WhoamiRole>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WhoamiRole {
+    pub resource_path: String,
+    pub resource_kind: String,
+    pub role: String,
+}
 
 fn capture_actor_from_resolved(resolved: &ResolvedPrincipal) -> CaptureActor {
     CaptureActor {
@@ -35,20 +76,14 @@ fn capture_actor_from_resolved(resolved: &ResolvedPrincipal) -> CaptureActor {
     }
 }
 
-/// `heddle whoami [--server <addr>]`.
-pub async fn cmd_whoami(ctx: &dyn CliContext, server: Option<String>) -> Result<()> {
-    let server = resolve_server(server.as_deref())?;
-    let output = resolve_whoami(ctx, &server).await?;
-    if ctx.should_output_json(None) {
-        println!("{}", serde_json::to_string(&output)?);
-    } else {
-        write_human(&mut std::io::stdout().lock(), &output)?;
-    }
-    Ok(())
+/// Resolve local capture attribution and hosted identity without rendering.
+pub async fn whoami(start_path: &std::path::Path, server: Option<&str>) -> Result<WhoamiReport> {
+    let server = resolve_server(server)?;
+    resolve_whoami(start_path, &server).await
 }
 
-async fn resolve_whoami(ctx: &dyn CliContext, server: &str) -> Result<WhoamiOutput> {
-    let capture_actor = resolve_capture_actor(ctx)?;
+async fn resolve_whoami(start_path: &std::path::Path, server: &str) -> Result<WhoamiReport> {
+    let capture_actor = resolve_capture_actor(start_path)?;
     let resolved = resolve_hosted_credential(Some(server))?;
     let mut output = resolve_local_whoami(server, &resolved, capture_actor)?;
     if !output.authenticated {
@@ -86,13 +121,9 @@ async fn resolve_whoami(ctx: &dyn CliContext, server: &str) -> Result<WhoamiOutp
 /// [`Repository::open`] on a plain Git tree would bootstrap a `.heddle`
 /// sidecar and rewrite Git excludes. A discovered store that fails to open
 /// is surfaced, not rewritten as "no repository."
-fn resolve_capture_actor(ctx: &dyn CliContext) -> Result<CaptureActor> {
+fn resolve_capture_actor(start: &std::path::Path) -> Result<CaptureActor> {
     let user_config = UserConfig::load_default()?;
-    let start = match ctx.repo_path() {
-        Some(path) => path.to_path_buf(),
-        None => std::env::current_dir().context("get current working directory")?,
-    };
-    let resolved = match Repository::open_existing(&start)
+    let resolved = match Repository::open_existing(start)
         .with_context(|| format!("open Heddle store at {}", start.display()))?
     {
         Some(repo) => resolve_principal(&repo, user_config.principal_pair())?,
@@ -105,10 +136,9 @@ fn resolve_local_whoami(
     server: &str,
     resolved: &ResolvedHostedCredential,
     capture_actor: CaptureActor,
-) -> Result<WhoamiOutput> {
+) -> Result<WhoamiReport> {
     let Some(token) = resolved.token.as_ref() else {
-        return Ok(WhoamiOutput {
-            output_kind: "whoami",
+        return Ok(WhoamiReport {
             capture_actor,
             server: server.to_string(),
             authenticated: false,
@@ -157,8 +187,7 @@ fn resolve_local_whoami(
         ))
     };
 
-    Ok(WhoamiOutput {
-        output_kind: "whoami",
+    Ok(WhoamiReport {
         capture_actor,
         server: server.to_string(),
         authenticated: true,
@@ -305,118 +334,6 @@ fn hosted_role_name(role: i32) -> &'static str {
     }
 }
 
-fn write_human(writer: &mut impl std::io::Write, output: &WhoamiOutput) -> std::io::Result<()> {
-    write_capture_actor(writer, &output.capture_actor)?;
-    writeln!(writer)?;
-    write_hosted_auth(writer, output)
-}
-
-fn write_capture_actor(
-    writer: &mut impl std::io::Write,
-    actor: &CaptureActor,
-) -> std::io::Result<()> {
-    writeln!(writer, "Capture actor: {} <{}>", actor.name, actor.email)?;
-    if let Some(source) = actor.source {
-        writeln!(
-            writer,
-            "Source:        {}",
-            principal_source_display(source)
-        )?;
-    }
-    Ok(())
-}
-
-fn write_hosted_auth(
-    writer: &mut impl std::io::Write,
-    output: &WhoamiOutput,
-) -> std::io::Result<()> {
-    writeln!(writer, "Hosted auth:")?;
-    writeln!(writer, "Server:        {}", output.server)?;
-    if !output.authenticated {
-        writeln!(writer, "Not authenticated with {}.", output.server)?;
-        if let Some(action) = &output.recommended_action {
-            writeln!(writer, "Run `{action}` to authenticate.")?;
-        }
-        return Ok(());
-    }
-    writeln!(writer, "Source:        {}", output.source)?;
-    if let Some(subject) = &output.subject {
-        writeln!(writer, "Subject:       {subject}")?;
-    }
-    if let Some(identity) = &output.identity {
-        if identity.actor_subject != identity.subject && !identity.actor_subject.is_empty() {
-            writeln!(writer, "Acting as:     {}", identity.actor_subject)?;
-        }
-        if !identity.credential_id.is_empty() {
-            writeln!(writer, "Credential:    {}", identity.credential_id)?;
-        }
-        if !identity.session_id.is_empty() {
-            writeln!(writer, "Session:       {}", identity.session_id)?;
-        }
-        if identity.is_staff {
-            writeln!(writer, "Staff:         yes")?;
-        }
-        if !identity.server_scope.is_empty() {
-            writeln!(writer, "Server scope:  {}", identity.server_scope)?;
-        }
-        if !identity.roles.is_empty() {
-            let roles = identity
-                .roles
-                .iter()
-                .map(|role| {
-                    format!(
-                        "{}:{}={}",
-                        role.resource_kind, role.resource_path, role.role
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            writeln!(writer, "Roles:         {roles}")?;
-        }
-    } else {
-        writeln!(
-            writer,
-            "Server:        unreachable (showing locally-known token facts)"
-        )?;
-    }
-    writeln!(
-        writer,
-        "Token kind:    {}",
-        output.token_kind.as_deref().unwrap_or("unknown")
-    )?;
-    if output.scopes.is_empty() {
-        writeln!(writer, "Scopes:        full resource authority")?;
-    } else {
-        writeln!(writer, "Scopes:        {}", output.scopes.join(", "))?;
-    }
-    match &output.operation_ceiling {
-        Some(ops) => writeln!(writer, "Op ceiling:    {}", ops.join(", "))?,
-        None => writeln!(writer, "Op ceiling:    full (no operation allowlist)")?,
-    }
-    if let Some(expires_at) = &output.expires_at {
-        match output.ttl_seconds_remaining {
-            Some(secs) if secs >= 0 => {
-                writeln!(writer, "Expires:       {expires_at} (in {secs}s)")?;
-            }
-            Some(secs) => writeln!(
-                writer,
-                "Expires:       {expires_at} (EXPIRED {}s ago)",
-                -secs
-            )?,
-            None => writeln!(writer, "Expires:       {expires_at}")?,
-        }
-    }
-    if output.proof_key_available {
-        writeln!(writer, "Signing:       ready (device proof key available)")?;
-    } else {
-        writeln!(writer, "Signing:       unavailable (no device proof key)")?;
-    }
-    if let Some(action) = &output.recommended_action {
-        writeln!(writer, "Note:          run `{action}`.")?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use objects::object::Principal;
@@ -474,91 +391,6 @@ mod tests {
         assert_eq!(
             output.recommended_action.as_deref(),
             Some("heddle auth login --server host.example")
-        );
-        let mut rendered = Vec::new();
-        write_human(&mut rendered, &output).unwrap();
-        let rendered = String::from_utf8(rendered).unwrap();
-        assert!(rendered.contains("Capture actor: Luke <luke@example.com>"));
-        let actor_at = rendered.find("Capture actor:").expect("capture actor");
-        let hosted_at = rendered.find("Hosted auth:").expect("hosted auth");
-        assert!(actor_at < hosted_at, "capture actor first:\n{rendered}");
-        assert_eq!(
-            rendered,
-            "Capture actor: Luke <luke@example.com>\n\
-             Source:        user_config (shared global config)\n\
-             \n\
-             Hosted auth:\n\
-             Server:        host.example\n\
-             Not authenticated with host.example.\n\
-             Run `heddle auth login --server host.example` to authenticate.\n"
-        );
-    }
-
-    #[test]
-    fn human_output_renders_authoritative_identity_and_local_token_facts() {
-        let mut output = WhoamiOutput {
-            output_kind: "whoami",
-            capture_actor: luke_actor(),
-            server: "host.example".to_string(),
-            authenticated: true,
-            source: "keystore".to_string(),
-            subject: Some("principal:alice".to_string()),
-            reachable: true,
-            token_kind: Some("agent".to_string()),
-            scopes: vec!["repo:alice/widgets".to_string()],
-            operation_ceiling: Some(vec!["repo.read".to_string(), "repo.push".to_string()]),
-            expires_at: Some("2030-01-01T00:00:00Z".to_string()),
-            ttl_seconds_remaining: Some(60),
-            proof_key_available: true,
-            identity: Some(WhoamiIdentity {
-                subject: "principal:alice".to_string(),
-                actor_subject: "agent:reviewer".to_string(),
-                is_staff: true,
-                is_service_account: false,
-                is_biscuit: true,
-                session_id: "session-1".to_string(),
-                amr: vec!["device".to_string()],
-                server_scope: "hosted".to_string(),
-                credential_id: "credential-1".to_string(),
-                device_id: Some("device-1".to_string()),
-                agent_provider: Some("openai".to_string()),
-                agent_model: Some("codex".to_string()),
-                roles: vec![WhoamiRole {
-                    resource_path: "alice/widgets".to_string(),
-                    resource_kind: "repo".to_string(),
-                    role: "maintainer".to_string(),
-                }],
-            }),
-            recommended_action: None,
-        };
-        let mut rendered = Vec::new();
-        write_human(&mut rendered, &output).unwrap();
-        let rendered = String::from_utf8(rendered).unwrap();
-        assert!(rendered.contains("Capture actor: Luke <luke@example.com>"));
-        assert!(rendered.contains("Hosted auth:"));
-        assert!(rendered.contains("Acting as:     agent:reviewer"));
-        assert!(rendered.contains("Roles:         repo:alice/widgets=maintainer"));
-        assert!(rendered.contains("Expires:       2030-01-01T00:00:00Z (in 60s)"));
-        output.identity = None;
-        output.reachable = false;
-        output.scopes.clear();
-        output.operation_ceiling = None;
-        output.ttl_seconds_remaining = Some(-5);
-        output.proof_key_available = false;
-        output.recommended_action = Some("heddle auth login --server host.example".to_string());
-        let mut rendered = Vec::new();
-        write_human(&mut rendered, &output).unwrap();
-        let rendered = String::from_utf8(rendered).unwrap();
-        assert!(rendered.contains("Server:        unreachable"));
-        assert!(rendered.contains("Scopes:        full resource authority"));
-        assert!(rendered.contains("EXPIRED 5s ago"));
-        output.ttl_seconds_remaining = None;
-        let mut rendered = Vec::new();
-        write_human(&mut rendered, &output).unwrap();
-        assert!(
-            String::from_utf8(rendered)
-                .unwrap()
-                .contains("Expires:       2030-01-01T00:00:00Z\n")
         );
     }
 

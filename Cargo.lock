@@ -2443,7 +2443,6 @@ name = "heddle-hosted-client"
 version = "0.20.5"
 dependencies = [
  "anyhow",
- "async-trait",
  "base64 0.22.1",
  "biscuit-auth",
  "blake3",
@@ -2452,9 +2451,6 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "heddle-api",
- "heddle-cli-args",
- "heddle-cli-contract",
- "heddle-cli-render",
  "heddle-config",
  "heddle-crypto",
  "heddle-objects",

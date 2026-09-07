@@ -6,7 +6,6 @@ use repo::{RepositorySourceAuthority, shell_quote};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceAction {
     Capture,
-    Commit,
     Push,
     Pull,
 }
@@ -28,12 +27,6 @@ impl SourceAuthorityActions {
     pub fn argv(self, action: SourceAction) -> Vec<String> {
         match (self.authority, action) {
             (_, SourceAction::Capture) => vec!["heddle", "capture", "-m", "..."],
-            (RepositorySourceAuthority::GitOverlay, SourceAction::Commit) => {
-                vec!["heddle", "commit", "-m", "..."]
-            }
-            (RepositorySourceAuthority::Native, SourceAction::Commit) => {
-                vec!["heddle", "capture", "-m", "..."]
-            }
             (_, SourceAction::Push) => vec!["heddle", "push"],
             (_, SourceAction::Pull) => vec!["heddle", "pull"],
         }
@@ -69,20 +62,6 @@ mod tests {
         assert_eq!(overlay.display(SourceAction::Pull), "heddle pull");
         assert_eq!(native.display(SourceAction::Push), "heddle push");
         assert_eq!(native.display(SourceAction::Pull), "heddle pull");
-    }
-
-    #[test]
-    fn commit_routes_to_the_authoritative_store() {
-        let overlay = SourceAuthorityActions::new(RepositorySourceAuthority::GitOverlay);
-        let native = SourceAuthorityActions::new(RepositorySourceAuthority::Native);
-        assert_eq!(
-            overlay.display(SourceAction::Commit),
-            "heddle commit -m \"...\""
-        );
-        assert_eq!(
-            native.display(SourceAction::Commit),
-            "heddle capture -m \"...\""
-        );
     }
 
     #[test]
