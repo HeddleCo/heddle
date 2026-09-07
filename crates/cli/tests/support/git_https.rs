@@ -7,7 +7,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::Duration,
@@ -26,6 +26,7 @@ pub struct PrivateCaGitServer {
     ca_pem: String,
     join: Option<thread::JoinHandle<()>>,
     port: u16,
+    requests: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
 }
 
@@ -67,12 +68,17 @@ impl PrivateCaGitServer {
             .set_nonblocking(true)
             .expect("nonblocking listener");
         let root = root.to_path_buf();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let thread_requests = Arc::clone(&requests);
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let join = thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
-                    Ok((stream, _)) => serve_git_request(stream, Arc::clone(&tls), &root),
+                    Ok((stream, _)) => {
+                        thread_requests.fetch_add(1, Ordering::Relaxed);
+                        serve_git_request(stream, Arc::clone(&tls), &root);
+                    }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(2));
                     }
@@ -84,6 +90,7 @@ impl PrivateCaGitServer {
             ca_pem: ca_cert.pem(),
             join: Some(join),
             port,
+            requests,
             stop,
         }
     }
@@ -94,6 +101,10 @@ impl PrivateCaGitServer {
 
     pub fn url(&self) -> String {
         format!("https://127.0.0.1:{}/source.git", self.port)
+    }
+
+    pub fn request_count(&self) -> usize {
+        self.requests.load(Ordering::Relaxed)
     }
 }
 

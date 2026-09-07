@@ -32,8 +32,10 @@ use sley::{
     Signature,
     plumbing::sley_core::BString as GitByteString,
     remote::{
-        CredentialProvider, FetchOptions, LsRemoteFilter, NoCredentials, ProgressSink,
-        PushActionPlan, PushCommand, PushOptions, SilentProgress,
+        CredentialProvider, FetchOptions, HttpPushActionsRequest,
+        HttpReceivePackObservationRequest, LsRemoteFilter, NoCredentials, ProgressSink,
+        PushActionPlan, PushCommand, PushDestination, PushOptions, PushServices, SilentProgress,
+        observe_http_receive_pack, push_http_actions_with_reader_from_observation,
     },
 };
 use sley_transport::{HttpClient, UreqHttpClient};
@@ -3396,31 +3398,60 @@ pub fn push_authoritative_git_refs(
         current_branch,
         force,
     } = options;
-    let remote_url = source.remote(remote).map_err(git_err)?.push_url();
+    let remote_context = source.remote(remote).map_err(git_err)?;
+    let remote_url = remote_context.push_url();
+    let destination = remote_context.push_destination(source).map_err(git_err)?;
+    let http_client = configured_https_client();
     let manifest_path = network_exported_refs_path(heddle_dir, &remote_url);
     let previously_exported = read_exported_refs_at(&manifest_path)?;
     let managed_record = read_projection_managed_refs(heddle_dir)?;
     let served_frontier =
         collect_authoritative_git_ref_updates(source, &managed_record, scope, current_branch)?;
 
-    let records = source
-        .ls_remote_with_http_client(
-            &remote_url,
-            LsRemoteFilter {
-                heads: false,
-                tags: false,
-                refs_only: true,
-            },
-            &|_| true,
-            credentials,
-            configured_https_client(),
-        )
-        .map_err(git_err)?;
-    let remote_refs = records
-        .into_iter()
-        .filter(|record| GitRefName::new(&record.name).content_namespace().is_some())
-        .map(|record| (record.name, record.oid))
-        .collect::<HashMap<_, _>>();
+    let (remote_refs, http_observation) = match &destination {
+        PushDestination::Http(remote_url) => {
+            let observation = observe_http_receive_pack(
+                HttpReceivePackObservationRequest {
+                    remote_url,
+                    format: source.object_format(),
+                    config: remote_context.config(),
+                },
+                credentials,
+                http_client,
+            )
+            .map_err(git_err)?;
+            let refs = observation
+                .refs()
+                .iter()
+                .filter(|record| {
+                    !record.name.ends_with("^{}")
+                        && GitRefName::new(&record.name).content_namespace().is_some()
+                })
+                .map(|record| (record.name.clone(), record.oid))
+                .collect::<HashMap<_, _>>();
+            (refs, Some(observation))
+        }
+        _ => (
+            source
+                .ls_remote_with_http_client(
+                    &remote_url,
+                    LsRemoteFilter {
+                        heads: false,
+                        tags: false,
+                        refs_only: true,
+                    },
+                    &|_| true,
+                    credentials,
+                    http_client,
+                )
+                .map_err(git_err)?
+                .into_iter()
+                .filter(|record| GitRefName::new(&record.name).content_namespace().is_some())
+                .map(|record| (record.name, record.oid))
+                .collect::<HashMap<_, _>>(),
+            None,
+        ),
+    };
     let creatable = creatable_ref_names(&served_frontier, scope, current_branch);
     let previously_exported_in_scope = previously_exported
         .iter()
@@ -3472,25 +3503,48 @@ pub fn push_authoritative_git_refs(
             force: false,
         });
     }
-    source
-        .push_actions_with_http_client(
-            remote,
-            PushActionPlan {
-                commands,
-                pack_objects,
-                options: PushOptions {
-                    quiet: true,
-                    force: force || force_transport_checks,
-                    thin: sley::remote::PushThinMode::Auto,
-                    atomic: false,
-                    push_options: Vec::new(),
+    let push_plan = PushActionPlan {
+        commands,
+        pack_objects,
+        options: PushOptions {
+            quiet: true,
+            force: force || force_transport_checks,
+            thin: sley::remote::PushThinMode::Auto,
+            atomic: false,
+            push_options: Vec::new(),
+        },
+    };
+    match (&destination, http_observation) {
+        (PushDestination::Http(remote_url), Some(observation)) => {
+            push_http_actions_with_reader_from_observation(
+                HttpPushActionsRequest {
+                    objects: source.object_database(),
+                    format: source.object_format(),
+                    config: remote_context.config(),
+                    remote_url,
+                    plan: &push_plan,
                 },
-            },
-            credentials,
-            progress,
-            configured_https_client(),
-        )
-        .map_err(git_err)?;
+                PushServices {
+                    credentials,
+                    progress,
+                    cancel: sley::CancelFlag::never(),
+                },
+                observation,
+            )
+            .map_err(git_err)?;
+        }
+        _ => {
+            source
+                .push_actions_with_http_client(
+                    remote,
+                    push_plan,
+                    credentials,
+                    progress,
+                    http_client,
+                )
+                .map_err(git_err)?;
+        }
+    }
     write_exported_refs_at(&manifest_path, &plan.new_manifest)?;
     Ok(planned_write_names(&plan))
 }

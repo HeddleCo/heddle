@@ -3118,9 +3118,27 @@ corresponding Iroh transport boundary so cross-client tests can distinguish
 connection churn from useful traffic. The old boolean “network client
 initialized” signal is gone.
 
+## Git transport seam
+
+- Consume `sley` and `sley-transport` 0.9.0. The released
+  `HttpPushActionsRequest` accepts Weft's `ObjectReader` directly; do not
+  materialize a temporary bare repository or copy projected objects into a
+  filesystem ODB.
+- Call `observe_http_receive_pack`, reconcile desired refs against
+  `HttpReceivePackObservation::refs()`, then consume that observation with
+  `push_http_actions_with_reader_from_observation`. The observation carries its
+  HTTP client/session source, so this is one discovery plus one receive-pack
+  request rather than an `ls-remote` followed by a second discovery.
+- Keep exact old ids in `PushActionPlan`. Sley validates them against the
+  observation before pack generation and sends the same ids as receive-pack
+  CAS preconditions, which still reject a concurrent remote move.
+- This end-to-end observation seam is smart-HTTP-specific. Keep SSH, `git://`,
+  and local pushes on Sley's transport-owned live-session paths; only the
+  lower streaming pack/body writer is transport-neutral.
+
 ## Cutover order
 
-1. Pin Weft to the paired Heddle/object-model revision.
+1. Pin Weft to the paired Heddle/object-model revision and Sley 0.9.0.
 2. Convert stored notes, states, attachments, env lifecycle data, and lossy Git
    residual closures offline.
 3. Update Weft's repository/ObjectStore Adapter and delete local-maintenance
