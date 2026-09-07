@@ -825,7 +825,7 @@ pub(crate) fn build_attribution(
     )
 }
 
-fn capture_agent_options(
+pub(crate) fn capture_agent_options(
     user_config: &UserConfig,
     agent: &SnapshotAgentOverrides,
 ) -> CaptureAgentOptions {

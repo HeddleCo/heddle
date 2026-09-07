@@ -1028,13 +1028,22 @@ fn uncheckpointed_state_is_ahead_of_git(repo: &Repository) -> Result<bool> {
     let Some(branch) = repo.git_overlay_current_branch()? else {
         return Ok(false);
     };
-    let Some(tip) = repo.git_overlay_branch_tip(&branch)? else {
+    let Some(current) = repo.current_state()? else {
         return Ok(false);
+    };
+    if repo
+        .latest_git_checkpoint_for_state(&current.state_id)?
+        .is_some()
+    {
+        return Ok(false);
+    }
+    // An attached unborn branch has no Git tip to map. If the worktree already
+    // matches an uncheckpointed Heddle state, capture must publish that state as
+    // the branch's first commit instead of misreporting a no-op.
+    let Some(tip) = repo.git_overlay_branch_tip(&branch)? else {
+        return Ok(true);
     };
     let Some(mapped) = tip.mapped_state else {
-        return Ok(false);
-    };
-    let Some(current) = repo.current_state()? else {
         return Ok(false);
     };
     if mapped == current.state_id {
@@ -1050,9 +1059,7 @@ fn uncheckpointed_state_is_ahead_of_git(repo: &Repository) -> Result<bool> {
     {
         return Ok(false);
     }
-    Ok(repo
-        .latest_git_checkpoint_for_state(&current.state_id)?
-        .is_none())
+    Ok(true)
 }
 
 fn preflight_large_capture(

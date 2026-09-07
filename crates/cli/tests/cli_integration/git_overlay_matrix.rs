@@ -581,13 +581,13 @@ fn git_overlay_matrix_undo_reconciles_checkout_without_persistent_mirror() {
     let committed = git_stdout(&work, &["rev-parse", "HEAD"]);
     assert_ne!(committed, previous);
 
-    let undo = json(&work, &["undo"]);
+    assert_undo_requires_hard(&work);
+    let undo = json(&work, &["undo", "--hard"]);
     assert_eq!(undo["status"], "completed", "{undo}");
     assert_eq!(git_stdout(&work, &["rev-parse", "HEAD"]), previous);
-    assert_eq!(
-        std::fs::read_to_string(work.join("second.txt")).unwrap(),
-        "second\n",
-        "undoing Git publication must preserve the captured worktree"
+    assert!(
+        !work.join("second.txt").exists(),
+        "hard undo must rewind the captured worktree with its Git checkpoint"
     );
     assert!(
         !work.join(".heddle/git").exists(),
@@ -2696,14 +2696,11 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
         temp.path(),
         &["--output", "json", "ready", "-m", "carry branch work"],
     );
-    assert_eq!(ready["status"], "blocked", "{ready}");
+    assert_eq!(ready["status"], "completed", "{ready}");
     assert_eq!(ready["captured"], true, "{ready}");
-    assert!(
-        ready["recommended_action"]
-            .as_str()
-            .is_some_and(|action| action.contains("heddle capture")),
-        "uncheckpointed overlay work should recommend completing capture: {ready}"
-    );
+    assert!(ready["captured_state"].as_str().is_some(), "{ready}");
+    assert_eq!(ready["verification"]["status"], "clean", "{ready}");
+    assert_eq!(git_status_short(temp.path()), "");
 }
 
 /// Full out-of-band round trip (#534): adopt → plain-git commits → detection
@@ -3295,16 +3292,18 @@ fn git_overlay_matrix_dirty_branch_switch_when_git_allows_carryover() {
             .any(|value| value == "carry.txt")
     );
 
+    let before_ready = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
     let ready = json(
         temp.path(),
         &["--output", "json", "ready", "-m", "first-run ready state"],
     );
     assert_eq!(ready["captured"], true);
-    let capture = json(
-        temp.path(),
-        &["--output", "json", "capture", "-m", "first-run ready state"],
+    assert!(ready["captured_state"].as_str().is_some());
+    assert_ne!(
+        git_stdout(temp.path(), &["rev-parse", "HEAD"]),
+        before_ready,
+        "ready capture must write through to Git"
     );
-    assert!(capture["git_checkpoint"].as_str().is_some());
 
     let after_ready = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(after_ready["thread"], "support/carry");
@@ -3320,6 +3319,8 @@ fn git_overlay_matrix_dirty_branch_switch_when_git_allows_carryover() {
             .unwrap()
             .is_empty()
     );
+    assert!(after_ready["git_checkpoint"].as_object().is_some());
+    assert_eq!(git_status_short(temp.path()), "");
 }
 
 #[test]
@@ -3483,10 +3484,9 @@ fn git_overlay_matrix_reopen_from_different_cwds_preserves_state_and_git_only_al
     assert_eq!(root_status_after["thread_changed_path_count"], 0);
     let root_bridge_after = json(temp.path(), &["status", "--output", "json"]);
     assert_no_legacy_verification_sidecars(&root_bridge_after);
-    assert_eq!(
-        root_bridge_after["verification"]["status"],
-        "needs_checkpoint"
-    );
+    assert_eq!(root_bridge_after["verification"]["status"], "clean");
+    assert!(root_bridge_after["git_checkpoint"].as_object().is_some());
+    assert_eq!(git_status_short(temp.path()), "");
 }
 
 #[test]
@@ -3531,7 +3531,9 @@ fn git_overlay_matrix_binary_file_commands_remain_coherent() {
         status_after["thread_changed_path_count"], 0,
         "{status_after}"
     );
-    assert_eq!(status_after["verification"]["status"], "needs_checkpoint");
+    assert_eq!(status_after["verification"]["status"], "clean");
+    assert!(status_after["git_checkpoint"].as_object().is_some());
+    assert_eq!(git_status_short(temp.path()), "");
 }
 
 #[cfg(unix)]
@@ -3737,17 +3739,19 @@ fn git_overlay_matrix_filemode_changes_surface_and_capture() {
             .any(|value| value == "script.sh")
     );
 
+    let before_ready = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
     let ready = json(
         temp.path(),
         &["--output", "json", "ready", "-m", "mode ready capture"],
     );
     assert_eq!(ready["captured"], true);
-
-    let capture = json(
-        temp.path(),
-        &["--output", "json", "capture", "-m", "mode ready capture"],
+    assert!(ready["captured_state"].as_str().is_some());
+    assert_ne!(
+        git_stdout(temp.path(), &["rev-parse", "HEAD"]),
+        before_ready,
+        "ready capture must checkpoint the mode change"
     );
-    assert!(capture["git_checkpoint"].as_str().is_some());
+    assert_eq!(git_status_short(temp.path()), "");
 }
 
 #[test]

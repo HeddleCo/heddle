@@ -6,7 +6,8 @@ use chrono::Utc;
 use objects::object::Tree;
 use repo::{Repository, ThreadFreshness, ThreadState};
 use verbs::{
-    ReadyDecisionInput, classify_ready_decision, has_integration_target,
+    CaptureOptions, MachineContractInput, ReadyDecisionInput, classify_ready_decision,
+    has_integration_target,
     ready_report_recommended_action as core_ready_report_recommended_action,
     ready_scoped_next_action as core_ready_scoped_next_action, ready_verification_preflight_blocks,
     status::next_action::non_empty_action,
@@ -22,7 +23,7 @@ use super::{
         OperatorAction, OperatorCommandOutput, VerificationClaimPolicy,
         fail_if_blocked_operator_status,
     },
-    snapshot::{SnapshotAgentOverrides, create_snapshot, ensure_current_state},
+    snapshot::{SnapshotAgentOverrides, capture_agent_options, ensure_current_state},
     thread::contextual_thread_action,
     thread_cmd::{
         current_thread, load_thread, refresh_thread, thread_manager, thread_not_found_advice,
@@ -31,12 +32,15 @@ use super::{
     verification_health::{
         RepositoryVerificationState, build_plain_git_verification_probe,
         build_repository_verification_state,
-        build_repository_verification_state_with_worktree_status,
+        build_repository_verification_state_with_worktree_status, machine_contract_coverage,
         override_trust_recommended_action,
     },
 };
 use crate::{
-    cli::{Cli, ReadyArgs, output_is_compact, should_output_json, style, worktree_status_options},
+    cli::{
+        Cli, ReadyArgs, execution_context_from_cli_parts, output_is_compact, should_output_json,
+        style, worktree_status_options,
+    },
     config::UserConfig,
 };
 
@@ -60,58 +64,63 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     if args.dry_run {
         return emit_ready_dry_run(cli, &repo, &args);
     }
-    super::workflow::recover_incomplete_land_if_present(&repo)?;
     let user_config = UserConfig::load_default().unwrap_or_default();
+    let ctx = execution_context_from_cli_parts(start, Some(repo), &user_config);
+    let repo = ctx.require_repo()?;
+    super::workflow::recover_incomplete_land_if_present(repo)?;
     // Compute the git-overlay worktree status ONCE up front. It feeds the initial
     // verification preflight here and the second preflight further down, which
     // `ready` previously recomputed from scratch — a full worktree walk that
     // re-reads + SHA-1s every tracked file. The second preflight can reuse this
     // status ONLY when no bootstrap capture intervened (see below): a bootstrap
-    // capture advances the Heddle state and flips the git-overlay health
-    // classification, so after one the second preflight must take a FRESH walk.
+    // capture advances both Heddle and Git state and flips the git-overlay
+    // health classification, so after one the second preflight must take a
+    // FRESH walk.
     let worktree_status = repo.git_overlay_worktree_status();
     let initial_trust =
-        build_repository_verification_state_with_worktree_status(&repo, &worktree_status);
+        build_repository_verification_state_with_worktree_status(repo, &worktree_status);
     if ready_verification_preflight_blocks(&initial_trust) {
         let output = trust_blocked_ready_output(args.thread.as_deref(), initial_trust);
-        write_ready_output(cli, &repo, &output)?;
+        write_ready_output(cli, repo, &output)?;
         return Ok(());
     }
     let had_current_state = repo.current_state()?.is_some();
     let status_options = worktree_status_options(Some(repo.config()));
     let bootstrap_dirty = if !had_current_state {
-        worktree_dirty(&repo, &status_options)?
+        worktree_dirty(repo, &status_options)?
     } else {
         false
     };
     let mut captured_state = None;
-    if !had_current_state && bootstrap_dirty && args.message.is_none() {
-        let dirty_paths = worktree_dirty_paths(&repo, &status_options)?;
-        let output = missing_ready_capture_intent_output(
-            &repo,
-            args.thread.as_deref(),
-            dirty_paths,
-            initial_trust,
-        )?;
-        write_ready_output(cli, &repo, &output)?;
-        return Ok(());
-    }
-    if !had_current_state {
-        let bootstrap_state = ensure_current_state(
-            &repo,
+    if !had_current_state && bootstrap_dirty {
+        let Some(message) = args.message.clone() else {
+            let dirty_paths = worktree_dirty_paths(repo, &status_options)?;
+            let output = missing_ready_capture_intent_output(
+                repo,
+                args.thread.as_deref(),
+                dirty_paths,
+                initial_trust,
+            )?;
+            write_ready_output(cli, repo, &output)?;
+            return Ok(());
+        };
+        captured_state = Some(capture_ready_worktree(
+            &ctx,
             &user_config,
-            args.message
-                .clone()
-                .or_else(|| Some("Bootstrap git-overlay readiness state".to_string())),
+            message,
+            args.confidence,
+        )?);
+    } else if !had_current_state {
+        ensure_current_state(
+            repo,
+            &user_config,
+            Some("Bootstrap git-overlay readiness state".to_string()),
         )?;
-        if bootstrap_dirty {
-            captured_state = Some(bootstrap_state.short());
-        }
     }
-    let manager = thread_manager(&repo);
+    let manager = thread_manager(repo);
     let mut thread = match args.thread.clone() {
-        Some(thread_id) => load_thread(&repo, &thread_id)?,
-        None => current_thread(&repo)?.ok_or_else(|| {
+        Some(thread_id) => load_thread(repo, &thread_id)?,
+        None => current_thread(repo)?.ok_or_else(|| {
             anyhow::anyhow!(RecoveryAdvice::no_current_thread(
                 "ready",
                 Some("--thread"),
@@ -122,16 +131,16 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
 
     // Reuse the status computed at the top only when no bootstrap capture ran
     // (`had_current_state`): between the initial preflight and here, the only
-    // mutation is `ensure_current_state`'s bootstrap capture, which fires iff
-    // `!had_current_state`. After a bootstrap capture the git-overlay health
-    // classification flips, so that case must take a FRESH walk.
+    // mutation is bootstrap binding or capture, which fires iff
+    // `!had_current_state`. After either, the git-overlay health classification
+    // can flip, so that case must take a FRESH walk.
     let preflight_trust = if had_current_state {
-        build_repository_verification_state_with_worktree_status(&repo, &worktree_status)
+        build_repository_verification_state_with_worktree_status(repo, &worktree_status)
     } else {
-        build_repository_verification_state(&repo)
+        build_repository_verification_state(repo)
     };
     if ready_verification_preflight_blocks(&preflight_trust) {
-        let mut report = build_thread_preview_report(&repo, &mut thread, true)?;
+        let mut report = build_thread_preview_report(repo, &mut thread, true)?;
         report.thread_state = "blocked".to_string();
         report.freshness = "not_checked".to_string();
         report.merge_relation = "blocked".to_string();
@@ -168,59 +177,46 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
             trust: preflight_trust,
             report,
         };
-        write_ready_output(cli, &repo, &output)?;
+        write_ready_output(cli, repo, &output)?;
         return Ok(());
     }
 
     let mut captured = !had_current_state && bootstrap_dirty;
-    let dirty = worktree_dirty(&repo, &status_options)?;
+    let dirty = worktree_dirty(repo, &status_options)?;
     if dirty {
-        if args.message.is_none() {
-            let dirty_paths = worktree_dirty_paths(&repo, &status_options)?;
+        let Some(message) = args.message.clone() else {
+            let dirty_paths = worktree_dirty_paths(repo, &status_options)?;
             let output = missing_ready_capture_intent_output(
-                &repo,
+                repo,
                 Some(&thread.id),
                 dirty_paths,
                 preflight_trust,
             )?;
-            write_ready_output(cli, &repo, &output)?;
+            write_ready_output(cli, repo, &output)?;
             return Ok(());
-        }
-        let snapshot = create_snapshot(
-            &repo,
-            &user_config,
-            args.message.clone(),
-            args.confidence,
-            SnapshotAgentOverrides {
-                provider: None,
-                model: None,
-                session: None,
-                segment: None,
-                policy: None,
-                no_policy: false,
-                no_agent: false,
-            },
-        )?;
-        captured_state = Some(snapshot.state_id);
+        };
+        let captured_state_id =
+            capture_ready_worktree(&ctx, &user_config, message, args.confidence)?;
+        captured_state = Some(captured_state_id);
         thread = manager
             .load(&thread.id)?
-            .or_else(|| current_thread(&repo).ok().flatten())
+            .or_else(|| current_thread(repo).ok().flatten())
             .ok_or_else(|| {
                 anyhow::anyhow!(thread_not_found_advice(&thread.id, "ready after capture"))
             })?;
         captured = true;
     }
 
-    let mut report = build_thread_preview_report(&repo, &mut thread, true)?;
+    let mut report = build_thread_preview_report(repo, &mut thread, true)?;
     if report.freshness == ThreadFreshness::Stale.to_string()
         && report.conflict_count == 0
         && super::workflow::non_staleness_blockers(&report.blockers).is_empty()
     {
-        thread = refresh_thread(&repo, &thread.id, cli)?;
-        report = build_thread_preview_report(&repo, &mut thread, true)?;
+        thread = refresh_thread(repo, &thread.id, cli)?;
+        report = build_thread_preview_report(repo, &mut thread, true)?;
     }
     if has_integration_target(&report.merge_relation) {
-        let policy_blockers = super::workflow::auto_land_policy_blockers(&repo, &thread);
+        let policy_blockers = super::workflow::auto_land_policy_blockers(repo, &thread);
         if !policy_blockers.is_empty() {
             for blocker in policy_blockers {
                 if !report.blockers.contains(&blocker) {
@@ -267,7 +263,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     {
         report.thread_health = "ready".to_string();
         report.recommended_action =
-            land_action_for_ready(&repo, &thread.id, cli.repo.as_deref(), &cwd);
+            land_action_for_ready(repo, &thread.id, cli.repo.as_deref(), &cwd);
         report.refresh_recommended_action_metadata();
     }
 
@@ -286,7 +282,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
     let import_hint = repo.git_import_guidance()?;
-    let mut trust = build_repository_verification_state(&repo);
+    let mut trust = build_repository_verification_state(repo);
     let report_recommended_action = ready_report_recommended_action(&report);
     let recommended_action = core_ready_scoped_next_action(
         operation.as_ref(),
@@ -295,7 +291,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
         report_recommended_action.as_deref(),
     );
     let recommended_action = contextual_thread_action(
-        &repo,
+        repo,
         &thread.id,
         thread.target_thread.as_deref(),
         &recommended_action,
@@ -303,7 +299,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     let report_action_selected = report_recommended_action
         .as_deref()
         .map(|action| {
-            contextual_thread_action(&repo, &thread.id, thread.target_thread.as_deref(), action)
+            contextual_thread_action(repo, &thread.id, thread.target_thread.as_deref(), action)
         })
         .is_some_and(|action| action == recommended_action);
     if report_action_selected
@@ -349,9 +345,39 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
         report,
     };
 
-    write_ready_output(cli, &repo, &output)?;
+    write_ready_output(cli, repo, &output)?;
 
     Ok(())
+}
+
+fn capture_ready_worktree(
+    ctx: &verbs::ExecutionContext,
+    user_config: &UserConfig,
+    message: String,
+    confidence: Option<f32>,
+) -> Result<String> {
+    let agent = SnapshotAgentOverrides {
+        provider: None,
+        model: None,
+        session: None,
+        segment: None,
+        policy: None,
+        no_policy: false,
+        no_agent: false,
+    };
+    let report = verbs::capture(
+        ctx,
+        CaptureOptions {
+            intent: message,
+            confidence,
+            force: false,
+            agent: capture_agent_options(user_config, &agent),
+            machine_contract_input: Some(MachineContractInput::from_coverage(
+                machine_contract_coverage(),
+            )),
+        },
+    )?;
+    Ok(report.state_id)
 }
 
 /// Render the `heddle ready --dry-run` plan. Read-only: builds the same
