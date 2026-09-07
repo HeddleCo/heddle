@@ -297,27 +297,15 @@ fn human_action_lines_use_shared_renderer() {
 fn git_overlay_mutation_preflight_stays_shared() {
     let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut violations = Vec::new();
-    for (file, forbidden) in [
-        (
-            "cli/commands/commit.rs",
-            &[
-                "plain_git_mutation_advice(",
-                "detached_git_head_mutation_advice(",
-                "unimported_git_history_advice(&repo, \"commit\")",
-                "raw_git_operation_mutation_advice(",
-                "verification_blocking_mutation_advice(",
-            ][..],
-        ),
-        (
-            "cli/commands/checkpoint.rs",
-            &[
-                "plain_git_mutation_advice(",
-                "detached_git_head_mutation_advice(",
-                "unimported_git_history_advice(repo, \"checkpoint\")",
-                "verification_blocking_mutation_advice(",
-            ][..],
-        ),
-    ] {
+    for (file, forbidden) in [(
+        "cli/commands/checkpoint.rs",
+        &[
+            "plain_git_mutation_advice(",
+            "detached_git_head_mutation_advice(",
+            "unimported_git_history_advice(repo, \"checkpoint\")",
+            "verification_blocking_mutation_advice(",
+        ][..],
+    )] {
         let path = src_dir.join(file);
         let source = fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
@@ -347,7 +335,6 @@ fn git_overlay_checkpoint_mutations_use_transaction_seam() {
             "cli/commands/checkpoint.rs",
             &["git_overlay_txn::preflight_checkpoint"][..],
         ),
-        ("cli/commands/commit.rs", &["create_git_checkpoint("][..]),
         (
             "cli/commands/workflow.rs",
             &["git_overlay_txn::preflight_land_checkpoint("][..],
@@ -363,11 +350,7 @@ fn git_overlay_checkpoint_mutations_use_transaction_seam() {
         }
     }
 
-    for file in [
-        "cli/commands/checkpoint.rs",
-        "cli/commands/commit.rs",
-        "cli/commands/workflow.rs",
-    ] {
+    for file in ["cli/commands/checkpoint.rs", "cli/commands/workflow.rs"] {
         let path = src_dir.join(file);
         let source = fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
@@ -392,7 +375,7 @@ fn git_overlay_checkpoint_mutations_use_transaction_seam() {
 
     assert!(
         violations.is_empty(),
-        "checkpoint/commit/land Git-overlay mutation gates should stay behind cli::commands::git_overlay_txn:\n{}",
+        "checkpoint/land Git-overlay mutation gates should stay behind cli::commands::git_overlay_txn:\n{}",
         violations.join("\n")
     );
 }

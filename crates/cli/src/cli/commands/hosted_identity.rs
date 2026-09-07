@@ -25,6 +25,8 @@ use crate::cli::{
     should_output_json,
 };
 
+use super::action_line::print_next;
+
 pub async fn cmd_hosted_auth(cli: &Cli, command: AuthCommands) -> Result<()> {
     let json = should_output_json(cli, None);
     let command = auth_command(command, crate::cli::is_interactive_tty());
@@ -137,7 +139,7 @@ fn write_login_outcome(outcome: AuthLoginOutcome, json: bool) -> Result<()> {
                     "Agent account {} is active; a human can claim it later.",
                     outcome.pet_name
                 );
-                println!("Next: {}", outcome.next.command);
+                print_next(outcome.next.command);
             }
         }
     }
