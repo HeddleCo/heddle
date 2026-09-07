@@ -401,10 +401,14 @@ jobs:
           set -euo pipefail
           cargo test --locked -p heddle-cli --features ci --test ci_run_local
 
-      - name: Telemetry build, clippy, and tests
+      # Clippy compiles every telemetry target. Execute only the tests whose
+      # behavior changes under the feature; Quality and Coverage already run
+      # the complete default-feature suite. The old pre-build plus unfiltered
+      # test command compiled the same telemetry graph twice and then reran
+      # every unrelated CLI integration test.
+      - name: Telemetry clippy and focused tests
         run: |
           set -euo pipefail
-          cargo build --locked -p heddle-cli --features telemetry --tests --bin heddle
           cargo clippy --locked -p heddle-cli -p heddle-config \
             --features heddle-cli/telemetry --lib --bins --tests --examples -- -D warnings
           current_fd_limit=$(ulimit -n)
@@ -413,7 +417,9 @@ jobs:
           fi
           echo "Open-file limit: $(ulimit -n)"
           cargo test --locked -p heddle-cli -p heddle-config \
-            --features heddle-cli/telemetry
+            --features heddle-cli/telemetry --lib --bins
+          cargo test --locked -p heddle-cli --features telemetry \
+            --test cli_workflow telemetry::
 
       - name: sccache stats
         run: sccache --show-stats
