@@ -65,7 +65,7 @@ jobs:
             cargo test --locked --release -p heddle-repo --lib \
               --no-run 2>&1 | tee -a release-compile.txt
           /usr/bin/time -f 'release_hosted_close_compile elapsed=%e user=%U sys=%S max_rss_kb=%M' \
-            cargo test --locked --release -p heddle-cli --lib \
+            cargo test --locked --release -p heddle-hosted-client --features client --lib \
               --no-run 2>&1 | tee -a release-compile.txt
 
       - name: Enforce instant core-loop contract
@@ -91,9 +91,13 @@ jobs:
       - name: Enforce hosted endpoint close contract
         run: |
           set -o pipefail
-          RUST_LOG=iroh=error cargo test --locked --release -p heddle-cli --lib \
+          RUST_LOG=iroh=error cargo test --locked --release -p heddle-hosted-client --features client --lib \
             hosted_endpoint_close_release_contract -- --ignored --nocapture \
             2>&1 | tee hosted-close-contract.txt
+          if ! grep -Fq 'HOSTED_CLOSE_GATES green' hosted-close-contract.txt; then
+            echo 'HOSTED CLOSE GATE red: contract test did not execute to completion'
+            exit 1
+          fi
           if grep -Fq 'Endpoint dropped without calling `Endpoint::close`' \
             hosted-close-contract.txt; then
             echo 'HOSTED_CLOSE_LEAK_GUARD red: endpoint was dropped ungracefully'
