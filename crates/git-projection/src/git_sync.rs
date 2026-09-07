@@ -6,6 +6,7 @@ use refs::RefExpectation;
 use sley::{
     ObjectId as SleyObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
 };
+use sley_refs::ReflogEntry;
 
 use crate::{
     git_core::{
@@ -275,7 +276,7 @@ pub(crate) fn set_ref(
         name,
         ReferenceTarget::Direct(oid),
         precondition.clone(),
-        Some(sley::plumbing::sley_refs::ReflogEntry {
+        Some(ReflogEntry {
             old_oid,
             new_oid: oid,
             committer: git_projection_identity(),
@@ -369,15 +370,7 @@ fn ensure_commit_update_fast_forward(
     old: SleyObjectId,
     new: SleyObjectId,
 ) -> GitProjectionResult<()> {
-    if sley::plumbing::sley_rev::is_ancestor(
-        repo.git_dir(),
-        repo.object_format(),
-        repo.objects().as_ref(),
-        &old,
-        &new,
-    )
-    .map_err(git_err)?
-    {
+    if repo.rev_graph().is_ancestor(old, new).map_err(git_err)? {
         Ok(())
     } else {
         Err(GitProjectionError::NonFastForwardRef {
@@ -406,11 +399,7 @@ fn peeled_oid(
     else {
         return Ok(None);
     };
-    match sley::plumbing::sley_rev::peel_to_commit(
-        repo.objects().as_ref(),
-        repo.object_format(),
-        &oid,
-    ) {
+    match repo.peel_to_commit_oid(oid) {
         Ok(commit_oid) => Ok(Some(commit_oid)),
         Err(_) => Ok(None),
     }
@@ -426,10 +415,7 @@ fn git_projection_identity() -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use sley::{
-        CommitObject, GitObjectType, GitTime, Signature, TreeEditor,
-        plumbing::{sley_core::BString, sley_object::EncodedObject},
-    };
+    use sley::{BString, CommitObject, GitObjectType, GitTime, Signature, TreeEditor};
     use tempfile::TempDir;
 
     use super::*;
@@ -461,7 +447,7 @@ mod tests {
                 encoding: None,
                 message: message.as_bytes().to_vec(),
             };
-            repo.write_object(EncodedObject::new(GitObjectType::Commit, object.write()))
+            repo.write_raw_object(GitObjectType::Commit, object.write())
                 .expect("write commit")
         };
         let ours = commit("ours");

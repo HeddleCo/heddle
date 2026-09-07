@@ -50,23 +50,15 @@ pub fn git_worktree_entry_state(
 /// Compare a worktree file using an already-discovered Git repository handle.
 pub fn git_worktree_entry_state_in_repo(
     repo: &sley::Repository,
-    root: &Path,
+    _root: &Path,
     path: &str,
     expected_oid: sley::ObjectId,
     mode: u32,
     index_probe: Option<IndexStatProbe>,
 ) -> Result<GitWorktreeEntryState> {
-    let workdir = repo.workdir().unwrap_or_else(|| root.to_path_buf());
-    let state = sley::plumbing::sley_worktree::worktree_entry_state_by_git_path(
-        &workdir,
-        repo.git_dir(),
-        repo.object_format(),
-        path.as_bytes(),
-        &expected_oid,
-        mode,
-        index_probe.as_ref(),
-    )
-    .map_err(sley_error)?;
+    let state = repo
+        .worktree_entry_state(path, &expected_oid, mode, index_probe.as_ref())
+        .map_err(sley_error)?;
     Ok(state.into())
 }
 

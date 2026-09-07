@@ -10,8 +10,8 @@ use serde_json::Value;
 use sley::{
     CommitObject, DeleteRef, EntryKind, GitObjectType, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository,
-    plumbing::{sley_object::EncodedObject, sley_refs::ReflogEntry},
 };
+use sley_refs::ReflogEntry;
 use tempfile::TempDir;
 
 fn write_commit(
@@ -36,7 +36,7 @@ fn write_commit(
         encoding: None,
         message: message.to_vec(),
     };
-    repo.write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
+    repo.write_raw_object(GitObjectType::Commit, commit.write())
         .expect("write commit")
 }
 

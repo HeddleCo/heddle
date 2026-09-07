@@ -27,7 +27,8 @@ use sley::{
     ConfigEdit, ConfigEditPlan, ConfigEditScope, HeadUpdateOptions, RefChange, ReferenceTarget,
     RemoteConfigRefusal, RemoteConfigRemove, RemoteConfigSet, Repository as SleyRepository,
     remote::{
-        FetchOptions, PackGenerationProgress, ProgressSink as SleyProgressSink, TransferProgress,
+        FetchOptions, PackGenerationProgress, ProgressSink as SleyProgressSink, RemotePolicy,
+        TransferProgress,
     },
 };
 #[cfg(feature = "client")]
@@ -616,6 +617,7 @@ fn pull_git_overlay(
 
 fn git_pull_fetch_options(remote_thread: &str) -> FetchOptions {
     FetchOptions {
+        policy: RemotePolicy::default(),
         quiet: true,
         progress: None,
         auto_follow_tags: false,
@@ -677,7 +679,8 @@ fn publish_git_pull_branch(
     materialized: bool,
 ) -> Result<()> {
     if materialized {
-        sley::plumbing::sley_worktree::checkout_detached_filtered(
+        sley_worktree::checkout_detached_filtered(
+            Some(repo.root()),
             repo.root(),
             git.git_dir(),
             git.object_format(),
@@ -720,7 +723,8 @@ fn rollback_git_pull_branch(
 ) -> Result<()> {
     let old_oid = old_oid.context("the previous branch was unborn")?;
     if materialized {
-        sley::plumbing::sley_worktree::checkout_detached_filtered(
+        sley_worktree::checkout_detached_filtered(
+            Some(repo.root()),
             repo.root(),
             git.git_dir(),
             git.object_format(),

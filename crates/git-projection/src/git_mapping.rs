@@ -268,11 +268,7 @@ fn collect_commit_oids(repo: &SleyRepository) -> GitProjectionResult<Vec<SleyObj
                 oid
             }
         };
-        if let Ok(commit_oid) = sley::plumbing::sley_rev::peel_to_commit(
-            repo.objects().as_ref(),
-            repo.object_format(),
-            &oid,
-        ) {
+        if let Ok(commit_oid) = repo.peel_to_commit_oid(oid) {
             tips.push(commit_oid);
         }
     }

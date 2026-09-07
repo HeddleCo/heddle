@@ -5783,9 +5783,9 @@ fn write_git_lane_reachable_pack(
     roots: &[GitObjectId],
     excluded: &[GitObjectId],
     writer: &mut impl Write,
-) -> Result<Option<sley::plumbing::sley_odb::ReachablePackReuseWrite>, ProtocolError> {
+) -> Result<Option<sley_odb::ReachablePackReuseWrite>, ProtocolError> {
     let excluded = excluded.iter().copied().collect::<HashSet<_>>();
-    let written = sley::plumbing::sley_odb::write_reachable_pack_with_reuse_stats_to_writer(
+    let written = sley_odb::write_reachable_pack_with_reuse_stats_to_writer(
         git_repo.object_database(),
         git_repo.object_format(),
         roots.iter().copied(),
@@ -6227,7 +6227,7 @@ struct GitPackPullInstall {
     pack_size: u64,
     next_offset: u64,
     next_chunk_index: u32,
-    writer: sley::plumbing::sley_odb::RawPackStreamingInstall,
+    writer: sley_odb::RawPackStreamingInstall,
 }
 
 impl GitPackPullInstall {

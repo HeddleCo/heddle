@@ -26,10 +26,11 @@ use repo::{
     refresh_thread_freshness,
 };
 use sley::{
-    DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions, IndexWriteOptions, ObjectId,
-    RefPrecondition, ReferenceTarget, Repository as SleyRepository, Signature,
-    plumbing::sley_core::BString as GitByteString,
+    BString as GitByteString, DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions,
+    IndexWriteOptions, ObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
+    Signature,
 };
+use sley_refs::ReflogEntry;
 
 use super::{advice::RecoveryAdvice, thread_cmd::thread_not_found_advice};
 
@@ -1424,12 +1425,8 @@ fn git_signature() -> Signature {
     }
 }
 
-fn git_reflog_entry(
-    old_oid: ObjectId,
-    new_oid: ObjectId,
-    message: &str,
-) -> sley::plumbing::sley_refs::ReflogEntry {
-    sley::plumbing::sley_refs::ReflogEntry {
+fn git_reflog_entry(old_oid: ObjectId, new_oid: ObjectId, message: &str) -> ReflogEntry {
+    ReflogEntry {
         old_oid,
         new_oid,
         committer: git_signature().to_ident_bytes(),

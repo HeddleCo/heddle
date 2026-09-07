@@ -9,8 +9,8 @@ use serde_json::Value;
 use sley::{
     CommitObject, EntryKind, GitObjectType, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository,
-    plumbing::{sley_object::EncodedObject, sley_refs::ReflogEntry},
 };
+use sley_refs::ReflogEntry;
 use tempfile::TempDir;
 
 #[path = "support/git_https.rs"]
@@ -175,7 +175,7 @@ fn write_commit(repo: &SleyRepository, parent: Option<ObjectId>, content: &[u8])
         encoding: None,
         message: content.to_vec(),
     };
-    repo.write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
+    repo.write_raw_object(GitObjectType::Commit, commit.write())
         .expect("commit")
 }
 

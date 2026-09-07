@@ -2,10 +2,7 @@
 //! Byte-exact annotated Git tag objects stored in Heddle's native CAS.
 
 use serde::{Deserialize, Serialize};
-use sley::{
-    GitObjectType, ObjectFormat as GitObjectFormat, ObjectId as GitObjectId, TagObject,
-    plumbing::sley_object::EncodedObject,
-};
+use sley::{GitObjectType, ObjectFormat as GitObjectFormat, ObjectId as GitObjectId, TagObject};
 use thiserror::Error;
 
 use super::{ContentHash, StateId};
@@ -95,8 +92,7 @@ impl AnnotatedTag {
 
     /// Original Git object id, computed from `tag <len>\0<body>`.
     pub fn git_oid(&self) -> Result<GitObjectId, AnnotatedTagError> {
-        EncodedObject::new(GitObjectType::Tag, self.body.clone())
-            .object_id(self.git_format()?)
+        sley_core::object_id_for_bytes(self.git_format()?, GitObjectType::Tag.as_str(), &self.body)
             .map_err(|error| AnnotatedTagError::InvalidGitTag(error.to_string()))
     }
 

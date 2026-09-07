@@ -27,17 +27,17 @@ pub use repo::{
     REMOTE_NAME_FOR_LOCAL_GIT_REPO, is_reserved_git_remote_name,
 };
 use sley::{
-    DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions, IndexWriteOptions,
-    ObjectFormat, ObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
-    Signature,
-    plumbing::sley_core::BString as GitByteString,
+    BString as GitByteString, DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions,
+    IndexWriteOptions, ObjectFormat, ObjectId, RefPrecondition, ReferenceTarget,
+    Repository as SleyRepository, Signature,
     remote::{
         CredentialProvider, FetchOptions, HttpPushActionsRequest,
         HttpReceivePackObservationRequest, LsRemoteFilter, NoCredentials, ProgressSink,
-        PushActionPlan, PushCommand, PushDestination, PushOptions, PushServices, SilentProgress,
-        observe_http_receive_pack, push_http_actions_with_reader_from_observation,
+        PushActionPlan, PushCommand, PushDestination, PushOptions, PushServices, RemotePolicy,
+        SilentProgress, observe_http_receive_pack, push_http_actions_with_reader_from_observation,
     },
 };
+use sley_refs::ReflogEntry;
 use sley_transport::{HttpClient, UreqHttpClient};
 
 use super::{
@@ -666,12 +666,17 @@ impl CheckoutWrite {
 
     fn excluded_objects(&self) -> GitProjectionResult<HashSet<ObjectId>> {
         match self.previous_branch {
-            Some(parent) => sley::plumbing::sley_odb::collect_reachable_object_ids(
-                self.object_repo.objects().as_ref(),
-                self.object_repo.object_format(),
-                [parent],
-            )
-            .map_err(git_err),
+            Some(parent) => self
+                .object_repo
+                .reachable_pack_plan()
+                .root(parent)
+                .build()
+                .map(|plan| {
+                    plan.map_or_else(HashSet::new, |plan| {
+                        plan.object_ids().iter().copied().collect()
+                    })
+                })
+                .map_err(git_err),
             None => Ok(HashSet::new()),
         }
     }
@@ -1452,6 +1457,7 @@ fn fetch_heddle_notes_into_repo(
         url,
         &[refspec],
         FetchOptions {
+            policy: RemotePolicy::default(),
             // sley 0.5.0 additions — heddle uses git defaults (no CLI override).
             filter_auto: false,
             progress: None,
@@ -1975,7 +1981,7 @@ pub fn set_reference(
         Some(ReferenceTarget::Direct(oid)) => oid,
         _ => ObjectId::null(repo.object_format()),
     };
-    let reflog = sley::plumbing::sley_refs::ReflogEntry {
+    let reflog = ReflogEntry {
         old_oid,
         new_oid: target,
         committer: git_projection_signature(),
@@ -1998,12 +2004,12 @@ fn update_checkout_branch_ref(
     target: ObjectId,
     previous_branch: Option<ObjectId>,
     log_message: &str,
-) -> GitProjectionResult<sley::plumbing::sley_refs::ReflogEntry> {
+) -> GitProjectionResult<ReflogEntry> {
     let expected = previous_branch.map_or(RefPrecondition::MustNotExist, |oid| {
         RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(oid))
     });
     let old_oid = previous_branch.unwrap_or_else(|| ObjectId::null(repo.object_format()));
-    let head_reflog = sley::plumbing::sley_refs::ReflogEntry {
+    let head_reflog = ReflogEntry {
         old_oid,
         new_oid: target,
         committer: git_projection_signature(),
@@ -3103,12 +3109,13 @@ fn clone_url_to_bare_via_sley(
     let repo = SleyRepository::init_bare(dest).map_err(git_err)?;
     let mut credentials =
         EmbeddingSafeCredentialProvider::new(&repo.config_snapshot().map_err(git_err)?);
-    let display_url = sley::plumbing::sley_core::redact_url_for_display(url);
+    let display_url = sley_core::redact_url_for_display(url);
     let outcome = repo
         .fetch_with_http_client(
             url,
             &heddle_fetch_refspecs()?,
             FetchOptions {
+                policy: RemotePolicy::default(),
                 // sley 0.5.0 additions — heddle uses git defaults (no CLI override).
                 filter_auto: false,
                 progress: None,
@@ -3378,6 +3385,7 @@ fn collect_authoritative_git_ref_updates(
 /// ownership record. The per-remote manifest separately prevents Heddle from
 /// claiming, rewinding, or deleting destination refs it did not publish.
 pub struct AuthoritativeGitPushOptions<'a> {
+    pub original_cwd: Option<&'a Path>,
     pub heddle_dir: &'a Path,
     pub remote: &'a str,
     pub scope: GitPushScope,
@@ -3392,6 +3400,7 @@ pub fn push_authoritative_git_refs(
     progress: &mut dyn ProgressSink,
 ) -> GitProjectionResult<Vec<String>> {
     let AuthoritativeGitPushOptions {
+        original_cwd,
         heddle_dir,
         remote,
         scope,
@@ -3399,6 +3408,7 @@ pub fn push_authoritative_git_refs(
         force,
     } = options;
     let remote_context = source.remote(remote).map_err(git_err)?;
+    let remote_policy = RemotePolicy::default();
     let remote_url = remote_context.push_url();
     let destination = remote_context.push_destination(source).map_err(git_err)?;
     let http_client = configured_https_client();
@@ -3412,6 +3422,7 @@ pub fn push_authoritative_git_refs(
         PushDestination::Http(remote_url) => {
             let observation = observe_http_receive_pack(
                 HttpReceivePackObservationRequest {
+                    policy: &remote_policy,
                     remote_url,
                     format: source.object_format(),
                     config: remote_context.config(),
@@ -3434,6 +3445,7 @@ pub fn push_authoritative_git_refs(
         _ => (
             source
                 .ls_remote_with_http_client(
+                    &remote_policy,
                     &remote_url,
                     LsRemoteFilter {
                         heads: false,
@@ -3507,6 +3519,7 @@ pub fn push_authoritative_git_refs(
         commands,
         pack_objects,
         options: PushOptions {
+            policy: remote_policy,
             quiet: true,
             force: force || force_transport_checks,
             thin: sley::remote::PushThinMode::Auto,
@@ -3536,6 +3549,7 @@ pub fn push_authoritative_git_refs(
         _ => {
             source
                 .push_actions_with_http_client(
+                    original_cwd,
                     remote,
                     push_plan,
                     credentials,
@@ -4060,11 +4074,8 @@ mod tests {
             encoding: None,
             message: message.as_bytes().to_vec(),
         };
-        repo.write_object(sley::plumbing::sley_object::EncodedObject::new(
-            GitObjectType::Commit,
-            commit.write(),
-        ))
-        .expect("write test commit")
+        repo.write_raw_object(GitObjectType::Commit, commit.write())
+            .expect("write test commit")
     }
 
     fn seed_commit(repo: &SleyRepository, message: &str) -> ObjectId {
@@ -4154,11 +4165,8 @@ mod tests {
     fn checkout_publish_rolls_back_branch_when_head_reflog_fails() {
         let tmp = tempfile::TempDir::new().unwrap();
         let repo = SleyRepository::init(tmp.path()).expect("init repository");
-        repo.write_object(sley::plumbing::sley_object::EncodedObject::new(
-            GitObjectType::Tree,
-            Vec::new(),
-        ))
-        .expect("write empty tree");
+        repo.write_raw_object(GitObjectType::Tree, Vec::new())
+            .expect("write empty tree");
         let previous = test_commit(&repo, "previous", &[]);
         let next = test_commit(&repo, "next", &[previous]);
         set_reference(

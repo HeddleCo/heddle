@@ -6,8 +6,8 @@ use serde_json::Value;
 use sley::{
     CommitObject, EntryKind, GitObjectType, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository,
-    plumbing::{sley_object::EncodedObject, sley_refs::ReflogEntry},
 };
+use sley_refs::ReflogEntry;
 use tempfile::TempDir;
 
 fn seed_git_source(path: &std::path::Path) {
@@ -31,7 +31,7 @@ fn seed_git_source(path: &std::path::Path) {
         message: b"seed\n".to_vec(),
     };
     let commit = repo
-        .write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
+        .write_raw_object(GitObjectType::Commit, commit.write())
         .expect("write commit");
     let references = repo.references();
     let mut refs = references.transaction();

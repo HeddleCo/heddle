@@ -401,7 +401,7 @@ impl Repository {
                 continue;
             };
             let Some(target) =
-                self.git_overlay_commit_tip_oid(&git_repo, &branch, "branch", &name)?
+                self.git_overlay_commit_tip_oid(&git_repo, &branch.target, "branch", &name)?
             else {
                 continue;
             };
@@ -480,7 +480,8 @@ impl Repository {
             let Some(name) = ref_name.short_name().map(str::to_string) else {
                 continue;
             };
-            let Some(target) = self.git_overlay_commit_tip_oid(&git_repo, &tag, "tag", &name)?
+            let Some(target) =
+                self.git_overlay_commit_tip_oid(&git_repo, &tag.target, "tag", &name)?
             else {
                 continue;
             };
@@ -554,7 +555,7 @@ impl Repository {
                 continue;
             }
             let Some(target) =
-                self.git_overlay_commit_tip_oid(&git_repo, &reference, "branch", name)?
+                self.git_overlay_commit_tip_oid(&git_repo, &reference.target, "branch", name)?
             else {
                 return Ok(None);
             };
@@ -593,8 +594,12 @@ impl Repository {
             if reference.name != full_name {
                 continue;
             }
-            let Some(target) =
-                self.git_overlay_commit_tip_oid(&git_repo, &reference, "remote branch", name)?
+            let Some(target) = self.git_overlay_commit_tip_oid(
+                &git_repo,
+                &reference.target,
+                "remote branch",
+                name,
+            )?
             else {
                 return Ok(None);
             };
@@ -630,7 +635,7 @@ impl Repository {
                 continue;
             }
             let Some(target) =
-                self.git_overlay_commit_tip_oid(&git_repo, &reference, "tag", name)?
+                self.git_overlay_commit_tip_oid(&git_repo, &reference.target, "tag", name)?
             else {
                 return Ok(None);
             };
@@ -1066,11 +1071,11 @@ impl Repository {
     fn git_overlay_commit_tip_oid(
         &self,
         git_repo: &SleyRepository,
-        reference: &sley::plumbing::sley_refs::Ref,
+        target: &SleyRefTarget,
         ref_kind: &str,
         ref_name: &str,
     ) -> Result<Option<SleyObjectId>> {
-        let target = match &reference.target {
+        let target = match target {
             SleyRefTarget::Direct(oid) => *oid,
             SleyRefTarget::Symbolic(_) => return Ok(None),
         };

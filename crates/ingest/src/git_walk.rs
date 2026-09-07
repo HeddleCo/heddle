@@ -372,11 +372,7 @@ impl GitSource {
             },
         };
 
-        match sley::plumbing::sley_rev::peel_to_commit(
-            self.repo.objects().as_ref(),
-            self.repo.object_format(),
-            &oid,
-        ) {
+        match self.repo.peel_to_commit_oid(oid) {
             Ok(commit_oid) if is_commit(&self.repo, commit_oid) => {
                 RefResolution::Commit(commit_oid)
             }

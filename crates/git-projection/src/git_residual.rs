@@ -37,10 +37,7 @@ use std::{
 
 use objects::fs_atomic::write_file_atomic;
 use serde::{Deserialize, Serialize};
-use sley::{
-    GitObjectType, ObjectFormat, ObjectId, Repository as SleyRepository,
-    plumbing::sley_object::EncodedObject,
-};
+use sley::{GitObjectType, ObjectFormat, ObjectId, Repository as SleyRepository};
 
 use crate::git_core::{GitProjectionError, GitProjectionResult, git_err};
 
@@ -101,9 +98,7 @@ impl ResidualStore {
         body: impl Into<Vec<u8>>,
     ) -> GitProjectionResult<ObjectId> {
         let body = body.into();
-        let encoded = EncodedObject::new(object_type, body.clone());
-        let oid = encoded
-            .object_id(object_format)
+        let oid = sley_core::object_id_for_bytes(object_format, object_type.as_str(), &body)
             .map_err(|error| GitProjectionError::Git(error.to_string()))?;
         self.put_residual_verified(oid, object_format, object_type, body)?;
         Ok(oid)
@@ -125,9 +120,7 @@ impl ResidualStore {
             )));
         }
         let body = body.into();
-        let encoded = EncodedObject::new(object_type, body.clone());
-        let computed = encoded
-            .object_id(object_format)
+        let computed = sley_core::object_id_for_bytes(object_format, object_type.as_str(), &body)
             .map_err(|error| GitProjectionError::Git(error.to_string()))?;
         if computed != oid {
             return Err(GitProjectionError::Git(format!(
@@ -164,9 +157,7 @@ impl ResidualStore {
         let (object_type, body) = decode_residual_file(&bytes)?;
         // Defensive re-hash: refuse a residual whose body no longer matches the
         // path oid (bitrot / partial write survivors).
-        let encoded = EncodedObject::new(object_type, body.clone());
-        let computed = encoded
-            .object_id(object_format)
+        let computed = sley_core::object_id_for_bytes(object_format, object_type.as_str(), &body)
             .map_err(|error| GitProjectionError::Git(error.to_string()))?;
         if &computed != oid {
             return Err(GitProjectionError::Git(format!(
@@ -382,7 +373,7 @@ impl ResidualStore {
             return Ok(false);
         };
         let written = target
-            .write_object(EncodedObject::new(residual.object_type, residual.body))
+            .write_raw_object(residual.object_type, residual.body)
             .map_err(git_err)?;
         if written != *oid {
             return Err(GitProjectionError::Git(format!(
@@ -415,10 +406,7 @@ impl ResidualStore {
                 ))
             })?;
             let written = target
-                .write_object(EncodedObject::new(
-                    residual.object_type,
-                    residual.body.clone(),
-                ))
+                .write_raw_object(residual.object_type, residual.body.clone())
                 .map_err(git_err)?;
             if written != oid {
                 return Err(GitProjectionError::Git(format!(
@@ -478,10 +466,7 @@ impl ResidualStore {
                 ))
             })?;
             let written = target
-                .write_object(EncodedObject::new(
-                    residual.object_type,
-                    residual.body.clone(),
-                ))
+                .write_raw_object(residual.object_type, residual.body.clone())
                 .map_err(git_err)?;
             if written != oid {
                 return Err(GitProjectionError::Git(format!(
@@ -624,8 +609,8 @@ fn object_type_from_tag(tag: u8) -> GitProjectionResult<GitObjectType> {
 #[cfg(test)]
 mod tests {
     use sley::{
-        CommitObject, EntryKind, GitTime, Repository as SleyRepository, Signature, TreeEditor,
-        plumbing::{sley_core::BString, sley_object::EncodedObject},
+        BString, CommitObject, EntryKind, GitTime, Repository as SleyRepository, Signature,
+        TreeEditor,
     };
 
     use super::*;
@@ -720,7 +705,7 @@ committer A <a@e> 1 +0000\n\
             encoding: None,
             message: message.as_bytes().to_vec(),
         };
-        repo.write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
+        repo.write_raw_object(GitObjectType::Commit, commit.write())
             .expect("write commit")
     }
 

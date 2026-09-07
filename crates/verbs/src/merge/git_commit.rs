@@ -20,8 +20,9 @@ use repo::Repository;
 use serde::Serialize;
 use sley::{
     CommitObject, GitObjectType, IndexWriteOptions, ObjectId as GitObjectId, RefPrecondition,
-    ReferenceTarget, Repository as SleyRepository, plumbing::sley_object::EncodedObject,
+    ReferenceTarget, Repository as SleyRepository,
 };
+use sley_refs::ReflogEntry;
 
 /// Outcome of `--git-commit --preview` — what *would* be committed if
 /// the merge ran for real.
@@ -275,7 +276,7 @@ pub fn write_git_commit(
         message: message.as_bytes().to_vec(),
     };
     let commit_id = git
-        .write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
+        .write_raw_object(GitObjectType::Commit, commit.write())
         .map_err(|err| {
             anyhow!(merge_git_commit_failed_advice(
                 "writing Git commit object",
@@ -341,7 +342,7 @@ fn update_head_ref(
         ref_name,
         ReferenceTarget::Direct(new_head),
         RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(old_head)),
-        Some(sley::plumbing::sley_refs::ReflogEntry {
+        Some(ReflogEntry {
             old_oid: old_head,
             new_oid: new_head,
             committer: identity.to_signature(seconds).to_ident_bytes(),

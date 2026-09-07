@@ -32,12 +32,10 @@ use heddle_git_projection::git_core::clone_url_to_bare;
 use objects::{object::Blob, store::ObjectStore};
 use repo::Repository;
 use sley::{
-    CommitObject, EntryKind, GitObjectType, GitTime, ObjectId, RefPrecondition, ReferenceTarget,
-    Repository as SleyRepository, Signature,
-    plumbing::{
-        sley_core::BString as GitByteString, sley_object::EncodedObject, sley_refs::ReflogEntry,
-    },
+    BString as GitByteString, CommitObject, EntryKind, GitObjectType, GitTime, ObjectId,
+    RefPrecondition, ReferenceTarget, Repository as SleyRepository, Signature,
 };
+use sley_refs::ReflogEntry;
 use tempfile::TempDir;
 
 /// Build a minimal bare Git repo with a single commit / tree / blob,
@@ -68,7 +66,7 @@ fn build_local_bare_with_one_blob() -> (TempDir, std::path::PathBuf, ObjectId, V
         message: b"seed".to_vec(),
     };
     let commit_oid = repo
-        .write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
+        .write_raw_object(GitObjectType::Commit, commit.write())
         .expect("commit");
     set_reference(&repo, "refs/heads/main", commit_oid);
 

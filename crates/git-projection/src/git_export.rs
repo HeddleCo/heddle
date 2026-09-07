@@ -13,8 +13,8 @@ use objects::{
 };
 use repo::Repository as HeddleRepository;
 use sley::{
-    CommitObject, EntryKind, GitObjectType, ObjectId, ReferenceTarget,
-    Repository as SleyRepository, Signature, plumbing::sley_object::EncodedObject,
+    BString, CommitObject, EntryKind, GitObjectType, ObjectId, ReferenceTarget,
+    Repository as SleyRepository, Signature,
 };
 use tracing::debug;
 
@@ -226,7 +226,7 @@ fn write_state_object(
         encoding: None,
         message: message.into_bytes(),
     };
-    repo.write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
+    repo.write_raw_object(GitObjectType::Commit, commit.write())
         .map_err(git_err)
 }
 
@@ -1574,8 +1574,8 @@ fn state_to_signature(state: &objects::object::State) -> Signature {
     raw.extend_from_slice(seconds.to_string().as_bytes());
     raw.extend_from_slice(b" +0000");
     Signature {
-        name: sley::plumbing::sley_core::BString::new(principal.name.clone()),
-        email: sley::plumbing::sley_core::BString::new(principal.email.clone()),
+        name: BString::new(principal.name.clone()),
+        email: BString::new(principal.email.clone()),
         time: sley::GitTime::new(seconds, 0),
         raw,
     }

@@ -101,8 +101,8 @@ pub use serde_json::Value;
 pub use sley::{
     BString as GitByteString, CommitObject, EntryKind, GitObjectType, GitTime, ObjectId,
     RefPrecondition, ReferenceTarget, Repository as SleyRepository, Signature, TagObject,
-    plumbing::{sley_object::EncodedObject, sley_refs::ReflogEntry},
 };
+pub use sley_refs::ReflogEntry;
 pub use tempfile::TempDir;
 
 pub trait SleyIntegrationRepoExt {
@@ -820,7 +820,7 @@ pub fn git_commit_with_tree(
         message: message.as_bytes().to_vec(),
     };
     let commit_id = repo
-        .write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
+        .write_raw_object(GitObjectType::Commit, commit.write())
         .expect("commit");
     if let Some(reference) = reference {
         git_set_reference(repo, reference, commit_id);
@@ -845,7 +845,7 @@ pub fn git_create_annotated_tag(
         raw_body: None,
     };
     let tag_id = repo
-        .write_object(EncodedObject::new(GitObjectType::Tag, tag.write()))
+        .write_raw_object(GitObjectType::Tag, tag.write())
         .expect("write annotated tag");
     let refs = repo.references();
     let mut tx = refs.transaction();

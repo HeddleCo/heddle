@@ -3120,7 +3120,7 @@ initialized” signal is gone.
 
 ## Git transport seam
 
-- Consume `sley` and `sley-transport` 0.9.0. The released
+- Consume `sley` and `sley-transport` 0.10.0. The released
   `HttpPushActionsRequest` accepts Weft's `ObjectReader` directly; do not
   materialize a temporary bare repository or copy projected objects into a
   filesystem ODB.

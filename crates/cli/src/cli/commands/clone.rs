@@ -46,14 +46,12 @@ use objects::{
 use repo::{BlobHydrator, Repository, ThreadManager};
 #[cfg(feature = "client")]
 use repo::{RepositorySourceAuthority, clone_intent::CloneIntent};
-#[cfg(feature = "client")]
-use sley::plumbing::sley_worktree;
 use sley::{
     ConfigEdit, ConfigEditPlan, ConfigEditScope, ConfigSectionEntry, GitObjectType,
     IndexWriteOptions, ObjectId, RefPrecondition, RemoteConfigSet, Repository as SleyRepository,
-    plumbing::sley_core::redact_url_for_display,
     remote::{ProgressSink as SleyProgressSink, TransferProgress},
 };
+use sley_core::redact_url_for_display;
 use verbs::{
     CloneMode, ClonePlanError, ClonePlanFacts, ClonePlanOptions, CloneRemoteSource,
     CloneThreadSelectError, UnsupportedCloneFlag, plan_clone, select_clone_checkout_thread,
@@ -2689,6 +2687,7 @@ fn finish_hosted_git_overlay_checkout(repo: &Repository, branch: &str) -> Result
     let git_repo = SleyRepository::discover(repo.root()).map_err(anyhow::Error::msg)?;
     let config = git_repo.config_snapshot().map_err(anyhow::Error::msg)?;
     let checkout = sley_worktree::checkout_branch_filtered(
+        Some(repo.root()),
         repo.root(),
         git_repo.git_dir(),
         git_repo.object_format(),
@@ -2702,6 +2701,7 @@ fn finish_hosted_git_overlay_checkout(repo: &Repository, branch: &str) -> Result
         anyhow::bail!("hosted Git-overlay clone missing {branch_ref}");
     }
     sley_worktree::reset_index_and_worktree_to_commit(
+        Some(repo.root()),
         repo.root(),
         git_repo.git_dir(),
         git_repo.object_format(),

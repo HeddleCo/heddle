@@ -8,8 +8,8 @@ use std::{
 use sley::{
     CommitObject, EntryKind, GitObjectType, ObjectFormat, ObjectId as GitObjectId,
     Repository as SleyRepository,
-    plumbing::{sley_object::EncodedObject, sley_odb, sley_pack::PackFile},
 };
+use sley_pack::PackFile;
 use tempfile::TempDir;
 
 use super::{build_git_lane_multi_root_pack_plan, write_git_lane_reachable_pack};
@@ -45,7 +45,7 @@ fn write_commit(
         message: format!("commit {name}\n").into_bytes(),
     };
     let oid = repo
-        .write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
+        .write_raw_object(GitObjectType::Commit, commit.write())
         .expect("write commit");
     (oid, blob)
 }
@@ -96,12 +96,20 @@ fn rebuild_without_reuse(
     Some(plan.prepare_to_memory().expect("rebuild old pack").pack)
 }
 
-fn parse_objects(bytes: &[u8], format: ObjectFormat) -> HashMap<GitObjectId, EncodedObject> {
+fn parse_objects(
+    bytes: &[u8],
+    format: ObjectFormat,
+) -> HashMap<GitObjectId, (GitObjectType, Vec<u8>)> {
     PackFile::parse(bytes, format)
         .expect("parse pack")
         .entries
         .into_iter()
-        .map(|entry| (entry.entry.oid, entry.object))
+        .map(|entry| {
+            (
+                entry.entry.oid,
+                (entry.object.object_type, entry.object.body),
+            )
+        })
         .collect()
 }
 
@@ -262,7 +270,7 @@ fn reuse_beats_full_repack_on_an_already_packed_closure() {
         message: b"packed corpus\n".to_vec(),
     };
     let root = repo
-        .write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
+        .write_raw_object(GitObjectType::Commit, commit.write())
         .expect("write commit");
     install_reachable_pack(&repo, &[root]);
 
