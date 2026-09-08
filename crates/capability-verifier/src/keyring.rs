@@ -85,6 +85,7 @@ pub fn verify_clone_keyring(
     }
     if keyring.accepted_transitions.len() > VerificationLimits::MAX_TRANSITIONS
         || keyring.ownership_transfers.len() > VerificationLimits::MAX_TRANSITIONS
+        || keyring.transfer_owner_histories.len() > VerificationLimits::MAX_TRANSITIONS
     {
         return Err(Error::TooLarge {
             limit: VerificationLimits::MAX_TRANSITIONS,
@@ -149,21 +150,60 @@ pub fn verify_clone_keyring(
         .as_slice()
         .try_into()
         .expect("verified account UUID");
-    if let Some(owner) = transfer_owners
-        .iter()
-        .find(|owner| owner.stable_owner_uuid == &initial_owner_uuid)
-    {
-        if owner.state.state_hash() != state.state_hash() {
+    // Transfer signatures name historical state hashes. Verify the original
+    // proofs before selecting the exact state; later rotations do not invalidate
+    // earlier accepted ownership handoffs.
+    let mut witnesses = Vec::with_capacity(keyring.transfer_owner_histories.len());
+    let mut transition_count = keyring.accepted_transitions.len();
+    for history in &keyring.transfer_owner_histories {
+        transition_count = transition_count.saturating_add(history.accepted_transitions.len());
+        if transition_count > VerificationLimits::MAX_TRANSITIONS {
+            return Err(Error::TooLarge {
+                limit: VerificationLimits::MAX_TRANSITIONS,
+            });
+        }
+        let mut owner = verify_owner_root(history.root.as_ref().ok_or_else(|| {
+            Error::BrokenChain("transfer history has no signed owner root".to_owned())
+        })?)?;
+        for transition in &history.accepted_transitions {
+            owner = apply_transition(&owner, transition, now_unix_seconds, limits)?;
+        }
+        if history.state_hash.as_slice() != owner.state_hash() {
             return Err(Error::BrokenChain(
-                "transfer directory disagrees with the keyring owner state".to_owned(),
+                "transfer history state hash differs from its signed proof".to_owned(),
             ));
         }
+        let uuid: [u8; 16] = owner
+            .signed_root()
+            .root
+            .as_ref()
+            .ok_or_else(|| Error::BrokenChain("verified owner root body missing".to_owned()))?
+            .account_uuid
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::BrokenChain("transfer owner UUID has wrong length".to_owned()))?;
+        if witnesses
+            .iter()
+            .any(|(id, previous): &([u8; 16], VerifiedOwnerState)| {
+                *id == uuid && previous.state_hash() == owner.state_hash()
+            })
+        {
+            return Err(Error::BrokenChain(
+                "duplicate transfer owner history".to_owned(),
+            ));
+        }
+        witnesses.push((uuid, owner));
     }
+    let mut owners = transfer_owners.to_vec();
+    owners.extend(witnesses.iter().map(|(uuid, state)| TransferOwner {
+        stable_owner_uuid: uuid,
+        state,
+    }));
     let current_owner_uuid = verify_transfer_audit_chain(
         &spool_uuid,
         &initial_owner_uuid,
         &keyring.ownership_transfers,
-        transfer_owners,
+        &owners,
     )?;
     Ok(VerifiedCloneKeyring {
         wire: keyring,

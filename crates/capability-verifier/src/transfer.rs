@@ -114,11 +114,18 @@ pub fn verify_resource_transfer(
     })
 }
 
-fn owner_for<'a>(owners: &'a [TransferOwner<'a>], uuid: &[u8]) -> Result<TransferOwner<'a>> {
+fn owner_for<'a>(
+    owners: &'a [TransferOwner<'a>],
+    uuid: &[u8],
+    state_hash: &[u8],
+) -> Result<TransferOwner<'a>> {
     let matching = owners
         .iter()
         .copied()
-        .filter(|owner| owner.stable_owner_uuid.as_slice() == uuid)
+        .filter(|owner| {
+            owner.stable_owner_uuid.as_slice() == uuid
+                && owner.state.state_hash().as_slice() == state_hash
+        })
         .collect::<Vec<_>>();
     if matching.len() != 1 {
         return Err(Error::BrokenChain(
@@ -166,8 +173,16 @@ pub fn verify_transfer_audit_chain(
                 "ownership transfer forks from a non-current owner".to_owned(),
             ));
         }
-        let source = owner_for(owners, &handoff.source_owner_uuid)?;
-        let destination = owner_for(owners, &handoff.destination_owner_uuid)?;
+        let source = owner_for(
+            owners,
+            &handoff.source_owner_uuid,
+            &handoff.source_owner_key_state_hash,
+        )?;
+        let destination = owner_for(
+            owners,
+            &handoff.destination_owner_uuid,
+            &handoff.destination_owner_key_state_hash,
+        )?;
         let verified = verify_resource_transfer(
             transfer,
             resource_uuid,

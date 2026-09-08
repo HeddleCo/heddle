@@ -11,21 +11,23 @@ use super::*;
 use crate::{
     canonical::{
         OWNER_CAPABILITY_DOMAIN, OWNER_ROOT_DOMAIN, OWNER_TRANSITION_DOMAIN,
-        PURGE_OPERATION_DOMAIN, TRANSFER_ACCEPTANCE_DOMAIN, TRANSFER_HANDOFF_DOMAIN,
-        capability_body, capability_without_id, digest, key_id, owner_root_body,
-        owner_root_without_id, transfer_acceptance_body, transfer_handoff_body, transition_body,
+        PURGE_OPERATION_DOMAIN, TRANSFER_ACCEPTANCE_DOMAIN, TRANSFER_AUDIT_DOMAIN,
+        TRANSFER_HANDOFF_DOMAIN, capability_body, capability_without_id, digest, key_id,
+        owner_root_body, owner_root_without_id, transfer_acceptance_body, transfer_audit_body,
+        transfer_handoff_body, transition_body,
     },
     crypto::verify_signature,
     wire::{
         AuthorizationKeyAlgorithm, AuthorizationSignature, AuthorizationVerificationKey,
         CapabilityPrincipal, CapabilityPrincipalKind, CloneAuthorizationKeyring, CloneOwnerPin,
-        CloneOwnerPinKind, OwnerAuthorizationBundle, OwnerCapability, OwnerKeyTransition,
-        OwnerKeyTransitionKind, OwnerRoot, PurgeOperationSigningBody, PurgeSidecarIdentity,
-        RecoveryGuardian, RecoveryGuardianKind, RecoveryPolicy, ResourceOwnershipTransfer,
-        ResourceTransferAcceptance, ResourceTransferHandoff, SidecarAuthorization,
-        SignedOwnerCapability, SignedOwnerKeyTransition, SignedOwnerRoot,
-        SignedResourceTransferHandoff, SignedSpoolOwnerGenesis, SpoolCapabilityAction,
-        SpoolCapabilityGrant, SpoolOwnerGenesis, SpoolSelector,
+        CloneOwnerPinKind, OwnerAuthorizationBundle, OwnerCapability, OwnerHistory,
+        OwnerKeyTransition, OwnerKeyTransitionKind, OwnerRoot, PurgeOperationSigningBody,
+        PurgeSidecarIdentity, RecoveryGuardian, RecoveryGuardianKind, RecoveryPolicy,
+        ResourceOwnershipTransfer, ResourceTransferAcceptance, ResourceTransferAuditRecord,
+        ResourceTransferHandoff, SidecarAuthorization, SignedOwnerCapability,
+        SignedOwnerKeyTransition, SignedOwnerRoot, SignedResourceTransferHandoff,
+        SignedSpoolOwnerGenesis, SpoolCapabilityAction, SpoolCapabilityGrant, SpoolOwnerGenesis,
+        SpoolSelector,
     },
 };
 
@@ -969,6 +971,7 @@ fn base_keyring() -> (CloneAuthorizationKeyring, SignedOwnerKeyTransition) {
             accepted_state_hash: current.state_hash().to_vec(),
             owner_genesis: Some(signed_genesis(SPOOL, &authority)),
             ownership_transfers: Vec::new(),
+            transfer_owner_histories: Vec::new(),
         },
         transition,
     )
@@ -1482,4 +1485,84 @@ fn print_fixture_json() {
         "KEYRING_FIXTURE_START\n{}\nKEYRING_FIXTURE_END",
         serde_json::to_string_pretty(&keyrings).expect("JSON")
     );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn portable_transfer_histories_select_exact_historical_states() {
+    let (mut keyring, _) = base_keyring();
+    let root = keyring.owner_root.as_ref().expect("source root");
+    let source = verify_owner_root(root).expect("original source state");
+    let destination_key = TestKey::new(11);
+    let destination_root = signed_root(
+        [0x33; 16],
+        &destination_key,
+        &[
+            (&TestKey::new(12), RecoveryGuardianKind::Paper),
+            (&TestKey::new(13), RecoveryGuardianKind::Social),
+        ],
+    );
+    let destination = verify_owner_root(&destination_root).expect("destination root");
+    // The resource moved before source rotation. The accepted current source
+    // state differs from the precise source state signed into the handoff.
+    let transfer = signed_transfer(
+        OWNER_UUID,
+        &source,
+        &TestKey::new(1),
+        [0x33; 16],
+        &destination,
+        &destination_key,
+    );
+    let mut audit = ResourceTransferAuditRecord {
+        transfer: Some(transfer),
+        previous_audit_record_hash: Vec::new(),
+        audit_record_hash: Vec::new(),
+        committed_at_unix_seconds: NOW,
+    };
+    audit.audit_record_hash = digest(
+        TRANSFER_AUDIT_DOMAIN,
+        &transfer_audit_body(&audit).expect("audit body"),
+    )
+    .to_vec();
+    keyring.ownership_transfers.push(audit);
+    keyring.transfer_owner_histories = vec![
+        OwnerHistory {
+            root: Some(root.clone()),
+            accepted_transitions: Vec::new(),
+            state_hash: source.state_hash().to_vec(),
+        },
+        OwnerHistory {
+            root: Some(root.clone()),
+            accepted_transitions: keyring.accepted_transitions.clone(),
+            state_hash: keyring.accepted_state_hash.clone(),
+        },
+        OwnerHistory {
+            root: Some(destination_root),
+            accepted_transitions: Vec::new(),
+            state_hash: destination.state_hash().to_vec(),
+        },
+    ];
+    let verified = verify_clone_keyring(keyring.clone(), NOW, limits(), &[])
+        .expect("portable historical transfer proofs");
+    assert_eq!(verified.current_owner_uuid(), [0x33; 16]);
+    let mut missing = keyring.clone();
+    missing.transfer_owner_histories.remove(0);
+    assert!(matches!(
+        verify_clone_keyring(missing, NOW, limits(), &[]),
+        Err(Error::BrokenChain(_))
+    ));
+    let mut duplicate = keyring.clone();
+    duplicate
+        .transfer_owner_histories
+        .push(duplicate.transfer_owner_histories[0].clone());
+    assert!(matches!(
+        verify_clone_keyring(duplicate, NOW, limits(), &[]),
+        Err(Error::BrokenChain(_))
+    ));
+    let mut tampered = keyring;
+    tampered.transfer_owner_histories[0].state_hash[0] ^= 1;
+    assert!(matches!(
+        verify_clone_keyring(tampered, NOW, limits(), &[]),
+        Err(Error::BrokenChain(_))
+    ));
 }
