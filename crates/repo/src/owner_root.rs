@@ -629,3 +629,129 @@ pub fn owner_key_transition_body(transition: &OwnerKeyTransition) -> Result<Vec<
     encoder.bytes(&transition.nonce)?;
     Ok(encoder.finish())
 }
+
+/// Issue spool genesis only with the authority active in the verified owner
+/// history. Transport possession alone does not establish owner-key authority.
+pub fn sign_current_spool_owner_genesis(
+    signer: &impl Signer,
+    spool_uuid: uuid::Uuid,
+    observed: &api::heddle::api::v2alpha1::OwnerState,
+    now_unix_seconds: i64,
+) -> Result<SignedSpoolOwnerGenesis> {
+    if spool_uuid.is_nil() {
+        bail!("spool identity must not be nil");
+    }
+    let verified = verify_observed_owner(observed, now_unix_seconds)?;
+    if verified.authority_key().public_key != signer.public_key() {
+        bail!(
+            "spool creation needs the current owner authority signer; this device proof key is not that authority"
+        );
+    }
+    Ok(crate::sign_spool_owner_genesis(
+        signer,
+        *spool_uuid.as_bytes(),
+    )?)
+}
+
+fn verify_observed_owner(
+    observed: &api::heddle::api::v2alpha1::OwnerState,
+    now_unix_seconds: i64,
+) -> Result<heddleco_capability_verifier::VerifiedOwnerState> {
+    let owner = observed
+        .owner
+        .as_ref()
+        .context("owner identity is required")?;
+    let account = uuid::Uuid::parse_str(&owner.id).context("owner account must be a UUID")?;
+    let signed_root = observed
+        .root
+        .as_ref()
+        .context("signed owner root is required")?;
+    if account.is_nil()
+        || signed_root
+            .root
+            .as_ref()
+            .context("owner root body missing")?
+            .account_uuid
+            != account.as_bytes()
+    {
+        bail!("owner account differs from the signed root");
+    }
+    if observed.accepted_transitions.len() > VerificationLimits::MAX_TRANSITIONS {
+        bail!("owner transition history exceeds the verification bound");
+    }
+    let limits = VerificationLimits::new(30 * 24 * 60 * 60)?;
+    let mut verified = verify_owner_root(signed_root).context("verify owner root")?;
+    for transition in &observed.accepted_transitions {
+        verified = apply_transition(&verified, transition, now_unix_seconds, limits)
+            .context("verify accepted owner transition")?;
+    }
+    if observed.version != verified.state_hash() {
+        bail!("observed owner version differs from verified current authority");
+    }
+    Ok(verified)
+}
+
+/// Verify portable immutable resource ownership before source materialization.
+/// Current account authority and historical transfer witnesses must agree; a
+/// host observation alone cannot establish or replace an owner root.
+pub fn verify_spool_owner_observation(
+    genesis: &SignedSpoolOwnerGenesis,
+    observed: &api::heddle::api::v2alpha1::OwnerState,
+    spool_uuid: uuid::Uuid,
+    now_unix_seconds: i64,
+) -> Result<heddleco_capability_verifier::VerifiedCloneKeyring> {
+    if spool_uuid.is_nil() {
+        bail!("spool identity must not be nil");
+    }
+    let current = verify_observed_owner(observed, now_unix_seconds)?;
+    let keyring = observed
+        .resource_keyring
+        .as_ref()
+        .context("resource ownership keyring is required")?;
+    if keyring.spool_uuid != spool_uuid.as_bytes()
+        || keyring.owner_genesis.as_ref() != Some(genesis)
+    {
+        bail!("resource keyring differs from the fetched spool genesis");
+    }
+    let verified = heddleco_capability_verifier::verify_clone_keyring(
+        keyring.clone(),
+        now_unix_seconds,
+        VerificationLimits::new(30 * 24 * 60 * 60)?,
+        &[],
+    )
+    .context("verify complete spool ownership history")?;
+    let account = uuid::Uuid::parse_str(&observed.owner.as_ref().context("owner required")?.id)?;
+    if verified.current_owner_uuid() != *account.as_bytes() {
+        bail!("observed owner is not the current resource owner");
+    }
+    let (historical_root, transitions) = if let Some(last) = keyring.ownership_transfers.last() {
+        let handoff = last
+            .transfer
+            .as_ref()
+            .and_then(|value| value.acceptance.as_ref())
+            .and_then(|value| value.signed_handoff.as_ref())
+            .and_then(|value| value.handoff.as_ref())
+            .context("verified transfer handoff missing")?;
+        let witness = keyring
+            .transfer_owner_histories
+            .iter()
+            .find(|history| {
+                history.state_hash == handoff.destination_owner_key_state_hash
+                    && history
+                        .root
+                        .as_ref()
+                        .and_then(|signed| signed.root.as_ref())
+                        .is_some_and(|root| root.account_uuid == account.as_bytes())
+            })
+            .context("current resource owner history is missing")?;
+        (witness.root.as_ref(), &witness.accepted_transitions)
+    } else {
+        (keyring.owner_root.as_ref(), &keyring.accepted_transitions)
+    };
+    if historical_root != Some(current.signed_root())
+        || !observed.accepted_transitions.starts_with(transitions)
+    {
+        bail!("current owner authority does not descend from the resource ownership proof");
+    }
+    Ok(verified)
+}

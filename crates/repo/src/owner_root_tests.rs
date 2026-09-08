@@ -459,3 +459,102 @@ fn proposed_claim_binds_entire_transition_and_browser_registration_key() {
             .contains("authorizations")
     );
 }
+
+#[test]
+fn spool_genesis_requires_current_authority_and_verifiable_history() {
+    use api::heddle::api::v2alpha1::{OwnerState, PrincipalRef};
+    let old = crypto::Ed25519Signer::generate().expect("original authority");
+    let current = crypto::Ed25519Signer::generate().expect("current authority");
+    let root = sign_claimable_deferred_human_root(&old, ACCOUNT, [7; 32], NOW).expect("root");
+    let left = crypto::Ed25519Signer::generate().expect("guardian");
+    let right = crypto::Ed25519Signer::generate().expect("guardian");
+    let policy = paper_policy(&left, &right);
+    let (next_authority_key, next_authority_key_proof, next_recovery_key_proofs) =
+        browser_claim_proofs(&root, &current, &policy, &[left, right], NOW + 1, [8; 32]);
+    let transition = sign_claim_deferred_human(ClaimDeferredHuman {
+        current_authority: &old,
+        signed_root: &root,
+        next_authority_key,
+        next_authority_key_proof,
+        next_recovery_policy: policy,
+        next_recovery_key_proofs,
+        valid_from_unix_seconds: NOW + 1,
+        nonce: [8; 32],
+    })
+    .expect("owner handoff");
+    let state = apply_transition(
+        &verify_owner_root(&root).expect("root verified"),
+        &transition,
+        NOW + 1,
+        VerificationLimits::new(30 * 24 * 60 * 60).expect("limits"),
+    )
+    .expect("history verified");
+    let owner = OwnerState {
+        owner: Some(PrincipalRef {
+            id: uuid::Uuid::from_bytes(ACCOUNT).to_string(),
+        }),
+        root: Some(root),
+        accepted_transitions: vec![transition],
+        version: state.state_hash().to_vec(),
+        ..Default::default()
+    };
+    let spool = uuid::Uuid::now_v7();
+    let genesis = crate::sign_current_spool_owner_genesis(&current, spool, &owner, NOW + 1)
+        .expect("current authority can create spool");
+    assert_eq!(
+        verify_spool_owner_genesis(&genesis)
+            .expect("spool proof")
+            .spool_uuid(),
+        *spool.as_bytes()
+    );
+    assert!(
+        crate::sign_current_spool_owner_genesis(&old, spool, &owner, NOW + 1).is_err(),
+        "retired original authority cannot issue genesis"
+    );
+    let initial = verify_owner_root(owner.root.as_ref().expect("root")).expect("root");
+    let mut observation = owner.clone();
+    observation.resource_keyring = Some(api::heddle::api::v2alpha1::CloneAuthorizationKeyring {
+        format_version: 1,
+        spool_uuid: spool.as_bytes().to_vec(),
+        canonical_spool_path_segments: vec!["test".into()],
+        pin: Some(api::heddle::api::v2alpha1::CloneOwnerPin {
+            kind: api::heddle::api::v2alpha1::CloneOwnerPinKind::CloneTofu as i32,
+            expected_owner_id: initial.owner_id().to_vec(),
+            first_seen_unix_seconds: NOW,
+        }),
+        owner_root: owner.root.clone(),
+        accepted_transitions: owner.accepted_transitions.clone(),
+        accepted_state_hash: owner.version.clone(),
+        owner_genesis: Some(genesis.clone()),
+        ..Default::default()
+    });
+    crate::verify_spool_owner_observation(&genesis, &observation, spool, NOW + 1)
+        .expect("current issuer proven");
+    let old_genesis =
+        crate::sign_spool_owner_genesis(&old, *spool.as_bytes()).expect("original genesis");
+    observation
+        .resource_keyring
+        .as_mut()
+        .expect("keyring")
+        .owner_genesis = Some(old_genesis.clone());
+    crate::verify_spool_owner_observation(&old_genesis, &observation, spool, NOW + 1)
+        .expect("immutable historical issuer remains valid");
+    assert!(
+        crate::verify_spool_owner_observation(&genesis, &observation, spool, NOW + 1).is_err(),
+        "different advertised genesis rejected"
+    );
+    observation.resource_keyring = None;
+    assert!(
+        crate::verify_spool_owner_observation(&old_genesis, &observation, spool, NOW + 1).is_err(),
+        "missing resource history is not authority"
+    );
+    let mut changed = owner.clone();
+    changed.version[0] ^= 1;
+    assert!(crate::sign_current_spool_owner_genesis(&current, spool, &changed, NOW + 1).is_err());
+    changed = owner.clone();
+    changed.accepted_transitions[0].authorizations[0].signature[0] ^= 1;
+    assert!(crate::sign_current_spool_owner_genesis(&current, spool, &changed, NOW + 1).is_err());
+    changed = owner;
+    changed.owner.as_mut().expect("owner").id = uuid::Uuid::now_v7().to_string();
+    assert!(crate::sign_current_spool_owner_genesis(&current, spool, &changed, NOW + 1).is_err());
+}

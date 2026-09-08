@@ -13,8 +13,8 @@ use objects::{
         thread_replication::{ThreadOperation, ThreadOperationBody},
     },
     store::{
-        ObjectStore, WriterLeaseAuthOutcome, WriterLeaseDraft, WriterLeaseGrant,
-        WriterLeaseReserveOutcome, WriterLeaseStore,
+        ObjectStore, WriterLeaseDraft, WriterLeaseGrant, WriterLeaseReserveOutcome,
+        WriterLeaseStore,
     },
 };
 use refs::Head;
@@ -162,21 +162,9 @@ impl ThreadCheckout {
         }
         let lock = objects::lock::RepoLock::at(self.local_dir.join("thread-capture.lock"));
         let _guard = lock.write().map_err(|e| Error::Invalid(e.to_string()))?;
-        let writer = WriterLeaseStore::new(self.repository.heddle_dir()).authenticate_and_renew(
-            lease,
-            token,
-            Utc::now(),
-        )?;
-        match writer {
-            WriterLeaseAuthOutcome::Authorized(writer)
-                if writer.path.as_deref() == Some(self.repository.root())
-                    && writer.thread == self.binding.thread.to_hex() => {}
-            _ => {
-                return Err(Error::Invalid(
-                    "capture requires this checkout's active writer".into(),
-                ));
-            }
-        }
+        let _writer =
+            self.repository
+                .authenticate_checkout_writer(self.binding.thread, lease, token)?;
         let path = self.local_dir.join("capture-journal.json");
         let receipts = self.local_dir.join("capture-receipts");
         objects::fs_atomic::create_dir_all_durable(&receipts)?;
