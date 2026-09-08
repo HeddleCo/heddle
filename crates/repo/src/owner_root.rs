@@ -149,6 +149,63 @@ where
     Ok(signed)
 }
 
+/// Co-sign an exact browser-produced account-claim proposal. The browser
+/// remains the enrolling request signer; this function returns only the owner
+/// transition and never submits registration or handles the browser private key.
+pub fn sign_proposed_account_claim(
+    current_authority: &impl Signer,
+    signed_root: &SignedOwnerRoot,
+    proposed: &SignedOwnerKeyTransition,
+    registration_public_key: &[u8],
+) -> Result<SignedOwnerKeyTransition> {
+    if !proposed.authorizations.is_empty() {
+        bail!("account claim proposal must not contain originating authorizations");
+    }
+    let transition = proposed
+        .transition
+        .as_ref()
+        .context("account claim has no transition")?;
+    let next = transition
+        .next_authority_key
+        .as_ref()
+        .context("account claim has no next authority")?;
+    if registration_public_key.len() != 32 || next.public_key != registration_public_key {
+        bail!("account claim next authority must equal the browser registration key");
+    }
+    let policy = transition
+        .next_recovery_policy
+        .as_ref()
+        .context("account claim has no recovery policy")?;
+    let nonce = transition
+        .nonce
+        .as_slice()
+        .try_into()
+        .context("account claim nonce must contain 32 bytes")?;
+    let expected = claim_deferred_human_transition(
+        signed_root,
+        next.clone(),
+        policy.clone(),
+        transition.valid_from_unix_seconds,
+        nonce,
+    )?;
+    if transition != &expected {
+        bail!("account claim must preserve the exact verified owner, previous state and sequence");
+    }
+    sign_claim_deferred_human(ClaimDeferredHuman {
+        current_authority,
+        signed_root,
+        next_authority_key: next.clone(),
+        next_authority_key_proof: proposed
+            .next_authority_key_proof
+            .clone()
+            .context("account claim has no next authority proof")?,
+        next_recovery_policy: policy.clone(),
+        next_recovery_key_proofs: proposed.next_recovery_key_proofs.clone(),
+        valid_from_unix_seconds: transition.valid_from_unix_seconds,
+        nonce,
+    })
+}
+
 /// Assemble the canonical sequence-0-to-human transition a browser signs.
 ///
 /// The device calls the same builder again while co-signing; any browser body
