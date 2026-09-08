@@ -355,6 +355,37 @@ mod tests {
     }
 
     #[test]
+    fn separate_checkouts_of_one_thread_have_independent_writers() {
+        let temp = TempDir::new().expect("lease directory");
+        let store = WriterLeaseStore::new(temp.path());
+        for name in ["agent-a", "agent-b"] {
+            let path = temp.path().join(name);
+            std::fs::create_dir(&path).expect("checkout directory");
+            let mut request = draft("shared-thread");
+            request.path = Some(path);
+            assert!(matches!(
+                store.reserve(request, Utc::now()).expect("reserve checkout"),
+                WriterLeaseReserveOutcome::Reserved(_)
+            ), "different checkouts must not contend on their Thread");
+        }
+        assert_eq!(store.list().expect("leases").len(), 2);
+    }
+
+    #[test]
+    fn one_checkout_cannot_have_two_writers_even_under_different_thread_names() {
+        let temp = TempDir::new().expect("lease directory");
+        let store = WriterLeaseStore::new(temp.path());
+        let path = temp.path().join("checkout");
+        std::fs::create_dir(&path).expect("checkout directory");
+        let mut first = draft("thread-a");
+        first.path = Some(path.clone());
+        let mut second = draft("thread-b");
+        second.path = Some(path.join("."));
+        assert!(matches!(store.reserve(first, Utc::now()).expect("first writer"), WriterLeaseReserveOutcome::Reserved(_)));
+        assert!(matches!(store.reserve(second, Utc::now()).expect("competing writer"), WriterLeaseReserveOutcome::LiveOwner(_)));
+    }
+
+    #[test]
     fn token_is_required_to_renew_or_release() {
         let temp = TempDir::new().unwrap();
         let store = WriterLeaseStore::new(temp.path());
