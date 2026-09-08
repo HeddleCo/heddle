@@ -39,7 +39,7 @@ repo = { workspace = true, optional = true, features = ["native", "git-overlay"]
 objects = { workspace = true, optional = true }
 crypto = { workspace = true, optional = true }
 heddle-object-model = { workspace = true, optional = true }
-biscuit-verifier = { package = "heddle-biscuit-verifier", path = "../biscuit-verifier", version = "0.21.0", optional = true }
+biscuit-verifier = { package = "heddle-biscuit-verifier", path = "../biscuit-verifier", version = "0.22.0", optional = true }
 chrono = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 heddle-perf-contract = { workspace = true, optional = true }
