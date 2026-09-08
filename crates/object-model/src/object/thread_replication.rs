@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Portable Thread identity and immutable replication operations. Source and
 //! discussion causality have separate graphs so selective sharing is closed.
+pub mod integration;
+
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
@@ -77,6 +79,7 @@ pub enum Admission {
 #[serde(tag = "kind", content = "canonical", rename_all = "snake_case")]
 pub enum ThreadOperationBody {
     Capture(Vec<u8>),
+    Integration(Vec<u8>),
     Discussion(Vec<u8>),
     Context(Vec<u8>),
 }
@@ -96,10 +99,33 @@ pub struct ThreadOperation {
 impl ThreadOperation {
     pub fn facet(&self) -> ThreadFacet {
         match self.body {
-            ThreadOperationBody::Capture(_) => ThreadFacet::Source,
+            ThreadOperationBody::Capture(_) | ThreadOperationBody::Integration(_) => {
+                ThreadFacet::Source
+            }
             ThreadOperationBody::Discussion(_) | ThreadOperationBody::Context(_) => {
                 ThreadFacet::Discussion
             }
+        }
+    }
+
+    /// The exact source revision represented by a capture or hosted integration.
+    pub fn source_state(&self) -> Result<Option<State>> {
+        match &self.body {
+            ThreadOperationBody::Capture(bytes) => State::decode_current_msgpack(bytes).map(Some),
+            ThreadOperationBody::Integration(bytes) => {
+                integration::HostedIntegration::decode(bytes)?
+                    .resulting_state()
+                    .map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+    pub fn integration(&self) -> Result<Option<integration::HostedIntegration>> {
+        match &self.body {
+            ThreadOperationBody::Integration(bytes) => {
+                integration::HostedIntegration::decode(bytes).map(Some)
+            }
+            _ => Ok(None),
         }
     }
 
@@ -136,6 +162,9 @@ impl ThreadOperation {
                 if state.encode_current_msgpack()? != *bytes {
                     return Err(invalid("non-canonical capture"));
                 }
+            }
+            ThreadOperationBody::Integration(bytes) => {
+                integration::HostedIntegration::decode(bytes)?.validate_operation(self)?;
             }
             ThreadOperationBody::Context(bytes) => {
                 let context = crate::object::ContextRevision::decode(bytes).map_err(invalid)?;
@@ -215,10 +244,12 @@ impl ThreadOperation {
                 let state = State::decode_current_msgpack(bytes)?;
                 let mut source_parents = BTreeSet::new();
                 for parent in parents {
-                    let ThreadOperationBody::Capture(bytes) = &parent.body else {
-                        return Err(invalid("capture parent is not source"));
-                    };
-                    source_parents.insert(State::decode_current_msgpack(bytes)?.id());
+                    source_parents.insert(
+                        parent
+                            .source_state()?
+                            .ok_or_else(|| invalid("capture parent is not source"))?
+                            .id(),
+                    );
                 }
                 let declared: BTreeSet<_> = state
                     .parents
@@ -234,6 +265,11 @@ impl ThreadOperation {
                         "capture source ancestry differs from causal parents",
                     ));
                 }
+            }
+            ThreadOperationBody::Integration(bytes) => {
+                let receipt = integration::HostedIntegration::decode(bytes)?;
+                receipt.validate_operation(self)?;
+                receipt.validate_parents(genesis, parents)?;
             }
             ThreadOperationBody::Context(bytes) => {
                 let context = crate::object::ContextRevision::decode(bytes).map_err(invalid)?;

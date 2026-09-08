@@ -621,7 +621,7 @@ fn rejected_causal_parent_rejects_its_pending_descendants() {
 }
 
 #[test]
-fn revision_lookup_requires_accepted_capture_in_the_selected_thread() {
+fn revision_lookup_requires_accepted_source_revision_in_the_selected_thread() {
     let (_dir, repo, genesis, signer, replica) = setup();
     let root = capture(&genesis, &signer, &[], vec![genesis.base]);
     let child = capture(&genesis, &signer, &[&root], vec![state_id(&root)]);
@@ -634,7 +634,7 @@ fn revision_lookup_requires_accepted_capture_in_the_selected_thread() {
     );
     assert!(
         replica
-            .accepted_capture(revision)
+            .accepted_source_revision(revision)
             .expect("pending lookup")
             .is_none()
     );
@@ -643,7 +643,7 @@ fn revision_lookup_requires_accepted_capture_in_the_selected_thread() {
         .expect("complete ancestry");
     assert_eq!(
         replica
-            .accepted_capture(revision)
+            .accepted_source_revision(revision)
             .expect("accepted lookup")
             .expect("accepted capture")
             .id(),
@@ -659,7 +659,7 @@ fn revision_lookup_requires_accepted_capture_in_the_selected_thread() {
     .expect("other Thread, same store");
     assert!(
         other
-            .accepted_capture(revision)
+            .accepted_source_revision(revision)
             .expect("scoped lookup")
             .is_none(),
         "repository object presence is not Thread membership"
@@ -673,7 +673,7 @@ fn revision_lookup_requires_accepted_capture_in_the_selected_thread() {
     ));
     assert!(
         replica
-            .accepted_capture(state_id(&invalid))
+            .accepted_source_revision(state_id(&invalid))
             .expect("rejected lookup")
             .is_none()
     );
@@ -728,5 +728,174 @@ fn checkout_creation_rejects_a_revision_outside_its_thread_before_writing_files(
     assert!(
         !destination.exists(),
         "scope validation must precede filesystem writes"
+    );
+}
+
+#[test]
+fn hosted_integration_requires_independent_persistent_executor_trust_and_never_writes_checkout() {
+    use objects::object::thread_replication::integration::{
+        HostedIntegration, SPOOL_GENESIS_TRUST_FORMAT,
+    };
+    use prost::Message;
+    let (_dir, repo, genesis, signer, replica) = setup();
+    let head_before = repo.head().expect("checkout HEAD");
+    let parent = capture(&genesis, &signer, &[], vec![genesis.base]);
+    replica
+        .receive(&parent, repo.store(), |_| Ok(()))
+        .expect("target source");
+    let owner = Ed25519Signer::from_seed(&[22; 32]).expect("owner");
+    let executor = Ed25519Signer::from_seed(&[23; 32]).expect("executor");
+    let spool: uuid::Uuid = genesis.spool.parse().expect("Spool");
+    let owner_genesis =
+        crate::sign_spool_owner_genesis(&owner, *spool.as_bytes()).expect("signed owner genesis");
+    let result = State::new_snapshot(
+        Tree::new().hash(),
+        vec![state_id(&parent)],
+        Attribution::human(Principal::new("source", "source@example.test")),
+    );
+    let receipt = HostedIntegration {
+        version: 1,
+        spool,
+        spool_genesis: ContentHash::compute_typed(
+            SPOOL_GENESIS_TRUST_FORMAT,
+            &owner_genesis
+                .genesis
+                .as_ref()
+                .expect("genesis body")
+                .encode_to_vec(),
+        ),
+        executor: executor.public_key().try_into().expect("endpoint"),
+        source_thread: ContentHash::from_bytes([24; 32]),
+        source_operation: ContentHash::from_bytes([25; 32]),
+        source_revision: result.id(),
+        target_thread: replica.thread_id(),
+        expected_target_frontier: BTreeSet::from([parent
+            .verify()
+            .expect("parent")
+            .id()
+            .expect("ID")]),
+        result: result.encode_current_msgpack().expect("result"),
+        initiating_request_proof: ContentHash::from_bytes([26; 32]),
+        review_policy_version: ContentHash::from_bytes([27; 32]),
+        review_evidence: BTreeSet::new(),
+        executed_at_ms: 100,
+    };
+    let operation = ThreadOperation {
+        version: 1,
+        thread: replica.thread_id(),
+        parents: receipt.expected_target_frontier.clone(),
+        publisher: receipt.executor,
+        body: ThreadOperationBody::Integration(receipt.encode().expect("receipt")),
+    };
+    let signed = SignedOperation::sign(&operation, &executor).expect("executor attestation");
+    for _ in 0..2 {
+        let error = replica
+            .receive(&signed, repo.store(), |_| Ok(()))
+            .expect_err("an ordinary delivery grant never establishes executor trust");
+        assert!(
+            error
+                .to_string()
+                .contains("independently pinned executor trust")
+        );
+        assert!(
+            replica
+                .operation(&operation.id().expect("ID"))
+                .expect("lookup")
+                .is_none()
+        );
+        assert_eq!(
+            replica.view().expect("view").source_heads,
+            BTreeSet::from([state_id(&parent)])
+        );
+        assert_eq!(repo.head().expect("unchanged checkout"), head_before);
+    }
+    assert!(
+        repo.pin_thread_hosted_executor(&replica, receipt.executor)
+            .is_err(),
+        "incoming attestation cannot supply missing owner pin"
+    );
+    repo.verify_and_pin_owner_genesis(
+        2,
+        Some(&owner_genesis),
+        &["selected".into(), "spool".into()],
+    )
+    .expect("selected remote owner genesis");
+    repo.pin_thread_hosted_executor(&replica, receipt.executor)
+        .expect("independent selected endpoint");
+    repo.pin_thread_hosted_executor(&replica, receipt.executor)
+        .expect("idempotent pin");
+    assert!(
+        matches!(replica.receive(&signed,repo.store(), |_|Err(Error::Invalid("active delivery denied".into()))),Err(Error::Invalid(reason)) if reason=="active delivery denied"),
+        "historical endpoint trust does not grant active writes"
+    );
+    assert_eq!(
+        replica
+            .receive(&signed, repo.store(), |_| Ok(()))
+            .expect("trusted receipt"),
+        Admission::Accepted
+    );
+    let reopened = ThreadReplica::open(repo.heddle_dir(), replica.thread_id()).expect("reopen");
+    assert_eq!(
+        reopened
+            .receive(&signed, repo.store(), |_| Ok(()))
+            .expect("persistent trust and original replay"),
+        Admission::Accepted
+    );
+    assert_eq!(
+        reopened.view().expect("source projection").source_heads,
+        BTreeSet::from([result.id()])
+    );
+    assert_eq!(
+        reopened
+            .accepted_source_revision(result.id())
+            .expect("membership")
+            .expect("accepted result")
+            .id(),
+        result.id()
+    );
+    assert_eq!(
+        repo.head().expect("integration is metadata only"),
+        head_before
+    );
+    let after = capture(&genesis, &signer, &[&signed], vec![result.id()]);
+    reopened
+        .receive(&after, repo.store(), |_| Ok(()))
+        .expect("later native capture");
+    assert_eq!(
+        reopened.view().expect("next source head").source_heads,
+        BTreeSet::from([state_id(&after)])
+    );
+    assert_eq!(
+        repo.head().expect("receive never checks out remote state"),
+        head_before
+    );
+    let mut foreign_receipt = receipt.clone();
+    foreign_receipt.spool_genesis = ContentHash::from_bytes([99; 32]);
+    let mut foreign = operation.clone();
+    foreign.body =
+        ThreadOperationBody::Integration(foreign_receipt.encode().expect("foreign receipt"));
+    let foreign =
+        SignedOperation::sign(&foreign, &executor).expect("valid signature is insufficient");
+    assert!(
+        reopened
+            .receive(&foreign, repo.store(), |_| Ok(()))
+            .is_err(),
+        "executor cannot swap immutable genesis"
+    );
+    let other = Ed25519Signer::from_seed(&[24; 32]).expect("unselected endpoint");
+    foreign_receipt = receipt;
+    foreign_receipt.executor = other.public_key().try_into().expect("endpoint");
+    let mut foreign = operation;
+    foreign.publisher = foreign_receipt.executor;
+    foreign.body = ThreadOperationBody::Integration(foreign_receipt.encode().expect("receipt"));
+    assert!(
+        reopened
+            .receive(
+                &SignedOperation::sign(&foreign, &other).expect("other valid signer"),
+                repo.store(),
+                |_| Ok(())
+            )
+            .is_err(),
+        "self-signed executor never enrolls itself"
     );
 }

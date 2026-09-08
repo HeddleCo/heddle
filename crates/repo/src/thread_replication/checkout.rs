@@ -66,7 +66,9 @@ impl ThreadCheckout {
         if path.exists() {
             return Err(Error::Invalid("checkout destination already exists".into()));
         }
-        if revision != replica.genesis()?.base && replica.accepted_capture(revision)?.is_none() {
+        if revision != replica.genesis()?.base
+            && replica.accepted_source_revision(revision)?.is_none()
+        {
             return Err(Error::Invalid(
                 "checkout source is not admitted in this Thread".into(),
             ));
@@ -330,7 +332,7 @@ impl ThreadCheckout {
         if expected != replica.genesis()?.base {
             let mut cursor = None;
             loop {
-                let page = replica.capture_operation_page(expected, cursor, 128)?;
+                let page = replica.source_operation_page(expected, cursor, 128)?;
                 if page.is_empty() {
                     break;
                 }

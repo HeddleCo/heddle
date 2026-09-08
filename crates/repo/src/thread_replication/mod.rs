@@ -3,6 +3,7 @@
 //! Endpoint adapters must authorize the exact Thread and disclosure facets before
 //! calling receive/export. Signatures prove the publisher, not spool membership.
 pub mod checkout;
+mod integration;
 mod local;
 mod peers;
 
@@ -75,14 +76,15 @@ impl ThreadReplica {
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS local_thread_names(name TEXT PRIMARY KEY, thread BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS threads(id BLOB PRIMARY KEY, genesis BLOB NOT NULL, genesis_signature BLOB NOT NULL CHECK(length(genesis_signature)=64), generation INTEGER NOT NULL DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS operations(id BLOB PRIMARY KEY, thread BLOB NOT NULL, facet INTEGER NOT NULL, canonical BLOB NOT NULL, signature BLOB NOT NULL, status INTEGER NOT NULL DEFAULT 0, reason TEXT, capture_state BLOB);
+            CREATE TABLE IF NOT EXISTS operations(id BLOB PRIMARY KEY, thread BLOB NOT NULL, facet INTEGER NOT NULL, canonical BLOB NOT NULL, signature BLOB NOT NULL, status INTEGER NOT NULL DEFAULT 0, reason TEXT, source_revision BLOB);
             CREATE INDEX IF NOT EXISTS operations_thread_status ON operations(thread,status);
-            CREATE INDEX IF NOT EXISTS operations_capture ON operations(thread,capture_state,status,id);
+            CREATE INDEX IF NOT EXISTS operations_source_revision ON operations(thread,source_revision,status,id);
             CREATE TABLE IF NOT EXISTS parents(child BLOB NOT NULL, parent BLOB NOT NULL, PRIMARY KEY(child,parent));
             CREATE INDEX IF NOT EXISTS parents_parent ON parents(parent);
             CREATE TABLE IF NOT EXISTS request_nonces(identity TEXT NOT NULL, nonce BLOB NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(identity,nonce));
             CREATE TABLE IF NOT EXISTS peer_heads(thread BLOB NOT NULL, peer BLOB NOT NULL, operation BLOB NOT NULL, facet INTEGER NOT NULL, PRIMARY KEY(thread,peer,operation));
             CREATE TABLE IF NOT EXISTS peer_receipts(thread BLOB NOT NULL, peer BLOB NOT NULL, operation BLOB NOT NULL, status INTEGER NOT NULL, reason TEXT, PRIMARY KEY(thread,peer,operation));
+            CREATE TABLE IF NOT EXISTS hosted_executor_pins(spool TEXT NOT NULL,genesis BLOB NOT NULL CHECK(length(genesis)=32),executor BLOB NOT NULL CHECK(length(executor)=32),PRIMARY KEY(spool,executor));
             CREATE TABLE IF NOT EXISTS sharing(thread BLOB NOT NULL, destination BLOB NOT NULL, source INTEGER NOT NULL, discussion INTEGER NOT NULL, version BLOB NOT NULL, PRIMARY KEY(thread,destination));")?;
         let transaction = connection.transaction()?;
         transaction.execute(
@@ -161,22 +163,21 @@ impl ThreadReplica {
     }
 
     /// Indexed membership lookup, independent of repository object presence.
-    /// Pending or rejected captures cannot authorize content or checkout reads.
-    pub fn accepted_capture(&self, revision: StateId) -> Result<Option<State>> {
+    /// Pending or rejected source operations cannot authorize content or checkout reads.
+    pub fn accepted_source_revision(&self, revision: StateId) -> Result<Option<State>> {
         let bytes: Option<Vec<u8>> = self.connect()?.query_row(
-            "SELECT canonical FROM operations WHERE thread=?1 AND capture_state=?2 AND status=1 ORDER BY id LIMIT 1",
+            "SELECT canonical FROM operations WHERE thread=?1 AND source_revision=?2 AND status=1 ORDER BY id LIMIT 1",
             params![self.thread.as_bytes(), revision.as_bytes()], |row| row.get(0),
         ).optional()?;
         bytes
             .map(|bytes| {
                 let operation = ThreadOperation::decode(&bytes)?;
-                let ThreadOperationBody::Capture(bytes) = operation.body else {
-                    return Err(Error::Invalid("capture index names a non-capture".into()));
-                };
-                let state = State::decode_current_msgpack(&bytes)?;
+                let state = operation.source_state()?.ok_or_else(|| {
+                    Error::Invalid("source index names a non-source operation".into())
+                })?;
                 if operation.thread != self.thread || state.id() != revision {
                     return Err(Error::Invalid(
-                        "capture index differs from canonical identity".into(),
+                        "source index differs from canonical identity".into(),
                     ));
                 }
                 Ok(state)
@@ -185,7 +186,7 @@ impl ThreadReplica {
     }
 
     /// Matching causal parents without scanning or decoding unrelated history.
-    pub fn capture_operation_page(
+    pub fn source_operation_page(
         &self,
         revision: StateId,
         after: Option<ContentHash>,
@@ -195,7 +196,7 @@ impl ThreadReplica {
             return Err(Error::Invalid("page size must be 1..1024".into()));
         }
         let connection = self.connect()?;
-        let mut query = connection.prepare("SELECT id FROM operations WHERE thread=?1 AND capture_state=?2 AND status=1 AND (?3 IS NULL OR id>?3) ORDER BY id LIMIT ?4")?;
+        let mut query = connection.prepare("SELECT id FROM operations WHERE thread=?1 AND source_revision=?2 AND status=1 AND (?3 IS NULL OR id>?3) ORDER BY id LIMIT ?4")?;
         let rows = query.query_map(
             params![
                 self.thread.as_bytes(),
@@ -221,16 +222,20 @@ impl ThreadReplica {
         if operation.thread != self.thread {
             return Err(Error::Invalid("wrong Thread".into()));
         }
+        self.require_trusted_integration(&operation)?;
         authorize(&operation)?;
         let id = operation.id()?;
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let capture_state = match &operation.body {
+        let source_revision = match &operation.body {
             ThreadOperationBody::Capture(bytes) => Some(State::decode_current_msgpack(bytes)?.id()),
+            ThreadOperationBody::Integration(_) => {
+                operation.source_state()?.map(|state| state.id())
+            }
             ThreadOperationBody::Discussion(_) | ThreadOperationBody::Context(_) => None,
         };
-        let inserted = tx.execute("INSERT OR IGNORE INTO operations(id,thread,facet,canonical,signature,capture_state) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![id.as_bytes(), self.thread.as_bytes(), facet_number(operation.facet()), signed.canonical, signed.signature, capture_state.map(|id| id.as_bytes().to_vec())])?;
+        let inserted = tx.execute("INSERT OR IGNORE INTO operations(id,thread,facet,canonical,signature,source_revision) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![id.as_bytes(), self.thread.as_bytes(), facet_number(operation.facet()), signed.canonical, signed.signature, source_revision.map(|id| id.as_bytes().to_vec())])?;
         if inserted > 0 {
             for parent in &operation.parents {
                 tx.execute(
@@ -292,8 +297,8 @@ impl ThreadReplica {
                 }
                 match operation.validate_parents(&genesis, &parents) {
                     Ok(()) => {
-                        if let ThreadOperationBody::Capture(bytes) = &operation.body {
-                            store.put_state(&State::decode_current_msgpack(bytes)?)?;
+                        if let Some(state) = operation.source_state()? {
+                            store.put_state(&state)?;
                         }
                         tx.execute(
                             "UPDATE operations SET status=1 WHERE id=?1",
@@ -500,12 +505,10 @@ impl ThreadReplica {
         let mut source_heads = BTreeSet::new();
         if let Some(heads) = frontiers.get(&ThreadFacet::Source) {
             for head in heads {
-                if let Some(ThreadOperation {
-                    body: ThreadOperationBody::Capture(bytes),
-                    ..
-                }) = accepted.get(head)
-                {
-                    source_heads.insert(State::decode_current_msgpack(bytes)?.id());
+                if let Some(operation) = accepted.get(head) {
+                    if let Some(state) = operation.source_state()? {
+                        source_heads.insert(state.id());
+                    }
                 }
             }
         }

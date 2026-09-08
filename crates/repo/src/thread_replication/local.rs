@@ -224,7 +224,7 @@ impl Repository {
     pub fn record_native_capture(&self, name: &str, state_id: StateId) -> Result<ContentHash> {
         let _guard = self.native_identity_lock()?;
         let replica = self.native_thread(name)?;
-        if let Some(existing) = replica.capture_operation_page(state_id, None, 1)?.first() {
+        if let Some(existing) = replica.source_operation_page(state_id, None, 1)?.first() {
             return Ok(*existing);
         }
         let state = self
@@ -237,7 +237,7 @@ impl Repository {
             if *parent == base {
                 continue;
             }
-            let operations = replica.capture_operation_page(*parent, None, 1024)?;
+            let operations = replica.source_operation_page(*parent, None, 1024)?;
             if operations.is_empty() {
                 return Err(Error::Invalid(format!(
                     "capture parent {} has no admitted native operation",

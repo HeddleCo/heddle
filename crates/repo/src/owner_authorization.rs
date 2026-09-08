@@ -74,6 +74,40 @@ struct PinnedOwnerGenesis {
 }
 
 impl Repository {
+    /// Pin an executor only after selecting and authenticating the remote. The
+    /// immutable Spool identity comes from the existing verified local owner
+    /// observation, never from an incoming integration attestation.
+    pub fn pin_thread_hosted_executor(
+        &self,
+        replica: &crate::thread_replication::ThreadReplica,
+        endpoint: [u8; 32],
+    ) -> Result<()> {
+        use objects::object::{
+            ContentHash,
+            thread_replication::integration::{SPOOL_GENESIS_TRUST_FORMAT, TrustedHostedExecutor},
+        };
+        let pin = self.read_owner_genesis_pin()?;
+        let signed = decode_canonical_genesis(&pin.signed_genesis)?;
+        let verified = verify_spool_owner_genesis(&signed)
+            .context("verify pinned owner genesis before trusting executor")?;
+        let body = verified
+            .signed()
+            .genesis
+            .as_ref()
+            .context("verified owner genesis body missing")?;
+        let trust = TrustedHostedExecutor {
+            spool: uuid::Uuid::from_bytes(verified.spool_uuid()),
+            spool_genesis: ContentHash::compute_typed(
+                SPOOL_GENESIS_TRUST_FORMAT,
+                &body.encode_to_vec(),
+            ),
+            executor: endpoint,
+        };
+        replica
+            .pin_hosted_executor(&trust)
+            .context("pin hosted executor for native Thread")
+    }
+
     fn owner_genesis_pin_path(&self) -> std::path::PathBuf {
         self.heddle_dir().join(OWNER_GENESIS_PIN_FILE)
     }
