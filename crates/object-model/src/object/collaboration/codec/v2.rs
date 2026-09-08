@@ -76,6 +76,9 @@ enum WireResolutionV1 {
     Dismissed {
         reason: String,
     },
+    IntoContext {
+        context: crate::object::ContextRevision,
+    },
     IntoAnnotation {
         annotation_kind: AnnotationKind,
         content: String,
@@ -262,6 +265,7 @@ impl From<CollaborationResolution> for WireResolutionV1 {
                 Self::AddressedByChange { change_id }
             }
             CollaborationResolution::Dismissed { reason } => Self::Dismissed { reason },
+            CollaborationResolution::IntoContext { context } => Self::IntoContext { context },
             CollaborationResolution::IntoAnnotation {
                 annotation_kind,
                 content,
@@ -286,6 +290,7 @@ impl From<WireResolutionV1> for CollaborationResolution {
                 Self::AddressedByChange { change_id }
             }
             WireResolutionV1::Dismissed { reason } => Self::Dismissed { reason },
+            WireResolutionV1::IntoContext { context } => Self::IntoContext { context },
             WireResolutionV1::IntoAnnotation {
                 annotation_kind,
                 content,

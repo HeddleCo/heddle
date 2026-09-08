@@ -103,13 +103,21 @@ impl Command {
             }
             inner.insert(decoded.operation_id);
         }
+        let mut body = self.body;
+        if let CollaborationOperationBodyV1::Resolve {
+            resolution:
+                heddle_object_model::object::CollaborationResolution::IntoContext { context },
+        } = &mut body
+        {
+            context.parents = outer.iter().copied().collect();
+        }
         let envelope = CollaborationOperationEnvelope::new(
             self.discussion,
             inner.into_iter().collect(),
             self.operation_id,
             self.author,
             self.occurred_at_ms,
-            self.body,
+            body,
         )
         .and_then(|envelope| envelope.with_metadata(self.metadata))
         .map_err(|error| Error::Io(error.to_string()))?;
@@ -156,11 +164,12 @@ pub fn sign_context(
     let mut ids = BTreeSet::new();
     for record in parents {
         let parent = verify(record)?;
-        let ThreadOperationBody::Context(bytes) = &parent.body else {
-            return Err(Error::Protocol("context parent is not a context revision"));
-        };
-        let previous =
-            ContextRevision::decode(bytes).map_err(|error| Error::Io(error.to_string()))?;
+        let previous = parent
+            .context_revision()
+            .map_err(|error| Error::Io(error.to_string()))?
+            .ok_or(Error::Protocol(
+                "context parent is not a context revision or extraction",
+            ))?;
         if parent.thread != thread
             || previous.id != context.id
             || previous.metadata.scope != context.metadata.scope
@@ -340,6 +349,86 @@ mod tests {
         );
     }
     #[test]
+    fn extracted_context_keeps_original_resolution_proof_and_actor_binding() {
+        use heddle_object_model::object::{
+            CollaborationResolution, StateId, thread_replication::ThreadGenesis,
+        };
+        let signer = Ed25519Signer::from_seed(&[7; 32]).expect("signer");
+        let genesis = ThreadGenesis {
+            version: 1,
+            spool: Uuid::from_u128(1).to_string(),
+            parent: None,
+            base: StateId::from_bytes([3; 32]),
+            name: "extraction".into(),
+            intent: "retain proof".into(),
+            creator: signer.public_key().try_into().expect("key"),
+            nonce: vec![1; 16],
+        };
+        let discussion = DiscussionRecordId::generate();
+        let make = |body| {
+            let mut command = command(discussion, body);
+            command.metadata.scope.thread = Some(genesis.id().expect("Thread"));
+            command
+        };
+        let open = make(CollaborationOperationBodyV1::Open {
+            blocking: true,
+            title: "Review".into(),
+            anchor: CollaborationAnchor::Repository,
+            visibility: VisibilityTier::Public,
+            turn: DiscussionTurnV1::new("Evidence").expect("turn"),
+            thread_ref: None,
+        })
+        .sign(&[], &signer)
+        .expect("root");
+        let mut context = ContextRevision {
+            version: 2,
+            id: Uuid::from_u128(9),
+            parents: vec![],
+            metadata: make(append("metadata")).metadata,
+            anchor: CollaborationAnchor::Repository,
+            content: "Durable rationale".into(),
+            tags: vec!["decision".into()],
+            supersedes: None,
+            extracted_from: Some(discussion),
+            occurred_at_ms: 100,
+        };
+        let extracted = make(CollaborationOperationBodyV1::Resolve {
+            resolution: CollaborationResolution::IntoContext {
+                context: context.clone(),
+            },
+        })
+        .sign(std::slice::from_ref(&open), &signer)
+        .expect("atomic extraction");
+        let extracted_operation = verify(&extracted).expect("original resolution");
+        extracted_operation
+            .validate_parents(&genesis, &[verify(&open).expect("root")])
+            .expect("discussion causal proof");
+        assert_eq!(
+            extracted_operation
+                .context_revision()
+                .expect("extracted context")
+                .expect("context")
+                .parents,
+            vec![operation_id(&open).expect("root ID")]
+        );
+        context.content = "Refined rationale".into();
+        let revision = sign_context(context.clone(), std::slice::from_ref(&extracted), &signer)
+            .expect("revise directly from original extraction");
+        verify(&revision)
+            .expect("revision")
+            .validate_parents(&genesis, &[extracted_operation])
+            .expect("context retains discussion extraction as causal root");
+        context.metadata.actor.principal_id = Uuid::from_u128(10);
+        assert!(
+            make(CollaborationOperationBodyV1::Resolve {
+                resolution: CollaborationResolution::IntoContext { context }
+            })
+            .sign(&[open], &signer)
+            .is_err(),
+            "extraction cannot assert a different author than the signed resolution"
+        );
+    }
+    #[test]
     fn canonical_browser_interop_vectors() {
         use heddle_object_model::object::{CollaborationMention, CollaborationResolution, StateId};
         let signer = Ed25519Signer::from_seed(&[7; 32]).expect("signer");
@@ -403,6 +492,20 @@ mod tests {
             extracted_from: Some(discussion),
             occurred_at_ms: 100,
         };
+        let extraction = command(
+            discussion,
+            CollaborationOperationBodyV1::Resolve {
+                resolution: CollaborationResolution::IntoContext {
+                    context: context.clone(),
+                },
+            },
+        )
+        .sign(std::slice::from_ref(&reopen), &signer)
+        .expect("extraction");
+        let mut revision = context.clone();
+        revision.content = "Refined extracted rationale".into();
+        let extracted_revision = sign_context(revision, std::slice::from_ref(&extraction), &signer)
+            .expect("extracted context revision");
         let context = sign_context(context, &[], &signer).expect("context");
         let source_record = |revision| {
             command(
@@ -445,6 +548,8 @@ mod tests {
             ("context", context),
             ("source_state", source_state),
             ("source_git", source_git),
+            ("extract_context", extraction),
+            ("extracted_revision", extracted_revision),
         ] {
             vectors.push_str(&format!(
                 "{} {} {} {} {}\n",

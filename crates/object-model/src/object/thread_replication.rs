@@ -103,6 +103,29 @@ impl ThreadOperation {
         }
     }
 
+    /// A context root may be extracted atomically by a discussion resolution.
+    /// Later context revisions retain that original signed resolution as parent.
+    pub fn context_revision(&self) -> Result<Option<crate::object::ContextRevision>> {
+        use crate::object::{CollaborationOperationBodyV1 as Body, CollaborationResolution};
+        match &self.body {
+            ThreadOperationBody::Context(bytes) => crate::object::ContextRevision::decode(bytes)
+                .map(Some)
+                .map_err(invalid),
+            ThreadOperationBody::Discussion(bytes) => {
+                let record = CollaborationOperationEnvelope::decode(bytes)
+                    .map_err(invalid)?
+                    .operation;
+                match record.body {
+                    Body::Resolve {
+                        resolution: CollaborationResolution::IntoContext { context },
+                    } => Ok(Some(context)),
+                    _ => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>> {
         if self.version != 1 {
             return Err(invalid("unsupported Thread operation version"));
@@ -133,6 +156,16 @@ impl ThreadOperation {
                     .is_some_and(|m| m.scope.thread != Some(self.thread))
                 {
                     return Err(invalid("collaboration metadata belongs to another Thread"));
+                }
+                if let Some(context) = self.context_revision()? {
+                    if Some(&context.metadata) != decoded.operation.metadata.as_ref()
+                        || context.extracted_from != Some(decoded.operation.discussion_id)
+                        || context.parents.iter().copied().collect::<BTreeSet<_>>() != self.parents
+                    {
+                        return Err(invalid(
+                            "extracted context differs from signed discussion actor, scope or parents",
+                        ));
+                    }
                 }
                 if decoded.operation.encode().map_err(invalid)? != *bytes {
                     return Err(invalid("non-canonical discussion operation"));
@@ -208,10 +241,9 @@ impl ThreadOperation {
                     return Err(invalid("context belongs to another spool"));
                 }
                 for parent in parents {
-                    let ThreadOperationBody::Context(bytes) = &parent.body else {
-                        return Err(invalid("context parent is not a context revision"));
-                    };
-                    let parent = crate::object::ContextRevision::decode(bytes).map_err(invalid)?;
+                    let parent = parent.context_revision()?.ok_or_else(|| {
+                        invalid("context parent is not a context revision or extraction")
+                    })?;
                     if parent.id != context.id || parent.metadata.scope != context.metadata.scope {
                         return Err(invalid("context parents belong to another record or scope"));
                     }

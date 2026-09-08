@@ -830,6 +830,11 @@ fn resolution_output(value: &CollaborationResolution) -> ResolutionOutput {
         CollaborationResolution::Dismissed { reason } => ResolutionOutput::Dismissed {
             reason: reason.clone(),
         },
+        CollaborationResolution::IntoContext { context } => ResolutionOutput::IntoContext {
+            context_id: context.id.to_string(),
+            content: context.content.clone(),
+            tags: context.tags.clone(),
+        },
         CollaborationResolution::IntoAnnotation {
             annotation_kind,
             content,

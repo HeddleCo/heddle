@@ -63,6 +63,11 @@ pub enum ResolutionOutput {
     Dismissed {
         reason: String,
     },
+    IntoContext {
+        context_id: String,
+        content: String,
+        tags: Vec<String>,
+    },
     IntoAnnotation {
         annotation_kind: String,
         content: String,

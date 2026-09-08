@@ -81,6 +81,9 @@ pub enum CollaborationResolution {
     Dismissed {
         reason: String,
     },
+    IntoContext {
+        context: super::ContextRevision,
+    },
     IntoAnnotation {
         annotation_kind: AnnotationKind,
         content: String,
@@ -327,6 +330,7 @@ pub(super) fn validate_anchor(anchor: &CollaborationAnchor) -> Result<(), Collab
 fn validate_resolution(value: &CollaborationResolution) -> Result<(), CollaborationCodecError> {
     match value {
         CollaborationResolution::Dismissed { reason } => require_text(reason, "dismiss reason"),
+        CollaborationResolution::IntoContext { context } => context.encode().map(|_| ()),
         CollaborationResolution::IntoAnnotation { content, .. } => {
             require_text(content, "annotation content")
         }
