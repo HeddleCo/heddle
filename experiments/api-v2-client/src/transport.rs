@@ -208,7 +208,7 @@ impl Reader {
                 let length =
                     u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
                 // Check before allocating or reading any body bytes.
-                if false && length > self.frame_limit {
+                if length > self.frame_limit {
                     return Err(Error::Protocol("response exceeds frame budget"));
                 }
                 length + 5
