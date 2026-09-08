@@ -790,6 +790,55 @@ mod tests {
             .to_vec();
         let child_key = parent_signer.verifying_key().to_bytes();
         let signature = parent_signer.sign(&pop_delegation_payload(&parent_id, &child_key));
+        let identity_only = token
+            .append(
+                delegation::AgentAttenuation {
+                    agent_id: "identity-administrator".into(),
+                    expires_at: expires,
+                    allowed_operations: Some(vec!["ObserveIdentity".into()]),
+                    allowed_resources: None,
+                }
+                .block()
+                .expect("explicit identity permission")
+                .fact(
+                    format!(
+                        "pop_delegation(\"{}\", \"{}\", \"{}\")",
+                        hex::encode(&parent_id),
+                        hex::encode(child_key),
+                        hex::encode(signature.to_bytes())
+                    )
+                    .as_str(),
+                )
+                .expect("delegated proof key"),
+            )
+            .expect("delegate account observation explicitly")
+            .to_base64()
+            .expect("credential");
+        let identity_facts = verify_at_with_resource(
+            &identity_only,
+            &[root.public()],
+            &[],
+            "ObserveIdentity",
+            None,
+            now,
+        )
+        .expect("explicit account observation");
+        assert!(
+            !identity_facts.limits_identity_disclosure,
+            "explicit identity permission grants the inherited view, not just the self-introspection exception"
+        );
+        assert!(
+            verify_at_with_resource(
+                &identity_only,
+                &[root.public()],
+                &[],
+                "RevokeSession",
+                None,
+                now
+            )
+            .is_err(),
+            "explicit observation does not grant session mutation"
+        );
         let narrowed = token
             .append(
                 delegation::AgentAttenuation {
