@@ -9,6 +9,7 @@
 
 mod agent_node_identity;
 pub mod auth;
+mod auth_pairing;
 mod auth_login;
 mod auth_login_agent;
 #[cfg(test)]

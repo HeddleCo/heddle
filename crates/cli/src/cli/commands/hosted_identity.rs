@@ -54,15 +54,10 @@ fn write_auth_event_to(
     mut open_browser: impl FnMut(&str) -> std::io::Result<()>,
 ) -> Result<()> {
     match event {
-        AuthEvent::DeviceAuthorizationReady {
-            verification_uri,
-            user_code,
-        } => {
+        AuthEvent::PairingReady { verification_uri } => {
             writeln!(stdout)?;
             writeln!(stdout, "Open this URL to authorize:")?;
             writeln!(stdout, "  {verification_uri}")?;
-            writeln!(stdout)?;
-            writeln!(stdout, "Enter code: {user_code}")?;
             writeln!(stdout)?;
         }
         AuthEvent::BrowserOpenRequested { url } => {
@@ -892,16 +887,14 @@ mod tests {
         write_auth_event_to(
             &mut stdout,
             &mut stderr,
-            AuthEvent::DeviceAuthorizationReady {
+            AuthEvent::PairingReady {
                 verification_uri: "https://app.heddle.test/device".into(),
-                user_code: "ABCD-EFGH".into(),
             },
             |_| Ok(()),
         )
         .expect("render device authorization");
         let text = String::from_utf8(stdout).expect("event output is UTF-8");
         assert!(text.contains("https://app.heddle.test/device"));
-        assert!(text.contains("ABCD-EFGH"));
         assert!(stderr.is_empty());
 
         let mut stdout = Vec::new();

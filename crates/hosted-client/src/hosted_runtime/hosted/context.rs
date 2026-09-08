@@ -679,7 +679,7 @@ mod tests {
         let request = b"device-enrollment";
         let signed = factory
             .unary(
-                "/heddle.api.v1alpha1.IdentityService/CreateDeviceAuthorization",
+                "/heddle.api.v2alpha1.IdentityService/BeginPairing",
                 request,
                 "",
             )
@@ -689,7 +689,7 @@ mod tests {
         assert_eq!(proof.signing_identity, identity);
         let canonical = signing::unary_bytes(
             &proof.signing_identity,
-            "/heddle.api.v1alpha1.IdentityService/CreateDeviceAuthorization",
+            "/heddle.api.v2alpha1.IdentityService/BeginPairing",
             proof.timestamp_millis,
             &proof.nonce,
             request,
