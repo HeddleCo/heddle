@@ -53,6 +53,22 @@ pub fn append(
         .internal_ctx("encode delegated bearer")
 }
 
+/// Require an actual signed-block descendant of the exact current bearer.
+/// Account/root equality alone is insufficient: a parallel root token could
+/// discard the current bearer’s restrictions. Hosts still verify both tokens.
+pub fn require_descendant(parent: &str, child: &str) -> Result<(), BiscuitError> {
+    let parent = parse(parent)?;
+    let child = parse(child)?;
+    let parent_ids = parent.revocation_identifiers();
+    let child_ids = child.revocation_identifiers();
+    if child_ids.len() <= parent_ids.len() || !child_ids.starts_with(&parent_ids) {
+        return Err(BiscuitError::Invalid(
+            "delegated credential does not extend the exact parent bearer".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Device delegation preserves the parent's permissions and agent attribution.
 /// Only its expiry is narrowed; this adds no independent root or agent identity.
 pub fn device_restrictions(expires_at: DateTime<Utc>) -> Result<BlockBuilder, BiscuitError> {
@@ -115,6 +131,15 @@ mod tests {
             device_restrictions(now + chrono::Duration::minutes(5)).expect("expiry"),
         )
         .expect("append");
+        require_descendant(&parent, &delegated).expect("actual delegated chain");
+        assert!(
+            require_descendant(&parent, &parent).is_err(),
+            "parent itself is not a child"
+        );
+        assert!(
+            require_descendant(&delegated, &parent).is_err(),
+            "cannot discard attenuation"
+        );
         let facts = crate::verify_any_at_with_resource(
             &delegated,
             None,
