@@ -44,6 +44,13 @@ cannot hide an accidental dependency between the two features. The core also
 compiles for `wasm32-unknown-unknown`; a browser transport adapter remains the
 consumer's responsibility.
 
+The Iroh adapter counts application bytes at each successful stream read/write,
+including framing, remote failures, and partial reads or writes before cancellation.
+`HEDDLE_PROFILE=1` enables the shared `heddle-perf-contract` counters. Endpoint
+initialization remains the connecting application's responsibility; constructing
+another RPC adapter does not imply another connection. CI runs the counter
+contract on a real Iroh connection with three unary calls and an observation.
+
 ## Live native replication
 
 `live_replication::run` asks the host for an `ActivityGuard` before each store

@@ -61,6 +61,7 @@ impl<A: Authorize> IrohTransport<A> {
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(io)?;
+        heddle_perf_contract::record_network_stream_opened();
         let mut writer = Writer::new(send, self.frame_limit, self.progress_timeout);
         let reader = Reader::for_method(recv, self.frame_limit, self.progress_timeout, method);
         let frame = if exchange {
@@ -89,13 +90,9 @@ impl<A: Authorize> RpcTransport for IrohTransport<A> {
         request: Vec<u8>,
     ) -> Result<Vec<u8>, Error> {
         let (_, mut reader) = self.open(method, &request, false).await?;
-        let frame = tokio::time::timeout(
-            reader.timeout,
-            reader.recv.read_to_end(reader.frame_limit + 1),
-        )
-        .await
-        .map_err(|_| Error::Timeout)?
-        .map_err(io)?;
+        let frame = tokio::time::timeout(reader.timeout, reader.read_unary())
+            .await
+            .map_err(|_| Error::Timeout)??;
         reader.done = true;
         match framing::decode_response_frame(&frame)? {
             framing::ResponseFrame::Success(bytes) => Ok(bytes.to_vec()),
@@ -132,6 +129,19 @@ pub struct Reader {
 }
 
 impl Reader {
+    async fn read_unary(&mut self) -> Result<Vec<u8>, Error> {
+        let mut body = Vec::new();
+        while let Some(chunk) = self.recv.read_chunk(8192).await.map_err(io)? {
+            // Count the actual boundary read even if this chunk exceeds budget.
+            heddle_perf_contract::record_network_bytes_received(chunk.len());
+            if body.len().saturating_add(chunk.len()) > self.frame_limit + 1 {
+                return Err(Error::Protocol("response exceeds frame budget"));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    }
+
     pub(crate) fn new(recv: RecvStream, frame_limit: usize, timeout: Duration) -> Self {
         Self {
             recv,
@@ -212,6 +222,7 @@ impl Reader {
             };
             match read {
                 Some(n) => {
+                    heddle_perf_contract::record_network_bytes_received(n);
                     if self.frame_deadline.is_none() {
                         self.frame_deadline = Some(tokio::time::Instant::now() + self.timeout);
                     }
@@ -287,10 +298,17 @@ impl Writer {
             ));
         }
         self.poisoned = true;
-        tokio::time::timeout(self.timeout, send.write_all(bytes))
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(io)?;
+        tokio::time::timeout(self.timeout, async {
+            let mut remaining = bytes;
+            while !remaining.is_empty() {
+                let written = send.write(remaining).await.map_err(io)?;
+                heddle_perf_contract::record_network_bytes_sent(written);
+                remaining = &remaining[written..];
+            }
+            Ok::<_, Error>(())
+        })
+        .await
+        .map_err(|_| Error::Timeout)??;
         self.poisoned = false;
         Ok(())
     }
