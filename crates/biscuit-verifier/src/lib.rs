@@ -698,6 +698,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn identity_observation_disclosure_respects_operation_and_resource_ceilings() {
+        let root = biscuit_auth::KeyPair::new();
+        let now = Utc::now();
+        let expires = now + chrono::Duration::minutes(10);
+        let token = Biscuit::builder()
+            .code(
+                format!(
+                    r#"
+                user("identity-owner");
+                session("identity-session");
+                expires_at({});
+                check if time($now), expires_at($end), $now < $end;
+                right("spool", "org/allowed", "admin");
+                check if operation("ObserveIdentity") or operation("ReadContent");
+                check if operation("ObserveIdentity") or resource("spool", "org/allowed/sub");
+            "#,
+                    expires.to_rfc3339()
+                )
+                .as_str(),
+            )
+            .expect("scoped authority statement")
+            .build(&root)
+            .expect("signed authority")
+            .to_base64()
+            .expect("credential encoding");
+        let trust = [root.public()];
+        let facts = verify_at_with_resource(&token, &trust, &[], "ObserveIdentity", None, now)
+            .expect("self-observation does not select a work resource");
+        assert!(
+            facts.limits_whoami_disclosure,
+            "an identity exception cannot disclose the authority block's broader scope"
+        );
+        assert_eq!(facts.bounded_whoami_scope, "spool:org/allowed/sub read");
+        verify_at_with_resource(
+            &token,
+            &trust,
+            &[],
+            "ReadContent",
+            Some(("spool", "org/allowed/sub")),
+            now,
+        )
+        .expect("work inside both ceilings remains allowed");
+        for (operation, resource, time) in [
+            ("ReadContent", Some(("spool", "org/other")), now),
+            ("PublishContent", Some(("spool", "org/allowed/sub")), now),
+            ("WhoAmI", None, now),
+            (
+                "ObserveIdentity",
+                None,
+                expires + chrono::Duration::seconds(1),
+            ),
+        ] {
+            assert!(
+                verify_at_with_resource(&token, &trust, &[], operation, resource, time).is_err(),
+                "self-observation must not widen other operations, resources, expiry or the retired route"
+            );
+        }
+    }
+
+    #[test]
     fn provider_plan_signature_binds_every_handoff_field() {
         let signing_key = SigningKey::from_bytes(&[7; 32]);
         let public_key = signing_key.verifying_key().to_bytes();
