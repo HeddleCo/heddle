@@ -113,7 +113,15 @@ async fn exact_body_pop_and_durable_nonce_guard_the_owner_boundary() {
     let dir = tempfile::TempDir::new().expect("directory");
     let repository = Repository::init_default(dir.path()).expect("repository");
     let genesis = genesis(&repository);
-    let replica = ThreadReplica::open(repository.heddle_dir(), &genesis).expect("replica");
+    let replica = ThreadReplica::create(
+        repository.heddle_dir(),
+        &crypto::thread_operation::SignedGenesis::sign(
+            &genesis,
+            &Ed25519Signer::from_seed(&[17; 32]).expect("creator key"),
+        )
+        .expect("creator proof"),
+    )
+    .expect("replica");
     let root = KeyPair::new();
     let authority =
         RootAuthority::new(vec![root.public()], "/owned/project".into()).expect("authority");
@@ -127,7 +135,8 @@ async fn exact_body_pop_and_durable_nonce_guard_the_owner_boundary() {
     let verified = authority
         .verify(&context, method, b"bound opening", "write", &replica)
         .expect("attached owner proof");
-    let reopened = ThreadReplica::open(repository.heddle_dir(), &genesis).expect("restart");
+    let reopened = ThreadReplica::open(repository.heddle_dir(), genesis.id().expect("Thread ID"))
+        .expect("restart");
     assert!(matches!(
         authority.verify(&context, method, b"bound opening", "write", &reopened),
         Err(transport::Error::Protocol("request nonce already consumed"))
@@ -149,8 +158,24 @@ async fn irohs_open_stream_syncs_later_writes_honors_opt_in_and_stops_on_root_de
     let left_repo = Repository::init_default(left_dir.path()).expect("left repo");
     let right_repo = Repository::init_default(right_dir.path()).expect("right repo");
     let genesis = genesis(&left_repo);
-    let left = ThreadReplica::open(left_repo.heddle_dir(), &genesis).expect("left replica");
-    let right = ThreadReplica::open(right_repo.heddle_dir(), &genesis).expect("right replica");
+    let left = ThreadReplica::create(
+        left_repo.heddle_dir(),
+        &crypto::thread_operation::SignedGenesis::sign(
+            &genesis,
+            &Ed25519Signer::from_seed(&[17; 32]).expect("creator key"),
+        )
+        .expect("creator proof"),
+    )
+    .expect("left replica");
+    let right = ThreadReplica::create(
+        right_repo.heddle_dir(),
+        &crypto::thread_operation::SignedGenesis::sign(
+            &genesis,
+            &Ed25519Signer::from_seed(&[17; 32]).expect("creator key"),
+        )
+        .expect("creator proof"),
+    )
+    .expect("right replica");
     let left_endpoint = endpoint().await;
     let right_endpoint = endpoint().await;
     let left_key = *left_endpoint.id().as_bytes();
@@ -170,15 +195,7 @@ async fn irohs_open_stream_syncs_later_writes_honors_opt_in_and_stops_on_root_de
         },
         facets.clone(),
     )
-    .expect("left peer")
-    .with_genesis(
-        opening::sign_genesis(
-            &genesis,
-            &Ed25519Signer::from_seed(&[17; 32]).expect("origin key"),
-        )
-        .expect("signed creation record"),
-    )
-    .expect("original genesis travels with publication");
+    .expect("original genesis loaded from durable replica");
     let right_peer = Peer::new(
         right.clone(),
         EndpointRef {
@@ -235,8 +252,8 @@ async fn irohs_open_stream_syncs_later_writes_honors_opt_in_and_stops_on_root_de
     accepted(&right, first).await;
     // Another process can open the same durable database. It need not hold a
     // handle to the RPC or notify it explicitly when recording new work.
-    let reopened =
-        ThreadReplica::open(left_repo.heddle_dir(), &genesis).expect("independent writer");
+    let reopened = ThreadReplica::open(left_repo.heddle_dir(), genesis.id().expect("Thread ID"))
+        .expect("independent writer");
     let later = capture(&left_repo, &reopened, &genesis);
     accepted(&right, later).await;
     let private = capture(&right_repo, &right, &genesis);

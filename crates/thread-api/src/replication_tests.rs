@@ -25,7 +25,11 @@ async fn reconnect_finds_missing_ancestors_through_already_pending_parents() {
         creator: signer.public_key().try_into().expect("Ed25519 key"),
         nonce: vec![],
     };
-    let replica = ThreadReplica::open(repository.heddle_dir(), &genesis).expect("replica");
+    let replica = ThreadReplica::create(
+        repository.heddle_dir(),
+        &crypto::thread_operation::SignedGenesis::sign(&genesis, &signer).expect("creator proof"),
+    )
+    .expect("replica");
     let mut previous = None;
     let mut source_parent = genesis.base;
     let mut records = Vec::new();
@@ -54,7 +58,8 @@ async fn reconnect_finds_missing_ancestors_through_already_pending_parents() {
             Admission::Pending,
         );
     }
-    let reopened = ThreadReplica::open(repository.heddle_dir(), &genesis).expect("restart");
+    let reopened = ThreadReplica::open(repository.heddle_dir(), genesis.id().expect("Thread ID"))
+        .expect("restart");
     let mut session = Session::new(
         LocalReplica::new(reopened, Arc::new(repository.store().clone())),
         [2; 32],
@@ -109,8 +114,16 @@ async fn wide_ancestry_resumes_through_a_small_window_and_retains_acceptance() {
         creator: signer.public_key().try_into().expect("key"),
         nonce: vec![],
     };
-    let left = ThreadReplica::open(left_repo.heddle_dir(), &genesis).expect("left replica");
-    let right = ThreadReplica::open(right_repo.heddle_dir(), &genesis).expect("right replica");
+    let left = ThreadReplica::create(
+        left_repo.heddle_dir(),
+        &crypto::thread_operation::SignedGenesis::sign(&genesis, &signer).expect("creator proof"),
+    )
+    .expect("left replica");
+    let right = ThreadReplica::create(
+        right_repo.heddle_dir(),
+        &crypto::thread_operation::SignedGenesis::sign(&genesis, &signer).expect("creator proof"),
+    )
+    .expect("right replica");
     let facets = BTreeSet::from([ThreadFacet::Source]);
     left.set_sharing([2; 32], &facets)
         .expect("opt in to destination");
@@ -181,7 +194,8 @@ async fn wide_ancestry_resumes_through_a_small_window_and_retains_acceptance() {
     // Lose the outstanding requests with the connection. The stored peer head
     // must refill the window without requiring any fresh mutation at the source.
     drop(b);
-    let reopened = ThreadReplica::open(right_repo.heddle_dir(), &genesis).expect("restart");
+    let reopened = ThreadReplica::open(right_repo.heddle_dir(), genesis.id().expect("Thread ID"))
+        .expect("restart");
     let mut b = Session::new(
         LocalReplica::new(reopened, Arc::new(right_repo.store().clone())),
         [1; 32],
@@ -230,7 +244,8 @@ async fn wide_ancestry_resumes_through_a_small_window_and_retains_acceptance() {
     );
     left.record_peer_receipt([2; 32], merged_id, &Admission::Pending)
         .expect("out-of-order receipt");
-    let reopened = ThreadReplica::open(left_repo.heddle_dir(), &genesis).expect("sender restart");
+    let reopened = ThreadReplica::open(left_repo.heddle_dir(), genesis.id().expect("Thread ID"))
+        .expect("sender restart");
     assert_eq!(
         reopened
             .peer_receipt([2; 32], merged_id)
@@ -269,7 +284,11 @@ async fn paged_announcement_restarts_when_a_write_lands_behind_its_cursor() {
         creator: signer.public_key().try_into().expect("key"),
         nonce: vec![],
     };
-    let replica = ThreadReplica::open(repository.heddle_dir(), &genesis).expect("replica");
+    let replica = ThreadReplica::create(
+        repository.heddle_dir(),
+        &crypto::thread_operation::SignedGenesis::sign(&genesis, &signer).expect("creator proof"),
+    )
+    .expect("replica");
     let mut records = Vec::new();
     for _ in 0..2 {
         let state = State::new_snapshot(

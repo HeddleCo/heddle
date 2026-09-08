@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use crypto::thread_operation::SignedOperation;
+use crypto::thread_operation::{SignedGenesis, SignedOperation};
 use objects::{
     object::{
         CollaborationOperationEnvelope, ContentHash, MaterializedRepositoryCollaboration, State,
@@ -59,15 +59,20 @@ pub struct ThreadReplica {
     thread: ContentHash,
 }
 impl ThreadReplica {
-    pub fn open(heddle_dir: &Path, genesis: &ThreadGenesis) -> Result<Self> {
+    /// Create or relay a Thread using the creator's original signed identity.
+    /// Verify before touching disk; possession of the key is not needed to relay.
+    pub fn create(heddle_dir: &Path, signed: &SignedGenesis) -> Result<Self> {
+        let genesis = signed.verify()?;
         objects::fs_atomic::create_dir_all_durable(heddle_dir)?;
         let this = Self {
             path: heddle_dir.join("thread-replication.sqlite3"),
             thread: genesis.id()?,
         };
-        let connection = this.connect()?;
+        let mut connection = this.connect_with_flags(
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+        )?;
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-            CREATE TABLE IF NOT EXISTS threads(id BLOB PRIMARY KEY, genesis BLOB NOT NULL, generation INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS threads(id BLOB PRIMARY KEY, genesis BLOB NOT NULL, genesis_signature BLOB NOT NULL CHECK(length(genesis_signature)=64), generation INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS operations(id BLOB PRIMARY KEY, thread BLOB NOT NULL, facet INTEGER NOT NULL, canonical BLOB NOT NULL, signature BLOB NOT NULL, status INTEGER NOT NULL DEFAULT 0, reason TEXT, capture_state BLOB);
             CREATE INDEX IF NOT EXISTS operations_thread_status ON operations(thread,status);
             CREATE INDEX IF NOT EXISTS operations_capture ON operations(thread,capture_state,status,id);
@@ -77,22 +82,58 @@ impl ThreadReplica {
             CREATE TABLE IF NOT EXISTS peer_heads(thread BLOB NOT NULL, peer BLOB NOT NULL, operation BLOB NOT NULL, facet INTEGER NOT NULL, PRIMARY KEY(thread,peer,operation));
             CREATE TABLE IF NOT EXISTS peer_receipts(thread BLOB NOT NULL, peer BLOB NOT NULL, operation BLOB NOT NULL, status INTEGER NOT NULL, reason TEXT, PRIMARY KEY(thread,peer,operation));
             CREATE TABLE IF NOT EXISTS sharing(thread BLOB NOT NULL, destination BLOB NOT NULL, source INTEGER NOT NULL, discussion INTEGER NOT NULL, version BLOB NOT NULL, PRIMARY KEY(thread,destination));")?;
-        connection.execute(
-            "INSERT OR IGNORE INTO threads(id,genesis) VALUES(?1,?2)",
-            params![this.thread.as_bytes(), genesis.encode()?],
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO threads(id,genesis,genesis_signature) VALUES(?1,?2,?3)",
+            params![this.thread.as_bytes(), &signed.canonical, &signed.signature],
         )?;
-        let stored: Vec<u8> = connection.query_row(
-            "SELECT genesis FROM threads WHERE id=?1",
+        let stored: (Vec<u8>, Vec<u8>) = transaction.query_row(
+            "SELECT genesis,genesis_signature FROM threads WHERE id=?1",
             [this.thread.as_bytes()],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        if stored != genesis.encode()? {
+        if stored.0 != signed.canonical || stored.1 != signed.signature {
             return Err(Error::Invalid("Thread genesis collision".into()));
         }
+        transaction.commit()?;
         Ok(this)
     }
+
+    /// Lookup is side-effect free and needs only stable identity, not a key or
+    /// caller-supplied genesis. Unknown IDs never create another replica.
+    pub fn open(heddle_dir: &Path, thread: ContentHash) -> Result<Self> {
+        let this = Self {
+            path: heddle_dir.join("thread-replication.sqlite3"),
+            thread,
+        };
+        this.signed_genesis()?;
+        Ok(this)
+    }
+
+    pub fn signed_genesis(&self) -> Result<SignedGenesis> {
+        let signed = self.connect()?.query_row(
+            "SELECT genesis,genesis_signature FROM threads WHERE id=?1",
+            [self.thread.as_bytes()],
+            |row| {
+                Ok(SignedGenesis {
+                    canonical: row.get(0)?,
+                    signature: row.get(1)?,
+                })
+            },
+        )?;
+        if signed.verify()?.id()? != self.thread {
+            return Err(Error::Invalid(
+                "stored creator proof differs from Thread identity".into(),
+            ));
+        }
+        Ok(signed)
+    }
+
     fn connect(&self) -> Result<Connection> {
-        let connection = Connection::open(&self.path)?;
+        self.connect_with_flags(rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+    }
+    fn connect_with_flags(&self, flags: rusqlite::OpenFlags) -> Result<Connection> {
+        let connection = Connection::open_with_flags(&self.path, flags)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
         Ok(connection)

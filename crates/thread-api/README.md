@@ -61,9 +61,10 @@ covers canonical bytes, typed BLAKE3 identity, Ed25519 signature and protobuf
 relay; browser-side canonical construction remains separate.
 
 `replication_rpc::Peer` opens one `SyncService.ReplicateThread` exchange for a
-Thread. Attach its original creation record with `Peer::with_genesis` and
-`replication::opening::sign_genesis` for first publication: an authorized hosted
-receiver can create the same replica in this opening. The creator's signature
+Thread. `ThreadReplica::create` requires and retains the original signed
+creation record. `ThreadReplica::open` reopens by Thread ID without a signing
+key and never creates storage. `Peer::new` loads this durable proof automatically;
+an authorized receiver can create the same replica in the first opening. The creator's signature
 and canonical hash remain unchanged when another authorized device relays it.
 `live_replication::Feed` is shared across streams for that Thread;
 it detects writes from other processes through the durable database generation.

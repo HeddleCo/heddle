@@ -39,7 +39,7 @@ pub struct Peer {
     replica: ThreadReplica,
     endpoint: EndpointRef,
     facets: BTreeSet<ThreadFacet>,
-    genesis: Option<SignedRecord>,
+    genesis: SignedRecord,
 }
 impl Peer {
     pub fn new(
@@ -53,20 +53,22 @@ impl Peer {
                 "replication requires an admission facet",
             ));
         }
+        let signed = replica.signed_genesis().map_err(io_error)?;
+        let native = signed.verify().map_err(io_error)?;
+        let genesis = SignedRecord {
+            format: objects::object::thread_replication::GENESIS_FORMAT.into(),
+            canonical_record: signed.canonical,
+            signatures: vec![RecordSignature {
+                public_key: native.creator.to_vec(),
+                signature: signed.signature,
+            }],
+        };
         Ok(Self {
             replica,
             endpoint,
             facets,
-            genesis: None,
+            genesis,
         })
-    }
-
-    /// Attach the creator's durable proof for first publication. The receiver
-    /// can install the same Thread in the opening instead of creating a new ID.
-    pub fn with_genesis(mut self, genesis: SignedRecord) -> Result<Self, transport::Error> {
-        opening::verify_genesis(&genesis, &self.reference()?)?;
-        self.genesis = Some(genesis);
-        Ok(self)
     }
 
     fn reference(&self) -> Result<ThreadRef, transport::Error> {
@@ -113,7 +115,7 @@ impl Peer {
                 .map(replication::wire_facet)
                 .collect(),
             sharing_policy_version: version.map(|v| v.as_bytes().to_vec()).unwrap_or_default(),
-            thread_genesis: self.genesis.clone(),
+            thread_genesis: Some(self.genesis.clone()),
             budget: Some(ReadBudget {
                 max_items: 64,
                 max_frame_bytes: FRAME_LIMIT as u32,

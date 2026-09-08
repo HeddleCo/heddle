@@ -24,18 +24,31 @@ fn local_creation_retains_creator_proof_and_reopens_by_id_without_the_key() {
     drop(created);
     drop(signer);
     let reopened = ThreadReplica::open(repo.heddle_dir(), id).expect("reopen by stable ID");
-    assert_eq!(reopened.signed_genesis().expect("durable original proof"), signed);
+    assert_eq!(
+        reopened.signed_genesis().expect("durable original proof"),
+        signed
+    );
     let relay = TempDir::new().expect("another device");
-    let copied = ThreadReplica::create(relay.path(), &reopened.signed_genesis().expect("relay proof")).expect("no creator key needed");
+    let copied = ThreadReplica::create(
+        relay.path(),
+        &reopened.signed_genesis().expect("relay proof"),
+    )
+    .expect("no creator key needed");
     assert_eq!(copied.thread_id(), id);
     assert_eq!(copied.signed_genesis().expect("unchanged proof"), signed);
     let missing = TempDir::new().expect("empty device");
     assert!(ThreadReplica::open(missing.path(), id).is_err());
-    assert!(!missing.path().join("thread-replication.sqlite3").exists(), "a lookup cannot create storage");
+    assert!(
+        !missing.path().join("thread-replication.sqlite3").exists(),
+        "a lookup cannot create storage"
+    );
     let mut invalid = signed;
     invalid.signature[0] ^= 1;
     assert!(ThreadReplica::create(missing.path(), &invalid).is_err());
-    assert!(!missing.path().join("thread-replication.sqlite3").exists(), "invalid proof must fail before storage creation");
+    assert!(
+        !missing.path().join("thread-replication.sqlite3").exists(),
+        "invalid proof must fail before storage creation"
+    );
 }
 
 #[test]
@@ -56,7 +69,16 @@ fn genesis_creation_and_reopen_share_the_same_record_bound() {
         genesis.id().is_err(),
         "an unpersistable genesis must not acquire a Thread ID"
     );
-    assert!(ThreadReplica::open(repository.heddle_dir(), &genesis).is_err());
+    assert!(
+        ThreadReplica::create(
+            repository.heddle_dir(),
+            &crypto::thread_operation::SignedGenesis {
+                canonical: vec![0; objects::object::thread_replication::MAX_OPERATION_BYTES + 1],
+                signature: vec![0; 64]
+            }
+        )
+        .is_err()
+    );
 }
 fn setup() -> (
     TempDir,
@@ -78,7 +100,11 @@ fn setup() -> (
         creator: signer.public_key().try_into().expect("key"),
         nonce: vec![1],
     };
-    let replica = ThreadReplica::open(repo.heddle_dir(), &genesis).expect("Thread replica");
+    let replica = ThreadReplica::create(
+        repo.heddle_dir(),
+        &crypto::thread_operation::SignedGenesis::sign(&genesis, &signer).expect("creator proof"),
+    )
+    .expect("Thread replica");
     (temp, repo, genesis, signer, replica)
 }
 fn capture(
@@ -172,7 +198,11 @@ fn offline_branches_and_discussion_converge_after_reordered_duplicate_delivery_a
     let (_left_dir, left_repo, genesis, signer, left) = setup();
     let right_dir = TempDir::new().expect("right directory");
     let right_repo = Repository::init_default(right_dir.path()).expect("right repository");
-    let right = ThreadReplica::open(right_repo.heddle_dir(), &genesis).expect("right replica");
+    let right = ThreadReplica::create(
+        right_repo.heddle_dir(),
+        &crypto::thread_operation::SignedGenesis::sign(&genesis, &signer).expect("creator proof"),
+    )
+    .expect("right replica");
     let a = capture(&genesis, &signer, &[], vec![genesis.base]);
     let b = capture(&genesis, &signer, &[], vec![genesis.base]);
     let d = discussion(&genesis, &signer, &[], "root");
@@ -204,8 +234,10 @@ fn offline_branches_and_discussion_converge_after_reordered_duplicate_delivery_a
     }
     drop(left);
     drop(right);
-    let left = ThreadReplica::open(left_repo.heddle_dir(), &genesis).expect("restart left");
-    let right = ThreadReplica::open(right_repo.heddle_dir(), &genesis).expect("restart right");
+    let left = ThreadReplica::open(left_repo.heddle_dir(), genesis.id().expect("Thread ID"))
+        .expect("restart left");
+    let right = ThreadReplica::open(right_repo.heddle_dir(), genesis.id().expect("Thread ID"))
+        .expect("restart right");
     let lv = left.view().expect("left view");
     let rv = right.view().expect("right view");
     assert_eq!(lv.frontiers, rv.frontiers);
@@ -260,7 +292,8 @@ fn missing_parents_survive_restart_without_becoming_accepted() {
     );
     let before = replica.generation().expect("generation");
     drop(replica);
-    let replica = ThreadReplica::open(repo.heddle_dir(), &genesis).expect("restart");
+    let replica =
+        ThreadReplica::open(repo.heddle_dir(), genesis.id().expect("Thread ID")).expect("restart");
     assert!(
         replica
             .view()
@@ -338,7 +371,8 @@ fn sharing_defaults_private_and_survives_reopen_with_revocation() {
         .set_sharing(destination, &BTreeSet::from([ThreadFacet::Discussion]))
         .expect("opt in");
     drop(replica);
-    let replica = ThreadReplica::open(repo.heddle_dir(), &genesis).expect("restart");
+    let replica =
+        ThreadReplica::open(repo.heddle_dir(), genesis.id().expect("Thread ID")).expect("restart");
     assert_eq!(
         replica.sharing(&destination).expect("policy"),
         (BTreeSet::from([ThreadFacet::Discussion]), Some(policy))
@@ -616,8 +650,12 @@ fn revision_lookup_requires_accepted_capture_in_the_selected_thread() {
     );
     let mut other_genesis = genesis.clone();
     other_genesis.nonce = vec![2];
-    let other =
-        ThreadReplica::open(repo.heddle_dir(), &other_genesis).expect("other Thread, same store");
+    let other = ThreadReplica::create(
+        repo.heddle_dir(),
+        &crypto::thread_operation::SignedGenesis::sign(&other_genesis, &signer)
+            .expect("creator proof"),
+    )
+    .expect("other Thread, same store");
     assert!(
         other
             .accepted_capture(revision)
@@ -650,7 +688,12 @@ fn peer_repair_does_not_treat_another_threads_operation_as_present() {
     let operation_id = root.verify().expect("signature").id().expect("ID");
     let mut other_genesis = genesis;
     other_genesis.nonce = vec![2];
-    let other = ThreadReplica::open(repo.heddle_dir(), &other_genesis).expect("other Thread");
+    let other = ThreadReplica::create(
+        repo.heddle_dir(),
+        &crypto::thread_operation::SignedGenesis::sign(&other_genesis, &signer)
+            .expect("creator proof"),
+    )
+    .expect("other Thread");
     other
         .remember_peer_heads([8; 32], &[(ThreadFacet::Source, operation_id)])
         .expect("untrusted claim");
