@@ -1,0 +1,62 @@
+name: Shared capability verifiers
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: crates/capability-verifier
+
+jobs:
+  native:
+    name: Native test, conformance, and clippy
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Native unit and conformance suite
+        run: cargo test --locked -p heddleco-capability-verifier -p heddle-biscuit-verifier --all-targets -- --nocapture
+      - name: Clippy
+        run: cargo clippy --locked -p heddleco-capability-verifier -p heddle-biscuit-verifier --all-targets -- -D warnings
+
+  wasm:
+    name: Worker WASM build and parity
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install the WASM test runner
+        run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
+      - name: Build Worker target
+        run: cargo build --locked -p heddleco-capability-verifier --target wasm32-unknown-unknown --lib
+      - name: Run the full fixture matrix in WASM
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: cargo test --locked -p heddleco-capability-verifier --target wasm32-unknown-unknown --lib -- --nocapture
+
+  publish-dry-run:
+    name: crates.io package dry-run
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify the publishable package
+        run: cargo publish -p heddleco-capability-verifier --dry-run

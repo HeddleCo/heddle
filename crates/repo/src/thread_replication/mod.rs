@@ -2,6 +2,8 @@
 //! Durable Thread replication over native captures and collaboration operations.
 //! Endpoint adapters must authorize the exact Thread and disclosure facets before
 //! calling receive/export. Signatures prove the publisher, not spool membership.
+pub mod checkout;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -108,6 +110,7 @@ impl ThreadReplica {
             CREATE INDEX IF NOT EXISTS operations_thread_status ON operations(thread,status);
             CREATE TABLE IF NOT EXISTS parents(child BLOB NOT NULL, parent BLOB NOT NULL, PRIMARY KEY(child,parent));
             CREATE INDEX IF NOT EXISTS parents_parent ON parents(parent);
+            CREATE TABLE IF NOT EXISTS request_nonces(identity TEXT NOT NULL, nonce BLOB NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(identity,nonce));
             CREATE TABLE IF NOT EXISTS sharing(thread BLOB NOT NULL, destination BLOB NOT NULL, source INTEGER NOT NULL, discussion INTEGER NOT NULL, version BLOB NOT NULL, PRIMARY KEY(thread,destination));")?;
         connection.execute(
             "INSERT OR IGNORE INTO threads(id,genesis) VALUES(?1,?2)",
@@ -237,6 +240,51 @@ impl ThreadReplica {
         Ok(())
     }
 
+    /// Claim a verified request nonce durably, across streams and restarts.
+    pub fn claim_request_nonce(&self, identity: &str, nonce: &[u8], now_ms: i64) -> Result<bool> {
+        if nonce.len() != 16 {
+            return Err(Error::Invalid("invalid request nonce".into()));
+        }
+        let mut connection = self.connect()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM request_nonces WHERE expires<=?1", [now_ms])?;
+        let count: i64 = tx.query_row("SELECT count(*) FROM request_nonces", [], |r| r.get(0))?;
+        if count >= 16384 {
+            return Err(Error::Invalid("request replay registry at capacity".into()));
+        }
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO request_nonces(identity,nonce,expires) VALUES(?1,?2,?3)",
+            params![identity, nonce, now_ms.saturating_add(120000)],
+        )?;
+        tx.commit()?;
+        Ok(inserted == 1)
+    }
+
+    pub fn frontier_page(
+        &self,
+        facet: ThreadFacet,
+        after: Option<ContentHash>,
+        limit: usize,
+    ) -> Result<Vec<ContentHash>> {
+        if limit == 0 || limit > 1024 {
+            return Err(Error::Invalid("page size must be 1..1024".into()));
+        }
+        let connection = self.connect()?;
+        let mut query = connection.prepare("SELECT o.id FROM operations o WHERE o.thread=?1 AND o.facet=?2 AND o.status=1 AND (?3 IS NULL OR o.id>?3) AND NOT EXISTS(SELECT 1 FROM parents p JOIN operations c ON c.id=p.child WHERE p.parent=o.id AND c.thread=o.thread AND c.status=1) ORDER BY o.id LIMIT ?4")?;
+        query
+            .query_map(
+                params![
+                    self.thread.as_bytes(),
+                    facet_number(facet),
+                    after.map(|id| id.as_bytes().to_vec()),
+                    limit as u32
+                ],
+                |r| r.get::<_, Vec<u8>>(0),
+            )?
+            .map(|row| hash(&row?))
+            .collect()
+    }
+
     pub fn operation(&self, id: &ContentHash) -> Result<Option<(SignedOperation, Admission)>> {
         let connection = self.connect()?;
         let row = connection
@@ -356,9 +404,8 @@ impl ThreadReplica {
                 }
             }
         }
-        let collaboration =
-            materialize_repository_collaboration(discussion.into_values())
-                .map_err(|e| Error::Invalid(e.to_string()))?;
+        let collaboration = materialize_repository_collaboration(discussion.into_values())
+            .map_err(|e| Error::Invalid(e.to_string()))?;
         tx.commit()?;
         Ok(ThreadView {
             generation,

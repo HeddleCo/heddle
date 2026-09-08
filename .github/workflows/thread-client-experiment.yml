@@ -1,9 +1,13 @@
-name: Thread client experiment
+name: Thread API
 
 on:
   pull_request:
     paths:
-      - 'experiments/api-v2-client/**'
+      - 'crates/thread-api/**'
+      - 'crates/repo/src/thread_replication/**'
+      - 'crates/object-model/src/object/thread_replication.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/thread-client-experiment.yml'
 
 permissions:
@@ -13,9 +17,6 @@ jobs:
   thread-client:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: experiments/api-v2-client
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -23,7 +24,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: experiments/api-v2-client
-      - run: cargo test --locked
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo run --locked --example thread
+          workspaces: .
+      - run: cargo test --locked -p heddle-thread-api
+      - run: cargo clippy --locked -p heddle-thread-api --all-targets -- -D warnings
+      - run: cargo run --locked -p heddle-thread-api --example thread

@@ -1,0 +1,363 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Checkout-local capture. Shared Thread observations never move this HEAD.
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
+
+use chrono::Utc;
+use crypto::Signer;
+use objects::{
+    object::{
+        Attribution, ContentHash, StateId,
+        thread_replication::{ThreadOperation, ThreadOperationBody},
+    },
+    store::{
+        ObjectStore, WriterLeaseAuthOutcome, WriterLeaseDraft, WriterLeaseGrant,
+        WriterLeaseReserveOutcome, WriterLeaseStore,
+    },
+};
+use refs::Head;
+use serde::{Deserialize, Serialize};
+
+use super::{Admission, Error, Result, SignedOperation, ThreadReplica};
+use crate::{AudienceTier, CheckoutMaterialization, Repository};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CheckoutBinding {
+    pub id: String,
+    pub thread: ContentHash,
+}
+#[derive(Serialize, Deserialize)]
+struct CaptureJournal {
+    operation_id: String,
+    expected: StateId,
+    summary: String,
+    publisher: Vec<u8>,
+    parents: BTreeSet<ContentHash>,
+    resulting: Option<StateId>,
+    attribution: Attribution,
+}
+
+pub struct CaptureInput<'a> {
+    pub lease: &'a str,
+    pub token: &'a str,
+    pub operation_id: &'a str,
+    pub expected: StateId,
+    pub summary: &'a str,
+    pub attribution: Attribution,
+}
+
+pub struct ThreadCheckout {
+    pub binding: CheckoutBinding,
+    pub repository: Repository,
+    local_dir: PathBuf,
+}
+impl ThreadCheckout {
+    /// Called under device authority. The destination must be absent; no
+    /// existing checkout is repurposed or overwritten.
+    pub fn create(
+        source: &Repository,
+        replica: &ThreadReplica,
+        path: &Path,
+        revision: StateId,
+        audience: &AudienceTier,
+    ) -> Result<Self> {
+        if path.exists() {
+            return Err(Error::Invalid("checkout destination already exists".into()));
+        }
+        let state = source
+            .store()
+            .get_state(&revision)?
+            .ok_or_else(|| Error::Invalid("checkout source unavailable".into()))?;
+        match source.checkout_state_gated(&revision, &state, path, audience)? {
+            CheckoutMaterialization::Materialized { .. } => {}
+            _ => {
+                return Err(Error::Invalid(
+                    "checkout source is outside the audience".into(),
+                ));
+            }
+        }
+        Repository::init_worktree(path, source.heddle_dir())?;
+        let repository = Repository::open(path)?;
+        repository
+            .refs()
+            .write_head(&Head::Detached { state: revision })?;
+        let binding = CheckoutBinding {
+            id: uuid::Uuid::now_v7().to_string(),
+            thread: replica.thread_id(),
+        };
+        let local_dir = path.canonicalize()?.join(".heddle");
+        objects::fs_atomic::write_file_atomic(
+            &local_dir.join("thread-checkout.json"),
+            &serde_json::to_vec(&binding).map_err(|e| Error::Invalid(e.to_string()))?,
+        )?;
+        Ok(Self {
+            binding,
+            repository,
+            local_dir,
+        })
+    }
+    pub fn open(path: &Path) -> Result<Self> {
+        let local_dir = path.canonicalize()?.join(".heddle");
+        let binding =
+            serde_json::from_slice(&std::fs::read(local_dir.join("thread-checkout.json"))?)
+                .map_err(|e| Error::Invalid(e.to_string()))?;
+        Ok(Self {
+            binding,
+            repository: Repository::open(path)?,
+            local_dir,
+        })
+    }
+    pub fn claim_writer(&self, actor: String, pid: Option<u32>) -> Result<WriterLeaseGrant> {
+        let result = WriterLeaseStore::new(self.repository.heddle_dir()).reserve(
+            WriterLeaseDraft {
+                thread: self.binding.thread.to_hex(),
+                actor_session_id: Some(actor),
+                task_assignment_id: None,
+                anchor_state: self.repository.head()?.map(|id| id.to_string_full()),
+                anchor_root: None,
+                path: Some(self.repository.root().to_owned()),
+                pid,
+                boot_id: pid.and_then(|_| objects::store::current_boot_id()),
+            },
+            Utc::now(),
+        )?;
+        match result {
+            WriterLeaseReserveOutcome::Reserved(grant) => Ok(grant),
+            WriterLeaseReserveOutcome::LiveOwner(owner) => Err(Error::Invalid(format!(
+                "checkout already has writer {}",
+                owner.lease_id
+            ))),
+        }
+    }
+
+    /// A journal binds the retry ID before native capture. If the process stops
+    /// between native commit and Thread admission, the checkout's detached HEAD
+    /// recovers the exact capture; a retry never takes a second snapshot.
+    pub fn capture(
+        &self,
+        replica: &ThreadReplica,
+        input: CaptureInput<'_>,
+        signer: &impl Signer,
+    ) -> Result<SignedOperation> {
+        let CaptureInput {
+            lease,
+            token,
+            operation_id,
+            expected,
+            summary,
+            attribution,
+        } = &input;
+        let expected = *expected;
+        if operation_id.is_empty() || replica.thread_id() != self.binding.thread {
+            return Err(Error::Invalid(
+                "invalid capture scope or operation ID".into(),
+            ));
+        }
+        let lock = objects::lock::RepoLock::at(self.local_dir.join("thread-capture.lock"));
+        let _guard = lock.write().map_err(|e| Error::Invalid(e.to_string()))?;
+        let writer = WriterLeaseStore::new(self.repository.heddle_dir()).authenticate_and_renew(
+            lease,
+            token,
+            Utc::now(),
+        )?;
+        match writer {
+            WriterLeaseAuthOutcome::Authorized(writer)
+                if writer.path.as_deref() == Some(self.repository.root())
+                    && writer.thread == self.binding.thread.to_hex() => {}
+            _ => {
+                return Err(Error::Invalid(
+                    "capture requires this checkout's active writer".into(),
+                ));
+            }
+        }
+        let path = self.local_dir.join("capture-journal.json");
+        let receipts = self.local_dir.join("capture-receipts");
+        objects::fs_atomic::create_dir_all_durable(&receipts)?;
+        let completed_path = receipts.join(
+            ContentHash::compute_typed("checkout-command-v1", operation_id.as_bytes()).to_hex(),
+        );
+        let completed = match std::fs::read(&completed_path) {
+            Ok(bytes) => Some(
+                serde_json::from_slice::<CaptureJournal>(&bytes)
+                    .map_err(|e| Error::Invalid(e.to_string()))?,
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        if let Some(completed) = completed {
+            if completed.operation_id != *operation_id
+                || completed.expected != expected
+                || completed.summary != *summary
+                || completed.attribution != *attribution
+                || completed.publisher != signer.public_key()
+            {
+                return Err(Error::Invalid(
+                    "capture retry changes its signed inputs".into(),
+                ));
+            }
+            let state_id = completed
+                .resulting
+                .ok_or_else(|| Error::Invalid("capture receipt has no result".into()))?;
+            let state = self
+                .repository
+                .store()
+                .get_state(&state_id)?
+                .ok_or_else(|| Error::Invalid("captured state unavailable".into()))?;
+            return SignedOperation::sign(
+                &ThreadOperation {
+                    version: 1,
+                    thread: self.binding.thread,
+                    parents: completed.parents,
+                    publisher: signer
+                        .public_key()
+                        .try_into()
+                        .map_err(|_| Error::Invalid("publisher key must be Ed25519".into()))?,
+                    body: ThreadOperationBody::Capture(state.encode_current_msgpack()?),
+                },
+                signer,
+            );
+        }
+        let old = match std::fs::read(&path) {
+            Ok(bytes) => Some(
+                serde_json::from_slice::<CaptureJournal>(&bytes)
+                    .map_err(|e| Error::Invalid(e.to_string()))?,
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        let mut journal = if let Some(old) = old {
+            if old.operation_id == *operation_id {
+                if old.expected != expected
+                    || old.summary != *summary
+                    || old.publisher != signer.public_key()
+                    || old.attribution != *attribution
+                {
+                    return Err(Error::Invalid(
+                        "capture retry changes its signed inputs".into(),
+                    ));
+                }
+                old
+            } else {
+                if old.resulting.is_none() {
+                    return Err(Error::Invalid(format!(
+                        "recover pending capture {} before starting another",
+                        old.operation_id
+                    )));
+                }
+                self.new_journal(replica, &input, signer)?
+            }
+        } else {
+            self.new_journal(replica, &input, signer)?
+        };
+        write_journal(&path, &journal)?;
+        let state = if let Some(id) = journal.resulting {
+            self.repository
+                .store()
+                .get_state(&id)?
+                .ok_or_else(|| Error::Invalid("captured state unavailable".into()))?
+        } else {
+            let head = self
+                .repository
+                .head()?
+                .ok_or_else(|| Error::Invalid("checkout has no HEAD".into()))?;
+            if head != expected {
+                let state = self
+                    .repository
+                    .store()
+                    .get_state(&head)?
+                    .ok_or_else(|| Error::Invalid("recovery source unavailable".into()))?;
+                if state.parents != vec![expected]
+                    || state.intent.as_deref() != Some(*summary)
+                    || state.attribution != *attribution
+                {
+                    return Err(Error::Invalid(
+                        "checkout changed outside the pending capture; explicit recovery required"
+                            .into(),
+                    ));
+                }
+                state
+            } else {
+                self.repository.snapshot_with_attribution(
+                    Some((*summary).to_owned()),
+                    None,
+                    attribution.clone(),
+                )?
+            }
+        };
+        let operation = ThreadOperation {
+            version: 1,
+            thread: self.binding.thread,
+            parents: journal.parents.clone(),
+            publisher: signer
+                .public_key()
+                .try_into()
+                .map_err(|_| Error::Invalid("publisher key must be Ed25519".into()))?,
+            body: ThreadOperationBody::Capture(state.encode_current_msgpack()?),
+        };
+        let signed = SignedOperation::sign(&operation, signer)?;
+        if replica.receive(&signed, self.repository.store(), |_| Ok(()))? != Admission::Accepted {
+            return Err(Error::Invalid(
+                "local capture has incomplete causal ancestry".into(),
+            ));
+        }
+        journal.resulting = Some(state.id());
+        write_journal(&completed_path, &journal)?;
+        write_journal(&path, &journal)?;
+        Ok(signed)
+    }
+
+    fn new_journal(
+        &self,
+        replica: &ThreadReplica,
+        input: &CaptureInput<'_>,
+        signer: &impl Signer,
+    ) -> Result<CaptureJournal> {
+        let expected = input.expected;
+        if self.repository.head()? != Some(expected) {
+            return Err(Error::Invalid("stale checkout source".into()));
+        }
+        let mut parents = BTreeSet::new();
+        if expected != replica.genesis()?.base {
+            let mut cursor = None;
+            loop {
+                let page = replica.accepted_page(
+                    objects::object::thread_replication::ThreadFacet::Source,
+                    cursor,
+                    128,
+                )?;
+                if page.is_empty() {
+                    break;
+                }
+                for (id, signed) in page {
+                    cursor = Some(id);
+                    if let ThreadOperationBody::Capture(bytes) = signed.verify()?.body
+                        && objects::object::State::decode_current_msgpack(&bytes)?.id() == expected
+                    {
+                        parents.insert(id);
+                    }
+                }
+            }
+            if parents.is_empty() {
+                return Err(Error::Invalid(
+                    "checkout source is not admitted in this Thread".into(),
+                ));
+            }
+        }
+        Ok(CaptureJournal {
+            operation_id: input.operation_id.into(),
+            expected,
+            summary: input.summary.into(),
+            publisher: signer.public_key().to_vec(),
+            parents,
+            resulting: None,
+            attribution: input.attribution.clone(),
+        })
+    }
+}
+fn write_journal(path: &Path, journal: &CaptureJournal) -> Result<()> {
+    let bytes = serde_json::to_vec(journal).map_err(|e| Error::Invalid(e.to_string()))?;
+    objects::fs_atomic::write_file_atomic(path, &bytes)?;
+    Ok(())
+}

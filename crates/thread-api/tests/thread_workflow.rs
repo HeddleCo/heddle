@@ -3,7 +3,7 @@
 mod support;
 
 use api::v2::client::ClientError;
-use heddle_thread_client::{content::BlobSource, contract::*, observation::Error, rpc, transport};
+use heddle_thread_api::{content::BlobSource, contract::*, observation::Error, rpc, transport};
 use support::{Peer, Scenario};
 
 #[tokio::test]
@@ -37,7 +37,7 @@ async fn a_persisted_checkpoint_resumes_committed_changes_without_replacement() 
         .await
         .expect("edit");
     let resumed =
-        heddle_thread_client::observation::Resume::decode(&saved).expect("persisted checkpoint");
+        heddle_thread_api::observation::Resume::decode(&saved).expect("persisted checkpoint");
     let mut view = thread
         .observe(
             &[ThreadSection::Overview],

@@ -1,6 +1,9 @@
 [workspace]
 members = [
     "crates/treadle-schema",
+    "crates/thread-api",
+    "crates/biscuit-verifier",
+    "crates/capability-verifier",
     "crates/cli",
     "crates/agent-relay",
     "crates/cli-args",
@@ -49,7 +52,7 @@ categories = ["development-tools"]
 [workspace.dependencies]
 aes-gcm = { version = "0.10", features = ["zeroize"] }
 anyhow = "1"
-api = { package = "heddle-api", version = "0.28.0" }
+api = { package = "heddle-api", git = "https://github.com/HeddleCo/api.git", rev = "cecd741688d17223c782f8f3d74566960c606e58" }
 async-trait = "0.1"
 base32 = "0.5"
 base64 = "0.22"
@@ -209,3 +212,7 @@ split-debuginfo = "unpacked"
 lto = true
 codegen-units = 1
 strip = true
+
+[patch.crates-io]
+heddleco-capability-verifier = { path = "crates/capability-verifier" }
+heddle-api = { git = "https://github.com/HeddleCo/api.git", rev = "cecd741688d17223c782f8f3d74566960c606e58" }

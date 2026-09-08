@@ -1,0 +1,32 @@
+// Heddle authorization rule pack shared by Weft and Worker WASM.
+//
+// Loaded into every Authorizer via `code()`. Tokens carry concrete `spool`
+// rights; parent-to-descendant inheritance is walked after fact extraction by
+// `BiscuitFacts::has_action_through_inheritance`.
+//
+// What's left here is the action hierarchy on a single resource,
+// where every variable in the head is bound by the body fact.
+//
+// Current convention: facts use `right($kind, $path, $action)`.
+// Constructors also emit thread/context kinds and merge/approve actions;
+// the hierarchy immediately below applies only to read/write/admin on the
+// same kind and path.
+//
+// `admin()` is the global-admin marker. It's NOT used to derive
+// concrete `right(...)` facts (that would leave $k/$p/$a unbound at
+// mint time too); instead, [`BiscuitFacts::is_admin`] checks the
+// fact directly and short-circuits per-resource permission checks.
+//
+// SECURITY / E2 CUTOVER GATE (weft#248):
+// `grant_envelope_conformance_tests` fuzzes this action lattice together with
+// exact resource/path subset enforcement. The Postgres-backed companion in
+// `weft-server/tests/grant_envelope_materialization_integration.rs` covers the
+// hosted-grant graph materialized at mint. `MIN_BROWSER_SESSION_ISSUED_AT`
+// must not flip while either half is absent or failing.
+
+// Action hierarchy: admin implies write implies read.
+// All three head variables ($k, $p) are bound by the body predicate,
+// so the parser accepts these rules.
+right($k, $p, "read")  <- right($k, $p, "write");
+right($k, $p, "read")  <- right($k, $p, "admin");
+right($k, $p, "write") <- right($k, $p, "admin");

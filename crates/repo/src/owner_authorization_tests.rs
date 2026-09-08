@@ -69,7 +69,7 @@ fn create_spool_genesis_is_uuidv7_self_signature_over_the_device_key() {
 
 #[test]
 fn verifier_consumes_the_current_owner_authorization_wire_contract() {
-    assert_eq!(HEDDLE_API_REQUIREMENT, "0.15");
+    assert_eq!(HEDDLE_API_REQUIREMENT, "0.28");
 
     let fixture = purge_fixture();
     let valid = fixture

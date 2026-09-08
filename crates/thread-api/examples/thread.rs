@@ -3,7 +3,7 @@
 mod support;
 
 use anyhow::{Context, Result};
-use heddle_thread_client::{content::BlobSource, contract::*};
+use heddle_thread_api::{content::BlobSource, contract::*};
 
 #[tokio::main]
 async fn main() -> Result<()> {

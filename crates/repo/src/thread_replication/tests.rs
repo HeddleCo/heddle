@@ -287,3 +287,126 @@ fn sharing_defaults_private_and_survives_reopen_with_revocation() {
         .expect("revoke");
     assert!(replica.sharing(&destination).expect("revoked").0.is_empty());
 }
+
+#[test]
+fn two_native_checkouts_capture_one_thread_without_rewriting_each_other() {
+    use super::checkout::{CaptureInput, ThreadCheckout};
+    let (temp, repo, genesis, signer, replica) = setup();
+    let left = ThreadCheckout::create(
+        &repo,
+        &replica,
+        &temp.path().join("left"),
+        genesis.base,
+        &crate::AudienceTier::Internal,
+    )
+    .expect("left checkout");
+    let right = ThreadCheckout::create(
+        &repo,
+        &replica,
+        &temp.path().join("right"),
+        genesis.base,
+        &crate::AudienceTier::Internal,
+    )
+    .expect("right checkout");
+    let left_writer = left
+        .claim_writer("agent-a".into(), Some(std::process::id()))
+        .expect("left writer");
+    let right_writer = right
+        .claim_writer("agent-b".into(), Some(std::process::id()))
+        .expect("right writer");
+    assert!(
+        left.claim_writer("agent-c".into(), Some(std::process::id()))
+            .is_err()
+    );
+    std::fs::write(left.repository.root().join("work.txt"), "left work").expect("left edit");
+    std::fs::write(right.repository.root().join("work.txt"), "right work").expect("right edit");
+    let left_capture = left
+        .capture(
+            &replica,
+            CaptureInput {
+                lease: &left_writer.lease.lease_id,
+                token: &left_writer.token,
+                operation_id: "capture-a",
+                expected: genesis.base,
+                summary: "left work",
+                attribution: author(),
+            },
+            &signer,
+        )
+        .expect("left native capture");
+    assert_eq!(
+        right.repository.head().expect("right HEAD"),
+        Some(genesis.base)
+    );
+    let right_capture = right
+        .capture(
+            &replica,
+            CaptureInput {
+                lease: &right_writer.lease.lease_id,
+                token: &right_writer.token,
+                operation_id: "capture-b",
+                expected: genesis.base,
+                summary: "right work",
+                attribution: author(),
+            },
+            &signer,
+        )
+        .expect("right native capture");
+    assert_eq!(
+        replica.view().expect("concurrent heads").source_heads,
+        BTreeSet::from([state_id(&left_capture), state_id(&right_capture)])
+    );
+    let retry = left
+        .capture(
+            &replica,
+            CaptureInput {
+                lease: &left_writer.lease.lease_id,
+                token: &left_writer.token,
+                operation_id: "capture-a",
+                expected: genesis.base,
+                summary: "left work",
+                attribution: author(),
+            },
+            &signer,
+        )
+        .expect("lost response retry");
+    assert_eq!(left_capture, retry);
+    // A stop after the durable receipt but before finalizing the active
+    // journal must not leave the checkout unable to start another capture.
+    let journal_path = left.repository.root().join(".heddle/capture-journal.json");
+    let mut journal: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&journal_path).expect("capture journal"),
+    )
+    .expect("journal JSON");
+    journal["resulting"] = serde_json::Value::Null;
+    std::fs::write(&journal_path, serde_json::to_vec(&journal).expect("journal bytes"))
+        .expect("simulate interrupted finalization");
+    let recovered = left
+        .capture(
+            &replica,
+            CaptureInput {
+                lease: &left_writer.lease.lease_id,
+                token: &left_writer.token,
+                operation_id: "capture-a",
+                expected: genesis.base,
+                summary: "left work",
+                attribution: author(),
+            },
+            &signer,
+        )
+        .expect("retry completed command after restart");
+    assert_eq!(left_capture, recovered);
+    let repaired: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&journal_path).expect("repaired journal"),
+    )
+    .expect("repaired JSON");
+    assert!(!repaired["resulting"].is_null(), "retry must finish the active journal");
+    assert_eq!(
+        std::fs::read_to_string(left.repository.root().join("work.txt")).expect("left bytes"),
+        "left work"
+    );
+    assert_eq!(
+        std::fs::read_to_string(right.repository.root().join("work.txt")).expect("right bytes"),
+        "right work"
+    );
+}

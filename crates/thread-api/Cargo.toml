@@ -1,0 +1,30 @@
+[package]
+name = "heddle-thread-api"
+version.workspace = true
+edition.workspace = true
+description = "Native Thread clients and durable peer replication over Iroh"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+api.workspace = true
+repo = { workspace = true, features = ["native", "git-overlay"] }
+objects.workspace = true
+crypto.workspace = true
+biscuit-verifier = { package = "heddle-biscuit-verifier", path = "../biscuit-verifier", version = "0.21.0" }
+biscuit-auth.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+blake3.workspace = true
+hex.workspace = true
+iroh = { package = "heddleco-iroh", version = "=0.1.0", default-features = false, features = ["tls-ring"] }
+prost = "=0.14.1"
+thiserror = "=2.0.18"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "io-util"] }
+
+[dev-dependencies]
+anyhow = "1"
+ed25519-dalek = "3"
+getrandom = "0.4"
+tempfile.workspace = true
+

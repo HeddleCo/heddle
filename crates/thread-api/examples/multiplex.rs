@@ -3,7 +3,7 @@ mod support;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
-use heddle_thread_client::contract::{ObservationMode, ThreadSection};
+use heddle_thread_api::contract::{ObservationMode, ThreadSection};
 
 #[tokio::main]
 async fn main() -> Result<()> {

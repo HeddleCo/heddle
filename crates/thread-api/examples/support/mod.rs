@@ -18,7 +18,7 @@ use api::{
     v2::{MethodDescriptor, client::Rpc},
 };
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use heddle_thread_client::{
+use heddle_thread_api::{
     Remote,
     contract::*,
     rpc,
@@ -119,7 +119,8 @@ fn overview(version: u8, outcome: &str) -> ThreadOverview {
             version: vec![version],
             ..Default::default()
         }),
-        tip: Some(revision()),
+        source_heads: vec![revision()],
+        integrated_revision: Some(revision()),
         capture_count: 1,
         ..Default::default()
     }
