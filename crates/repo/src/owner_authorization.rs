@@ -52,6 +52,7 @@ pub fn sign_spool_owner_genesis(
         .chain_update(spool_uuid)
         .finalize();
     Ok(SignedSpoolOwnerGenesis {
+        delegated_creation: None,
         genesis: Some(SpoolOwnerGenesis {
             spool_uuid: spool_uuid.to_vec(),
             owner_public_key: Some(owner_public_key),

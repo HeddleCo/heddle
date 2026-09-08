@@ -17,7 +17,7 @@ continues to use the purge-only rules below.
 
 ## Contract
 
-Version 0.17 consumes `heddle-api = "0.28"`. Public proof types come from
+Version 0.17 consumes `heddle-api = "0.29"`. Public proof types come from
 `heddle.api.v2alpha1`; the durable signing formats keep their own versions.
 The verifier implements the purge-only owner contract:
 

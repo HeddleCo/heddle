@@ -194,6 +194,17 @@ pub fn verify_clone_keyring(
     // Creation may follow an owner-key rotation. Verify its key against the
     // complete signed history, while the accepted state still determines
     // current authority. A later rotation does not rewrite immutable genesis.
+    if owner_genesis.signed().delegated_creation.is_some() {
+        let creation = crate::creation::validate_spool_creation_structure(
+            owner_genesis.signed(),
+            now_unix_seconds,
+        )?;
+        if !state.extends(creation.owner_state()) {
+            return Err(Error::BrokenChain(
+                "creation witness diverges from pinned owner history".into(),
+            ));
+        }
+    }
     if !state.contains_authority_key(owner_genesis.owner_public_key()) {
         return Err(Error::BrokenChain(
             "spool genesis key is absent from the verified owner history".to_owned(),

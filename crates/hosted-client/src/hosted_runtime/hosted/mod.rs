@@ -389,6 +389,7 @@ impl HostedClient {
             }
         };
         let updated = config::credentials::ServerCredential {
+            mint_root_attachment: credential.mint_root_attachment,
             token: root.token.clone(),
             subject: root.subject,
             device_id: credential.device_id,

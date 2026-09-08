@@ -730,6 +730,26 @@ struct VerifiedDelegationChain {
     agent_id: Option<String>,
 }
 
+/// Verify only the cryptographic proof-key lineage of an already signature-
+/// checked Biscuit. This deliberately does not authorize an operation, evaluate
+/// expiry, or consult revocations; portable evidence callers must distinguish
+/// structural lineage from current permission.
+pub fn verify_proof_key_lineage(biscuit: &Biscuit) -> Result<String, BiscuitError> {
+    let mut authorizer = biscuit_auth::builder::AuthorizerBuilder::new()
+        .set_limits(super::authorizer_limits())
+        .build(biscuit)
+        .map_err(|error| BiscuitError::Invalid(error.to_string()))?;
+    if authority_pop_delegation_present(&mut authorizer)? {
+        return Err(BiscuitError::Invalid(
+            "authority block cannot delegate its own proof key".into(),
+        ));
+    }
+    let authority = authority_string_fact(&mut authorizer, "device_pop_key")?;
+    verified_delegation_chain(authority, None, &[], biscuit)?
+        .effective_pop_key
+        .ok_or_else(|| BiscuitError::Invalid("credential has no verified proof key".into()))
+}
+
 fn verified_delegation_chain(
     authority_key_hex: Option<String>,
     initial_pop_key_hex: Option<&str>,

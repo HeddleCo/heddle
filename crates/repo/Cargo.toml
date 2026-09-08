@@ -11,6 +11,8 @@ categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+biscuit-auth.workspace = true
+heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.22.0" }
 base32.workspace = true
 api = { workspace = true }
 blake3.workspace = true

@@ -188,8 +188,10 @@ pub fn run_fixture(json: &str) -> Result<Vec<ConformanceOutcome>> {
             let body: PurgeOperationSigningBody =
                 canonical_message(&case.operation_body_hex, 4096)?;
             let payload = hex_bytes(&case.payload_hex, limits.max_payload_bytes())?;
-            let owner_genesis: SignedSpoolOwnerGenesis =
-                canonical_message(&case.owner_genesis_hex, 4096)?;
+            let owner_genesis: SignedSpoolOwnerGenesis = canonical_message(
+                &case.owner_genesis_hex,
+                crate::creation::MAX_CREATION_PROOF_BYTES + 1024,
+            )?;
             let current_state_hash = fixed(
                 &case.current_owner_state_hash_hex,
                 "current owner state hash",

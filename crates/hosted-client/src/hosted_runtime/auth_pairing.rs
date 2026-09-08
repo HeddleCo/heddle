@@ -263,6 +263,9 @@ fn verify_response(
         .id;
     let pem = subject.to_pem().context("encode paired proof key")?;
     Ok(config::credentials::ServerCredential {
+        mint_root_attachment: result
+            .mint_root_attachment
+            .map(|proof| proof.encode_to_vec()),
         token,
         subject: facts.sub,
         device_id: Some(credential_id.clone()),

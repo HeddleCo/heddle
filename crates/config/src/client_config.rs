@@ -14,6 +14,8 @@ pub struct ClientConfig {
     pub token: Option<AuthToken>,
     /// Optional private key used to prove possession of a bound token.
     pub auth_proof_key_pem: Option<String>,
+    /// Retained public owner association for the original credential mint root.
+    pub mint_root_attachment: Option<Vec<u8>>,
     /// Stable authenticated principal bound to the bearer token. Request
     /// signatures use this value as their canonical identity; the device key
     /// remains only the proof key.
@@ -70,6 +72,7 @@ impl ClientConfig {
             client_id: client_id.into(),
             token: None,
             auth_proof_key_pem: None,
+            mint_root_attachment: None,
             authenticated_principal: None,
             server_key: None,
             descriptor_key_id: None,

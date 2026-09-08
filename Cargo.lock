@@ -2156,7 +2156,7 @@ dependencies = [
 [[package]]
 name = "heddle-api"
 version = "0.29.0"
-source = "git+https://github.com/HeddleCo/api.git?rev=006710b32c5f996d3728d83530824414943a8d0d#006710b32c5f996d3728d83530824414943a8d0d"
+source = "git+https://github.com/HeddleCo/api.git?rev=2341218db49560df95a74c99659f40c0b7248a83#2341218db49560df95a74c99659f40c0b7248a83"
 dependencies = [
  "blake3",
  "bytes",
@@ -2722,9 +2722,11 @@ version = "0.22.0"
 dependencies = [
  "anyhow",
  "base32",
+ "biscuit-auth",
  "blake3",
  "chrono",
  "heddle-api",
+ "heddle-biscuit-verifier",
  "heddle-crypto",
  "heddle-objects",
  "heddle-oplog",
@@ -2883,10 +2885,13 @@ dependencies = [
 name = "heddleco-capability-verifier"
 version = "0.17.0"
 dependencies = [
+ "base64 0.22.1",
  "biscuit-auth",
+ "chrono",
  "ed25519-dalek 3.0.0",
  "getrandom 0.2.17",
  "heddle-api",
+ "heddle-biscuit-verifier",
  "hex",
  "prost 0.14.1",
  "serde",

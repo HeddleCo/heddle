@@ -164,6 +164,7 @@ pub(crate) fn store_agent_root(
     credentials::store_server_credential(
         server,
         credentials::ServerCredential {
+            mint_root_attachment: None,
             token,
             subject,
             device_id: None,

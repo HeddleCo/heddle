@@ -19,6 +19,7 @@ use crypto::{Ed25519Signer, Signer as _};
 use opentelemetry::propagation::{Injector, TextMapPropagator};
 #[cfg(feature = "telemetry")]
 use opentelemetry_sdk::propagation::TraceContextPropagator;
+use prost::Message;
 use prost_types::Timestamp;
 #[cfg(feature = "telemetry")]
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
@@ -36,6 +37,7 @@ const NONCE_LEN: usize = 16;
 pub struct CallContextFactory {
     bearer_capability: Vec<u8>,
     bearer_grant_envelope: Vec<u8>,
+    mint_root_attachment: Option<Vec<u8>>,
     signer: Option<Arc<Ed25519Signer>>,
     signing_identity: Option<String>,
     timeout: Duration,
@@ -64,6 +66,7 @@ impl Default for CallContextFactory {
         Self {
             bearer_capability: Vec::new(),
             bearer_grant_envelope: Vec::new(),
+            mint_root_attachment: None,
             signer: None,
             signing_identity: None,
             timeout: Duration::from_secs(30),
@@ -131,6 +134,34 @@ impl CallContextFactory {
         .map_err(|error| HostedError::Framing(error.to_string()))
     }
 
+    /// Build owner-derived creation evidence for the exact resolved request.
+    pub(crate) fn mint_spool_creation(
+        &self,
+        intent: repo::SpoolCreationIntent,
+        owner: &api::heddle::api::v2alpha1::OwnerState,
+    ) -> Result<SignedSpoolOwnerGenesis> {
+        let signer = self
+            .signer
+            .as_deref()
+            .ok_or(HostedError::SigningIdentityRequired)?;
+        let now = chrono::Utc::now().timestamp();
+        let current = repo::verify_account_owner_observation(owner, now)
+            .map_err(|error| HostedError::Framing(error.to_string()))?;
+        if current.authority_key().public_key == signer.public_key() {
+            return self.mint_spool_owner_genesis(intent.spool_uuid, owner);
+        }
+        let token = std::str::from_utf8(&self.bearer_capability)
+            .map_err(|error| HostedError::Framing(error.to_string()))?;
+        let attachment = self
+            .mint_root_attachment
+            .as_deref()
+            .map(api::heddle::api::v2alpha1::SignedMintRootAttachment::decode)
+            .transpose()
+            .map_err(|error| HostedError::Framing(error.to_string()))?;
+        repo::sign_delegated_spool_creation(signer, intent, owner, token, attachment, now)
+            .map_err(|error| HostedError::Framing(error.to_string()))
+    }
+
     pub fn with_bearer_capability(mut self, capability: impl Into<Vec<u8>>) -> Self {
         self.bearer_capability = capability.into();
         self
@@ -195,6 +226,7 @@ impl CallContextFactory {
                 .as_ref()
                 .map_or_else(Vec::new, |token| token.id.as_bytes().to_vec()),
             bearer_grant_envelope: Vec::new(),
+            mint_root_attachment: config.mint_root_attachment.clone(),
             signer,
             signing_identity: config.authenticated_principal.clone(),
             timeout: Duration::from_secs(config.timeout_secs.max(1)),
@@ -762,5 +794,107 @@ mod tests {
             &signed.owner_signature.expect("owner signature").signature,
         )
         .unwrap();
+    }
+    #[test]
+    fn spool_creation_binds_delegated_parent_path_name_and_original_owner() {
+        use api::heddle::api::v2alpha1 as v2;
+        let owner = Ed25519Signer::from_seed(&[83; 32]).expect("owner");
+        let agent = Ed25519Signer::from_seed(&[84; 32]).expect("agent");
+        let account = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now().timestamp();
+        let root =
+            repo::sign_claimable_deferred_human_root(&owner, *account.as_bytes(), [7; 32], now)
+                .expect("root");
+        let binding =
+            repo::sign_agent_claim_binding(&owner, &root, "original-owner").expect("binding");
+        let current =
+            heddleco_capability_verifier::verify_owner_root(&root).expect("verified owner");
+        let observed = v2::OwnerState {
+            owner: Some(v2::PrincipalRef {
+                id: account.to_string(),
+            }),
+            root: Some(root),
+            version: current.state_hash().to_vec(),
+            binding: Some(binding),
+            ..Default::default()
+        };
+        let pair = biscuit_auth::KeyPair::from(
+            &biscuit_auth::PrivateKey::from_bytes(
+                &owner.to_seed(),
+                biscuit_auth::Algorithm::Ed25519,
+            )
+            .expect("test mint key"),
+        );
+        let token = biscuit_auth::Biscuit::builder().code(format!("user(\"{account}\"); session(\"original-session\"); device_pop_key(\"{}\"); right(\"spool\", \"acme\", \"admin\");",hex::encode(agent.public_key())).as_str()).expect("authority facts").build(&pair).expect("existing token").to_base64().expect("base64");
+        let factory = CallContextFactory::default()
+            .with_bearer_capability(token.into_bytes())
+            .with_signing_key_pem(
+                &agent.to_pem().expect("pem"),
+                format!("principal:{account}"),
+            )
+            .expect("agent context");
+        let spool = uuid::Uuid::now_v7();
+        let parent = uuid::Uuid::now_v7();
+        let intent = || repo::SpoolCreationIntent {
+            spool_uuid: spool,
+            parent_spool_uuid: Some(parent),
+            parent_path_segments: vec!["acme".into()],
+            name: "project".into(),
+        };
+        let signed = factory
+            .mint_spool_creation(intent(), &observed)
+            .expect("delegated creation without owner private key");
+        let proof = signed.delegated_creation.as_ref().expect("delegated proof");
+        let statement = proof.statement.as_ref().expect("statement");
+        assert_eq!(statement.parent_spool_uuid, parent.as_bytes());
+        assert_eq!(statement.parent_path_segments, ["acme"]);
+        assert_eq!(statement.name, "project");
+        assert_eq!(
+            signed
+                .genesis
+                .as_ref()
+                .expect("genesis")
+                .owner_public_key
+                .as_ref()
+                .expect("owner")
+                .public_key,
+            owner.public_key()
+        );
+        let mut changed = signed.clone();
+        changed
+            .delegated_creation
+            .as_mut()
+            .expect("proof")
+            .statement
+            .as_mut()
+            .expect("statement")
+            .name = "different".into();
+        assert!(
+            heddleco_capability_verifier::creation::validate_spool_creation_structure(
+                &changed, now
+            )
+            .is_err(),
+            "name cannot change after signing"
+        );
+        let mut bad = intent();
+        bad.parent_path_segments.push(String::new());
+        assert!(
+            factory
+                .mint_spool_creation(bad, &observed)
+                .expect_err("noncanonical spelling")
+                .to_string()
+                .contains("non-canonical")
+        );
+        let direct = CallContextFactory::default()
+            .with_signing_key_pem(
+                &owner.to_pem().expect("pem"),
+                format!("principal:{account}"),
+            )
+            .expect("owner context");
+        let genesis = direct
+            .mint_spool_creation(intent(), &observed)
+            .expect("direct current owner");
+        assert!(genesis.owner_signature.is_some());
+        assert!(genesis.delegated_creation.is_none());
     }
 }

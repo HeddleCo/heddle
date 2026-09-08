@@ -249,7 +249,8 @@ fn validate_recovery_policy(
     Ok(())
 }
 
-/// Verify self-signed spool genesis evidence and return its TOFU-pinnable binding.
+/// Verify immutable owner or delegated genesis signatures and return its
+/// TOFU-pinnable binding. This is not fresh creation authorization.
 pub fn verify_spool_owner_genesis(
     signed: &SignedSpoolOwnerGenesis,
 ) -> Result<VerifiedSpoolOwnerGenesis> {
@@ -267,6 +268,17 @@ pub fn verify_spool_owner_genesis(
         .as_ref()
         .ok_or_else(|| Error::Invalid("spool owner genesis has no owner key".to_owned()))?;
     validate_key(owner_public_key)?;
+    if signed.delegated_creation.is_some() {
+        // This clock-free entry point proves only signatures/lineage. The
+        // keyring reader bounds owner history using its actual observation
+        // time; fresh creation must use admit_fresh_spool_creation instead.
+        crate::creation::validate_spool_creation_structure(signed, i64::MAX)?;
+        return Ok(VerifiedSpoolOwnerGenesis {
+            signed: signed.clone(),
+            spool_uuid,
+            owner_public_key: owner_public_key.clone(),
+        });
+    }
     let signed_digest: [u8; 32] = Sha256::new()
         .chain_update(&owner_public_key.public_key)
         .chain_update(spool_uuid)

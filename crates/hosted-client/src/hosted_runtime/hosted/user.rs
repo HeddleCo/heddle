@@ -229,7 +229,23 @@ impl HostedClient {
         let owner = self.current_owner_state().await?;
         let genesis = self
             .context
-            .mint_spool_owner_genesis(spool_uuid, &owner)
+            .mint_spool_creation(
+                repo::SpoolCreationIntent {
+                    spool_uuid,
+                    parent_spool_uuid: parent
+                        .as_ref()
+                        .map(|value| uuid::Uuid::parse_str(&value.id))
+                        .transpose()
+                        .map_err(native_protocol_error)?,
+                    parent_path_segments: if parent_path.is_empty() {
+                        Vec::new()
+                    } else {
+                        parent_path.split('/').map(str::to_owned).collect()
+                    },
+                    name: slug.to_owned(),
+                },
+                &owner,
+            )
             .map_err(hosted_to_protocol_error)?;
         let new_id = genesis
             .genesis

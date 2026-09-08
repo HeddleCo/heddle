@@ -7,6 +7,7 @@
 
 mod canonical;
 mod capability;
+pub mod creation;
 mod crypto;
 mod decision;
 mod error;
@@ -49,7 +50,7 @@ pub mod wire {
 }
 
 /// The exact API contract version used by this release line.
-pub const HEDDLE_API_REQUIREMENT: &str = "0.28";
+pub const HEDDLE_API_REQUIREMENT: &str = "0.29";
 
 #[cfg(test)]
 mod tests;

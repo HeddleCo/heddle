@@ -13,7 +13,7 @@ use crate::{
 
 const MAX_OWNER_ROOT_BYTES: usize = 64 * 1024;
 const MAX_OPERATION_BODY_BYTES: usize = 4 * 1024;
-const MAX_OWNER_GENESIS_BYTES: usize = 4 * 1024;
+const MAX_OWNER_GENESIS_BYTES: usize = crate::creation::MAX_CREATION_PROOF_BYTES + 1024;
 
 #[derive(Serialize)]
 struct OwnerStateSummary {

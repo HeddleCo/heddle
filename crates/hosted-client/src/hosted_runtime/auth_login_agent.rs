@@ -6,6 +6,7 @@ use api::heddle::api::v2alpha1::{
 };
 use config::UserConfig;
 use crypto::{Ed25519Signer, Signer as _};
+use prost::Message;
 
 use super::{
     HostedAuthMode, HostedSession, agent_node_identity,
@@ -307,6 +308,7 @@ pub(crate) fn provision_response_for_test(
             ..Default::default()
         }),
         credential: Some(v2::CredentialResult {
+            mint_root_attachment: None,
             outcome: Some(v2::credential_result::Outcome::ClientOwned(
                 v2::ClientOwnedCredential {
                     r#ref: Some(v2::RecordRef {
@@ -389,12 +391,16 @@ fn bind_registered_agent(minted: &mut AgentRoot, result: v2::CredentialResult) -
         expires_at: Some(expires_at),
     })?;
     minted.token = restrict_agent_account_root(&root.token, &signer, root.expires_at)?;
+    minted.mint_root_attachment = result
+        .mint_root_attachment
+        .map(|proof| proof.encode_to_vec());
     minted.credential_id = Some(reference.id);
     minted.expires_at = root.expires_at;
     Ok(())
 }
 
 struct AgentRoot {
+    mint_root_attachment: Option<Vec<u8>>,
     credential_id: Option<String>,
     /// The account-root capability with local agent attribution persisted to the on-disk
     /// credential. This is what everyday hosted calls (and `derive-agent`)
@@ -410,6 +416,7 @@ fn store_agent_credential(server: &str, minted: AgentRoot) -> Result<()> {
     config::credentials::store_server_credential(
         server,
         config::credentials::ServerCredential {
+            mint_root_attachment: minted.mint_root_attachment,
             token: minted.token,
             subject: minted.subject,
             device_id: None,
@@ -438,6 +445,7 @@ fn mint_agent_credential_for_server(server: &str) -> Result<AgentRoot> {
         )?;
         let signer = Ed25519Signer::from_pem(&minted.private_key_pem)?;
         minted.token = restrict_agent_account_root(&root.token, &signer, root.expires_at)?;
+        minted.mint_root_attachment = stored.mint_root_attachment;
         minted.credential_id = root.credential_id;
         minted.expires_at = root.expires_at;
     }
@@ -468,6 +476,7 @@ fn mint_agent_credential() -> Result<AgentRoot> {
         bail!("client-minted agent capability is not bound to this node key");
     }
     Ok(AgentRoot {
+        mint_root_attachment: None,
         credential_id: None,
         token: restricted,
         subject: metadata.subject,

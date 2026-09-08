@@ -147,6 +147,7 @@ fn store_device_cred(server: &str, expires_at: Option<chrono::DateTime<Utc>>) ->
     credentials::store_server_credential(
         server,
         ServerCredential {
+            mint_root_attachment: None,
             token: token.clone(),
             subject: "alice".to_string(),
             device_id: None,

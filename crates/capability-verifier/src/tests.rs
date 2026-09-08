@@ -38,6 +38,9 @@ const OTHER_SPOOL: [u8; 16] = [0x23; 16];
 const PATH: [&str; 2] = ["acme", "verifier"];
 const PAYLOAD: &[u8] = b"canonical purge payload v2";
 
+#[path = "creation_tests.rs"]
+mod creation_tests;
+
 struct TestKey {
     seed: [u8; 32],
     signing: SigningKey,
@@ -167,6 +170,7 @@ fn signed_genesis(spool_uuid: [u8; 16], owner: &TestKey) -> SignedSpoolOwnerGene
         .finalize()
         .into();
     SignedSpoolOwnerGenesis {
+        delegated_creation: None,
         genesis: Some(SpoolOwnerGenesis {
             spool_uuid: spool_uuid.to_vec(),
             owner_public_key: Some(owner.wire()),

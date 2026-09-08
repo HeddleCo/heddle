@@ -46,6 +46,10 @@ mod owner_authorization;
 #[cfg(test)]
 mod owner_authorization_tests;
 mod owner_root;
+mod spool_creation;
+pub use spool_creation::{
+    SpoolCreationIntent, sign_delegated_spool_creation, sign_mint_root_attachment,
+};
 #[cfg(test)]
 mod owner_root_tests;
 pub mod thread_replication;

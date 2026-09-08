@@ -516,6 +516,7 @@ pub(crate) fn derive_agent(
             agent_id: Some(agent_id.clone()),
         };
         let verified = VerifiedCredential {
+            mint_root_attachment: parent.mint_root_attachment.clone(),
             server: server.to_string(),
             kind: CredentialKind::Agent,
             subject: metadata.subject.clone(),
@@ -548,6 +549,7 @@ pub(crate) fn derive_agent(
     credentials::store_server_credential(
         server,
         ServerCredential {
+            mint_root_attachment: parent.mint_root_attachment,
             token: child_token,
             subject: parent.subject.unwrap_or(metadata.subject),
             device_id: None,
@@ -1074,6 +1076,7 @@ async fn create_service_token_connected(
         (chrono::Utc::now() + chrono::Duration::seconds(SERVICE_TOKEN_TTL_SECS)).to_rfc3339();
 
     let verified = VerifiedCredential {
+        mint_root_attachment: None,
         server: server.clone(),
         kind: CredentialKind::Service,
         subject,
@@ -1676,6 +1679,7 @@ mod tests {
 
     fn sample_credential() -> ServerCredential {
         ServerCredential {
+            mint_root_attachment: None,
             token: "tkn".to_string(),
             subject: "dev".to_string(),
             device_id: None,
@@ -1709,6 +1713,7 @@ mod tests {
             .expect("encode parent");
         (
             ServerCredential {
+                mint_root_attachment: None,
                 token,
                 subject: "alice".to_string(),
                 device_id: Some("device-root".to_string()),
@@ -2143,6 +2148,7 @@ mod tests {
     fn auth_status_qualifies_a_credential_without_a_proof_key() {
         let credential = sample_credential();
         let resolved = crate::hosted_runtime::hosted::ResolvedHostedCredential {
+            mint_root_attachment: None,
             token: Some(wire::AuthToken::new(credential.token, "credential-store")),
             proof_key_pem: credential.private_key_pem,
             renewable: None,
@@ -2217,6 +2223,7 @@ mod tests {
             credential_file::write_credential_file(
                 &path,
                 &VerifiedCredential {
+                    mint_root_attachment: None,
                     server: server.to_string(),
                     kind: CredentialKind::Device,
                     subject: "alice".to_string(),
