@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+use crypto::{Ed25519Signer, Signer};
 use objects::object::{
     Attribution, CollaborationAnchor, CollaborationIdempotencyKey, CollaborationOperationBodyV1,
     DiscussionRecordId, DiscussionTurnV1, Principal, Tree, VisibilityTier,
@@ -266,7 +267,9 @@ fn bad_signatures_and_denied_scope_never_persist_and_cross_facet_parents_are_rej
     corrupt.signature[0] ^= 1;
     assert!(matches!(
         replica.receive(&corrupt, repo.store(), |_| Ok(())),
-        Err(Error::Signature(_))
+        Err(Error::SignedOperation(
+            crypto::thread_operation::Error::Signature(_)
+        ))
     ));
     assert!(
         matches!(replica.receive(&record,repo.store(), |_|Err(Error::Invalid("scope denied".into()))),Err(Error::Invalid(message)) if message=="scope denied")

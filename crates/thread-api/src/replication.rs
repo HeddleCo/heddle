@@ -3,6 +3,7 @@
 //! endpoints. The RPC adapter supplies the verified request scope.
 use std::collections::BTreeSet;
 
+use crypto::thread_operation::SignedOperation;
 use objects::{
     object::{
         ContentHash,
@@ -10,7 +11,7 @@ use objects::{
     },
     store::ObjectStore,
 };
-use repo::thread_replication::{Admission, SignedOperation, ThreadReplica};
+use repo::thread_replication::{Admission, ThreadReplica};
 
 use crate::contract::*;
 
@@ -18,6 +19,8 @@ use crate::contract::*;
 pub enum Error {
     #[error(transparent)]
     Store(#[from] repo::thread_replication::Error),
+    #[error(transparent)]
+    Signature(#[from] crypto::thread_operation::Error),
     #[error("replication protocol: {0}")]
     Protocol(&'static str),
 }

@@ -11,19 +11,16 @@ use std::{
     time::Duration,
 };
 
-use crypto::{Ed25519Signer, Signer};
+use crypto::thread_operation::SignedOperation;
 use objects::{
     object::{
         CollaborationOperationEnvelope, ContentHash, MaterializedRepositoryCollaboration, State,
         StateId, materialize_repository_collaboration,
-        thread_replication::{
-            OPERATION_FORMAT, ThreadFacet, ThreadGenesis, ThreadOperation, ThreadOperationBody,
-        },
+        thread_replication::{ThreadFacet, ThreadGenesis, ThreadOperation, ThreadOperationBody},
     },
     store::ObjectStore,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -35,44 +32,12 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("Thread signature: {0}")]
     Signature(#[from] crypto::SignerError),
+    #[error(transparent)]
+    SignedOperation(#[from] crypto::thread_operation::Error),
     #[error("{0}")]
     Invalid(String),
 }
 pub type Result<T> = std::result::Result<T, Error>;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignedOperation {
-    pub canonical: Vec<u8>,
-    pub signature: Vec<u8>,
-}
-impl SignedOperation {
-    pub fn sign(operation: &ThreadOperation, signer: &impl Signer) -> Result<Self> {
-        if signer.public_key() != operation.publisher {
-            return Err(Error::Invalid("publisher differs from signing key".into()));
-        }
-        let canonical = operation.encode()?;
-        let signature = signer.sign(&signing_bytes(&canonical))?;
-        Ok(Self {
-            canonical,
-            signature,
-        })
-    }
-    pub fn verify(&self) -> Result<ThreadOperation> {
-        let operation = ThreadOperation::decode(&self.canonical)?;
-        Ed25519Signer::verify_with_public_key(
-            &signing_bytes(&self.canonical),
-            &operation.publisher,
-            &self.signature,
-        )?;
-        Ok(operation)
-    }
-}
-fn signing_bytes(canonical: &[u8]) -> Vec<u8> {
-    let mut bytes = OPERATION_FORMAT.as_bytes().to_vec();
-    bytes.push(0);
-    bytes.extend_from_slice(canonical);
-    bytes
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Admission {

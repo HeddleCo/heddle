@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 use biscuit_auth::{Biscuit, KeyPair};
-use crypto::{Ed25519Signer, Signer};
+use crypto::{Ed25519Signer, Signer, thread_operation::SignedOperation};
 use iroh::{Endpoint, RelayMode, endpoint::presets};
 use objects::object::{
     Attribution, ContentHash, Principal, State, Tree,
     thread_replication::{ThreadGenesis, ThreadOperation, ThreadOperationBody},
 };
-use repo::{
-    Repository,
-    thread_replication::{Admission, SignedOperation},
-};
+use repo::{Repository, thread_replication::Admission};
 
 use super::*;
 use crate::authority::CredentialSigner;

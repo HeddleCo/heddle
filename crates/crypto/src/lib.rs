@@ -10,6 +10,7 @@ mod p256;
 mod pem_loader;
 pub mod pop;
 mod state_signature;
+pub mod thread_operation;
 
 #[cfg(test)]
 mod behavior_tests;

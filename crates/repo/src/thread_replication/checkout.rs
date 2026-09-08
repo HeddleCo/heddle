@@ -6,7 +6,7 @@ use std::{
 };
 
 use chrono::Utc;
-use crypto::Signer;
+use crypto::{Signer, thread_operation::SignedOperation};
 use objects::{
     object::{
         Attribution, ContentHash, StateId,
@@ -20,7 +20,7 @@ use objects::{
 use refs::Head;
 use serde::{Deserialize, Serialize};
 
-use super::{Admission, Error, Result, SignedOperation, ThreadReplica};
+use super::{Admission, Error, Result, ThreadReplica};
 use crate::{AudienceTier, CheckoutMaterialization, Repository};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -220,7 +220,7 @@ impl ThreadCheckout {
                 }
                 Err(error) => return Err(error.into()),
             }
-            return SignedOperation::sign(
+            return Ok(SignedOperation::sign(
                 &ThreadOperation {
                     version: 1,
                     thread: self.binding.thread,
@@ -232,7 +232,7 @@ impl ThreadCheckout {
                     body: ThreadOperationBody::Capture(state.encode_current_msgpack()?),
                 },
                 signer,
-            );
+            )?);
         }
         let old = match std::fs::read(&path) {
             Ok(bytes) => Some(
