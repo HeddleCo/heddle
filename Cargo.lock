@@ -2156,8 +2156,6 @@ dependencies = [
 [[package]]
 name = "heddle-api"
 version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b206b8d4eead491a1f803db16c3ba8571acc346386d509673347f4cf962360f"
 dependencies = [
  "blake3",
  "bytes",

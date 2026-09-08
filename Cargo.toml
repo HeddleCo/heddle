@@ -209,3 +209,6 @@ split-debuginfo = "unpacked"
 lto = true
 codegen-units = 1
 strip = true
+
+[patch.crates-io]
+heddle-api = { path = "../weft-2107-also-api" }

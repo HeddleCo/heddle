@@ -207,7 +207,7 @@ impl HostedClient {
         &mut self,
         parent_path: &str,
         slug: &str,
-        kind: wire::HostedSpoolKind,
+        is_repo: bool,
         display_name: Option<String>,
     ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
         let operation_id =
@@ -224,7 +224,7 @@ impl HostedClient {
             CreateSpoolRequest {
                 parent_path: parent_path.to_string(),
                 slug: slug.to_string(),
-                is_repo: kind.is_repo(),
+                is_repo,
                 display_name,
                 visibility: Visibility::Private as i32,
                 client_operation_id: operation_id.to_wire(),
@@ -735,12 +735,7 @@ mod tests {
         let _ = client.get_current_user_spool().await;
         assert!(client.list_spools(true).await.unwrap().is_empty());
         client
-            .create_spool(
-                "acme",
-                "widgets",
-                wire::HostedSpoolKind::Project,
-                Some("Widgets".to_string()),
-            )
+            .create_spool("acme", "widgets", true, Some("Widgets".to_string()))
             .await
             .expect("CreateSpool mints owner genesis and reaches the server");
         client
@@ -926,12 +921,7 @@ mod tests {
         let (mut client, server, captured) =
             crate::hosted_runtime::hosted::test_server::start_recording_create_spool().await;
         let created = client
-            .create_spool(
-                "cedar-jay-9dce33",
-                "spool-d",
-                wire::HostedSpoolKind::Project,
-                None,
-            )
+            .create_spool("cedar-jay-9dce33", "spool-d", true, None)
             .await
             .expect("CreateSpool with minted genesis");
         assert_eq!(created.full_path, "cedar-jay-9dce33/spool-d");
@@ -994,12 +984,7 @@ mod tests {
         crate::hosted_runtime::identity_state::store(&state).expect("store claim state");
 
         client
-            .create_spool(
-                "quiet-otter",
-                "spool-d",
-                wire::HostedSpoolKind::Project,
-                None,
-            )
+            .create_spool("quiet-otter", "spool-d", true, None)
             .await
             .expect("CreateSpool must not read or upload the claimable owner root");
         client.close().await;
