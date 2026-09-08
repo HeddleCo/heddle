@@ -21,7 +21,7 @@ impl RemoteTarget {
     /// Accepts:
     /// - `file:///path/to/repo` or `file://path/to/repo`
     /// - `/path/to/repo` (raw path, if it exists as a directory)
-    /// - `heddle://host[:port]/repo` (port defaults to HTTPS 443)
+    /// - `https://host[:port]/repo` (port defaults to HTTPS 443)
     /// - `host:port` (network address)
     pub fn parse(s: &str) -> Result<Self, String> {
         // Check for file:// protocol
@@ -35,17 +35,17 @@ impl RemoteTarget {
             ));
         }
 
+        // Existing local directories win over scheme-less hosted paths.
+        let path = PathBuf::from(s);
+        if path.is_dir() {
+            return Ok(RemoteTarget::Local(path));
+        }
+
         if let Some((authority, repo_path)) = parse_network_with_repo_path(s) {
             return Ok(RemoteTarget::Network {
                 authority,
                 repo_path,
             });
-        }
-
-        // Check if it's a raw path (exists as a directory)
-        let path = PathBuf::from(s);
-        if path.exists() && path.is_dir() {
-            return Ok(RemoteTarget::Local(path));
         }
 
         if looks_like_unresolved_local_path(s) {
@@ -60,21 +60,8 @@ impl RemoteTarget {
         ))
     }
 
-    /// Parse a target under native repository source authority.
-    ///
-    /// Native repositories may use an HTTPS repository URL after the caller
-    /// has verified the server's well-known Iroh endpoint. The regular parser
-    /// deliberately keeps treating HTTPS as non-native so Git-owned callers
-    /// retain their existing transport classification.
+    /// Parse a hosted target. Repository source authority does not change URL routing.
     pub fn parse_native(s: &str) -> Result<Self, String> {
-        if let Some(rest) = s.strip_prefix("https://") {
-            let (authority, repo_path) = parse_https_network_with_repo_path(rest)
-                .ok_or_else(|| format!("invalid native HTTPS remote url: {s}"))?;
-            return Ok(RemoteTarget::Network {
-                authority,
-                repo_path,
-            });
-        }
         Self::parse(s)
     }
 
@@ -97,7 +84,7 @@ impl std::fmt::Display for RemoteTarget {
                 repo_path,
             } => {
                 if let Some(repo_path) = repo_path {
-                    write!(f, "heddle://{authority}/{repo_path}")
+                    write!(f, "https://{authority}/{repo_path}")
                 } else {
                     write!(f, "{authority}")
                 }
@@ -108,14 +95,17 @@ impl std::fmt::Display for RemoteTarget {
 }
 
 fn parse_network_with_repo_path(s: &str) -> Option<(String, Option<String>)> {
-    if let Some(rest) = s.strip_prefix("heddle://") {
+    if s.ends_with(".git") || s.contains("://") && !s.starts_with("https://") {
+        return None;
+    }
+    if let Some(rest) = s.strip_prefix("https://") {
         return parse_authority_with_repo_path(rest, true);
     }
-    parse_authority_with_repo_path(s, false)
-}
-
-fn parse_https_network_with_repo_path(s: &str) -> Option<(String, Option<String>)> {
-    parse_authority_with_repo_path(s, true)
+    // A slash distinguishes a bare hosted path from a configured remote name.
+    if looks_like_unresolved_local_path_prefix(s) {
+        return None;
+    }
+    parse_authority_with_repo_path(s, s.contains('/'))
 }
 
 fn parse_authority_with_repo_path(
@@ -166,12 +156,16 @@ fn validate_port(port: &str) -> Option<()> {
     port.parse::<u16>().ok().map(|_| ())
 }
 
-fn looks_like_unresolved_local_path(value: &str) -> bool {
+fn looks_like_unresolved_local_path_prefix(value: &str) -> bool {
     value.starts_with('/')
         || value.starts_with("./")
         || value.starts_with("../")
         || value.starts_with("~/")
         || value.contains('\\')
+}
+
+fn looks_like_unresolved_local_path(value: &str) -> bool {
+    looks_like_unresolved_local_path_prefix(value)
         || (!value.contains("://") && !value.contains(':'))
 }
 
@@ -180,8 +174,8 @@ mod tests {
     use super::RemoteTarget;
 
     #[test]
-    fn heddle_url_preserves_hostname_authority() {
-        let target = RemoteTarget::parse("heddle://api-staging.heddle.sh/org/repo")
+    fn hosted_url_preserves_hostname_authority() {
+        let target = RemoteTarget::parse("https://api-staging.heddle.sh/org/repo")
             .expect("parse hosted hostname");
         match target {
             RemoteTarget::Network {
@@ -228,8 +222,8 @@ mod tests {
     }
 
     #[test]
-    fn native_parser_accepts_https_without_changing_generic_classification() {
-        assert!(RemoteTarget::parse("https://127.0.0.1:8431/acme/heddle").is_err());
+    fn native_and_generic_parsers_accept_hosted_https() {
+        assert!(RemoteTarget::parse("https://127.0.0.1:8431/acme/heddle").is_ok());
 
         let target = RemoteTarget::parse_native("https://127.0.0.1:8431/acme/heddle")
             .expect("parse native HTTPS URL");
@@ -256,10 +250,10 @@ mod tests {
     }
 
     #[test]
-    fn heddle_scheme_without_port_uses_default_https_port() {
-        assert!(RemoteTarget::parse("heddle://api.heddle.sh/luke/tiny-notes").is_ok());
-        assert!(RemoteTarget::parse_native("heddle://api.heddle.sh/luke/tiny-notes").is_ok());
-        assert!(RemoteTarget::parse("heddle://127.0.0.1:8421/luke/tiny-notes").is_ok());
+    fn https_without_port_uses_default_https_port() {
+        assert!(RemoteTarget::parse("https://api.heddle.sh/luke/tiny-notes").is_ok());
+        assert!(RemoteTarget::parse_native("https://api.heddle.sh/luke/tiny-notes").is_ok());
+        assert!(RemoteTarget::parse("https://127.0.0.1:8421/luke/tiny-notes").is_ok());
     }
 
     #[test]

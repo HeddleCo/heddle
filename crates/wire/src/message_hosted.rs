@@ -8,15 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostedSpoolKind {
-    Org,
-    Project,
-}
-
-impl HostedSpoolKind {
-    /// Whether the spool can store repository content.
-    pub fn is_repo(self) -> bool {
-        matches!(self, Self::Project)
-    }
+    Spool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,9 +128,27 @@ mod tests {
     use super::HostedSpoolKind;
 
     #[test]
-    fn hosted_spool_kinds_map_org_and_project_capabilities() {
-        assert!(!HostedSpoolKind::Org.is_repo());
-        assert!(HostedSpoolKind::Project.is_repo());
+    fn spool_kind_does_not_determine_repository_capability() {
+        let kind = HostedSpoolKind::Spool;
+        let encoded = rmp_serde::to_vec(&kind).expect("encode spool kind");
+        assert_eq!(
+            rmp_serde::from_slice::<HostedSpoolKind>(&encoded).expect("decode spool kind"),
+            kind
+        );
+        for is_repo in [false, true] {
+            let spool = super::HostedSpoolInfo {
+                spool_id: "id".into(),
+                full_path: "spool/alice/notes".into(),
+                kind: "spool".into(),
+                is_repo,
+                display_name: None,
+            };
+            let bytes = rmp_serde::to_vec(&spool).expect("encode spool");
+            let decoded: super::HostedSpoolInfo =
+                rmp_serde::from_slice(&bytes).expect("decode spool");
+            assert_eq!(decoded.is_repo, is_repo);
+            assert_eq!(decoded.kind, "spool");
+        }
     }
 }
 

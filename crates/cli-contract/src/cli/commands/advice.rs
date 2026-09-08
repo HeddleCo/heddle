@@ -1024,7 +1024,7 @@ impl RecoveryAdvice {
             format!(
                 "Refusing to {action}: remote '{remote}' is a Git remote, not a Heddle-native remote"
             ),
-            "For a native server, use `https://<host>/<repo>` or `heddle://<host>:<port>/<repo>` with an explicit port. `heddle://` without a port is not a push URL. Or clone/adopt this Git remote in a Git-overlay checkout.",
+            "For a Heddle server, use `https://<host>/<repo>`. Git remote URLs must end in `.git` and require a Git-overlay checkout.",
             format!("remote '{remote}' resolves to Git storage"),
             format!(
                 "{action} would route a Git repository through Heddle-native sync and fail after setup work"
@@ -1081,7 +1081,7 @@ impl RecoveryAdvice {
             verbs::remote_advice_kind::INVALID_REMOTE_URL,
             format!("invalid remote url: {remote}"),
             format!(
-                "{parse_error}. Use `https://<host>/<repo>` for a Heddle server, `host:port/repo` or `heddle://host:port/repo` with an explicit port, or an existing local repository path."
+                "{parse_error}. Use `https://<host>/<repo>` for a Heddle server, `host:port/repo` or `https://host:port/repo` with an explicit port, or an existing local repository path."
             ),
             format!("remote '{remote}' cannot be parsed as a URL that push or pull can use"),
             "storing the remote would leave push and pull failing with the same invalid URL",

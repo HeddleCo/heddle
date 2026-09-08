@@ -314,9 +314,9 @@ pub fn looks_like_local_path(remote: &str) -> bool {
 
 /// Whether an unparsed remote string looks like a Git clone URL.
 ///
-/// Matches CLI: any `://` scheme or SCP-style `git@` host.
+/// Uses the same suffix rule as push, pull, and remote configuration.
 pub fn looks_like_git_overlay_url(remote: &str) -> bool {
-    remote.contains("://") || remote.starts_with("git@")
+    crate::remote::looks_like_git_remote_url(remote)
 }
 
 /// Resolve adopt start path from positional / `--repo` / cwd.
@@ -1484,7 +1484,7 @@ mod tests {
 
     #[test]
     fn plan_clone_network_security_and_effective_lazy() {
-        let mut opts = base_clone_options("heddle://host:1/repo", "/dest");
+        let mut opts = base_clone_options("https://host:1/repo", "/dest");
         opts.insecure = true;
         opts.lazy = false;
         opts.filter = Some("blob:none".into());
@@ -1619,7 +1619,7 @@ mod tests {
             }
         ));
 
-        let mut opts = base_clone_options("heddle://h:1/r", "/dest");
+        let mut opts = base_clone_options("https://h:1/r", "/dest");
         opts.recursive = true;
         opts.filter = Some("blob:none".into());
         let err = plan_clone(

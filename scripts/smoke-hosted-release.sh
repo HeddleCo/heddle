@@ -42,7 +42,7 @@ require_command python3
 
 if [[ -z "$HEDDLE_SMOKE_REMOTE" ]]; then
   [[ -n "$WEFT_ADDR" ]] || fail "set WEFT_ADDR or HEDDLE_SMOKE_REMOTE"
-  HEDDLE_SMOKE_REMOTE="heddle://$WEFT_ADDR"
+  HEDDLE_SMOKE_REMOTE="https://$WEFT_ADDR"
 fi
 
 heddle_runtime() {

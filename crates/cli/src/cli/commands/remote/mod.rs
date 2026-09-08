@@ -1411,10 +1411,7 @@ async fn push_network_connected(
         }
     }
 
-    let repo_path = match options.repo_path {
-        Some(repo_path) => repo_path.to_string(),
-        None => auto_provision_hosted_repo(repo, client, &options).await?,
-    };
+    let repo_path = auto_provision_hosted_repo(repo, client, &options).await?;
 
     // --all-threads (heddle#838) on the NATIVE hosted path fans out one push
     // per pushable thread. The Git-backed projection path (the #846 default)
@@ -1744,28 +1741,35 @@ async fn auto_provision_hosted_repo(
     options: &PushNetworkOptions<'_>,
 ) -> Result<String> {
     let user_spool = client.get_current_user_spool().await?;
-    let slug = default_spool_slug_from_repo_root(repo.root())?;
-    let derived_full_path = format!("{}/{}", user_spool.full_path, slug);
-    let provisioned_repo = match client
-        .create_spool(
-            &user_spool.full_path,
-            &slug,
-            wire::HostedSpoolKind::Project,
-            None,
-        )
-        .await
-    {
-        Ok(created) => AutoProvisionedHostedRepo::Created(created.full_path),
-        Err(err) if auto_provision_create_already_exists(&err) => {
-            AutoProvisionedHostedRepo::Existing(derived_full_path)
-        }
-        Err(err) => {
-            return Err(map_push_failure(remote_push_failure(
-                options.track_name,
-                Some(&auto_provision_create_error_message(&slug, &err)),
-            )));
-        }
+    let full_path = match options.repo_path {
+        Some(path) => path.to_string(),
+        None => format!(
+            "{}/{}",
+            user_spool.full_path,
+            default_spool_slug_from_repo_root(repo.root())?
+        ),
     };
+    let Some(relative_path) = full_path
+        .strip_prefix(&user_spool.full_path)
+        .and_then(|path| path.strip_prefix('/'))
+    else {
+        // Root inference needs authoritative ownership metadata. Until weft
+        // exposes it, do not mistake a discoverable root for an owned root or
+        // silently redirect an explicit destination into another namespace.
+        return Ok(full_path);
+    };
+    let provisioned_repo = provision_personal_hosted_path(
+        &user_spool.full_path,
+        relative_path,
+        async |parent, slug, kind| client.create_spool(parent, slug, kind, None).await,
+    )
+    .await
+    .map_err(|err| {
+        map_push_failure(remote_push_failure(
+            options.track_name,
+            Some(&auto_provision_create_error_message(&full_path, &err)),
+        ))
+    })?;
 
     let configured_remote = persist_auto_provisioned_remote(
         repo,
@@ -1777,7 +1781,7 @@ async fn auto_provision_hosted_repo(
     if !should_output_json(options.cli, Some(repo.config())) {
         let display_full_path = hosted_spool_display_path(
             user_spool.display_name.as_deref().unwrap_or_default(),
-            &slug,
+            relative_path,
             provisioned_repo.full_path(),
         );
         println!(
@@ -1807,6 +1811,42 @@ async fn auto_provision_hosted_repo(
     }
 
     Ok(provisioned_repo.into_full_path())
+}
+
+/// Create ancestors before the content-bearing spool using the existing RPC.
+/// AlreadyExists is the only failure that permits continuing down the path.
+#[cfg(feature = "client")]
+async fn provision_personal_hosted_path(
+    personal_root: &str,
+    relative_path: &str,
+    mut create: impl AsyncFnMut(
+        &str,
+        &str,
+        bool,
+    ) -> std::result::Result<wire::HostedSpoolInfo, ProtocolError>,
+) -> std::result::Result<AutoProvisionedHostedRepo, ProtocolError> {
+    if relative_path
+        .split('/')
+        .any(|component| matches!(component, "" | "." | ".."))
+    {
+        return Err(ProtocolError::InvalidState(
+            "hosted spool path must contain nonempty names, without '.' or '..'".to_string(),
+        ));
+    }
+    let mut provisioned = AutoProvisionedHostedRepo::Existing(personal_root.to_string());
+    let mut components = relative_path.split('/').peekable();
+    while let Some(slug) = components.next() {
+        let kind = components.peek().is_none();
+        let path = format!("{}/{slug}", provisioned.full_path());
+        provisioned = match create(provisioned.full_path(), slug, kind).await {
+            Ok(created) => AutoProvisionedHostedRepo::Created(created.full_path),
+            Err(err) if auto_provision_create_already_exists(&err) => {
+                AutoProvisionedHostedRepo::Existing(path)
+            }
+            Err(err) => return Err(err),
+        };
+    }
+    Ok(provisioned)
 }
 
 #[cfg(feature = "client")]
@@ -1853,7 +1893,7 @@ fn auto_provision_create_error_message(slug: &str, err: &ProtocolError) -> Strin
         _ => redact_internal_hosted_paths(&err.to_string()),
     };
     format!(
-        "could not create hosted spool '{slug}': {error}. Pass a full hosted remote path or choose another local folder name"
+        "could not create hosted spool '{slug}': {error}. Check access to the parent spool or choose another path"
     )
 }
 
@@ -1891,7 +1931,7 @@ fn persist_auto_provisioned_remote(
 
 /// Build the user-facing hosted URL written after CreateSpool.
 ///
-/// Keep the scheme and hostname the user typed (`https://` / `heddle://`).
+/// Keep the scheme and hostname the user typed (`https://`).
 /// A resolved SocketAddr is only persisted when that was the input —
 /// otherwise later TLS/SNI and descriptor trust look up the IP.
 #[cfg(feature = "client")]
@@ -1919,9 +1959,7 @@ fn rewrite_hosted_remote_path(url: &str, full_path: &str) -> Option<String> {
 
 #[cfg(feature = "client")]
 fn split_hosted_remote_scheme(url: &str) -> Option<(&'static str, &str)> {
-    url.strip_prefix("https://")
-        .map(|rest| ("https", rest))
-        .or_else(|| url.strip_prefix("heddle://").map(|rest| ("heddle", rest)))
+    url.strip_prefix("https://").map(|rest| ("https", rest))
 }
 
 #[cfg(feature = "client")]
@@ -1937,7 +1975,7 @@ fn user_facing_hosted_authority<'a>(
         }
         return (scheme, authority);
     }
-    ("heddle", authority)
+    ("https", authority)
 }
 
 #[cfg(feature = "client")]
@@ -1963,9 +2001,8 @@ fn auto_provision_remote_name(
     match remote_arg {
         Some(arg) if cfg.get(arg).is_ok() => Ok(Some(arg.to_string())),
         Some(arg) => {
-            // Same parser `push` uses: native HTTPS host-only
-            // (`https://host[:port]`) is a CreateSpool target, but the
-            // generic parser rejects the scheme so origin was never saved.
+            // A host-only push creates a spool and saves its resolved path
+            // as origin when this repository has no default remote.
             let is_direct_network_without_path = matches!(
                 repo::remote::parse_target_for_repository(repo, arg),
                 Ok(RemoteTarget::Network {
@@ -2045,6 +2082,111 @@ mod tests {
 
     use super::*;
 
+    #[cfg(feature = "client")]
+    #[tokio::test]
+    async fn auto_provision_explicit_personal_path_creates_missing_ancestors() {
+        use std::collections::HashSet;
+
+        let mut paths = HashSet::from(["alice".to_string(), "alice/team".to_string()]);
+        let mut calls = Vec::new();
+        let provisioned = provision_personal_hosted_path(
+            "alice",
+            "team/nested/repo",
+            async |parent, slug, kind| {
+                assert!(
+                    paths.contains(parent),
+                    "parent must exist before creating its child"
+                );
+                calls.push((parent.to_string(), slug.to_string(), kind));
+                let full_path = format!("{parent}/{slug}");
+                if !paths.insert(full_path.clone()) {
+                    return Err(ProtocolError::AlreadyExists(full_path));
+                }
+                Ok(wire::HostedSpoolInfo {
+                    spool_id: full_path.clone(),
+                    full_path,
+                    kind: "spool".to_string(),
+                    is_repo: kind,
+                    display_name: None,
+                })
+            },
+        )
+        .await
+        .expect("create the explicit personal destination");
+        assert!(matches!(provisioned, AutoProvisionedHostedRepo::Created(_)));
+        assert_eq!(provisioned.full_path(), "alice/team/nested/repo");
+        assert!(paths.contains("alice/team/nested/repo"));
+        assert_eq!(
+            calls,
+            [
+                ("alice".into(), "team".into(), false),
+                ("alice/team".into(), "nested".into(), false),
+                ("alice/team/nested".into(), "repo".into(), true),
+            ]
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[tokio::test]
+    async fn auto_provision_stops_on_denial_instead_of_treating_it_as_existing() {
+        let mut calls = 0;
+        let result = provision_personal_hosted_path("alice", "team/repo", async |_, _, _| {
+            calls += 1;
+            Err(ProtocolError::AuthorizationFailed("access denied".into()))
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls, 1, "never create a child after its parent was denied");
+    }
+
+    #[cfg(feature = "client")]
+    #[tokio::test]
+    async fn auto_provision_rejects_invalid_paths_before_creating_ancestors() {
+        for path in ["team//repo", "team/../repo", "team/./repo", ""] {
+            let result = provision_personal_hosted_path("alice", path, async |_, _, _| {
+                panic!("invalid paths must not send CreateSpool")
+            })
+            .await;
+            assert!(result.is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn remote_url_suffix_selects_transport_for_push_and_pull() {
+        let native_dir = tempfile::TempDir::new().unwrap();
+        let native = Repository::init_default(native_dir.path()).unwrap();
+        let overlay_dir = tempfile::TempDir::new().unwrap();
+        SleyRepository::init(overlay_dir.path()).unwrap();
+        let overlay = Repository::init_git_overlay_sidecar(overlay_dir.path()).unwrap();
+        for repo in [&native, &overlay] {
+            for (url, expected) in [
+                (
+                    "https://example.com/ns/repo.git",
+                    RemoteTransportKind::GitUrl,
+                ),
+                (
+                    "https://example.com/ns/repo",
+                    RemoteTransportKind::NetworkHeddle,
+                ),
+                (
+                    "https://github.com/ns/repo",
+                    RemoteTransportKind::NetworkHeddle,
+                ),
+            ] {
+                assert_eq!(
+                    classify_push_remote_spec(repo, Some(url)),
+                    Some(expected),
+                    "push {url}"
+                );
+                assert_eq!(
+                    classify_pull_remote_spec(repo, Some(url)),
+                    Some(expected),
+                    "pull {url}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn spool_slug_from_local_name_normalizes_folder_names() {
         assert_eq!(spool_slug_from_local_name("My Cool Repo"), "my-cool-repo");
@@ -2059,8 +2201,7 @@ mod tests {
         let repo = Repository::init_git_overlay_sidecar(temp.path()).unwrap();
         let plan = ConfigEditPlan::new(git.common_dir().join("config"))
             .with_operation(
-                ConfigEdit::set("remote.origin.url", "heddle://127.0.0.1:8421/acme/widget")
-                    .unwrap(),
+                ConfigEdit::set("remote.origin.url", "https://127.0.0.1:8421/acme/widget").unwrap(),
             )
             .with_operation(ConfigEdit::set("branch.main.remote", "origin").unwrap())
             .with_operation(ConfigEdit::set("branch.main.merge", "refs/heads/main").unwrap());
@@ -2079,7 +2220,7 @@ mod tests {
     }
 
     #[test]
-    fn https_transport_follows_repository_source_authority() {
+    fn https_transport_is_hosted_for_both_repository_authorities() {
         let native_dir = tempfile::TempDir::new().unwrap();
         let native = Repository::init_default(native_dir.path()).unwrap();
         let https = "https://127.0.0.1:8431/acme/widget";
@@ -2098,10 +2239,10 @@ mod tests {
         assert_eq!(key.as_deref(), Some("127.0.0.1:8431"));
         assert_eq!(
             classify_push_remote_spec(&native, Some("https://github.com/luke/tiny-notes")),
-            Some(RemoteTransportKind::GitUrl)
+            Some(RemoteTransportKind::NetworkHeddle)
         );
         assert_eq!(
-            classify_push_remote_spec(&native, Some("heddle://api.heddle.sh/luke/tiny-notes")),
+            classify_push_remote_spec(&native, Some("https://api.heddle.sh/luke/tiny-notes")),
             Some(RemoteTransportKind::NetworkHeddle)
         );
 
@@ -2110,7 +2251,7 @@ mod tests {
         let overlay = Repository::init_git_overlay_sidecar(overlay_dir.path()).unwrap();
         assert_eq!(
             classify_push_remote_spec(&overlay, Some(https)),
-            Some(RemoteTransportKind::GitUrl)
+            Some(RemoteTransportKind::NetworkHeddle)
         );
     }
 
@@ -2149,7 +2290,7 @@ mod tests {
         cfg.add(
             "weft",
             Remote {
-                url: "heddle://127.0.0.1:8421".to_string(),
+                url: "https://127.0.0.1:8421".to_string(),
                 insecure: false,
             },
         )
@@ -2187,7 +2328,7 @@ mod tests {
 
         assert_eq!(configured.as_deref(), Some("origin"));
         let remote = RemoteConfig::open(&repo).unwrap().get("origin").unwrap();
-        assert_eq!(remote.url, "heddle://api-staging.heddle.sh/org/repo");
+        assert_eq!(remote.url, "https://api-staging.heddle.sh/org/repo");
         let RemoteTarget::Network { authority, .. } = RemoteTarget::parse(&remote.url).unwrap()
         else {
             panic!("persisted hosted remote must remain a network target");
