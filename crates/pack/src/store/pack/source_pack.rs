@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Exact source closure validation, shared by device and hosted publication.
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::{Read, Seek, Write},
+};
 
-use super::{ObjectType, PackObjectId, PackReader};
+use super::{ObjectType, PackObjectId, PackReader, PackStats, StreamingPackBuilder, SyncData};
 use crate::{
-    object::{ContentHash, State, Tree, TreeEntryTarget},
+    object::{ContentHash, ObjectSource, State, Tree, TreeEntryTarget},
     store::{Result, StoreError},
 };
 
@@ -69,17 +72,8 @@ pub(super) fn validate(
             let tree = trees
                 .get(&hash)
                 .ok_or_else(|| invalid("source tree unavailable"))?;
-            for entry in tree.entries() {
-                let child = match entry.target() {
-                    TreeEntryTarget::Tree { hash } => Some((*hash, ObjectType::Tree)),
-                    TreeEntryTarget::Blob { hash, .. } | TreeEntryTarget::Symlink { hash } => {
-                        Some((*hash, ObjectType::Blob))
-                    }
-                    TreeEntryTarget::Gitlink { .. } | TreeEntryTarget::Spoollink { .. } => None,
-                };
-                if let Some((hash, kind)) = child {
-                    pending.push((PackObjectId::Hash(hash), kind));
-                }
+            for (hash, kind) in children(tree) {
+                pending.push((PackObjectId::Hash(hash), kind));
             }
         }
     }
@@ -92,4 +86,110 @@ pub(super) fn validate(
 }
 fn invalid(message: &str) -> StoreError {
     StoreError::InvalidObject(message.into())
+}
+
+/// Build an exact selected-source pack without consulting State history,
+/// provenance, attachments, or linked spools. Full canonical trees keep private
+/// delta bases out of the pack. The caller owns revision authorization and the
+/// temporary output directory; discard that directory on failure.
+///
+/// Object bytes stream into the builder one object at a time. Blob header
+/// lengths are checked before reading where the source supports that probe.
+/// No object repository, CLI, network, or async runtime dependency is required.
+pub fn build_source_pack<W: Write + Read + Seek + SyncData>(
+    mut builder: StreamingPackBuilder<W>,
+    source: &impl ObjectSource,
+    selected: &State,
+    max_objects: usize,
+    max_decoded_bytes: u64,
+) -> Result<(W, PackStats)> {
+    if max_objects < 2 {
+        return Err(invalid("source pack object budget exceeded"));
+    }
+    let canonical = selected.encode_current_msgpack()?;
+    let mut decoded = 0_u64;
+    charge_bytes(&mut decoded, canonical.len() as u64, max_decoded_bytes)?;
+    builder.add_id(
+        PackObjectId::StateId(selected.id()),
+        ObjectType::State,
+        &canonical,
+    )?;
+    let mut discovered = BTreeMap::from([(selected.tree, ObjectType::Tree)]);
+    let mut pending = discovered.clone();
+    while let Some((hash, kind)) = pending.pop_first() {
+        match kind {
+            ObjectType::Tree => {
+                let tree = source
+                    .get_tree(&hash)?
+                    .ok_or_else(|| invalid("selected source tree is missing"))?;
+                if tree.hash() != hash {
+                    return Err(invalid("source tree differs from its address"));
+                }
+                let canonical = tree.encode_canonical()?;
+                charge_bytes(&mut decoded, canonical.len() as u64, max_decoded_bytes)?;
+                for (hash, kind) in children(&tree) {
+                    if let Some(expected) = discovered.get(&hash) {
+                        if *expected != kind {
+                            return Err(invalid(
+                                "source object is referenced with conflicting types",
+                            ));
+                        }
+                        continue;
+                    }
+                    // The selected State occupies one slot beyond this set.
+                    // Check before queuing or reading the excess object.
+                    if discovered.len().saturating_add(1) >= max_objects {
+                        return Err(invalid("source pack object budget exceeded"));
+                    }
+                    discovered.insert(hash, kind);
+                    pending.insert(hash, kind);
+                }
+                builder.add_id(PackObjectId::Hash(hash), ObjectType::Tree, &canonical)?;
+            }
+            ObjectType::Blob => {
+                let length = source
+                    .decoded_blob_len(&hash)?
+                    .ok_or_else(|| invalid("selected source blob is missing"))?;
+                if length > max_decoded_bytes.saturating_sub(decoded) {
+                    return Err(invalid("source pack decoded byte budget exceeded"));
+                }
+                let bytes = source
+                    .get_blob_bytes(&hash)?
+                    .ok_or_else(|| invalid("selected source blob is missing"))?;
+                if bytes.len() as u64 != length
+                    || ContentHash::compute_typed("blob", &bytes) != hash
+                {
+                    return Err(invalid(
+                        "source blob differs from its address or declared size",
+                    ));
+                }
+                charge_bytes(&mut decoded, length, max_decoded_bytes)?;
+                builder.add_id(PackObjectId::Hash(hash), ObjectType::Blob, bytes)?;
+            }
+            _ => return Err(invalid("unexpected source object type")),
+        }
+    }
+    builder.finalize()
+}
+
+fn charge_bytes(decoded: &mut u64, length: u64, limit: u64) -> Result<()> {
+    *decoded = decoded
+        .checked_add(length)
+        .ok_or_else(|| invalid("source pack size overflow"))?;
+    if *decoded > limit {
+        return Err(invalid("source pack decoded byte budget exceeded"));
+    }
+    Ok(())
+}
+
+fn children(tree: &Tree) -> impl Iterator<Item = (ContentHash, ObjectType)> + '_ {
+    tree.entries()
+        .iter()
+        .filter_map(|entry| match entry.target() {
+            TreeEntryTarget::Tree { hash } => Some((*hash, ObjectType::Tree)),
+            TreeEntryTarget::Blob { hash, .. } | TreeEntryTarget::Symlink { hash } => {
+                Some((*hash, ObjectType::Blob))
+            }
+            TreeEntryTarget::Gitlink { .. } | TreeEntryTarget::Spoollink { .. } => None,
+        })
 }
