@@ -2805,6 +2805,7 @@ name = "heddle-thread-api"
 version = "0.21.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "biscuit-auth",
  "blake3",
  "chrono",

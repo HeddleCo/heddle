@@ -11,6 +11,7 @@ use api::{
     heddle::api::v1alpha1::{CallContext, RequestProof},
     v2::MethodDescriptor,
 };
+use base64::Engine as _;
 use biscuit_verifier::{BiscuitFacts, PublicKey};
 use chrono::{DateTime, Utc};
 use crypto::{Ed25519Signer, Signer};
@@ -80,8 +81,9 @@ impl RootAuthority {
         {
             return Err(Error::Protocol("request deadline expired"));
         }
-        let bearer = std::str::from_utf8(&context.bearer_capability)
-            .map_err(|_| Error::Protocol("invalid Biscuit encoding"))?;
+        // The RPC carries raw Biscuit bytes. Text is confined to the verifier's
+        // existing storage/configuration API; it is never a second wire form.
+        let bearer = base64::engine::general_purpose::URL_SAFE.encode(&context.bearer_capability);
         let envelope = if context.bearer_grant_envelope.is_empty() {
             None
         } else {
@@ -96,7 +98,7 @@ impl RootAuthority {
             .next()
             .ok_or(Error::Protocol("invalid method path"))?;
         let facts = biscuit_verifier::verify_any_at_with_resource(
-            bearer,
+            &bearer,
             envelope,
             &self
                 .roots
@@ -141,7 +143,8 @@ pub struct VerifiedCall {
 /// supplied by the application, exactly as it is for a Weft request.
 pub struct CredentialSigner {
     pub signer: Ed25519Signer,
-    pub bearer: String,
+    /// Raw serialized Biscuit, directly usable from IssuedCredential.biscuit.
+    pub bearer: Vec<u8>,
     pub grant_envelope: Vec<u8>,
 }
 impl Authorize for CredentialSigner {
@@ -172,7 +175,7 @@ impl Authorize for CredentialSigner {
             ))
             .map_err(|e| Error::Io(e.to_string()))?;
         Ok(CallContext {
-            bearer_capability: self.bearer.as_bytes().to_vec(),
+            bearer_capability: self.bearer.clone(),
             bearer_grant_envelope: self.grant_envelope.clone(),
             request_proof: Some(RequestProof {
                 algorithm: "ed25519".into(),

@@ -15,6 +15,7 @@ native = [
     "dep:objects",
     "dep:crypto",
     "dep:biscuit-verifier",
+    "dep:base64",
     "dep:chrono",
     "dep:uuid",
     "dep:hex",
@@ -28,6 +29,7 @@ replication = ["signing", "dep:heddle-object-model", "dep:tokio"]
 signing = ["dep:crypto", "dep:hex"]
 
 [dependencies]
+base64 = { workspace = true, optional = true }
 api.workspace = true
 repo = { workspace = true, optional = true, features = ["native", "git-overlay"] }
 objects = { workspace = true, optional = true }

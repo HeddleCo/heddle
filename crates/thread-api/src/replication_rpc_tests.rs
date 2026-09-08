@@ -26,7 +26,7 @@ fn credential(root: &KeyPair) -> CredentialSigner {
         .expect("owner-minted Biscuit");
     CredentialSigner {
         signer,
-        bearer: token.to_base64().expect("token encoding"),
+        bearer: token.to_vec().expect("token encoding"),
         grant_envelope: vec![],
     }
 }
