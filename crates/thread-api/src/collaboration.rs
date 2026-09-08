@@ -418,6 +418,19 @@ mod tests {
             .expect("revision")
             .validate_parents(&genesis, &[extracted_operation])
             .expect("context retains discussion extraction as causal root");
+        let mut detached = verify(&revision).expect("context operation");
+        let mut detached_context = detached.context_revision().expect("decode").expect("context");
+        detached_context.extracted_from = None;
+        detached.body = ThreadOperationBody::Context(detached_context.encode().expect("context"));
+        assert!(detached.validate_parents(&genesis, &[verify(&extracted).expect("original extraction")]).is_err(),
+            "context revision cannot strip its extraction provenance");
+        let mut invented_root = verify(&revision).expect("context operation");
+        let mut invented_context = invented_root.context_revision().expect("decode").expect("context");
+        invented_context.parents.clear();
+        invented_root.parents.clear();
+        invented_root.body = ThreadOperationBody::Context(invented_context.encode().expect("context"));
+        assert!(invented_root.validate_parents(&genesis, &[]).is_err(),
+            "extraction requires an original signed discussion resolution");
         context.metadata.actor.principal_id = Uuid::from_u128(10);
         assert!(
             make(CollaborationOperationBodyV1::Resolve {
