@@ -120,6 +120,7 @@ mod tests {
         let change = ChangeId::from_bytes([2; 16]);
         let turn = || DiscussionTurnV1::new("x").unwrap();
         let open = |anchor| CollaborationOperationBodyV1::Open {
+            blocking: false,
             title: "t".to_string(),
             anchor,
             visibility: VisibilityTier::default(),
@@ -269,23 +270,23 @@ mod tests {
         let expected = [
             (
                 "open_repository",
-                "f9214075818b1039339a16d9482b6fbae90d2def24623ac96be7c945261e7711",
+                "69b3baebacb9d29c3d6c5cac73d6f14b2fe5231e061065249e808e2d92cddefe",
             ),
             (
                 "open_state",
-                "196fd4cd1058139ae0f36fa9d73ec8a837a31ca9122f79336b131768bee15c69",
+                "785cf6234fdfc4a01ff068a9b67a2c0d60172f59795c39c3c5b4e1037176a964",
             ),
             (
                 "open_change",
-                "3dc64cf9c798e2d1e992c746254beba2d5008034091aac867bdd969134794539",
+                "e520779bc52b05e753a139bddafd25dcc8765182b865cd305691f85129b58c03",
             ),
             (
                 "open_path",
-                "07341819d8ccd19fc862d757031d1ced169a7063954cc172a44db334d3140cb2",
+                "1c814db69893d0ee71abe9d5a1d7d17724ff893fdf36bf90e9c40aa4beae9803",
             ),
             (
                 "open_symbol",
-                "7e59bc78ce16efb74354a958516756ee5cc9dcc374299d664685a9b02b399cf4",
+                "9f43eb25d8c920d89a31c148fcd177e789e909eb7d3715fc2f899f85fa680197",
             ),
             (
                 "append_turn",

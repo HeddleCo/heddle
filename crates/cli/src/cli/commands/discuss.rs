@@ -129,6 +129,7 @@ fn run_open(
         repo.get_attribution()?,
         now_ms(),
         CollaborationOperationBodyV1::Open {
+            blocking: false,
             title,
             anchor: CollaborationAnchor::Symbol {
                 state_id,

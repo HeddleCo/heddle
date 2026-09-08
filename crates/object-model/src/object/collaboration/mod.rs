@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod codec;
+mod context;
 mod ids;
 mod materialize;
 mod metadata;
 mod operation;
 
 pub use codec::{CollaborationCodecError, DecodedCollaborationOperation};
+pub use context::{CONTEXT_FORMAT, ContextRevision};
 pub use ids::{
     CollabOpId, CollabOpIdParseError, CollaborationIdempotencyKey, DiscussionRecordId,
     DiscussionRecordIdParseError, LegacyDiscussionId, LegacySourceLocator,

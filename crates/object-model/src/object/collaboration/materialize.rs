@@ -93,6 +93,7 @@ fn has_unaccepted_ancestor(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MaterializedDiscussion {
+    pub blocking: bool,
     pub discussion_id: DiscussionRecordId,
     pub title: String,
     pub anchor: CollaborationAnchor,
@@ -201,6 +202,7 @@ fn materialize_discussion(
             visibility,
             turn,
             thread_ref,
+            ..
         } => (
             title.clone(),
             anchor.clone(),
@@ -298,8 +300,15 @@ fn materialize_discussion(
         })
         .copied()
         .collect::<BTreeSet<_>>();
-    let display_head = *heads.iter().next().expect("root guarantees a head");
+    let display_head = *heads
+        .iter()
+        .next()
+        .ok_or_else(|| CollaborationCodecError::Invalid("discussion has no causal head".into()))?;
     Ok(MaterializedDiscussion {
+        blocking: matches!(
+            root,
+            CollaborationOperationBodyV1::Open { blocking: true, .. }
+        ),
         discussion_id,
         title,
         anchor,
@@ -471,6 +480,7 @@ mod tests {
             "root",
             1,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "Review".to_string(),
                 anchor: CollaborationAnchor::Repository,
                 visibility: VisibilityTier::default(),
@@ -486,6 +496,7 @@ mod tests {
             "symbol-root",
             1,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "Review".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: StateId::from_bytes([1; 32]),

@@ -96,6 +96,7 @@ enum WireLegacyResolutionV1 {
 #[serde(rename_all = "snake_case", tag = "kind")]
 enum WireBodyV1 {
     Open {
+        blocking: bool,
         title: String,
         anchor: WireAnchorV1,
         visibility: VisibilityTier,
@@ -328,12 +329,14 @@ impl From<CollaborationOperationBodyV1> for WireBodyV1 {
     fn from(value: CollaborationOperationBodyV1) -> Self {
         match value {
             CollaborationOperationBodyV1::Open {
+                blocking,
                 title,
                 anchor,
                 visibility,
                 turn,
                 thread_ref,
             } => Self::Open {
+                blocking,
                 title,
                 anchor: anchor.into(),
                 visibility,
@@ -390,12 +393,14 @@ impl From<WireBodyV1> for CollaborationOperationBodyV1 {
     fn from(value: WireBodyV1) -> Self {
         match value {
             WireBodyV1::Open {
+                blocking,
                 title,
                 anchor,
                 visibility,
                 turn,
                 thread_ref,
             } => Self::Open {
+                blocking,
                 title,
                 anchor: anchor.into(),
                 visibility,

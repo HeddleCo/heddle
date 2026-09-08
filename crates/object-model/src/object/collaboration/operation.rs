@@ -101,6 +101,7 @@ pub enum LegacyDiscussionResolutionV1 {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CollaborationOperationBodyV1 {
     Open {
+        blocking: bool,
         title: String,
         anchor: CollaborationAnchor,
         visibility: VisibilityTier,
@@ -306,7 +307,7 @@ impl CollaborationOperationEnvelope {
     }
 }
 
-fn validate_anchor(anchor: &CollaborationAnchor) -> Result<(), CollaborationCodecError> {
+pub(super) fn validate_anchor(anchor: &CollaborationAnchor) -> Result<(), CollaborationCodecError> {
     match anchor {
         CollaborationAnchor::Path { path, .. } => require_text(path, "anchor path"),
         CollaborationAnchor::Symbol { path, symbol, .. } => {

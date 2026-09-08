@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use crypto::{Signer, thread_operation::SignedOperation};
 use heddle_object_model::object::{
     Attribution, CollaborationIdempotencyKey, CollaborationMetadata, CollaborationOperationBodyV1,
-    CollaborationOperationEnvelope, ContentHash, DiscussionRecordId,
+    CollaborationOperationEnvelope, ContentHash, ContextRevision, DiscussionRecordId,
     thread_replication::{OPERATION_FORMAT, ThreadOperation, ThreadOperationBody},
 };
 
@@ -31,9 +31,12 @@ pub fn verify(record: &SignedRecord) -> Result<ThreadOperation, Error> {
             "collaboration signature key differs from publisher",
         ));
     }
-    if !matches!(operation.body, ThreadOperationBody::Discussion(_)) {
+    if !matches!(
+        operation.body,
+        ThreadOperationBody::Discussion(_) | ThreadOperationBody::Context(_)
+    ) {
         return Err(Error::Protocol(
-            "collaboration requires a discussion operation",
+            "collaboration requires a discussion or context operation",
         ));
     }
     Ok(operation)
@@ -135,6 +138,66 @@ impl Command {
     }
 }
 
+/// Append an immutable context revision. Original signed parent records bind
+/// the same stable record and scope; concurrent revisions remain separate heads.
+pub fn sign_context(
+    mut context: ContextRevision,
+    parents: &[SignedRecord],
+    signer: &impl Signer,
+) -> Result<SignedRecord, Error> {
+    if parents.len() > 128 {
+        return Err(Error::Protocol("context has more than 128 causal parents"));
+    }
+    let thread = context.metadata.scope.thread.ok_or(Error::Protocol(
+        "Thread context requires native Thread scope",
+    ))?;
+    let mut ids = BTreeSet::new();
+    for record in parents {
+        let parent = verify(record)?;
+        let ThreadOperationBody::Context(bytes) = &parent.body else {
+            return Err(Error::Protocol("context parent is not a context revision"));
+        };
+        let previous =
+            ContextRevision::decode(bytes).map_err(|error| Error::Io(error.to_string()))?;
+        if parent.thread != thread
+            || previous.id != context.id
+            || previous.metadata.scope != context.metadata.scope
+        {
+            return Err(Error::Protocol(
+                "context parent belongs to another record or scope",
+            ));
+        }
+        if !ids.insert(parent.id().map_err(|error| Error::Io(error.to_string()))?) {
+            return Err(Error::Protocol("duplicate context causal parent"));
+        }
+    }
+    context.parents = ids.iter().copied().collect();
+    let operation = ThreadOperation {
+        version: 1,
+        thread,
+        parents: ids,
+        publisher: signer
+            .public_key()
+            .try_into()
+            .map_err(|_| Error::Protocol("context requires an Ed25519 signer"))?,
+        body: ThreadOperationBody::Context(
+            context
+                .encode()
+                .map_err(|error| Error::Io(error.to_string()))?,
+        ),
+    };
+    let signed =
+        SignedOperation::sign(&operation, signer).map_err(|error| Error::Io(error.to_string()))?;
+    Ok(SignedRecord {
+        format: OPERATION_FORMAT.into(),
+        canonical_record: signed.canonical,
+        signatures: vec![RecordSignature {
+            public_key: operation.publisher.to_vec(),
+            signature: signed.signature,
+        }],
+    })
+}
+
 /// The public causal vocabulary is the outer replication operation identity.
 pub fn operation_id(record: &SignedRecord) -> Result<ContentHash, Error> {
     verify(record)?
@@ -185,6 +248,7 @@ mod tests {
         let root = command(
             discussion,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "Review".into(),
                 anchor: CollaborationAnchor::Repository,
                 visibility: VisibilityTier::Private {
@@ -232,6 +296,132 @@ mod tests {
             command(discussion, append("duplicate parent"))
                 .sign(&[root.clone(), root], &signer)
                 .is_err()
+        );
+    }
+    #[test]
+    fn context_revisions_retain_history_and_bind_parent_record_identity() {
+        let signer = Ed25519Signer::from_seed(&[7; 32]).expect("signer");
+        let context = ContextRevision {
+            version: 2,
+            id: Uuid::from_u128(9),
+            parents: vec![],
+            metadata: command(DiscussionRecordId::generate(), append("metadata")).metadata,
+            anchor: CollaborationAnchor::Repository,
+            content: "Original rationale".into(),
+            tags: vec!["decision".into()],
+            supersedes: None,
+            extracted_from: None,
+            occurred_at_ms: 100,
+        };
+        let first = sign_context(context.clone(), &[], &signer).expect("first context");
+        let mut revised = context.clone();
+        revised.content = "Revised rationale".into();
+        let second =
+            sign_context(revised.clone(), std::slice::from_ref(&first), &signer).expect("revision");
+        assert_eq!(
+            verify(&second).expect("second").parents,
+            BTreeSet::from([operation_id(&first).expect("first ID")])
+        );
+        let ThreadOperationBody::Context(bytes) = verify(&first).expect("first").body else {
+            panic!("context");
+        };
+        assert_eq!(
+            ContextRevision::decode(&bytes)
+                .expect("original context")
+                .content,
+            "Original rationale"
+        );
+        revised.id = Uuid::from_u128(10);
+        assert!(
+            sign_context(revised, std::slice::from_ref(&first), &signer).is_err(),
+            "parent cannot silently change record identity"
+        );
+    }
+    #[test]
+    fn canonical_browser_interop_vectors() {
+        use heddle_object_model::object::{CollaborationMention, CollaborationResolution, StateId};
+        let signer = Ed25519Signer::from_seed(&[7; 32]).expect("signer");
+        let discussion: DiscussionRecordId = "disc-01980000-0000-7000-8000-000000000123"
+            .parse()
+            .expect("stable discussion ID");
+        let open = command(
+            discussion,
+            CollaborationOperationBodyV1::Open {
+                blocking: true,
+                title: "Review".into(),
+                anchor: CollaborationAnchor::Repository,
+                visibility: VisibilityTier::Public,
+                turn: DiscussionTurnV1::new("First turn").expect("turn"),
+                thread_ref: None,
+            },
+        )
+        .sign(&[], &signer)
+        .expect("open");
+        let mut append_command = command(discussion, append("See the reviewed state"));
+        append_command.metadata.mentions = vec![CollaborationMention::State {
+            spool: Uuid::from_u128(1),
+            state: StateId::from_bytes([5; 32]),
+        }];
+        let append = append_command
+            .sign(std::slice::from_ref(&open), &signer)
+            .expect("append");
+        let resolve = command(
+            discussion,
+            CollaborationOperationBodyV1::Resolve {
+                resolution: CollaborationResolution::Dismissed {
+                    reason: "Verified".into(),
+                },
+            },
+        )
+        .sign(std::slice::from_ref(&append), &signer)
+        .expect("resolve");
+        let reopen = command(
+            discussion,
+            CollaborationOperationBodyV1::Reopen {
+                reason: "New evidence".into(),
+            },
+        )
+        .sign(std::slice::from_ref(&resolve), &signer)
+        .expect("reopen");
+        let context = ContextRevision {
+            version: 2,
+            id: Uuid::from_u128(9),
+            parents: vec![],
+            metadata: command(
+                discussion,
+                CollaborationOperationBodyV1::Reopen {
+                    reason: "metadata".into(),
+                },
+            )
+            .metadata,
+            anchor: CollaborationAnchor::Repository,
+            content: "Design rationale".into(),
+            tags: vec!["decision".into()],
+            supersedes: None,
+            extracted_from: Some(discussion),
+            occurred_at_ms: 100,
+        };
+        let context = sign_context(context, &[], &signer).expect("context");
+        let mut vectors = String::new();
+        for (name, record) in [
+            ("open", open),
+            ("append", append),
+            ("resolve", resolve),
+            ("reopen", reopen),
+            ("context", context),
+        ] {
+            vectors.push_str(&format!(
+                "{} {} {} {} {}\n",
+                name,
+                hex::encode(&record.signatures[0].public_key),
+                hex::encode(&record.canonical_record),
+                hex::encode(&record.signatures[0].signature),
+                operation_id(&record).expect("operation ID").to_hex()
+            ));
+        }
+        assert_eq!(
+            vectors,
+            include_str!("../tests/fixtures/collaboration_v2.txt")
         );
     }
 }

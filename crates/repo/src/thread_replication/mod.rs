@@ -225,7 +225,7 @@ impl ThreadReplica {
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let capture_state = match &operation.body {
             ThreadOperationBody::Capture(bytes) => Some(State::decode_current_msgpack(bytes)?.id()),
-            ThreadOperationBody::Discussion(_) => None,
+            ThreadOperationBody::Discussion(_) | ThreadOperationBody::Context(_) => None,
         };
         let inserted = tx.execute("INSERT OR IGNORE INTO operations(id,thread,facet,canonical,signature,capture_state) VALUES(?1,?2,?3,?4,?5,?6)",
             params![id.as_bytes(), self.thread.as_bytes(), facet_number(operation.facet()), signed.canonical, signed.signature, capture_state.map(|id| id.as_bytes().to_vec())])?;

@@ -157,6 +157,7 @@ fn discussion(
     let turn = DiscussionTurnV1::new(key).expect("turn");
     let body = if parents.is_empty() {
         CollaborationOperationBodyV1::Open {
+            blocking: false,
             title: "Decision".into(),
             anchor: CollaborationAnchor::Repository,
             visibility: VisibilityTier::Public,

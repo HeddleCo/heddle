@@ -78,6 +78,7 @@ pub enum Admission {
 pub enum ThreadOperationBody {
     Capture(Vec<u8>),
     Discussion(Vec<u8>),
+    Context(Vec<u8>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,7 +97,9 @@ impl ThreadOperation {
     pub fn facet(&self) -> ThreadFacet {
         match self.body {
             ThreadOperationBody::Capture(_) => ThreadFacet::Source,
-            ThreadOperationBody::Discussion(_) => ThreadFacet::Discussion,
+            ThreadOperationBody::Discussion(_) | ThreadOperationBody::Context(_) => {
+                ThreadFacet::Discussion
+            }
         }
     }
 
@@ -109,6 +112,16 @@ impl ThreadOperation {
                 let state = State::decode_current_msgpack(bytes)?;
                 if state.encode_current_msgpack()? != *bytes {
                     return Err(invalid("non-canonical capture"));
+                }
+            }
+            ThreadOperationBody::Context(bytes) => {
+                let context = crate::object::ContextRevision::decode(bytes).map_err(invalid)?;
+                if context.metadata.scope.thread != Some(self.thread)
+                    || context.parents.iter().copied().collect::<BTreeSet<_>>() != self.parents
+                {
+                    return Err(invalid(
+                        "context scope or causal parents differ from Thread operation",
+                    ));
                 }
             }
             ThreadOperationBody::Discussion(bytes) => {
@@ -187,6 +200,21 @@ impl ThreadOperation {
                     return Err(invalid(
                         "capture source ancestry differs from causal parents",
                     ));
+                }
+            }
+            ThreadOperationBody::Context(bytes) => {
+                let context = crate::object::ContextRevision::decode(bytes).map_err(invalid)?;
+                if context.metadata.scope.spool.to_string() != genesis.spool {
+                    return Err(invalid("context belongs to another spool"));
+                }
+                for parent in parents {
+                    let ThreadOperationBody::Context(bytes) = &parent.body else {
+                        return Err(invalid("context parent is not a context revision"));
+                    };
+                    let parent = crate::object::ContextRevision::decode(bytes).map_err(invalid)?;
+                    if parent.id != context.id || parent.metadata.scope != context.metadata.scope {
+                        return Err(invalid("context parents belong to another record or scope"));
+                    }
                 }
             }
             ThreadOperationBody::Discussion(bytes) => {
