@@ -1094,7 +1094,7 @@ fn later_rotation_retains_genesis_history_without_retaining_old_purge_authority(
         NOW + 100,
     );
     assert_eq!(decide(&proof), Decision::Purge);
-    let retired_proof = artifact_for_state(
+    let mut retired_proof = artifact_for_state(
         &original_root,
         keyring.owner_genesis.expect("genesis"),
         keyring.accepted_transitions,
@@ -1106,6 +1106,7 @@ fn later_rotation_retains_genesis_history_without_retaining_old_purge_authority(
         NOW - 10,
         NOW + 100,
     );
+    retired_proof.current_state_hash = current.state_hash();
     assert_eq!(decide(&retired_proof), Decision::Deny(Denial::Time));
 }
 

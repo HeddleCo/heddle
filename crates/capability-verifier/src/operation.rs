@@ -97,15 +97,12 @@ fn decision_result(
         .as_ref()
         .ok_or_else(|| Error::CapabilityDenied("purge capability is absent".to_owned()))?;
     let verified = verify_authorization_bundle(bundle, context.now_unix_seconds, context.limits)?;
-    let root_key = bundle
-        .owner_root
-        .as_ref()
-        .and_then(|signed| signed.root.as_ref())
-        .and_then(|root| root.authority_key.as_ref())
-        .expect("verified owner root authority");
-    if root_key != genesis.owner_public_key() {
+    if !verified
+        .owner_state()
+        .contains_authority_key(genesis.owner_public_key())
+    {
         return Err(Error::BrokenChain(
-            "owner root does not match the pinned spool genesis".to_owned(),
+            "pinned spool genesis key is absent from the verified owner history".to_owned(),
         ));
     }
     if verified.owner_state().state_hash() != *context.current_owner_state_hash {

@@ -66,6 +66,12 @@ impl VerifiedOwnerState {
         &self.authority_key
     }
 
+    /// Establish historical genesis provenance, without authorizing issuance.
+    /// Current capabilities still pass `issuer_at` and its retirement checks.
+    pub(crate) fn contains_authority_key(&self, key: &AuthorizationVerificationKey) -> bool {
+        self.issuers.values().any(|authority| &authority.key == key)
+    }
+
     /// Active recovery policy.
     #[must_use]
     pub const fn recovery_policy(&self) -> &RecoveryPolicy {

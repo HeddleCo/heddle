@@ -122,14 +122,17 @@ pub fn verify_clone_keyring(
             .as_ref()
             .ok_or_else(|| Error::Invalid("clone keyring has no owner root".to_owned()))?,
     )?;
-    if state.authority_key() != owner_genesis.owner_public_key() {
-        return Err(Error::BrokenChain(
-            "owner root is not rooted at the spool genesis key".to_owned(),
-        ));
-    }
     verify_pin(&keyring, &state)?;
     for transition in &keyring.accepted_transitions {
         state = apply_transition(&state, transition, now_unix_seconds, limits)?;
+    }
+    // Creation may follow an owner-key rotation. Verify its key against the
+    // complete signed history, while the accepted state still determines
+    // current authority. A later rotation does not rewrite immutable genesis.
+    if !state.contains_authority_key(owner_genesis.owner_public_key()) {
+        return Err(Error::BrokenChain(
+            "spool genesis key is absent from the verified owner history".to_owned(),
+        ));
     }
     if keyring.accepted_state_hash.as_slice() != state.state_hash() {
         return Err(Error::BrokenChain(
