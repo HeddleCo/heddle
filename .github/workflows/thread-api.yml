@@ -58,6 +58,7 @@ jobs:
       - run: cargo test --locked -p heddle-thread-api --no-default-features --lib
       - run: cargo test --locked -p heddle-thread-api --no-default-features --features native --lib
       - run: cargo test --locked -p heddle-thread-api --no-default-features --features iroh
+      - run: HEDDLE_PROFILE=1 cargo test --locked -p heddle-thread-api --no-default-features --features iroh --test transport_observation -- --ignored --nocapture
       - run: cargo test --locked -p heddle-repo --no-default-features --features native,git-overlay thread_replication -- --nocapture
       - run: cargo test --locked -p heddle-objects writer_lease -- --nocapture
       - run: cargo clippy --locked -p heddle-thread-api --all-targets -- -D warnings

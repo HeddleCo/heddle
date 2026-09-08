@@ -2816,6 +2816,7 @@ dependencies = [
  "heddle-crypto",
  "heddle-object-model",
  "heddle-objects",
+ "heddle-perf-contract",
  "heddle-repo",
  "heddleco-iroh",
  "hex",
