@@ -19,6 +19,8 @@ pub(crate) mod helpers;
 mod human;
 mod hydration;
 mod methods;
+#[cfg(test)]
+mod native_transport_tests;
 pub(crate) mod operation_id;
 mod provider_pull;
 mod provider_transport;
