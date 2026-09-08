@@ -383,3 +383,22 @@ fn truncated_target_inventory_cannot_produce_confident_correspondence() {
     assert!(result.changes.is_empty());
     assert_eq!(result.omitted[0].limitations, [Limitation::Budget]);
 }
+
+#[test]
+fn predicate_binding_dependencies_include_local_expressions_transitively() {
+    let base = "fn f() { let kind = A; let enabled = kind == A; let p = P { v: if enabled { X } else { Y } }; }";
+    let source = base.replace("let kind = A", "let kind = B");
+    let result = compare_file("source.rs", Some(base), Some(&source), &[]);
+    assert_eq!(result.changes.len(), 1, "a dependency of the resolved predicate changed");
+    assert_eq!(result.changes[0].correspondences[0].kind, CorrespondenceKind::Replaced);
+    assert!(result.changes[0].bindings.iter().any(|b| b.name == "kind"));
+}
+
+#[test]
+fn unsupported_while_pattern_does_not_resolve_an_outer_homonym() {
+    let base = "fn f() { let x = false; while let Some(x) = next() { p.v = A; } }";
+    let source = base.replace("p.v = A", "p.v = if x { B } else { A }");
+    let result = compare_file("source.rs", Some(base), Some(&source), &[]);
+    assert!(result.changes[0].limitations.contains(&Limitation::Syntax));
+    assert_eq!(result.changes[0].correspondences[0].kind, CorrespondenceKind::Unmatched);
+}
