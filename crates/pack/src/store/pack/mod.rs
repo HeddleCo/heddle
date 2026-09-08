@@ -18,6 +18,8 @@ mod versioned_header;
 
 #[cfg(test)]
 mod pack_tests;
+#[cfg(test)]
+mod source_pack_tests;
 
 pub use compact_frame::compress_compact_frame;
 pub use manager::PackManager;
