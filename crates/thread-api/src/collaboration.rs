@@ -1,5 +1,6 @@
 //! Portable collaboration commands. Original parent records reconstruct both
 //! causal frontiers; callers never translate UI version tokens into proofs.
+mod references;
 use std::collections::BTreeSet;
 
 use crypto::{Signer, thread_operation::SignedOperation};
@@ -8,6 +9,7 @@ use heddle_object_model::object::{
     CollaborationOperationEnvelope, ContentHash, ContextRevision, DiscussionRecordId,
     thread_replication::{OPERATION_FORMAT, ThreadOperation, ThreadOperationBody},
 };
+pub use references::{anchor, mention, mention_ref};
 
 use crate::{
     contract::{RecordSignature, SignedRecord},
@@ -402,6 +404,38 @@ mod tests {
             occurred_at_ms: 100,
         };
         let context = sign_context(context, &[], &signer).expect("context");
+        let source_record = |revision| {
+            command(
+                discussion,
+                CollaborationOperationBodyV1::Open {
+                    blocking: true,
+                    title: "Review source".into(),
+                    visibility: VisibilityTier::Public,
+                    anchor: CollaborationAnchor::Source {
+                        source: heddle_object_model::object::CollaborationSourceAnchor {
+                            revision,
+                            path: "src/main.rs".into(),
+                            symbol_id: "run".into(),
+                            start_line: Some(12),
+                            end_line: Some(18),
+                        },
+                    },
+                    turn: DiscussionTurnV1::new("Check these lines").expect("turn"),
+                    thread_ref: None,
+                },
+            )
+            .sign(&[], &signer)
+            .expect("source root")
+        };
+        let source_state =
+            source_record(heddle_object_model::object::CollaborationRevision::State {
+                state_id: StateId::from_bytes([5; 32]),
+            });
+        let source_git = source_record(
+            heddle_object_model::object::CollaborationRevision::GitCommit {
+                oid: "a".repeat(40),
+            },
+        );
         let mut vectors = String::new();
         for (name, record) in [
             ("open", open),
@@ -409,6 +443,8 @@ mod tests {
             ("resolve", resolve),
             ("reopen", reopen),
             ("context", context),
+            ("source_state", source_state),
+            ("source_git", source_git),
         ] {
             vectors.push_str(&format!(
                 "{} {} {} {} {}\n",
