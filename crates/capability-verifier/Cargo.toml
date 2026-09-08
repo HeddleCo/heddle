@@ -24,7 +24,7 @@ include = [
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-biscuit-auth = { version = "6.0", default-features = false, features = ["datalog-macro", "wasm"] }
+biscuit-auth = { version = "6.0", default-features = false, features = ["datalog-macro"] }
 ed25519-dalek = { version = "3.0", default-features = false, features = ["alloc", "fast"] }
 heddle-api = "0.28"
 hex = "0.4"
@@ -35,6 +35,8 @@ sha2 = "0.10"
 thiserror = "2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# Browser bindings and the browser clock backend must not enter native hosts.
+biscuit-auth = { version = "6.0", default-features = false, features = ["datalog-macro", "wasm"] }
 # biscuit-auth links its token builder even for verification-only consumers.
 # Enabling its transitive entropy backend makes that pure code linkable in a
 # browser Worker; this crate never calls a randomness API.

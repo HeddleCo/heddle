@@ -7,7 +7,7 @@ use crypto::{
     Conclusion, Ed25519Signer, Execution, FailureClass, FailureDetail, LogRef, Outcome, Repro,
     SignedVerdict, SignerKind, StateRef, signed_verdict_from_signer,
 };
-use objects::object::{ChangeId, ContentHash};
+use heddle_object_model::object::{ChangeId, ContentHash};
 
 pub const SIGNED_AT: &str = "2026-06-11T18:05:54Z";
 

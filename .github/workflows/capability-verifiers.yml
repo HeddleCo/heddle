@@ -27,6 +27,8 @@ jobs:
           components: clippy
       - name: Native unit and conformance suite
         run: cargo test --locked -p heddleco-capability-verifier -p heddle-biscuit-verifier --all-targets -- --nocapture
+      - name: Keep signing and verification dependencies narrow
+        run: python3 ../../.github/check_leaf_dependencies.py
       - name: Clippy
         run: cargo clippy --locked -p heddleco-capability-verifier -p heddle-biscuit-verifier --all-targets -- -D warnings
       - name: Public crate documentation
