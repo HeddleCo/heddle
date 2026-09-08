@@ -134,3 +134,103 @@ fn publication_rejects_unindexed_bytes_even_when_selected_objects_are_complete()
         "an unindexed record must not cross the selected disclosure boundary"
     );
 }
+
+struct SelectedSource {
+    entries: Vec<(PackObjectId, ObjectType, Vec<u8>)>,
+    blob_reads: std::cell::Cell<usize>,
+}
+impl crate::object::ObjectSource for SelectedSource {
+    fn get_tree(&self, hash: &ContentHash) -> crate::store::Result<Option<Tree>> {
+        let bytes = self
+            .entries
+            .iter()
+            .find(|(id, kind, _)| *id == PackObjectId::Hash(*hash) && *kind == ObjectType::Tree);
+        Ok(bytes
+            .map(|(_, _, bytes)| Tree::decode_canonical(bytes))
+            .transpose()?)
+    }
+    fn get_state(&self, _: &StateId) -> crate::store::Result<Option<State>> {
+        panic!("source publication must never read historical States");
+    }
+    fn get_blob(&self, hash: &ContentHash) -> crate::store::Result<Option<Blob>> {
+        self.blob_reads.set(self.blob_reads.get() + 1);
+        let bytes = self
+            .entries
+            .iter()
+            .find(|(id, kind, _)| *id == PackObjectId::Hash(*hash) && *kind == ObjectType::Blob);
+        Ok(bytes.map(|(_, _, bytes)| Blob::new(bytes.clone())))
+    }
+    fn decoded_blob_len(&self, hash: &ContentHash) -> crate::store::Result<Option<u64>> {
+        Ok(self
+            .entries
+            .iter()
+            .find(|(id, kind, _)| *id == PackObjectId::Hash(*hash) && *kind == ObjectType::Blob)
+            .map(|(_, _, bytes)| bytes.len() as u64))
+    }
+}
+fn export_selected(
+    source: &SelectedSource,
+    state: &State,
+    max_objects: usize,
+    max_bytes: u64,
+) -> crate::store::Result<PackReader<'static>> {
+    let dir = tempfile::tempdir().expect("source spool");
+    let index_path = dir.path().join("index");
+    let builder = StreamingPackBuilder::new(
+        std::io::Cursor::new(Vec::new()),
+        index_path.clone(),
+        CompressionConfig::default(),
+        dir.path().join("buckets"),
+    )?;
+    let (pack, stats) = build_source_pack(builder, source, state, max_objects, max_bytes)?;
+    assert_eq!(stats.object_count, 3);
+    PackReader::from_bytes(pack.into_inner(), std::fs::read(index_path)?)
+}
+#[test]
+fn source_export_reads_only_selected_content_and_emits_a_complete_pack() {
+    let (state, entries) = fixture();
+    let source = SelectedSource {
+        entries,
+        blob_reads: std::cell::Cell::new(0),
+    };
+    let reader = export_selected(&source, &state, 16, 65536).expect("source-only export");
+    assert_eq!(
+        source.blob_reads.get(),
+        1,
+        "a file and symlink sharing content need only one read"
+    );
+    assert_eq!(
+        reader
+            .validate_source_closure(&state, 16, 65536)
+            .expect("exact closure")
+            .len(),
+        3
+    );
+}
+#[test]
+fn source_export_checks_address_and_budget_before_publication() {
+    let (state, entries) = fixture();
+    let mut source = SelectedSource {
+        entries,
+        blob_reads: std::cell::Cell::new(0),
+    };
+    assert!(
+        export_selected(&source, &state, 2, 65536).is_err(),
+        "object budget must apply before writing the excess object"
+    );
+    assert_eq!(
+        source.blob_reads.get(),
+        0,
+        "known excess objects must not be loaded"
+    );
+    assert!(
+        export_selected(&source, &state, 16, 1).is_err(),
+        "decoded byte budget"
+    );
+    assert_eq!(source.blob_reads.get(), 0);
+    source.entries[2].2 = b"wrong bytes under the original address".to_vec();
+    assert!(
+        export_selected(&source, &state, 16, 65536).is_err(),
+        "producer must reject a corrupt source address"
+    );
+}
