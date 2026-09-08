@@ -47,6 +47,7 @@ mod owner_authorization_tests;
 mod owner_root;
 #[cfg(test)]
 mod owner_root_tests;
+pub mod thread_replication;
 pub use owner_authorization::sign_spool_owner_genesis;
 pub use owner_root::{
     CLAIMABLE_DEFERRED_HUMAN_TTL_SECS, ClaimDeferredHuman, OWNER_TRANSITION_DOMAIN,

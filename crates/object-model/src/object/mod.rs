@@ -184,3 +184,5 @@ pub use tree_stream::{
 };
 pub use tree_walk::{TreeIntegrityEvent, walk_tree_integrity};
 pub use visibility_tier::VisibilityTier;
+
+pub mod thread_replication;
