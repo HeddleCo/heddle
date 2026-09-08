@@ -196,11 +196,13 @@ fn sign_request(
             }),
             caller_public_key: browser.public_key().to_vec(),
             // Device checks presence/key binding; Weft verifies these passkey bytes.
-            passkey: Some(PasskeyRegistration {
-                credential_id: vec![1],
-                client_data_json: vec![2],
-                attestation_object: vec![3],
-            }),
+            proof: Some(complete_registration_request::Proof::Passkey(
+                PasskeyRegistration {
+                    credential_id: vec![1],
+                    client_data_json: vec![2],
+                    attestation_object: vec![3],
+                },
+            )),
             device_binding: Some(PasskeyProof::default()),
             ..Default::default()
         }),

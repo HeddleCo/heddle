@@ -332,6 +332,7 @@ pub(crate) fn provision_response_for_test(
                 ..Default::default()
             }),
             owner_authorization: None,
+            ..Default::default()
         }),
         claim_web_origin: origin.into(),
         ..Default::default()

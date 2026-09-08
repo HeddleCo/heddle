@@ -136,7 +136,10 @@ pub(crate) fn handle_with_authority(
                     .challenge
                     .as_ref()
                     .is_none_or(|challenge| challenge.id.is_empty())
-                || registration.passkey.as_ref().is_none_or(|passkey| {
+                || registration.proof.as_ref().is_none_or(|proof| {
+                    let complete_registration_request::Proof::Passkey(passkey) = proof else {
+                        return true;
+                    };
                     passkey.credential_id.is_empty()
                         || passkey.client_data_json.is_empty()
                         || passkey.attestation_object.is_empty()
