@@ -39,7 +39,11 @@ fn genesis(repository: &Repository) -> ThreadGenesis {
         base: repository.head().expect("HEAD").expect("base"),
         name: "live".into(),
         intent: "live source metadata".into(),
-        creator: [17; 32],
+        creator: Ed25519Signer::from_seed(&[17; 32])
+            .expect("creator")
+            .public_key()
+            .try_into()
+            .expect("public key"),
         nonce: vec![],
     }
 }
@@ -166,7 +170,15 @@ async fn irohs_open_stream_syncs_later_writes_honors_opt_in_and_stops_on_root_de
         },
         facets.clone(),
     )
-    .expect("left peer");
+    .expect("left peer")
+    .with_genesis(
+        opening::sign_genesis(
+            &genesis,
+            &Ed25519Signer::from_seed(&[17; 32]).expect("origin key"),
+        )
+        .expect("signed creation record"),
+    )
+    .expect("original genesis travels with publication");
     let right_peer = Peer::new(
         right.clone(),
         EndpointRef {

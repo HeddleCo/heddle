@@ -2,7 +2,10 @@
 //! This validates transport bindings and limits; it does not grant authority.
 use std::collections::BTreeSet;
 
-use heddle_object_model::object::thread_replication::{OPERATION_FORMAT, ThreadFacet};
+use crypto::{Signer, thread_operation::SignedGenesis};
+use heddle_object_model::object::thread_replication::{
+    GENESIS_FORMAT, OPERATION_FORMAT, ThreadFacet, ThreadGenesis,
+};
 
 use crate::{contract::*, transport::Error};
 
@@ -41,8 +44,9 @@ pub fn parse_facets(values: &[i32]) -> Result<BTreeSet<ThreadFacet>, Error> {
 }
 
 /// The remote key must come from the authenticated transport, never the frame.
-/// Creation is a separate authorized operation; this opening cannot install
-/// or replace a Thread genesis. The caller verifies PoP over the exact bytes.
+/// An attached genesis retains the original creator's signature and identity.
+/// The host must authorize publication and commit that genesis before Ready;
+/// parsing it grants no authority. PoP covers the entire exact opening.
 pub fn accept(
     open: &ReplicationOpen,
     thread: &ThreadRef,
@@ -50,9 +54,9 @@ pub fn accept(
     remote_key: [u8; 32],
     admission: &BTreeSet<ThreadFacet>,
     sharing_policy_version: Vec<u8>,
-) -> Result<ReplicationReady, Error> {
+) -> Result<AcceptedOpening, Error> {
     validate_endpoint(local)?;
-    if open.thread.as_ref() != Some(thread) || open.thread_genesis.is_some() {
+    if open.thread.as_ref() != Some(thread) {
         return Err(Error::Protocol(
             "replication requires an already resolved Thread",
         ));
@@ -90,22 +94,79 @@ pub fn accept(
         return Err(Error::Protocol("no authorized replication facets"));
     }
     let requested = open.budget.as_ref().map_or(0, |budget| budget.max_items);
-    Ok(ReplicationReady {
-        thread: Some(thread.clone()),
-        endpoint: Some(local.clone()),
-        facets: facets.into_iter().map(super::wire_facet).collect(),
-        sharing_policy_version,
-        budget: Some(ReadBudget {
-            max_items: if requested == 0 {
-                MAX_ITEMS
-            } else {
-                requested.min(MAX_ITEMS)
-            },
-            max_frame_bytes: FRAME_LIMIT as u32,
-            max_snapshot_bytes: 0,
-        }),
-        record_formats: vec![OPERATION_FORMAT.into()],
+    let genesis = open
+        .thread_genesis
+        .as_ref()
+        .map(|record| verify_genesis(record, thread))
+        .transpose()?;
+    Ok(AcceptedOpening {
+        genesis,
+        ready: ReplicationReady {
+            thread: Some(thread.clone()),
+            endpoint: Some(local.clone()),
+            facets: facets.into_iter().map(super::wire_facet).collect(),
+            sharing_policy_version,
+            budget: Some(ReadBudget {
+                max_items: if requested == 0 {
+                    MAX_ITEMS
+                } else {
+                    requested.min(MAX_ITEMS)
+                },
+                max_frame_bytes: FRAME_LIMIT as u32,
+                max_snapshot_bytes: 0,
+            }),
+            record_formats: vec![OPERATION_FORMAT.into()],
+        },
     })
+}
+
+/// Parsed proposal; authorization and durable installation belong to the host.
+pub struct AcceptedOpening {
+    pub ready: ReplicationReady,
+    pub genesis: Option<ThreadGenesis>,
+}
+
+pub fn sign_genesis(genesis: &ThreadGenesis, signer: &impl Signer) -> Result<SignedRecord, Error> {
+    let signed =
+        SignedGenesis::sign(genesis, signer).map_err(|error| Error::Io(error.to_string()))?;
+    Ok(SignedRecord {
+        format: GENESIS_FORMAT.into(),
+        canonical_record: signed.canonical,
+        signatures: vec![RecordSignature {
+            public_key: genesis.creator.to_vec(),
+            signature: signed.signature,
+        }],
+    })
+}
+
+pub fn verify_genesis(record: &SignedRecord, thread: &ThreadRef) -> Result<ThreadGenesis, Error> {
+    if record.format != GENESIS_FORMAT || record.signatures.len() != 1 {
+        return Err(Error::Protocol("unsupported Thread genesis record"));
+    }
+    let genesis = SignedGenesis {
+        canonical: record.canonical_record.clone(),
+        signature: record.signatures[0].signature.clone(),
+    }
+    .verify()
+    .map_err(|_| Error::Protocol("invalid Thread genesis signature"))?;
+    let id = genesis
+        .id()
+        .map_err(|_| Error::Protocol("invalid Thread genesis"))?;
+    if record.signatures[0].public_key != genesis.creator
+        || thread
+            .spool
+            .as_ref()
+            .is_none_or(|spool| spool.id != genesis.spool)
+        || thread
+            .id
+            .as_ref()
+            .is_none_or(|thread| thread.value != id.as_bytes())
+    {
+        return Err(Error::Protocol(
+            "Thread genesis identity does not match opening",
+        ));
+    }
+    Ok(genesis)
 }
 
 pub fn validate_ready(
@@ -153,33 +214,88 @@ mod tests {
     #[test]
     fn first_publication_retains_signed_genesis_and_rejects_changed_identity() {
         use crypto::{Ed25519Signer, Signer};
-        use heddle_object_model::object::{StateId, thread_replication::{ThreadGenesis, GENESIS_FORMAT}};
-        let signer = Ed25519Signer::from_seed(&[23;32]).expect("origin device");
-        let genesis = ThreadGenesis { version: 1, spool: "spool".into(), parent: None,
-            base: StateId::from_bytes([1;32]), name: "original".into(), intent: "publish once".into(),
-            creator: signer.public_key().try_into().expect("public key"), nonce: vec![2;16] };
+        use heddle_object_model::object::{
+            StateId,
+            thread_replication::{GENESIS_FORMAT, ThreadGenesis},
+        };
+        let signer = Ed25519Signer::from_seed(&[23; 32]).expect("origin device");
+        let genesis = ThreadGenesis {
+            version: 1,
+            spool: "spool".into(),
+            parent: None,
+            base: StateId::from_bytes([1; 32]),
+            name: "original".into(),
+            intent: "publish once".into(),
+            creator: signer.public_key().try_into().expect("public key"),
+            nonce: vec![2; 16],
+        };
         let canonical = genesis.encode().expect("canonical genesis");
-        let mut signing = GENESIS_FORMAT.as_bytes().to_vec(); signing.push(0); signing.extend(&canonical);
-        let signed = SignedRecord { format: GENESIS_FORMAT.into(), canonical_record: canonical,
-            signatures: vec![RecordSignature { public_key: signer.public_key().to_vec(), signature: signer.sign(&signing).expect("origin signature") }] };
-        let thread = ThreadRef { spool: Some(SpoolRef { id: genesis.spool.clone() }), id: Some(ThreadId { value: genesis.id().expect("Thread ID").as_bytes().to_vec() }) };
-        let local = EndpointRef { public_key: vec![7;32], kind: EndpointKind::Weft as i32 };
-        let open = ReplicationOpen { thread: Some(thread.clone()), thread_genesis: Some(signed),
-            source: Some(EndpointRef { public_key: vec![8;32], kind: EndpointKind::Device as i32 }), destination: Some(local.clone()),
-            facets: vec![SharedFacet::Source as i32], session_nonce: vec![9;16], record_formats: vec![OPERATION_FORMAT.into()], ..Default::default() };
+        let mut signing = GENESIS_FORMAT.as_bytes().to_vec();
+        signing.push(0);
+        signing.extend(&canonical);
+        let signed = SignedRecord {
+            format: GENESIS_FORMAT.into(),
+            canonical_record: canonical,
+            signatures: vec![RecordSignature {
+                public_key: signer.public_key().to_vec(),
+                signature: signer.sign(&signing).expect("origin signature"),
+            }],
+        };
+        let thread = ThreadRef {
+            spool: Some(SpoolRef {
+                id: genesis.spool.clone(),
+            }),
+            id: Some(ThreadId {
+                value: genesis.id().expect("Thread ID").as_bytes().to_vec(),
+            }),
+        };
+        let local = EndpointRef {
+            public_key: vec![7; 32],
+            kind: EndpointKind::Weft as i32,
+        };
+        let open = ReplicationOpen {
+            thread: Some(thread.clone()),
+            thread_genesis: Some(signed),
+            source: Some(EndpointRef {
+                public_key: vec![8; 32],
+                kind: EndpointKind::Device as i32,
+            }),
+            destination: Some(local.clone()),
+            facets: vec![SharedFacet::Source as i32],
+            session_nonce: vec![9; 16],
+            record_formats: vec![OPERATION_FORMAT.into()],
+            ..Default::default()
+        };
         let facets = BTreeSet::from([ThreadFacet::Source]);
-        assert!(accept(&open, &thread, &local, [8;32], &facets, vec![]).is_ok(), "first publication must accept the original signed genesis");
+        assert!(
+            accept(&open, &thread, &local, [8; 32], &facets, vec![]).is_ok(),
+            "first publication must accept the original signed genesis"
+        );
         let mut changed = open.clone();
         changed.thread_genesis.as_mut().expect("genesis").signatures[0].signature[0] ^= 1;
-        assert!(accept(&changed, &thread, &local, [8;32], &facets, vec![]).is_err());
+        assert!(accept(&changed, &thread, &local, [8; 32], &facets, vec![]).is_err());
         changed = open.clone();
-        changed.thread.as_mut().expect("Thread").id.as_mut().expect("ID").value[0] ^= 1;
+        changed
+            .thread
+            .as_mut()
+            .expect("Thread")
+            .id
+            .as_mut()
+            .expect("ID")
+            .value[0] ^= 1;
         let claimed = changed.thread.clone().expect("claimed Thread");
-        assert!(accept(&changed, &claimed, &local, [8;32], &facets, vec![]).is_err());
+        assert!(accept(&changed, &claimed, &local, [8; 32], &facets, vec![]).is_err());
         changed = open;
-        changed.thread.as_mut().expect("Thread").spool.as_mut().expect("spool").id = "another".into();
+        changed
+            .thread
+            .as_mut()
+            .expect("Thread")
+            .spool
+            .as_mut()
+            .expect("spool")
+            .id = "another".into();
         let claimed = changed.thread.clone().expect("claimed Thread");
-        assert!(accept(&changed, &claimed, &local, [8;32], &facets, vec![]).is_err());
+        assert!(accept(&changed, &claimed, &local, [8; 32], &facets, vec![]).is_err());
     }
 
     #[test]
@@ -217,7 +333,8 @@ mod tests {
         };
         let allowed = BTreeSet::from([ThreadFacet::Source]);
         let ready = accept(&open, &thread, &local, [2; 32], &allowed, vec![5; 32])
-            .expect("authorized opening");
+            .expect("authorized opening")
+            .ready;
         assert_eq!(
             validate_ready(&ready, &thread, &local, &facets, 1).expect("bound ready"),
             (allowed.clone(), 1)

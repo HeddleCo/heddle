@@ -47,7 +47,11 @@ consumer's responsibility.
 ## Live native replication
 
 `replication_rpc::Peer` opens one `SyncService.ReplicateThread` exchange for a
-known Thread. `live_replication::Feed` is shared across streams for that Thread;
+Thread. Attach its original creation record with `Peer::with_genesis` and
+`replication::opening::sign_genesis` for first publication: an authorized hosted
+receiver can create the same replica in this opening. The creator's signature
+and canonical hash remain unchanged when another authorized device relays it.
+`live_replication::Feed` is shared across streams for that Thread;
 it detects writes from other processes through the durable database generation.
 Source and discussion operations have separate causal graphs and sharing facets.
 Each destination remains private by default until its Thread sharing policy opts

@@ -39,6 +39,7 @@ pub struct Peer {
     replica: ThreadReplica,
     endpoint: EndpointRef,
     facets: BTreeSet<ThreadFacet>,
+    genesis: Option<SignedRecord>,
 }
 impl Peer {
     pub fn new(
@@ -56,7 +57,16 @@ impl Peer {
             replica,
             endpoint,
             facets,
+            genesis: None,
         })
+    }
+
+    /// Attach the creator's durable proof for first publication. The receiver
+    /// can install the same Thread in the opening instead of creating a new ID.
+    pub fn with_genesis(mut self, genesis: SignedRecord) -> Result<Self, transport::Error> {
+        opening::verify_genesis(&genesis, &self.reference()?)?;
+        self.genesis = Some(genesis);
+        Ok(self)
     }
 
     fn reference(&self) -> Result<ThreadRef, transport::Error> {
@@ -103,7 +113,7 @@ impl Peer {
                 .map(replication::wire_facet)
                 .collect(),
             sharing_policy_version: version.map(|v| v.as_bytes().to_vec()).unwrap_or_default(),
-            thread_genesis: None,
+            thread_genesis: self.genesis.clone(),
             budget: Some(ReadBudget {
                 max_items: 64,
                 max_frame_bytes: FRAME_LIMIT as u32,
@@ -209,7 +219,8 @@ impl Peer {
                 remote_key,
                 &peer.facets,
                 version.map(|v| v.as_bytes().to_vec()).unwrap_or_default(),
-            )?;
+            )?
+            .ready;
             let (facets, max_items) = opening::validate_ready(
                 &ready,
                 &peer.reference()?,
