@@ -50,6 +50,7 @@ pub fn sign(
         credential_digest: blake3::hash(credential).as_bytes().to_vec(),
         not_before_unix_seconds,
         expires_at_unix_seconds,
+        ..Default::default()
     };
     validate(&binding, credential)?;
     let canonical_record = binding.encode_to_vec();
