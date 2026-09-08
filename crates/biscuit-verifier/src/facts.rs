@@ -270,7 +270,8 @@ pub struct BiscuitFacts {
     /// `bootstrap_session(true)` marker before recovery setup (weft#182).
     pub bootstrap_session: bool,
     /// Whether ObserveIdentity must return the least-privileged self-introspection
-    /// shape because the bearer is attenuated or carries a route ceiling.
+    /// shape because a route ceiling grants self-introspection as an exception.
+    /// Delegating a proof key alone preserves the parent's account authority.
     ///
     /// `pub` (was `pub(crate)`) so the ObserveIdentity handler in `weft-server` can read
     /// it across the weft#719 phase 3 crate boundary. Set only by
@@ -521,8 +522,7 @@ impl BiscuitFacts {
         // `staff_marker_any_block` is NOT consulted here — it exists only for
         // the client-mint fence.
         let is_staff = authority_staff_marker(authorizer)?;
-        let identity_observation_bounds =
-            identity_observation_bounds(biscuit.block_count(), &checks, &rights, is_staff);
+        let identity_observation_bounds = identity_observation_bounds(&checks, &rights, is_staff);
 
         // Render a scope `scope` string for the legacy consumers
         // that haven't been swung over to the BiscuitFacts helpers
@@ -1203,12 +1203,11 @@ struct IdentityObservationBounds {
 /// exemption makes ObserveIdentity callable through an otherwise restrictive caveat,
 /// so the response cannot simply echo the authority block's broader scope.
 fn identity_observation_bounds(
-    block_count: usize,
     checks: &[Check],
     rights: &[Right],
     is_staff: bool,
 ) -> IdentityObservationBounds {
-    let mut limited = block_count > 1;
+    let mut limited = false;
     let mut resource_ceiling_groups: Vec<Vec<Rule>> = Vec::new();
 
     for check in checks {
