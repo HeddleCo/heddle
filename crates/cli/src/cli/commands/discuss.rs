@@ -883,6 +883,34 @@ fn anchor_label(value: &AnchorOutput) -> String {
     match value {
         AnchorOutput::Repository => "repository".to_string(),
         AnchorOutput::State { state_id } => state_id.clone(),
+        AnchorOutput::Source {
+            state_id,
+            git_commit_oid,
+            path,
+            symbol_id,
+            start_line,
+            end_line,
+        } => {
+            let revision = state_id
+                .as_deref()
+                .or(git_commit_oid.as_deref())
+                .unwrap_or("unknown revision");
+            let mut location = if path.is_empty() {
+                revision.to_string()
+            } else {
+                format!("{revision}:{path}")
+            };
+            if !symbol_id.is_empty() {
+                location.push_str(&format!(":{symbol_id}"));
+            }
+            if let Some(start) = start_line {
+                location.push_str(&format!(":{start}"));
+            }
+            if let Some(end) = end_line {
+                location.push_str(&format!("-{end}"));
+            }
+            location
+        }
         AnchorOutput::Change { change_id } => change_id.clone(),
         AnchorOutput::Path { path, .. } => path.clone(),
         AnchorOutput::Symbol { path, symbol, .. } => format!("{path}:{symbol}"),
