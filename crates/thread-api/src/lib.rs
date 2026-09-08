@@ -7,6 +7,8 @@ pub mod content;
 #[cfg(feature = "replication")]
 pub mod live_replication;
 pub mod observation;
+#[cfg(any(feature = "native", feature = "replication", feature = "iroh"))]
+pub mod publication;
 #[cfg(feature = "replication")]
 pub mod replication;
 #[cfg(all(feature = "native", feature = "iroh"))]
