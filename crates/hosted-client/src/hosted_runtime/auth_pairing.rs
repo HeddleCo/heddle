@@ -49,11 +49,12 @@ pub(super) async fn login(
             .r#ref
             .clone()
             .context("pairing response omitted reference")?;
+        let pending_device = match pending.receiver.as_ref() {
+            Some(api::pairing_record::Receiver::Device(device)) => device.clone(),
+            _ => bail!("daemon pairing requires an actual device endpoint"),
+        };
         if pending.subject_public_key != subject.public_key()
-            || pending
-                .device
-                .as_ref()
-                .is_none_or(|device| device.public_key != endpoint.public_key())
+            || pending_device.public_key != endpoint.public_key()
             || pending.challenge.len() != 32
         {
             bail!("pairing response does not name the enrolling device keys");
@@ -101,12 +102,14 @@ pub(super) async fn login(
                 if let api::pairing_event::Payload::Pairing(record) = change {
                     if record.r#ref.as_ref() != Some(&reference)
                         || record.subject_public_key != pending.subject_public_key
-                        || record.device != pending.device
+                        || record.receiver != pending.receiver
                         || record.challenge != pending.challenge
                     {
                         bail!("pairing observation changed the enrolled device");
                     }
-                    if let Some(binding) = record.approval_binding {
+                    if let Some(api::pairing_record::Approval::ApprovalBinding(binding)) =
+                        record.approval
+                    {
                         approved = Some(binding);
                     }
                 }
@@ -117,7 +120,7 @@ pub(super) async fn login(
         };
         drop(observation);
         if binding.subject_public_key != pending.subject_public_key
-            || binding.device != pending.device
+            || binding.device.as_ref() != Some(&pending_device)
             || binding.pairing_challenge != pending.challenge
         {
             bail!("approval commitment differs from pending pairing");
@@ -130,7 +133,9 @@ pub(super) async fn login(
             .call::<rpc::IdentityServiceCompletePairing>(&api::CompletePairingRequest {
                 client_operation_id: operation.clone(),
                 pairing: Some(reference),
-                attachment: Some(attachment.clone()),
+                proof: Some(api::complete_pairing_request::Proof::Attachment(
+                    attachment.clone(),
+                )),
             })
             .await?;
         finish(

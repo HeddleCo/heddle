@@ -121,7 +121,7 @@ fn overview(version: u8, outcome: &str) -> ThreadOverview {
         }),
         source_heads: vec![revision()],
         integrated_revision: Some(revision()),
-        capture_count: 1,
+        capture_count: Some(1),
         ..Default::default()
     }
 }
