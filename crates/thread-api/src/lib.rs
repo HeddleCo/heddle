@@ -5,6 +5,8 @@
 pub mod authority;
 pub mod content;
 #[cfg(feature = "replication")]
+pub mod creation;
+#[cfg(feature = "replication")]
 pub mod live_replication;
 pub mod observation;
 #[cfg(any(feature = "native", feature = "replication", feature = "iroh"))]

@@ -69,3 +69,21 @@ fn creation_rejects_a_changed_creator_record_and_invalid_operation_identity() {
     changed.canonical_record = claimed.encode().expect("changed canonical record");
     assert!(ThreadCreation::from_signed("01980000-0000-7000-8000-000000000002", changed).is_err());
 }
+
+#[test]
+fn creation_rejects_mutable_or_noncanonical_spool_identity() {
+    let signer = Ed25519Signer::from_seed(&[11; 32]).expect("creator");
+    for spool in [
+        "org/name",
+        "00000000-0000-0000-0000-000000000000",
+        "01980000-0000-7000-8000-ABCDEFABCDEF",
+    ] {
+        let mut genesis = genesis(&signer);
+        genesis.spool = spool.into();
+        assert!(
+            ThreadCreation::sign("01980000-0000-7000-8000-000000000002", &genesis, &signer)
+                .is_err(),
+            "a private Thread must be publishable without changing its identity: {spool}"
+        );
+    }
+}
