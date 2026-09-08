@@ -256,6 +256,122 @@ pub fn anchor(
     )
 }
 
+/// Native audiences map exactly to canonical tiers. An omitted audience must
+/// never silently turn a private record into public data.
+pub fn visibility(
+    audience: i32,
+    label: &str,
+) -> Result<heddle_object_model::object::VisibilityTier, Error> {
+    use heddle_object_model::object::VisibilityTier as Tier;
+    match Audience::try_from(audience) {
+        Ok(Audience::Public) if label.is_empty() => Ok(Tier::Public),
+        Ok(Audience::Members) if label.is_empty() => Ok(Tier::Internal),
+        Ok(Audience::Private)
+            if !label.trim().is_empty()
+                && label.len() <= 512
+                && !label.chars().any(char::is_control) =>
+        {
+            Ok(Tier::Private {
+                scope_label: label.into(),
+            })
+        }
+        _ => Err(Error::Protocol(
+            "explicit audience and matching private label required",
+        )),
+    }
+}
+/// None means this canonical tier has no lossless native audience projection;
+/// callers retain its original signed record and original visibility guard.
+pub fn audience(tier: &heddle_object_model::object::VisibilityTier) -> Option<(Audience, String)> {
+    use heddle_object_model::object::VisibilityTier as Tier;
+    match tier {
+        Tier::Public => Some((Audience::Public, String::new())),
+        Tier::Internal => Some((Audience::Members, String::new())),
+        Tier::Private { scope_label } => Some((Audience::Private, scope_label.clone())),
+        Tier::TeamScoped { .. } | Tier::Restricted { .. } => None,
+    }
+}
+
+/// Project source location and ownership without discarding path, symbol or
+/// line information. Change anchors require an exact source revision first.
+pub fn anchor_ref(
+    value: &heddle_object_model::object::CollaborationAnchor,
+    scope: &heddle_object_model::object::CollaborationScope,
+) -> Result<CollaborationAnchor, Error> {
+    use heddle_object_model::object::{
+        CollaborationAnchor as Anchor, CollaborationRevision as Revision,
+    };
+    let thread = scope.thread.map(|id| ThreadRef {
+        spool: wire_spool(scope.spool),
+        id: Some(ThreadId {
+            value: id.as_bytes().to_vec(),
+        }),
+    });
+    let source = match value {
+        Anchor::Repository => {
+            return Ok(CollaborationAnchor {
+                target: Some(match thread {
+                    Some(thread) => collaboration_anchor::Target::Thread(thread),
+                    None => collaboration_anchor::Target::Spool(SpoolRef {
+                        id: scope.spool.to_string(),
+                    }),
+                }),
+            });
+        }
+        Anchor::Source { source } => SourceAnchor {
+            revision: Some(RevisionRef {
+                spool: wire_spool(scope.spool),
+                revision: Some(match &source.revision {
+                    Revision::State { state_id } => {
+                        revision_ref::Revision::State(api::heddle::api::v1alpha1::StateId {
+                            value: state_id.as_bytes().to_vec(),
+                        })
+                    }
+                    Revision::GitCommit { oid } => {
+                        revision_ref::Revision::GitCommitOid(oid.clone())
+                    }
+                }),
+            }),
+            path: source.path.clone(),
+            symbol_id: source.symbol_id.clone(),
+            start_line: source.start_line,
+            end_line: source.end_line,
+            thread,
+        },
+        Anchor::State { state_id }
+        | Anchor::Path { state_id, .. }
+        | Anchor::Symbol { state_id, .. } => SourceAnchor {
+            revision: Some(RevisionRef {
+                spool: wire_spool(scope.spool),
+                revision: Some(revision_ref::Revision::State(
+                    api::heddle::api::v1alpha1::StateId {
+                        value: state_id.as_bytes().to_vec(),
+                    },
+                )),
+            }),
+            path: match value {
+                Anchor::Path { path, .. } | Anchor::Symbol { path, .. } => path.clone(),
+                _ => String::new(),
+            },
+            symbol_id: match value {
+                Anchor::Symbol { symbol, .. } => symbol.clone(),
+                _ => String::new(),
+            },
+            start_line: None,
+            end_line: None,
+            thread,
+        },
+        Anchor::Change { .. } => {
+            return Err(Error::Protocol(
+                "change anchor requires exact source revision",
+            ));
+        }
+    };
+    Ok(CollaborationAnchor {
+        target: Some(collaboration_anchor::Target::Source(source)),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,6 +483,11 @@ mod tests {
             ),
             ("src/main.rs", "run", Some(12), Some(18))
         );
+        assert_eq!(
+            anchor_ref(&Anchor::Source { source: actual }, &scope).expect("source projection"),
+            value,
+            "source fields survive both directions"
+        );
         source
             .thread
             .as_mut()
@@ -384,6 +505,41 @@ mod tests {
             )
             .is_err(),
             "source must not escape the Thread"
+        );
+    }
+    #[test]
+    fn audience_mapping_is_explicit_and_lossless() {
+        use heddle_object_model::object::VisibilityTier as Tier;
+        for (kind, label) in [
+            (Audience::Public, ""),
+            (Audience::Members, ""),
+            (Audience::Private, "review-team"),
+        ] {
+            let tier = visibility(kind as i32, label).expect("valid audience");
+            assert_eq!(audience(&tier), Some((kind, label.into())));
+        }
+        for (kind, label) in [
+            (Audience::Unspecified, ""),
+            (Audience::Private, ""),
+            (Audience::Public, "review-team"),
+            (Audience::Members, "review-team"),
+        ] {
+            assert!(
+                visibility(kind as i32, label).is_err(),
+                "must not change audience or fabricate label"
+            );
+        }
+        assert!(
+            audience(&Tier::TeamScoped {
+                team_id: "team".into()
+            })
+            .is_none()
+        );
+        assert!(
+            audience(&Tier::Restricted {
+                scope_label: "restricted".into()
+            })
+            .is_none()
         );
     }
 }

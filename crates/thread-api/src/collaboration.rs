@@ -9,7 +9,7 @@ use heddle_object_model::object::{
     CollaborationOperationEnvelope, ContentHash, ContextRevision, DiscussionRecordId,
     thread_replication::{OPERATION_FORMAT, ThreadOperation, ThreadOperationBody},
 };
-pub use references::{anchor, mention, mention_ref};
+pub use references::{anchor, anchor_ref, audience, mention, mention_ref, visibility};
 
 use crate::{
     contract::{RecordSignature, SignedRecord},
