@@ -193,3 +193,79 @@ async fn exchange_receives_before_request_fin_and_half_close_keeps_responses_ali
     local.close().await;
     server.close().await;
 }
+
+#[tokio::test]
+async fn a_quiet_live_stream_stays_open_past_the_frame_progress_timeout() {
+    let (server, local, outgoing, incoming) = endpoints().await;
+    let (mut send, _) = outgoing.open_bi().await.expect("stream");
+    send.write_all(&framing::encode_stream_message(&[1]).expect("frame"))
+        .await
+        .expect("opening response");
+    let (_, recv) = incoming.accept_bi().await.expect("receive");
+    let mut reader = Reader::new(recv, 1024, Duration::from_millis(80));
+    assert_eq!(reader.next().await.expect("initial frame"), Some(vec![1]));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(240), reader.next())
+            .await
+            .is_err(),
+        "waiting for the next live event is not stalled frame progress"
+    );
+    send.write_all(&framing::encode_stream_message(&[2]).expect("frame"))
+        .await
+        .expect("later event");
+    assert_eq!(
+        reader.next().await.expect("live stream survived idle"),
+        Some(vec![2])
+    );
+    reader.cancel();
+    local.close().await;
+    server.close().await;
+}
+
+#[tokio::test]
+async fn partial_frame_deadline_survives_canceling_and_resuming_next() {
+    let (server, local, outgoing, incoming) = endpoints().await;
+    let (mut send, _) = outgoing.open_bi().await.expect("stream");
+    send.write_all(&framing::encode_stream_message(&[1]).expect("frame"))
+        .await
+        .expect("opening response");
+    let (_, recv) = incoming.accept_bi().await.expect("receive");
+    let mut reader = Reader::new(recv, 1024, Duration::from_millis(250));
+    assert_eq!(reader.next().await.expect("first frame"), Some(vec![1]));
+    send.write_all(&[0, 0]).await.expect("start next frame");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), reader.next())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        reader.buffer,
+        [0, 0],
+        "cancel after consuming the frame prefix"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    send.write_all(&[0, 0, 1, 2])
+        .await
+        .expect("late completion");
+    assert!(
+        matches!(reader.next().await, Err(Error::Timeout)),
+        "a new next() call cannot restart a partially consumed frame's deadline"
+    );
+    local.close().await;
+    server.close().await;
+}
+
+#[tokio::test]
+async fn the_initial_stream_response_still_requires_timely_progress() {
+    let (server, local, outgoing, incoming) = endpoints().await;
+    let (mut send, recv) = outgoing.open_bi().await.expect("stream");
+    send.write_all(&[1]).await.expect("request opens stream");
+    let (_response, _request) = incoming
+        .accept_bi()
+        .await
+        .expect("server holds response open");
+    let mut reader = Reader::new(recv, 1024, Duration::from_millis(80));
+    assert!(matches!(reader.next().await, Err(Error::Timeout)));
+    local.close().await;
+    server.close().await;
+}
