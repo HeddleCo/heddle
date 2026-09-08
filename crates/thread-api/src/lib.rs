@@ -73,30 +73,44 @@ impl<T: RpcTransport<Error = Error>> Remote<T> {
         Ok(Self { api, description })
     }
 
-    /// Observe typed results for one pinned revision pair. Pagination and live
-    /// replacement use the same atomic checkpoint client as Thread views.
-    pub async fn observe_analysis(
+    /// Observe any contract view as atomic bounded batches. The bookmark binds
+    /// the exact method and projection as well as the authenticated endpoint.
+    pub async fn observe<M>(
         &self,
-        mut request: contract::ObserveAnalysisRequest,
+        mut request: M::Request,
         resume: Option<observation::Resume>,
-    ) -> Result<observation::AnalysisObservation<T::Reader>, observation::Error> {
+    ) -> Result<observation::Observation<T::Reader, M::Response>, observation::Error>
+    where
+        M: api::v2::client::ServerStreamingRpc,
+        M::Request: observation::ObservationRequest,
+        M::Response: observation::ObservedEvent,
+    {
+        use observation::ObservationRequest as _;
         let budget = observation::budget(&self.description)?;
-        let options = request.observe.get_or_insert_default();
+        let options = request.options_mut();
         options.budget = Some(budget);
         options.after_cursor.clear();
-        let query = prost::Message::encode_to_vec(&request);
+        let mut query = b"heddle-observation-query-v2\0".to_vec();
+        query.extend_from_slice(M::METHOD.path.as_bytes());
+        query.push(0);
+        query.extend_from_slice(&prost::Message::encode_to_vec(&request));
         observation::validate_resume(&resume, &self.description, &query)?;
-        if let Some(options) = request.observe.as_mut() {
-            options.after_cursor = resume
-                .as_ref()
-                .map(|r| r.cursor.clone())
-                .unwrap_or_default();
+        if let Some(resume) = &resume {
+            request.options_mut().after_cursor = resume.cursor.clone();
         }
-        let messages = self
-            .api
-            .observe::<rpc::AnalysisServiceObserveAnalysis>(&request)
-            .await?;
-        observation::AnalysisObservation::new(messages, &self.description, budget, resume, query)
+        let messages = self.api.observe::<M>(&request).await?;
+        observation::Observation::new(messages, &self.description, budget, resume, query)
+    }
+
+    /// Source-backed analysis uses the same committed view protocol as identity,
+    /// collaboration, checkouts and Thread observations.
+    pub async fn observe_analysis(
+        &self,
+        request: contract::ObserveAnalysisRequest,
+        resume: Option<observation::Resume>,
+    ) -> Result<observation::AnalysisObservation<T::Reader>, observation::Error> {
+        self.observe::<rpc::AnalysisServiceObserveAnalysis>(request, resume)
+            .await
     }
 
     /// Binding a Thread is local and costs no RPC. Persist this stable reference
@@ -145,40 +159,19 @@ impl<T: RpcTransport<Error = Error>> Thread<'_, T> {
         mode: contract::ObservationMode,
         resume: Option<observation::Resume>,
     ) -> Result<observation::ThreadObservation<T::Reader>, observation::Error> {
-        let budget = observation::budget(&self.remote.description)?;
-        let mut request = contract::ObserveThreadRequest {
-            thread: Some(self.reference.clone()),
-            sections: sections.iter().map(|s| *s as i32).collect(),
-            observe: Some(contract::ObserveOptions {
-                mode: mode as i32,
-                after_cursor: resume
-                    .as_ref()
-                    .map(|r| r.cursor.clone())
-                    .unwrap_or_default(),
-                budget: Some(budget),
-            }),
-            ..Default::default()
-        };
-        let cursor = request
-            .observe
-            .as_mut()
-            .map(|o| std::mem::take(&mut o.after_cursor));
-        let query = prost::Message::encode_to_vec(&request);
-        observation::validate_resume(&resume, &self.remote.description, &query)?;
-        if let Some(options) = request.observe.as_mut() {
-            options.after_cursor = cursor.unwrap_or_default();
-        }
-        let messages = self
-            .remote
-            .api
-            .observe::<rpc::ThreadServiceObserveThread>(&request)
-            .await?;
-        observation::ThreadObservation::new(
-            messages,
-            &self.remote.description,
-            budget,
-            resume,
-            query,
-        )
+        self.remote
+            .observe::<rpc::ThreadServiceObserveThread>(
+                contract::ObserveThreadRequest {
+                    thread: Some(self.reference.clone()),
+                    sections: sections.iter().map(|section| *section as i32).collect(),
+                    observe: Some(contract::ObserveOptions {
+                        mode: mode as i32,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                resume,
+            )
+            .await
     }
 }

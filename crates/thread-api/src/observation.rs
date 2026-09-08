@@ -182,6 +182,70 @@ impl ObservedEvent for AnalysisEvent {
     }
 }
 
+/// Request shapes with the common observation controls. Typed RPC selection still
+/// comes from the contract; this trait never guesses a method from a payload.
+pub trait ObservationRequest: prost::Message {
+    fn options_mut(&mut self) -> &mut ObserveOptions;
+}
+macro_rules! observation_requests {
+    ($($request:ty),+ $(,)?) => { $(
+        impl ObservationRequest for $request {
+            fn options_mut(&mut self) -> &mut ObserveOptions {
+                self.observe.get_or_insert_default()
+            }
+        }
+    )+ };
+}
+observation_requests!(
+    ObserveThreadRequest,
+    ObserveThreadsRequest,
+    ObserveAnalysisRequest,
+    ObserveIdentityRequest,
+    ObservePairingRequest,
+    ObserveOwnershipRequest,
+    ObserveWorkspaceRequest,
+    ObserveSpoolRequest,
+    ObserveCollaborationRequest,
+    ObserveCheckoutsRequest,
+    ObserveRunsRequest,
+    ObserveAttentionRequest,
+    ObserveNotificationsRequest,
+    ObserveOperationsRequest,
+    ObserveIntegrationsRequest,
+);
+
+macro_rules! observed_events {
+    ($($event:ty => $module:ident [$($removal:ident),*]),+ $(,)?) => { $(
+        impl ObservedEvent for $event {
+            type Payload = $module::Payload;
+            fn frame(&self) -> Option<&StreamFrame> { self.frame.as_ref() }
+            fn has_payload(&self) -> bool { self.payload.is_some() }
+            fn take_payload(&mut self) -> Option<Self::Payload> { self.payload.take() }
+            fn is_removal(&self) -> bool {
+                match &self.payload {
+                    $(Some($module::Payload::$removal(_)) => true,)*
+                    _ => false,
+                }
+            }
+        }
+    )+ };
+}
+observed_events!(
+    IdentityEvent => identity_event [Removal],
+    PairingEvent => pairing_event [],
+    OwnershipEvent => ownership_event [],
+    WorkspaceEvent => workspace_event [Removal],
+    SpoolEvent => spool_event [Removal],
+    ThreadListEvent => thread_list_event [Removal],
+    CollaborationEvent => collaboration_event [Removal],
+    CheckoutEvent => checkout_event [Removal],
+    RunEvent => run_event [Removal],
+    AttentionEvent => attention_event [Removal],
+    NotificationEvent => notification_event [Removal],
+    OperationEvent => operation_event [Removal],
+    IntegrationEvent => integration_event [Removal],
+);
+
 pub struct Observation<R: MessageReader<Error = transport::Error>, E: ObservedEvent> {
     messages: Messages<R, E>,
     state: Option<ObservationState>,

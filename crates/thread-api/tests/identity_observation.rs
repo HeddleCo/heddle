@@ -143,12 +143,36 @@ fn checkpoint(sequence: u64, cursor: u8, previous: Vec<u8>) -> IdentityEvent {
 
 #[tokio::test]
 async fn identity_observation_delivers_only_committed_identity_and_rejects_cross_method_resume() {
-    let remote = remote(vec![open(), change(2, "human", StreamDataKind::Snapshot), checkpoint(3, 1, vec![])]);
-    let mut view = remote.observe::<heddle_thread_api::rpc::IdentityServiceObserveIdentity>(ObserveIdentityRequest::default(), None).await.expect("identity observation");
-    let batch = view.next_commit().await.expect("checkpoint").expect("snapshot");
+    let remote = remote(vec![
+        open(),
+        change(2, "human", StreamDataKind::Snapshot),
+        checkpoint(3, 1, vec![]),
+    ]);
+    let mut view = remote
+        .observe::<heddle_thread_api::rpc::IdentityServiceObserveIdentity>(
+            ObserveIdentityRequest::default(),
+            None,
+        )
+        .await
+        .expect("identity observation");
+    let batch = view
+        .next_commit()
+        .await
+        .expect("checkpoint")
+        .expect("snapshot");
     assert!(batch.replace);
     assert!(matches!(&batch.changes[0], identity_event::Payload::Identity(p) if p.id == "human"));
     assert!(matches!(view.next_commit().await, Err(Error::Interrupted)));
-    let result = remote.observe::<heddle_thread_api::rpc::IdentityServiceObservePairing>(ObservePairingRequest::default(), Some(batch.resume)).await;
-    assert!(matches!(result, Err(Error::Invalid("resume belongs to a different source or projection"))));
+    let result = remote
+        .observe::<heddle_thread_api::rpc::RunServiceObserveRuns>(
+            ObserveRunsRequest::default(),
+            Some(batch.resume),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(Error::Invalid(
+            "resume belongs to a different source or projection"
+        ))
+    ));
 }

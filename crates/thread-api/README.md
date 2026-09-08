@@ -335,3 +335,10 @@ and resumable uploads retain progress deadlines. All streams bound their initial
 response and incomplete frames. Cancellation preserves a partial frame's original
 deadline as well as its bytes. Callers can impose an overall wait and cancel an
 observation independently; connection liveness remains Iroh's responsibility.
+
+All native observation RPCs share `Remote::observe::<rpc::...>(request, resume)`.
+Identity, pairing, ownership, workspace, spool, Thread lists, collaboration,
+checkouts, runs, attention, notifications, integrations and durable operations
+use the same bounded atomic checkpoint reader as Thread and analysis views.
+Bookmarks bind the authenticated endpoint, exact method and selected projection;
+identical protobuf request bytes on different methods cannot exchange bookmarks.
