@@ -10,8 +10,8 @@ use prost::Message;
 
 use crate::{contract::*, transport::Error};
 
-pub const FORMAT: &str = "heddle.root-attachment.v1";
-const DOMAIN: &[u8] = b"heddle.root-attachment.v1\0";
+pub const FORMAT: &str = "heddle.root-attachment.v2";
+const DOMAIN: &[u8] = b"heddle.root-attachment.v2\0";
 const MAX_CREDENTIAL: usize = 64 * 1024;
 
 /// Evidence verified at the caller's supplied time. Keep the original credential
@@ -32,48 +32,108 @@ impl VerifiedAttachment {
     }
 }
 
-/// Sign with the paired subject key after receiving its root-derived credential.
-/// Hosts still call `verify` with an independently configured root trust list.
-pub fn sign(
+/// Sign a public approval commitment before receiving the private credential.
+/// Both physical endpoint and credential subject prove possession; neither
+/// signature establishes root authority. Hosts verify the delegated Biscuit too.
+pub fn sign_binding(
     subject: &impl Signer,
-    root_public_key: &[u8],
-    credential: &[u8],
-    device: EndpointRef,
-    not_before_unix_seconds: i64,
-    expires_at_unix_seconds: i64,
+    endpoint: &impl Signer,
+    binding: RootAttachmentBinding,
 ) -> Result<RootAttachment, Error> {
-    let binding = RootAttachmentBinding {
-        format_version: 1,
-        root_public_key: root_public_key.to_vec(),
-        subject_public_key: subject.public_key().to_vec(),
-        device: Some(device.clone()),
-        credential_digest: blake3::hash(credential).as_bytes().to_vec(),
-        not_before_unix_seconds,
-        expires_at_unix_seconds,
-        ..Default::default()
-    };
-    validate(&binding, credential)?;
+    validate_binding(&binding)?;
+    if binding.subject_public_key != subject.public_key()
+        || binding
+            .device
+            .as_ref()
+            .is_none_or(|device| device.public_key != endpoint.public_key())
+    {
+        return Err(Error::Protocol(
+            "attachment signing keys do not match approval",
+        ));
+    }
     let canonical_record = binding.encode_to_vec();
-    let signature = subject.sign(&statement(&canonical_record)).map_err(io)?;
+    let payload = statement(&canonical_record);
+    let mut signatures = vec![RecordSignature {
+        public_key: subject.public_key().to_vec(),
+        signature: subject.sign(&payload).map_err(io)?,
+    }];
+    if endpoint.public_key() != subject.public_key() {
+        signatures.push(RecordSignature {
+            public_key: endpoint.public_key().to_vec(),
+            signature: endpoint.sign(&payload).map_err(io)?,
+        });
+    }
     Ok(RootAttachment {
-        root_public_key: root_public_key.to_vec(),
-        subject_public_key: subject.public_key().to_vec(),
-        device: Some(device),
+        root_public_key: binding.root_public_key,
+        subject_public_key: binding.subject_public_key,
+        device: binding.device,
         attachment: Some(SignedRecord {
             format: FORMAT.into(),
             canonical_record,
-            signatures: vec![RecordSignature {
-                public_key: subject.public_key().to_vec(),
-                signature,
-            }],
+            signatures,
         }),
     })
 }
 
+/// Check possession against the exact stored public approval. This alone is not
+/// authority: the host separately verifies the private credential and account.
+pub fn verify_possession(
+    attachment: &RootAttachment,
+    expected: &RootAttachmentBinding,
+) -> Result<(), Error> {
+    validate_binding(expected)?;
+    let record = attachment
+        .attachment
+        .as_ref()
+        .ok_or(Error::Protocol("missing endpoint attachment proof"))?;
+    if record.format != FORMAT
+        || record.canonical_record != expected.encode_to_vec()
+        || attachment.root_public_key != expected.root_public_key
+        || attachment.subject_public_key != expected.subject_public_key
+        || attachment.device != expected.device
+    {
+        return Err(Error::Protocol("attachment differs from approved binding"));
+    }
+    let endpoint = expected
+        .device
+        .as_ref()
+        .ok_or(Error::Protocol("missing endpoint"))?;
+    let keys = if endpoint.public_key == expected.subject_public_key {
+        vec![expected.subject_public_key.as_slice()]
+    } else {
+        vec![
+            expected.subject_public_key.as_slice(),
+            endpoint.public_key.as_slice(),
+        ]
+    };
+    if record.signatures.len() != keys.len() {
+        return Err(Error::Protocol(
+            "attachment requires exact endpoint and subject signatures",
+        ));
+    }
+    for (signature, key) in record.signatures.iter().zip(keys) {
+        if signature.public_key != key {
+            return Err(Error::Protocol(
+                "attachment signer differs from expected key",
+            ));
+        }
+        Ed25519Signer::verify_with_public_key(
+            &statement(&record.canonical_record),
+            key,
+            &signature.signature,
+        )
+        .map_err(|_| Error::Protocol("invalid endpoint attachment possession signature"))?;
+    }
+    Ok(())
+}
+
+/// `trusted_roots` must be independently attached to `expected_account_id`.
+/// The binding never supplies its own trust list or authorizes a future call.
 pub fn verify(
     attachment: &RootAttachment,
     original_credential: &[u8],
     trusted_roots: &[PublicKey],
+    expected_account_id: &str,
     expected_device: &EndpointRef,
     now: DateTime<Utc>,
 ) -> Result<VerifiedAttachment, Error> {
@@ -92,6 +152,7 @@ pub fn verify(
         || binding.root_public_key != attachment.root_public_key
         || binding.subject_public_key != attachment.subject_public_key
         || binding.device != attachment.device
+        || binding.account_id != expected_account_id
         || binding.device.as_ref() != Some(expected_device)
         || now.timestamp() < binding.not_before_unix_seconds
         || now.timestamp() >= binding.expires_at_unix_seconds
@@ -136,39 +197,34 @@ pub fn verify(
         last,
     )
     .map_err(|_| Error::Protocol("endpoint attachment outlives credential attenuation"))?;
-    let [signature] = record.signatures.as_slice() else {
-        return Err(Error::Protocol(
-            "endpoint attachment requires one subject signature",
-        ));
-    };
-    if signature.public_key != binding.subject_public_key {
-        return Err(Error::Protocol(
-            "endpoint attachment signer is not the credential subject",
-        ));
-    }
-    Ed25519Signer::verify_with_public_key(
-        &statement(&record.canonical_record),
-        &signature.public_key,
-        &signature.signature,
-    )
-    .map_err(|_| Error::Protocol("invalid endpoint attachment subject signature"))?;
+    verify_possession(attachment, &binding)?;
     Ok(VerifiedAttachment { binding })
 }
 
-fn validate(binding: &RootAttachmentBinding, credential: &[u8]) -> Result<(), Error> {
-    if binding.format_version != 1
+fn validate_binding(binding: &RootAttachmentBinding) -> Result<(), Error> {
+    if binding.format_version != 2
+        || uuid::Uuid::parse_str(&binding.account_id).map_or(true, |id| id.is_nil())
+        || binding.pairing_challenge.len() != 32
         || binding.root_public_key.len() != 32
         || binding.subject_public_key.len() != 32
         || binding.device.as_ref().is_none_or(|device| {
             device.kind != EndpointKind::Device as i32 || device.public_key.len() != 32
         })
-        || credential.is_empty()
-        || credential.len() > MAX_CREDENTIAL
-        || binding.credential_digest != blake3::hash(credential).as_bytes()
+        || binding.credential_digest.len() != 32
         || binding.not_before_unix_seconds <= 0
         || binding.expires_at_unix_seconds <= binding.not_before_unix_seconds
     {
         return Err(Error::Protocol("invalid endpoint attachment binding"));
+    }
+    Ok(())
+}
+fn validate(binding: &RootAttachmentBinding, credential: &[u8]) -> Result<(), Error> {
+    validate_binding(binding)?;
+    if credential.is_empty()
+        || credential.len() > MAX_CREDENTIAL
+        || binding.credential_digest != blake3::hash(credential).as_bytes()
+    {
+        return Err(Error::Protocol("attachment credential digest mismatch"));
     }
     Ok(())
 }

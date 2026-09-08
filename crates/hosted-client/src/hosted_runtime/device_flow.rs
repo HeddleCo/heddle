@@ -202,35 +202,26 @@ pub fn attenuate_for_agent(
     if !effective_parent_key.eq_ignore_ascii_case(&hex::encode(parent_signer.public_key())) {
         bail!("parent signer does not match the parent token's effective PoP key");
     }
-    let unverified = biscuit_auth::UnverifiedBiscuit::from_base64(parent_token_b64.as_bytes())
-        .context("parse parent biscuit (unverified)")?;
-    let parent_revocation_id = unverified
-        .revocation_identifiers()
-        .last()
-        .context("parent Biscuit has no revocation identifier")?
-        .to_vec();
+    let child: &[u8; 32] = child_public_key
+        .try_into()
+        .context("child PoP public key must be 32 bytes")?;
     let signature = parent_signer
-        .sign(&pop_delegation_payload(
-            &parent_revocation_id,
-            child_public_key,
-        ))
-        .context("sign child PoP delegation")?;
-    let mut block = build_attenuation_block(&restrictions)?;
-    block = block
-        .fact(
-            format!(
-                "pop_delegation({}, {}, {})",
-                biscuit_string(&hex::encode(parent_revocation_id)),
-                biscuit_string(&hex::encode(child_public_key)),
-                biscuit_string(&hex::encode(signature)),
-            )
-            .as_str(),
+        .sign(
+            &biscuit_verifier::key_delegation::statement(parent_token_b64, child)
+                .context("prepare child proof-key statement")?,
         )
-        .context("child PoP delegation fact")?;
-    let attenuated = unverified
-        .append(block)
-        .context("append attenuation block")?;
-    attenuated.to_base64().context("encode attenuated biscuit")
+        .context("sign child proof-key delegation")?;
+    let signature: &[u8; 64] = signature
+        .as_slice()
+        .try_into()
+        .context("Ed25519 delegation signature must be 64 bytes")?;
+    biscuit_verifier::key_delegation::append(
+        parent_token_b64,
+        child,
+        signature,
+        build_attenuation_block(&restrictions)?,
+    )
+    .context("append child proof-key delegation")
 }
 
 /// Versioned byte domain shared with weft's delegated-PoP verifier. The

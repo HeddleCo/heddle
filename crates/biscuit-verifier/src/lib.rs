@@ -18,6 +18,7 @@ use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use thiserror::Error;
 
 pub mod delegation;
+pub mod key_delegation;
 pub mod edge;
 pub mod envelope;
 pub mod facts;
