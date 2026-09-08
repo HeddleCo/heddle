@@ -324,3 +324,18 @@ async fn irohs_open_stream_syncs_later_writes_honors_opt_in_and_stops_on_root_de
     left_endpoint.close().await;
     right_endpoint.close().await;
 }
+
+#[tokio::test]
+async fn call_context_carries_the_serialized_biscuit_returned_by_credential_ceremonies() {
+    use crate::transport::Authorize;
+    let root = KeyPair::new();
+    let credential = credential(&root);
+    let method = api::v2::method_descriptor("/heddle.api.v2alpha1.SyncService/ReplicateThread")
+        .expect("replication descriptor");
+    let context = credential
+        .context(method, &[])
+        .await
+        .expect("signed context");
+    Biscuit::from(&context.bearer_capability, root.public())
+        .expect("CallContext carries raw serialized Biscuit bytes");
+}
